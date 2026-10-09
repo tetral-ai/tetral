@@ -9,10 +9,15 @@ import type {
   ProviderRequest,
   RunWebRequest,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { FetchFunction } from "@ai-sdk/provider-utils";
 
 export function validProviderRequest(overrides: Partial<ProviderRequest> = {}): ProviderRequest {
   const request: ProviderRequest = {
     requestId: "req_1",
+    outputContractVersion: 2,
+    modelRequestStartEventId: "evt_00000000000000000000000000000000",
+    threadRole: 1,
+    threadVisibility: 1,
     modelRequestId: "mreq_1",
     requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST,
     workspaceId: "wksp_1",
@@ -20,6 +25,7 @@ export function validProviderRequest(overrides: Partial<ProviderRequest> = {}): 
     sessionThreadId: "thrd_1",
     bindingId: "bind_1",
     bindingGeneration: 42,
+    runtimeProcessId: "process-test",
     runtimeBindingToken: "binding-token",
     model: {
       providerId: "openai",
@@ -94,6 +100,7 @@ export function validRunWebRequest(): RunWebRequest {
     sessionThreadId: "thrd_1",
     bindingId: "bind_1",
     bindingGeneration: 42,
+    runtimeProcessId: "process-test",
     runtimeBindingToken: "binding-token",
     toolUseEventId: "sevt_tool_1",
     input: {
@@ -103,3 +110,15 @@ export function validRunWebRequest(): RunWebRequest {
     },
   };
 }
+
+/**
+ * Provider fetch for registries whose cases inject the model stream or stop
+ * before provider HTTP. Production injects the command-owned transport; a call
+ * here means a case reached the network boundary it does not control.
+ */
+export const unusedProviderFetch: FetchFunction = Object.assign(
+  async (): Promise<Response> => {
+    throw new Error("fixture provider fetch is not configured for this case");
+  },
+  { preconnect: () => {} },
+);

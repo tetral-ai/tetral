@@ -7,8 +7,8 @@
  * credentials, and streams catalog-approved provider events back to gRPC.
  * Platform credentials may switch only before the provider streamer emits its
  * first event; session credentials always receive one attempt. The request-local
- * fragment tracker forwards success only after every explicit fragment lifecycle
- * closes; provider faults discard partial fragments and retain their own error.
+ * block assembler emits complete content and forwards success only after every
+ * explicit fragment lifecycle closes; provider faults discard partial fragments and retain their own error.
  *
  * The application and gRPC server construct and call this module. It delegates
  * binding checks to `RuntimeBindingTokenVerifier`, attachment reads to
@@ -27,8 +27,13 @@ import type {
   RunWebRequest,
   RunWebResponse,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { NormalizedProviderEventType, validateNormalizedProviderEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import type { NormalizedProviderEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import { ProviderBlockAssembler, ProviderIncompleteStreamError, ProviderAssemblyLimitError } from "./providers/block-assembler.js";
+import type { ProviderAssemblyBounds, ProviderAssemblyResources } from "./providers/block-assembler.js";
+import { DefaultProviderAssemblyBounds } from "./providers/resource-policy.js";
 import { ProviderStreamEventType } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { MaxIdBytes, validateProviderRequest, validateProviderStreamEvent } from "@tetral/gateway-protocol/src/bounds.js";
+import { MaxIdBytes, validateProviderRequest } from "@tetral/gateway-protocol/src/bounds.js";
 import { classifyProviderStreamError, ProviderRequestLoweringError, ProviderStreamTimeoutError, providerErrorEvent } from "@tetral/gateway-lowering/src/errors.js";
 import { GrpcStatusError } from "./errors.js";
 import type { RuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
@@ -42,6 +47,9 @@ import type { ProviderCredentialResolver, ResolvedProviderCredential } from "./p
 import type { ProviderErrorInput } from "@tetral/gateway-lowering/src/errors.js";
 import type { ResolvedProviderRequestAttachment } from "@tetral/gateway-lowering/src/request.js";
 import { ProviderGatewayMetricsRegistry } from "./metrics.js";
+import type { ProviderStageSample, ProviderStageOutcome, ProviderContentKind } from "./metrics.js";
+import { ProviderStreamEvent as ProviderStreamFrame } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { PreviewRequestProducer } from "./providers/preview-publisher.js";
 
 /**
  * Authenticates the internal gRPC caller and returns the workload identity
@@ -73,6 +81,10 @@ export interface ProviderGatewayServiceOptions {
   readonly maxConcurrentTurns?: number | undefined;
   readonly providerStreamTimeouts?: ProviderStreamTimeoutOptions | undefined;
   readonly metrics?: ProviderGatewayMetricsRegistry | undefined;
+  readonly assemblyBounds?: ProviderAssemblyBounds;
+  readonly previewProducerFactory?: (request: ProviderRequest) => PreviewRequestProducer;
+  readonly observeAssemblyResources?: (resources:ProviderAssemblyResources,requestId:string)=>void;
+  readonly observationClock?: ()=>number;
 }
 
 /**
@@ -88,11 +100,42 @@ export class ProviderGatewayServiceShell {
   private readonly providerStreamer: ProviderRequestStreamer;
   private readonly admission: TurnAdmissionGate;
   private readonly metrics: ProviderGatewayMetricsRegistry;
+  private stopping = false;
+  private readonly frameDeadlines = new WeakMap<ProviderStreamEvent,{deadline:number;request:ProviderRequest;startedAt:number}>();
+  providerFrameDeadline(event:ProviderStreamEvent):number|undefined { return this.frameDeadlines.get(event)?.deadline; }
+  recordProviderWriteTimeout(event:ProviderStreamEvent):void {
+    const frame=this.frameDeadlines.get(event);if(frame!==undefined)logGatewayProviderTimeout(this.options.logger,frame.request,{kind:"overall_timeout",elapsedMs:performance.now()-frame.startedAt});
+  }
+  private readonly completeFrameTimes = new WeakMap<ProviderStreamEvent, { completedAt: number; requestId: string; kind: ProviderContentKind; canonicalBytes: number; encodedBytes: number; release?: () => void; callbackAt?: number }>();
+  recordCompleteFrameWriteStarted(event: ProviderStreamEvent): void {
+    const frame = this.completeFrameTimes.get(event);
+    if (frame === undefined || frame.release !== undefined) return;
+    try { frame.release = this.metrics.holdCompleteFrame(frame.encodedBytes); } catch { /* Observability is fail-open. */ }
+  }
+  recordCompleteFrameWriteCallback(event: ProviderStreamEvent): void {
+    const frame = this.completeFrameTimes.get(event);
+    if (frame !== undefined) frame.callbackAt = this.clock();
+  }
+  recordCompleteFrameWrite(event: ProviderStreamEvent, outcome: ProviderStageOutcome = "success"): void {
+    const frame = this.completeFrameTimes.get(event);
+    this.frameDeadlines.delete(event);
+    if (frame === undefined) return;
+    this.completeFrameTimes.delete(event);
+    try { frame.release?.(); } catch { /* Observability is fail-open. */ }
+    this.observeStage({stage:"complete_frame_write", outcome, kind:frame.kind, durationMs:(frame.callbackAt ?? this.clock()) - frame.completedAt, canonicalBytes:frame.canonicalBytes, encodedBytes:frame.encodedBytes},frame.requestId);
+  }
+  private observeStage(sample: ProviderStageSample, requestId: string): void {
+    try { this.metrics.observeProviderStage(sample); } catch { /* Observability is fail-open. */ }
+    try { this.options.logger.info({event:"provider.stage_completed", "event.kind":"stage_completed", component:"gateway", operation:"provider.stream", "request.id":requestId, stage:sample.stage, outcome:sample.outcome, kind:sample.kind, duration_ms:Math.max(0,sample.durationMs), bytes_in:sample.canonicalBytes, bytes_out:sample.encodedBytes}); } catch { /* The raw sample sink cannot affect delivery. */ }
+  }
+  private clock():number { return this.options.observationClock?.() ?? performance.now(); }
+  private readonly workers = new Map<AbortController, Promise<void>>();
 
   constructor(private readonly options: ProviderGatewayServiceOptions) {
     this.providerStreamer = options.providerStreamer ?? new CatalogGatedProviderStreamer();
     this.admission = new TurnAdmissionGate(options.maxConcurrentTurns ?? 8);
     this.metrics = options.metrics ?? new ProviderGatewayMetricsRegistry();
+    try { this.metrics.setCapacity(options.maxConcurrentTurns ?? 8); } catch { /* Metrics are best effort. */ }
   }
 
   /**
@@ -116,8 +159,35 @@ export class ProviderGatewayServiceShell {
     metadata: Metadata,
     abortSignal: AbortSignal | undefined,
   ): AsyncGenerator<ProviderStreamEvent> {
+    let previewProducer: PreviewRequestProducer | undefined;
+    let assemblyMetrics:ReturnType<ProviderGatewayMetricsRegistry["startContentAssembly"]> | undefined;
+    try { assemblyMetrics=this.metrics.startContentAssembly(); } catch { /* Fail-open metrics. */ }
+    const assembler = new ProviderBlockAssembler({
+      bounds: this.options.assemblyBounds ?? DefaultProviderAssemblyBounds,
+      request,
+      observeResources: resources=>{
+        try { assemblyMetrics?.observe(resources); } catch { /* Fail-open metrics. */ }
+        try { this.options.observeAssemblyResources?.(resources,request.requestId); } catch { /* Fail-open metrics. */ }
+      },
+      offerPreview: preview => {
+        try { previewProducer?.offer(preview); } catch { /* Previews never change complete delivery. */ }
+      },
+    });
+    const processController = new AbortController();
+    abortSignal =
+      abortSignal === undefined
+        ? processController.signal
+        : AbortSignal.any([abortSignal, processController.signal]);
+    let done!: () => void;
+    this.workers.set(
+      processController,
+      new Promise<void>((resolve) => {
+        done = resolve;
+      }),
+    );
     const started = performance.now();
     let requestOutcome: "ok" | "failed" = "failed";
+    let capacityRejected = false;
     let errorClass = "runtime_error";
     let errorCode = "stream_incomplete";
     let providerStatusCode: number | undefined;
@@ -157,21 +227,25 @@ export class ProviderGatewayServiceShell {
       }
       const release = this.admission.tryAcquire();
       if (release === undefined) {
+        capacityRejected = true;
+        try { this.metrics.recordAdmissionRejection(); } catch { /* Metrics cannot reject work. */ }
         errorClass = "provider_error";
         errorCode = "provider_unavailable";
-        yield providerErrorEvent({
+        yield* assembler.accept(providerErrorEvent({
           code: "provider_unavailable",
           message: "Gateway provider capacity is exhausted.",
           retryable: true,
           fatal: false,
           statusCode: 503,
-        });
+        }));
         return;
       }
       const finishMetrics = this.metrics.startProviderStream();
+      // Scope and durable Start are validated before any best-effort publication.
+      try { previewProducer = this.options.previewProducerFactory?.(request); } catch { /* Publication cannot reject an admitted model request. */ }
       let failed = false;
       const providerAbortController = new AbortController();
-      const providerStartedAt = performance.now();
+      const providerStartedAt = started;
       const providerDeadline = providerStartedAt + limits.timeoutMs;
       let providerTimeoutLogged = false;
       const forwardAbort = (): void => providerAbortController.abort(abortSignal?.reason ?? new DOMException("Provider request cancelled.", "AbortError"));
@@ -186,6 +260,7 @@ export class ProviderGatewayServiceShell {
           caller.serviceAccount.podUid,
           providerAbortController.signal,
           providerDeadline,
+          assembler,
           (timeout) => {
             providerAbortController.abort(new DOMException("Provider request timed out.", "AbortError"));
             if (providerTimeoutLogged) {
@@ -211,10 +286,12 @@ export class ProviderGatewayServiceShell {
               ? "provider_configuration"
               : providerFailureClass;
           }
+          this.frameDeadlines.set(event,{deadline:providerDeadline,request,startedAt:providerStartedAt});
           yield event;
         }
       } catch (error) {
         failed = true;
+        if (assembler.isTerminal) throw new GrpcStatusError(status.INTERNAL, "gateway provider stream failed after terminal");
         if (error instanceof GrpcStatusError) {
           errorClass = "grpc_status";
           errorCode = String(error.code);
@@ -223,7 +300,7 @@ export class ProviderGatewayServiceShell {
         const classified = classifyProviderStreamError(error);
         errorClass = "provider_error";
         errorCode = providerLogErrorCode(classified.code);
-        yield providerErrorEvent(classified);
+        yield* assembler.accept(providerErrorEvent(classified));
       } finally {
         abortSignal?.removeEventListener("abort", forwardAbort);
         finishMetrics(failed);
@@ -240,6 +317,18 @@ export class ProviderGatewayServiceShell {
       }
       throw error;
     } finally {
+      try { previewProducer?.close(); } catch { /* Previews have no durable custody. */ }
+      done();
+      assembler.release();
+      try { assemblyMetrics?.close(); } catch { /* Fail-open metrics. */ }
+      this.workers.delete(processController);
+      try {
+        const outcome = requestOutcome === "ok" ? "success"
+          : abortSignal?.aborted === true ? "cancelled"
+          : errorCode === "provider_timeout" ? "timeout"
+          : errorClass === "request_validation" || (errorClass === "grpc_status" && ["3", "7", "16"].includes(errorCode)) || capacityRejected ? "rejected" : "error";
+        this.metrics.observeRequest(outcome, (performance.now() - started) / 1000);
+      } catch { /* Metrics cannot replace the request outcome. */ }
       const record = {
         event: "provider_request_streamed",
         "event.kind": "provider_request_streamed",
@@ -256,7 +345,10 @@ export class ProviderGatewayServiceShell {
         if (requestOutcome === "ok") {
           this.options.logger.info(record);
         } else {
-          this.options.logger.error({
+          // Ordinary denial/cancellation is expected control flow; failure meaning is retained.
+          const emit = errorClass === "request_validation" || (errorClass === "grpc_status" && ["1", "3", "7", "16"].includes(errorCode))
+            ? this.options.logger.info : this.options.logger.error;
+          emit.call(this.options.logger, {
               ...record,
               ...semanticErrorFields({
                 errorClass,
@@ -269,6 +361,64 @@ export class ProviderGatewayServiceShell {
       } catch {
         // Observability must not replace the request's outcome.
       }
+    }
+  }
+
+  /**
+   * Stops admission, lets admitted workers finish until `drainDeadline`, then aborts their provider
+   * and attachment work and waits for them to join until `deadline`. A worker suspended on a stream
+   * write held by HTTP/2 flow control cannot observe that abort, so when the cancellation and join
+   * window expires `closeStreams` force-closes the remaining streams before the final join and the
+   * missed-deadline error.
+   */
+  async shutdown(
+    deadline: Date,
+    drainDeadline: Date = deadline,
+    closeStreams?: () => void,
+  ): Promise<void> {
+    this.stopping = true;
+    const drainStarted = performance.now();
+    const joined = Promise.all([...this.workers.values()]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cutoff = new Promise<"cutoff">((resolve) => {
+      timer = setTimeout(
+        () => resolve("cutoff"),
+        Math.max(0, drainDeadline.getTime() - Date.now()),
+      );
+    });
+    const result = await Promise.race([joined, cutoff]);
+    if (timer !== undefined) clearTimeout(timer);
+    try { this.metrics.operations.observeShutdown("shutdown_drain", result === "cutoff" ? "timeout" : "success", (performance.now()-drainStarted)/1000, this.options.logger); } catch { /* Metrics are best effort. */ }
+    if (result === "cutoff") {
+      const joinStarted = performance.now();
+      for (const controller of this.workers.keys())
+        controller.abort(new Error("Provider process draining"));
+      const end = new Promise<"expired">((resolve) => {
+        timer = setTimeout(
+          () => resolve("expired"),
+          Math.max(0, deadline.getTime() - Date.now()),
+        );
+      });
+      let expired = false;
+      try {
+        expired = await Promise.race([
+          joined.then(() => false),
+          end.then(() => true),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+      // Keep ownership through forced cancellation even when a dependency ignores it.
+      // Commands may close required clients only after this promise has joined.
+      if (expired) {
+        closeStreams?.();
+        await joined;
+        try { this.metrics.operations.observeShutdown("shutdown_cancel_join", "timeout", (performance.now()-joinStarted)/1000, this.options.logger); } catch { /* Metrics are best effort. */ }
+        throw new Error(
+          "Provider workers did not join before shutdown deadline",
+        );
+      }
+      try { this.metrics.operations.observeShutdown("shutdown_cancel_join", "success", (performance.now()-joinStarted)/1000, this.options.logger); } catch { /* Metrics are best effort. */ }
     }
   }
 
@@ -310,7 +460,7 @@ export class ProviderGatewayServiceShell {
   }
 
   private ensureReady(): void {
-    if (!this.options.ready()) {
+    if (this.stopping || !this.options.ready()) {
       throw new GrpcStatusError(status.UNAVAILABLE, "gateway service not ready");
     }
   }
@@ -340,31 +490,35 @@ export class ProviderGatewayServiceShell {
     runtimePodUid: string,
     abortSignal: AbortSignal,
     providerDeadline: number,
+    assembler: ProviderBlockAssembler,
     abortOnTimeout: (timeout: ProviderTimeoutObservation) => void,
     recordFailureOrigin: (origin: "http_rejection" | "transport_failure") => void,
   ): AsyncGenerator<ProviderStreamEvent> {
     const catalogError = this.catalogGate(request);
     if (catalogError !== undefined) {
-      yield providerErrorEvent(catalogError);
+      yield* assembler.accept(providerErrorEvent(catalogError));
       return;
     }
     const attachmentResolution = await withinProviderDeadline(
-      this.resolveAttachments(request, runtimePodUid, abortSignal),
+      this.resolveAttachments(
+        request,
+        runtimePodUid,
+        abortSignal,
+        Date.now() + Math.max(0, providerDeadline - performance.now()),
+      ),
       abortSignal,
       providerDeadline,
       () => abortOnTimeout({ kind: "overall_timeout" }),
     );
     if (!attachmentResolution.ok) {
-      yield providerErrorEvent(attachmentResolution.error);
+      yield* assembler.accept(providerErrorEvent(attachmentResolution.error));
       return;
     }
     if (attachmentResolution.rejections.length > 0) {
-      yield {
-        type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS,
-        attachmentRejections: {
-          rejections: [...attachmentResolution.rejections],
-        },
-      };
+      yield* assembler.accept({
+        type: NormalizedProviderEventType.AttachmentRejections,
+        attachmentRejections: { rejections: [...attachmentResolution.rejections] },
+      });
     }
     const providerRequest = {
       ...request,
@@ -387,7 +541,7 @@ export class ProviderGatewayServiceShell {
     //   | emitted == true (session) | session    | no switch or retry; forward terminal;      | no              |
     //   |                           |            | Runtime owns recovery                     |                 |
     //
-    // ProviderOpenFragmentTracker validates only this attempt. A nominal finish or
+    // The request-local assembler validates this attempt. A nominal finish or
     // EOF with unresolved fragments becomes one retryable provider-stream failure;
     // an explicit provider fault retains its classification without synthetic ENDs.
     const attemptedPlatformKeyIds = new Set<string>();
@@ -406,7 +560,7 @@ export class ProviderGatewayServiceShell {
         if (lastPlatformProviderError !== undefined && lastPlatformFailureOrigin !== undefined) {
           recordFailureOrigin(lastPlatformFailureOrigin);
         }
-        yield providerErrorEvent(credential.error);
+        yield* assembler.accept(providerErrorEvent(credential.error));
         return;
       }
       const resolvedCredential = credential.credential;
@@ -414,7 +568,11 @@ export class ProviderGatewayServiceShell {
       let lastEventAt: number | undefined;
       let lastEventKind: string | undefined;
       let lastTransportActivityAt = Date.now();
-      const openFragments = new ProviderOpenFragmentTracker();
+      const dispatchedAt = this.clock();
+      let firstFragmentAt: number | undefined;
+      let firstFragmentKind: ProviderContentKind = "none";
+      let firstComplete: { at: number; kind: ProviderContentKind; canonicalBytes: number; encodedBytes: number } | undefined;
+      let attemptOutcome: ProviderStageOutcome = "cancelled";
       try {
         const providerEvents = controlProviderStream(this.providerStreamer.stream({
           request: providerRequest,
@@ -436,27 +594,48 @@ export class ProviderGatewayServiceShell {
           ...this.providerStreamTimeouts(providerDeadlineRemainingMs(providerDeadline)),
           overallTimeoutMs: providerDeadlineRemainingMs(providerDeadline),
           isSemanticProgress: isProviderSemanticProgress,
+          joinIteratorReturn: this.providerStreamer.joinIteratorReturn===true,
           transportActivityAt: () => lastTransportActivityAt,
         });
         for await (const event of providerEvents) {
-          const eventValidation = validateProviderStreamEvent(event);
-          if (!eventValidation.ok) {
+          const eventValidation = validateNormalizedProviderEvent(event);
+          if (!eventValidation) {
             throw new GrpcStatusError(status.INTERNAL, "gateway provider stream contract violation");
           }
           emitted = true;
+          const fragmentKind = normalizedContentKind(event);
+          if (firstFragmentAt === undefined && fragmentKind !== "none") {
+            firstFragmentAt = this.clock();
+            firstFragmentKind = fragmentKind;
+          }
+          if (event.providerError !== undefined) attemptOutcome = "error";
+          else if (event.finish !== undefined) attemptOutcome = "success";
           lastEventAt = performance.now();
           lastEventKind = boundedProviderEventKind(event.type);
-          openFragments.record(event);
-          yield event;
+          for(const frame of assembler.accept(event)) {
+            if(frame.textComplete!==undefined || frame.reasoningComplete!==undefined || frame.toolCallComplete!==undefined){
+              const completedAt = this.clock();
+              const description = completeFrameDescription(frame);
+              this.completeFrameTimes.set(frame,{completedAt,requestId:request.requestId,...description});
+              firstComplete ??= {at:completedAt,...description};
+            }
+            yield frame;
+          }
         }
-        openFragments.assertComplete("eof");
+        assembler.assertComplete("eof");
         return;
       } catch (error) {
+        attemptOutcome = abortSignal.aborted ? "cancelled" : "error";
+        if (assembler.isTerminal) throw new GrpcStatusError(status.INTERNAL, "gateway provider stream failed after terminal");
         if (error instanceof GrpcStatusError) {
           throw error;
         }
+        if (error instanceof ProviderAssemblyLimitError) {
+          yield* assembler.accept(providerErrorEvent({code:"provider_stream_limit_exceeded",message:"Provider output exceeded Gateway resource limits.",retryable:false,fatal:true,statusCode:413}));
+          return;
+        }
         if (error instanceof ProviderRequestLoweringError) {
-          yield providerErrorEvent(error.providerError);
+          yield* assembler.accept(providerErrorEvent(error.providerError));
           return;
         }
         const providerKeyFailure = error instanceof ProviderKeyFailureError
@@ -478,7 +657,7 @@ export class ProviderGatewayServiceShell {
           (providerKeyFailure?.origin === "transport_failure" && !capturedSemanticSignal)
         ) {
           recordFailureOrigin("transport_failure");
-          yield providerErrorEvent(classifyProviderStreamError(error));
+          yield* assembler.accept(providerErrorEvent(classifyProviderStreamError(error)));
           return;
         }
         if (providerKeyFailure === undefined) {
@@ -486,38 +665,38 @@ export class ProviderGatewayServiceShell {
             logProviderStreamIncomplete(this.options.logger, request, error);
           }
           recordFailureOrigin("transport_failure");
-          yield providerErrorEvent(classifyProviderStreamError(error));
+          yield* assembler.accept(providerErrorEvent(classifyProviderStreamError(error)));
           return;
         }
         if (resolvedCredential?.source === "session") {
           recordFailureOrigin(providerKeyFailure.origin);
-          yield providerErrorEvent(
+          yield* assembler.accept(providerErrorEvent(
             providerKeyFailure.classification.action === "quarantine" ||
             providerKeyFailure.classification.providerError.statusCode === 401 ||
             providerKeyFailure.classification.providerError.statusCode === 403
               ? sessionCredentialUnavailableError(providerKeyFailure.classification.providerError.statusCode)
               : providerKeyFailure.classification.providerError,
-          );
+          ));
           return;
         }
         if (resolvedCredential?.source !== "platform") {
           recordFailureOrigin(providerKeyFailure.origin);
-          yield providerErrorEvent(
+          yield* assembler.accept(providerErrorEvent(
             providerKeyFailure.classification.action === "quarantine"
               ? platformCredentialPoolUnavailableError(providerKeyFailure.classification.providerError.statusCode)
               : providerKeyFailure.classification.providerError,
-          );
+          ));
           return;
         }
         const platformKeyId = resolvedCredential.platformKey.keyId;
         this.options.credentialResolver?.recordPlatformFailure(platformKeyId, providerKeyFailure.classification);
         if (emitted) {
           recordFailureOrigin(providerKeyFailure.origin);
-          yield providerErrorEvent(
+          yield* assembler.accept(providerErrorEvent(
             providerKeyFailure.classification.action === "quarantine"
               ? platformCredentialPoolUnavailableError(providerKeyFailure.classification.providerError.statusCode)
               : providerKeyFailure.classification.providerError,
-          );
+          ));
           return;
         }
         attemptedPlatformKeyIds.add(platformKeyId);
@@ -527,18 +706,23 @@ export class ProviderGatewayServiceShell {
         lastPlatformFailureOrigin = providerKeyFailure.origin;
         if (providerKeyFailure.classification.action === "fail-fast") {
           recordFailureOrigin(providerKeyFailure.origin);
-          yield providerErrorEvent(providerKeyFailure.classification.providerError);
+          yield* assembler.accept(providerErrorEvent(providerKeyFailure.classification.providerError));
           return;
         }
         if (platformAttempts >= PlatformKeyPoolConstants.maxKeySwitchesPerTurn) {
           recordFailureOrigin(providerKeyFailure.origin);
-          yield providerErrorEvent(
+          yield* assembler.accept(providerErrorEvent(
             providerKeyFailure.classification.action === "quarantine"
               ? platformCredentialPoolUnavailableError(providerKeyFailure.classification.providerError.statusCode)
               : providerKeyFailure.classification.providerError,
-          );
+          ));
           return;
         }
+      } finally {
+        if (abortSignal.aborted) attemptOutcome = "cancelled";
+        const finishedAt = this.clock();
+        this.observeStage({stage:"provider_first_fragment",outcome:attemptOutcome,kind:firstFragmentKind,durationMs:(firstFragmentAt ?? finishedAt)-dispatchedAt,canonicalBytes:firstComplete?.canonicalBytes ?? 0,encodedBytes:firstComplete?.encodedBytes ?? 0},request.requestId);
+        this.observeStage({stage:"provider_first_complete",outcome:attemptOutcome,kind:firstComplete?.kind ?? "none",durationMs:(firstComplete?.at ?? finishedAt)-(firstFragmentAt ?? dispatchedAt),canonicalBytes:firstComplete?.canonicalBytes ?? 0,encodedBytes:firstComplete?.encodedBytes ?? 0},request.requestId);
       }
     }
   }
@@ -573,6 +757,7 @@ export class ProviderGatewayServiceShell {
     request: ProviderRequest,
     runtimePodUid: string,
     abortSignal: AbortSignal,
+    deadline: number,
   ): Promise<{
     readonly ok: true;
     readonly attachments: readonly ResolvedProviderRequestAttachment[];
@@ -585,7 +770,12 @@ export class ProviderGatewayServiceShell {
       return { ok: false, error: attachmentUnavailableProviderError() };
     }
     try {
-      return await this.options.attachmentResolver.resolve({ request, runtimePodUid, abortSignal });
+      return await this.options.attachmentResolver.resolve({
+        request,
+        runtimePodUid,
+        abortSignal,
+        deadline,
+      });
     } catch {
       return { ok: false, error: attachmentUnavailableProviderError() };
     }
@@ -678,21 +868,21 @@ function logGatewayProviderTimeout(
   }
 }
 
-function boundedProviderEventKind(type: ProviderStreamEventType): string {
+function boundedProviderEventKind(type: NormalizedProviderEventType): string {
   switch (type) {
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START: return "text_start";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA: return "text_delta";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END: return "text_end";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START: return "reasoning_start";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA: return "reasoning_delta";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END: return "reasoning_end";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START: return "tool_input_start";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA: return "tool_input_delta";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END: return "tool_input_end";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL: return "tool_call";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH: return "finish";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR: return "provider_error";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS: return "attachment_rejections";
+    case NormalizedProviderEventType.TextStart: return "text_start";
+    case NormalizedProviderEventType.TextDelta: return "text_delta";
+    case NormalizedProviderEventType.TextEnd: return "text_end";
+    case NormalizedProviderEventType.ReasoningStart: return "reasoning_start";
+    case NormalizedProviderEventType.ReasoningDelta: return "reasoning_delta";
+    case NormalizedProviderEventType.ReasoningEnd: return "reasoning_end";
+    case NormalizedProviderEventType.ToolInputStart: return "tool_input_start";
+    case NormalizedProviderEventType.ToolInputDelta: return "tool_input_delta";
+    case NormalizedProviderEventType.ToolInputEnd: return "tool_input_end";
+    case NormalizedProviderEventType.ToolCall: return "tool_call";
+    case NormalizedProviderEventType.Finish: return "finish";
+    case NormalizedProviderEventType.ProviderError: return "provider_error";
+    case NormalizedProviderEventType.AttachmentRejections: return "attachment_rejections";
     default: return "unknown";
   }
 }
@@ -766,141 +956,6 @@ function providerAttemptHeaders(value: unknown): Readonly<Record<string, string 
   );
 }
 
-class ProviderOpenFragmentTracker {
-  private readonly textIds = new Set<string>();
-  private readonly reasoningIds = new Set<string>();
-  private readonly toolInputs = new Map<string, { readonly name: string; ended: boolean }>();
-  private readonly toolCalls = new Set<string>();
-
-  record(event: ProviderStreamEvent): void {
-    switch (event.type) {
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START:
-        this.start(this.textIds, event.text?.id, "text");
-        return;
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA:
-        this.delta(this.textIds, event.text?.id, "text");
-        return;
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END:
-        this.end(this.textIds, event.text?.id, "text");
-        return;
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START:
-        this.start(this.reasoningIds, event.reasoning?.id, "reasoning");
-        return;
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA:
-        this.delta(this.reasoningIds, event.reasoning?.id, "reasoning");
-        return;
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END:
-        this.end(this.reasoningIds, event.reasoning?.id, "reasoning");
-        return;
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START:
-        if (event.toolInput !== undefined && event.toolInput.id.length > 0) {
-          if (this.toolInputs.has(event.toolInput.id) || this.toolCalls.has(event.toolInput.id)) {
-            throw this.incomplete("tool_input");
-          }
-          this.toolInputs.set(event.toolInput.id, { name: event.toolInput.name, ended: false });
-        }
-        return;
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA:
-        this.toolInputDelta(event.toolInput?.id, event.toolInput?.name);
-        return;
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END:
-        this.endToolInput(event.toolInput?.id, event.toolInput?.name);
-        return;
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL:
-        this.consumeToolCall(event.toolCall?.id, event.toolCall?.name);
-        return;
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH:
-        this.assertComplete("finish");
-        return;
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR:
-        this.clear();
-        return;
-      default:
-        return;
-    }
-  }
-
-  assertComplete(category: ProviderIncompleteStreamCategory): void {
-    if (this.textIds.size > 0 || this.reasoningIds.size > 0 || this.toolInputs.size > 0) {
-      throw this.incomplete(category);
-    }
-  }
-
-  private endToolInput(id: string | undefined, name: string | undefined): void {
-    const fragment = id === undefined ? undefined : this.toolInputs.get(id);
-    if (fragment === undefined || fragment.ended || fragment.name !== name) {
-      throw this.incomplete("tool_input");
-    }
-    fragment.ended = true;
-  }
-
-  private toolInputDelta(id: string | undefined, name: string | undefined): void {
-    const fragment = id === undefined ? undefined : this.toolInputs.get(id);
-    if (fragment === undefined || fragment.ended || fragment.name !== name) {
-      throw this.incomplete("tool_input");
-    }
-  }
-
-  private consumeToolCall(id: string | undefined, name: string | undefined): void {
-    if (id === undefined || name === undefined || this.toolCalls.has(id)) {
-      throw this.incomplete("tool_call");
-    }
-    const fragment = this.toolInputs.get(id);
-    if (fragment !== undefined && (!fragment.ended || fragment.name !== name)) {
-      throw this.incomplete("tool_call");
-    }
-    if (fragment !== undefined) {
-      this.toolInputs.delete(id);
-    }
-    this.toolCalls.add(id);
-  }
-
-  private incomplete(category: ProviderIncompleteStreamCategory): ProviderIncompleteStreamError {
-    return new ProviderIncompleteStreamError(category, {
-      text: this.textIds.size,
-      reasoning: this.reasoningIds.size,
-      toolInput: this.toolInputs.size,
-    });
-  }
-
-  private clear(): void {
-    this.textIds.clear();
-    this.reasoningIds.clear();
-    this.toolInputs.clear();
-    this.toolCalls.clear();
-  }
-
-  private start(ids: Set<string>, id: string | undefined, category: "text" | "reasoning"): void {
-    if (id === undefined || id.length === 0 || ids.has(id)) {
-      throw this.incomplete(category);
-    }
-    ids.add(id);
-  }
-
-  private delta(ids: ReadonlySet<string>, id: string | undefined, category: "text" | "reasoning"): void {
-    if (id === undefined || id.length === 0 || !ids.has(id)) {
-      throw this.incomplete(category);
-    }
-  }
-
-  private end(ids: Set<string>, id: string | undefined, category: "text" | "reasoning"): void {
-    this.delta(ids, id, category);
-    ids.delete(id!);
-  }
-}
-
-type ProviderIncompleteStreamCategory = "finish" | "eof" | "text" | "reasoning" | "tool_input" | "tool_call";
-
-class ProviderIncompleteStreamError extends Error {
-  constructor(
-    readonly category: ProviderIncompleteStreamCategory,
-    readonly counts: { readonly text: number; readonly reasoning: number; readonly toolInput: number },
-  ) {
-    super("provider stream ended with an incomplete fragment lifecycle");
-    this.name = "ProviderIncompleteStreamError";
-  }
-}
-
 function logProviderStreamIncomplete(
   logger: GatewayLogger,
   request: ProviderRequest,
@@ -948,6 +1003,7 @@ export interface ProviderAttachmentResolveInput {
   readonly request: ProviderRequest;
   readonly runtimePodUid: string;
   readonly abortSignal?: AbortSignal | undefined;
+  readonly deadline?: number;
 }
 
 /**
@@ -958,7 +1014,9 @@ export interface ProviderAttachmentResolveInput {
  * failures propagate to the transport adapter instead.
  */
 export interface ProviderRequestStreamer {
-  readonly stream: (input: ProviderRequestStreamInput) => AsyncIterable<ProviderStreamEvent>;
+  /** Actual native SDK adapter guarantees abortable iterator closure. */
+  readonly joinIteratorReturn?: true;
+  readonly stream: (input: ProviderRequestStreamInput) => AsyncIterable<NormalizedProviderEvent>;
 }
 
 /**
@@ -987,7 +1045,7 @@ interface ResolvedProviderStreamTimeoutOptions {
 }
 
 class CatalogGatedProviderStreamer implements ProviderRequestStreamer {
-  async *stream(input: ProviderRequestStreamInput): AsyncGenerator<ProviderStreamEvent> {
+  async *stream(input: ProviderRequestStreamInput): AsyncGenerator<NormalizedProviderEvent> {
     input.abortSignal?.throwIfAborted();
     const model = input.request.model;
     const entry = model === undefined ? undefined : lookupGatewayModel(model.providerId, model.modelId);
@@ -1037,15 +1095,15 @@ const DefaultProviderChunkTimeoutMs = 30_000;
 const DefaultProviderSemanticProgressTimeoutMs = 60_000;
 
 function isProviderSemanticProgress(value: unknown): boolean {
-  const event = value as ProviderStreamEvent;
+  const event = value as NormalizedProviderEvent;
   switch (event.type) {
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA:
+    case NormalizedProviderEventType.TextDelta:
       return (event.text?.text.length ?? 0) > 0;
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA:
+    case NormalizedProviderEventType.ReasoningDelta:
       return (event.reasoning?.text.length ?? 0) > 0;
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA:
+    case NormalizedProviderEventType.ToolInputDelta:
       return (event.toolInput?.text.length ?? 0) > 0;
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL:
+    case NormalizedProviderEventType.ToolCall:
       return true;
     default:
       return false;
@@ -1108,4 +1166,19 @@ function providerAbortError(signal: AbortSignal): DOMException {
   return signal.reason instanceof DOMException && signal.reason.name === "AbortError"
     ? signal.reason
     : new DOMException("Provider request cancelled.", "AbortError");
+}
+
+function normalizedContentKind(event: NormalizedProviderEvent): ProviderContentKind {
+  if (event.text !== undefined) return "text";
+  if (event.reasoning !== undefined) return "reasoning";
+  if (event.toolInput !== undefined || event.toolCall !== undefined) return "tool";
+  return "none";
+}
+function completeFrameDescription(frame: ProviderStreamEvent): {kind: ProviderContentKind; canonicalBytes: number; encodedBytes: number} {
+  const encoder = new TextEncoder();
+  const canonical = frame.textComplete !== undefined ? JSON.stringify(frame.textComplete.text)
+    : frame.reasoningComplete !== undefined ? JSON.stringify(frame.reasoningComplete.text)
+    : frame.toolCallComplete?.inputJson ?? "";
+  const metadata = frame.reasoningComplete?.providerMetadataJson ?? frame.toolCallComplete?.providerMetadataJson ?? "";
+  return {kind: frame.textComplete !== undefined ? "text" : frame.reasoningComplete !== undefined ? "reasoning" : "tool", canonicalBytes:encoder.encode(canonical).byteLength + encoder.encode(metadata).byteLength, encodedBytes:ProviderStreamFrame.encode(frame).finish().byteLength};
 }

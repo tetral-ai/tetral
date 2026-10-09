@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -40,8 +38,13 @@ type APIKeyMetadata struct {
 	KeyPrefix   string `json:"key_prefix"`
 	KeyKind     string `json:"key_kind"`
 	CreatedAt   string `json:"created_at"`
-	LastUsedAt  string `json:"last_used_at,omitempty"`
-	RevokedAt   string `json:"revoked_at,omitempty"`
+	// LastUsedAt is the approximate database time of a sampled successful
+	// admission, normally written about a second later and at most once per
+	// five minutes of admission time. Under overload, failure or shutdown it
+	// may be missing or older than the latest use. It is neither security
+	// evidence nor a last-request guarantee.
+	LastUsedAt string `json:"last_used_at,omitempty"`
+	RevokedAt  string `json:"revoked_at,omitempty"`
 }
 
 // CreateAPIKeyResult is the one-time response shape for
@@ -52,12 +55,11 @@ type CreateAPIKeyResult struct {
 	APIKey string `json:"api_key"`
 }
 
-// APIKeyStore manages workspace-scoped API key rows on top of the
-// PostgreSQL `api_keys` table. Workspace-scoped management calls run
-// under transaction-local `tetral.workspace_id` set by
-// storage.WithWorkspaceTx; the narrow authentication lookup uses a
-// transaction-local `tetral.auth_lookup = 'true'` setting that the
-// auth_lookup RLS policy permits FOR SELECT only.
+// APIKeyStore owns workspace-scoped key metadata listing and revocation,
+// bootstrap refresh and CreateForPrincipal issuance. Credential admission
+// belongs to AuthorityResolver: its fixed digest lookup, current root locks and
+// share-locked credential recheck; APIKeyUsageRecorder samples usage afterwards.
+// A caller-supplied lookup flag alone does not confer global table access.
 type APIKeyStore struct {
 	db *sql.DB
 }
@@ -65,59 +67,6 @@ type APIKeyStore struct {
 // NewAPIKeyStore constructs an APIKeyStore backed by db.
 func NewAPIKeyStore(db *sql.DB) *APIKeyStore {
 	return &APIKeyStore{db: db}
-}
-
-// CreateForWorkspace inserts a new standard API key for workspaceID.
-// It generates the raw token through GenerateAPIKey, stores its
-// digest + prefix metadata, and returns the create-only response
-// shape including the raw token. The raw token is never persisted in
-// any text or byte column.
-func (s *APIKeyStore) CreateForWorkspace(ctx context.Context, workspaceID workspace.ID, name string) (*CreateAPIKeyResult, error) {
-	trimmed := strings.TrimSpace(name)
-	if trimmed == "" {
-		return nil, &ValidationError{Message: "name must not be empty"}
-	}
-	if runeCount(trimmed) > keyMetadataNameMaxRunes {
-		return nil, &ValidationError{Message: fmt.Sprintf("name must be at most %d Unicode code points", keyMetadataNameMaxRunes)}
-	}
-
-	rawToken, err := GenerateAPIKey()
-	if err != nil {
-		return nil, err
-	}
-	digest := DigestAPIKey(rawToken)
-	prefix := KeyPrefixFor(rawToken)
-	now := storage.Now().Format(time.RFC3339)
-	apiKeyID := id.New("ak_")
-
-	var stored APIKeyMetadata
-	if err := storage.WithWorkspaceTx(ctx, s.db, string(workspaceID), func(tx *sql.Tx) error {
-		_, execErr := tx.ExecContext(ctx,
-			`INSERT INTO api_keys (id, workspace_id, name, key_prefix, key_digest, key_kind, created_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-			apiKeyID, string(workspaceID), trimmed, prefix, digest, KindStandard, now,
-		)
-		if execErr != nil {
-			return mapPostgreSQLError(execErr)
-		}
-		stored = APIKeyMetadata{
-			ID:          apiKeyID,
-			Type:        "api_key",
-			WorkspaceID: string(workspaceID),
-			Name:        trimmed,
-			KeyPrefix:   prefix,
-			KeyKind:     KindStandard,
-			CreatedAt:   now,
-		}
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-
-	return &CreateAPIKeyResult{
-		APIKeyMetadata: stored,
-		APIKey:         rawToken,
-	}, nil
 }
 
 // ListActiveForWorkspace returns active (non-revoked) API key
@@ -244,88 +193,6 @@ func (s *APIKeyStore) RevokeForWorkspace(ctx context.Context, workspaceID worksp
 	})
 }
 
-// TouchLastUsedForWorkspace updates audit metadata for a successfully
-// authenticated key. auth calls this after the digest lookup
-// succeeds, through the workspace-scoped RLS path instead of the
-// cross-workspace auth lookup transaction.
-func (s *APIKeyStore) TouchLastUsedForWorkspace(ctx context.Context, workspaceID workspace.ID, apiKeyID string) error {
-	now := storage.Now().Format(time.RFC3339)
-	return storage.WithWorkspaceTx(ctx, s.db, string(workspaceID), func(tx *sql.Tx) error {
-		result, execErr := tx.ExecContext(ctx,
-			`UPDATE api_keys SET last_used_at = $1
-			 WHERE id = $2 AND workspace_id = $3 AND revoked_at IS NULL`,
-			now, apiKeyID, string(workspaceID),
-		)
-		if execErr != nil {
-			return mapPostgreSQLError(execErr)
-		}
-		affected, _ := result.RowsAffected()
-		if affected == 0 {
-			return &AuthenticationError{Message: "invalid api key"}
-		}
-		return nil
-	})
-}
-
-// AuthenticationResult is the result of a successful raw-key lookup:
-// the workspace.Workspace owning the matching api_key row.
-type AuthenticationResult struct {
-	APIKeyID  string
-	Workspace workspace.Workspace
-}
-
-// AuthenticateRawKey looks up the api_keys row whose digest matches
-// SHA-256(rawToken) and is not revoked. The lookup runs inside a
-// transaction with `tetral.auth_lookup = 'true'` set
-// transaction-locally so the narrow auth_lookup RLS policy permits
-// the cross-workspace SELECT; no other workspace_id GUC is set, so
-// any accidental write through this transaction would be blocked by
-// workspace_isolation. Workspace fields (id, type, name, created_at)
-// are joined in the same query so callers do not need a follow-up
-// workspaces.Get call.
-func (s *APIKeyStore) AuthenticateRawKey(ctx context.Context, rawToken string) (*AuthenticationResult, error) {
-	if rawToken == "" {
-		return nil, &AuthenticationError{Message: "missing api key"}
-	}
-	digest := DigestAPIKey(rawToken)
-
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	if err != nil {
-		return nil, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-
-	if _, err := tx.ExecContext(ctx,
-		`SELECT set_config('tetral.auth_lookup', 'true', true)`); err != nil {
-		return nil, err
-	}
-
-	var apiKeyID string
-	var ws workspace.Workspace
-	err = tx.QueryRowContext(ctx,
-		`SELECT k.id, k.workspace_id, w.type, w.name, w.created_at
-		   FROM api_keys k JOIN workspaces w ON w.id = k.workspace_id
-		  WHERE k.key_digest = $1 AND k.revoked_at IS NULL`,
-		digest,
-	).Scan(&apiKeyID, &ws.ID, &ws.Type, &ws.Name, &ws.CreatedAt)
-	if err == sql.ErrNoRows {
-		return nil, &AuthenticationError{Message: "invalid api key"}
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	committed = true
-	return &AuthenticationResult{APIKeyID: apiKeyID, Workspace: ws}, nil
-}
-
 // UpsertBootstrap atomically refreshes the bootstrap api_keys row
 // for workspaceID to point at digest + prefix derived from
 // rawBootstrap. If no bootstrap row exists, one is created; if a
@@ -333,7 +200,9 @@ func (s *APIKeyStore) AuthenticateRawKey(ctx context.Context, rawToken string) (
 // place; if the digest already matches an active row, the operation
 // is a no-op; if the digest matches a revoked bootstrap row,
 // revoked_at is cleared on that same row so the configured
-// ENGINE_API_KEY is authoritative after restart. Standard
+// ENGINE_API_KEY is authoritative after restart. Replacement and
+// reactivation clear last_used_at, and the schema trigger advances the
+// row's usage generation so earlier usage samples cannot land. Standard
 // (key_kind='standard') rows are untouched, so refreshing the
 // bootstrap key never invalidates or reactivates workspace-managed
 // keys.
@@ -343,61 +212,22 @@ func (s *APIKeyStore) UpsertBootstrap(ctx context.Context, workspaceID workspace
 	now := storage.Now().Format(time.RFC3339)
 
 	return storage.WithWorkspaceTx(ctx, s.db, string(workspaceID), func(tx *sql.Tx) error {
-		var existingID string
-		var existingDigest []byte
-		var existingRevokedAt sql.NullTime
-		err := tx.QueryRowContext(ctx,
-			`SELECT id, key_digest, revoked_at FROM api_keys
-			  WHERE workspace_id = $1 AND key_kind = $2`,
-			string(workspaceID), KindBootstrap,
-		).Scan(&existingID, &existingDigest, &existingRevokedAt)
-		switch {
-		case err == sql.ErrNoRows:
-			apiKeyID := id.New("ak_")
-			_, insertErr := tx.ExecContext(ctx,
-				`INSERT INTO api_keys (id, workspace_id, name, key_prefix, key_digest, key_kind, created_at)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-				apiKeyID, string(workspaceID), "bootstrap", prefix, digest, KindBootstrap, now,
-			)
-			if insertErr != nil {
-				return mapPostgreSQLError(insertErr)
-			}
-			return nil
-		case err != nil:
+		// Serialize each workspace's bootstrap startup without requiring Workspace
+		// mutation privileges. The bootstrap workspace index alone cannot arbitrate
+		// simultaneous inserts that also conflict on the global key_digest index.
+		// The transaction releases this namespaced advisory lock on commit/rollback;
+		// a hash collision only serializes otherwise independent bootstrap starts.
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('tetral.auth.bootstrap:' || $1::text, 0))`, string(workspaceID)); err != nil {
 			return err
 		}
-		if bytesEqual(existingDigest, digest) {
-			if !existingRevokedAt.Valid {
-				return nil
-			}
-			_, updateErr := tx.ExecContext(ctx,
-				`UPDATE api_keys
-				    SET last_used_at = NULL,
-				        revoked_at = NULL
-				  WHERE id = $1 AND workspace_id = $2 AND key_kind = $3`,
-				existingID, string(workspaceID), KindBootstrap,
-			)
-			if updateErr != nil {
-				return mapPostgreSQLError(updateErr)
-			}
-			return nil
-		}
-		// Refresh: replace the digest and prefix in place. last_used_at
-		// is cleared because the previous secret no longer applies.
-		_, updateErr := tx.ExecContext(ctx,
-			`UPDATE api_keys
-			    SET key_digest = $1,
-			        key_prefix = $2,
-			        last_used_at = NULL,
-			        revoked_at = NULL,
-			        created_at = $3
-			  WHERE id = $4 AND workspace_id = $5 AND key_kind = $6`,
-			digest, prefix, now, existingID, string(workspaceID), KindBootstrap,
-		)
-		if updateErr != nil {
-			return mapPostgreSQLError(updateErr)
-		}
-		return nil
+		_, err := tx.ExecContext(ctx, `INSERT INTO api_keys(id,workspace_id,name,key_prefix,key_digest,key_kind,authority_kind,created_at)
+   VALUES($1,$2,'bootstrap',$3,$4,'bootstrap','independent_key',$5)
+   ON CONFLICT(workspace_id) WHERE key_kind='bootstrap'
+   DO UPDATE SET key_digest=EXCLUDED.key_digest,key_prefix=EXCLUDED.key_prefix,
+     last_used_at=NULL,revoked_at=NULL,
+     created_at=CASE WHEN api_keys.key_digest=EXCLUDED.key_digest THEN api_keys.created_at ELSE EXCLUDED.created_at END
+   WHERE api_keys.key_digest<>EXCLUDED.key_digest OR api_keys.revoked_at IS NOT NULL`, id.New("ak_"), string(workspaceID), prefix, digest, now)
+		return mapPostgreSQLError(err)
 	})
 }
 
@@ -426,22 +256,30 @@ func mapPostgreSQLError(err error) error {
 	return err
 }
 
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 func runeCount(s string) int {
 	n := 0
 	for range s {
 		n++
 	}
 	return n
+}
+
+// GetForWorkspace supplies trusted key ownership facts for the public gate.
+func (s *APIKeyStore) GetForWorkspace(ctx context.Context, ws workspace.ID, keyID string) (APIKeyMetadata, error) {
+	meta := APIKeyMetadata{Type: "api_key"}
+	err := storage.WithWorkspaceTx(ctx, s.db, string(ws), func(tx *sql.Tx) error {
+		var last, revoked sql.NullString
+		err := tx.QueryRowContext(ctx, `SELECT id,workspace_id,name,key_prefix,key_kind,created_at,last_used_at,revoked_at FROM api_keys WHERE id=$1 AND workspace_id=$2 AND revoked_at IS NULL`, keyID, string(ws)).Scan(&meta.ID, &meta.WorkspaceID, &meta.Name, &meta.KeyPrefix, &meta.KeyKind, &meta.CreatedAt, &last, &revoked)
+		if err == sql.ErrNoRows {
+			return &NotFoundError{Message: "api key not found"}
+		}
+		if last.Valid {
+			meta.LastUsedAt = last.String
+		}
+		if revoked.Valid {
+			meta.RevokedAt = revoked.String
+		}
+		return err
+	})
+	return meta, err
 }

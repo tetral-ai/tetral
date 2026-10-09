@@ -9,41 +9,35 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
-	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
-	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
+	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
+	"github.com/tetral-ai/tetral/services/job-runner/jobrunnertest"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
 
-type runtimeInputExhaustionWorkspaceLister struct{}
-
-func (runtimeInputExhaustionWorkspaceLister) ListIDs(context.Context) ([]workspace.ID, error) {
-	return []workspace.ID{"ws_execution_store"}, nil
-}
-
 type runtimeInputExhaustionSender struct {
-	agentruntimebridge.RuntimeCommandSender
+	jobrunner.RuntimeCommandSender
 	calls int
 }
 
-func (s *runtimeInputExhaustionSender) AcceptTaskNotification(context.Context, agentruntimebridge.RuntimePodTarget, *agentruntimev1.AcceptTaskNotificationRequest) (*agentruntimev1.AcceptTaskNotificationResponse, error) {
+func (s *runtimeInputExhaustionSender) AcceptTaskNotification(context.Context, jobrunner.RuntimePodTarget, *agentruntimev1.AcceptTaskNotificationRequest) (*agentruntimev1.AcceptTaskNotificationResponse, error) {
 	s.calls++
 	return &agentruntimev1.AcceptTaskNotificationResponse{Outcome: &agentruntimev1.AcceptTaskNotificationResponse_Accepted{Accepted: &agentruntimev1.AcceptTaskNotificationAccepted{}}}, nil
 }
 
 type runtimeInputExhaustionDeliverer struct {
-	direct agentruntimebridge.RuntimePodDirectDeliverer
+	direct jobrunner.RuntimePodDirectDeliverer
 }
 
-func (d runtimeInputExhaustionDeliverer) DeliverRuntimeJob(ctx context.Context, job agentruntimebridge.RuntimeJob) (agentruntimebridge.RuntimeDeliveryResult, error) {
+func (d runtimeInputExhaustionDeliverer) DeliverRuntimeJob(ctx context.Context, job jobrunner.RuntimeJob) (jobrunner.RuntimeDeliveryResult, error) {
 	return d.direct.DeliverRuntimeJob(ctx, job)
 }
 
-func (d runtimeInputExhaustionDeliverer) FinalizeRuntimeDelivery(ctx context.Context, job agentruntimebridge.RuntimeJob, result agentruntimebridge.RuntimeDeliveryResult) (agentruntimebridge.RuntimeDeliveryResult, error) {
+func (d runtimeInputExhaustionDeliverer) FinalizeRuntimeDelivery(ctx context.Context, job jobrunner.RuntimeJob, result jobrunner.RuntimeDeliveryResult) (jobrunner.RuntimeDeliveryResult, error) {
 	return d.direct.FinalizeRuntimeDelivery(ctx, job, result)
 }
 
-func (d runtimeInputExhaustionDeliverer) ReplayRuntimeDeliveryFinalization(ctx context.Context, job agentruntimebridge.RuntimeJob) (agentruntimebridge.RuntimeDeliveryResult, bool, error) {
+func (d runtimeInputExhaustionDeliverer) ReplayRuntimeDeliveryFinalization(ctx context.Context, job jobrunner.RuntimeJob) (jobrunner.RuntimeDeliveryResult, bool, error) {
 	return d.direct.ReplayRuntimeDeliveryFinalization(ctx, job)
 }
 
@@ -52,9 +46,11 @@ func TestPostgreSQLTaskNotificationProducerAndJobRunnerTerminalizeQueuedInbox(t 
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
 	if _, err := adminDB.ExecContext(context.Background(), `INSERT INTO session_events (
-		workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,created_at,updated_at
+		workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,
+		model_request_id,model_tool_call_id,created_at,updated_at
 	) VALUES ('ws_execution_store','sesn_execution_store','thr_execution_store','evt_execution_a',1,
-		'agent.tool_use','{"type":"agent.tool_use","name":"exec_command","input":{}}',now(),now())`); err != nil {
+		'agent.tool_use','{"type":"agent.tool_use","name":"exec_command","input":{}}',
+		'mreq_execution_a','evt_execution_a_call',now(),now())`); err != nil {
 		t.Fatalf("seed background task source event: %v", err)
 	}
 	client := dbconnect.NewClientForTesting(runtimeDB)
@@ -88,14 +84,20 @@ func TestPostgreSQLTaskNotificationProducerAndJobRunnerTerminalizeQueuedInbox(t 
 	}
 
 	sender := &runtimeInputExhaustionSender{}
-	deliveryStore := agentruntimebridge.NewPostgreSQLRuntimeDeliveryStore(client, 9090)
-	runner := &agentruntimebridge.JobRunner{
-		Queue:      tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil),
-		Workspaces: runtimeInputExhaustionWorkspaceLister{},
-		Deliverer:  runtimeInputExhaustionDeliverer{direct: agentruntimebridge.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}},
-		Config:     agentruntimebridge.JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	visibility := jobrunnertest.NewBindingVisibility(adminDB)
+	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 9090, jobrunner.KubernetesRuntimeTargetResolver{Snapshot: visibility.Snapshot, GetPod: visibility.GetPod, LoadClient: jobrunnertest.UnavailableLoadClient()})
+	runner := &jobrunner.JobRunner{
+		Queue:     tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil),
+		Deliverer: runtimeInputExhaustionDeliverer{direct: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}},
+		Config:    jobrunner.JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if err := runner.RunOnce(context.Background()); err != nil {
+	// One production acquisition dispatches the final attempt; the production
+	// join waits for it.
+	acquisition, err := runner.AcquireAndDispatch(context.Background())
+	if err != nil || acquisition.Dispatched != 1 {
+		t.Fatalf("acquire final task-notification attempt = %+v/%v; want one dispatched job", acquisition, err)
+	}
+	if err := runner.JoinDispatched(context.Background()); err != nil {
 		t.Fatalf("run final task-notification attempt: %v", err)
 	}
 	var inboxStatus, queueStatus, errorKind string

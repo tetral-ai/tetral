@@ -7,15 +7,15 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
+
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
-	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
-	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -28,11 +28,11 @@ func TestPostgreSQLMemoryEffectRequiresExactExecutableRoute(t *testing.T) {
 		podUID    = "pod_memory_route_gate"
 		storeID   = "memstore_memory_route_gate"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
+	sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	toolUseID := writeDurableOrdinaryToolUseForTest(t, store, scope, "mreq_memory_route_gate", "call_memory_route_gate", "memory",
 		`{"action":"create","path":"route.md","content":"owned"}`)
 	request := &bridgev1.RunMemoryRequest{Scope: scope, ToolUseEventId: toolUseID}
@@ -75,8 +75,8 @@ func TestPostgreSQLMemoryEffectRequiresExactExecutableRoute(t *testing.T) {
 		t.Fatalf("delete route: %v", err)
 	}
 	assertRejectedWithoutEffect("missing", scope)
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, threadID, toolUseID)
-	assertRejectedWithoutEffect("stale binding", bridgeAPIScope(sessionID, threadID, bindingID, 2, podUID))
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, threadID, toolUseID)
+	assertRejectedWithoutEffect("stale binding", sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 2, podUID))
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_pending_tool_uses SET status='resolved',result_event_id='evt_conflicting_route_result' WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, sessionID, toolUseID); err != nil {
 		t.Fatalf("make conflicting resolved route: %v", err)
 	}
@@ -104,11 +104,11 @@ func TestPostgreSQLActorEffectsUseExecutableRouteGate(t *testing.T) {
 			childID := "thr_actor_route_child_" + suffix
 			bindingID := "bind_actor_route_" + suffix
 			podUID := "pod_actor_route_" + suffix
-			seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-			seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+			sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+			scope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 			input := fmt.Sprintf(`{"task_name":"task_%s"}`, childID)
 			if toolName == "send_message" {
 				input = fmt.Sprintf(`{"task_name":"task_%s","message":"blocked"}`, childID)
@@ -120,7 +120,7 @@ func TestPostgreSQLActorEffectsUseExecutableRouteGate(t *testing.T) {
 			switch toolName {
 			case "send_message":
 				response, err := store.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
-					Scope: scope, DeliveryId: agentMailDeliveryID(toolUseID, childID), TargetThreadId: childID,
+					Scope: scope, DeliveryId: runtimecontrol.AgentMailDeliveryID(toolUseID, childID), TargetThreadId: childID,
 					SourceToolUseEventId: toolUseID, Content: "blocked",
 				})
 				if status.Code(err) != codes.FailedPrecondition || response != nil {
@@ -167,11 +167,11 @@ func TestPostgreSQLActorEffectsRejectExecutableCapabilitySubstitution(t *testing
 			childID := "thr_actor_capability_child_" + suffix
 			bindingID := "bind_actor_capability_" + suffix
 			podUID := "pod_actor_capability_" + suffix
-			seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-			seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+			sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+			scope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 			toolUseID := writeDurableOrdinaryToolUseForTest(t, store, scope, "mreq_actor_capability_"+suffix, "call_actor_capability_"+suffix, "list_agents", `{}`)
 			var responseNonNil bool
 			var err error
@@ -185,7 +185,7 @@ func TestPostgreSQLActorEffectsRejectExecutableCapabilitySubstitution(t *testing
 			case "send_message":
 				var mailResponse *bridgev1.DeliverInterAgentMailResponse
 				mailResponse, err = store.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
-					Scope: scope, DeliveryId: agentMailDeliveryID(toolUseID, childID), TargetThreadId: childID,
+					Scope: scope, DeliveryId: runtimecontrol.AgentMailDeliveryID(toolUseID, childID), TargetThreadId: childID,
 					SourceToolUseEventId: toolUseID, Content: "do not deliver",
 				})
 				responseNonNil = mailResponse != nil
@@ -234,10 +234,10 @@ func TestPostgreSQLSandboxEffectRejectsExecutableCapabilitySubstitution(t *testi
 			threadID := "thr_sandbox_capability_" + suffix
 			bindingID := "bind_sandbox_capability_" + suffix
 			podUID := "pod_sandbox_capability_" + suffix
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+			scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 			toolUseID := writeDurableOrdinaryToolUseForTest(t, store, scope, "mreq_sandbox_capability_"+suffix, "call_sandbox_capability_"+suffix, toolName, `{}`)
 
 			response, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
@@ -268,21 +268,21 @@ func TestPostgreSQLToolSettlementClosesExactRouteAtomically(t *testing.T) {
 			threadID := "thr_settlement_route_" + decision
 			bindingID := "bind_settlement_route_" + decision
 			podUID := "pod_settlement_route_" + decision
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+			scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 			toolUseID := writeDurableOrdinaryToolUseForTest(t, store, scope, "mreq_settlement_route_"+decision, "call_settlement_route_"+decision, "Read", `{"path":"owned.txt"}`)
 			if decision == "deny" {
 				if _, err := admin.ExecContext(context.Background(), `UPDATE session_pending_tool_uses SET decision='deny' WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, sessionID, toolUseID); err != nil {
 					t.Fatalf("deny settlement route: %v", err)
 				}
 			}
-			settlement := bridgeCompletedToolSettlementForTest(toolUseID, "done")
+			settlement := sessionfixture.BridgeCompletedToolSettlementForTest(toolUseID, "done")
 			if decision == "deny" {
-				settlement = bridgeErrorToolSettlementForTest(toolUseID, "policy denied")
+				settlement = sessionfixture.BridgeErrorToolSettlementForTest(toolUseID, "policy denied")
 			}
-			request := bridgeToolSettlementRequestForTest(scope, settlement)
+			request := sessionfixture.BridgeToolSettlementRequestForTest(scope, settlement)
 			if _, err := admin.ExecContext(context.Background(), `CREATE FUNCTION fail_exact_route_settlement() RETURNS trigger AS $$ BEGIN RETURN NULL; END; $$ LANGUAGE plpgsql;
 				CREATE TRIGGER fail_exact_route_settlement BEFORE UPDATE ON session_pending_tool_uses
 				FOR EACH ROW EXECUTE FUNCTION fail_exact_route_settlement()`); err != nil {
@@ -363,10 +363,10 @@ func TestPostgreSQLToolSettlementRejectsNonsettleableRoutesWithoutResult(t *test
 			threadID := "thr_nonsettleable_" + routeState
 			bindingID := "bind_nonsettleable_" + routeState
 			podUID := "pod_nonsettleable_" + routeState
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+			scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 			toolUseID := writeDurableOrdinaryToolUseForTest(t, store, scope, "mreq_nonsettleable_"+routeState, "call_nonsettleable_"+routeState, "Read", `{"path":"owned.txt"}`)
 			switch routeState {
 			case "missing":
@@ -382,7 +382,7 @@ func TestPostgreSQLToolSettlementRejectsNonsettleableRoutesWithoutResult(t *test
 					t.Fatalf("make cancelled settlement route: %v", err)
 				}
 			}
-			response, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest(toolUseID, "unowned")))
+			response, err := store.SettleToolResult(context.Background(), sessionfixture.BridgeToolSettlementRequestForTest(scope, sessionfixture.BridgeCompletedToolSettlementForTest(toolUseID, "unowned")))
 			if status.Code(err) != codes.FailedPrecondition || response != nil {
 				t.Fatalf("%s settlement = %#v/%v; want FailedPrecondition", routeState, response, err)
 			}
@@ -394,101 +394,5 @@ func TestPostgreSQLToolSettlementRejectsNonsettleableRoutesWithoutResult(t *test
 				t.Fatalf("%s settlement results = %d; want zero", routeState, results)
 			}
 		})
-	}
-}
-
-func TestPostgreSQLRuntimeTerminationClosesMainAndSiblingToolRoutesAtomically(t *testing.T) {
-	fixture := newCloseoutSentinelFixture(t, "termination_tool_routes")
-	const (
-		childID          = "thr_termination_tool_routes_child"
-		requestChildID   = "thr_termination_open_request_child"
-		requestID        = "mreq_termination_open_request_child"
-		requestStartID   = "evt_termination_open_request_child"
-		interruptChildID = "thr_termination_interrupt_child"
-		interruptInputID = "rin_termination_interrupt_child"
-		interruptEventID = "evt_termination_interrupt_child"
-	)
-	seedBridgeAPIChildThread(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, childID)
-	seedBridgeAPIChildThread(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, requestChildID)
-	seedBridgeAPIChildThread(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, interruptChildID)
-	mainScope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
-	childScope := bridgeAPIScope(fixture.sessionID, childID, fixture.bindingID, 1, fixture.podUID)
-	mainToolID := writeDurableOrdinaryToolUseForTest(t, fixture.store, mainScope, "mreq_termination_main_tool", "call_termination_main_tool", "Read", `{"path":"main.txt"}`)
-	childToolID := writeDurableOrdinaryToolUseForTest(t, fixture.store, childScope, "mreq_termination_child_tool", "call_termination_child_tool", "Read", `{"path":"child.txt"}`)
-	if _, err := fixture.admin.ExecContext(context.Background(), `UPDATE session_pending_tool_uses SET status='pending',decision=NULL WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, fixture.sessionID, childToolID); err != nil {
-		t.Fatalf("make sibling pending/ask route: %v", err)
-	}
-	seedBridgeAPIEvent(t, fixture.admin, "default", fixture.sessionID, requestChildID, requestStartID, 1,
-		"span.model_request_start", `{"type":"span.model_request_start","model_request_id":"`+requestID+`"}`)
-	if _, err := fixture.admin.ExecContext(context.Background(), `UPDATE session_events
-		SET model_request_id=$3, projection_json='{"request_kind":"agent_provider_request","context_through_message_sequence":0}'
-		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, fixture.sessionID, requestStartID, requestID); err != nil {
-		t.Fatalf("seed sibling open Request: %v", err)
-	}
-	seedBridgeAPIEvent(t, fixture.admin, "default", fixture.sessionID, interruptChildID, interruptEventID, 1,
-		"user.interrupt", `{"type":"user.interrupt"}`)
-	seedRuntimeInboxBirthForJob(t, fixture.admin, RuntimeJob{
-		WorkspaceID: "default", SessionID: fixture.sessionID, SessionThreadID: interruptChildID,
-		RuntimeInputID: interruptInputID, InputKind: "interrupt_control", EventIDs: []string{interruptEventID},
-		SequenceFrom: 1, SequenceTo: 1,
-	})
-	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(fixture.runtime))
-	enqueueInterruptExhaustionJob(t, queueStore, fixture.sessionID, interruptChildID, interruptInputID,
-		"interrupt_control", interruptEventID, 1, queue.DefaultMaxAttempts, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	running, err := fixture.store.WriteEvent(context.Background(), closeoutWriteEventRequest(mainScope, "rwrite_termination_tool_routes"))
-	if err != nil || running.GetCommitted() == nil {
-		t.Fatalf("open termination owner Turn = %#v/%v", running, err)
-	}
-	request := &bridgev1.CommitRuntimeTerminationRequest{
-		Scope: mainScope, RuntimeWriteId: running.GetCommitted().GetEventId(),
-		FailureJson: `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`,
-	}
-	if _, err := fixture.admin.ExecContext(context.Background(), `CREATE FUNCTION fail_terminal_sibling_route_close() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'injected terminal route failure'; END; $$ LANGUAGE plpgsql;
-		CREATE TRIGGER fail_terminal_sibling_route_close BEFORE UPDATE ON session_pending_tool_uses
-		FOR EACH ROW WHEN (OLD.session_thread_id = 'thr_termination_tool_routes_child') EXECUTE FUNCTION fail_terminal_sibling_route_close()`); err != nil {
-		t.Fatalf("install terminal route rollback trigger: %v", err)
-	}
-	if response, err := fixture.server.CommitRuntimeTermination(context.Background(), request); err == nil || response != nil {
-		t.Fatalf("terminal sibling route failure = %#v/%v; want atomic rollback", response, err)
-	}
-	var terminalEvents, results, nonterminalRoutes, requestEnds int
-	var interruptInboxStatus, interruptQueueStatus string
-	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type IN ('session.status_terminated','session.thread_status_terminated')),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_event_id' IN ($2,$3)),
-		(SELECT count(*) FROM session_pending_tool_uses WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id IN ($2,$3) AND status IN ('pending','resolving'))`,
-		fixture.sessionID, mainToolID, childToolID).Scan(&terminalEvents, &results, &nonterminalRoutes); err != nil {
-		t.Fatalf("read rolled-back termination routes: %v", err)
-	}
-	if terminalEvents != 0 || results != 0 || nonterminalRoutes != 2 {
-		t.Fatalf("rolled-back termination = terminal:%d results:%d nonterminal:%d", terminalEvents, results, nonterminalRoutes)
-	}
-	if _, err := fixture.admin.ExecContext(context.Background(), `DROP TRIGGER fail_terminal_sibling_route_close ON session_pending_tool_uses; DROP FUNCTION fail_terminal_sibling_route_close()`); err != nil {
-		t.Fatalf("remove terminal route rollback trigger: %v", err)
-	}
-	committed, err := fixture.server.CommitRuntimeTermination(context.Background(), request)
-	if err != nil || committed.GetCommitted() == nil {
-		t.Fatalf("terminate all Tool routes = %#v/%v", committed, err)
-	}
-	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type IN ('session.status_terminated','session.thread_status_terminated')),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_event_id' IN ($2,$3)),
-		(SELECT count(*) FROM session_pending_tool_uses WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id IN ($2,$3) AND status IN ('pending','resolving')),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_end' AND model_request_id=$4),
-		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$5),
-		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$6)`,
-		fixture.sessionID, mainToolID, childToolID, requestID, interruptInputID,
-		queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, fixture.sessionID, interruptInputID),
-	).Scan(&terminalEvents, &results, &nonterminalRoutes, &requestEnds, &interruptInboxStatus, &interruptQueueStatus); err != nil {
-		t.Fatalf("read committed termination routes: %v", err)
-	}
-	if terminalEvents < 4 || results != 2 || nonterminalRoutes != 0 || requestEnds != 1 ||
-		interruptInboxStatus != "cancelled" || interruptQueueStatus != queue.StatusCancelled {
-		t.Fatalf("committed termination = terminal:%d results:%d nonterminal:%d requestEnds:%d interrupt:%s/%s; want all siblings closed",
-			terminalEvents, results, nonterminalRoutes, requestEnds, interruptInboxStatus, interruptQueueStatus)
-	}
-	replayed, err := fixture.server.CommitRuntimeTermination(context.Background(), request)
-	if err != nil || replayed.GetDuplicate() == nil {
-		t.Fatalf("replay termination = %#v/%v; want duplicate", replayed, err)
 	}
 }

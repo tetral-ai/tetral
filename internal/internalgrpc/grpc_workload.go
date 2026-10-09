@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
 	"sync"
 	"time"
 
@@ -34,8 +33,10 @@ type GRPCWorkloadParams struct {
 	MethodAuthorizer    MethodAuthorizer
 	ReadinessDependency func() bool
 	ShutdownTimeout     time.Duration
+	CancelJoinTimeout   time.Duration
 	DBStatsProvider     workload.DBStatsProvider
 	ServerOptions       []grpc.ServerOption
+	Logger              *slog.Logger
 
 	// Seams. Production wiring fills these from the real implementations; command
 	// tests stub them to drive startup/shutdown without a real cluster. Any nil
@@ -80,11 +81,14 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 	if shutdownTimeout <= 0 {
 		shutdownTimeout = 10 * time.Second
 	}
-	deploymentEnvironment := valueOrDefault(env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), "local")
-	serviceVersion := valueOrDefault(env.Getenv("TETRAL_SERVICE_VERSION"), "unknown")
-	logger := workload.NewLogger(os.Stderr, params.ServiceName, deploymentEnvironment, serviceVersion)
-	httpMetrics := workload.NewHTTPMetrics()
-	grpcMetrics := workload.NewGRPCMetrics()
+	resource := workload.ResourceConfigFromEnv(env.Getenv)
+	deploymentEnvironment, serviceVersion := resource.DeploymentEnvironment, resource.ServiceVersion
+	logger := params.Logger
+	if logger == nil {
+		logger = workload.ComponentLogger(params.ServiceName)
+	}
+	httpMetrics := workload.NewHTTPMetrics(params.ServiceName)
+	grpcMetrics := workload.NewGRPCMetrics(params.ServiceName)
 
 	authConfig, err := grpcauth.LoadConfig(env)
 	if err != nil {
@@ -140,10 +144,11 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 			OnServing: func() {
 				markGRPCServing.Do(func() { close(grpcServing) })
 			},
-			ShutdownTimeout: shutdownTimeout,
-			Logger:          logger,
-			Metrics:         grpcMetrics,
-			ServerOptions:   params.ServerOptions,
+			ShutdownTimeout:   shutdownTimeout,
+			CancelJoinTimeout: params.CancelJoinTimeout,
+			Logger:            logger,
+			Metrics:           grpcMetrics,
+			ServerOptions:     params.ServerOptions,
 		})
 		if grpcCtx.Err() == nil {
 			if runErr == nil {
@@ -158,19 +163,28 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 	case <-grpcServing:
 		readiness.MarkReady()
 	case err = <-grpcErr:
+		workload.BeginProcessShutdown(ctx)
 		cancelGRPC()
 		if err == nil {
 			return fmt.Errorf("internal grpc stopped before serving")
 		}
 		return err
 	case <-serverCtx.Done():
+		readiness.BeginShutdown()
+		workload.BeginProcessShutdown(ctx)
 		cancelGRPC()
+		// The listener owner must finish before callers close its dependencies,
+		// even when cancellation arrives before the serving callback.
+		if runErr := <-grpcErr; runErr != nil {
+			return runErr
+		}
 		return serverCtx.Err()
 	}
 	metricsOptions := []workload.HealthRouterOption{
 		workload.WithHTTPMetrics(httpMetrics),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
 		workload.WithMetricsCollector("grpc", grpcMetrics.Collector()),
+		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
 	}
 	if params.DBStatsProvider != nil {
 		metricsOptions = append(metricsOptions, workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", params.DBStatsProvider)))
@@ -182,22 +196,19 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 		ListenAddress:         httpAddress,
 		ListenConfigKey:       params.HTTPListenEnvKey,
 		Listener:              httpListener,
+		Metrics:               httpMetrics.Operations,
 		Handler:               workload.HealthRouter(readiness, metricsOptions...),
 		Readiness:             readiness,
 		ShutdownTimeout:       shutdownTimeout,
 		Logger:                logger,
 	})
+	workload.BeginProcessShutdown(ctx)
 	readiness.BeginShutdown()
 	cancelGRPC()
-	select {
-	case grpcRunErr := <-grpcErr:
-		if err == nil {
-			err = grpcRunErr
-		}
-	case <-time.After(shutdownTimeout):
-		if err == nil {
-			err = fmt.Errorf("internal grpc shutdown timed out")
-		}
+	// Run owns the drain deadline and forced cancellation. An outer timeout
+	// cannot safely release pools while its handlers are still joining.
+	if grpcRunErr := <-grpcErr; err == nil {
+		err = grpcRunErr
 	}
 	return err
 }
@@ -219,8 +230,5 @@ func valueOrDefault(value string, fallback string) string {
 // may carry DSNs, tokens, or payloads. The shared workload helper guarantees this
 // is the same rule every workload applies.
 func logGRPCStartupFailure(serviceName string, logger *slog.Logger, cause workload.StartupFailureCause, err error) error {
-	if logger == nil {
-		logger = workload.NewLogger(os.Stderr, serviceName, "", "")
-	}
 	return workload.LogStartupFailure(logger, serviceName, workload.WithStartupFailureCause(cause, err))
 }

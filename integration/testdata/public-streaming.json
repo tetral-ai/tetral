@@ -1,0 +1,146 @@
+{
+  "version": 1,
+  "content": {
+    "first_fragments": [
+      "alpha ",
+      "\u03b2eta ",
+      "omega\n"
+    ],
+    "first_complete": "alpha \u03b2eta omega\n",
+    "second_fragments": [
+      "second\n"
+    ],
+    "second_complete": "second\n",
+    "incomplete": "unfinished must never become a final",
+    "reasoning_text": "private-reasoning-marker",
+    "reasoning_signature": "private-provider-signature-marker",
+    "tool_input_marker": "private-tool-input-marker"
+  },
+  "unicode": {
+    "single": {
+      "fragments": [
+        "\ud83d",
+        "\ude00"
+      ],
+      "complete": "\ud83d\ude00"
+    },
+    "interleaved": {
+      "fragments": [
+        {
+          "block": "A",
+          "text": "\ud83d"
+        },
+        {
+          "block": "B",
+          "text": "\ud834"
+        },
+        {
+          "block": "A",
+          "text": "\ude00"
+        },
+        {
+          "block": "B",
+          "text": "\udd1e"
+        }
+      ],
+      "complete": {
+        "A": "\ud83d\ude00",
+        "B": "\ud834\udd1e"
+      }
+    },
+    "healthy": [
+      {
+        "block": "A",
+        "fragments": [
+          "\ud83d\ude00"
+        ],
+        "complete": "\ud83d\ude00"
+      },
+      {
+        "block": "B",
+        "fragments": [
+          "\ud834\udd1e"
+        ],
+        "complete": "\ud834\udd1e"
+      }
+    ]
+  },
+  "wire": {
+    "identity": {
+      "version": 1,
+      "workspace_id": "workspace A/\u03b2",
+      "session_id": "sess_0123456789abcdef",
+      "thread_id": "thread_0123456789abcdef",
+      "model_request_id": "request_0123456789abcdef",
+      "model_request_start_event_id": "evt_0123456789abcdef",
+      "request_kind": "agent_provider_request"
+    },
+    "message_event_id": "evt_1123456789abcdef0123456789abcdef",
+    "thinking_event_id": "evt_2123456789abcdef0123456789abcdef",
+    "request_open_keys": [
+      "kind",
+      "model_request_id",
+      "model_request_start_event_id",
+      "request_kind",
+      "session_id",
+      "thread_id",
+      "version",
+      "workspace_id"
+    ],
+    "event_start_keys": [
+      "event_id",
+      "event_type",
+      "kind",
+      "model_request_id",
+      "model_request_start_event_id",
+      "preview_sequence",
+      "request_kind",
+      "session_id",
+      "thread_id",
+      "version",
+      "workspace_id"
+    ],
+    "event_delta_keys": [
+      "event_id",
+      "event_type",
+      "kind",
+      "model_request_id",
+      "model_request_start_event_id",
+      "preview_sequence",
+      "request_kind",
+      "session_id",
+      "text",
+      "thread_id",
+      "version",
+      "workspace_id"
+    ]
+  },
+  "public": {
+    "message_start": {
+      "type": "event_start",
+      "event": {
+        "id": "evt_1123456789abcdef0123456789abcdef",
+        "type": "agent.message"
+      }
+    },
+    "thinking_start": {
+      "type": "event_start",
+      "event": {
+        "id": "evt_2123456789abcdef0123456789abcdef",
+        "type": "agent.thinking"
+      }
+    },
+    "message_delta": {
+      "type": "event_delta",
+      "event_id": "evt_1123456789abcdef0123456789abcdef",
+      "delta": {
+        "type": "content_delta",
+        "index": 0,
+        "content": {
+          "type": "text",
+          "text": "alpha "
+        }
+      }
+    }
+  }
+}

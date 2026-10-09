@@ -1,4 +1,7 @@
+import { DefaultBridgeMethodPolicies } from "../../src/bridge-policy.js";
 import { describe, expect, test } from "bun:test";
+import { Writable } from "node:stream";
+import { createDiagnosticStreamSink, createTetralJsonLogger } from "@tetral/ts-observability";
 import { createRuntimeGrpcServer } from "../../src/grpc-server.js";
 import { createRuntimeHttpServer } from "../../src/http-server.js";
 import { RuntimePodLifecycle } from "../../src/lifecycle.js";
@@ -6,6 +9,41 @@ import { RuntimePodMetricsRegistry } from "../../src/metrics.js";
 import { RuntimeControlService } from "../../src/runtime-service.js";
 
 describe("Runtime Pod server bind addresses", () => {
+	test("HTTP metrics reports actual diagnostic emissions and rejected sink writes", async () => {
+		let acceptSink = true;
+		const logger = createTetralJsonLogger({ serviceName: "agent-runtime", write: () => acceptSink });
+		logger.info({ event: "http_diagnostic_probe" });
+		acceptSink = false;
+		logger.error({ event: "http_diagnostic_drop" });
+		const httpServer = createRuntimeHttpServer("127.0.0.1:0", fakeLifecycle(), undefined, logger);
+		try {
+			const response = await fetch(new URL("/metrics", httpServer.url));
+			expect(response.status).toBe(200);
+			const body = await response.text();
+			expect(body).toContain("tetral_diagnostic_emitted_total 1\n");
+			expect(body).toContain("tetral_diagnostic_dropped_total 1\n");
+			expect(body).toContain("tetral_diagnostic_sink_failures_total 0\n");
+		} finally {
+			httpServer.stop();
+			logger.close();
+		}
+	});
+	test("HTTP metrics includes an asynchronous production stream failure", async () => {
+		const stream = new Writable({ write(_chunk, _encoding, done) { done(); } });
+		const sink = createDiagnosticStreamSink(stream);
+		const logger = createTetralJsonLogger({ serviceName: "agent-runtime", write: sink.write, sinkFailures: () => sink.stats().failures });
+		logger.info({ event: "http_diagnostic_probe" });
+		stream.emit("error", new Error("asynchronous stderr failure"));
+		logger.info({ event: "http_diagnostic_after_error" });
+		const httpServer = createRuntimeHttpServer("127.0.0.1:0", fakeLifecycle(), undefined, logger);
+		try {
+			const response = await fetch(new URL("/metrics", httpServer.url));
+			const body = await response.text();
+			expect(body).toContain("tetral_diagnostic_emitted_total 1\n");
+			expect(body).toContain("tetral_diagnostic_dropped_total 1\n");
+			expect(body).toContain("tetral_diagnostic_sink_failures_total 1\n");
+		} finally { httpServer.stop(); logger.close(); sink.close(); stream.destroy(); }
+	});
 	test("HTTP server accepts explicit production host addresses, serves metrics, and rejects hostless addresses", async () => {
 		const metricsRegistry = new RuntimePodMetricsRegistry();
 		metricsRegistry.recordHotState({
@@ -26,6 +64,14 @@ describe("Runtime Pod server bind addresses", () => {
 			11,
 			"success",
 		);
+		metricsRegistry.observeContentCommitLatency("text", "content_commit", 25, "duplicate", "approval_reviewer");
+		metricsRegistry.observeContentCommitLatency("request_end", "request_end_apply", 7, "failed", "agent_provider_request");
+		metricsRegistry.observeContinuationLatency("permit_wait", 17, "cancelled", "agent_provider_request");
+		metricsRegistry.recordApprovalWaitDelta(1, "agent_provider_request", "user");
+		metricsRegistry.recordApprovalWaitDelta(-1, "agent_provider_request", "user");
+		metricsRegistry.observeContinuationLatency("approval_wait", 37, "cancelled", "agent_provider_request", "user");
+		metricsRegistry.recordApprovalWaitUnavailable("agent_provider_request", "user");
+		metricsRegistry.recordContentSubmissionDelta(1, 123);
 		metricsRegistry.recordCleanupCommandOutcome("completed");
 		metricsRegistry.recordCloseoutEvent({
 			event: "runtime_closeout_stalled",
@@ -53,6 +99,17 @@ describe("Runtime Pod server bind addresses", () => {
 			expect(body).toContain("runtimepod_active_fibers 1");
 			expect(body).toContain("runtimepod_active_tool_fibers 2");
 			expect(body).toContain("runtimepod_pending_approvals 1");
+			expect(body).toContain('runtimepod_content_commit_latency_ms_count{kind="text",outcome="duplicate",phase="content_commit",request_kind="approval_reviewer"} 1');
+			expect(body).toContain('runtimepod_content_commit_latency_ms_sum{kind="request_end",outcome="failed",phase="request_end_apply",request_kind="agent_provider_request"} 7');
+			expect(body).toContain('runtimepod_continuation_latency_ms_sum{operation="permit_wait",outcome="cancelled",request_kind="agent_provider_request"} 17');
+			expect(body).toContain('runtimepod_pending_content_entries 1');
+			expect(body).toContain('runtimepod_pending_content_bytes 123');
+			expect(body).toContain('runtimepod_approval_wait_started_total{approval_source="user",request_kind="agent_provider_request"} 1');
+			expect(body).toContain('runtimepod_approval_wait_outstanding{approval_source="user",request_kind="agent_provider_request"} 0');
+			expect(body).toContain('runtimepod_approval_wait_unavailable_total{approval_source="user",request_kind="agent_provider_request"} 1');
+			expect(body).toContain('runtimepod_continuation_latency_ms_count{approval_source="user",operation="approval_wait",outcome="cancelled",request_kind="agent_provider_request"} 1');
+			expect(body).toContain('runtimepod_continuation_latency_ms_sum{approval_source="user",operation="approval_wait",outcome="cancelled",request_kind="agent_provider_request"} 37');
+			expect(body).not.toContain('outcome="unavailable"');
 			expect(body).toContain(
 				'runtimepod_provider_stream_duration_ms_count{kind="agent_provider_request",outcome="success"} 1',
 			);
@@ -103,8 +160,9 @@ function fakeLifecycle() {
 					ip: "10.0.0.1",
 				},
 				deploymentEnvironment: "test",
+ diagnostics: {level:"info",maxRecordBytes:16384,summaryIntervalMs:30000,burst:1},
 				serviceVersion: "test",
-				bridge: { namespace: "engine", serviceAccount: "bridge" },
+				jobRunner: { namespace: "engine", serviceAccount: "job-runner" },
 				grpcBindAddress: "127.0.0.1:0",
 				httpBindAddress: "127.0.0.1:0",
 				kubernetesApiServerUrl: "https://kubernetes.default.svc",
@@ -119,6 +177,11 @@ function fakeLifecycle() {
 				mcpConnectorGrpcAddress: "gateway.engine.svc:9091",
 				webConnectorGrpcAddress: "gateway.engine.svc:9092",
 				providerStreamTimeoutMs: 1_800_000,
+				bridgeMethodPolicies: DefaultBridgeMethodPolicies,
+				transportProfile: "standard-routed",
+				maxLocalSessions: 256,
+				maxConcurrentTools: 8,
+				lifecycle: { reportIntervalMs: 2000, processFreshnessMs: 10000, currentStepTimeoutMs: 60000, settlementTimeoutMs: 15000, settlementAttemptTimeoutMs: 5000, localJoinTimeoutMs: 5000, proxyJoinTimeoutMs: 5000 },
 				platformModels: {
 					approvalReviewer: {
 						providerId: "anthropic",
@@ -137,22 +200,33 @@ function fakeLifecycle() {
 			grpc: async () => undefined,
 			authClient: async () => undefined,
 		},
+		runtimeProcess: {
+			runtimeProcessId: "process-test",
+			register: async () => undefined,
+			report: async () => undefined,
+			release: async () => {
+				throw new Error("listener fixture owns no Session binding");
+			},
+			close: async () => undefined,
+		},
+		shutdownHooks: { quiesce: async () => undefined },
 	});
 }
 
 function fakeRuntimeControlService(): RuntimeControlService {
 	return new RuntimeControlService({
+	runtimeProcessId: "process-test",
 		ownPod: {
 			namespace: "engine",
 			name: "runtime-pod-a",
 			uid: "uid-a",
 			ip: "10.0.0.1",
 		},
-		allowedBridge: { namespace: "engine", name: "bridge" },
+		allowedJobRunner: { namespace: "engine", name: "job-runner" },
 		authenticator: {
 			authenticate: async () => ({
 				ok: true,
-				serviceAccount: { namespace: "engine", name: "bridge" },
+				serviceAccount: { namespace: "engine", name: "job-runner" },
 			}),
 		},
 		runHost: {

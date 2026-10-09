@@ -223,19 +223,13 @@ export function providerContextRoleToJSON(object: ProviderContextRole): string {
 
 export enum ProviderStreamEventType {
   PROVIDER_STREAM_EVENT_TYPE_UNSPECIFIED = 0,
-  PROVIDER_STREAM_EVENT_TYPE_TEXT_START = 1,
-  PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA = 2,
-  PROVIDER_STREAM_EVENT_TYPE_TEXT_END = 3,
-  PROVIDER_STREAM_EVENT_TYPE_REASONING_START = 4,
-  PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA = 5,
-  PROVIDER_STREAM_EVENT_TYPE_REASONING_END = 6,
-  PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START = 7,
-  PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA = 8,
-  PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END = 9,
-  PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL = 10,
   PROVIDER_STREAM_EVENT_TYPE_FINISH = 11,
   PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR = 12,
   PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS = 13,
+  PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED = 14,
+  PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE = 15,
+  PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE = 16,
+  PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE = 17,
   UNRECOGNIZED = -1,
 }
 
@@ -244,36 +238,6 @@ export function providerStreamEventTypeFromJSON(object: any): ProviderStreamEven
     case 0:
     case "PROVIDER_STREAM_EVENT_TYPE_UNSPECIFIED":
       return ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_UNSPECIFIED;
-    case 1:
-    case "PROVIDER_STREAM_EVENT_TYPE_TEXT_START":
-      return ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START;
-    case 2:
-    case "PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA":
-      return ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA;
-    case 3:
-    case "PROVIDER_STREAM_EVENT_TYPE_TEXT_END":
-      return ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END;
-    case 4:
-    case "PROVIDER_STREAM_EVENT_TYPE_REASONING_START":
-      return ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START;
-    case 5:
-    case "PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA":
-      return ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA;
-    case 6:
-    case "PROVIDER_STREAM_EVENT_TYPE_REASONING_END":
-      return ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END;
-    case 7:
-    case "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START":
-      return ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START;
-    case 8:
-    case "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA":
-      return ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA;
-    case 9:
-    case "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END":
-      return ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END;
-    case 10:
-    case "PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL":
-      return ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL;
     case 11:
     case "PROVIDER_STREAM_EVENT_TYPE_FINISH":
       return ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH;
@@ -283,6 +247,18 @@ export function providerStreamEventTypeFromJSON(object: any): ProviderStreamEven
     case 13:
     case "PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS":
       return ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS;
+    case 14:
+    case "PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED":
+      return ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED;
+    case 15:
+    case "PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE":
+      return ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE;
+    case 16:
+    case "PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE":
+      return ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE;
+    case 17:
+    case "PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE":
+      return ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -294,33 +270,106 @@ export function providerStreamEventTypeToJSON(object: ProviderStreamEventType): 
   switch (object) {
     case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_UNSPECIFIED:
       return "PROVIDER_STREAM_EVENT_TYPE_UNSPECIFIED";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START:
-      return "PROVIDER_STREAM_EVENT_TYPE_TEXT_START";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA:
-      return "PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END:
-      return "PROVIDER_STREAM_EVENT_TYPE_TEXT_END";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START:
-      return "PROVIDER_STREAM_EVENT_TYPE_REASONING_START";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA:
-      return "PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END:
-      return "PROVIDER_STREAM_EVENT_TYPE_REASONING_END";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START:
-      return "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA:
-      return "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END:
-      return "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END";
-    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL:
-      return "PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL";
     case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH:
       return "PROVIDER_STREAM_EVENT_TYPE_FINISH";
     case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR:
       return "PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR";
     case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS:
       return "PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS";
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED:
+      return "PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED";
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE:
+      return "PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE";
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE:
+      return "PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE";
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE:
+      return "PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE";
     case ProviderStreamEventType.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+/** Loaded thread identity; unspecified values never authorize previews. */
+export enum ProviderThreadRole {
+  PROVIDER_THREAD_ROLE_UNSPECIFIED = 0,
+  PROVIDER_THREAD_ROLE_MAIN = 1,
+  PROVIDER_THREAD_ROLE_SUBAGENT = 2,
+  PROVIDER_THREAD_ROLE_APPROVAL_REVIEWER = 3,
+  UNRECOGNIZED = -1,
+}
+
+export function providerThreadRoleFromJSON(object: any): ProviderThreadRole {
+  switch (object) {
+    case 0:
+    case "PROVIDER_THREAD_ROLE_UNSPECIFIED":
+      return ProviderThreadRole.PROVIDER_THREAD_ROLE_UNSPECIFIED;
+    case 1:
+    case "PROVIDER_THREAD_ROLE_MAIN":
+      return ProviderThreadRole.PROVIDER_THREAD_ROLE_MAIN;
+    case 2:
+    case "PROVIDER_THREAD_ROLE_SUBAGENT":
+      return ProviderThreadRole.PROVIDER_THREAD_ROLE_SUBAGENT;
+    case 3:
+    case "PROVIDER_THREAD_ROLE_APPROVAL_REVIEWER":
+      return ProviderThreadRole.PROVIDER_THREAD_ROLE_APPROVAL_REVIEWER;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return ProviderThreadRole.UNRECOGNIZED;
+  }
+}
+
+export function providerThreadRoleToJSON(object: ProviderThreadRole): string {
+  switch (object) {
+    case ProviderThreadRole.PROVIDER_THREAD_ROLE_UNSPECIFIED:
+      return "PROVIDER_THREAD_ROLE_UNSPECIFIED";
+    case ProviderThreadRole.PROVIDER_THREAD_ROLE_MAIN:
+      return "PROVIDER_THREAD_ROLE_MAIN";
+    case ProviderThreadRole.PROVIDER_THREAD_ROLE_SUBAGENT:
+      return "PROVIDER_THREAD_ROLE_SUBAGENT";
+    case ProviderThreadRole.PROVIDER_THREAD_ROLE_APPROVAL_REVIEWER:
+      return "PROVIDER_THREAD_ROLE_APPROVAL_REVIEWER";
+    case ProviderThreadRole.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum ProviderThreadVisibility {
+  PROVIDER_THREAD_VISIBILITY_UNSPECIFIED = 0,
+  PROVIDER_THREAD_VISIBILITY_PUBLIC = 1,
+  PROVIDER_THREAD_VISIBILITY_INTERNAL = 2,
+  UNRECOGNIZED = -1,
+}
+
+export function providerThreadVisibilityFromJSON(object: any): ProviderThreadVisibility {
+  switch (object) {
+    case 0:
+    case "PROVIDER_THREAD_VISIBILITY_UNSPECIFIED":
+      return ProviderThreadVisibility.PROVIDER_THREAD_VISIBILITY_UNSPECIFIED;
+    case 1:
+    case "PROVIDER_THREAD_VISIBILITY_PUBLIC":
+      return ProviderThreadVisibility.PROVIDER_THREAD_VISIBILITY_PUBLIC;
+    case 2:
+    case "PROVIDER_THREAD_VISIBILITY_INTERNAL":
+      return ProviderThreadVisibility.PROVIDER_THREAD_VISIBILITY_INTERNAL;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return ProviderThreadVisibility.UNRECOGNIZED;
+  }
+}
+
+export function providerThreadVisibilityToJSON(object: ProviderThreadVisibility): string {
+  switch (object) {
+    case ProviderThreadVisibility.PROVIDER_THREAD_VISIBILITY_UNSPECIFIED:
+      return "PROVIDER_THREAD_VISIBILITY_UNSPECIFIED";
+    case ProviderThreadVisibility.PROVIDER_THREAD_VISIBILITY_PUBLIC:
+      return "PROVIDER_THREAD_VISIBILITY_PUBLIC";
+    case ProviderThreadVisibility.PROVIDER_THREAD_VISIBILITY_INTERNAL:
+      return "PROVIDER_THREAD_VISIBILITY_INTERNAL";
+    case ProviderThreadVisibility.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
   }
@@ -679,6 +728,12 @@ export interface ProviderRequest {
   attachments: ProviderRequestAttachment[];
   limits: ProviderRequestLimits | undefined;
   outputSchemaJson?: string | undefined;
+  runtimeProcessId: string;
+  /** Version 2 is mandatory; there is no fragment-wire fallback. */
+  outputContractVersion: number;
+  modelRequestStartEventId: string;
+  threadRole: ProviderThreadRole;
+  threadVisibility: ProviderThreadVisibility;
 }
 
 export interface ModelRef {
@@ -780,10 +835,12 @@ export interface ProviderRequestLimits {
 
 export interface ProviderStreamEvent {
   type: ProviderStreamEventType;
-  text?: ProviderTextPayload | undefined;
-  reasoning?: ProviderReasoningPayload | undefined;
-  toolInput?: ProviderToolInputPayload | undefined;
-  toolCall?: ProviderToolCallPayload | undefined;
+  /** Consecutive from one across every frame of this RPC, including controls. */
+  frameSequence: number;
+  thinkingStarted?: ProviderThinkingStartedPayload | undefined;
+  textComplete?: ProviderTextCompletePayload | undefined;
+  reasoningComplete?: ProviderReasoningCompletePayload | undefined;
+  toolCallComplete?: ProviderToolCallCompletePayload | undefined;
   finish?: ProviderFinishPayload | undefined;
   providerError?: ProviderErrorPayload | undefined;
   attachmentRejections?: ProviderAttachmentRejectionsPayload | undefined;
@@ -799,30 +856,30 @@ export interface ProviderAttachmentRejectionsPayload {
   rejections: ProviderAttachmentRejection[];
 }
 
-export interface ProviderTextPayload {
-  id: string;
-  text: string;
-  metadataJson: string;
+/** Public progress control: no reasoning body or provider metadata. */
+export interface ProviderThinkingStartedPayload {
+  providerPartId: string;
+  eventId: string;
 }
 
-export interface ProviderReasoningPayload {
-  id: string;
+export interface ProviderTextCompletePayload {
+  providerPartId: string;
+  eventId: string;
   text: string;
-  metadataJson: string;
 }
 
-export interface ProviderToolInputPayload {
-  id: string;
-  name: string;
+export interface ProviderReasoningCompletePayload {
+  providerPartId: string;
+  thinkingEventId: string;
   text: string;
-  metadataJson: string;
+  providerMetadataJson: string;
 }
 
-export interface ProviderToolCallPayload {
-  id: string;
+export interface ProviderToolCallCompletePayload {
+  modelToolCallId: string;
   name: string;
   inputJson: string;
-  metadataJson: string;
+  providerMetadataJson: string;
 }
 
 export interface RequestUsage {
@@ -868,6 +925,7 @@ export interface RunWebRequest {
   bindingId: string;
   bindingGeneration: number;
   runtimeBindingToken: string;
+  runtimeProcessId: string;
 }
 
 export interface RunWebResponse {
@@ -929,6 +987,7 @@ export interface RunMcpToolRequest {
   bindingId: string;
   bindingGeneration: number;
   runtimeBindingToken: string;
+  runtimeProcessId: string;
 }
 
 export interface RunMcpToolResponse {
@@ -987,6 +1046,11 @@ function createBaseProviderRequest(): ProviderRequest {
     attachments: [],
     limits: undefined,
     outputSchemaJson: undefined,
+    runtimeProcessId: "",
+    outputContractVersion: 0,
+    modelRequestStartEventId: "",
+    threadRole: 0,
+    threadVisibility: 0,
   };
 }
 
@@ -1039,6 +1103,21 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
     }
     if (message.outputSchemaJson !== undefined) {
       writer.uint32(138).string(message.outputSchemaJson);
+    }
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(146).string(message.runtimeProcessId);
+    }
+    if (message.outputContractVersion !== 0) {
+      writer.uint32(152).uint32(message.outputContractVersion);
+    }
+    if (message.modelRequestStartEventId !== "") {
+      writer.uint32(162).string(message.modelRequestStartEventId);
+    }
+    if (message.threadRole !== 0) {
+      writer.uint32(168).int32(message.threadRole);
+    }
+    if (message.threadVisibility !== 0) {
+      writer.uint32(176).int32(message.threadVisibility);
     }
     return writer;
   },
@@ -1178,6 +1257,46 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
           message.outputSchemaJson = reader.string();
           continue;
         }
+        case 18: {
+          if (tag !== 146) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
+        case 19: {
+          if (tag !== 152) {
+            break;
+          }
+
+          message.outputContractVersion = reader.uint32();
+          continue;
+        }
+        case 20: {
+          if (tag !== 162) {
+            break;
+          }
+
+          message.modelRequestStartEventId = reader.string();
+          continue;
+        }
+        case 21: {
+          if (tag !== 168) {
+            break;
+          }
+
+          message.threadRole = reader.int32() as any;
+          continue;
+        }
+        case 22: {
+          if (tag !== 176) {
+            break;
+          }
+
+          message.threadVisibility = reader.int32() as any;
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1253,6 +1372,31 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
         : isSet(object.output_schema_json)
         ? globalThis.String(object.output_schema_json)
         : undefined,
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
+      outputContractVersion: isSet(object.outputContractVersion)
+        ? globalThis.Number(object.outputContractVersion)
+        : isSet(object.output_contract_version)
+        ? globalThis.Number(object.output_contract_version)
+        : 0,
+      modelRequestStartEventId: isSet(object.modelRequestStartEventId)
+        ? globalThis.String(object.modelRequestStartEventId)
+        : isSet(object.model_request_start_event_id)
+        ? globalThis.String(object.model_request_start_event_id)
+        : "",
+      threadRole: isSet(object.threadRole)
+        ? providerThreadRoleFromJSON(object.threadRole)
+        : isSet(object.thread_role)
+        ? providerThreadRoleFromJSON(object.thread_role)
+        : 0,
+      threadVisibility: isSet(object.threadVisibility)
+        ? providerThreadVisibilityFromJSON(object.threadVisibility)
+        : isSet(object.thread_visibility)
+        ? providerThreadVisibilityFromJSON(object.thread_visibility)
+        : 0,
     };
   },
 
@@ -1306,6 +1450,21 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
     if (message.outputSchemaJson !== undefined) {
       obj.outputSchemaJson = message.outputSchemaJson;
     }
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
+    if (message.outputContractVersion !== 0) {
+      obj.outputContractVersion = Math.round(message.outputContractVersion);
+    }
+    if (message.modelRequestStartEventId !== "") {
+      obj.modelRequestStartEventId = message.modelRequestStartEventId;
+    }
+    if (message.threadRole !== 0) {
+      obj.threadRole = providerThreadRoleToJSON(message.threadRole);
+    }
+    if (message.threadVisibility !== 0) {
+      obj.threadVisibility = providerThreadVisibilityToJSON(message.threadVisibility);
+    }
     return obj;
   },
 
@@ -1334,6 +1493,11 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
       ? ProviderRequestLimits.fromPartial(object.limits)
       : undefined;
     message.outputSchemaJson = object.outputSchemaJson ?? undefined;
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
+    message.outputContractVersion = object.outputContractVersion ?? 0;
+    message.modelRequestStartEventId = object.modelRequestStartEventId ?? "";
+    message.threadRole = object.threadRole ?? 0;
+    message.threadVisibility = object.threadVisibility ?? 0;
     return message;
   },
 };
@@ -2940,10 +3104,11 @@ export const ProviderRequestLimits: MessageFns<ProviderRequestLimits> = {
 function createBaseProviderStreamEvent(): ProviderStreamEvent {
   return {
     type: 0,
-    text: undefined,
-    reasoning: undefined,
-    toolInput: undefined,
-    toolCall: undefined,
+    frameSequence: 0,
+    thinkingStarted: undefined,
+    textComplete: undefined,
+    reasoningComplete: undefined,
+    toolCallComplete: undefined,
     finish: undefined,
     providerError: undefined,
     attachmentRejections: undefined,
@@ -2955,17 +3120,20 @@ export const ProviderStreamEvent: MessageFns<ProviderStreamEvent> = {
     if (message.type !== 0) {
       writer.uint32(24).int32(message.type);
     }
-    if (message.text !== undefined) {
-      ProviderTextPayload.encode(message.text, writer.uint32(34).fork()).join();
+    if (message.frameSequence !== 0) {
+      writer.uint32(88).uint32(message.frameSequence);
     }
-    if (message.reasoning !== undefined) {
-      ProviderReasoningPayload.encode(message.reasoning, writer.uint32(42).fork()).join();
+    if (message.thinkingStarted !== undefined) {
+      ProviderThinkingStartedPayload.encode(message.thinkingStarted, writer.uint32(98).fork()).join();
     }
-    if (message.toolInput !== undefined) {
-      ProviderToolInputPayload.encode(message.toolInput, writer.uint32(50).fork()).join();
+    if (message.textComplete !== undefined) {
+      ProviderTextCompletePayload.encode(message.textComplete, writer.uint32(106).fork()).join();
     }
-    if (message.toolCall !== undefined) {
-      ProviderToolCallPayload.encode(message.toolCall, writer.uint32(58).fork()).join();
+    if (message.reasoningComplete !== undefined) {
+      ProviderReasoningCompletePayload.encode(message.reasoningComplete, writer.uint32(114).fork()).join();
+    }
+    if (message.toolCallComplete !== undefined) {
+      ProviderToolCallCompletePayload.encode(message.toolCallComplete, writer.uint32(122).fork()).join();
     }
     if (message.finish !== undefined) {
       ProviderFinishPayload.encode(message.finish, writer.uint32(66).fork()).join();
@@ -2994,36 +3162,44 @@ export const ProviderStreamEvent: MessageFns<ProviderStreamEvent> = {
           message.type = reader.int32() as any;
           continue;
         }
-        case 4: {
-          if (tag !== 34) {
+        case 11: {
+          if (tag !== 88) {
             break;
           }
 
-          message.text = ProviderTextPayload.decode(reader, reader.uint32());
+          message.frameSequence = reader.uint32();
           continue;
         }
-        case 5: {
-          if (tag !== 42) {
+        case 12: {
+          if (tag !== 98) {
             break;
           }
 
-          message.reasoning = ProviderReasoningPayload.decode(reader, reader.uint32());
+          message.thinkingStarted = ProviderThinkingStartedPayload.decode(reader, reader.uint32());
           continue;
         }
-        case 6: {
-          if (tag !== 50) {
+        case 13: {
+          if (tag !== 106) {
             break;
           }
 
-          message.toolInput = ProviderToolInputPayload.decode(reader, reader.uint32());
+          message.textComplete = ProviderTextCompletePayload.decode(reader, reader.uint32());
           continue;
         }
-        case 7: {
-          if (tag !== 58) {
+        case 14: {
+          if (tag !== 114) {
             break;
           }
 
-          message.toolCall = ProviderToolCallPayload.decode(reader, reader.uint32());
+          message.reasoningComplete = ProviderReasoningCompletePayload.decode(reader, reader.uint32());
+          continue;
+        }
+        case 15: {
+          if (tag !== 122) {
+            break;
+          }
+
+          message.toolCallComplete = ProviderToolCallCompletePayload.decode(reader, reader.uint32());
           continue;
         }
         case 8: {
@@ -3062,17 +3238,30 @@ export const ProviderStreamEvent: MessageFns<ProviderStreamEvent> = {
   fromJSON(object: any): ProviderStreamEvent {
     return {
       type: isSet(object.type) ? providerStreamEventTypeFromJSON(object.type) : 0,
-      text: isSet(object.text) ? ProviderTextPayload.fromJSON(object.text) : undefined,
-      reasoning: isSet(object.reasoning) ? ProviderReasoningPayload.fromJSON(object.reasoning) : undefined,
-      toolInput: isSet(object.toolInput)
-        ? ProviderToolInputPayload.fromJSON(object.toolInput)
-        : isSet(object.tool_input)
-        ? ProviderToolInputPayload.fromJSON(object.tool_input)
+      frameSequence: isSet(object.frameSequence)
+        ? globalThis.Number(object.frameSequence)
+        : isSet(object.frame_sequence)
+        ? globalThis.Number(object.frame_sequence)
+        : 0,
+      thinkingStarted: isSet(object.thinkingStarted)
+        ? ProviderThinkingStartedPayload.fromJSON(object.thinkingStarted)
+        : isSet(object.thinking_started)
+        ? ProviderThinkingStartedPayload.fromJSON(object.thinking_started)
         : undefined,
-      toolCall: isSet(object.toolCall)
-        ? ProviderToolCallPayload.fromJSON(object.toolCall)
-        : isSet(object.tool_call)
-        ? ProviderToolCallPayload.fromJSON(object.tool_call)
+      textComplete: isSet(object.textComplete)
+        ? ProviderTextCompletePayload.fromJSON(object.textComplete)
+        : isSet(object.text_complete)
+        ? ProviderTextCompletePayload.fromJSON(object.text_complete)
+        : undefined,
+      reasoningComplete: isSet(object.reasoningComplete)
+        ? ProviderReasoningCompletePayload.fromJSON(object.reasoningComplete)
+        : isSet(object.reasoning_complete)
+        ? ProviderReasoningCompletePayload.fromJSON(object.reasoning_complete)
+        : undefined,
+      toolCallComplete: isSet(object.toolCallComplete)
+        ? ProviderToolCallCompletePayload.fromJSON(object.toolCallComplete)
+        : isSet(object.tool_call_complete)
+        ? ProviderToolCallCompletePayload.fromJSON(object.tool_call_complete)
         : undefined,
       finish: isSet(object.finish) ? ProviderFinishPayload.fromJSON(object.finish) : undefined,
       providerError: isSet(object.providerError)
@@ -3093,17 +3282,20 @@ export const ProviderStreamEvent: MessageFns<ProviderStreamEvent> = {
     if (message.type !== 0) {
       obj.type = providerStreamEventTypeToJSON(message.type);
     }
-    if (message.text !== undefined) {
-      obj.text = ProviderTextPayload.toJSON(message.text);
+    if (message.frameSequence !== 0) {
+      obj.frameSequence = Math.round(message.frameSequence);
     }
-    if (message.reasoning !== undefined) {
-      obj.reasoning = ProviderReasoningPayload.toJSON(message.reasoning);
+    if (message.thinkingStarted !== undefined) {
+      obj.thinkingStarted = ProviderThinkingStartedPayload.toJSON(message.thinkingStarted);
     }
-    if (message.toolInput !== undefined) {
-      obj.toolInput = ProviderToolInputPayload.toJSON(message.toolInput);
+    if (message.textComplete !== undefined) {
+      obj.textComplete = ProviderTextCompletePayload.toJSON(message.textComplete);
     }
-    if (message.toolCall !== undefined) {
-      obj.toolCall = ProviderToolCallPayload.toJSON(message.toolCall);
+    if (message.reasoningComplete !== undefined) {
+      obj.reasoningComplete = ProviderReasoningCompletePayload.toJSON(message.reasoningComplete);
+    }
+    if (message.toolCallComplete !== undefined) {
+      obj.toolCallComplete = ProviderToolCallCompletePayload.toJSON(message.toolCallComplete);
     }
     if (message.finish !== undefined) {
       obj.finish = ProviderFinishPayload.toJSON(message.finish);
@@ -3123,17 +3315,18 @@ export const ProviderStreamEvent: MessageFns<ProviderStreamEvent> = {
   fromPartial<I extends Exact<DeepPartial<ProviderStreamEvent>, I>>(object: I): ProviderStreamEvent {
     const message = createBaseProviderStreamEvent();
     message.type = object.type ?? 0;
-    message.text = (object.text !== undefined && object.text !== null)
-      ? ProviderTextPayload.fromPartial(object.text)
+    message.frameSequence = object.frameSequence ?? 0;
+    message.thinkingStarted = (object.thinkingStarted !== undefined && object.thinkingStarted !== null)
+      ? ProviderThinkingStartedPayload.fromPartial(object.thinkingStarted)
       : undefined;
-    message.reasoning = (object.reasoning !== undefined && object.reasoning !== null)
-      ? ProviderReasoningPayload.fromPartial(object.reasoning)
+    message.textComplete = (object.textComplete !== undefined && object.textComplete !== null)
+      ? ProviderTextCompletePayload.fromPartial(object.textComplete)
       : undefined;
-    message.toolInput = (object.toolInput !== undefined && object.toolInput !== null)
-      ? ProviderToolInputPayload.fromPartial(object.toolInput)
+    message.reasoningComplete = (object.reasoningComplete !== undefined && object.reasoningComplete !== null)
+      ? ProviderReasoningCompletePayload.fromPartial(object.reasoningComplete)
       : undefined;
-    message.toolCall = (object.toolCall !== undefined && object.toolCall !== null)
-      ? ProviderToolCallPayload.fromPartial(object.toolCall)
+    message.toolCallComplete = (object.toolCallComplete !== undefined && object.toolCallComplete !== null)
+      ? ProviderToolCallCompletePayload.fromPartial(object.toolCallComplete)
       : undefined;
     message.finish = (object.finish !== undefined && object.finish !== null)
       ? ProviderFinishPayload.fromPartial(object.finish)
@@ -3316,28 +3509,25 @@ export const ProviderAttachmentRejectionsPayload: MessageFns<ProviderAttachmentR
   },
 };
 
-function createBaseProviderTextPayload(): ProviderTextPayload {
-  return { id: "", text: "", metadataJson: "" };
+function createBaseProviderThinkingStartedPayload(): ProviderThinkingStartedPayload {
+  return { providerPartId: "", eventId: "" };
 }
 
-export const ProviderTextPayload: MessageFns<ProviderTextPayload> = {
-  encode(message: ProviderTextPayload, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.id !== "") {
-      writer.uint32(10).string(message.id);
+export const ProviderThinkingStartedPayload: MessageFns<ProviderThinkingStartedPayload> = {
+  encode(message: ProviderThinkingStartedPayload, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.providerPartId !== "") {
+      writer.uint32(10).string(message.providerPartId);
     }
-    if (message.text !== "") {
-      writer.uint32(18).string(message.text);
-    }
-    if (message.metadataJson !== "") {
-      writer.uint32(26).string(message.metadataJson);
+    if (message.eventId !== "") {
+      writer.uint32(18).string(message.eventId);
     }
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): ProviderTextPayload {
+  decode(input: BinaryReader | Uint8Array, length?: number): ProviderThinkingStartedPayload {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseProviderTextPayload();
+    const message = createBaseProviderThinkingStartedPayload();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -3346,7 +3536,7 @@ export const ProviderTextPayload: MessageFns<ProviderTextPayload> = {
             break;
           }
 
-          message.id = reader.string();
+          message.providerPartId = reader.string();
           continue;
         }
         case 2: {
@@ -3354,15 +3544,7 @@ export const ProviderTextPayload: MessageFns<ProviderTextPayload> = {
             break;
           }
 
-          message.text = reader.string();
-          continue;
-        }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.metadataJson = reader.string();
+          message.eventId = reader.string();
           continue;
         }
       }
@@ -3374,165 +3556,67 @@ export const ProviderTextPayload: MessageFns<ProviderTextPayload> = {
     return message;
   },
 
-  fromJSON(object: any): ProviderTextPayload {
+  fromJSON(object: any): ProviderThinkingStartedPayload {
     return {
-      id: isSet(object.id) ? globalThis.String(object.id) : "",
-      text: isSet(object.text) ? globalThis.String(object.text) : "",
-      metadataJson: isSet(object.metadataJson)
-        ? globalThis.String(object.metadataJson)
-        : isSet(object.metadata_json)
-        ? globalThis.String(object.metadata_json)
+      providerPartId: isSet(object.providerPartId)
+        ? globalThis.String(object.providerPartId)
+        : isSet(object.provider_part_id)
+        ? globalThis.String(object.provider_part_id)
+        : "",
+      eventId: isSet(object.eventId)
+        ? globalThis.String(object.eventId)
+        : isSet(object.event_id)
+        ? globalThis.String(object.event_id)
         : "",
     };
   },
 
-  toJSON(message: ProviderTextPayload): unknown {
+  toJSON(message: ProviderThinkingStartedPayload): unknown {
     const obj: any = {};
-    if (message.id !== "") {
-      obj.id = message.id;
+    if (message.providerPartId !== "") {
+      obj.providerPartId = message.providerPartId;
     }
-    if (message.text !== "") {
-      obj.text = message.text;
-    }
-    if (message.metadataJson !== "") {
-      obj.metadataJson = message.metadataJson;
+    if (message.eventId !== "") {
+      obj.eventId = message.eventId;
     }
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<ProviderTextPayload>, I>>(base?: I): ProviderTextPayload {
-    return ProviderTextPayload.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<ProviderThinkingStartedPayload>, I>>(base?: I): ProviderThinkingStartedPayload {
+    return ProviderThinkingStartedPayload.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<ProviderTextPayload>, I>>(object: I): ProviderTextPayload {
-    const message = createBaseProviderTextPayload();
-    message.id = object.id ?? "";
-    message.text = object.text ?? "";
-    message.metadataJson = object.metadataJson ?? "";
+  fromPartial<I extends Exact<DeepPartial<ProviderThinkingStartedPayload>, I>>(
+    object: I,
+  ): ProviderThinkingStartedPayload {
+    const message = createBaseProviderThinkingStartedPayload();
+    message.providerPartId = object.providerPartId ?? "";
+    message.eventId = object.eventId ?? "";
     return message;
   },
 };
 
-function createBaseProviderReasoningPayload(): ProviderReasoningPayload {
-  return { id: "", text: "", metadataJson: "" };
+function createBaseProviderTextCompletePayload(): ProviderTextCompletePayload {
+  return { providerPartId: "", eventId: "", text: "" };
 }
 
-export const ProviderReasoningPayload: MessageFns<ProviderReasoningPayload> = {
-  encode(message: ProviderReasoningPayload, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.id !== "") {
-      writer.uint32(10).string(message.id);
+export const ProviderTextCompletePayload: MessageFns<ProviderTextCompletePayload> = {
+  encode(message: ProviderTextCompletePayload, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.providerPartId !== "") {
+      writer.uint32(10).string(message.providerPartId);
     }
-    if (message.text !== "") {
-      writer.uint32(18).string(message.text);
-    }
-    if (message.metadataJson !== "") {
-      writer.uint32(26).string(message.metadataJson);
-    }
-    return writer;
-  },
-
-  decode(input: BinaryReader | Uint8Array, length?: number): ProviderReasoningPayload {
-    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
-    const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseProviderReasoningPayload();
-    while (reader.pos < end) {
-      const tag = reader.uint32();
-      switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 10) {
-            break;
-          }
-
-          message.id = reader.string();
-          continue;
-        }
-        case 2: {
-          if (tag !== 18) {
-            break;
-          }
-
-          message.text = reader.string();
-          continue;
-        }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.metadataJson = reader.string();
-          continue;
-        }
-      }
-      if ((tag & 7) === 4 || tag === 0) {
-        break;
-      }
-      reader.skip(tag & 7);
-    }
-    return message;
-  },
-
-  fromJSON(object: any): ProviderReasoningPayload {
-    return {
-      id: isSet(object.id) ? globalThis.String(object.id) : "",
-      text: isSet(object.text) ? globalThis.String(object.text) : "",
-      metadataJson: isSet(object.metadataJson)
-        ? globalThis.String(object.metadataJson)
-        : isSet(object.metadata_json)
-        ? globalThis.String(object.metadata_json)
-        : "",
-    };
-  },
-
-  toJSON(message: ProviderReasoningPayload): unknown {
-    const obj: any = {};
-    if (message.id !== "") {
-      obj.id = message.id;
-    }
-    if (message.text !== "") {
-      obj.text = message.text;
-    }
-    if (message.metadataJson !== "") {
-      obj.metadataJson = message.metadataJson;
-    }
-    return obj;
-  },
-
-  create<I extends Exact<DeepPartial<ProviderReasoningPayload>, I>>(base?: I): ProviderReasoningPayload {
-    return ProviderReasoningPayload.fromPartial(base ?? ({} as any));
-  },
-  fromPartial<I extends Exact<DeepPartial<ProviderReasoningPayload>, I>>(object: I): ProviderReasoningPayload {
-    const message = createBaseProviderReasoningPayload();
-    message.id = object.id ?? "";
-    message.text = object.text ?? "";
-    message.metadataJson = object.metadataJson ?? "";
-    return message;
-  },
-};
-
-function createBaseProviderToolInputPayload(): ProviderToolInputPayload {
-  return { id: "", name: "", text: "", metadataJson: "" };
-}
-
-export const ProviderToolInputPayload: MessageFns<ProviderToolInputPayload> = {
-  encode(message: ProviderToolInputPayload, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.id !== "") {
-      writer.uint32(10).string(message.id);
-    }
-    if (message.name !== "") {
-      writer.uint32(18).string(message.name);
+    if (message.eventId !== "") {
+      writer.uint32(18).string(message.eventId);
     }
     if (message.text !== "") {
       writer.uint32(26).string(message.text);
     }
-    if (message.metadataJson !== "") {
-      writer.uint32(34).string(message.metadataJson);
-    }
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): ProviderToolInputPayload {
+  decode(input: BinaryReader | Uint8Array, length?: number): ProviderTextCompletePayload {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseProviderToolInputPayload();
+    const message = createBaseProviderTextCompletePayload();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -3541,7 +3625,7 @@ export const ProviderToolInputPayload: MessageFns<ProviderToolInputPayload> = {
             break;
           }
 
-          message.id = reader.string();
+          message.providerPartId = reader.string();
           continue;
         }
         case 2: {
@@ -3549,7 +3633,110 @@ export const ProviderToolInputPayload: MessageFns<ProviderToolInputPayload> = {
             break;
           }
 
-          message.name = reader.string();
+          message.eventId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.text = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ProviderTextCompletePayload {
+    return {
+      providerPartId: isSet(object.providerPartId)
+        ? globalThis.String(object.providerPartId)
+        : isSet(object.provider_part_id)
+        ? globalThis.String(object.provider_part_id)
+        : "",
+      eventId: isSet(object.eventId)
+        ? globalThis.String(object.eventId)
+        : isSet(object.event_id)
+        ? globalThis.String(object.event_id)
+        : "",
+      text: isSet(object.text) ? globalThis.String(object.text) : "",
+    };
+  },
+
+  toJSON(message: ProviderTextCompletePayload): unknown {
+    const obj: any = {};
+    if (message.providerPartId !== "") {
+      obj.providerPartId = message.providerPartId;
+    }
+    if (message.eventId !== "") {
+      obj.eventId = message.eventId;
+    }
+    if (message.text !== "") {
+      obj.text = message.text;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ProviderTextCompletePayload>, I>>(base?: I): ProviderTextCompletePayload {
+    return ProviderTextCompletePayload.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ProviderTextCompletePayload>, I>>(object: I): ProviderTextCompletePayload {
+    const message = createBaseProviderTextCompletePayload();
+    message.providerPartId = object.providerPartId ?? "";
+    message.eventId = object.eventId ?? "";
+    message.text = object.text ?? "";
+    return message;
+  },
+};
+
+function createBaseProviderReasoningCompletePayload(): ProviderReasoningCompletePayload {
+  return { providerPartId: "", thinkingEventId: "", text: "", providerMetadataJson: "" };
+}
+
+export const ProviderReasoningCompletePayload: MessageFns<ProviderReasoningCompletePayload> = {
+  encode(message: ProviderReasoningCompletePayload, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.providerPartId !== "") {
+      writer.uint32(10).string(message.providerPartId);
+    }
+    if (message.thinkingEventId !== "") {
+      writer.uint32(18).string(message.thinkingEventId);
+    }
+    if (message.text !== "") {
+      writer.uint32(26).string(message.text);
+    }
+    if (message.providerMetadataJson !== "") {
+      writer.uint32(34).string(message.providerMetadataJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ProviderReasoningCompletePayload {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseProviderReasoningCompletePayload();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.providerPartId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.thinkingEventId = reader.string();
           continue;
         }
         case 3: {
@@ -3565,7 +3752,7 @@ export const ProviderToolInputPayload: MessageFns<ProviderToolInputPayload> = {
             break;
           }
 
-          message.metadataJson = reader.string();
+          message.providerMetadataJson = reader.string();
           continue;
         }
       }
@@ -3577,57 +3764,69 @@ export const ProviderToolInputPayload: MessageFns<ProviderToolInputPayload> = {
     return message;
   },
 
-  fromJSON(object: any): ProviderToolInputPayload {
+  fromJSON(object: any): ProviderReasoningCompletePayload {
     return {
-      id: isSet(object.id) ? globalThis.String(object.id) : "",
-      name: isSet(object.name) ? globalThis.String(object.name) : "",
+      providerPartId: isSet(object.providerPartId)
+        ? globalThis.String(object.providerPartId)
+        : isSet(object.provider_part_id)
+        ? globalThis.String(object.provider_part_id)
+        : "",
+      thinkingEventId: isSet(object.thinkingEventId)
+        ? globalThis.String(object.thinkingEventId)
+        : isSet(object.thinking_event_id)
+        ? globalThis.String(object.thinking_event_id)
+        : "",
       text: isSet(object.text) ? globalThis.String(object.text) : "",
-      metadataJson: isSet(object.metadataJson)
-        ? globalThis.String(object.metadataJson)
-        : isSet(object.metadata_json)
-        ? globalThis.String(object.metadata_json)
+      providerMetadataJson: isSet(object.providerMetadataJson)
+        ? globalThis.String(object.providerMetadataJson)
+        : isSet(object.provider_metadata_json)
+        ? globalThis.String(object.provider_metadata_json)
         : "",
     };
   },
 
-  toJSON(message: ProviderToolInputPayload): unknown {
+  toJSON(message: ProviderReasoningCompletePayload): unknown {
     const obj: any = {};
-    if (message.id !== "") {
-      obj.id = message.id;
+    if (message.providerPartId !== "") {
+      obj.providerPartId = message.providerPartId;
     }
-    if (message.name !== "") {
-      obj.name = message.name;
+    if (message.thinkingEventId !== "") {
+      obj.thinkingEventId = message.thinkingEventId;
     }
     if (message.text !== "") {
       obj.text = message.text;
     }
-    if (message.metadataJson !== "") {
-      obj.metadataJson = message.metadataJson;
+    if (message.providerMetadataJson !== "") {
+      obj.providerMetadataJson = message.providerMetadataJson;
     }
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<ProviderToolInputPayload>, I>>(base?: I): ProviderToolInputPayload {
-    return ProviderToolInputPayload.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<ProviderReasoningCompletePayload>, I>>(
+    base?: I,
+  ): ProviderReasoningCompletePayload {
+    return ProviderReasoningCompletePayload.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<ProviderToolInputPayload>, I>>(object: I): ProviderToolInputPayload {
-    const message = createBaseProviderToolInputPayload();
-    message.id = object.id ?? "";
-    message.name = object.name ?? "";
+  fromPartial<I extends Exact<DeepPartial<ProviderReasoningCompletePayload>, I>>(
+    object: I,
+  ): ProviderReasoningCompletePayload {
+    const message = createBaseProviderReasoningCompletePayload();
+    message.providerPartId = object.providerPartId ?? "";
+    message.thinkingEventId = object.thinkingEventId ?? "";
     message.text = object.text ?? "";
-    message.metadataJson = object.metadataJson ?? "";
+    message.providerMetadataJson = object.providerMetadataJson ?? "";
     return message;
   },
 };
 
-function createBaseProviderToolCallPayload(): ProviderToolCallPayload {
-  return { id: "", name: "", inputJson: "", metadataJson: "" };
+function createBaseProviderToolCallCompletePayload(): ProviderToolCallCompletePayload {
+  return { modelToolCallId: "", name: "", inputJson: "", providerMetadataJson: "" };
 }
 
-export const ProviderToolCallPayload: MessageFns<ProviderToolCallPayload> = {
-  encode(message: ProviderToolCallPayload, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.id !== "") {
-      writer.uint32(10).string(message.id);
+export const ProviderToolCallCompletePayload: MessageFns<ProviderToolCallCompletePayload> = {
+  encode(message: ProviderToolCallCompletePayload, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.modelToolCallId !== "") {
+      writer.uint32(10).string(message.modelToolCallId);
     }
     if (message.name !== "") {
       writer.uint32(18).string(message.name);
@@ -3635,16 +3834,16 @@ export const ProviderToolCallPayload: MessageFns<ProviderToolCallPayload> = {
     if (message.inputJson !== "") {
       writer.uint32(26).string(message.inputJson);
     }
-    if (message.metadataJson !== "") {
-      writer.uint32(34).string(message.metadataJson);
+    if (message.providerMetadataJson !== "") {
+      writer.uint32(34).string(message.providerMetadataJson);
     }
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): ProviderToolCallPayload {
+  decode(input: BinaryReader | Uint8Array, length?: number): ProviderToolCallCompletePayload {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseProviderToolCallPayload();
+    const message = createBaseProviderToolCallCompletePayload();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -3653,7 +3852,7 @@ export const ProviderToolCallPayload: MessageFns<ProviderToolCallPayload> = {
             break;
           }
 
-          message.id = reader.string();
+          message.modelToolCallId = reader.string();
           continue;
         }
         case 2: {
@@ -3677,7 +3876,7 @@ export const ProviderToolCallPayload: MessageFns<ProviderToolCallPayload> = {
             break;
           }
 
-          message.metadataJson = reader.string();
+          message.providerMetadataJson = reader.string();
           continue;
         }
       }
@@ -3689,27 +3888,31 @@ export const ProviderToolCallPayload: MessageFns<ProviderToolCallPayload> = {
     return message;
   },
 
-  fromJSON(object: any): ProviderToolCallPayload {
+  fromJSON(object: any): ProviderToolCallCompletePayload {
     return {
-      id: isSet(object.id) ? globalThis.String(object.id) : "",
+      modelToolCallId: isSet(object.modelToolCallId)
+        ? globalThis.String(object.modelToolCallId)
+        : isSet(object.model_tool_call_id)
+        ? globalThis.String(object.model_tool_call_id)
+        : "",
       name: isSet(object.name) ? globalThis.String(object.name) : "",
       inputJson: isSet(object.inputJson)
         ? globalThis.String(object.inputJson)
         : isSet(object.input_json)
         ? globalThis.String(object.input_json)
         : "",
-      metadataJson: isSet(object.metadataJson)
-        ? globalThis.String(object.metadataJson)
-        : isSet(object.metadata_json)
-        ? globalThis.String(object.metadata_json)
+      providerMetadataJson: isSet(object.providerMetadataJson)
+        ? globalThis.String(object.providerMetadataJson)
+        : isSet(object.provider_metadata_json)
+        ? globalThis.String(object.provider_metadata_json)
         : "",
     };
   },
 
-  toJSON(message: ProviderToolCallPayload): unknown {
+  toJSON(message: ProviderToolCallCompletePayload): unknown {
     const obj: any = {};
-    if (message.id !== "") {
-      obj.id = message.id;
+    if (message.modelToolCallId !== "") {
+      obj.modelToolCallId = message.modelToolCallId;
     }
     if (message.name !== "") {
       obj.name = message.name;
@@ -3717,21 +3920,23 @@ export const ProviderToolCallPayload: MessageFns<ProviderToolCallPayload> = {
     if (message.inputJson !== "") {
       obj.inputJson = message.inputJson;
     }
-    if (message.metadataJson !== "") {
-      obj.metadataJson = message.metadataJson;
+    if (message.providerMetadataJson !== "") {
+      obj.providerMetadataJson = message.providerMetadataJson;
     }
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<ProviderToolCallPayload>, I>>(base?: I): ProviderToolCallPayload {
-    return ProviderToolCallPayload.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<ProviderToolCallCompletePayload>, I>>(base?: I): ProviderToolCallCompletePayload {
+    return ProviderToolCallCompletePayload.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<ProviderToolCallPayload>, I>>(object: I): ProviderToolCallPayload {
-    const message = createBaseProviderToolCallPayload();
-    message.id = object.id ?? "";
+  fromPartial<I extends Exact<DeepPartial<ProviderToolCallCompletePayload>, I>>(
+    object: I,
+  ): ProviderToolCallCompletePayload {
+    const message = createBaseProviderToolCallCompletePayload();
+    message.modelToolCallId = object.modelToolCallId ?? "";
     message.name = object.name ?? "";
     message.inputJson = object.inputJson ?? "";
-    message.metadataJson = object.metadataJson ?? "";
+    message.providerMetadataJson = object.providerMetadataJson ?? "";
     return message;
   },
 };
@@ -4354,6 +4559,7 @@ function createBaseRunWebRequest(): RunWebRequest {
     bindingId: "",
     bindingGeneration: 0,
     runtimeBindingToken: "",
+    runtimeProcessId: "",
   };
 }
 
@@ -4382,6 +4588,9 @@ export const RunWebRequest: MessageFns<RunWebRequest> = {
     }
     if (message.runtimeBindingToken !== "") {
       writer.uint32(66).string(message.runtimeBindingToken);
+    }
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(74).string(message.runtimeProcessId);
     }
     return writer;
   },
@@ -4457,6 +4666,14 @@ export const RunWebRequest: MessageFns<RunWebRequest> = {
           message.runtimeBindingToken = reader.string();
           continue;
         }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4504,6 +4721,11 @@ export const RunWebRequest: MessageFns<RunWebRequest> = {
         : isSet(object.runtime_binding_token)
         ? globalThis.String(object.runtime_binding_token)
         : "",
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
     };
   },
 
@@ -4533,6 +4755,9 @@ export const RunWebRequest: MessageFns<RunWebRequest> = {
     if (message.runtimeBindingToken !== "") {
       obj.runtimeBindingToken = message.runtimeBindingToken;
     }
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
     return obj;
   },
 
@@ -4551,6 +4776,7 @@ export const RunWebRequest: MessageFns<RunWebRequest> = {
     message.bindingId = object.bindingId ?? "";
     message.bindingGeneration = object.bindingGeneration ?? 0;
     message.runtimeBindingToken = object.runtimeBindingToken ?? "";
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
     return message;
   },
 };
@@ -5438,6 +5664,7 @@ function createBaseRunMcpToolRequest(): RunMcpToolRequest {
     bindingId: "",
     bindingGeneration: 0,
     runtimeBindingToken: "",
+    runtimeProcessId: "",
   };
 }
 
@@ -5463,6 +5690,9 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
     }
     if (message.runtimeBindingToken !== "") {
       writer.uint32(90).string(message.runtimeBindingToken);
+    }
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(98).string(message.runtimeProcessId);
     }
     return writer;
   },
@@ -5530,6 +5760,14 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
           message.runtimeBindingToken = reader.string();
           continue;
         }
+        case 12: {
+          if (tag !== 98) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5576,6 +5814,11 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
         : isSet(object.runtime_binding_token)
         ? globalThis.String(object.runtime_binding_token)
         : "",
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
     };
   },
 
@@ -5602,6 +5845,9 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
     if (message.runtimeBindingToken !== "") {
       obj.runtimeBindingToken = message.runtimeBindingToken;
     }
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
     return obj;
   },
 
@@ -5617,6 +5863,7 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
     message.bindingId = object.bindingId ?? "";
     message.bindingGeneration = object.bindingGeneration ?? 0;
     message.runtimeBindingToken = object.runtimeBindingToken ?? "";
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
     return message;
   },
 };

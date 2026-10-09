@@ -1,0 +1,296 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tetral-agent-runtime-istiod
+  namespace: tetral-agent-runtime
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-runtime
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+          podSelector:
+            matchLabels:
+              app: istiod
+              istio.io/rev: "1-31-1"
+      ports:
+        - protocol: TCP
+          port: 15012
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tetral-job-runner-istiod
+  namespace: tetral-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: job-runner
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+          podSelector:
+            matchLabels:
+              app: istiod
+              istio.io/rev: "1-31-1"
+      ports:
+        - protocol: TCP
+          port: 15012
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tetral-bridge-istiod
+  namespace: tetral-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: bridge
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+          podSelector:
+            matchLabels:
+              app: istiod
+              istio.io/rev: "1-31-1"
+      ports:
+        - protocol: TCP
+          port: 15012
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tetral-mcp-connector-istiod
+  namespace: tetral-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-connector
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+          podSelector:
+            matchLabels:
+              app: istiod
+              istio.io/rev: "1-31-1"
+      ports:
+        - protocol: TCP
+          port: 15012
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tetral-provider-gateway-istiod
+  namespace: tetral-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: provider-gateway
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+          podSelector:
+            matchLabels:
+              app: istiod
+              istio.io/rev: "1-31-1"
+      ports:
+        - protocol: TCP
+          port: 15012
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tetral-sandbox-istiod
+  namespace: tetral-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+          podSelector:
+            matchLabels:
+              app: istiod
+              istio.io/rev: "1-31-1"
+      ports:
+        - protocol: TCP
+          port: 15012
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: provider-gateway-nats
+  namespace: tetral-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: provider-gateway
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nats
+              app.kubernetes.io/instance: tetral-nats
+      ports:
+        - protocol: TCP
+          port: 4222
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: event-stream-nats
+  namespace: tetral-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: event-stream
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nats
+              app.kubernetes.io/instance: tetral-nats
+      ports:
+        - protocol: TCP
+          port: 4222
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: tetral-bridge-protected
+  namespace: tetral-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bridge
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              # Canonical inventory retains full URI; Istio adds its prefix.
+              - "cluster.local/ns/tetral-agent-runtime/sa/agent-runtime"
+              # Canonical inventory retains full URI; Istio adds its prefix.
+              - "cluster.local/ns/tetral-system/sa/mcp-connector"
+              # Canonical inventory retains full URI; Istio adds its prefix.
+              - "cluster.local/ns/tetral-system/sa/provider-gateway"
+      to:
+        - operation:
+            ports: ["9090"]
+    # Probes and nonbusiness listeners retain their owning NetworkPolicy.
+    - to:
+        - operation:
+            notPorts: ["9090"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: tetral-mcp-connector-protected
+  namespace: tetral-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-connector
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              # Canonical inventory retains full URI; Istio adds its prefix.
+              - "cluster.local/ns/tetral-agent-runtime/sa/agent-runtime"
+              # Canonical inventory retains full URI; Istio adds its prefix.
+              - "cluster.local/ns/tetral-system/sa/job-runner"
+              # Canonical inventory retains full URI; Istio adds its prefix.
+              - "cluster.local/ns/tetral-system/sa/bridge"
+      to:
+        - operation:
+            ports: ["9091"]
+    # Probes and nonbusiness listeners retain their owning NetworkPolicy.
+    - to:
+        - operation:
+            notPorts: ["9091"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: tetral-provider-gateway-protected
+  namespace: tetral-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: provider-gateway
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              # Canonical inventory retains full URI; Istio adds its prefix.
+              - "cluster.local/ns/tetral-agent-runtime/sa/agent-runtime"
+      to:
+        - operation:
+            ports: ["9090"]
+    # Probes and nonbusiness listeners retain their owning NetworkPolicy.
+    - to:
+        - operation:
+            notPorts: ["9090"]
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: tetral-bridge-protected
+  namespace: tetral-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bridge
+  portLevelMtls:
+    "9090":
+      mode: STRICT
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: tetral-mcp-connector-protected
+  namespace: tetral-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-connector
+  portLevelMtls:
+    "9091":
+      mode: STRICT
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: tetral-provider-gateway-protected
+  namespace: tetral-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: provider-gateway
+  portLevelMtls:
+    "9090":
+      mode: STRICT

@@ -72,7 +72,7 @@ func newEnvironmentTestRouterAndDB(t *testing.T) (http.Handler, *environment.Pos
 func newEnvironmentListQueryTestRouter() http.Handler {
 	envHandler := httpapi.NewEnvironmentHandler(environmentListQueryTestService{})
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
-		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_test"}, nil
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_test"), nil
 	})
 	return httpapi.NewRouter(nil, "", httpapi.WithAuthenticator(authenticator), httpapi.WithEnvironmentHandler(envHandler))
 }

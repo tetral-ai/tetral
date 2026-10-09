@@ -3,6 +3,7 @@ package tetralqueue
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -14,6 +15,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/internalgrpc"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sessionrpc"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 
@@ -33,7 +35,7 @@ func TestQueueServerLogsSuccessfulLeaseWaitAndDurableIdentity(t *testing.T) {
 		AvailableAt: now.Add(-500 * time.Millisecond), AttemptCount: 2,
 	}}}
 	var logs bytes.Buffer
-	server := NewServer(store, slog.New(slog.NewJSONHandler(&logs, nil)))
+	server := NewServer(store, slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	nowCalls := 0
 	server.now = func() time.Time {
 		nowCalls++
@@ -204,6 +206,122 @@ func TestQueueLeaseCarriesMaximumLegalBatchWithinScopedFuse(t *testing.T) {
 	}
 }
 
+func TestQueueJobRunnerLeaseCarriesMaximumAcceptedBatchWithinScopedFuse(t *testing.T) {
+	now := time.Date(294276, 12, 31, 23, 59, 59, 999999999, time.UTC)
+	const payloadPrefix = `{"payload":"`
+	const payloadSuffix = `"}`
+	maxPayload := []byte(payloadPrefix + strings.Repeat("x", queue.MaxQueueJobPayloadBytes-len(payloadPrefix)-len(payloadSuffix)) + payloadSuffix)
+	maximum := queue.MaxJobRunnerLeaseJobs()
+	jobs := make([]*queue.Job, 0, maximum)
+	for index := 0; index < maximum; index++ {
+		suffix := fmt.Sprintf("%016x", index)
+		jobs = append(jobs, &queue.Job{
+			ID:             queue.JobIDPrefix + suffix,
+			WorkspaceID:    workspace.ID(strings.Repeat("w", workspace.MaxWorkspaceIDBytes)),
+			Kind:           queue.KindSessionDeleteCleanup,
+			PartitionKey:   strings.Repeat("p", queue.MaxQueuePartitionKeyBytes-len(suffix)) + suffix,
+			DedupeKey:      strings.Repeat("d", queue.MaxQueueDedupeKeyBytes-len(suffix)) + suffix,
+			PayloadVersion: math.MinInt32,
+			PayloadJSON:    append([]byte(nil), maxPayload...),
+			Status:         queue.StatusDeadLettered,
+			Priority:       math.MinInt32,
+			AvailableAt:    now,
+			LeasedBy:       strings.Repeat("l", queue.MaxQueueLeaseOwnerBytes),
+			LeaseToken:     "qlt_" + strings.Repeat("a", queue.MaxQueueLeaseTokenBytes-len("qlt_")-len(suffix)) + suffix,
+			LeasedAt:       &now,
+			LeasedUntil:    &now,
+			AttemptCount:   math.MinInt32,
+			MaxAttempts:    math.MinInt32,
+		})
+	}
+	store := &recordingStore{jobRunnerResult: queue.LeaseJobRunnerJobsResult{Jobs: jobs, RetryAfter: time.Duration(math.MaxInt32) * time.Millisecond}}
+	conn, cleanup := newQueueClientConn(t, store, now)
+	defer cleanup()
+	client := queuev1.NewQueueServiceClient(conn)
+
+	response, err := client.LeaseJobRunnerJobs(context.Background(), &queuev1.LeaseJobRunnerJobsRequest{
+		MaxJobs: int32(maximum), LeaseOwner: strings.Repeat("l", queue.MaxQueueLeaseOwnerBytes), LeaseDurationMs: 300000,
+	})
+	if err != nil {
+		t.Fatalf("LeaseJobRunnerJobs maximum accepted batch: %v", err)
+	}
+	if got := len(response.GetJobs()); got != maximum {
+		t.Fatalf("leased jobs = %d; want derived maximum %d", got, maximum)
+	}
+	if got := proto.Size(response); got > sessionrpc.MaxQueueLeaseGRPCMessageBytes {
+		t.Fatalf("serialized LeaseJobRunnerJobs response = %d bytes; exceeds scoped %d-byte fuse", got, sessionrpc.MaxQueueLeaseGRPCMessageBytes)
+	}
+	if store.jobRunnerRequest.MaxJobs != maximum || store.jobRunnerRequest.LeaseDuration != 300*time.Second {
+		t.Fatalf("store request = %+v; want the accepted bounds unchanged", store.jobRunnerRequest)
+	}
+}
+
+func TestQueueJobRunnerLeaseValidationAndOutcomeMapping(t *testing.T) {
+	store := &recordingStore{jobRunnerResult: queue.LeaseJobRunnerJobsResult{RetryAfter: 250 * time.Millisecond}}
+	conn, cleanup := newQueueClientConn(t, store, time.Now())
+	defer cleanup()
+	client := queuev1.NewQueueServiceClient(conn)
+	valid := func() *queuev1.LeaseJobRunnerJobsRequest {
+		return &queuev1.LeaseJobRunnerJobsRequest{MaxJobs: 8, LeaseOwner: "job-runner", LeaseDurationMs: 30000}
+	}
+	for name, mutate := range map[string]func(*queuev1.LeaseJobRunnerJobsRequest){
+		"zero max_jobs":      func(r *queuev1.LeaseJobRunnerJobsRequest) { r.MaxJobs = 0 },
+		"negative max_jobs":  func(r *queuev1.LeaseJobRunnerJobsRequest) { r.MaxJobs = -1 },
+		"oversized max_jobs": func(r *queuev1.LeaseJobRunnerJobsRequest) { r.MaxJobs = int32(queue.MaxJobRunnerLeaseJobs() + 1) },
+		"empty owner":        func(r *queuev1.LeaseJobRunnerJobsRequest) { r.LeaseOwner = "" },
+		"oversized owner": func(r *queuev1.LeaseJobRunnerJobsRequest) {
+			r.LeaseOwner = strings.Repeat("o", queue.MaxQueueLeaseOwnerBytes+1)
+		},
+		"duration below minimum": func(r *queuev1.LeaseJobRunnerJobsRequest) { r.LeaseDurationMs = 4999 },
+		"duration above maximum": func(r *queuev1.LeaseJobRunnerJobsRequest) { r.LeaseDurationMs = 300001 },
+		"overflowing duration":   func(r *queuev1.LeaseJobRunnerJobsRequest) { r.LeaseDurationMs = math.MaxInt64 },
+	} {
+		request := valid()
+		mutate(request)
+		store.jobRunnerRequest = queue.LeaseJobRunnerJobsRequest{}
+		if _, err := client.LeaseJobRunnerJobs(context.Background(), request); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("%s: error = %v; want InvalidArgument", name, err)
+		}
+		if store.jobRunnerRequest.LeaseOwner != "" {
+			t.Fatalf("%s reached the store", name)
+		}
+	}
+	for _, millis := range []int64{5000, 300000} {
+		request := valid()
+		request.LeaseDurationMs = millis
+		response, err := client.LeaseJobRunnerJobs(context.Background(), request)
+		if err != nil || response.GetRetryAfterMs() != 250 || store.jobRunnerRequest.LeaseDuration != time.Duration(millis)*time.Millisecond {
+			t.Fatalf("duration %d ms: response=%v err=%v store=%+v", millis, response, err, store.jobRunnerRequest)
+		}
+	}
+
+	store.jobRunnerErr = queue.ErrJobRunnerSchedulerClosed
+	if _, err := client.LeaseJobRunnerJobs(context.Background(), valid()); status.Code(err) != codes.Unavailable {
+		t.Fatalf("lease from a quiescing scheduler = %v; want Unavailable", err)
+	}
+	store.jobRunnerErr = nil
+
+	for _, outcome := range []struct {
+		updated bool
+		err     error
+		code    codes.Code
+	}{
+		{updated: true, code: codes.OK},
+		{err: &queue.ValidationError{Message: "lease_token is required"}, code: codes.InvalidArgument},
+		{err: &queue.PreconditionError{Message: "queue lease was not issued by direct Job Runner leasing"}, code: codes.FailedPrecondition},
+		{err: errors.New("database unavailable"), code: codes.Internal},
+	} {
+		store.releaseUpdated, store.releaseErr = outcome.updated, outcome.err
+		response, err := client.ReleaseUnstartedJob(context.Background(), &queuev1.ReleaseUnstartedJobRequest{WorkspaceId: "ws_release", JobId: "qjob_release", LeaseToken: "qlt_release"})
+		if status.Code(err) != outcome.code || (err == nil && !response.GetUpdated()) {
+			t.Fatalf("release outcome %+v: response=%v err=%v", outcome, response, err)
+		}
+		if store.releaseRequest != (queue.ReleaseUnstartedJobRequest{WorkspaceID: "ws_release", JobID: "qjob_release", LeaseToken: "qlt_release"}) {
+			t.Fatalf("release request = %+v", store.releaseRequest)
+		}
+	}
+}
+
 func TestQueueJobVariableFieldCensusMatchesLeaseArithmetic(t *testing.T) {
 	bounds := queue.QueueJobFieldBounds()
 	bounded := make(map[string]queue.QueueJobFieldBound, len(bounds))
@@ -297,16 +415,32 @@ func newQueueClientConn(t *testing.T, store *recordingStore, now time.Time) (*gr
 }
 
 type recordingStore struct {
-	leaseJobs     []*queue.Job
-	leaseRequest  queue.LeaseRequest
-	ackRequest    queue.AckRequest
-	deferRequest  queue.DeferRequest
-	cancelRequest queue.CancelRequest
+	leaseJobs        []*queue.Job
+	leaseRequest     queue.LeaseRequest
+	jobRunnerResult  queue.LeaseJobRunnerJobsResult
+	jobRunnerRequest queue.LeaseJobRunnerJobsRequest
+	jobRunnerErr     error
+	releaseRequest   queue.ReleaseUnstartedJobRequest
+	releaseUpdated   bool
+	releaseErr       error
+	ackRequest       queue.AckRequest
+	deferRequest     queue.DeferRequest
+	cancelRequest    queue.CancelRequest
 }
 
 func (s *recordingStore) Lease(_ context.Context, request queue.LeaseRequest) ([]*queue.Job, error) {
 	s.leaseRequest = request
 	return s.leaseJobs, nil
+}
+
+func (s *recordingStore) LeaseJobRunnerJobs(_ context.Context, request queue.LeaseJobRunnerJobsRequest) (queue.LeaseJobRunnerJobsResult, error) {
+	s.jobRunnerRequest = request
+	return s.jobRunnerResult, s.jobRunnerErr
+}
+
+func (s *recordingStore) ReleaseUnstartedJob(_ context.Context, request queue.ReleaseUnstartedJobRequest) (bool, error) {
+	s.releaseRequest = request
+	return s.releaseUpdated, s.releaseErr
 }
 
 func (s *recordingStore) Heartbeat(context.Context, queue.HeartbeatRequest) (queue.HeartbeatResult, error) {
@@ -338,4 +472,25 @@ func (s *recordingStore) Cancel(_ context.Context, request queue.CancelRequest) 
 
 func timePtr(value time.Time) *time.Time {
 	return &value
+}
+
+func TestHealthyEmptyLeasePollingIsQuietAtDefaultLevel(t *testing.T) {
+	var output bytes.Buffer
+	store := &recordingStore{}
+	server := NewServer(store, workload.NewLogger(&output, "queue", "test", "unit"))
+	for n := 0; n < 1000; n++ {
+		response, err := server.Lease(context.Background(), &queuev1.LeaseRequest{WorkspaceId: "ws_observed", Kinds: []string{queue.KindSandboxToolExecute}, LeaseOwner: "sandbox", MaxJobs: 1, LeaseDurationMs: 1000})
+		if err != nil || len(response.GetJobs()) != 0 {
+			t.Fatalf("empty poll %d: %v %+v", n, err, response)
+		}
+	}
+	for n := 0; n < 1000; n++ {
+		response, err := server.Heartbeat(context.Background(), &queuev1.HeartbeatRequest{WorkspaceId: "ws_observed", JobId: "qjob_observed", LeaseToken: "lease", LeaseDurationMs: 1000})
+		if err != nil || !response.GetUpdated() {
+			t.Fatalf("heartbeat %d: %v", n, err)
+		}
+	}
+	if output.Len() != 0 {
+		t.Fatalf("empty polling chatter at Info: %s", output.String())
+	}
 }

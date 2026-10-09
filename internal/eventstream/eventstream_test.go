@@ -20,7 +20,9 @@ import (
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	eventstream "github.com/tetral-ai/tetral/internal/eventstream"
+	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	eventstreamservice "github.com/tetral-ai/tetral/services/event-stream"
 )
@@ -65,7 +67,7 @@ func TestEventStreamListReturnsPublicEventEnvelope(t *testing.T) {
 			NextPage: stringPtr("next-token"),
 		},
 	}
-	router := eventstream.NewListRouter(reader, verifier)
+	router := listRouter(reader, verifier, nil)
 	request := signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true&limit=2&order=asc")
 	recorder := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
 
@@ -131,7 +133,7 @@ func testEventStreamListProjectsAllPublicChildEventVariants(t *testing.T, path s
 	}
 	reader := &recordingReader{listResult: eventstream.ListResult{Data: data}}
 	recorder := httptest.NewRecorder()
-	eventstream.NewListRouter(reader, verifier).ServeHTTP(recorder, signedRequest(t, signer, http.MethodGet, path))
+	listRouter(reader, verifier, nil).ServeHTTP(recorder, signedRequest(t, signer, http.MethodGet, path))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200 body=%s", recorder.Code, recorder.Body.String())
 	}
@@ -156,12 +158,7 @@ func testEventStreamSSEProjectsAllPublicChildEventVariants(t *testing.T, path st
 	recorder := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
 	request := signedRequest(t, signer, http.MethodGet, path)
 	request.Header.Set("Accept", "text/event-stream")
-	eventstreamservice.NewRouter(
-		reader,
-		verifier,
-		eventstreamservice.WithStreamPollInterval(time.Millisecond),
-		eventstreamservice.WithStreamMaxEmptyPolls(1),
-	).ServeHTTP(recorder, request)
+	streamRouter(t, reader, verifier).ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200 body=%s", recorder.Code, recorder.Body.String())
 	}
@@ -243,7 +240,7 @@ func assertPublicChildOutletEvents(t *testing.T, got []map[string]any, fixtures 
 func TestEventStreamSessionListDecodesSDKFiltersAndRejectsUnknownParameters(t *testing.T) {
 	signer, verifier := testInternalPrincipalPair(t)
 	reader := &recordingReader{}
-	router := eventstream.NewListRouter(reader, verifier)
+	router := listRouter(reader, verifier, nil)
 	request := signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true&types[]=user.message&types[]=agent.message&created_at[gt]=2026-01-01T00:00:00Z&created_at[lte]=2026-01-02T00:00:00Z")
 	recorder := httptest.NewRecorder()
 
@@ -288,9 +285,9 @@ func TestEventStreamRoutesRequireExactlyOneBetaMarkerBeforeReaderAccess(t *testi
 				reader := &recordingReader{}
 				var router http.Handler
 				if strings.HasSuffix(route, "/stream") {
-					router = eventstreamservice.NewRouter(reader, verifier, eventstreamservice.WithStreamMaxEmptyPolls(1))
+					router = eventstreamservice.NewRouter(reader, verifier)
 				} else {
-					router = eventstream.NewListRouter(reader, verifier)
+					router = listRouter(reader, verifier, nil)
 				}
 				recorder := httptest.NewRecorder()
 				router.ServeHTTP(recorder, signedRequest(t, signer, http.MethodGet, route+query))
@@ -315,7 +312,7 @@ func TestEventStreamSSEStartsAtCurrentHighWaterAndClosesOnDeleted(t *testing.T) 
 			{StreamPosition: 12, Event: eventstream.Event{ID: "evt_deleted", Type: "session.deleted", SessionID: "sesn_stream", Payload: json.RawMessage(`{"deleted":true}`)}},
 		},
 	}
-	router := eventstreamservice.NewRouter(reader, verifier, eventstreamservice.WithStreamPollInterval(time.Millisecond), eventstreamservice.WithStreamMaxEmptyPolls(1))
+	router := streamRouter(t, reader, verifier)
 	request := signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_stream/events/stream?beta=true")
 	request.Header.Set("Accept", "text/event-stream")
 	recorder := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
@@ -347,15 +344,13 @@ func TestEventStreamSSEStartsAtCurrentHighWaterAndClosesOnDeleted(t *testing.T) 
 	}
 }
 
-func TestIdleEventStreamEmitsHeartbeatBeforeTheNextPoll(t *testing.T) {
+func TestIdleEventStreamEmitsAHeartbeatRightAfterOpening(t *testing.T) {
 	signer, verifier := testInternalPrincipalPair(t)
 	reader := &recordingReader{}
 	pollInterval := 20 * time.Millisecond
-	router := eventstreamservice.NewRouter(
-		reader,
-		verifier,
-		eventstreamservice.WithStreamPollInterval(pollInterval),
-	)
+	idle := eventstreamservice.NewIdleCoalescer(reader, pollInterval, nil)
+	t.Cleanup(idle.Close)
+	router := eventstreamservice.NewRouter(reader, verifier, eventstreamservice.WithIdleCoalescer(idle))
 	request := signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_idle/events/stream?beta=true")
 	ctx, cancel := context.WithCancel(request.Context())
 	request = request.WithContext(ctx)
@@ -382,7 +377,7 @@ func TestIdleEventStreamEmitsHeartbeatBeforeTheNextPoll(t *testing.T) {
 			}
 		case <-deadline.C:
 			cancel()
-			t.Fatal("idle SSE did not flush a heartbeat within one poll interval")
+			t.Fatal("idle SSE did not flush a heartbeat right after opening")
 		}
 	}
 }
@@ -396,7 +391,7 @@ func TestEventStreamThreadRoutesUseThreadScope(t *testing.T) {
 			},
 		},
 	}
-	router := eventstream.NewListRouter(reader, verifier)
+	router := listRouter(reader, verifier, nil)
 	request := signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_thread_events/threads/thr_child/events?limit=2&order=desc&beta=true")
 	recorder := httptest.NewRecorder()
 
@@ -426,7 +421,7 @@ func TestEventStreamThreadSSEStartsAtThreadHighWater(t *testing.T) {
 			{StreamPosition: 22, Event: eventstream.Event{ID: "evt_deleted_thread", Type: "session.deleted", SessionID: "sesn_thread_stream", ThreadID: "thr_child", Payload: json.RawMessage(`{"deleted":true}`)}},
 		},
 	}
-	router := eventstreamservice.NewRouter(reader, verifier, eventstreamservice.WithStreamPollInterval(time.Millisecond), eventstreamservice.WithStreamMaxEmptyPolls(1))
+	router := streamRouter(t, reader, verifier)
 	request := signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_thread_stream/threads/thr_child/stream?beta=true")
 	request.Header.Set("Accept", "text/event-stream")
 	recorder := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
@@ -732,7 +727,7 @@ func TestEventStreamBoundaryLogsServerErrorsOnly(t *testing.T) {
 	signer, verifier := testInternalPrincipalPair(t)
 	t.Run("fast 2xx emits no boundary log", func(t *testing.T) {
 		var buffer bytes.Buffer
-		router := eventstream.NewListRouter(&recordingReader{}, verifier, eventstream.WithListLogger(captureLogger(&buffer)))
+		router := listRouter(&recordingReader{}, verifier, captureLogger(&buffer))
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true"))
 		if recorder.Code != http.StatusOK {
@@ -745,7 +740,7 @@ func TestEventStreamBoundaryLogsServerErrorsOnly(t *testing.T) {
 
 	t.Run("missing principal is auth-only and not boundary logged", func(t *testing.T) {
 		var buffer bytes.Buffer
-		router := eventstream.NewListRouter(&recordingReader{}, verifier, eventstream.WithListLogger(captureLogger(&buffer)))
+		router := listRouter(&recordingReader{}, verifier, captureLogger(&buffer))
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/sessions/sesn_events/events", nil))
 		if recorder.Code != http.StatusUnauthorized {
@@ -758,7 +753,7 @@ func TestEventStreamBoundaryLogsServerErrorsOnly(t *testing.T) {
 
 	t.Run("500 emits boundary log", func(t *testing.T) {
 		var buffer bytes.Buffer
-		router := eventstream.NewListRouter(nil, verifier, eventstream.WithListLogger(captureLogger(&buffer)))
+		router := listRouter(nil, verifier, captureLogger(&buffer))
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true"))
 		if recorder.Code != http.StatusInternalServerError {
@@ -782,6 +777,8 @@ type recordingReader struct {
 	changeCalls      int
 	currentCalls     int
 	listCalls        int
+	previewCalls     int
+	finalCalls       int
 }
 
 type ListResult = eventstream.ListResult
@@ -880,6 +877,26 @@ func (r *recordingReader) ListThreadEventChanges(_ context.Context, _ workspace.
 	return r.ListSessionEventChanges(context.Background(), workspace.DefaultID, "", after, 0)
 }
 
+// ReadSessionSignals reports every Session unchanged. It runs on the shared
+// check workers and touches no recorded field.
+func (*recordingReader) ReadSessionSignals(_ context.Context, _ workspace.ID, sessionIDs []string) ([]eventstream.SessionSignal, error) {
+	signals := make([]eventstream.SessionSignal, 0, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		signals = append(signals, eventstream.SessionSignal{SessionID: sessionID, Exists: true, LifecycleState: "active"})
+	}
+	return signals, nil
+}
+
+// streamRouter mounts the Event Stream router with its own shared idle checks.
+// Its streams return after one completed unchanged check while idle, so a
+// recorder can read the finished body.
+func streamRouter(t *testing.T, reader *recordingReader, verifier *auth.InternalPrincipalVerifier) http.Handler {
+	t.Helper()
+	idle := eventstreamservice.NewIdleCoalescer(reader, time.Millisecond, nil)
+	t.Cleanup(idle.Close)
+	return eventstreamservice.NewRouter(reader, verifier, eventstreamservice.WithIdleCoalescer(idle), eventstreamservice.WithStreamCompletedCheckLimit(1))
+}
+
 func testInternalPrincipalPair(t *testing.T) (*auth.InternalPrincipalSigner, *auth.InternalPrincipalVerifier) {
 	t.Helper()
 	privateKey, err := auth.GenerateEd25519PrivateKeyBase64()
@@ -900,15 +917,19 @@ func testInternalPrincipalPair(t *testing.T) (*auth.InternalPrincipalSigner, *au
 func signedRequest(t *testing.T, signer *auth.InternalPrincipalSigner, method string, target string) *http.Request {
 	t.Helper()
 	request := httptest.NewRequest(method, target, nil)
-	token, err := signer.Mint(auth.Principal{ //nolint:gosec // Test principal token fixture.
-		Workspace: workspace.Workspace{ID: workspace.DefaultID, Type: "workspace", Name: "Default"},
-		APIKeyID:  "ak_event_stream_test", //nolint:gosec // Test principal id, not a secret.
-	}, method, request.URL.Path, "req_event_stream_test", time.Minute)
+	token, err := signer.Mint(auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID, Type: "workspace", Name: "Default"}, "ak_event_stream_test"), method, request.URL.Path, "req_event_stream_test", time.Minute)
 	if err != nil {
 		t.Fatalf("mint principal: %v", err)
 	}
 	request.Header.Set("X-Tetral-Internal-Principal", token)
 	return request
+}
+
+// listRouter mounts the list handler through the public API router exactly as
+// the API service does: signed principal admission, declared operations and
+// the production boundary middleware. A nil logger keeps the router default.
+func listRouter(reader eventstream.ListReader, verifier *auth.InternalPrincipalVerifier, logger *slog.Logger) http.Handler {
+	return httpapi.NewRouter(nil, "", httpapi.WithSessionEventListHandler(eventstream.NewListHandler(reader)), httpapi.WithInternalPrincipalVerifier(verifier), httpapi.WithLogger(logger))
 }
 
 func captureLogger(buffer *bytes.Buffer) *slog.Logger {
@@ -1006,12 +1027,15 @@ func seedEventStreamEventAt(t *testing.T, db *sql.DB, workspaceID string, sessio
 	if threadID == "" {
 		thread = nil
 	}
+	relation := sessionfixture.ToolEventRelationForTest(t, db, workspaceID, eventID, eventType, payloadJSON)
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $11)`,
-		workspaceID, sessionID, thread, eventID, sequence, eventType, payloadJSON, visibility, sessionVisible, createdAt, processed); err != nil {
+			visibility, session_visible, model_request_id, model_tool_call_id, tool_use_event_id,
+			created_at, updated_at, processed_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14)`,
+		workspaceID, sessionID, thread, eventID, sequence, eventType, payloadJSON, visibility, sessionVisible,
+		relation.ModelRequestID, relation.ModelToolCallID, relation.ToolUseEventID, createdAt, processed); err != nil {
 		t.Fatalf("seed event %s: %v", eventID, err)
 	}
 }
@@ -1072,4 +1096,59 @@ func eventIDs(events []eventstream.Event) []string {
 
 func equalStrings(left []string, right []string) bool {
 	return slices.Equal(left, right)
+}
+
+func (r *recordingReader) ReadPreviewRequest(context.Context, workspace.ID, string, string, string, string) (eventstream.PreviewRequest, error) {
+	r.previewCalls++
+	return eventstream.PreviewRequest{}, nil
+}
+func (r *recordingReader) ListRequestFinalMessages(context.Context, eventstream.ReadScope, string, int64, int) ([]eventstream.RequestFinalMessage, error) {
+	r.finalCalls++
+	return nil, nil
+}
+
+func TestPublicAuthorizationEventReadsDenyBeforeReaderAccess(t *testing.T) {
+	signer, verifier := testInternalPrincipalPair(t)
+	// Bounded signed admission uses the production operation policy. Restricted
+	// product roles are not assignable; this fixture removes event permissions.
+	principal := auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_restricted_fixture")
+	principal.Authority.Operations = []auth.Operation{auth.OperationModelsList}
+	for _, path := range []string{
+		"/v1/sessions/sesn_events/events?beta=true",
+		"/v1/sessions/sesn_absent/events?beta=true",
+		"/v1/sessions/sesn_events/threads/thr_main/events?beta=true",
+		"/v1/sessions/sesn_absent/threads/thr_absent/events?beta=true",
+		"/v1/sessions/sesn_events/events/stream?beta=true",
+		"/v1/sessions/sesn_absent/events/stream?beta=true&event_deltas[]=agent.message",
+		"/v1/sessions/sesn_events/threads/thr_main/stream?beta=true",
+		"/v1/sessions/sesn_absent/threads/thr_absent/stream?beta=true",
+	} {
+		t.Run(path, func(t *testing.T) {
+			reader := &recordingReader{listResult: eventstream.ListResult{Data: []eventstream.Event{{ID: "evt_private", Type: "agent.message", Payload: json.RawMessage(`{"content":[{"type":"text","text":"secret stored content"}]}`)}}}}
+			var router http.Handler
+			if strings.Contains(path, "/stream") {
+				router = eventstreamservice.NewRouter(reader, verifier)
+			} else {
+				router = listRouter(reader, verifier, nil)
+			}
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			token, err := signer.Mint(principal, http.MethodGet, request.URL.Path, "req_restricted_fixture", time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Header.Set("X-Tetral-Internal-Principal", token)
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusForbidden {
+				t.Fatalf("status=%d want403 body=%s", recorder.Code, recorder.Body.String())
+			}
+			assertErrorEnvelope(t, recorder, "permission_error", true)
+			if reader.listCalls != 0 || reader.currentCalls != 0 || reader.changeCalls != 0 || reader.previewCalls != 0 || reader.finalCalls != 0 {
+				t.Fatalf("denied route reached reader: list=%d current=%d changes=%d preview=%d final=%d", reader.listCalls, reader.currentCalls, reader.changeCalls, reader.previewCalls, reader.finalCalls)
+			}
+			if strings.Contains(recorder.Body.String(), "secret stored content") || recorder.Header().Get("Content-Type") == "text/event-stream" {
+				t.Fatal("denial started a stream or disclosed data")
+			}
+		})
+	}
 }

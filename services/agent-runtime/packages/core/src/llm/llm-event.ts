@@ -4,7 +4,7 @@
  * It guards explicit local-schema parsing and sanitizes normalized failure fields;
  * ordinary stream text and metadata retain the bounds already enforced at the
  * shared Gateway protocol boundary. LLMService maps those validated Gateway frames
- * into these shapes, while ProviderStreamAccumulator and ThreadLoop consume them.
+ * into these shapes, while RequestContentProcessor and ThreadLoop consume them.
  */
 
 import {
@@ -13,7 +13,9 @@ import {
 	MaxProviderErrorMessageBytes,
 	MaxProviderToolCallInputJsonBytes,
 	MaxProviderUsageJsonBytes,
-	MaxTextBytes,
+	validProviderCompleteText,
+	validProviderEventId,
+	hasOnlyUnicodeScalars,
 } from "@tetral/gateway-protocol/src/bounds.js";
 import { z } from "zod/v4";
 import type { ProviderError } from "../contracts/provider.js";
@@ -81,21 +83,8 @@ const SensitiveTextPatterns = [
 
 /** Closed event-type vocabulary emitted by the Runtime LLM stream adapter. */
 export const LLMEventTypes = [
-	"step-start",
-	"text-start",
-	"text-delta",
-	"text-end",
-	"reasoning-start",
-	"reasoning-delta",
-	"reasoning-end",
-	"tool-input-start",
-	"tool-input-delta",
-	"tool-input-end",
-	"tool-call",
-	"step-finish",
-	"finish",
-	"provider-error",
-	"attachment-rejections",
+ "thinking-started", "text-complete", "reasoning-complete", "tool-call-complete",
+ "finish", "provider-error", "attachment-rejections",
 ] as const;
 
 /** JSON value shape allowed in bounded Runtime stream payloads. */
@@ -158,21 +147,6 @@ function isRuntimeJsonValue(value: unknown): value is RuntimeJsonValue {
 	);
 }
 
-function hasOnlyUnicodeScalars(value: string): boolean {
-	for (let index = 0; index < value.length; index += 1) {
-		const code = value.charCodeAt(index);
-		if (code >= 0xd800 && code <= 0xdbff) {
-			const next = value.charCodeAt(index + 1);
-			if (index + 1 >= value.length || next < 0xdc00 || next > 0xdfff)
-				return false;
-			index += 1;
-		} else if (code >= 0xdc00 && code <= 0xdfff) {
-			return false;
-		}
-	}
-	return true;
-}
-
 const SanitizedTextSchema = z
 	.string()
 	.refine(
@@ -184,13 +158,8 @@ const SanitizedIdentifierSchema = IdentifierSchema.refine(
 	(value) => isWithinUtf8ByteBudget(value, MaxIdBytes),
 	`identifier must be at most ${MaxIdBytes} UTF-8 bytes`,
 ).transform(sanitizeRuntimeText);
-const RuntimeTextSchema = z
-	.string()
-	.refine(hasOnlyUnicodeScalars, "text must contain only Unicode scalar values")
-	.refine(
-		(value) => isWithinUtf8ByteBudget(value, MaxTextBytes),
-		`text must be at most ${MaxTextBytes} UTF-8 bytes`,
-	);
+const RuntimeTextSchema = z.string().refine(validProviderCompleteText, "invalid complete text");
+const ProviderEventIdSchema = z.string().refine(validProviderEventId, "invalid provider event identity");
 const RuntimePreviewTextSchema = z
 	.string()
 	.refine(
@@ -330,79 +299,13 @@ export type RuntimeFailure = z.infer<typeof RuntimeFailureSchema>;
 // Normalized provider-to-processor contract; raw SDK/provider events cannot cross this boundary.
 /** Bounded event union emitted to request-turn orchestration. */
 export const LLMEventSchema = z.discriminatedUnion("type", [
-	z.strictObject({
-		type: z.literal("step-start"),
-		stepIndex: NonNegativeIntegerSchema.optional(),
-	}),
-	z.strictObject({
-		type: z.literal("text-start"),
-		id: RuntimeIdentifierSchema,
-	}),
-	z.strictObject({
-		type: z.literal("text-delta"),
-		id: RuntimeIdentifierSchema,
-		text_delta: RuntimeTextSchema,
-	}),
-	z.strictObject({ type: z.literal("text-end"), id: RuntimeIdentifierSchema }),
-	z.strictObject({
-		type: z.literal("reasoning-start"),
-		id: RuntimeIdentifierSchema,
-		providerMetadata: ProviderMetadataSchema.optional(),
-	}),
-	z.strictObject({
-		type: z.literal("reasoning-delta"),
-		id: RuntimeIdentifierSchema,
-		text_delta: RuntimeTextSchema,
-		providerMetadata: ProviderMetadataSchema.optional(),
-	}),
-	z.strictObject({
-		type: z.literal("reasoning-end"),
-		id: RuntimeIdentifierSchema,
-		providerMetadata: ProviderMetadataSchema.optional(),
-	}),
-	z.strictObject({
-		type: z.literal("tool-input-start"),
-		id: RuntimeIdentifierSchema,
-		toolName: RuntimeIdentifierSchema,
-	}),
-	z.strictObject({
-		type: z.literal("tool-input-delta"),
-		id: RuntimeIdentifierSchema,
-		text_delta: RuntimeTextSchema,
-		toolName: RuntimeIdentifierSchema.optional(),
-	}),
-	z.strictObject({
-		type: z.literal("tool-input-end"),
-		id: RuntimeIdentifierSchema,
-		toolName: RuntimeIdentifierSchema.optional(),
-	}),
-	z.strictObject({
-		type: z.literal("tool-call"),
-		id: RuntimeIdentifierSchema,
-		toolName: RuntimeIdentifierSchema,
-		input: RuntimeToolInputSchema,
-		inputPreview: RuntimeJsonPreviewSchema,
-	}),
-	z.strictObject({
-		type: z.literal("step-finish"),
-		finishReason: RuntimeFinishReasonSchema.optional(),
-		usage: RuntimeUsageSchema.optional(),
-	}),
-	z.strictObject({
-		type: z.literal("finish"),
-		finishReason: RuntimeFinishReasonSchema.optional(),
-		usage: RuntimeUsageSchema.optional(),
-		providerMetadata: ProviderMetadataSchema.optional(),
-		modelLimits: RuntimeModelLimitsSchema.optional(),
-	}),
-	z.strictObject({
-		type: z.literal("provider-error"),
-		error: RuntimeFailureSchema,
-	}),
-	z.strictObject({
-		type: z.literal("attachment-rejections"),
-		rejections: z.array(RuntimeAttachmentRejectionSchema).min(1).max(32),
-	}),
+ z.strictObject({type:z.literal("thinking-started"),providerPartId:RuntimeIdentifierSchema,eventId:ProviderEventIdSchema}),
+ z.strictObject({type:z.literal("text-complete"),providerPartId:RuntimeIdentifierSchema,eventId:ProviderEventIdSchema,text:RuntimeTextSchema}),
+ z.strictObject({type:z.literal("reasoning-complete"),providerPartId:RuntimeIdentifierSchema,thinkingEventId:ProviderEventIdSchema,text:z.string().refine(hasOnlyUnicodeScalars),providerMetadata:ProviderMetadataSchema.optional()}),
+ z.strictObject({type:z.literal("tool-call-complete"),id:RuntimeIdentifierSchema,toolName:RuntimeIdentifierSchema,input:RuntimeToolInputSchema,inputPreview:RuntimeJsonPreviewSchema,providerMetadata:ProviderMetadataSchema.optional()}),
+ z.strictObject({type:z.literal("finish"),finishReason:RuntimeFinishReasonSchema.optional(),usage:RuntimeUsageSchema.optional(),providerMetadata:ProviderMetadataSchema.optional(),modelLimits:RuntimeModelLimitsSchema.optional()}),
+ z.strictObject({type:z.literal("provider-error"),error:RuntimeFailureSchema}),
+ z.strictObject({type:z.literal("attachment-rejections"),rejections:z.array(RuntimeAttachmentRejectionSchema).min(1).max(32)}),
 ]);
 /** Discriminated provider-stream event consumed by request-turn orchestration. */
 export type LLMEvent = z.infer<typeof LLMEventSchema>;

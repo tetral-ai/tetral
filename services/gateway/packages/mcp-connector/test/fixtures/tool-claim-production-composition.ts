@@ -1,3 +1,4 @@
+import { fixtureServerResolver } from "./registered-server.js";
 import { createHmac } from "node:crypto";
 import { Metadata } from "@grpc/grpc-js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -14,7 +15,7 @@ import { BridgeAPIEventWriter } from "../../../../../agent-runtime/packages/runt
 import { RuntimePodToolRunner } from "../../../../../agent-runtime/packages/runtime-pod/src/tool-runner.js";
 import { BridgeAPIMcpToolResultIdempotencyStore } from "../../src/bridge-client.js";
 import { McpSDKClient } from "../../src/client.js";
-import { SQLGitHubMcpCredentialResolver } from "../../src/credential.js";
+import { SQLMcpCredentialResolver } from "../../src/credential.js";
 import type { McpCredentialSQL } from "../../src/credential.js";
 import type { McpOAuthRefreshCompletedEvent } from "../../src/credential-update-path.js";
 import { createMcpConnectorGrpcServer } from "../../src/server.js";
@@ -193,6 +194,7 @@ const settlement = await writer.settleToolResult({
 	sessionThreadId: runtimeRequest.sessionThreadId,
 	bindingId: runtimeRequest.bindingId,
 	bindingGeneration: runtimeRequest.bindingGeneration,
+	runtimeProcessId: runtimeRequest.runtimeProcessId,
 	targetPodUid: runtimeRequest.targetPodUid,
 	settlement: { toolUseEventId, outcome: runtimeToolSettlement(runtimeResult) },
 });
@@ -317,6 +319,7 @@ function runRequest(eventId: string): RunMcpToolRequest {
 		toolUseEventId: eventId,
 		bindingId: "bind_mcp_production_composition",
 		bindingGeneration: 1,
+		runtimeProcessId: `process_${runtimePodUid}`,
 		runtimeBindingToken: signedBindingToken(),
 	};
 }
@@ -332,6 +335,7 @@ function mcpRuntimeRequest(
 		sessionThreadId: "thr_mcp_production_composition",
 		bindingId: "bind_mcp_production_composition",
 		bindingGeneration: 1,
+		runtimeProcessId: `process_${runtimePodUid}`,
 		runtimeBindingToken: signedBindingToken(),
 		targetPodUid: runtimePodUid,
 		modelRequestId: "mreq_mcp_durable_claim",
@@ -375,6 +379,7 @@ async function runOAuthRuntime(
 			sessionThreadId: request.sessionThreadId,
 			bindingId: request.bindingId,
 			bindingGeneration: request.bindingGeneration,
+			runtimeProcessId: request.runtimeProcessId,
 			targetPodUid: request.targetPodUid,
 			settlement: { toolUseEventId: eventId, outcome: runtimeToolSettlement(result) },
 		});
@@ -461,7 +466,7 @@ async function createOAuthCredentialComposition(databaseURL: string, schema: str
 			expires_in: 3600,
 		});
 	};
-	const resolver = new SQLGitHubMcpCredentialResolver(
+	const resolver = new SQLMcpCredentialResolver(
 		app as unknown as McpCredentialSQL,
 		keyHex,
 		() => now,
@@ -523,10 +528,10 @@ async function createOAuthCredentialComposition(databaseURL: string, schema: str
 }
 
 function oauthMcpClient(
-	resolver: SQLGitHubMcpCredentialResolver,
+	resolver: SQLMcpCredentialResolver,
 	observeToken: (token: string) => void,
 ): McpSDKClient {
-	return new McpSDKClient({
+	return new McpSDKClient({serverResolver: fixtureServerResolver,
 		credentialResolver: resolver,
 		onToolsListChanged: async () => undefined,
 		createTransport: ({ token }) => {
@@ -622,6 +627,7 @@ function signedBindingToken(): string {
 			binding_id: "bind_mcp_production_composition",
 			binding_generation: 1,
 			runtime_pod_uid: runtimePodUid,
+			runtime_process_id: `process_${runtimePodUid}`,
 			exp: Math.floor(new Date("2026-01-01T00:05:00Z").getTime() / 1_000),
 		}),
 	).toString("base64url");

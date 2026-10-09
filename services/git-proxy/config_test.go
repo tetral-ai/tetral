@@ -3,6 +3,7 @@ package gitproxy
 import (
 	"context"
 	"database/sql"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,10 +20,9 @@ func TestConfigFromEnvLoadsGitProxyRuntimeSurface(t *testing.T) {
 		EnvDatabaseURL:           "postgres://runtime:secret@postgres/tetral",
 		EnvVaultKey:              "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		EnvPublicBaseURL:         "https://git.tetral.example/",
-		EnvDeploymentEnvironment: "test",
-		EnvServiceVersion:        "unit",
+		EnvDeploymentEnvironment: " test ",
+		EnvServiceVersion:        " unit ",
 		EnvDrainGraceSeconds:     "42",
-		EnvLegacyPathCutover:     "true",
 	})
 	if err != nil {
 		t.Fatalf("ConfigFromEnv: %v", err)
@@ -32,7 +32,7 @@ func TestConfigFromEnvLoadsGitProxyRuntimeSurface(t *testing.T) {
 		cfg.DatabaseURL == "" ||
 		cfg.DeploymentEnvironment != "test" ||
 		cfg.ServiceVersion != "unit" ||
-		cfg.DrainGrace != 42*time.Second || !cfg.LegacyPathCutover {
+		cfg.DrainGrace != 42*time.Second {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 	if cfg.PublicBaseURL == nil || cfg.PublicBaseURL.String() != "https://git.tetral.example" {
@@ -52,7 +52,6 @@ func TestConfigFromEnvRequiresSafeCredentialAndDatabaseShape(t *testing.T) {
 		{name: "public base", env: envMap{EnvDatabaseURL: "postgres://runtime@postgres/tetral", EnvVaultKey: validVaultKey(), EnvPublicBaseURL: "http://git.tetral.example?token=secret"}, want: EnvPublicBaseURL},
 		{name: "public base path", env: envMap{EnvDatabaseURL: "postgres://runtime@postgres/tetral", EnvVaultKey: validVaultKey(), EnvPublicBaseURL: "https://git.tetral.example/base"}, want: EnvPublicBaseURL},
 		{name: "drain", env: envMap{EnvDatabaseURL: "postgres://runtime@postgres/tetral", EnvVaultKey: validVaultKey(), EnvDrainGraceSeconds: "0"}, want: EnvDrainGraceSeconds},
-		{name: "legacy cutover", env: envMap{EnvDatabaseURL: "postgres://runtime@postgres/tetral", EnvVaultKey: validVaultKey(), EnvLegacyPathCutover: "yes"}, want: EnvLegacyPathCutover},
 		{name: "metrics same as public", env: envMap{EnvDatabaseURL: "postgres://runtime@postgres/tetral", EnvVaultKey: validVaultKey(), EnvHTTPAddress: "127.0.0.1:8080", EnvMetricsAddress: "127.0.0.1:8080"}, want: EnvMetricsAddress},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -81,7 +80,7 @@ func TestBuildHTTPHandlerKeepsProbesOutOfGitRelay(t *testing.T) {
 	assertProbe(t, handler, "/metrics/", 404, "404 page not found\n")
 	readiness.MarkReady()
 	assertProbe(t, handler, "/ready", 200, "ready\n")
-	assertProbe(t, handler, "/ticket/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", 204, "")
+	assertProbe(t, handler, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", 204, "")
 	if proxyCalls != 1 {
 		t.Fatalf("proxyCalls = %d; want only the git route to hit proxy", proxyCalls)
 	}
@@ -91,19 +90,21 @@ func TestBuildMetricsHTTPHandlerServesMetricsOnInternalSurface(t *testing.T) {
 	readiness := workload.NewReadiness()
 	metrics := NewGitProxyMetrics()
 	metrics.IncActive()
-	handler := BuildMetricsHTTPHandler(readiness, metrics, fakeDBStatsProvider{stats: sql.DBStats{OpenConnections: 3}})
+	handler := BuildMetricsHTTPHandler(readiness, metrics, fakeDBStatsProvider{stats: sql.DBStats{OpenConnections: 3}}, workload.NewLogger(io.Discard, ServiceName, "", ""))
 
 	assertProbe(t, handler, "/health", 200, "ok\n")
 	assertProbe(t, handler, "/ready", 503, "not ready\n")
 	assertProbeContains(t, handler, "/metrics", 200, "gitproxy_active_connections 1")
 	assertProbeContains(t, handler, "/metrics", 200, "go_goroutines")
 	assertProbeContains(t, handler, "/metrics", 200, `db_pool_open_connections{pool="runtime"} 3`)
+	assertProbeContains(t, handler, "/metrics", 200, "tetral_diagnostic_sink_failures_total 0")
 	readiness.MarkReady()
 	assertProbe(t, handler, "/ready", 200, "ready\n")
 }
 
 func TestRunHTTPPairStartsPublicAndMetricsListeners(t *testing.T) {
 	calls := make(chan workload.Config, 2)
+	operations := workload.NewOperationMetrics(ServiceName)
 	err := runHTTPPair(
 		context.Background(),
 		func(_ context.Context, cfg workload.Config) error {
@@ -122,6 +123,7 @@ func TestRunHTTPPairStartsPublicAndMetricsListeners(t *testing.T) {
 		},
 		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		operations,
 	)
 	if err != nil {
 		t.Fatalf("runHTTPPair: %v", err)
@@ -136,6 +138,9 @@ func TestRunHTTPPairStartsPublicAndMetricsListeners(t *testing.T) {
 	}
 	if byKey[EnvMetricsAddress].ListenAddress != "127.0.0.1:18081" {
 		t.Fatalf("metrics listener config = %+v", byKey[EnvMetricsAddress])
+	}
+	if byKey[EnvHTTPAddress].Metrics != operations || byKey[EnvMetricsAddress].Metrics != operations {
+		t.Fatal("public and metrics listeners must record the process operation metrics")
 	}
 }
 

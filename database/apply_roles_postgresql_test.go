@@ -3,6 +3,7 @@ package database_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -14,12 +15,14 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/tetral-ai/tetral/database"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/environment"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -57,13 +60,24 @@ func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
 					"REVOKE UPDATE ON environments FROM " + pgx.Identifier{declarations.Roles["sandbox"].Name}.Sanitize(),
 					"GRANT SELECT ON queue_jobs TO " + pgx.Identifier{declarations.Roles["auth"].Name}.Sanitize(),
 					"GRANT UPDATE ON SEQUENCE session_runtime_binding_generation_seq TO " + pgx.Identifier{declarations.Roles["auth"].Name}.Sanitize(),
+					"GRANT EXECUTE ON FUNCTION public.tetral_lock_runtime_process(text,text,text) TO " + pgx.Identifier{declarations.Roles["auth"].Name}.Sanitize(),
+					"REVOKE EXECUTE ON FUNCTION public.tetral_lock_runtime_process(text,text,text) FROM " + pgx.Identifier{declarations.Roles["job_runner"].Name}.Sanitize(),
+					"GRANT EXECUTE ON FUNCTION public.tetral_lock_runtime_process_liveness(text,text,text) TO " + pgx.Identifier{declarations.Roles["bridge"].Name}.Sanitize(),
+					"REVOKE EXECUTE ON FUNCTION public.tetral_lock_runtime_process_liveness(text,text,text) FROM " + pgx.Identifier{declarations.Roles["job_runner"].Name}.Sanitize(),
+					"GRANT UPDATE ON runtime_process_liveness TO " + pgx.Identifier{declarations.Roles["job_runner"].Name}.Sanitize(),
+					"GRANT EXECUTE ON FUNCTION public.tetral_job_runner_binding_page(text,text,text,text,integer) TO " + pgx.Identifier{declarations.Roles["cleanup"].Name}.Sanitize(),
+					"REVOKE EXECUTE ON FUNCTION public.tetral_job_runner_binding_upper() FROM " + pgx.Identifier{declarations.Roles["job_runner"].Name}.Sanitize(),
+					"REVOKE EXECUTE ON FUNCTION public.tetral_cleanup_due_sessions(timestamptz,timestamptz,text,integer) FROM " + pgx.Identifier{declarations.Roles["cleanup"].Name}.Sanitize(),
+					"REVOKE EXECUTE ON FUNCTION public.tetral_prune_event_changes(timestamptz,timestamptz,text,text,bigint,integer) FROM " + pgx.Identifier{declarations.Roles["cleanup"].Name}.Sanitize(),
+					"GRANT EXECUTE ON FUNCTION public.tetral_prune_event_idempotency(timestamptz,timestamptz,text,text,bytea,integer) TO " + pgx.Identifier{declarations.Roles["api"].Name}.Sanitize(),
+					"GRANT EXECUTE ON FUNCTION public.tetral_prune_job_runner_jobs(text,timestamptz,integer) TO " + pgx.Identifier{declarations.Roles["sandbox"].Name}.Sanitize(),
 				} {
 					if _, err := admin.Exec(statement); err != nil {
 						t.Fatal(err)
 					}
 				}
 				drift := workloadPrivilegeMismatches(t, admin, roleContract, declarations)
-				for _, want := range []string{"sandbox environments UPDATE", "auth queue_jobs SELECT", "auth session_runtime_binding_generation_seq UPDATE"} {
+				for _, want := range []string{"sandbox environments UPDATE", "auth queue_jobs SELECT", "auth session_runtime_binding_generation_seq UPDATE", "auth tetral_lock_runtime_process EXECUTE", "job_runner tetral_lock_runtime_process EXECUTE", "bridge tetral_lock_runtime_process_liveness EXECUTE", "job_runner tetral_lock_runtime_process_liveness EXECUTE", "job_runner runtime_process_liveness UPDATE", "cleanup tetral_job_runner_binding_page EXECUTE", "job_runner tetral_job_runner_binding_upper EXECUTE", "cleanup tetral_cleanup_due_sessions EXECUTE", "cleanup tetral_prune_event_changes EXECUTE", "api tetral_prune_event_idempotency EXECUTE", "sandbox tetral_prune_job_runner_jobs EXECUTE"} {
 					if !contains(drift, want) {
 						t.Fatalf("catalog checker missed injected drift %s: %v", want, drift)
 					}
@@ -89,22 +103,29 @@ func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
 			_ = connection.Close(context.Background())
 		}
 		assertExactWorkloadPrivileges(t, admin, roleContract, declarations)
+		assertProcessRegistryPrivileges(t, databaseName, admin, declarations)
+		assertBridgeLacksRunnerPlacementAndCleanupWrites(t, databaseName, declarations.Roles["bridge"])
+		assertMCPConnectorLacksProviderCredentialReads(t, databaseName, declarations.Roles["mcp_connector"])
 		assertGoServingReadinessAcceptsEveryWorkloadRole(t, databaseName, roleContract, declarations)
-		assertBunReadinessAcceptsServingRole(t, databaseName, declarations.Roles["gateway"])
-		assertGatewayCommandsAcceptOrdinaryRole(t, databaseName, declarations.Roles["gateway"])
-		if _, err := admin.Exec("ALTER ROLE " + pgx.Identifier{declarations.Roles["gateway"].Name}.Sanitize() + " BYPASSRLS"); err != nil {
-			t.Fatal(err)
+		for _, workload := range []string{"provider_gateway", "mcp_connector"} {
+			assertBunReadinessAcceptsServingRole(t, databaseName, declarations.Roles[workload])
+			assertGatewayCommandsAcceptOrdinaryRole(t, databaseName, declarations.Roles[workload])
+			if _, err := admin.Exec("ALTER ROLE " + pgx.Identifier{declarations.Roles[workload].Name}.Sanitize() + " BYPASSRLS"); err != nil {
+				t.Fatal(err)
+			}
+			assertGatewayCommandsRejectPrivilegedRole(t, databaseName, declarations.Roles[workload])
 		}
-		assertGatewayCommandsRejectPrivilegedRole(t, databaseName, declarations.Roles["gateway"])
 
 		assertWorkloadDenied(t, databaseName, declarations.Roles["auth"], `SELECT 1 FROM queue_jobs LIMIT 1`)
-		assertWorkloadDenied(t, databaseName, declarations.Roles["gateway"], `SELECT 1 FROM session_events LIMIT 1`)
+		assertWorkloadDenied(t, databaseName, declarations.Roles["provider_gateway"], `SELECT 1 FROM session_events LIMIT 1`)
+		assertWorkloadDenied(t, databaseName, declarations.Roles["mcp_connector"], `SELECT 1 FROM session_events LIMIT 1`)
 		assertWorkloadDenied(t, databaseName, declarations.Roles["queue"], `TRUNCATE queue_jobs`)
 		assertWorkloadDenied(t, databaseName, declarations.Roles["bridge"], `CREATE TABLE forbidden_bridge_ddl (id integer)`)
 		assertWorkloadDenied(t, databaseName, declarations.Roles["auth"], `BEGIN; SELECT set_config('tetral.queue_maintenance','true',true); SELECT 1 FROM queue_jobs LIMIT 1; COMMIT`)
 
 		seedRLSRows(t, admin)
 		assertAPIAndBridgeDurableOperations(t, databaseName, admin, declarations)
+		assertAuthLookupBoundary(t, databaseName, admin, declarations)
 		auth := openManagedRole(t, databaseName, declarations.Roles["auth"])
 		defer func() { _ = auth.Close(context.Background()) }()
 		tx, err := auth.Begin(context.Background())
@@ -190,7 +211,7 @@ func assertBunReadinessAcceptsServingRole(t *testing.T, databaseName string, cre
 		if strings.Contains(string(output), dsn) || strings.Contains(string(output), credential.Name) {
 			t.Fatal("Bun readiness failure disclosed database identity")
 		}
-		t.Fatalf("Bun readiness rejected gateway serving role: %v: %s", err, output)
+		t.Fatalf("Bun readiness rejected Gateway workload serving role: %v: %s", err, output)
 	}
 }
 
@@ -281,6 +302,26 @@ func workloadPrivilegeMismatches(t *testing.T, admin *sql.DB, contract database.
 			t.Fatal(err)
 		}
 		_ = rows.Close()
+	}
+	var allowed bool
+	for _, function := range []struct{ name, catalog, declared string }{
+		{"tetral_lock_runtime_process", "public.tetral_lock_runtime_process(text,text,text)", "tetral_lock_runtime_process(text, text, text)"},
+		{"tetral_lock_runtime_process_liveness", "public.tetral_lock_runtime_process_liveness(text,text,text)", "tetral_lock_runtime_process_liveness(text, text, text)"},
+		{"tetral_job_runner_binding_upper", "public.tetral_job_runner_binding_upper()", "tetral_job_runner_binding_upper()"},
+		{"tetral_job_runner_binding_page", "public.tetral_job_runner_binding_page(text,text,text,text,integer)", "tetral_job_runner_binding_page(text, text, text, text, integer)"},
+		{"tetral_cleanup_due_sessions", "public.tetral_cleanup_due_sessions(timestamptz,timestamptz,text,integer)", "tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer)"},
+		{"tetral_prune_event_idempotency", "public.tetral_prune_event_idempotency(timestamptz,timestamptz,text,text,bytea,integer)", "tetral_prune_event_idempotency(timestamptz, timestamptz, text, text, bytea, integer)"},
+		{"tetral_prune_event_changes", "public.tetral_prune_event_changes(timestamptz,timestamptz,text,text,bigint,integer)", "tetral_prune_event_changes(timestamptz, timestamptz, text, text, bigint, integer)"},
+		{"tetral_prune_job_runner_jobs", "public.tetral_prune_job_runner_jobs(text,timestamptz,integer)", "tetral_prune_job_runner_jobs(text, timestamptz, integer)"},
+	} {
+		for workload, role := range contract.Workloads {
+			if err := admin.QueryRow(`SELECT has_function_privilege($1,$2,'EXECUTE')`, declarations.Roles[workload].Name, function.catalog).Scan(&allowed); err != nil {
+				t.Fatal(err)
+			}
+			if allowed != contains(role.Functions, function.declared) {
+				mismatches = append(mismatches, workload+" "+function.name+" EXECUTE")
+			}
+		}
 	}
 	return mismatches
 }
@@ -475,6 +516,55 @@ func assertWorkloadDenied(t *testing.T, databaseName string, credential database
 	}
 }
 
+// assertWorkloadPrivilegeDenied requires the privilege check itself to reject
+// the statement. PostgreSQL checks table and sequence privileges before
+// constraints and RLS, so a re-added grant cannot hide behind another error.
+func assertWorkloadPrivilegeDenied(t *testing.T, databaseName string, credential database.RoleCredential, statement string) {
+	t.Helper()
+	connection := openManagedRole(t, databaseName, credential)
+	defer func() { _ = connection.Close(context.Background()) }()
+	_, err := connection.Exec(context.Background(), statement)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+		t.Fatalf("statement %q: want SQLSTATE 42501, got %v", statement, err)
+	}
+}
+
+// Runtime placement and Session cleanup belong to Job Runner. Bridge keeps the
+// binding UPDATE/DELETE needed by release and termination, but cannot allocate
+// a binding generation, create a binding, or delete Session cleanup custody.
+func assertBridgeLacksRunnerPlacementAndCleanupWrites(t *testing.T, databaseName string, bridge database.RoleCredential) {
+	t.Helper()
+	statements := []string{
+		`SELECT nextval('session_runtime_binding_generation_seq')`,
+		`INSERT INTO session_runtime_bindings DEFAULT VALUES`,
+		`INSERT INTO sandbox_lifecycle_operations DEFAULT VALUES`,
+	}
+	for _, table := range []string{
+		"session_sandbox_bindings", "session_transient_attachments", "session_background_tasks",
+		"sandbox_output_capture_operations", "sandbox_output_capture_blobs", "sandbox_lifecycle_operations",
+	} {
+		statements = append(statements, "DELETE FROM "+table)
+	}
+	for _, statement := range statements {
+		assertWorkloadPrivilegeDenied(t, databaseName, bridge, statement)
+	}
+}
+
+// MCP Connector resolves only its own Vault credentials. Provider session
+// bindings and platform provider keys belong to Provider Gateway.
+func assertMCPConnectorLacksProviderCredentialReads(t *testing.T, databaseName string, mcpConnector database.RoleCredential) {
+	t.Helper()
+	for _, statement := range []string{
+		`SELECT 1 FROM platform_provider_keys LIMIT 1`,
+		`SELECT 1 FROM session_provider_auth LIMIT 1`,
+		`INSERT INTO session_provider_auth DEFAULT VALUES`,
+		`UPDATE session_provider_auth SET provider_id=provider_id`,
+	} {
+		assertWorkloadPrivilegeDenied(t, databaseName, mcpConnector, statement)
+	}
+}
+
 func seedRLSRows(t *testing.T, admin *sql.DB) {
 	t.Helper()
 	for _, workspaceID := range []string{"ws_contract_a", "ws_contract_b"} {
@@ -483,7 +573,7 @@ func seedRLSRows(t *testing.T, admin *sql.DB) {
 		}
 	}
 	for index, workspaceID := range []string{"ws_contract_a", "ws_contract_b"} {
-		if _, err := admin.Exec(`INSERT INTO api_keys (workspace_id,id,name,key_prefix,key_digest,key_kind,created_at) VALUES ($1,$2,'contract','tk_test',$3,'standard',clock_timestamp())`, workspaceID, fmt.Sprintf("ak_contract_%c", 'a'+index), []byte{byte(index + 1)}); err != nil {
+		if _, err := admin.Exec(`INSERT INTO api_keys (workspace_id,id,name,key_prefix,key_digest,key_kind,authority_kind,created_at) VALUES ($1,$2,'contract','tk_test',$3,'standard','independent_key',clock_timestamp())`, workspaceID, fmt.Sprintf("ak_contract_%c", 'a'+index), []byte{byte(index + 1)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -577,4 +667,151 @@ func currentDatabase(t *testing.T, admin *sql.DB) string {
 		t.Fatal(err)
 	}
 	return name
+}
+
+func assertProcessRegistryPrivileges(t *testing.T, databaseName string, admin *sql.DB, declarations database.RoleDeclarations) {
+	t.Helper()
+	bridge := openManagedRoleSQL(t, databaseName, declarations.Roles["bridge"])
+	defer func() {
+		if err := bridge.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	identity := runtimecontrol.ProcessIdentity{Namespace: "tetral-agent-runtime", PodUID: "role-boundary-pod", ID: "role-boundary-process"}
+	process, err := runtimecontrol.RegisterProcess(context.Background(), dbconnect.NewClientForTesting(bridge), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	promoted, promotedNow, err := runtimecontrol.ReportProcess(context.Background(), dbconnect.NewClientForTesting(bridge), identity, process.RegistrationReceipt, runtimecontrol.ProcessAccepting)
+	if err != nil || !promotedNow {
+		t.Fatalf("Bridge role promotion=%t: %v", promotedNow, err)
+	}
+	// The unchanged report updates only liveness under the Bridge role.
+	reported, promotedNow, err := runtimecontrol.ReportProcess(context.Background(), dbconnect.NewClientForTesting(bridge), identity, process.RegistrationReceipt, runtimecontrol.ProcessAccepting)
+	if err != nil || promotedNow || !reported.Current || reported.ReportedAt.Before(promoted.ReportedAt) {
+		t.Fatalf("Bridge role unchanged report=%+v promoted=%t: %v", reported, promotedNow, err)
+	}
+	runner := openManagedRoleSQL(t, databaseName, declarations.Roles["job_runner"])
+	defer func() {
+		if err := runner.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	// Runner reads lifecycle and liveness only through the two lock-only functions.
+	lockBoth := func(operation string, shadow bool) {
+		t.Helper()
+		if err := dbconnect.NewClientForTesting(runner).WithTx(context.Background(), operation, nil, func(tx *dbconnect.Tx) error {
+			if shadow {
+				if _, err := tx.Exec(context.Background(), `SET LOCAL search_path=process_shadow,public,pg_catalog`); err != nil {
+					return err
+				}
+			}
+			process, err := runtimecontrol.RequireCurrentProcessTx(context.Background(), tx, identity)
+			if err != nil {
+				return err
+			}
+			if process.Phase != runtimecontrol.ProcessAccepting {
+				t.Fatal("restricted lock returned wrong process")
+			}
+			liveness, err := runtimecontrol.LockProcessLivenessTx(context.Background(), tx, identity)
+			if err != nil {
+				return err
+			}
+			if !liveness.Valid || !liveness.Time.Equal(reported.ReportedAt) {
+				t.Fatalf("restricted liveness lock returned %v; want %v", liveness, reported.ReportedAt)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lockBoth("runtimecontrol.test_restricted_lock", false)
+	for _, table := range []string{"runtime_processes", "runtime_process_pods", "runtime_process_liveness"} {
+		for _, statement := range []string{"INSERT INTO " + table + " DEFAULT VALUES", "UPDATE " + table + " SET namespace=namespace", "DELETE FROM " + table} {
+			assertWorkloadDenied(t, databaseName, declarations.Roles["job_runner"], statement)
+		}
+	}
+	for _, workload := range []string{"api", "auth", "queue", "sandbox", "provider_gateway", "mcp_connector", "git_proxy", "cleanup", "event_stream"} {
+		assertWorkloadDenied(t, databaseName, declarations.Roles[workload], `SELECT 1 FROM public.tetral_lock_runtime_process('tetral-agent-runtime','role-boundary-pod','role-boundary-process')`)
+	}
+	for _, workload := range []string{"api", "auth", "queue", "sandbox", "provider_gateway", "mcp_connector", "git_proxy", "cleanup", "event_stream", "bridge"} {
+		assertWorkloadDenied(t, databaseName, declarations.Roles[workload], `SELECT 1 FROM public.tetral_lock_runtime_process_liveness('tetral-agent-runtime','role-boundary-pod','role-boundary-process')`)
+	}
+	assertWorkloadDenied(t, databaseName, declarations.Roles["job_runner"], `CREATE OR REPLACE FUNCTION public.tetral_lock_runtime_process(text,text,text) RETURNS SETOF public.runtime_processes LANGUAGE sql AS 'SELECT * FROM public.runtime_processes'`)
+	for _, workload := range []string{"job_runner", "bridge"} {
+		assertWorkloadDenied(t, databaseName, declarations.Roles[workload], `CREATE OR REPLACE FUNCTION public.tetral_lock_runtime_process_liveness(text,text,text) RETURNS SETOF public.runtime_process_liveness LANGUAGE sql AS 'SELECT * FROM public.runtime_process_liveness'`)
+	}
+	// Only the installer-owned role identifier is concatenated, using pgx's
+	// PostgreSQL identifier quoting; all SQL below is fixed test DDL.
+	//nolint:gosec // G202: the identifier is quoted, not an executable SQL fragment.
+	if _, err := admin.Exec(`CREATE SCHEMA process_shadow;
+ CREATE VIEW process_shadow.runtime_processes AS SELECT namespace,pod_uid,runtime_process_id,registration_order,registration_receipt,'draining'::text phase,is_current,registered_at,retired_at FROM public.runtime_processes;
+ CREATE FUNCTION process_shadow.tetral_lock_runtime_process(text,text,text) RETURNS SETOF public.runtime_processes LANGUAGE sql AS 'SELECT * FROM process_shadow.runtime_processes';
+ CREATE VIEW process_shadow.runtime_process_liveness AS SELECT namespace,pod_uid,runtime_process_id,NULL::timestamptz reported_at FROM public.runtime_process_liveness;
+ CREATE FUNCTION process_shadow.tetral_lock_runtime_process_liveness(text,text,text) RETURNS SETOF public.runtime_process_liveness LANGUAGE sql AS 'SELECT * FROM process_shadow.runtime_process_liveness';
+ GRANT USAGE ON SCHEMA process_shadow TO ` + pgx.Identifier{declarations.Roles["job_runner"].Name}.Sanitize()); err != nil {
+		t.Fatal(err)
+	}
+	lockBoth("runtimecontrol.test_shadow_lock", true)
+}
+
+func assertAuthLookupBoundary(t *testing.T, databaseName string, admin *sql.DB, declarations database.RoleDeclarations) {
+	t.Helper()
+	ctx := context.Background()
+	authConnection := openManagedRole(t, databaseName, declarations.Roles["auth"])
+	defer func() { _ = authConnection.Close(ctx) }()
+	tx, err := authConnection.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT set_config('tetral.workspace_id','ws_contract_a',true),set_config('tetral.auth_lookup','true',true)`); err != nil {
+		t.Fatal(err)
+	}
+	var visible int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM api_keys WHERE id IN ('ak_contract_a','ak_contract_b')`).Scan(&visible); err != nil {
+		t.Fatal(err)
+	}
+	if visible != 1 {
+		t.Fatalf("caller lookup flag broadened Auth visibility=%d", visible)
+	}
+	var resolved string
+	if err := tx.QueryRow(ctx, `SELECT workspace_id FROM public.tetral_auth_lookup_key(decode('02','hex'))`).Scan(&resolved); err != nil {
+		t.Fatal(err)
+	}
+	if resolved != "ws_contract_b" {
+		t.Fatal("exact digest lookup did not resolve its workspace")
+	}
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM api_keys WHERE id IN ('ak_contract_a','ak_contract_b')`).Scan(&visible); err != nil {
+		t.Fatal(err)
+	}
+	if visible != 1 {
+		t.Fatalf("definer lookup leaked global policy=%d", visible)
+	}
+	_ = tx.Rollback(ctx)
+	for _, statement := range []string{
+		`UPDATE auth_federation_rules SET enabled=false`,
+		`UPDATE auth_identities SET enabled=false`,
+		`UPDATE auth_workspace_grants SET enabled=false`,
+		`DELETE FROM auth_access_tokens`,
+	} {
+		assertWorkloadDenied(t, databaseName, declarations.Roles["auth"], statement)
+	}
+	for _, statement := range []string{
+		`SELECT * FROM public.tetral_auth_lookup_key(decode('02','hex'))`,
+		`SELECT * FROM public.tetral_auth_lookup_token(decode('02','hex'))`,
+		`SELECT * FROM public.tetral_auth_lookup_grants('identity_any',NULL)`,
+		`SELECT * FROM public.tetral_auth_lock_authority('rule','identity','grant','workspace')`,
+		`SELECT * FROM public.tetral_auth_prune_tokens(1000)`,
+		`SELECT * FROM api_keys`,
+	} {
+		assertWorkloadDenied(t, databaseName, declarations.Roles["api"], statement)
+	}
+	var unsafe int
+	if err := admin.QueryRow(`SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('tetral_auth_lookup_key','tetral_auth_lookup_token','tetral_auth_lookup_grants','tetral_auth_lock_authority','tetral_auth_prune_tokens') AND (NOT p.prosecdef OR NOT ('search_path=pg_catalog'=ANY(p.proconfig)) OR EXISTS(SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE'))`).Scan(&unsafe); err != nil {
+		t.Fatal(err)
+	}
+	if unsafe != 0 {
+		t.Fatalf("unsafe Auth function catalog=%d", unsafe)
+	}
 }

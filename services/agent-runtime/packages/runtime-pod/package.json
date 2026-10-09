@@ -14,6 +14,6 @@
     "@tetral/agent-runtime-protocol": "workspace:*",
     "@tetral/gateway-protocol": "file:../../../gateway/packages/protocol",
     "@tetral/ts-observability": "file:../../../../internal/ts-observability",
-    "@grpc/grpc-js": "1.14.4"
+    "@grpc/grpc-js": "1.14.5"
   }
 }

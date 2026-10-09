@@ -10,7 +10,9 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -22,16 +24,16 @@ func TestFailedRequestWithoutRetentionDeclarationKeepsAssistantAuditOnly(t *test
 		bindingID = "bind_failed_acknowledged_context"
 		podUID    = "pod_failed_acknowledged_context"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("failed-context-test-signing-key")
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_failed_context_start", "mreq_failed_context", requestKindAgentProviderRequest, 0)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_failed_context_start", "mreq_failed_context", runtimecontrol.RequestKindAgentProviderRequest, 0)
 	member, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_failed_context_member", ModelRequestId: "mreq_failed_context",
-		EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"acknowledged before failure"}]}`,
-		AssistantContextDelta: bridgeTextContextDeltaForTest("acknowledged before failure"),
+		PreallocatedEventId: bridgeString("evt_00000000000000000000000000000005"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"acknowledged before failure"}]}`,
+		AssistantContextDelta: sessionfixture.BridgeTextContextDeltaForTest("acknowledged before failure"),
 	})
 	if err != nil || member.GetCommitted() == nil {
 		t.Fatalf("write acknowledged member = %#v/%v", member, err)
@@ -51,7 +53,7 @@ func TestFailedRequestWithoutRetentionDeclarationKeepsAssistantAuditOnly(t *test
 	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode failed request context: %v", err)
 	}
-	if payload.OpenRequestDraft != nil || len(payload.ContextEntries) != 0 {
+	if payload.CurrentRequestMessage != nil || len(payload.Messages) != 0 {
 		t.Fatalf("audit-only failed Assistant entered cold provider context = %#v", payload)
 	}
 }
@@ -69,6 +71,14 @@ func TestProviderContextRetentionValidationAcceptsMechanicallyValidRuntimeDeclar
 }
 
 func TestPostgreSQLWriteRequestEndRejectsIncompleteToolRetention(t *testing.T) {
+	for _, disposition := range []string{"completed", "failed", "interrupted", "rescheduled", "compacted"} {
+		t.Run(disposition, func(t *testing.T) {
+			testIncompleteToolRetention(t, disposition)
+		})
+	}
+}
+
+func testIncompleteToolRetention(t *testing.T, disposition string) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_incomplete_tool_retention"
@@ -76,16 +86,16 @@ func TestPostgreSQLWriteRequestEndRejectsIncompleteToolRetention(t *testing.T) {
 		bindingID = "bind_incomplete_tool_retention"
 		podUID    = "pod_incomplete_tool_retention"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_incomplete_retention_start", "mreq_incomplete_retention", requestKindAgentProviderRequest, 0)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_incomplete_retention_start", "mreq_incomplete_retention", runtimecontrol.RequestKindAgentProviderRequest, 0)
 	toolUseIDs := make([]string, 0, 2)
 	for index, suffix := range []string{"a", "b"} {
 		written, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 			Scope: scope, RuntimeWriteId: "rwrite_incomplete_retention_tool_" + suffix, ModelRequestId: "mreq_incomplete_retention",
-			ToolDeclaration: bridgeToolDeclarationForTest("call_incomplete_retention_"+suffix, "Read", `{}`, "allow", "sandbox_execute"),
+			ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest("call_incomplete_retention_"+suffix, "Read", `{}`, "allow", "sandbox_execute"),
 		})
 		if err != nil || written.GetCommitted() == nil {
 			t.Fatalf("write Tool Use %d = %#v/%v", index, written, err)
@@ -97,7 +107,7 @@ func TestPostgreSQLWriteRequestEndRejectsIncompleteToolRetention(t *testing.T) {
 		Scope: scope, RuntimeWriteId: "rwrite_incomplete_retention_end", ModelRequestId: "mreq_incomplete_retention",
 		FinishReason: "tool_calls", UsageJson: `{}`,
 		ProviderContextRetention: &bridgev1.ProviderContextRetention{
-			Disposition: "completed", ToolUseEventIds: toolUseIDs[:1],
+			Disposition: disposition, ToolUseEventIds: toolUseIDs[:1],
 		},
 	})
 	if status.Code(err) != codes.FailedPrecondition {
@@ -122,15 +132,15 @@ func TestWriteRequestEndReturnsOnlyDirectDurableFacts(t *testing.T) {
 		bindingID = "bind_request_end_facts"
 		podUID    = "pod_request_end_facts"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_start_end", "mreq_end", requestKindAgentProviderRequest, 0)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_start_end", "mreq_end", runtimecontrol.RequestKindAgentProviderRequest, 0)
 	message, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_member_end", ModelRequestId: "mreq_end",
-		EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"done"}]}`,
-		AssistantContextDelta: bridgeTextContextDeltaForTest("done"),
+		PreallocatedEventId: bridgeString("evt_00000000000000000000000000000006"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"done"}]}`,
+		AssistantContextDelta: sessionfixture.BridgeTextContextDeltaForTest("done"),
 	})
 	if err != nil || message.GetCommitted() == nil {
 		t.Fatalf("seed Assistant context: response=%#v err=%v", message, err)
@@ -180,14 +190,14 @@ func TestLoadContextCarriesAcceptedRescheduleAttemptAndDeadline(t *testing.T) {
 		bindingID = "bind_reschedule_context_facts"
 		podUID    = "pod_reschedule_context_facts"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("reschedule-context-test-signing-key")
 	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
 	store.Clock = func() time.Time { return now }
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_reschedule_compaction_start", "mreq_reschedule_compaction", requestKindCompactionSummary, 0)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_reschedule_compaction_start", "mreq_reschedule_compaction", runtimecontrol.RequestKindCompactionSummary, 0)
 	compactionEnd, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_reschedule_compaction_end", ModelRequestId: "mreq_reschedule_compaction",
 		FinishReason: "error", UsageJson: `{}`,
@@ -199,11 +209,11 @@ func TestLoadContextCarriesAcceptedRescheduleAttemptAndDeadline(t *testing.T) {
 	if err != nil || compactionEnd.GetCommitted().GetRescheduled() == nil {
 		t.Fatalf("write prior compaction reschedule: response=%#v err=%v", compactionEnd, err)
 	}
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_reschedule_start", "mreq_reschedule", requestKindAgentProviderRequest, 0)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_reschedule_start", "mreq_reschedule", runtimecontrol.RequestKindAgentProviderRequest, 0)
 	message, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_reschedule_member", ModelRequestId: "mreq_reschedule",
-		EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"partial"}]}`,
-		AssistantContextDelta: bridgeTextContextDeltaForTest("partial"),
+		PreallocatedEventId: bridgeString("evt_00000000000000000000000000000007"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"partial"}]}`,
+		AssistantContextDelta: sessionfixture.BridgeTextContextDeltaForTest("partial"),
 	})
 	if err != nil || message.GetCommitted() == nil {
 		t.Fatalf("seed rescheduled Assistant context: response=%#v err=%v", message, err)

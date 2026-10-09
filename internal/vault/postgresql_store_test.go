@@ -1390,7 +1390,7 @@ func TestPostgreSQLCredentialStoreNormalizesAndRejectsProviderOAuthBeforePersist
 	}
 	assertProviderOAuthExpiryCopies(t, admin, creds, created.ID, canonicalLockedExpiry)
 
-	logs, err := captureVaultStoreLogs(func() error {
+	rejectProviderOAuth := func() error {
 		auth := validAuth
 		auth.ProviderID = "invalid-provider"
 		_, createErr := creds.Create(ctx, workspace.DefaultID, v.ID, vault.CreateCredentialRequest{
@@ -1398,27 +1398,35 @@ func TestPostgreSQLCredentialStoreNormalizesAndRejectsProviderOAuthBeforePersist
 			Auth:        auth,
 		})
 		return createErr
-	})
+	}
+	logs, err := captureVaultStoreLogs(slog.LevelDebug, rejectProviderOAuth)
 	if err == nil {
 		t.Fatal("logged invalid provider OAuth credential succeeded")
 	}
 	for _, required := range []string{
+		"level=DEBUG",
 		"provider_credential_rejected",
 		"provider.id=invalid-provider",
 		"validation.member=provider_id",
+		"error.class=validation",
 		"error.code=invalid_provider_oauth",
+		`error.message_safe="provider credential rejected"`,
 	} {
 		if !strings.Contains(logs, required) {
 			t.Fatalf("provider credential rejection log missing %q: %s", required, logs)
 		}
 	}
 	assertStringOmits(t, logs, validAuth.AccessToken, validAuth.RefreshToken, validAuth.AccountID, validAuth.ExpiresAt)
+	quietLogs, quietErr := captureVaultStoreLogs(slog.LevelInfo, rejectProviderOAuth)
+	if quietErr == nil || quietLogs != "" {
+		t.Fatalf("routine credential rejection at default Info: err=%v logs=%s", quietErr, quietLogs)
+	}
 }
 
-func captureVaultStoreLogs(run func() error) (string, error) {
+func captureVaultStoreLogs(level slog.Level, run func() error) (string, error) {
 	var logs bytes.Buffer
 	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: level})))
 	defer slog.SetDefault(previous)
 	err := run()
 	return logs.String(), err

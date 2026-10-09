@@ -1,14 +1,17 @@
 package webconnector
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +25,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/internalgrpc"
 	grpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
+	"github.com/tetral-ai/tetral/internal/workload"
 	providergatewayv1 "github.com/tetral-ai/tetral/services/gateway/gen/tetral/provider_gateway/v1"
 )
 
@@ -41,6 +45,8 @@ func TestBindingAdmissionRejectsEveryTamperedClaimBeforeBlobOrBackendAccess(t *t
 		{name: "thread claim", mutate: func(request *providergatewayv1.RunWebRequest) { request.SessionThreadId = "other-thread" }},
 		{name: "binding claim", mutate: func(request *providergatewayv1.RunWebRequest) { request.BindingId = "other-binding" }},
 		{name: "binding generation claim", mutate: func(request *providergatewayv1.RunWebRequest) { request.BindingGeneration++ }},
+		{name: "runtime process claim", mutate: func(request *providergatewayv1.RunWebRequest) { request.RuntimeProcessId = "other-process" }},
+		{name: "missing runtime process", mutate: func(request *providergatewayv1.RunWebRequest) { request.RuntimeProcessId = "" }},
 		{name: "runtime pod claim", podUID: "other-runtime-pod"},
 		{name: "expiration claim", replaceToken: func(request *providergatewayv1.RunWebRequest) string {
 			return signRequest(request, "runtime-pod", nowValue, key)
@@ -168,7 +174,7 @@ func bindingAdmissionRequest() *providergatewayv1.RunWebRequest {
 		SessionThreadId:   "thr",
 		ToolUseEventId:    "evt-admission",
 		BindingId:         "bind",
-		BindingGeneration: 1,
+		BindingGeneration: 1, RuntimeProcessId: "process_web_fixture",
 		Input: &providergatewayv1.WebToolInput{
 			SearchQuery: []*providergatewayv1.WebSearchQuery{{Q: "example"}},
 		},
@@ -209,4 +215,97 @@ func (panicBlobStore) CopyObject(context.Context, string, string) error {
 func (panicBlobStore) Delete(context.Context, string) error { panic("blob access before admission") }
 func (panicBlobStore) DeletePrefix(context.Context, string) error {
 	panic("blob access before admission")
+}
+
+// The mutex makes the actual RPC handler's output observable without depending
+// on transport activity as a synchronization contract.
+type diagnosticRPCBuffer struct {
+	mu sync.Mutex
+	bytes.Buffer
+}
+
+func (b *diagnosticRPCBuffer) Write(value []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Buffer.Write(value)
+}
+func (b *diagnosticRPCBuffer) snapshot() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.String()
+}
+
+func TestWebRPCOwnsOrdinaryDenialSummaryWithoutServiceDuplicate(t *testing.T) {
+	var logs diagnosticRPCBuffer
+	logger := workload.NewLogger(&logs, "web-connector", "test", "unit")
+	listener := bufconn.Listen(1024 * 1024)
+	t.Cleanup(func() { _ = listener.Close() })
+	backend := &fakeBackend{}
+	objects := blob.NewFakeBlobStore()
+	service, key, now := testService(objects, backend)
+	service.WithLogger(logger)
+	server, err := internalgrpc.NewServer(internalgrpc.Config{
+		ServiceName: ServiceName, Listener: listener, Logger: logger,
+		Authenticator:    fixedAuthenticator{identity: grpcauth.Identity{ServiceAccount: grpcauth.ServiceAccount{Namespace: "tetral-agent-runtime", Name: "agent-runtime"}, KubernetesPodUID: "runtime-pod"}},
+		MethodAuthorizer: MethodAuthorizer, Register: func(server *grpc.Server) { Register(server, service) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan struct{})
+	t.Cleanup(func() {
+		server.Stop()
+		select {
+		case <-served:
+		case <-time.After(time.Second):
+			t.Error("RPC server did not join")
+		}
+	})
+	go func() { defer close(served); _ = server.Serve(listener) }()
+	connection, err := grpc.NewClient("passthrough:///buffer", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	ctx, cancel := context.WithTimeout(metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer workload-token"), 2*time.Second)
+	defer cancel()
+	client := providergatewayv1.NewProviderGatewayServiceClient(connection)
+	healthy := testRequest(&providergatewayv1.WebToolInput{SearchQuery: []*providergatewayv1.WebSearchQuery{{Q: "safe query"}}}, "event-rpc-healthy", key, now)
+	response, err := client.RunWeb(ctx, healthy)
+	if err != nil || response.GetStatus() != providergatewayv1.RunWebStatus_RUN_WEB_STATUS_COMPLETED {
+		t.Fatalf("healthy outcome=%v err=%v", response, err)
+	}
+	denied := testRequest(healthy.Input, "event-rpc-denied", key, now)
+	denied.RuntimeBindingToken = "PRIVATE_INVALID_BINDING_SENTINEL"
+	if _, err := client.RunWeb(ctx, denied); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("denial code=%s", status.Code(err))
+	}
+	invalid := testRequest(healthy.Input, "event-rpc-invalid", key, now)
+	invalid.BindingGeneration = 0
+	if _, err := client.RunWeb(ctx, invalid); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("invalid code=%s", status.Code(err))
+	}
+	server.GracefulStop() // All handler logging must complete before inspection.
+	output := logs.snapshot()
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) != 2 || strings.Contains(output, "PRIVATE_INVALID_BINDING_SENTINEL") {
+		t.Fatalf("RPC diagnostics = %s", output)
+	}
+	for index, code := range []string{"permissiondenied", "invalidargument"} {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(lines[index]), &record); err != nil {
+			t.Fatal(err)
+		}
+		if record["level"] != "INFO" || record["msg"] != "internal.grpc.request" || record["error.class"] != "grpc_error" || record["error.code"] != code || record["error.message_safe"] != "internal gRPC request failed" {
+			t.Fatalf("ordinary boundary summary = %#v", record)
+		}
+	}
+	if backend.calls != 1 || objects.Len() != 1 {
+		t.Fatalf("denial side effects: backend=%d objects=%d", backend.calls, objects.Len())
+	}
+	service.metrics.mu.Lock()
+	defer service.metrics.mu.Unlock()
+	if service.metrics.requests[metricKey{"search", "completed"}] != 1 || service.metrics.requests[metricKey{"search", "runtime_error"}] != 2 {
+		t.Fatalf("request metrics changed with duplicate removal: %#v", service.metrics.requests)
+	}
 }

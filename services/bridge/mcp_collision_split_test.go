@@ -10,10 +10,11 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/mcpmanifest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -23,9 +24,9 @@ func TestFilterMCPManifestCollisionsOwnsOnlyPinnedFamily(t *testing.T) {
 	platformNames := []string{"web", "memory", "spawn_agent", "send_message", "wait_agent", "interrupt_agent", "close_agent", "resume_agent", "list_agents"}
 	allNames := append(append(append([]string{}, claudeNames...), gptNames...), platformNames...)
 	allNames = append(allNames, "github_search")
-	tools := make([]MCPManifestTool, 0, len(allNames))
+	tools := make([]mcpmanifest.Tool, 0, len(allNames))
 	for _, name := range allNames {
-		tools = append(tools, MCPManifestTool{Name: name})
+		tools = append(tools, mcpmanifest.Tool{Name: name})
 	}
 
 	for _, test := range []struct {
@@ -37,7 +38,7 @@ func TestFilterMCPManifestCollisionsOwnsOnlyPinnedFamily(t *testing.T) {
 		{family: "gpt", blocked: gptNames, passed: append(append(append([]string{}, claudeNames...), platformNames...), "github_search")},
 	} {
 		t.Run(test.family, func(t *testing.T) {
-			filtered, omissions := filterMCPManifestCollisions(test.family, tools)
+			filtered, omissions := mcpmanifest.FilterCollisions(test.family, tools)
 			got := make([]string, 0, len(filtered))
 			for _, tool := range filtered {
 				got = append(got, tool.Name)
@@ -59,9 +60,9 @@ func TestFilterMCPManifestCollisionsOwnsOnlyPinnedFamily(t *testing.T) {
 func TestPostgreSQLBridgeAPIStoreMcpManifestChangedFiltersPinnedFamilyAndLogsAfterAcceptance(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedMCPFamilySession(t, admin, "sesn_mcp_collision_changed", "thr_mcp_collision_changed", "claude")
-	lister := &recordingMCPManifestLister{results: []MCPManifestListResult{{
+	lister := &recordingMCPManifestLister{results: []mcpmanifest.ListResult{{
 		ManifestETag: "connector_etag_changed",
-		Tools: []MCPManifestTool{
+		Tools: []mcpmanifest.Tool{
 			{Name: "Read", Description: "Pinned family", InputSchemaJSON: `{"type":"object"}`},
 			{Name: "exec_command", Description: "Other family", InputSchemaJSON: `{"type":"object"}`},
 			{Name: "memory", Description: "Platform", InputSchemaJSON: `{"type":"object"}`},
@@ -101,9 +102,9 @@ func TestPostgreSQLBridgeAPIStoreMcpManifestChangedFailureBeforeAcceptanceLogsNo
 	var logs bytes.Buffer
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
-	store.MCPManifestLister = &recordingMCPManifestLister{results: []MCPManifestListResult{{
+	store.MCPManifestLister = &recordingMCPManifestLister{results: []mcpmanifest.ListResult{{
 		ManifestETag: "connector_etag_changed_fail",
-		Tools: []MCPManifestTool{
+		Tools: []mcpmanifest.Tool{
 			{Name: "Read", InputSchemaJSON: `{"type":"object"}`},
 			{Name: "github_search", InputSchemaJSON: `not-json`},
 		},
@@ -118,61 +119,12 @@ func TestPostgreSQLBridgeAPIStoreMcpManifestChangedFailureBeforeAcceptanceLogsNo
 	assertMCPFamilyOmissionWarnings(t, logs.Bytes(), ServiceNameBridgeAPI, "sesn_mcp_collision_changed_fail", "claude", nil)
 }
 
-func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestFiltersPinnedFamilyAndLogsAfterAcceptance(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedMCPFamilySession(t, admin, "sesn_mcp_collision_initial", "thr_mcp_collision_initial", "gpt")
-	var logs bytes.Buffer
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	store.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
-	store.MCPManifestLister = &recordingMCPManifestLister{results: []MCPManifestListResult{{
-		ManifestETag: "connector_etag_initial",
-		Tools: []MCPManifestTool{
-			{Name: "apply_patch", Description: "Pinned family", InputSchemaJSON: `{"type":"object"}`},
-			{Name: "Read", Description: "Other family", InputSchemaJSON: `{"type":"object"}`},
-			{Name: "web", Description: "Platform", InputSchemaJSON: `{"type":"object"}`},
-			{Name: "github_search", Description: "Ordinary", InputSchemaJSON: `{"type":"object"}`},
-		},
-	}}}
-
-	err := store.captureInitialMCPManifests(context.Background(), RuntimeJob{
-		WorkspaceID: "default", SessionID: "sesn_mcp_collision_initial",
-	}, []MCPManifestToolsetConfig{{MCPServerName: "github", BuiltinFamily: "gpt"}}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	if err != nil {
-		t.Fatalf("captureInitialMCPManifests: %v", err)
-	}
-	assertStoredMCPManifest(t, admin, "sesn_mcp_collision_initial", "connector_etag_initial", []string{"Read", "web", "github_search"})
-	assertMCPFamilyOmissionWarnings(t, logs.Bytes(), ServiceNameJobRunner, "sesn_mcp_collision_initial", "gpt", []string{"apply_patch"})
-}
-
-func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestFailureBeforeAcceptanceLogsNoOmission(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedMCPFamilySession(t, admin, "sesn_mcp_collision_initial_fail", "thr_mcp_collision_initial_fail", "gpt")
-	var logs bytes.Buffer
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	store.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
-	store.MCPManifestLister = &recordingMCPManifestLister{results: []MCPManifestListResult{{
-		ManifestETag: "connector_etag_initial_fail",
-		Tools: []MCPManifestTool{
-			{Name: "apply_patch", InputSchemaJSON: `{"type":"object"}`},
-			{Name: "github_search", InputSchemaJSON: `not-json`},
-		},
-	}}}
-
-	err := store.captureInitialMCPManifests(context.Background(), RuntimeJob{
-		WorkspaceID: "default", SessionID: "sesn_mcp_collision_initial_fail",
-	}, []MCPManifestToolsetConfig{{MCPServerName: "github", BuiltinFamily: "gpt"}}, time.Now())
-	if err != nil {
-		t.Fatalf("captureInitialMCPManifests: %v", err)
-	}
-	assertMCPFamilyOmissionWarnings(t, logs.Bytes(), ServiceNameJobRunner, "sesn_mcp_collision_initial_fail", "gpt", nil)
-}
-
 func TestProductionMCPManifestStoresReceiveWorkloadLoggers(t *testing.T) {
 	bridgeMain, err := os.ReadFile("cmd/bridge-api/main.go")
 	if err != nil {
 		t.Fatalf("read bridge-api main: %v", err)
 	}
-	jobRunnerMain, err := os.ReadFile("cmd/job-runner/main.go")
+	jobRunnerMain, err := os.ReadFile("../job-runner/cmd/job-runner/main.go")
 	if err != nil {
 		t.Fatalf("read job-runner main: %v", err)
 	}
@@ -186,8 +138,8 @@ func TestProductionMCPManifestStoresReceiveWorkloadLoggers(t *testing.T) {
 
 func seedMCPFamilySession(t *testing.T, admin *sql.DB, sessionID string, threadID string, family string) {
 	t.Helper()
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	seedBridgeAPIAgentConfig(t, admin, "default", sessionID, `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPIAgentConfig(t, admin, "default", sessionID, `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
 	installed := `{"tools":[{"type":"tetral_agent_toolset","family":"` + family + `"},{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}]}`
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET installed_tools_json = $1 WHERE workspace_id = 'default' AND id = $2`, installed, sessionID); err != nil {
 		t.Fatalf("seed installed MCP tools: %v", err)

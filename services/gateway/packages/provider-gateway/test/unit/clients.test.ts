@@ -1,9 +1,11 @@
+import { NormalizedProviderEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import type { NormalizedProviderEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { describe, expect, jest, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import {
   ProviderFinishReason,
   ProviderRequestKind,
-  ProviderStreamEventType,
+
   ProviderContextRole,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { ProviderKeyFailureError } from "../../src/providers/pool.js";
@@ -15,15 +17,15 @@ import {
   OpenAICodexResponsesEndpoint,
   OpenAIOAuthDummyAPIKey,
 } from "../../src/providers/openai-oauth.js";
-import { validProviderRequest } from "./fixtures.js";
+import { unusedProviderFetch, validProviderRequest } from "./fixtures.js";
 import type { TextStreamPart, ToolSet } from "ai";
 import type { FetchFunction } from "@ai-sdk/provider-utils";
-import type { ProviderRequest, ProviderStreamEvent } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { ProviderRequest } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { ResolvedProviderRequestAttachment } from "@tetral/gateway-lowering/src/request.js";
 import type {
   AnthropicProviderSettings,
-  GatewayStreamTextInput,
-  GatewayStreamTextResult,
+  GatewayModelStreamInput,
+  GatewayModelStreamResult,
   OpenAIProviderSettings,
   OpenAICompatibleProviderSettings,
 } from "../../src/providers/clients.js";
@@ -36,16 +38,17 @@ const approvalReviewerOutputSchemaJson = await readFile(
 
 describe("ProviderClientRegistry provider streaming", () => {
   test("forwards DeepSeek reviewer JSON-object strategy into provider construction", async () => {
-    const calls: GatewayStreamTextInput[] = [];
+    const calls: GatewayModelStreamInput[] = [];
     const providerSettings: OpenAICompatibleProviderSettings[] = [];
     const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       openAICompatibleProviderFactory: (settings) => {
         providerSettings.push(settings);
         return (modelId) => ({ provider: "deepseek", modelId });
       },
-      streamText: (input) => {
+      streamModel: (input) => {
         calls.push(input);
-        return streamTextResult([finishPart()]);
+        return modelStreamResult([finishPart()]);
       },
     });
     const request = deepSeekRequest({
@@ -68,13 +71,14 @@ describe("ProviderClientRegistry provider streaming", () => {
     let providerFactoryCalls = 0;
     let streamCalls = 0;
     const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       openAIProviderFactory: () => {
         providerFactoryCalls += 1;
         return { responses: (modelId) => ({ provider: "openai", modelId }) };
       },
-      streamText: () => {
+      streamModel: () => {
         streamCalls += 1;
-        return streamTextResult([finishPart()]);
+        return modelStreamResult([finishPart()]);
       },
     });
     const request = openAIRequest({
@@ -99,13 +103,14 @@ describe("ProviderClientRegistry provider streaming", () => {
     let providerFactoryCalls = 0;
     let streamCalls = 0;
     const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       anthropicProviderFactory: () => {
         providerFactoryCalls += 1;
         return (modelId) => ({ provider: "anthropic", modelId });
       },
-      streamText: () => {
+      streamModel: () => {
         streamCalls += 1;
-        return streamTextResult([finishPart()]);
+        return modelStreamResult([finishPart()]);
       },
     });
     const request = anthropicRequest({
@@ -148,16 +153,17 @@ describe("ProviderClientRegistry provider streaming", () => {
   });
 
   test("lowers approval reviewer output schema and reports route-effective model limits", async () => {
-    const calls: GatewayStreamTextInput[] = [];
+    const calls: GatewayModelStreamInput[] = [];
     const request = anthropicRequest({
       requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER,
       outputSchemaJson: approvalReviewerOutputSchemaJson,
     });
     const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       anthropicProviderFactory: () => (modelId) => ({ provider: "anthropic", modelId }),
-      streamText: (input) => {
+      streamModel: (input) => {
         calls.push(input);
-        return streamTextResult([finishPart()]);
+        return modelStreamResult([finishPart()]);
       },
     });
 
@@ -169,7 +175,7 @@ describe("ProviderClientRegistry provider streaming", () => {
       schema: JSON.parse(approvalReviewerOutputSchemaJson),
     });
     expect(events.at(-1)).toMatchObject({
-      type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+      type: NormalizedProviderEventType.Finish,
       finish: {
         contextWindowTokens: 1_000_000,
         inputLimitTokens: undefined,
@@ -179,12 +185,13 @@ describe("ProviderClientRegistry provider streaming", () => {
   });
 
   test("streams every non-reviewer request kind as plain text", async () => {
-    const calls: GatewayStreamTextInput[] = [];
+    const calls: GatewayModelStreamInput[] = [];
     const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       anthropicProviderFactory: () => (modelId) => ({ provider: "anthropic", modelId }),
-      streamText: (input) => {
+      streamModel: (input) => {
         calls.push(input);
-        return streamTextResult([finishPart()]);
+        return modelStreamResult([finishPart()]);
       },
     });
 
@@ -200,8 +207,25 @@ describe("ProviderClientRegistry provider streaming", () => {
     expect(calls.every((call) => call.output === undefined)).toBe(true);
   });
 
-  test("lowers Anthropic requests into the pinned AI SDK v6 streamText shape and raises provider events", async () => {
-    const calls: GatewayStreamTextInput[] = [];
+  test("model warnings reach the registry observer with catalog provider and model identity", async () => {
+    const observed: unknown[] = [];
+    const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
+      anthropicProviderFactory: () => (modelId) => ({ provider: "anthropic", modelId }),
+      onModelWarnings: (event) => observed.push(event),
+      streamModel: (input) => {
+        input.onWarnings?.([{ type: "unsupported", feature: "topK" }, { type: "other" }]);
+        return modelStreamResult([finishPart()]);
+      },
+    });
+
+    await collectEvents(registry.stream({ request: anthropicRequest(), credential: platformAnthropicCredential() }));
+
+    expect(observed).toEqual([{ providerId: "anthropic", modelId: "claude-opus-4-8", warnings: [{ type: "unsupported", feature: "topK" }, { type: "other" }] }]);
+  });
+
+  test("lowers Anthropic requests into the pinned AI SDK v6 model input shape and raises provider events", async () => {
+    const calls: GatewayModelStreamInput[] = [];
     const providerSettings: AnthropicProviderSettings[] = [];
     const request = anthropicRequest({
       model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "xhigh" },
@@ -209,13 +233,14 @@ describe("ProviderClientRegistry provider streaming", () => {
       attachments: [],
     });
     const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       anthropicProviderFactory: (settings) => {
         providerSettings.push(settings);
         return (modelId) => ({ provider: "anthropic", modelId });
       },
-      streamText: (input) => {
+      streamModel: (input) => {
         calls.push(input);
-        return streamTextResult([
+        return modelStreamResult([
           { type: "start" },
           { type: "text-start", id: "txt_1", providerMetadata: { anthropic: { request_id: "reqp_1" } } },
           { type: "text-delta", id: "txt_1", text: "hello" },
@@ -278,10 +303,10 @@ describe("ProviderClientRegistry provider streaming", () => {
     expect(calls[0]?.tools?.Read?.description).toBe("Read a file.");
 
     expect(events.map((event) => event.type)).toEqual([
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+      NormalizedProviderEventType.TextStart,
+      NormalizedProviderEventType.TextDelta,
+      NormalizedProviderEventType.TextEnd,
+      NormalizedProviderEventType.Finish,
     ]);
     expect(events[1]?.text?.text).toBe("hello");
     expect(events[3]?.finish).toMatchObject({
@@ -305,12 +330,13 @@ describe("ProviderClientRegistry provider streaming", () => {
   });
 
   test("streams current-stage empty ModelRef.variant with each model's base effort behavior", async () => {
-    const anthropicCalls: GatewayStreamTextInput[] = [];
+    const anthropicCalls: GatewayModelStreamInput[] = [];
     await collectEvents(new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       anthropicProviderFactory: () => (modelId) => ({ provider: "anthropic", modelId }),
-      streamText: (input) => {
+      streamModel: (input) => {
         anthropicCalls.push(input);
-        return streamTextResult([finishPart()]);
+        return modelStreamResult([finishPart()]);
       },
     }).stream({ request: anthropicRequest(), credential: sessionAnthropicCredential() }));
     expect(anthropicCalls[0]?.providerOptions?.anthropic).toEqual({
@@ -319,12 +345,13 @@ describe("ProviderClientRegistry provider streaming", () => {
       sendReasoning: true,
     });
 
-    const openAICalls: GatewayStreamTextInput[] = [];
+    const openAICalls: GatewayModelStreamInput[] = [];
     await collectEvents(new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       openAIProviderFactory: () => ({ responses: (modelId) => ({ provider: "openai", modelId }) }),
-      streamText: (input) => {
+      streamModel: (input) => {
         openAICalls.push(input);
-        return streamTextResult([finishPart()]);
+        return modelStreamResult([finishPart()]);
       },
     }).stream({ request: openAIRequest(), credential: sessionOpenAICredential() }));
     expect(openAICalls[0]?.providerOptions?.openai).toMatchObject({
@@ -333,34 +360,37 @@ describe("ProviderClientRegistry provider streaming", () => {
       include: ["reasoning.encrypted_content"],
     });
 
-    const deepSeekCalls: GatewayStreamTextInput[] = [];
+    const deepSeekCalls: GatewayModelStreamInput[] = [];
     await collectEvents(new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       openAICompatibleProviderFactory: () => (modelId) => ({ provider: "deepseek", modelId }),
-      streamText: (input) => {
+      streamModel: (input) => {
         deepSeekCalls.push(input);
-        return streamTextResult([finishPart()]);
+        return modelStreamResult([finishPart()]);
       },
     }).stream({ request: deepSeekRequest(), credential: sessionDeepSeekCredential() }));
     expect(deepSeekCalls[0]?.providerOptions?.deepseek).toEqual({
       reasoningEffort: "high",
     });
 
-    const kimiCalls: GatewayStreamTextInput[] = [];
+    const kimiCalls: GatewayModelStreamInput[] = [];
     await collectEvents(new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       anthropicProviderFactory: () => (modelId) => ({ provider: "moonshotai", modelId }),
-      streamText: (input) => {
+      streamModel: (input) => {
         kimiCalls.push(input);
-        return streamTextResult([finishPart()]);
+        return modelStreamResult([finishPart()]);
       },
     }).stream({ request: kimiRequest(), credential: sessionKimiCredential() }));
     expect(JSON.stringify(kimiCalls[0]?.providerOptions ?? {})).not.toContain("\"effort\"");
 
-    const zaiCalls: GatewayStreamTextInput[] = [];
+    const zaiCalls: GatewayModelStreamInput[] = [];
     await collectEvents(new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       openAICompatibleProviderFactory: () => (modelId) => ({ provider: "zai", modelId }),
-      streamText: (input) => {
+      streamModel: (input) => {
         zaiCalls.push(input);
-        return streamTextResult([finishPart()]);
+        return modelStreamResult([finishPart()]);
       },
     }).stream({ request: zaiRequest(), credential: sessionZaiCredential() }));
     expect(zaiCalls[0]?.providerOptions?.zai).toEqual({
@@ -370,7 +400,7 @@ describe("ProviderClientRegistry provider streaming", () => {
   });
 
   test("passes resolved image and PDF attachments to AI SDK user content parts", async () => {
-    const calls: GatewayStreamTextInput[] = [];
+    const calls: GatewayModelStreamInput[] = [];
     const attachments = [
       resolvedAttachment({ transient: transientOrigin("att_image"), mime: "image/png", filename: "plot.png", data: new Uint8Array([1, 2]) }),
       resolvedAttachment({ transient: transientOrigin("att_pdf"), mime: "application/pdf", filename: "report.pdf", data: new Uint8Array([3, 4]) }),
@@ -380,10 +410,11 @@ describe("ProviderClientRegistry provider streaming", () => {
       attachments,
     });
     const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       anthropicProviderFactory: () => (modelId) => ({ provider: "anthropic", modelId }),
-      streamText: (input) => {
+      streamModel: (input) => {
         calls.push(input);
-        return streamTextResult([finishPart()]);
+        return modelStreamResult([finishPart()]);
       },
     });
 
@@ -402,8 +433,9 @@ describe("ProviderClientRegistry provider streaming", () => {
   test("uses platform Anthropic keys without exposing key identity in finish metadata", async () => {
     const request = anthropicRequest({ attachments: [] });
     const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       anthropicProviderFactory: () => () => ({}),
-      streamText: () => streamTextResult([{
+      streamModel: () => modelStreamResult([{
         type: "finish",
         finishReason: "stop",
         rawFinishReason: undefined,
@@ -427,8 +459,9 @@ describe("ProviderClientRegistry provider streaming", () => {
   test("drops AI SDK stream lifecycle markers before raising provider events", async () => {
     const request = anthropicRequest({ attachments: [] });
     const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       anthropicProviderFactory: () => () => ({}),
-      streamText: () => streamTextResult([
+      streamModel: () => modelStreamResult([
         { type: "start" } as TextStreamPart<ToolSet>,
         { type: "start-step" } as TextStreamPart<ToolSet>,
         {
@@ -442,7 +475,7 @@ describe("ProviderClientRegistry provider streaming", () => {
     const events = await collectEvents(registry.stream({ request, credential: platformAnthropicCredential() }));
 
     expect(events.map((event) => event.type)).toEqual([
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+      NormalizedProviderEventType.Finish,
     ]);
     expect(events[0]?.finish?.usage?.providerUsageJson).toContain("providerOnlyCounter");
   });
@@ -460,7 +493,7 @@ describe("ProviderClientRegistry provider streaming", () => {
         providerSettings.push(settings);
         return () => ({});
       },
-      streamText: () => streamTextResult([{
+      streamModel: () => modelStreamResult([{
         type: "finish",
         finishReason: "stop",
         rawFinishReason: undefined,
@@ -499,7 +532,7 @@ describe("ProviderClientRegistry provider streaming", () => {
         providerSettings.push(settings);
         return () => ({});
       },
-      streamText: () => streamTextResult([finishPart()]),
+      streamModel: () => modelStreamResult([finishPart()]),
     });
 
     await collectEvents(registry.stream({ request: anthropicRequest({ attachments: [] }), credential: sessionAnthropicCredential() }));
@@ -532,7 +565,7 @@ describe("ProviderClientRegistry provider streaming", () => {
         kimiSettings.push(settings);
         return (modelId) => ({ provider: "anthropic", modelId });
       },
-      streamText: () => streamTextResult([finishPart()]),
+      streamModel: () => modelStreamResult([finishPart()]),
     });
 
     await collectEvents(registry.stream({ request: openAIRequest(), credential: sessionOpenAICredential() }));
@@ -571,7 +604,7 @@ describe("ProviderClientRegistry provider streaming", () => {
         compatibleProviderSettings.push(settings);
         return () => ({});
       },
-      streamText: () => streamTextResult([finishPart()]),
+      streamModel: () => modelStreamResult([finishPart()]),
     });
 
     await collectEvents(registry.stream({ request: anthropicRequest({ attachments: [] }), credential: sessionAnthropicCredential() }));
@@ -621,7 +654,7 @@ describe("ProviderClientRegistry provider streaming", () => {
         providerSettings.push(settings);
         return () => ({});
       },
-      streamText: () => streamTextResult([finishPart()]),
+      streamModel: () => modelStreamResult([finishPart()]),
     });
 
     await collectEvents(registry.stream({ request: anthropicRequest({ attachments: [] }), credential: sessionAnthropicCredential() }));
@@ -698,7 +731,7 @@ describe("ProviderClientRegistry provider streaming", () => {
           providerSettings.push(settings);
           return () => ({});
         },
-        streamText: () => streamTextResult([finishPart()]),
+        streamModel: () => modelStreamResult([finishPart()]),
       });
 
       await collectEvents(registry.stream({ request: anthropicRequest({ attachments: [] }), credential: sessionAnthropicCredential() }));
@@ -727,7 +760,7 @@ describe("ProviderClientRegistry provider streaming", () => {
         bodyProviderSettings.push(settings);
         return () => ({});
       },
-      streamText: () => streamTextResult([finishPart()]),
+      streamModel: () => modelStreamResult([finishPart()]),
     });
     await collectEvents(bodyRegistry.stream({ request: anthropicRequest({ attachments: [] }), credential: sessionAnthropicCredential() }));
     const bodyResponse = await bodyProviderSettings[0]?.fetch?.("https://api.anthropic.com/v1/messages");
@@ -751,7 +784,7 @@ describe("ProviderClientRegistry provider streaming", () => {
         providerSettings.push(settings);
         return () => ({});
       },
-      streamText: () => streamTextResult([finishPart()]),
+      streamModel: () => modelStreamResult([finishPart()]),
     });
     let transportActivity = 0;
     await collectEvents(registry.stream({
@@ -770,12 +803,13 @@ describe("ProviderClientRegistry provider streaming", () => {
     expect(transportActivity).toBe(2);
   });
 
-  test("fails closed for non-catalog models and missing credentials before streamText", async () => {
-    let streamTextCalls = 0;
+  test("fails closed for non-catalog models and missing credentials before model dispatch", async () => {
+    let modelStreamCalls = 0;
     const registry = new ProviderClientRegistry({
-      streamText: () => {
-        streamTextCalls += 1;
-        return streamTextResult([]);
+      fetch: unusedProviderFetch,
+      streamModel: () => {
+        modelStreamCalls += 1;
+        return modelStreamResult([]);
       },
     });
 
@@ -807,11 +841,11 @@ describe("ProviderClientRegistry provider streaming", () => {
       retryable: false,
       fatal: true,
     });
-    expect(streamTextCalls).toBe(0);
+    expect(modelStreamCalls).toBe(0);
   });
 
   test("streams OpenAI GPT through the Responses client and strips stateless item ids on the raw wire", async () => {
-    const calls: GatewayStreamTextInput[] = [];
+    const calls: GatewayModelStreamInput[] = [];
     const providerSettings: OpenAIProviderSettings[] = [];
     const observedRequests: Array<{ readonly url: string; readonly body: string }> = [];
     const registry = new ProviderClientRegistry({
@@ -824,9 +858,9 @@ describe("ProviderClientRegistry provider streaming", () => {
         providerSettings.push(settings);
         return { responses: (modelId) => ({ provider: "openai", modelId }) };
       },
-      streamText: (input) => {
+      streamModel: (input) => {
         calls.push(input);
-        return streamTextResult([finishPart()]);
+        return modelStreamResult([finishPart()]);
       },
     });
 
@@ -935,11 +969,11 @@ describe("ProviderClientRegistry provider streaming", () => {
     }));
 
     expect(events.map((event) => event.type)).toEqual([
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+      NormalizedProviderEventType.ToolInputStart,
+      NormalizedProviderEventType.ToolInputDelta,
+      NormalizedProviderEventType.ToolInputEnd,
+      NormalizedProviderEventType.ToolCall,
+      NormalizedProviderEventType.Finish,
     ]);
     expect(events[1]?.toolInput?.text).toBe(rawPatch);
     expect(JSON.parse(events[3]?.toolCall?.inputJson ?? "null")).toBe(rawPatch);
@@ -976,7 +1010,7 @@ describe("ProviderClientRegistry provider streaming", () => {
   });
 
   test("T6 streams OpenAI OAuth through the subscription transport with header swap and system instructions", async () => {
-    const calls: GatewayStreamTextInput[] = [];
+    const calls: GatewayModelStreamInput[] = [];
     const providerSettings: OpenAIProviderSettings[] = [];
     const observedRequests: Array<{
       readonly url: string;
@@ -1005,9 +1039,9 @@ describe("ProviderClientRegistry provider streaming", () => {
         providerSettings.push(settings);
         return { responses: (modelId) => ({ provider: "openai-oauth", modelId }) };
       },
-      streamText: (input) => {
+      streamModel: (input) => {
         calls.push(input);
-        return streamTextResult([finishPart()]);
+        return modelStreamResult([finishPart()]);
       },
     });
 
@@ -1060,16 +1094,17 @@ describe("ProviderClientRegistry provider streaming", () => {
   });
 
   test("GPT-5.6 Sol accepts ChatGPT OAuth supply through the subscription transport", async () => {
-    const calls: GatewayStreamTextInput[] = [];
+    const calls: GatewayModelStreamInput[] = [];
     const providerSettings: OpenAIProviderSettings[] = [];
     const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       openAIProviderFactory: (settings) => {
         providerSettings.push(settings);
         return { responses: (modelId) => ({ provider: "openai", modelId }) };
       },
-      streamText: (input) => {
+      streamModel: (input) => {
         calls.push(input);
-        return streamTextResult([finishPart()]);
+        return modelStreamResult([finishPart()]);
       },
     });
 
@@ -1081,7 +1116,7 @@ describe("ProviderClientRegistry provider streaming", () => {
     }));
 
     expect(events.at(-1)).toMatchObject({
-      type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+      type: NormalizedProviderEventType.Finish,
       finish: {
         contextWindowTokens: 500_000,
         inputLimitTokens: 372_000,
@@ -1154,8 +1189,8 @@ describe("ProviderClientRegistry provider streaming", () => {
         providerSettings.push(settings);
         return { responses: () => ({ provider: "openai-oauth" }) };
       },
-      streamText: () => {
-        return streamTextResult([finishPart()]);
+      streamModel: () => {
+        return modelStreamResult([finishPart()]);
       },
     });
 
@@ -1178,15 +1213,16 @@ describe("ProviderClientRegistry provider streaming", () => {
   });
 
   test("OpenAI OAuth fails closed when an expired token cannot be refreshed", async () => {
-    let streamTextCalls = 0;
+    let modelStreamCalls = 0;
     const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       openAIOAuthCredentialRefreshWriter: {
         refreshOpenAIOAuthCredential: async () => ({ ok: false, error: "credential_required" }),
       },
       openAIProviderFactory: () => ({ responses: () => ({}) }),
-      streamText: () => {
-        streamTextCalls += 1;
-        return streamTextResult([finishPart()]);
+      streamModel: () => {
+        modelStreamCalls += 1;
+        return modelStreamResult([finishPart()]);
       },
     });
 
@@ -1200,16 +1236,17 @@ describe("ProviderClientRegistry provider streaming", () => {
       retryable: false,
       fatal: true,
     });
-    expect(streamTextCalls).toBe(0);
+    expect(modelStreamCalls).toBe(0);
   });
 
   test("OpenAI OAuth fails closed when the Vault rotation boundary is not wired", async () => {
-    let streamTextCalls = 0;
+    let modelStreamCalls = 0;
     const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       openAIProviderFactory: () => ({ responses: () => ({}) }),
-      streamText: () => {
-        streamTextCalls += 1;
-        return streamTextResult([finishPart()]);
+      streamModel: () => {
+        modelStreamCalls += 1;
+        return modelStreamResult([finishPart()]);
       },
     });
 
@@ -1223,20 +1260,21 @@ describe("ProviderClientRegistry provider streaming", () => {
       retryable: false,
       fatal: true,
     });
-    expect(streamTextCalls).toBe(0);
+    expect(modelStreamCalls).toBe(0);
   });
 
   test("streams Moonshot Kimi through the Anthropic-family client with session credentials", async () => {
-    const calls: GatewayStreamTextInput[] = [];
+    const calls: GatewayModelStreamInput[] = [];
     const providerSettings: AnthropicProviderSettings[] = [];
     const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       anthropicProviderFactory: (settings) => {
         providerSettings.push(settings);
         return (modelId) => ({ provider: "moonshotai", modelId });
       },
-      streamText: (input) => {
+      streamModel: (input) => {
         calls.push(input);
-        return streamTextResult([finishPart()]);
+        return modelStreamResult([finishPart()]);
       },
     });
 
@@ -1283,16 +1321,17 @@ describe("ProviderClientRegistry provider streaming", () => {
   });
 
   test("streams DeepSeek through the openai-compatible client with hosted or session credentials", async () => {
-    const calls: GatewayStreamTextInput[] = [];
+    const calls: GatewayModelStreamInput[] = [];
     const providerSettings: OpenAICompatibleProviderSettings[] = [];
     const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       openAICompatibleProviderFactory: (settings) => {
         providerSettings.push(settings);
         return (modelId) => ({ provider: "deepseek", modelId });
       },
-      streamText: (input) => {
+      streamModel: (input) => {
         calls.push(input);
-        return streamTextResult([finishPart()]);
+        return modelStreamResult([finishPart()]);
       },
     });
 
@@ -1338,16 +1377,17 @@ describe("ProviderClientRegistry provider streaming", () => {
   });
 
   test("streams Z.ai GLM through the openai-compatible client with session credentials", async () => {
-    const calls: GatewayStreamTextInput[] = [];
+    const calls: GatewayModelStreamInput[] = [];
     const providerSettings: OpenAICompatibleProviderSettings[] = [];
     const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       openAICompatibleProviderFactory: (settings) => {
         providerSettings.push(settings);
         return (modelId) => ({ provider: "zai", modelId });
       },
-      streamText: (input) => {
+      streamModel: (input) => {
         calls.push(input);
-        return streamTextResult([finishPart()]);
+        return modelStreamResult([finishPart()]);
       },
     });
 
@@ -1398,11 +1438,68 @@ describe("ProviderClientRegistry provider streaming", () => {
     expect(events[0]?.finish?.metadataJson).toBe(JSON.stringify({ credential_source: "session" }));
   });
 
+  for (const { name, request, credential } of [
+    { name: "Anthropic", request: anthropicRequest(), credential: sessionAnthropicCredential() },
+    { name: "OpenAI", request: openAIRequest(), credential: sessionOpenAICredential() },
+    { name: "OpenAI-compatible", request: deepSeekRequest(), credential: sessionDeepSeekCredential() },
+  ]) {
+    test(`${name} adapter cancels oversized error bodies and raises one safe retryable failure`, async () => {
+      let calls = 0;
+      let reads = 0;
+      let cancellations = 0;
+      const registry = new ProviderClientRegistry({
+        fetch: Object.assign(async () => {
+          calls += 1;
+          return new Response(new ReadableStream<Uint8Array>({
+            pull(controller) {
+              reads += 1;
+              if (reads === 1) {
+                controller.enqueue(new TextEncoder().encode('{"error":{"message":"private-body-canary"}}'));
+              } else {
+                controller.close();
+              }
+            },
+            cancel() { cancellations += 1; },
+          }, { highWaterMark: 0 }), {
+            status: 500,
+            headers: {
+              "content-type": "application/json",
+              "content-length": String(2 * 1024 * 1024 * 1024 + 1),
+            },
+          });
+        }, { preconnect: () => {} }),
+      });
+
+      const events: NormalizedProviderEvent[] = [];
+      const error = await caughtError((async () => {
+        for await (const event of registry.stream({ request, credential })) {
+          events.push(event);
+        }
+      })());
+      expect(error).toBeInstanceOf(ProviderKeyFailureError);
+      expect(calls).toBe(1);
+      expect(cancellations).toBe(1);
+      // The gateway transport wrapper may prefetch one chunk; the SDK must
+      // cancel rather than consume an advertised oversized response.
+      expect(reads).toBeLessThanOrEqual(1);
+      expect(events).toHaveLength(0);
+      expect((error as ProviderKeyFailureError).classification.providerError).toEqual({
+        code: "provider_stream_error",
+        message: "Provider returned a retryable server error.",
+        retryable: true,
+        fatal: false,
+        statusCode: 500,
+        retryAfterMs: 0,
+      });
+    });
+  }
+
   test("classifies Anthropic body errors so service can switch platform keys before first byte", async () => {
     const request = anthropicRequest({ attachments: [] });
     const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       anthropicProviderFactory: () => () => ({}),
-      streamText: () => streamTextResult([{
+      streamModel: () => modelStreamResult([{
         type: "error",
         error: {
           statusCode: 429,
@@ -1436,8 +1533,9 @@ describe("ProviderClientRegistry provider streaming", () => {
   test("classifies an untagged status-less Anthropic error as transport failure", async () => {
     const request = anthropicRequest({ attachments: [] });
     const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       anthropicProviderFactory: () => () => ({}),
-      streamText: () => streamTextResult([{
+      streamModel: () => modelStreamResult([{
         type: "error",
         error: { opaque: "statusless-private-canary" },
       }]),
@@ -1467,8 +1565,9 @@ describe("ProviderClientRegistry provider streaming", () => {
   test("treats an Anthropic stream that closes without finish as a retryable terminal failure", async () => {
     const request = anthropicRequest({ attachments: [] });
     const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       anthropicProviderFactory: () => () => ({}),
-      streamText: () => streamTextResult([
+      streamModel: () => modelStreamResult([
         { type: "start" },
         { type: "text-start", id: "txt_1" },
         { type: "text-delta", id: "txt_1", text: "partial" },
@@ -1558,7 +1657,7 @@ function zaiRequest(overrides: Partial<ProviderRequest> = {}): ProviderRequest {
   });
 }
 
-function streamTextResult(parts: readonly TextStreamPart<ToolSet>[]): GatewayStreamTextResult {
+function modelStreamResult(parts: readonly TextStreamPart<ToolSet>[]): GatewayModelStreamResult {
   return {
     fullStream: (async function* () {
       for (const part of parts) {
@@ -1583,8 +1682,8 @@ function finishPart(): TextStreamPart<ToolSet> {
   };
 }
 
-async function collectEvents(events: AsyncIterable<ProviderStreamEvent>): Promise<readonly ProviderStreamEvent[]> {
-  const output: ProviderStreamEvent[] = [];
+async function collectEvents(events: AsyncIterable<NormalizedProviderEvent>): Promise<readonly NormalizedProviderEvent[]> {
+  const output: NormalizedProviderEvent[] = [];
   for await (const event of events) {
     output.push(event);
   }
@@ -1642,7 +1741,7 @@ async function openAIOAuthRedirect(status: number, location: string): Promise<re
       providerSettings.push(settings);
       return { responses: () => ({ provider: "openai-oauth" }) };
     },
-    streamText: () => streamTextResult([finishPart()]),
+    streamModel: () => modelStreamResult([finishPart()]),
   });
 
   await collectEvents(registry.stream({ request: openAIRequest(), credential: sessionOpenAIOAuthCredential() }));

@@ -1,0 +1,17 @@
+import assert from "node:assert/strict";
+import {pathToFileURL} from "node:url";
+import {join} from "node:path";
+const sdkRoot=process.env.TETRAL_ENGINE_SDK_ROOT;
+const [first,second]=process.argv.slice(2);
+assert(sdkRoot&&first&&second&&process.env.REPLICA_API_KEY);
+const {default:Tetral}=await import(pathToFileURL(join(sdkRoot,"src/index.ts")).href);
+const a=new Tetral({apiKey:process.env.REPLICA_API_KEY,baseURL:first,maxRetries:0});
+const b=new Tetral({apiKey:process.env.REPLICA_API_KEY,baseURL:second,maxRetries:0});
+const environment=await a.beta.environments.create({name:"replica-public-environment",config:{type:"cloud",networking:{type:"blocked"}}});
+const agent=await a.beta.agents.create({name:"replica-public-agent",model:"anthropic/claude-opus-4-8",approval_mode:"ask_for_approval",tools:[{type:"tetral_agent_toolset",family:"claude"}]});
+const created=await a.beta.sessions.create({agent:agent.id,environment_id:environment.id,vault_ids:[]});
+const fromB=await b.beta.sessions.retrieve(created.id);assert.equal(fromB.id,created.id);assert.equal(fromB.status,created.status);assert.deepEqual(fromB.agent,created.agent);
+const listed=await b.beta.sessions.list();assert(listed.data.some((row:{id:string})=>row.id===created.id));
+await b.beta.sessions.update(created.id,{agent:{approval_mode:"full_access"}});
+const updated=await a.beta.sessions.retrieve(created.id);assert.equal(updated.agent.approval_mode,"full_access");
+console.log(JSON.stringify({ok:true,sessionId:created.id,environmentId:environment.id,agentId:agent.id,status:created.status,approvalMode:updated.agent.approval_mode}));

@@ -12,6 +12,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -24,10 +25,10 @@ func TestPostgreSQLAtomicSubagentCreationCommitsAndReplaysWholeInitialLineage(t 
 		podUID    = "pod_atomic_subagent"
 		prompt    = "perform the opening delegated task"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
-	scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 	toolUseID := writeDurableOrdinaryToolUseForTest(t, store, scope, "mreq_atomic_subagent", "call_atomic_subagent", "spawn_agent",
 		`{"task_name":"provider-owned-name","agent_type":"general","fork_turns":"none","prompt":"provider-owned-prompt"}`)
 	request := &bridgev1.CreateSubagentThreadRequest{
@@ -61,10 +62,10 @@ func TestPostgreSQLAtomicSubagentCreationRollsBackEveryOwnedFact(t *testing.T) {
 		bindingID = "bind_atomic_subagent_rollback"
 		podUID    = "pod_atomic_subagent_rollback"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
-	scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 	toolUseID := writeDurableOrdinaryToolUseForTest(t, store, scope, "mreq_atomic_subagent_rollback", "call_atomic_subagent_rollback", "spawn_agent",
 		`{"task_name":"rollback-worker","prompt":"rollback opening"}`)
 	if _, err := admin.ExecContext(context.Background(), `CREATE FUNCTION fail_atomic_subagent_queue() RETURNS trigger AS $$

@@ -19,7 +19,7 @@ import { createGatewayGrpcServer } from "../../../../../gateway/packages/provide
 import { ProviderClientRegistry } from "../../../../../gateway/packages/provider-gateway/src/providers/clients.js";
 import { ProviderCredentialResolver } from "../../../../../gateway/packages/provider-gateway/src/providers/credentials.js";
 import { ProviderGatewayServiceShell } from "../../../../../gateway/packages/provider-gateway/src/service.js";
-import type { GatewayStreamTextInput } from "../../../../../gateway/packages/provider-gateway/src/providers/clients.js";
+import type { GatewayModelStreamInput } from "../../../../../gateway/packages/provider-gateway/src/providers/clients.js";
 
 const inputPath = process.argv[2];
 if (inputPath === undefined) {
@@ -35,6 +35,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly fileId?: string;
 	readonly readyPath?: string;
 	readonly acceptResultPath?: string;
@@ -57,6 +58,7 @@ const address = {
 	bindingId: input.bindingId,
 	bindingGeneration: input.bindingGeneration,
 	targetPodUid: input.targetPodUid,
+	runtimeProcessId: input.runtimeProcessId,
 };
 const writer = new BridgeAPIEventWriter({
 	address: input.bridgeAddress,
@@ -70,7 +72,7 @@ const providerAttachmentCounts: number[] = [];
 const signalProviderStart = async (
 	attachmentCount: number,
 	attachmentBytes: number,
-	providerRequest: GatewayStreamTextInput,
+	providerRequest: GatewayModelStreamInput,
 ): Promise<void> => {
 	if (input.providerStartedPath === undefined) return;
 	await writeFile(
@@ -87,8 +89,16 @@ const signalProviderStart = async (
 };
 
 const providerStreamer = new ProviderClientRegistry({
+	// This fixture supplies provider events directly. Unexpected HTTP access
+	// must fail instead of creating an unused default transport owner.
+	fetch: Object.assign(
+		async () => {
+			throw new Error("Unexpected provider network access in scripted attachment fixture.");
+		},
+		{ preconnect: () => {} },
+	),
 	anthropicProviderFactory: () => (modelId) => ({ provider: "anthropic", modelId }),
-	streamText: (providerRequest) => {
+	streamModel: (providerRequest) => {
 		gatewayRequests += 1;
 		providerInvocations += 1;
 		const attachmentFacts = loweredProviderAttachmentFacts(providerRequest);
@@ -152,6 +162,14 @@ const credentialResolver = new ProviderCredentialResolver({
 	},
 	masterKeyHex: "0".repeat(64),
 });
+// Runtime and Gateway are separate Bun packages with distinct grpc-js instances.
+// Let Gateway construct its own Metadata through the production token path.
+const gatewayTokenPath = `${inputPath}.gateway-token`;
+await writeFile(gatewayTokenPath, "attachment-recovery-gateway-token", { mode: 0o600 });
+const attachmentResolver = new BridgeAPIAttachmentResolver({
+	address: input.bridgeAddress,
+	tokenPath: gatewayTokenPath,
+});
 const gatewayService = new ProviderGatewayServiceShell({
 	authenticator: {
 		authenticate: async () => ({
@@ -164,15 +182,11 @@ const gatewayService = new ProviderGatewayServiceShell({
 		}),
 	},
 	runtimeBindingTokenVerifier: { verify: () => true },
-	logger: { info: () => undefined, error: () => undefined },
+	logger: { info: () => undefined, warn: () => undefined, error: () => undefined } as never,
 	ready: () => true,
 	providerStreamer,
 	credentialResolver,
-	attachmentResolver: new BridgeAPIAttachmentResolver({
-		address: input.bridgeAddress,
-		tokenPath: "/unused/service-account-token",
-		metadataFactory,
-	}),
+	attachmentResolver,
 });
 const gatewayServer = createGatewayGrpcServer(gatewayService);
 const gatewayPort = await gatewayServer.bind("127.0.0.1:0");
@@ -222,7 +236,7 @@ if (input.mode === "cold") {
 	try {
 		const loaded = await bridgeLoader.loadThreadContext(address);
 		const checkpoint = extractThreadTurnCheckpoint({
-			contextEntries: loaded.contextEntries,
+			messages: loaded.messages,
 			facts: loaded.turnFacts,
 		});
 		const preloadResult = await hosts.subAgentRunHost.preloadThread(address);
@@ -231,7 +245,7 @@ if (input.mode === "cold") {
 				pendingAttachments: loaded.pendingAttachments?.length ?? 0,
 				attachmentInMessageOrCheckpoint:
 					input.fileId !== undefined &&
-					JSON.stringify({ contextEntries: loaded.contextEntries, checkpoint }).includes(input.fileId),
+					JSON.stringify({ currentRequestMessage:null,messages: loaded.messages, checkpoint }).includes(input.fileId),
 				providerInvocations,
 				preloadResult,
 			}),
@@ -262,17 +276,18 @@ if (input.mode === "cold") {
 		metadataFactory,
 	});
 	const service = new RuntimeControlService({
+	runtimeProcessId: input.runtimeProcessId,
 		ownPod: {
 			namespace: "tetral-agent-runtime",
 			name: "runtime-pod-attachment-recovery",
 			uid: input.targetPodUid,
 			ip: "127.0.0.1",
 		},
-		allowedBridge: { namespace: "tetral-system", name: "bridge" },
+		allowedJobRunner: { namespace: "tetral-system", name: "job-runner" },
 		authenticator: {
 			authenticate: async () => ({
 				ok: true as const,
-				serviceAccount: { namespace: "tetral-system", name: "bridge" },
+				serviceAccount: { namespace: "tetral-system", name: "job-runner" },
 			}),
 		},
 		runHost: {
@@ -326,7 +341,7 @@ if (input.mode === "cold") {
 	}
 }
 
-function loweredProviderAttachmentFacts(input: GatewayStreamTextInput): {
+function loweredProviderAttachmentFacts(input: GatewayModelStreamInput): {
 	readonly count: number;
 	readonly bytes: number;
 } {

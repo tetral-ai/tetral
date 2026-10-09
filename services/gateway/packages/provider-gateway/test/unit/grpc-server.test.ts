@@ -1,3 +1,5 @@
+import { NormalizedProviderEventType as FragmentType } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import type { NormalizedProviderEvent, NormalizedTextEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { credentials, Metadata, status as grpcStatus } from "@grpc/grpc-js";
@@ -14,17 +16,22 @@ import type { GatewayAuthenticator, ProviderRequestStreamer } from "../../src/se
 import type { StatusObject } from "@grpc/grpc-js";
 
 describe("Gateway gRPC streaming transport", () => {
+  test("passes the independently calibrated finite session budget to the real server constructor", () => {
+    const server=createGatewayGrpcServer(createService({stream:async function*(){}}));
+    expect((server.server as unknown as {options:Record<string,unknown>}).options["grpc-node.max_session_memory"]).toBe(256);
+    server.server.forceShutdown();
+  });
   test("streams many events through a real grpc-js client and ends cleanly", async () => {
     const request = validAnthropicProviderRequest();
     const service = createService({
       stream: async function* () {
-        yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+        yield textEvent(FragmentType.TextStart, "");
         for (let index = 0; index < 32; index += 1) {
-          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, `chunk-${index}`);
+          yield textEvent(FragmentType.TextDelta, `chunk-${index}`);
         }
-        yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, "");
+        yield textEvent(FragmentType.TextEnd, "");
         yield {
-          type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+          type: FragmentType.Finish,
           finish: {
             reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
             usage: {
@@ -48,9 +55,10 @@ describe("Gateway gRPC streaming transport", () => {
       const events = await readStream(call);
       const finalStatus = await finalStatusPromise;
 
-      expect(events).toHaveLength(35);
-      expect(events[0]?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START);
-      expect(events[34]?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH);
+      expect(events).toHaveLength(2);
+      expect(events[0]?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE);
+      expect(events[0]?.textComplete?.text).toBe(Array.from({length:32},(_,i)=>`chunk-${i}`).join(""));
+      expect(events[1]?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH);
       expect(finalStatus.code).toBe(grpcStatus.OK);
       expect(finalStatus.metadata).toBeInstanceOf(Metadata);
       expect(finalStatus.metadata.getMap()).toEqual({});
@@ -108,9 +116,10 @@ describe("Gateway gRPC streaming transport", () => {
       const service = createService({
         stream: async function* () {
           yield {
-            type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+            type: FragmentType.ToolCall,
             toolCall: { id: `call_${scenario.name}`, name: "bounded_tool", inputJson: scenario.inputJson, metadataJson: "{}" },
           };
+          yield {type:FragmentType.Finish,finish:{reason:ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,metadataJson:"{}",usage:undefined}};
         },
       });
       const server = createGatewayGrpcServer(service);
@@ -120,8 +129,8 @@ describe("Gateway gRPC streaming transport", () => {
       });
       try {
         const events = await readStream(client.streamProviderRequest(request, metadata()));
-        expect(events, scenario.name).toHaveLength(1);
-        expect(events[0]?.toolCall?.inputJson, scenario.name).toBe(scenario.inputJson);
+        expect(events, scenario.name).toHaveLength(2);
+        expect(events[0]?.toolCallComplete?.inputJson, scenario.name).toBe(scenario.inputJson);
       } finally {
         await server.shutdown();
         client.close();
@@ -130,8 +139,8 @@ describe("Gateway gRPC streaming transport", () => {
   }, 15_000);
 
   test("honors writable backpressure before consuming the next provider event", async () => {
-    const first = textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "one");
-    const second = textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "two");
+    const first = completeText("one",1);
+    const second = completeText("two",2);
     const call = new BackpressureCall();
     const writeTask = writeProviderStreamEvents(call, asyncEvents([first, second]));
 
@@ -146,8 +155,8 @@ describe("Gateway gRPC streaming transport", () => {
   });
 
   test("stops waiting for drain when the client cancels during backpressure", async () => {
-    const first = textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "one");
-    const second = textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "two");
+    const first = completeText("one",1);
+    const second = completeText("two",2);
     const call = new BackpressureCall();
     const writeTask = writeProviderStreamEvents(call, asyncEvents([first, second]));
 
@@ -172,7 +181,7 @@ describe("Gateway gRPC streaming transport", () => {
           aborted = true;
           release?.();
         }, { once: true });
-        yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+        yield {type:FragmentType.ReasoningStart,reasoning:{id:"thinking",text:"",metadataJson:"{}"}};
         await new Promise<void>((resolve) => {
           release = resolve;
         });
@@ -230,9 +239,9 @@ function validAnthropicProviderRequest() {
 }
 
 function textEvent(
-  type: ProviderStreamEventType,
+  type: NormalizedTextEventType,
   text: string,
-): ProviderStreamEvent {
+): NormalizedProviderEvent {
   return {
     type,
     text: {
@@ -262,11 +271,12 @@ class BackpressureCall extends EventEmitter {
   readonly writes: ProviderStreamEvent[] = [];
   private waiters: Array<() => void> = [];
 
-  write(event: ProviderStreamEvent): boolean {
+  write(event: ProviderStreamEvent, callback: (error?:Error|null)=>void): boolean {
     this.writes.push(event);
     for (const waiter of this.waiters.splice(0)) {
       waiter();
     }
+    callback();
     return this.writes.length !== 1;
   }
 
@@ -294,3 +304,5 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
+
+function completeText(text:string,frameSequence:number):ProviderStreamEvent {return {frameSequence,type:ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE,textComplete:{providerPartId:`text_${frameSequence}`,eventId:`evt_${frameSequence.toString().padStart(32,"0")}`,text}};}

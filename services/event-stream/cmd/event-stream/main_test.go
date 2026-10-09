@@ -25,11 +25,14 @@ import (
 func TestEventStreamCommandHealthReadyAndScopedRoutes(t *testing.T) {
 	signer, verifier, _ := commandInternalPrincipalPair(t)
 	readiness := workload.NewReadiness()
+	reader := &commandEventReader{}
+	idle := eventstream.NewIdleCoalescer(reader, time.Millisecond, nil)
+	t.Cleanup(idle.Close)
 	handler := buildHTTPHandler(readiness, eventstream.NewRouter(
-		&commandEventReader{},
+		reader,
 		verifier,
-		eventstream.WithStreamPollInterval(time.Millisecond),
-		eventstream.WithStreamMaxEmptyPolls(1),
+		eventstream.WithIdleCoalescer(idle),
+		eventstream.WithStreamCompletedCheckLimit(1),
 	))
 
 	assertProbe(t, handler, "/health", http.StatusOK, "ok")
@@ -157,12 +160,12 @@ func TestEventStreamCommandStartupDoesNotReferenceBootstrapOrRawAPIKeyAuth(t *te
 		t.Fatalf("read main.go: %v", err)
 	}
 	text := string(source)
-	for _, forbidden := range []string{"RefreshBootstrap", "UpsertBootstrap", "ValidateBootstrapKey", "NewAPIKeyStore", "StoreAuthenticator", "x-api-key", "InitializeSchema"} {
+	for _, forbidden := range []string{"RefreshBootstrap", "UpsertBootstrap", "ValidateBootstrapKey", "NewAPIKeyStore", "AuthenticateKey", "x-api-key", "InitializeSchema"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("services/event-stream/cmd/event-stream/main.go references forbidden startup token %q", forbidden)
 		}
 	}
-	if strings.Contains(text, "OpenPlainDSNFromEnv") {
+	if strings.Contains(text, "OpenProtectedDSNFromEnv") {
 		t.Fatal("event-stream must use its service-specific read-only database DSN env")
 	}
 	if !strings.Contains(text, envEventStreamDatabaseURL) {
@@ -336,6 +339,14 @@ func (*commandEventReader) ListThreadEventChanges(context.Context, workspace.ID,
 	return nil, nil
 }
 
+func (*commandEventReader) ReadSessionSignals(_ context.Context, _ workspace.ID, sessionIDs []string) ([]eventstream.SessionSignal, error) {
+	signals := make([]eventstream.SessionSignal, 0, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		signals = append(signals, eventstream.SessionSignal{SessionID: sessionID, Exists: true, LifecycleState: "active"})
+	}
+	return signals, nil
+}
+
 func commandInternalPrincipalPair(t *testing.T) (*auth.InternalPrincipalSigner, *auth.InternalPrincipalVerifier, string) {
 	t.Helper()
 	privateKey, err := auth.GenerateEd25519PrivateKeyBase64()
@@ -356,10 +367,7 @@ func commandInternalPrincipalPair(t *testing.T) (*auth.InternalPrincipalSigner, 
 func commandSignedRequest(t *testing.T, signer *auth.InternalPrincipalSigner, method string, target string) *http.Request {
 	t.Helper()
 	request := httptest.NewRequest(method, target, nil)
-	token, err := signer.Mint(auth.Principal{ //nolint:gosec // Test principal token fixture.
-		Workspace: workspace.Workspace{ID: workspace.DefaultID, Type: "workspace", Name: "Default"},
-		APIKeyID:  "ak_event_stream_command_test", //nolint:gosec // Test principal id, not a secret.
-	}, method, request.URL.Path, "req_event_stream_command_test", time.Minute)
+	token, err := signer.Mint(auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID, Type: "workspace", Name: "Default"}, "ak_event_stream_command_test"), method, request.URL.Path, "req_event_stream_command_test", time.Minute)
 	if err != nil {
 		t.Fatalf("mint principal: %v", err)
 	}
@@ -436,4 +444,11 @@ func captureStderr(t *testing.T) (*bytes.Buffer, func()) {
 		}
 	})
 	return &buffer, finish
+}
+
+func (*commandEventReader) ReadPreviewRequest(context.Context, workspace.ID, string, string, string, string) (eventstream.PreviewRequest, error) {
+	return eventstream.PreviewRequest{}, nil
+}
+func (*commandEventReader) ListRequestFinalMessages(context.Context, eventstream.ReadScope, string, int64, int) ([]eventstream.RequestFinalMessage, error) {
+	return nil, nil
 }

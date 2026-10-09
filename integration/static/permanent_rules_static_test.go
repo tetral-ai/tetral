@@ -42,7 +42,7 @@ func TestFinalArchitectureGRPCAndProtobufImportsAreConfined(t *testing.T) {
 		}
 		for _, imported := range file.Imports {
 			value := strings.Trim(imported.Path.Value, `"`)
-			if finalArchitectureIsGRPCOrProtobufImport(value) && !finalArchitectureAllowsGRPCOrProtobuf(rel) {
+			if finalArchitectureIsGRPCOrProtobufImport(value) && !finalArchitectureAllowsGRPCOrProtobuf(rel, value) {
 				violations = append(violations, rel+" imports "+value)
 			}
 		}
@@ -53,6 +53,27 @@ func TestFinalArchitectureGRPCAndProtobufImportsAreConfined(t *testing.T) {
 	}
 	if len(violations) > 0 {
 		t.Fatalf("gRPC/protobuf imports outside allowed internal surfaces:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestFinalArchitectureSecretHelperProtobufScope(t *testing.T) {
+	const helper = "integration/envoy-gateway-secret-helper/main.go"
+	for _, test := range []struct {
+		path       string
+		importPath string
+		allowed    bool
+	}{
+		{helper, "google.golang.org/protobuf/encoding/protojson", true},
+		{helper, "google.golang.org/protobuf/proto", true},
+		{helper, "google.golang.org/protobuf/types/known/anypb", true},
+		{helper, "google.golang.org/grpc", false},
+		{helper, "google.golang.org/protobuf/reflect/protoreflect", false},
+		{"integration/envoy-gateway-secret-helper/other.go", "google.golang.org/protobuf/proto", false},
+		{"integration/other-helper/main.go", "google.golang.org/protobuf/proto", false},
+	} {
+		if got := finalArchitectureAllowsGRPCOrProtobuf(test.path, test.importPath); got != test.allowed {
+			t.Errorf("%s importing %s: allowed=%v, want %v", test.path, test.importPath, got, test.allowed)
+		}
 	}
 }
 
@@ -218,20 +239,22 @@ func constantGoString(expression ast.Expr, resolving map[*ast.Object]bool) (stri
 func TestRuntimeCommandDataMarshalSitesAreExplicitAndComplete(t *testing.T) {
 	engineRoot := finalArchitectureEngineRoot(t)
 	want := map[string]bool{
-		"services/bridge/bridge_api_events.go:userMessageContextDraftJSON":         true,
-		"services/bridge/bridge_api_mcp.go:runtimeMCPManifestCommandPayload":       true,
-		"services/bridge/bridge_api_settlement.go:validateStableReasoningBudget":   true,
-		"services/bridge/runtime_delivery.go:acceptedMessageCommandPayloadTx":      true,
-		"services/bridge/runtime_delivery.go:runtimeCommandPayloadForJobTx":        true,
-		"services/bridge/runtime_delivery.go:runtimeSessionConfigCommandPayloadTx": true,
+		"internal/runtimecontrol/events.go:UserMessageContextDraftJSON":                true,
+		"internal/mcpmanifest/manifest.go:CommandPayload":                              true,
+		"services/bridge/bridge_api_settlement.go:stableReasoningCharge":               true,
+		"services/job-runner/runtime_delivery.go:acceptedMessageCommandPayloadTx":      true,
+		"services/job-runner/runtime_delivery.go:runtimeCommandPayloadForJobTx":        true,
+		"services/job-runner/runtime_delivery.go:runtimeSessionConfigCommandPayloadTx": true,
 	}
 	got := map[string]bool{}
-	root := filepath.Join(engineRoot, "services", "bridge")
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+	err := filepath.WalkDir(engineRoot, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+		if entry.IsDir() {
+			return finalArchitectureSkipDir(entry)
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
@@ -239,6 +262,23 @@ func TestRuntimeCommandDataMarshalSitesAreExplicitAndComplete(t *testing.T) {
 			return err
 		}
 		rel := finalArchitectureRel(t, engineRoot, path)
+		// Resolve import aliases so moving callers or renaming a local import
+		// cannot hide a new command-data serialization site from the census.
+		aliases := map[string]bool{}
+		for _, imported := range file.Imports {
+			value, err := strconv.Unquote(imported.Path.Value)
+			if err != nil {
+				return err
+			}
+			if value != "github.com/tetral-ai/tetral/internal/runtimecontrol" {
+				continue
+			}
+			alias := "runtimecontrol"
+			if imported.Name != nil {
+				alias = imported.Name.Name
+			}
+			aliases[alias] = true
+		}
 		for _, declaration := range file.Decls {
 			function, ok := declaration.(*ast.FuncDecl)
 			if !ok || function.Body == nil {
@@ -249,9 +289,16 @@ func TestRuntimeCommandDataMarshalSitesAreExplicitAndComplete(t *testing.T) {
 				if !ok {
 					return true
 				}
-				identifier, ok := call.Fun.(*ast.Ident)
-				if ok && identifier.Name == "marshalBridgeDataJSON" {
-					got[rel+":"+function.Name.Name] = true
+				switch fun := call.Fun.(type) {
+				case *ast.SelectorExpr:
+					qualifier, ok := fun.X.(*ast.Ident)
+					if ok && aliases[qualifier.Name] && fun.Sel.Name == "MarshalDataJSON" {
+						got[rel+":"+function.Name.Name] = true
+					}
+				case *ast.Ident:
+					if (aliases["."] || filepath.ToSlash(filepath.Dir(rel)) == "internal/runtimecontrol") && fun.Name == "MarshalDataJSON" {
+						got[rel+":"+function.Name.Name] = true
+					}
 				}
 				return true
 			})
@@ -326,7 +373,7 @@ func TestFinalArchitectureServiceLocalMetricsSurfacesStayInternal(t *testing.T) 
 		`path === "/metrics"`,
 		`text/plain; version=0.0.4; charset=utf-8`,
 		"runtimeMetrics?: RuntimePodMetricsSource",
-		"runtimePodMetricsText(lifecycle, runtimeMetrics)",
+		"runtimePodMetricsText(lifecycle, runtimeMetrics, readContainerMemory)",
 	} {
 		if !strings.Contains(runtimeHTTP, required) {
 			t.Fatalf("Runtime Pod HTTP ops plane missing metrics guard token %q", required)
@@ -352,7 +399,7 @@ func TestFinalArchitectureServiceLocalMetricsSurfacesStayInternal(t *testing.T) 
 			t.Fatalf("Provider Gateway HTTP ops plane missing metrics guard token %q", required)
 		}
 	}
-	gatewayService := finalArchitectureReadText(t, filepath.Join(engineRoot, "services", "gateway", "k8s", "service.yaml"))
+	gatewayService := finalArchitectureReadText(t, filepath.Join(engineRoot, "services", "gateway", "k8s", "provider-gateway", "service.yaml"))
 	for _, required := range []string{
 		"- name: http",
 		"targetPort: http",
@@ -474,15 +521,31 @@ func TestFinalArchitectureBridgeServiceLayoutAndProtocolSource(t *testing.T) {
 		filepath.Join("gen", "tetral", "bridge", "v1", "bridge.pb.go"),
 		filepath.Join("gen", "tetral", "bridge", "v1", "bridge_grpc.pb.go"),
 		filepath.Join("cmd", "bridge-api", "main.go"),
-		filepath.Join("cmd", "job-runner", "main.go"),
 		filepath.Join("k8s", "configmap.yaml"),
 		filepath.Join("k8s", "deployment.yaml"),
 		filepath.Join("k8s", "networkpolicy.yaml"),
 		"api.go",
-		"job_runner.go",
 	} {
 		if _, err := os.Stat(filepath.Join(bridgeRoot, required)); err != nil {
 			t.Fatalf("Bridge service package is missing %s: %v", required, err)
+		}
+	}
+	runnerRoot := filepath.Join(engineRoot, "services", "job-runner")
+	for _, required := range []string{
+		filepath.Join("cmd", "job-runner", "main.go"),
+		"job_runner.go", "config.go",
+		filepath.Join("k8s", "deployment.yaml"),
+		filepath.Join("k8s", "networkpolicy.yaml"),
+		filepath.Join("k8s", "service.yaml"),
+		filepath.Join("k8s", "serviceaccount.yaml"),
+	} {
+		if _, err := os.Stat(filepath.Join(runnerRoot, required)); err != nil {
+			t.Fatalf("Job Runner service package is missing %s: %v", required, err)
+		}
+	}
+	for _, moved := range []string{filepath.Join("cmd", "job-runner", "main.go"), "job_runner.go"} {
+		if _, err := os.Stat(filepath.Join(bridgeRoot, moved)); !os.IsNotExist(err) {
+			t.Fatalf("Runner owner must not remain under Bridge at %s: %v", moved, err)
 		}
 	}
 	protoBody, err := os.ReadFile(filepath.Join(bridgeRoot, "proto", "tetral", "bridge", "v1", "bridge.proto")) //nolint:gosec // repository-local static test path.
@@ -689,10 +752,30 @@ func finalArchitectureIsGRPCOrProtobufImport(importPath string) bool {
 		strings.HasPrefix(importPath, "google.golang.org/protobuf")
 }
 
-func finalArchitectureAllowsGRPCOrProtobuf(rel string) bool {
+func finalArchitectureAllowsGRPCOrProtobuf(rel, importPath string) bool {
+	// This exact test-only entry point compares pinned upstream xDS resources
+	// and extracts omitted Secrets. It owns no Engine RPC or gRPC transport.
+	if rel == "integration/envoy-gateway-secret-helper/main.go" {
+		return importPath == "google.golang.org/protobuf/encoding/protojson" ||
+			importPath == "google.golang.org/protobuf/proto" ||
+			importPath == "google.golang.org/protobuf/types/known/anypb"
+	}
+	// The native credential owner implements gRPC handshakes without owning
+	// business RPCs. These exact local fixture files execute and measure the
+	// actual proxy boundary; they do not widen production adapter ownership.
+	if rel == "internal/transportsecurity/credentials.go" ||
+		rel == "integration/transporttest/cmd/backend/main.go" ||
+		rel == "integration/transporttest/measurements.go" {
+		return true
+	}
 	for _, prefix := range []string{
 		"internal/gen/",
 		"internal/internalgrpc/",
+		// These contracts are consumed by both Bridge and Runner. Manifest
+		// discovery owns its RPC client; durable authority preserves RPC status
+		// errors at the shared boundary without importing either service.
+		"internal/mcpmanifest/",
+		"internal/runtimecontrol/",
 	} {
 		if strings.HasPrefix(rel, prefix) {
 			return true

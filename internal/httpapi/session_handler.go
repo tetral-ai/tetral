@@ -22,6 +22,11 @@ import (
 const sessionBodyByteCap = 1 << 20
 
 type sessionService interface {
+	LookupSession(context.Context, workspace.ID, string) (string, error)
+	LookupThread(context.Context, workspace.ID, string, string) (string, error)
+	LookupResource(context.Context, workspace.ID, string, string) (string, error)
+	LookupSessionDeletion(context.Context, workspace.ID, string) (string, error)
+	LookupResourceDeletion(context.Context, workspace.ID, string, string) (string, error)
 	Create(rctx context.Context, ws workspace.ID, request session.CreateRequest) (*session.Response, error)
 	Get(rctx context.Context, ws workspace.ID, sessionID string) (*session.Response, error)
 	List(rctx context.Context, ws workspace.ID, options session.ListOptions) (*session.ListResult, error)
@@ -309,11 +314,6 @@ func (s *strictSessionJSONString) UnmarshalJSON(raw []byte) error {
 }
 
 func (h *SessionHandler) createSession(w http.ResponseWriter, r *http.Request) {
-	ws, err := requestWorkspace(r.Context())
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
 	if err := validateSessionBetaRoute(r); err != nil {
 		writeError(w, r, err)
 		return
@@ -352,6 +352,11 @@ func (h *SessionHandler) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	ws, err := requestWorkspace(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
 	response, err := h.service.Create(r.Context(), ws, session.CreateRequest{
 		Agent:         agentRef,
 		EnvironmentID: environmentID,
@@ -369,12 +374,12 @@ func (h *SessionHandler) createSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *SessionHandler) getSession(w http.ResponseWriter, r *http.Request) {
-	ws, err := requestWorkspace(r.Context())
-	if err != nil {
+	if err := validateSessionBetaRoute(r); err != nil {
 		writeError(w, r, err)
 		return
 	}
-	if err := validateSessionBetaRoute(r); err != nil {
+	ws, err := requestWorkspace(r.Context())
+	if err != nil {
 		writeError(w, r, err)
 		return
 	}
@@ -383,16 +388,19 @@ func (h *SessionHandler) getSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	if !authorizeReadResource(w, r, ws, "session", response.ID) {
+		return
+	}
 	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *SessionHandler) listSessions(w http.ResponseWriter, r *http.Request) {
-	ws, err := requestWorkspace(r.Context())
+	options, err := parseSessionListOptions(r)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	options, err := parseSessionListOptions(r)
+	ws, err := requestWorkspace(r.Context())
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -406,12 +414,12 @@ func (h *SessionHandler) listSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *SessionHandler) listThreads(w http.ResponseWriter, r *http.Request) {
-	ws, err := requestWorkspace(r.Context())
+	options, err := parseSessionThreadListOptions(r)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	options, err := parseSessionThreadListOptions(r)
+	ws, err := requestWorkspace(r.Context())
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -421,16 +429,19 @@ func (h *SessionHandler) listThreads(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	if !authorizeReadResource(w, r, ws, "session", chi.URLParam(r, "session_id")) {
+		return
+	}
 	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *SessionHandler) getThread(w http.ResponseWriter, r *http.Request) {
-	ws, err := requestWorkspace(r.Context())
-	if err != nil {
+	if err := validateSessionBetaRoute(r); err != nil {
 		writeError(w, r, err)
 		return
 	}
-	if err := validateSessionBetaRoute(r); err != nil {
+	ws, err := requestWorkspace(r.Context())
+	if err != nil {
 		writeError(w, r, err)
 		return
 	}
@@ -439,20 +450,23 @@ func (h *SessionHandler) getThread(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	if !authorizeReadResource(w, r, ws, "thread", response.ID) {
+		return
+	}
 	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *SessionHandler) archiveThread(w http.ResponseWriter, r *http.Request) {
-	ws, err := requestWorkspace(r.Context())
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
 	if err := validateSessionBetaRoute(r); err != nil {
 		writeError(w, r, err)
 		return
 	}
 	if err := requireEmptySessionBody(w, r); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	ws, err := requestWorkspace(r.Context())
+	if err != nil {
 		writeError(w, r, err)
 		return
 	}
@@ -465,11 +479,6 @@ func (h *SessionHandler) archiveThread(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *SessionHandler) updateSession(w http.ResponseWriter, r *http.Request) {
-	ws, err := requestWorkspace(r.Context())
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
 	if err := validateSessionBetaRoute(r); err != nil {
 		writeError(w, r, err)
 		return
@@ -531,6 +540,11 @@ func (h *SessionHandler) updateSession(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, &ValidationError{Message: "field is immutable"})
 			return
 		}
+	}
+	ws, err := requestWorkspace(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
 	}
 	response, err := h.service.Update(r.Context(), ws, chi.URLParam(r, "session_id"), request)
 	if err != nil {
@@ -600,16 +614,16 @@ func parseSessionAgentRawArray(field string, raw json.RawMessage) (agent.RawArra
 }
 
 func (h *SessionHandler) archiveSession(w http.ResponseWriter, r *http.Request) {
-	ws, err := requestWorkspace(r.Context())
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
 	if err := validateSessionBetaRoute(r); err != nil {
 		writeError(w, r, err)
 		return
 	}
 	if err := requireEmptySessionBody(w, r); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	ws, err := requestWorkspace(r.Context())
+	if err != nil {
 		writeError(w, r, err)
 		return
 	}
@@ -622,16 +636,16 @@ func (h *SessionHandler) archiveSession(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *SessionHandler) deleteSession(w http.ResponseWriter, r *http.Request) {
-	ws, err := requestWorkspace(r.Context())
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
 	if err := validateSessionBetaRoute(r); err != nil {
 		writeError(w, r, err)
 		return
 	}
 	if err := requireEmptySessionBody(w, r); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	ws, err := requestWorkspace(r.Context())
+	if err != nil {
 		writeError(w, r, err)
 		return
 	}
@@ -644,17 +658,17 @@ func (h *SessionHandler) deleteSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *SessionHandler) addResource(w http.ResponseWriter, r *http.Request) {
-	ws, err := requestWorkspace(r.Context())
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
 	if err := validateSessionBetaRoute(r); err != nil {
 		writeError(w, r, err)
 		return
 	}
 	var httpRequest resourceHTTPRequest
 	if err := decodeStrictSessionBody(w, r, &httpRequest); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	ws, err := requestWorkspace(r.Context())
+	if err != nil {
 		writeError(w, r, err)
 		return
 	}
@@ -667,11 +681,6 @@ func (h *SessionHandler) addResource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *SessionHandler) updateResource(w http.ResponseWriter, r *http.Request) {
-	ws, err := requestWorkspace(r.Context())
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
 	if err := validateSessionBetaRoute(r); err != nil {
 		writeError(w, r, err)
 		return
@@ -695,6 +704,11 @@ func (h *SessionHandler) updateResource(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, &ValidationError{Message: "authorization_token is required"})
 		return
 	}
+	ws, err := requestWorkspace(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
 	response, err := h.service.UpdateResource(r.Context(), ws, chi.URLParam(r, "session_id"), chi.URLParam(r, "resource_id"), token)
 	if err != nil {
 		writeError(w, r, err)
@@ -704,12 +718,12 @@ func (h *SessionHandler) updateResource(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *SessionHandler) listResources(w http.ResponseWriter, r *http.Request) {
-	ws, err := requestWorkspace(r.Context())
+	options, err := parseSessionResourceListOptions(r)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	options, err := parseSessionResourceListOptions(r)
+	ws, err := requestWorkspace(r.Context())
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -719,16 +733,19 @@ func (h *SessionHandler) listResources(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	if !authorizeReadResource(w, r, ws, "session", chi.URLParam(r, "session_id")) {
+		return
+	}
 	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *SessionHandler) getResource(w http.ResponseWriter, r *http.Request) {
-	ws, err := requestWorkspace(r.Context())
-	if err != nil {
+	if err := validateSessionBetaRoute(r); err != nil {
 		writeError(w, r, err)
 		return
 	}
-	if err := validateSessionBetaRoute(r); err != nil {
+	ws, err := requestWorkspace(r.Context())
+	if err != nil {
 		writeError(w, r, err)
 		return
 	}
@@ -737,20 +754,23 @@ func (h *SessionHandler) getResource(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	if !authorizeReadResource(w, r, ws, "session_resource", response.ID) {
+		return
+	}
 	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *SessionHandler) deleteResource(w http.ResponseWriter, r *http.Request) {
-	ws, err := requestWorkspace(r.Context())
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
 	if err := validateSessionBetaRoute(r); err != nil {
 		writeError(w, r, err)
 		return
 	}
 	if err := requireEmptySessionBody(w, r); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	ws, err := requestWorkspace(r.Context())
+	if err != nil {
 		writeError(w, r, err)
 		return
 	}

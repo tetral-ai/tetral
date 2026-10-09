@@ -18,7 +18,6 @@ import {
 	applyToolSettlementToContext,
 	assistantAppendFromDraftParts,
 	internalToolRepairContext,
-	sealAssistantDraft,
 } from "../../src/runtime/runtime-declaration.js";
 import type {
 	RuntimeAcceptedInputState,
@@ -34,6 +33,7 @@ function messageInput(
 		bindingId: "bind_1",
 		bindingGeneration: 1,
 		targetPodUid: "pod_1",
+		runtimeProcessId: "process-test",
 		runtimeInputId: "rin_1",
 		inputOrder: 1,
 		kind: "messages",
@@ -114,7 +114,7 @@ describe("Runtime context declaration applicators", () => {
 		expect(applyAcceptedInputResult(drafts, [])).toEqual([]);
 	});
 
-	test("Assistant append remains an open draft until Request End seals it", () => {
+	test("Assistant append applies the exact Bridge-assigned committed message identity", () => {
 		const append = assistantAppendFromDraftParts([
 			{ type: "text", text: "working", truncated: false },
 			{
@@ -132,13 +132,12 @@ describe("Runtime context declaration applicators", () => {
 			},
 		]);
 		const applied = applyAssistantAppendResult({
-			modelRequestId: "req_1",
 			append,
 			result: { messageSequence: 8, createdToolUseEventIds: ["evt_tool_1"] },
 		});
 
-		expect(applied.draft).toEqual({
-			modelRequestId: "req_1",
+		expect(applied.message).toEqual({
+ contextKind:"assistant",
 			messageSequence: 8,
 			parts: [
 				{ type: "text", text: "working" },
@@ -151,11 +150,7 @@ describe("Runtime context declaration applicators", () => {
 			],
 		});
 		expect(applied.activeToolParts[0]?.toolUseEventId).toBe("evt_tool_1");
-		expect(sealAssistantDraft(applied.draft)).toEqual({
-			messageSequence: 8,
-			contextKind: "assistant",
-			parts: applied.draft.parts,
-		});
+
 	});
 
 	test("Tool settlement pairs by modelToolCallId without rewriting the call", () => {
@@ -336,7 +331,7 @@ describe("Runtime context declaration applicators", () => {
 		]);
 	});
 
-	test("internal repair joins the request-owned open Assistant draft", () => {
+	test("internal repair joins the request-associated committed Assistant message", () => {
 		const repair = internalToolRepairContext({
 			modelToolCallId: "call_invalid",
 			toolName: "missing_tool",
@@ -350,12 +345,11 @@ describe("Runtime context declaration applicators", () => {
 			},
 		});
 		const repairOnly = applyInternalToolRepairResult({
-			modelRequestId: "mreq_1",
 			assignedMessageSequence: 8,
 			context: repair,
 		});
 		expect(repairOnly).toMatchObject({
-			modelRequestId: "mreq_1",
+ contextKind:"assistant",
 			messageSequence: 8,
 			parts: [
 				{ type: "tool_call", modelToolCallId: "call_invalid" },
@@ -364,10 +358,9 @@ describe("Runtime context declaration applicators", () => {
 		});
 
 		const mixed = applyInternalToolRepairResult({
-			modelRequestId: "mreq_1",
 			assignedMessageSequence: 8,
-			existingDraft: {
-				modelRequestId: "mreq_1",
+			existingMessage: {
+ contextKind:"assistant",
 				messageSequence: 8,
 				parts: [{ type: "text", text: "before repair" }],
 			},
@@ -380,11 +373,10 @@ describe("Runtime context declaration applicators", () => {
 		]);
 		expect(() =>
 			applyInternalToolRepairResult({
-				modelRequestId: "mreq_1",
 				assignedMessageSequence: 9,
-				existingDraft: repairOnly,
+				existingMessage: repairOnly,
 				context: repair,
 			}),
-		).toThrow("changed the open Request draft identity");
+		).toThrow("changed the committed message identity");
 	});
 });

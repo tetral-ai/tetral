@@ -11,6 +11,40 @@ available. Do not replace these examples with `latest` or an unnumbered Alpha
 tag.
 
 Before applying updated workloads, complete the separate database preparation
-step described in the [upgrade procedure](../helm/tetral/README.md#upgrade-and-rollback).
+step described in [database preparation and compatible rollout](../helm/tetral/README.md#database-preparation-and-compatible-rollout).
 Every serving process verifies readiness; applying API first no longer migrates
 the database. The former `rollout-schema-ordered.sh` is removed for that reason.
+
+Bridge, Job Runner, Provider Gateway, MCP Connector and Web Connector are
+independent workloads with separate ServiceAccounts and access grants. Their
+source-owned fragments live under their service `k8s/` directories; the Gateway
+workspace holds `k8s/provider-gateway/` and `k8s/mcp-connector/`. The aggregate
+files here compose those fragments exactly. `job-runner-rbac.yaml` grants only
+Runner Runtime visibility. TokenReview bindings cover receiving workloads only.
+The obsolete combined `gateway.yaml` and Bridge visibility role are removed.
+See the [workload replica and access contract](../helm/tetral/README.md#independent-workload-replicas-and-access)
+for default replicas, Provider autoscaling and credential audience separation.
+
+Provider Gateway and Event Stream preview wiring requires the separately rendered
+[Core NATS release](../nats/README.md) and its role credential Secrets. The
+hardened app example additionally expects native trust and issued per-role
+leaves; it never falls back to plaintext. Regenerate application manifests with
+`python3 deploy/render-manifests.py` after changing chart values, and regenerate
+the independent broker manifests with `deploy/nats/render.py` for the selected
+replica count. Broker and application manifests have separate lifecycle owners.
+
+
+Portable defaults use standard NetworkPolicies with Cilium disabled. The
+optional Cilium API-server policy fragment is projected separately; installing
+it requires that provider's CRDs and supported behavior. Bind actual Kubernetes
+API peers and port, DNS, database and issuer HTTPS destinations in named chart
+values before projecting a managed installation.
+
+The optional public edge now uses the independently installed
+[Envoy Gateway prerequisite](../envoy-gateway/README.md). Its application
+resources live under `edge-gateway/envoy-gateway.yaml`; hardened edge resources
+are separate from the hardened workload set. Both profiles require Istiod.
+The [managed resource inventory](../managed/resource-inventory.json) records
+exact default identities, optional profile resources and ownership-qualified
+removals. Fresh installation order is described in the
+[initialization contract](../managed/README.md).

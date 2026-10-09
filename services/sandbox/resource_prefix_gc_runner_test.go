@@ -169,12 +169,13 @@ func seedResourcePrefixGCSession(t *testing.T, db *sql.DB, sessionID string, bou
 	seedEnvironmentArtifactStoreEnvironment(t, db, workspaceID, "env_resource_prefix_gc")
 	seedEnvironmentArtifactStoreSession(t, db, workspaceID, sessionID, "env_resource_prefix_gc")
 	if bound {
+		registerSandboxFixtureProcess(t, db, "tetral", "uid_"+sessionID)
 		now := time.Date(2026, 7, 5, 8, 0, 0, 0, time.UTC)
 		if _, err := db.Exec(`INSERT INTO session_runtime_bindings (
 			workspace_id, session_id, binding_id, binding_generation,
 			agent_runtime_namespace, agent_runtime_pod_name, agent_runtime_pod_uid,
-			agent_runtime_pod_ip, bound_at, updated_at
-		) VALUES ($1, $2, $3, 1, 'tetral', 'agent-runtime', $4, '10.0.0.1', $5, $5)`,
+			agent_runtime_pod_ip, runtime_process_id, bound_at, updated_at
+		) VALUES ($1, $2, $3, 1, 'tetral', 'agent-runtime', $4, '10.0.0.1', 'process_' || $4, $5, $5)`,
 			workspaceID, sessionID, "binding_"+sessionID, "uid_"+sessionID, now); err != nil {
 			t.Fatalf("seed runtime binding: %v", err)
 		}

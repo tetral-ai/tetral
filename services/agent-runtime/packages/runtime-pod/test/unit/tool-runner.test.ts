@@ -7,7 +7,6 @@ import { status as GrpcStatus, Metadata } from "@grpc/grpc-js";
 import type {
 	RuntimeContextEntry,
 	RuntimeJsonValue,
-	RuntimeOpenRequestDraft,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import {
 	RuntimeInternalToolRepairStore,
@@ -109,10 +108,10 @@ function assistantRunningToolMessage(
 	toolName: string,
 	_toolUseEventId: string,
 	input: RuntimeJsonValue,
-	modelRequestId = "mreq_resume_checkpoint",
-): RuntimeOpenRequestDraft {
+	_modelRequestId = "mreq_resume_checkpoint",
+): RuntimeContextEntry {
 	return {
-		modelRequestId,
+		contextKind: "assistant",
 		messageSequence,
 		parts: [
 			{ type: "tool_call", modelToolCallId, toolName, canonicalInput: input },
@@ -250,6 +249,7 @@ describe("RuntimePodToolRunner", () => {
 					bindingId: "bind_1",
 					bindingGeneration: 42,
 					targetPodUid: "pod_1",
+					runtimeProcessId: "process-test",
 				},
 			},
 		});
@@ -425,28 +425,34 @@ describe("RuntimePodToolRunner", () => {
 		"retries only the result wait after durable sandbox acceptance (%s)",
 		async (code) => {
 			const bridge = new RecordingBridgeClient();
-			bridge.awaitSandboxExecutionErrors.push(
-				Object.assign(new Error("result wait interrupted"), {
-					code,
-				}),
-			);
+			for (let attempt = 0; attempt < 3; attempt += 1) {
+				bridge.awaitSandboxExecutionErrors.push(
+					Object.assign(new Error("result wait interrupted"), {
+						code,
+					}),
+				);
+			}
 			const sleep = new ControlledSleep();
 			const pending = makeRunner({ bridge, sleep: sleep.sleep }).runTool(
 				toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
 			);
-			await Bun.sleep(0);
-
-			expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
-			expect(bridge.awaitSandboxExecutionRequests).toHaveLength(1);
-			expect(sleep.calls).toHaveLength(1);
-			sleep.releaseNext();
+			for (let attempt = 1; attempt <= 3; attempt += 1) {
+				await waitForCondition(
+					() => sleep.calls.length === attempt,
+					"result wait rejoin delay",
+				);
+				expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+				expect(bridge.awaitSandboxExecutionRequests).toHaveLength(attempt);
+				sleep.releaseNext();
+			}
 
 			expect((await pending).type).toBe("completed");
+			expect(sleep.calls.map((call) => call.delayMs)).toEqual([300, 300, 300]);
 			expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
-			expect(bridge.awaitSandboxExecutionRequests).toHaveLength(2);
-			expect(bridge.awaitSandboxExecutionRequests[1]).toEqual(
-				bridge.awaitSandboxExecutionRequests[0],
-			);
+			expect(bridge.awaitSandboxExecutionRequests).toHaveLength(4);
+			for (const awaitRequest of bridge.awaitSandboxExecutionRequests) {
+				expect(awaitRequest).toEqual(bridge.awaitSandboxExecutionRequests[0]!);
+			}
 		},
 	);
 
@@ -1619,6 +1625,7 @@ describe("RuntimePodToolRunner", () => {
 						bindingId: "bind_1",
 						bindingGeneration: 42,
 						targetPodUid: "pod_1",
+						runtimeProcessId: "process-test",
 					},
 				},
 			},
@@ -1769,6 +1776,7 @@ describe("RuntimePodToolRunner", () => {
 				toolUseEventId: "sevt_tool_1",
 				bindingId: "bind_1",
 				bindingGeneration: 42,
+				runtimeProcessId: "process-test",
 				runtimeBindingToken: "binding-token",
 				input: {
 					searchQuery: [{ q: "tetral", domains: ["example.com"] }],
@@ -2032,6 +2040,7 @@ describe("RuntimePodToolRunner", () => {
 				toolUseEventId: "sevt_tool_1",
 				bindingId: "bind_1",
 				bindingGeneration: 42,
+				runtimeProcessId: "process-test",
 				runtimeBindingToken: "binding-token",
 			},
 		]);
@@ -3406,6 +3415,173 @@ describe("RuntimePodToolRunner", () => {
 		expect(bridge.awaitChildInterruptRequests).toHaveLength(1);
 	});
 
+	test.each([
+		{
+			committedAtMs: 1_200,
+			pollsAtMs: [0, 300, 900, 1_900],
+			sleepsMs: [300, 600, 1_000],
+		},
+		{
+			committedAtMs: 2_400,
+			pollsAtMs: [0, 300, 900, 1_900, 2_900],
+			sleepsMs: [300, 600, 1_000, 1_000],
+		},
+	])(
+		"interrupt_agent polls a pending child interrupt at once, then after 300/600/1000 ms waits (child input committed at $committedAtMs ms)",
+		async ({ committedAtMs, pollsAtMs, sleepsMs }) => {
+			const clock = new VirtualClock();
+			const bridge = new RecordingBridgeClient();
+			const observedPollsAtMs: number[] = [];
+			bridge.onAwaitChildInterrupt = () => {
+				observedPollsAtMs.push(clock.nowMs);
+				return clock.nowMs < committedAtMs ? childInterruptPending() : undefined;
+			};
+			const subAgentHost = new RecordingSubAgentHost();
+			const runner = makeRunner({ bridge, subAgentHost, sleep: clock.sleep });
+
+			const result = await runner.runTool(
+				toolRequest("interrupt_agent", { task_name: "worker" }),
+			);
+
+			expect(result).toEqual({
+				type: "completed",
+				output: expect.objectContaining({
+					text: expect.stringContaining("interrupted: true"),
+				}),
+			});
+			expect(observedPollsAtMs).toEqual([...pollsAtMs]);
+			expect(clock.sleeps.map((sleep) => sleep.delayMs)).toEqual([
+				...sleepsMs,
+			]);
+			expect(bridge.admitChildInterruptRequests).toHaveLength(1);
+			for (const awaitRequest of bridge.awaitChildInterruptRequests) {
+				expect(awaitRequest).toEqual(bridge.awaitChildInterruptRequests[0]!);
+			}
+			expect(bridge.closeChildControlRequests).toHaveLength(0);
+			expect(subAgentHost.actions).toEqual([]);
+		},
+	);
+
+	test("interrupt_agent abort during a pending wait stops polling, and the next operation starts its own backoff", async () => {
+		const clock = new VirtualClock();
+		const bridge = new RecordingBridgeClient();
+		const observedPollsAtMs: number[] = [];
+		const committedAtMs = 700;
+		bridge.onAwaitChildInterrupt = () => {
+			observedPollsAtMs.push(clock.nowMs);
+			return clock.nowMs < committedAtMs ? childInterruptPending() : undefined;
+		};
+		const subAgentHost = new RecordingSubAgentHost();
+		const runner = makeRunner({ bridge, subAgentHost, sleep: clock.sleep });
+		const abortController = new AbortController();
+		clock.abortAt(450, abortController);
+
+		const cancelled = await runner.runTool(
+			toolRequest(
+				"interrupt_agent",
+				{ task_name: "worker" },
+				"sevt_tool_interrupt_aborted",
+				abortController.signal,
+			),
+		);
+
+		expect(cancelled).toMatchObject({ type: "cancelled" });
+		expect(clock.sleeps).toEqual([
+			{ startMs: 0, delayMs: 300 },
+			{ startMs: 300, delayMs: 600 },
+		]);
+		expect(clock.nowMs).toBe(450);
+		expect(observedPollsAtMs).toEqual([0, 300]);
+		expect(bridge.closeChildControlRequests).toHaveLength(0);
+		expect(subAgentHost.actions).toEqual([]);
+
+		const next = await runner.runTool(
+			toolRequest(
+				"interrupt_agent",
+				{ task_name: "worker" },
+				"sevt_tool_interrupt_next",
+			),
+		);
+
+		expect(next).toMatchObject({ type: "completed" });
+		expect(clock.sleeps.slice(2)).toEqual([{ startMs: 450, delayMs: 300 }]);
+		expect(observedPollsAtMs).toEqual([0, 300, 450, 750]);
+		expect(
+			bridge.awaitChildInterruptRequests.map(
+				(awaitRequest) => awaitRequest.controlOperationId,
+			),
+		).toEqual([
+			"ctrl_sevt_tool_interrupt_aborted",
+			"ctrl_sevt_tool_interrupt_aborted",
+			"ctrl_sevt_tool_interrupt_next",
+			"ctrl_sevt_tool_interrupt_next",
+		]);
+		expect(bridge.closeChildControlRequests).toHaveLength(0);
+	});
+
+	test("interrupt_agent replays a transport failure at the rejoin delay without advancing or resetting the pending backoff", async () => {
+		const clock = new VirtualClock();
+		const bridge = new RecordingBridgeClient();
+		const observedPollsAtMs: number[] = [];
+		const replies: Error[] = [
+			childInterruptPending(),
+			childInterruptPending(),
+			grpcError(GrpcStatus.UNAVAILABLE),
+			childInterruptPending(),
+		];
+		bridge.onAwaitChildInterrupt = () => {
+			observedPollsAtMs.push(clock.nowMs);
+			return replies.shift();
+		};
+		const runner = makeRunner({
+			bridge,
+			subAgentHost: new RecordingSubAgentHost(),
+			sleep: clock.sleep,
+		});
+
+		const result = await runner.runTool(
+			toolRequest("interrupt_agent", { task_name: "worker" }),
+		);
+
+		expect(result).toMatchObject({ type: "completed" });
+		expect(clock.sleeps.map((sleep) => sleep.delayMs)).toEqual([
+			300, 600, 300, 1_000,
+		]);
+		expect(observedPollsAtMs).toEqual([0, 300, 900, 1_200, 2_200]);
+		expect(bridge.awaitChildInterruptRequests).toHaveLength(5);
+		for (const awaitRequest of bridge.awaitChildInterruptRequests) {
+			expect(awaitRequest).toEqual(bridge.awaitChildInterruptRequests[0]!);
+		}
+	});
+
+	test("interrupt_agent keeps a failed-precondition await terminal without another poll", async () => {
+		const clock = new VirtualClock();
+		const bridge = new RecordingBridgeClient();
+		const replies: Error[] = [
+			childInterruptPending(),
+			grpcError(GrpcStatus.FAILED_PRECONDITION),
+		];
+		bridge.onAwaitChildInterrupt = () => replies.shift();
+		const subAgentHost = new RecordingSubAgentHost();
+		const runner = makeRunner({ bridge, subAgentHost, sleep: clock.sleep });
+
+		const result = await runner.runTool(
+			toolRequest("interrupt_agent", { task_name: "worker" }),
+		);
+
+		expect(result).toMatchObject({
+			type: "error",
+			error: {
+				message: "Sub-agent interrupt completion is unavailable.",
+				retryable: false,
+			},
+		});
+		expect(clock.sleeps.map((sleep) => sleep.delayMs)).toEqual([300]);
+		expect(bridge.awaitChildInterruptRequests).toHaveLength(2);
+		expect(bridge.closeChildControlRequests).toHaveLength(0);
+		expect(subAgentHost.actions).toEqual([]);
+	});
+
 	test("rejects an oversized child task name as a retryable Bridge boundary contract failure", async () => {
 		const bridge = new RecordingBridgeClient();
 		bridge.childStatus = "running";
@@ -3484,7 +3660,7 @@ describe("RuntimePodToolRunner", () => {
 			{
 				name: "execution run open",
 				context: {
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					thread: closedThread,
 					pendingToolUses: [],
 					pendingSandboxExecutions: [],
@@ -3503,7 +3679,7 @@ describe("RuntimePodToolRunner", () => {
 			{
 				name: "open request",
 				context: {
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					thread: closedThread,
 					pendingToolUses: [],
 					pendingSandboxExecutions: [],
@@ -3527,8 +3703,8 @@ describe("RuntimePodToolRunner", () => {
 			{
 				name: "pending tool route",
 				context: {
-					contextEntries: pendingContextEntries,
-					openRequestDraft: pendingOpenRequestDraft,
+					messages:((draft)=>draft==null?pendingContextEntries:[...pendingContextEntries,{messageSequence:draft.messageSequence,contextKind:"assistant" as const,parts:draft.parts}])(pendingOpenRequestDraft),currentRequestMessage:((draft)=>draft==null?null:{modelRequestId:"mreq_resume_checkpoint",assistantMessageSequence:draft.messageSequence})(pendingOpenRequestDraft),
+
 					thread: closedThread,
 					turnFacts: pendingFacts,
 					pendingToolUses: [
@@ -3547,8 +3723,8 @@ describe("RuntimePodToolRunner", () => {
 			{
 				name: "unfinished sandbox route",
 				context: {
-					contextEntries: pendingContextEntries,
-					openRequestDraft: pendingOpenRequestDraft,
+					messages:((draft)=>draft==null?pendingContextEntries:[...pendingContextEntries,{messageSequence:draft.messageSequence,contextKind:"assistant" as const,parts:draft.parts}])(pendingOpenRequestDraft),currentRequestMessage:((draft)=>draft==null?null:{modelRequestId:"mreq_resume_checkpoint",assistantMessageSequence:draft.messageSequence})(pendingOpenRequestDraft),
+
 					thread: closedThread,
 					turnFacts: pendingFacts,
 					pendingToolUses: [],
@@ -3567,7 +3743,7 @@ describe("RuntimePodToolRunner", () => {
 			{
 				name: "unresolved interrupt",
 				context: {
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					thread: closedThread,
 					pendingToolUses: [],
 					pendingSandboxExecutions: [],
@@ -3586,8 +3762,8 @@ describe("RuntimePodToolRunner", () => {
 			{
 				name: "interrupted incomplete Tool Use without a route",
 				context: {
-					contextEntries: pendingContextEntries,
-					openRequestDraft: pendingOpenRequestDraft,
+					messages:((draft)=>draft==null?pendingContextEntries:[...pendingContextEntries,{messageSequence:draft.messageSequence,contextKind:"assistant" as const,parts:draft.parts}])(pendingOpenRequestDraft),currentRequestMessage:((draft)=>draft==null?null:{modelRequestId:"mreq_resume_checkpoint",assistantMessageSequence:draft.messageSequence})(pendingOpenRequestDraft),
+
 					thread: closedThread,
 					pendingToolUses: [],
 					pendingSandboxExecutions: [],
@@ -3607,7 +3783,7 @@ describe("RuntimePodToolRunner", () => {
 			{
 				name: "terminal closeout",
 				context: {
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					thread: closedThread,
 					pendingToolUses: [],
 					pendingSandboxExecutions: [],
@@ -3635,7 +3811,7 @@ describe("RuntimePodToolRunner", () => {
 			{
 				name: "reducer has pending input",
 				context: {
-					contextEntries: [pendingInput],
+					currentRequestMessage:null,messages: [pendingInput],
 					thread: closedThread,
 					pendingToolUses: [],
 					pendingSandboxExecutions: [],
@@ -3645,7 +3821,7 @@ describe("RuntimePodToolRunner", () => {
 		];
 		for (const testCase of cases) {
 			const checkpoint = extractThreadTurnCheckpoint({
-				contextEntries: testCase.context.contextEntries,
+				messages: testCase.context.messages,
 				facts: testCase.context.turnFacts,
 			});
 			const routeView = extractColdThreadToolRouteView({
@@ -3702,7 +3878,7 @@ describe("RuntimePodToolRunner", () => {
 		// pending sets as independent arguments from the context loader — and they
 		// are what isolates routes, pendingToolUses and pendingSandboxExecutions.
 		const quiescentCheckpoint = extractThreadTurnCheckpoint({
-			contextEntries: [],
+			messages: [],
 			facts: emptyResumeTurnFacts,
 		});
 		expect(() =>
@@ -3768,7 +3944,7 @@ describe("RuntimePodToolRunner", () => {
 		}
 
 		const pendingAttachmentHosts = await buildResumeTestHosts(async () => ({
-			contextEntries: [],
+			currentRequestMessage:null,messages: [],
 			thread: closedThread,
 			pendingToolUses: [],
 			pendingSandboxExecutions: [],
@@ -3810,7 +3986,7 @@ describe("RuntimePodToolRunner", () => {
 		}
 
 		const hosts = await buildResumeTestHosts(async () => ({
-			contextEntries: [],
+			currentRequestMessage:null,messages: [],
 			thread: closedThread,
 			turnFacts: emptyResumeTurnFacts,
 			runtimeBindingToken: "runtime-binding-token-quiescent-resume",
@@ -4135,6 +4311,7 @@ function resumeChildControl() {
 		bindingId: "bind_1",
 		bindingGeneration: 42,
 		targetPodUid: "pod_1",
+		runtimeProcessId: "process-test",
 		runtimeInputId: "rin_resume_inspect",
 		eventIds: [],
 		sequenceFrom: 0,
@@ -4250,6 +4427,7 @@ function toolRequest(
 		bindingGeneration: 42,
 		runtimeBindingToken: "binding-token",
 		targetPodUid: "pod_1",
+		runtimeProcessId: "process-test",
 		modelRequestId: "mreq_1",
 		modelToolCallId: "tool_call_1",
 		modelOrder,
@@ -4352,6 +4530,45 @@ class ControlledSleep {
 	}
 }
 
+/**
+ * Fake clock for injected sleeps: each sleep advances virtual time at once,
+ * unless a scheduled abort lands inside that wait, which then rejects it.
+ */
+class VirtualClock {
+	nowMs = 0;
+	readonly sleeps: Array<{ readonly startMs: number; readonly delayMs: number }> =
+		[];
+	private scheduledAbort:
+		| { readonly atMs: number; readonly controller: AbortController }
+		| undefined;
+
+	abortAt(atMs: number, controller: AbortController): void {
+		this.scheduledAbort = { atMs, controller };
+	}
+
+	readonly sleep = async (
+		delayMs: number,
+		abortSignal: AbortSignal,
+	): Promise<void> => {
+		this.sleeps.push({ startMs: this.nowMs, delayMs });
+		const wakeMs = this.nowMs + delayMs;
+		const scheduled = this.scheduledAbort;
+		if (scheduled !== undefined && scheduled.atMs < wakeMs) {
+			this.scheduledAbort = undefined;
+			this.nowMs = Math.max(this.nowMs, scheduled.atMs);
+			scheduled.controller.abort();
+		}
+		abortSignal.throwIfAborted();
+		this.nowMs = wakeMs;
+	};
+}
+
+function childInterruptPending(): Error {
+	return Object.assign(new Error("child interrupt is still pending"), {
+		code: GrpcStatus.DEADLINE_EXCEEDED,
+	});
+}
+
 function stableTestId(prefix: string, seed: string): string {
 	return `${prefix}_${sha256(seed).slice(0, 32)}`;
 }
@@ -4410,6 +4627,8 @@ class RecordingBridgeClient {
 	readonly admitChildInterruptErrors: Error[] = [];
 	awaitChildInterruptResponse: unknown | undefined;
 	readonly awaitChildInterruptErrors: Error[] = [];
+	/** Observes each poll; a returned error replaces the completed reply. */
+	onAwaitChildInterrupt: (() => Error | undefined) | undefined;
 	closeChildControlResponse: unknown | undefined;
 	readonly closeChildControlErrors: Error[] = [];
 	markChildThreadActiveResponse: unknown | undefined;
@@ -4525,6 +4744,7 @@ class RecordingBridgeClient {
 	private awaitSandboxExecution(
 		request: AwaitSandboxExecutionRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.awaitSandboxExecutionRequests.push(request);
@@ -4548,6 +4768,7 @@ class RecordingBridgeClient {
 	private runMemory(
 		request: RunMemoryRequest,
 		metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.runMemoryRequests.push(request);
@@ -4588,6 +4809,7 @@ class RecordingBridgeClient {
 	private sendCommandInput(
 		request: SendCommandInputRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.sendCommandInputRequests.push(request);
@@ -4608,6 +4830,7 @@ class RecordingBridgeClient {
 	private readCommandResult(
 		request: ReadCommandResultRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.readCommandResultRequests.push(request);
@@ -4617,7 +4840,7 @@ class RecordingBridgeClient {
 			return grpcCall();
 		}
 		if (this.deferReadCommandResult) {
-			return grpcCall();
+			return {cancel:()=>callback(Object.assign(new Error("cancelled"), {code:GrpcStatus.CANCELLED}), undefined)};
 		}
 		callback(
 			null,
@@ -4652,6 +4875,7 @@ class RecordingBridgeClient {
 	private authorizeWebToolExecution(
 		request: AuthorizeWebToolExecutionRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.authorizeWebToolExecutionRequests.push(request);
@@ -4662,6 +4886,7 @@ class RecordingBridgeClient {
 	private createSubagentThread(
 		request: CreateSubagentThreadRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.createSubagentThreadRequests.push(request);
@@ -4686,6 +4911,7 @@ class RecordingBridgeClient {
 	private resolveChildThread(
 		request: ResolveChildThreadRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.resolveChildThreadRequests.push(request);
@@ -4703,6 +4929,7 @@ class RecordingBridgeClient {
 	private listChildThreads(
 		request: ListChildThreadsRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.listChildThreadsRequests.push(request);
@@ -4739,6 +4966,7 @@ class RecordingBridgeClient {
 	private deliverInterAgentMail(
 		request: DeliverInterAgentMailRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.deliverInterAgentMailRequests.push(request);
@@ -4772,6 +5000,7 @@ class RecordingBridgeClient {
 	private admitChildInterrupt(
 		request: AdmitChildInterruptRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.admitChildInterruptRequests.push(request);
@@ -4792,10 +5021,12 @@ class RecordingBridgeClient {
 	private awaitChildInterrupt(
 		request: AwaitChildInterruptRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.awaitChildInterruptRequests.push(request);
-		const transportError = this.awaitChildInterruptErrors.shift();
+		const transportError =
+			this.awaitChildInterruptErrors.shift() ?? this.onAwaitChildInterrupt?.();
 		if (transportError !== undefined) {
 			callback(transportError, undefined);
 			return grpcCall();
@@ -4825,6 +5056,7 @@ class RecordingBridgeClient {
 	private closeChildControl(
 		request: CloseChildControlRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.closeChildControlRequests.push(request);
@@ -4868,6 +5100,7 @@ class RecordingBridgeClient {
 	private markChildThreadActive(
 		request: MarkChildThreadActiveRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.markChildThreadActiveRequests.push(request);

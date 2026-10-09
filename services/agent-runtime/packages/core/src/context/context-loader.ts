@@ -1,3 +1,4 @@
+import type { RuntimeCurrentRequestMessage } from "../contracts/runtime.js";
 /**
  * @packageDocumentation
  * Defines the single cold thread-load boundary and the durable declaration
@@ -11,7 +12,6 @@ import type {
 	RuntimeContextEntry,
 	RuntimeInterruptToolResult,
 	RuntimeJsonValue,
-	RuntimeOpenRequestDraft,
 	RuntimeProviderAttachment,
 } from "../contracts/runtime.js";
 import type { ThreadContextPrefix } from "../session/context-manager.js";
@@ -37,8 +37,8 @@ export interface ContextLoader {
 		command: RuntimeThreadAddressState,
 		options?: RuntimeContextLoadOptions,
 	) => Promise<{
-		readonly contextEntries: readonly RuntimeContextEntry[];
-		readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
+		readonly messages: readonly RuntimeContextEntry[];
+		readonly currentRequestMessage: RuntimeCurrentRequestMessage | null;
 		readonly turnFacts: ThreadTurnLoadFacts;
 		readonly threadContextPrefix?: ThreadContextPrefix | undefined;
 		readonly runtimeBindingToken: string;
@@ -83,6 +83,8 @@ export interface RuntimeRecoveryLoadAuthority {
 
 export interface RuntimeContextLoadOptions {
 	readonly recovery?: RuntimeRecoveryLoadAuthority | undefined;
+	readonly sourceEventId?: string | undefined;
+	readonly handoffId?: string | undefined;
 }
 
 /** Result of committing one accepted command before mutating its hot thread state. */

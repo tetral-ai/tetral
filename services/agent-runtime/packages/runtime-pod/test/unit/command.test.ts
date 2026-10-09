@@ -1,3 +1,4 @@
+import { DefaultBridgeMethodPolicies } from "../../src/bridge-policy.js";
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -5,7 +6,7 @@ import { join } from "node:path";
 import { Metadata } from "@grpc/grpc-js";
 import type { SessionEventWriter } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { normalizeRuntimeFailure } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import { ProviderStreamAccumulator } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
+import { RequestContentProcessor } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
 import * as ThreadLoop from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "@tetral/agent-runtime-core/src/thread-loop/thread-runtime.js";
 import {
@@ -25,6 +26,8 @@ import {
 import type { InterruptRequest } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import { InterruptOrigin } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import { Effect } from "effect";
+import installedBuiltinPolicyFixture from "../../../protocol/testdata/installed-builtin-policy.json";
+import { evaluateToolGate } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
 import type { RuntimePodCommandDependencies } from "../../src/command.js";
 import {
 	buildRuntimePodCommandDependencies,
@@ -72,6 +75,11 @@ describe("Runtime Pod command entrypoint", () => {
 			config: {
 				...validConfig(),
 				providerStreamTimeoutMs: 765_432,
+				bridgeMethodPolicies: DefaultBridgeMethodPolicies,
+				transportProfile: "standard-routed",
+				maxLocalSessions: 256,
+				maxConcurrentTools: 8,
+				lifecycle: { reportIntervalMs: 2000, processFreshnessMs: 10000, currentStepTimeoutMs: 60000, settlementTimeoutMs: 15000, settlementAttemptTimeoutMs: 5000, localJoinTimeoutMs: 5000, proxyJoinTimeoutMs: 5000 },
 			},
 			logger: { info: () => undefined, error: () => undefined },
 			builderOptions: {
@@ -315,22 +323,18 @@ describe("Runtime Pod command entrypoint", () => {
 						...(producer === "immediate"
 							? {
 									events: [
-										{ type: "text-start" as const, id: "terminal-text" },
-										{
-											type: "text-delta" as const,
-											id: "terminal-text",
-											text_delta: "PROMPT_CANARY",
-										},
-										{ type: "text-end" as const, id: "terminal-text" },
-										{ type: "step-start" as const, stepIndex: 1 },
+
+
+										{type:"text-complete" as const,providerPartId:"terminal-text",eventId:"evt_e4e54ecb9743805d4609baa06deea927",text:("PROMPT_CANARY")},{type:"finish" as const,finishReason:"stop" as const},
+
 									],
 									createProcessor: (processorOptions) => {
-										const processor = new ProviderStreamAccumulator(
+										const processor = new RequestContentProcessor(
 											processorOptions,
 										);
 										const process = processor.process.bind(processor);
 										processor.process = async (source) =>
-											source.event.type === "step-start"
+											source.event.type === "finish"
 												? {
 														ok: false,
 														events: [],
@@ -410,6 +414,8 @@ describe("Runtime Pod command entrypoint", () => {
 				"time",
 				"level",
 				"service.name",
+                "service.instance.id",
+                "process.pid",
 				"service.version",
 				"deployment.environment",
 				"event",
@@ -684,6 +690,8 @@ describe("Runtime Pod command entrypoint", () => {
 			"app.start",
 			"info:workload.started",
 			"waitForever",
+			"app.shutdown",
+			"core.close",
 		]);
 	});
 
@@ -705,7 +713,7 @@ describe("Runtime Pod command entrypoint", () => {
 			});
 		});
 
-		expect(records).toEqual(["app.start", "waitForever"]);
+		expect(records).toEqual(["app.start", "waitForever", "app.shutdown", "core.close"]);
 	});
 
 	test("command runner exposes shutdown path that closes app and core resources", async () => {
@@ -734,15 +742,9 @@ describe("Runtime Pod command entrypoint", () => {
 			JSON.stringify({
 				config_generation: 7,
 				runtime_config: {
-					installedTools: [{ type: "tetral_agent_toolset", family: "claude" }],
+					installedTools: [{ type: "tetral_agent_toolset", family: "claude", configs: [{ name: "write", enabled: false }, { name: "read", enabled: true, permission_policy: "always_allow" }] }],
 				},
 				approval_mode: "full_access",
-				tools: {
-					configs: [
-						{ name: "Write", enabled: false },
-						{ name: "Read", enabled: true, permission_policy: "always_allow" },
-					],
-				},
 			}),
 		);
 
@@ -750,6 +752,45 @@ describe("Runtime Pod command entrypoint", () => {
 		expect(lookupToolEntry(policy.toolCatalog, "Write")).toBeUndefined();
 		expect(lookupToolEntry(policy.toolCatalog, "Read")).toBeDefined();
 		expect(lookupToolEntry(policy.toolCatalog, "spawn_agent")).toBeDefined();
+	});
+
+	for (const vector of installedBuiltinPolicyFixture) {
+		test(`installed builtin snapshot uses shared literal policy: ${vector.name}`, () => {
+			const payload = JSON.stringify({ runtime_config: { installedTools: vector.installedTools },
+				approval_mode: "ask_for_approval" });
+			const policy = runtimeToolPolicyFromPatchPayload(payload);
+			for (const entry of policy.toolCatalog.entries) {
+				const overrides = vector.expectedOverrides as Readonly<Record<string, string>>;
+				const expected = overrides[entry.name] ?? vector.expectedDefault;
+				if (expected !== "always_allow" && expected !== "always_ask") {
+					throw new Error("shared builtin policy fixture has an invalid expectation");
+				}
+				expect(effectivePermissionPolicy(entry, policy.toolCatalog.configs)).toBe(expected);
+				expect(evaluateToolGate({ catalog: policy.toolCatalog, toolName: entry.name,
+					approvalMode: policy.approvalMode }).type).toBe(expected === "always_allow" ? "run" : "ask");
+			}
+		});
+	}
+
+	test("installed builtin defaults survive partial override and approval-only patch", () => {
+		const initial = JSON.stringify({ runtime_config: { installedTools: [{ type: "tetral_agent_toolset", family: "claude",
+			default_config: { enabled: true, permission_policy: { type: "always_ask" } },
+			configs: [{ name: "write", permission_policy: { type: "always_allow" } }, { name: "read", enabled: false }] }] },
+			approval_mode: "ask_for_approval", tools: { configs: [{ name: "Write", enabled: false }] } });
+		for (const patches of [[initial], [initial, JSON.stringify({ approval_mode: "approve_for_me" })]]) {
+			const policy = runtimeToolPolicyFromPatchPayloads(patches);
+			expect(lookupToolEntry(policy.toolCatalog, "Read")).toBeUndefined();
+			expect(evaluateToolGate({ catalog: policy.toolCatalog, toolName: "Write", approvalMode: policy.approvalMode }).type).toBe("run");
+			expect(evaluateToolGate({ catalog: policy.toolCatalog, toolName: "Bash", approvalMode: policy.approvalMode }).type).toBe(patches.length === 1 ? "ask" : "review_required");
+		}
+	});
+
+	test("installed builtin policy rejects ambiguous aliases and malformed permissions", () => {
+		for (const configs of [[{ name: "read", enabled: true }, { name: "Read", enabled: false }],
+			[{ name: "read", permission_policy: { type: "unknown" } }], [{ name: "github_Search", enabled: true }]]) {
+			expect(() => runtimeToolPolicyFromPatchPayload(JSON.stringify({ runtime_config: { installedTools:
+				[{ type: "tetral_agent_toolset", family: "claude", configs }] } }))).toThrow("runtime installed builtin policy is malformed");
+		}
 	});
 
 	test("single-family cold policy and same-family patches stay generation-fenced", () => {
@@ -892,11 +933,8 @@ describe("Runtime Pod command entrypoint", () => {
 					config_generation: 8,
 					runtime_config: {
 						installedTools: [
-							{ type: "tetral_agent_toolset", family: "claude" },
+							{ type: "tetral_agent_toolset", family: "claude", configs: [{ name: "memory", enabled: false }] },
 						],
-					},
-					tools: {
-						configs: [{ name: "memory", enabled: false }],
 					},
 				}),
 			),
@@ -908,12 +946,9 @@ describe("Runtime Pod command entrypoint", () => {
 			JSON.stringify({
 				config_generation: 7,
 				runtime_config: {
-					installedTools: [{ type: "tetral_agent_toolset", family: "claude" }],
+					installedTools: [{ type: "tetral_agent_toolset", family: "claude", configs: [{ name: "write", enabled: false }] }],
 				},
 				approval_mode: "full_access",
-				tools: {
-					configs: [{ name: "Write", enabled: false }],
-				},
 				tool_policy: {
 					mcpToolsets: [
 						{
@@ -1327,7 +1362,7 @@ describe("Runtime Pod command entrypoint", () => {
 					status: {
 						authenticated: true,
 						audiences: ["tetral-internal-grpc"],
-						user: { username: "system:serviceaccount:engine:bridge" },
+						user: { username: "system:serviceaccount:engine:job-runner" },
 					},
 				}),
 				{ status: 201 },
@@ -1346,12 +1381,14 @@ describe("Runtime Pod command entrypoint", () => {
 			config,
 			logger: { info: () => undefined, error: () => undefined },
 			builderOptions: {
+                routingProxyReady:async()=>undefined,
+                runtimeProcessFactory:()=>({runtimeProcessId:"process-test",register:async()=>undefined,report:async()=>undefined,release:async()=>{throw new Error("unexpected release");},close:async()=>undefined}),
 				coreHostsFactory: async (options) =>
 					await buildRuntimeCoreHosts({
 						...options,
 						contextLoader: {
 							loadThreadContext: async () => ({
-								contextEntries: [],
+								currentRequestMessage:null,messages: [],
 								turnFacts: { events: [], internalRepairs: [] },
 								runtimeBindingToken: "runtime-binding-token-command-test",
 							}),
@@ -1407,6 +1444,29 @@ describe("Runtime Pod command entrypoint", () => {
 		}
 	});
 
+	test("production startup gates on the routing proxy for the configured transport profile", async () => {
+		const profiles: unknown[] = [];
+		const dependencies = await buildRuntimePodCommandDependencies({
+			config: { ...validConfig(), transportProfile: "hardened" },
+			logger: { info: () => undefined, error: () => undefined },
+			builderOptions: {
+				routingProxyReady: async (profile) => {
+					profiles.push(profile);
+					throw new Error("routing proxy fixture stops startup");
+				},
+			},
+		});
+		try {
+			await expect(dependencies.app.start()).rejects.toThrow(
+				"runtime pod startup failed",
+			);
+			expect(profiles).toEqual(["hardened"]);
+		} finally {
+			await dependencies.app.shutdown().catch(() => undefined);
+			await dependencies.coreHosts.close();
+		}
+	});
+
 	test("production startup validates inbound TokenReview reviewer token and CA material before readiness", async () => {
 		for (const scenario of [
 			{ name: "missing reviewer token", token: "missing", ca: "valid" },
@@ -1420,6 +1480,7 @@ describe("Runtime Pod command entrypoint", () => {
 			const records: unknown[] = [];
 			const dependencies = await buildRuntimePodCommandDependencies({
 				config: fixture.config,
+                builderOptions:{routingProxyReady:async()=>undefined},
 				logger: {
 					info: () => undefined,
 					error: (record) => records.push(record),
@@ -1448,6 +1509,7 @@ describe("Runtime Pod command entrypoint", () => {
 					expect(serialized, scenario.name).not.toContain(forbidden);
 				}
 			} finally {
+                await dependencies.app.shutdown().catch(()=>undefined);
 				await dependencies.coreHosts.close();
 			}
 		}
@@ -1510,12 +1572,12 @@ function validEnv(): Record<string, string> {
 		TETRAL_RUNTIME_POD_NAME: "runtime-pod-a",
 		TETRAL_RUNTIME_POD_UID: "uid-a",
 		TETRAL_RUNTIME_POD_IP: "10.0.0.1",
-		TETRAL_RUNTIME_POD_GRPC_PORT: "9090",
+		TETRAL_RUNTIME_POD_GRPC_PORT: "19090",
 		TETRAL_RUNTIME_POD_HTTP_ADDR: "127.0.0.1:0",
 		TETRAL_DEPLOYMENT_ENVIRONMENT: "test",
 		TETRAL_SERVICE_VERSION: "test",
 		TETRAL_RUNTIME_POD_GRPC_AUDIENCE: "tetral-internal-grpc",
-		TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS: "engine/bridge",
+		TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS: "engine/job-runner",
 		KUBERNETES_API_SERVER_URL: "https://kubernetes.default.svc",
 		KUBERNETES_API_CA_CERT_PATH:
 			"/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
@@ -1606,6 +1668,7 @@ function validInterrupt(
 		bindingId: "bind_1",
 		bindingGeneration: 42,
 		targetPodUid: "uid-a",
+		runtimeProcessId: "process-test",
 		runtimeInputId: "rin_1",
 		origin: InterruptOrigin.INTERRUPT_ORIGIN_USER,
 		interruptLeaseRef: {
@@ -1766,6 +1829,7 @@ function fakeDependencies(records: string[]): RuntimePodCommandDependencies {
 					cleaned: false,
 				}),
 			},
+			quiesce: async () => undefined,
 			shutdownActiveRuns: async () => undefined,
 			close: async () => {
 				records.push("core.close");

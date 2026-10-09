@@ -1,9 +1,10 @@
 import { readFile } from "node:fs/promises";
 import type { RuntimeJsonValue } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { SessionEventWriterRetryPolicy } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import type { ProviderStreamAccumulatorWriter } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
-import { ProviderStreamAccumulator } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
-import { ContextManager } from "@tetral/agent-runtime-core/src/session/context-manager.js";
+import type { RequestContentProcessorWriter } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
+import { RequestContentProcessor } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
+import {ThreadState} from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+import {extractThreadTurnCheckpoint} from "@tetral/agent-runtime-core/src/thread-loop/turn/load.js";
 import type { RuntimeToolExecutionRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import type { RuntimeToolRegistrationState } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import {
@@ -17,7 +18,7 @@ import {
 import { createToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import { evaluateToolGate } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
 import { ToolScheduler } from "@tetral/agent-runtime-core/src/tools/tool-scheduler.js";
-import { BridgeAPIEventWriter } from "../../src/bridge-client.js";
+import { BridgeAPIEventWriter, BridgeAPIContextLoader } from "../../src/bridge-client.js";
 import { RuntimePodToolRunner } from "../../src/tool-runner.js";
 
 const inputPath = process.argv[2];
@@ -32,6 +33,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly modelRequestId: string;
 	readonly modelToolCallId: string;
 	readonly toolName: string;
@@ -44,7 +46,14 @@ const writer = new BridgeAPIEventWriter({
 	tokenPath: input.tokenPath,
 	sleep: async () => {},
 });
-const processorWriter: ProviderStreamAccumulatorWriter = {
+const contextLoader = new BridgeAPIContextLoader({address:input.address,tokenPath:input.tokenPath});
+const loaded = await contextLoader.loadThreadContext(input);
+const threadState = new ThreadState(input.sessionId);
+threadState.installThreadCheckpoint(extractThreadTurnCheckpoint({messages:loaded.messages,facts:loaded.turnFacts}));
+threadState.contextManager.replaceMessages(loaded.messages);
+threadState.installCurrentRequestMessage(loaded.currentRequestMessage ?? undefined);
+threadState.markPersistentContextLoaded();
+const processorWriter: RequestContentProcessorWriter = {
 	appendEvent: async (
 		event,
 		_source,
@@ -58,6 +67,7 @@ const processorWriter: ProviderStreamAccumulatorWriter = {
 			bindingId: input.bindingId,
 			bindingGeneration: input.bindingGeneration,
 			targetPodUid: input.targetPodUid,
+			runtimeProcessId: input.runtimeProcessId,
 			writeId: `rwrite_${input.modelRequestId}_${input.modelToolCallId}`,
 			event,
 			...(modelRequestId === undefined ? {} : { modelRequestId }),
@@ -78,8 +88,7 @@ const processorWriter: ProviderStreamAccumulatorWriter = {
 		throw new Error("internal repair is outside the Sandbox composition");
 	},
 };
-const contextManager = new ContextManager(input.sessionId);
-const processor = new ProviderStreamAccumulator({
+const processor = new RequestContentProcessor({
 	modelRequestId: input.modelRequestId,
 	requestId: `req_${input.modelRequestId}`,
 	workspaceId: input.workspaceId,
@@ -88,11 +97,15 @@ const processor = new ProviderStreamAccumulator({
 	bindingId: input.bindingId,
 	bindingGeneration: input.bindingGeneration,
 	targetPodUid: input.targetPodUid,
-	contextOwner: contextManager,
+	runtimeProcessId: input.runtimeProcessId,
+	contextOwner: threadState.contextManager,
+  activeToolReferences:()=>threadState.activeTools(),
+  onAssistantMessageCommitted:reference=>threadState.associateCurrentRequestMessage(reference),
+  onCommittedApplicationFailure:()=>threadState.invalidateResidentState(),
 	writer: processorWriter,
 });
 const providerEvent = {
-	type: "tool-call" as const,
+	type: "tool-call-complete" as const,
 	id: input.modelToolCallId,
 	toolName: input.toolName,
 	input: input.providerInput,
@@ -134,7 +147,7 @@ const gateDecision = evaluateToolGate({
 if (gateDecision.type !== "run")
 	throw new Error("Runtime gate did not authorize the production Tool job");
 if (
-	!processor.reservePublicToolUse(
+	!await processor.reservePublicToolUse(
 		source,
 		job.modelToolCallId,
 		publicToolEventForEntry(entry),
@@ -152,6 +165,11 @@ const committed = await processor.commitPublicToolUse(
 if (!committed.ok)
 	throw new Error("Runtime could not durably commit the production Tool declaration");
 
+threadState.registerActiveTool({toolUseEventId:committed.toolUseEventId,modelRequestId:input.modelRequestId,modelToolCallId:input.modelToolCallId,assistantMessageSequence:threadState.currentRequestMessage()!.assistantMessageSequence,disposition:"hot_execution"});
+threadState.applyThreadTurnFact({fact:"tool_use_committed",eventId:committed.toolUseEventId,modelRequestId:input.modelRequestId,modelToolCallId:input.modelToolCallId,toolName:entry.definition.name});
+const registeredOwner = threadState.activeTools()[0]!;
+const resolved = threadState.resolveActiveTool(committed.toolUseEventId,registeredOwner,entry);
+if(resolved === undefined) throw new Error("registered committed Tool owner was lost before execution");
 const request: RuntimeToolExecutionRequest = {
 	workspaceId: input.workspaceId,
 	sessionId: input.sessionId,
@@ -160,12 +178,13 @@ const request: RuntimeToolExecutionRequest = {
 	bindingGeneration: input.bindingGeneration,
 	runtimeBindingToken: "composition-binding-token",
 	targetPodUid: input.targetPodUid,
+	runtimeProcessId: input.runtimeProcessId,
 	modelRequestId: input.modelRequestId,
 	modelToolCallId: input.modelToolCallId,
 	modelOrder: job.modelOrder,
 	toolUseEventId: committed.toolUseEventId,
 	entry,
-	input: job.input,
+	input: resolved.input,
 	retainedContextEntries: [],
 	abortSignal: new AbortController().signal,
 };
@@ -187,6 +206,7 @@ const settlement = await writer.settleToolResult({
 	bindingId: input.bindingId,
 	bindingGeneration: input.bindingGeneration,
 	targetPodUid: input.targetPodUid,
+	runtimeProcessId: input.runtimeProcessId,
 	settlement: {
 		toolUseEventId: committed.toolUseEventId,
 		outcome: runtimeToolSettlement(result),
@@ -196,8 +216,12 @@ if (!settlement.ok) throw settlement.error;
 process.stdout.write(
 	JSON.stringify({
 		toolUseEventId: committed.toolUseEventId,
-		canonicalExecutionInput: job.input,
+		canonicalExecutionInput: resolved.input,
 		result,
 		settlement: settlement.result,
 	}),
 );
+
+await contextLoader.close();
+await writer.close();
+await runner.close();

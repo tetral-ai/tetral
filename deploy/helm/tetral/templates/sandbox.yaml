@@ -58,18 +58,27 @@ metadata:
     app.kubernetes.io/name: sandbox
     app.kubernetes.io/part-of: tetral
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicas.sandbox }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: {{ .Values.rollout.maxSurge }}
   selector:
     matchLabels:
       app.kubernetes.io/name: sandbox
   template:
     metadata:
+      annotations:
+{{ include "tetral.routingAnnotations" (dict "root" . "role" "sandbox") | indent 8 }}
       labels:
         app.kubernetes.io/name: sandbox
         app.kubernetes.io/part-of: tetral
+        istio.io/rev: {{ .Values.routing.revision | quote }}
     spec:
       serviceAccountName: sandbox
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
       containers:
         - name: sandbox
           image: {{ include "tetral.image" (dict "root" . "name" "tetral") }}
@@ -77,14 +86,20 @@ spec:
           command:
             - /usr/local/bin/tetral-sandbox
           env:
+{{ include "tetral.diagnosticEnv" . | trim | indent 12 }}
+{{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" true "bun" false) | trim | indent 12 }}
+            - name: TETRAL_DRAIN_TIMEOUT_MS
+              value: {{ .Values.lifecycle.sandboxDrainMs | quote }}
+            - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
+              value: {{ .Values.lifecycle.cancelJoinMs | quote }}
+            - name: TETRAL_ROUTING_PROXY_REQUIRED
+              value: "true"
             - name: TETRAL_SANDBOX_HTTP_ADDR
               value: ":8080"
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT
               value: {{ .Values.observability.deploymentEnvironment | quote }}
             - name: TETRAL_SERVICE_VERSION
               value: {{ .Values.observability.serviceVersion | quote }}
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
             - name: TETRAL_POSTGRES_DSN
               valueFrom:
                 secretKeyRef:
@@ -267,6 +282,10 @@ spec:
             httpGet:
               path: /ready
               port: http
+          volumeMounts:
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
           resources:
 {{ toYaml .Values.resources.sandbox | nindent 12 }}
           securityContext:
@@ -276,6 +295,10 @@ spec:
             capabilities:
               drop:
                 - ALL
+      volumes:
+        - name: store-trust
+          configMap:
+            name: {{ .Values.transport.storeTrustConfigMap | quote }}
 ---
 apiVersion: v1
 kind: Service

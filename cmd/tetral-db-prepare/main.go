@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/tetral-ai/tetral/database"
+	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workload"
 )
@@ -24,8 +25,39 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, getenv func(string) string, input io.Reader, stderr io.Writer) (result error) {
-	logger := workload.NewLogger(stderr, "db-prepare", getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), getenv("TETRAL_SERVICE_VERSION"))
+type preparationConnection struct {
+	config  *pgx.ConnConfig
+	refresh func(context.Context, *pgx.ConnConfig) error
+	close   func() error
+}
+
+func protectedPreparationConnection(ctx context.Context, getenv func(string) string) (preparationConnection, error) {
+	name := getenv("TETRAL_DATABASE_TLS_SERVER_NAME")
+	config, owner, err := dbconnect.OpenProtectedConfig(ctx, getenv(adminDatabaseURLEnv), getenv("TETRAL_DATABASE_TLS_CA_PATH"), name)
+	if err != nil {
+		return preparationConnection{}, prepareError("PostgreSQL protected connection requires valid CA trust and server name")
+	}
+	return preparationConnection{config: config, close: owner.Close, refresh: func(_ context.Context, next *pgx.ConnConfig) error {
+		var err error
+		next.TLSConfig, err = owner.ClientTLSConfig(name, "")
+		next.Fallbacks = nil
+		return err
+	}}, nil
+}
+
+func run(ctx context.Context, getenv func(string) string, input io.Reader, stderr io.Writer) error {
+	return runWithConnection(ctx, getenv, input, stderr, protectedPreparationConnection)
+}
+
+func runWithConnection(ctx context.Context, getenv func(string) string, input io.Reader, stderr io.Writer, open func(context.Context, func(string) string) (preparationConnection, error)) (result error) {
+	diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(getenv)
+	diagnosticOwner := workload.NewProcessLogger(stderr, "db-prepare", getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), getenv("TETRAL_SERVICE_VERSION"), diagnostics)
+	defer diagnosticOwner.CloseWithBudget()
+	logger := diagnosticOwner.Logger
+	defer workload.InstallDefaultLogger(logger)()
+	if diagnosticErr != nil {
+		return workload.LogStartupFailure(logger, "db-prepare", diagnosticErr)
+	}
 	ctx = storage.WithMigrationLogger(ctx, logger)
 	step := "validate_input"
 	logger.Info("database.prepare.started")
@@ -52,12 +84,19 @@ func run(ctx context.Context, getenv func(string) string, input io.Reader, stder
 	if err := declarations.Validate(); err != nil {
 		return err
 	}
-	config, err := pgx.ParseConfig(dsn)
+	_, err := pgx.ParseConfig(dsn)
 	if err != nil {
 		return prepareError("PostgreSQL administrative connection string is invalid")
 	}
+	step = "configure_transport"
+	connectionOwner, err := open(ctx, getenv)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = connectionOwner.close() }()
+	config := connectionOwner.config
 	step = "verify_admin"
-	migrationDB := sql.OpenDB(stdlib.GetConnector(*config))
+	migrationDB := sql.OpenDB(stdlib.GetConnector(*config, stdlib.OptionBeforeConnect(connectionOwner.refresh)))
 	defer func() { _ = migrationDB.Close() }()
 	var superuser bool
 	if err := migrationDB.QueryRowContext(ctx, "SELECT rolsuper FROM pg_roles WHERE rolname = current_user").Scan(&superuser); err != nil {
@@ -75,7 +114,10 @@ func run(ctx context.Context, getenv func(string) string, input io.Reader, stder
 		return prepareError("Could not close PostgreSQL schema connection")
 	}
 	step = "connect_roles"
-	connection, err := pgx.Connect(ctx, dsn)
+	if err := connectionOwner.refresh(ctx, config); err != nil {
+		return prepareError("PostgreSQL trust refresh failed before role installation")
+	}
+	connection, err := pgx.ConnectConfig(ctx, config)
 	if err != nil {
 		return prepareError("Could not connect PostgreSQL role installer; check database connectivity and authentication")
 	}

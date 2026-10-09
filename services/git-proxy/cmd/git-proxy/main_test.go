@@ -20,7 +20,7 @@ func TestGitProxySchemaBehindStopsBeforeEncryptorAndListeners(t *testing.T) {
 	runtimeDB := storagetest.NewPostgreSQLDB(t)
 	client := dbconnect.NewClientForTesting(runtimeDB)
 	previousOpen, previousVerify, previousRun := openDatabase, verifySchema, runGitProxy
-	openDatabase = func(context.Context, string, string) (dbconnect.OpenResult, error) {
+	openDatabase = func(context.Context, string, string, string) (dbconnect.OpenResult, error) {
 		return dbconnect.OpenResult{Client: client}, nil
 	}
 	verifySchema = func(context.Context, *dbconnect.Client) error {
@@ -44,7 +44,7 @@ func TestGitProxySchemaBehindStopsBeforeEncryptorAndListeners(t *testing.T) {
 
 func TestGitProxyCommandRejectsInvalidConfigBeforeDatabaseOpen(t *testing.T) {
 	previousOpen := openDatabase
-	openDatabase = func(context.Context, string, string) (dbconnect.OpenResult, error) {
+	openDatabase = func(context.Context, string, string, string) (dbconnect.OpenResult, error) {
 		t.Fatal("openDatabase must not run after config rejection")
 		return dbconnect.OpenResult{}, nil
 	}
@@ -64,7 +64,7 @@ func TestGitProxyCommandRejectsInvalidConfigBeforeDatabaseOpen(t *testing.T) {
 
 func TestGitProxyCommandStartupFailureLogRedactsDependencyError(t *testing.T) {
 	previousOpen := openDatabase
-	openDatabase = func(context.Context, string, string) (dbconnect.OpenResult, error) {
+	openDatabase = func(context.Context, string, string, string) (dbconnect.OpenResult, error) {
 		return dbconnect.OpenResult{}, errors.New("postgres://user:secret@db.internal/tetral raw bearer token")
 	}
 	t.Cleanup(func() { openDatabase = previousOpen })

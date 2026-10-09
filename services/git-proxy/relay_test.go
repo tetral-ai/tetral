@@ -27,14 +27,14 @@ import (
 func TestProxyRejectsInvalidRoutesBeforeUpstream(t *testing.T) {
 	upstreamCalls := 0
 	var logs bytes.Buffer
-	_, hash := deterministicTicket(t, 8)
+	token, hash := deterministicTicket(t, 8)
 	proxy := testProxyWithTicketsAndOptions(t, liveTickets(hash), func(w http.ResponseWriter, _ *http.Request) {
 		upstreamCalls++
 		w.WriteHeader(http.StatusOK)
 	}, fakeRepositoryAuthorizer{}, HandlerOptions{AccessLogger: NewJSONAccessLogger(&logs)})
 
 	recorder := httptest.NewRecorder()
-	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/ticket/github.com/tetral-ai/tetral/info/refs", nil))
+	proxy.ServeHTTP(recorder, ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/tetral/info/refs", token, nil))
 
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("status = %d; want 404", recorder.Code)
@@ -58,14 +58,14 @@ func TestProxyRejectsInvalidRoutesBeforeUpstream(t *testing.T) {
 
 func TestProxyRejectsMalformedQueryBeforeUpstream(t *testing.T) {
 	upstreamCalls := 0
-	_, hash := deterministicTicket(t, 9)
+	token, hash := deterministicTicket(t, 9)
 	proxy := testProxyWithTicketsAndOptions(t, liveTickets(hash), func(w http.ResponseWriter, _ *http.Request) {
 		upstreamCalls++
 		w.WriteHeader(http.StatusOK)
 	}, fakeRepositoryAuthorizer{}, HandlerOptions{})
 
 	recorder := httptest.NewRecorder()
-	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/ticket/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack&bad=x;y", nil))
+	proxy.ServeHTTP(recorder, ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack&bad=x;y", token, nil))
 
 	if recorder.Code != http.StatusNotFound || upstreamCalls != 0 {
 		t.Fatalf("status/upstreamCalls = %d/%d; want 404/0", recorder.Code, upstreamCalls)
@@ -129,7 +129,7 @@ func TestProxyRejectsBadTicketsBeforeUpstream(t *testing.T) {
 			}, fakeRepositoryAuthorizer{})
 
 			recorder := httptest.NewRecorder()
-			proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/"+tc.token+"/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", nil))
+			proxy.ServeHTTP(recorder, ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", tc.token, nil))
 
 			if recorder.Code != http.StatusUnauthorized {
 				t.Fatalf("status = %d; want 401", recorder.Code)
@@ -141,32 +141,36 @@ func TestProxyRejectsBadTicketsBeforeUpstream(t *testing.T) {
 	}
 }
 
-func TestProxyDedicatedHeaderAndLegacyCutoverTable(t *testing.T) {
+// Git Proxy reads the ticket only from X-Tetral-Git-Ticket. A ticket carried as
+// the leading URL segment is an unknown route: it returns 404 before ticket
+// validation and makes no upstream call.
+func TestProxyAcceptsTicketOnlyFromHeader(t *testing.T) {
 	token, hash := deterministicTicket(t, 41)
 	for _, testCase := range []struct {
-		name          string
-		legacyEnabled bool
-		path          string
-		header        string
-		wantStatus    int
-		wantUpstream  int32
+		name         string
+		path         string
+		header       string
+		wantStatus   int
+		wantUpstream int32
+		// wantLookups is the exact ticket-store lookup count, or -1 when the
+		// row does not assert it.
+		wantLookups int32
 	}{
-		{name: "header during cutover", legacyEnabled: true, path: "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", header: token, wantStatus: http.StatusOK, wantUpstream: 1},
-		{name: "header after close", path: "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", header: token, wantStatus: http.StatusOK, wantUpstream: 1},
-		{name: "legacy during cutover", legacyEnabled: true, path: "/" + token + "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", wantStatus: http.StatusOK, wantUpstream: 1},
-		{name: "legacy after close", path: "/" + token + "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", wantStatus: http.StatusNotFound},
-		{name: "missing header", path: "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", wantStatus: http.StatusUnauthorized},
-		{name: "malformed header", path: "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", header: "malformed", wantStatus: http.StatusUnauthorized},
+		{name: "header", path: "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", header: token, wantStatus: http.StatusOK, wantUpstream: 1, wantLookups: 1},
+		{name: "ticket in URL", path: "/" + token + "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", wantStatus: http.StatusNotFound, wantLookups: 0},
+		{name: "missing header", path: "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", wantStatus: http.StatusUnauthorized, wantLookups: -1},
+		{name: "malformed header", path: "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", header: "malformed", wantStatus: http.StatusUnauthorized, wantLookups: -1},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			var upstreamCalls int32
-			proxy := testProxyWithTicketsForCutover(t, liveTickets(hash), func(w http.ResponseWriter, request *http.Request) {
+			store := &countingTicketStore{tickets: liveTickets(hash)}
+			proxy := testProxyWithTicketStore(t, store, func(w http.ResponseWriter, request *http.Request) {
 				atomic.AddInt32(&upstreamCalls, 1)
 				if got := request.Header.Get("X-Tetral-Git-Ticket"); got != "" {
 					t.Errorf("upstream X-Tetral-Git-Ticket = %q; want stripped", got)
 				}
 				w.WriteHeader(http.StatusOK)
-			}, fakeRepositoryAuthorizer{}, HandlerOptions{}, testCase.legacyEnabled)
+			}, fakeRepositoryAuthorizer{}, HandlerOptions{})
 			request := httptest.NewRequest(http.MethodGet, testCase.path, nil)
 			if testCase.header != "" {
 				request.Header.Set("X-Tetral-Git-Ticket", testCase.header)
@@ -175,6 +179,9 @@ func TestProxyDedicatedHeaderAndLegacyCutoverTable(t *testing.T) {
 			proxy.ServeHTTP(recorder, request)
 			if recorder.Code != testCase.wantStatus || atomic.LoadInt32(&upstreamCalls) != testCase.wantUpstream {
 				t.Fatalf("status/upstream = %d/%d; want %d/%d", recorder.Code, upstreamCalls, testCase.wantStatus, testCase.wantUpstream)
+			}
+			if got := store.lookups.Load(); testCase.wantLookups >= 0 && got != testCase.wantLookups {
+				t.Fatalf("ticket store lookups = %d; want %d", got, testCase.wantLookups)
 			}
 		})
 	}
@@ -195,7 +202,7 @@ func TestProxyInjectsAuthorizationOnlyForAllowlistedRepositories(t *testing.T) {
 
 	for _, repo := range []string{"tetral", "public"} {
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodGet, "/"+token+"/github.com/tetral-ai/"+repo+"/info/refs?service=git-upload-pack", nil)
+		request := ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/"+repo+"/info/refs?service=git-upload-pack", token, nil)
 		request.Header.Set("Authorization", "Bearer sandbox-supplied-value")
 		proxy.ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusOK {
@@ -225,9 +232,8 @@ func TestProxyForwardsOnlyContractedGitHeaders(t *testing.T) {
 		},
 	})
 
-	request := httptest.NewRequest(http.MethodPost, "/"+token+"/github.com/tetral-ai/tetral/git-upload-pack", strings.NewReader("0000"))
+	request := ticketedGitRequest(http.MethodPost, "/github.com/tetral-ai/tetral/git-upload-pack", token, strings.NewReader("0000"))
 	request.Header.Set("Authorization", "Bearer sandbox-supplied-value")
-	request.Header.Set("X-Tetral-Git-Ticket", token)
 	request.Header.Set("Content-Type", "application/x-git-upload-pack-request")
 	request.Header.Set("Accept", "application/x-git-upload-pack-result")
 	request.Header.Set("Git-Protocol", "version=2")
@@ -293,7 +299,7 @@ func TestProxyRereadsRepositoryTokenOnceForBodylessInfoRefsUnauthorized(t *testi
 	}))
 
 	recorder := httptest.NewRecorder()
-	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/"+token+"/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", nil))
+	proxy.ServeHTTP(recorder, ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", token, nil))
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%q; want 200 after repository-token reread", recorder.Code, recorder.Body.String())
@@ -326,7 +332,7 @@ func TestProxyRelaysOriginalUnauthorizedWhenReactiveRereadFindsRepositoryUnmount
 	}))
 
 	recorder := httptest.NewRecorder()
-	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/"+token+"/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", nil))
+	proxy.ServeHTTP(recorder, ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", token, nil))
 
 	if recorder.Code != http.StatusUnauthorized || recorder.Body.String() != "original unauthorized response\n" {
 		t.Fatalf("response = %d %q; want original upstream 401", recorder.Code, recorder.Body.String())
@@ -377,7 +383,7 @@ func TestProxyClassifiesReactiveCredentialRereadFailures(t *testing.T) {
 			}), HandlerOptions{AccessLogger: NewJSONAccessLogger(&logs)})
 
 			recorder := httptest.NewRecorder()
-			proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/"+token+"/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", nil))
+			proxy.ServeHTTP(recorder, ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", token, nil))
 
 			if recorder.Code != test.wantStatus {
 				t.Fatalf("status = %d body=%q; want %d", recorder.Code, recorder.Body.String(), test.wantStatus)
@@ -410,7 +416,7 @@ func TestProxyStopsAfterOneBodylessInfoRefsReread(t *testing.T) {
 	}))
 
 	recorder := httptest.NewRecorder()
-	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/"+token+"/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", nil))
+	proxy.ServeHTTP(recorder, ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", token, nil))
 
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d body=%q; want second upstream 401", recorder.Code, recorder.Body.String())
@@ -433,7 +439,7 @@ func TestProxyDoesNotRereadOrReplayRequestBodiesAfterUnauthorized(t *testing.T) 
 	}))
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/"+token+"/github.com/tetral-ai/tetral/git-upload-pack", stringsReader("pack-data"))
+	request := ticketedGitRequest(http.MethodPost, "/github.com/tetral-ai/tetral/git-upload-pack", token, stringsReader("pack-data"))
 	proxy.ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusUnauthorized {
@@ -460,7 +466,7 @@ func TestProxyLeavesAnonymousUpstreamAuthFailuresUnchanged(t *testing.T) {
 			}))
 
 			recorder := httptest.NewRecorder()
-			proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/"+token+"/github.com/tetral-ai/private/info/refs?service=git-upload-pack", nil))
+			proxy.ServeHTTP(recorder, ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/private/info/refs?service=git-upload-pack", token, nil))
 
 			if recorder.Code != upstreamStatus {
 				t.Fatalf("status = %d body=%q; want upstream %d passthrough", recorder.Code, recorder.Body.String(), upstreamStatus)
@@ -483,7 +489,7 @@ func TestProxyDoesNotRereadInjectedCredentialAfterForbidden(t *testing.T) {
 	}))
 
 	recorder := httptest.NewRecorder()
-	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/"+token+"/github.com/tetral-ai/private/info/refs?service=git-upload-pack", nil))
+	proxy.ServeHTTP(recorder, ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/private/info/refs?service=git-upload-pack", token, nil))
 
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("status = %d body=%q; want upstream 403 passthrough", recorder.Code, recorder.Body.String())
@@ -505,7 +511,7 @@ func TestProxyRewritesGitHubRedirectsBackThroughProxy(t *testing.T) {
 	})
 
 	recorder := httptest.NewRecorder()
-	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/"+token+"/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", nil))
+	proxy.ServeHTTP(recorder, ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", token, nil))
 
 	if recorder.Code != http.StatusMovedPermanently {
 		t.Fatalf("status = %d; want 301", recorder.Code)
@@ -529,7 +535,7 @@ func TestProxyLeavesNonRedirectLocationHeadersUnchanged(t *testing.T) {
 	})
 
 	recorder := httptest.NewRecorder()
-	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/"+token+"/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", nil))
+	proxy.ServeHTTP(recorder, ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", token, nil))
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200", recorder.Code)
@@ -559,7 +565,7 @@ func TestProxyStreamsRequestAndResponseBodies(t *testing.T) {
 		},
 	})
 
-	request := httptest.NewRequest(http.MethodPost, "/"+token+"/github.com/tetral-ai/tetral/git-upload-pack", io.NopCloser(stringsReader("pack-data")))
+	request := ticketedGitRequest(http.MethodPost, "/github.com/tetral-ai/tetral/git-upload-pack", token, io.NopCloser(stringsReader("pack-data")))
 	request.ContentLength = int64(len("pack-data"))
 	recorder := httptest.NewRecorder()
 	proxy.ServeHTTP(recorder, request)
@@ -588,7 +594,7 @@ func TestProxyAllowsTwoRequestOperationAcrossTicketRotationGrace(t *testing.T) {
 	})
 
 	infoRefs := httptest.NewRecorder()
-	proxy.ServeHTTP(infoRefs, httptest.NewRequest(http.MethodGet, "/"+token+"/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", nil))
+	proxy.ServeHTTP(infoRefs, ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", token, nil))
 	if infoRefs.Code != http.StatusOK {
 		t.Fatalf("info/refs status = %d; want 200", infoRefs.Code)
 	}
@@ -597,7 +603,7 @@ func TestProxyAllowsTwoRequestOperationAcrossTicketRotationGrace(t *testing.T) {
 	ticket.Status = gitticket.StatusRotated
 	ticket.RotatedAt = &rotatedWithinGrace
 	uploadPack := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/"+token+"/github.com/tetral-ai/tetral/git-upload-pack", stringsReader("pack-data"))
+	request := ticketedGitRequest(http.MethodPost, "/github.com/tetral-ai/tetral/git-upload-pack", token, stringsReader("pack-data"))
 	request.ContentLength = int64(len("pack-data"))
 	proxy.ServeHTTP(uploadPack, request)
 	if uploadPack.Code != http.StatusOK {
@@ -610,7 +616,7 @@ func TestProxyAllowsTwoRequestOperationAcrossTicketRotationGrace(t *testing.T) {
 	rotatedPastGrace := now.Add(-2 * time.Minute)
 	ticket.RotatedAt = &rotatedPastGrace
 	expired := httptest.NewRecorder()
-	proxy.ServeHTTP(expired, httptest.NewRequest(http.MethodGet, "/"+token+"/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", nil))
+	proxy.ServeHTTP(expired, ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", token, nil))
 	if expired.Code != http.StatusUnauthorized {
 		t.Fatalf("expired rotated status = %d; want 401", expired.Code)
 	}
@@ -634,7 +640,7 @@ func TestProxyIdleProgressTimeoutCancelsStalledUpstream(t *testing.T) {
 	done := make(chan int, 1)
 	go func() {
 		recorder := httptest.NewRecorder()
-		proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/"+token+"/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", nil))
+		proxy.ServeHTTP(recorder, ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", token, nil))
 		done <- recorder.Code
 	}()
 	select {
@@ -671,7 +677,7 @@ func TestProxyProgressingTransferHasNoTotalTimeout(t *testing.T) {
 
 	startedAt := time.Now()
 	recorder := httptest.NewRecorder()
-	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/"+token+"/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", nil))
+	proxy.ServeHTTP(recorder, ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", token, nil))
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%q; want 200 for progressing transfer", recorder.Code, recorder.Body.String())
@@ -700,7 +706,7 @@ func TestProxyUploadProgressPreventsIdleTimeout(t *testing.T) {
 
 	startedAt := time.Now()
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/"+token+"/github.com/tetral-ai/tetral/git-receive-pack", &slowChunkReader{
+	request := ticketedGitRequest(http.MethodPost, "/github.com/tetral-ai/tetral/git-receive-pack", token, &slowChunkReader{
 		chunks: []string{"p", "a", "c", "k", "-data"},
 		delay:  20 * time.Millisecond,
 	})
@@ -752,7 +758,7 @@ func TestProxyStreams100MiBWithBoundedRSS(t *testing.T) {
 	runtime.GC()
 	before := processMemoryBytes(t)
 	recorder := newDiscardResponseWriter()
-	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/"+token+"/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", nil))
+	proxy.ServeHTTP(recorder, ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", token, nil))
 	runtime.GC()
 	after := processMemoryBytes(t)
 
@@ -812,12 +818,17 @@ func TestProxyGracefullyDrainsInFlightTransferOnShutdown(t *testing.T) {
 	waitForReady(t, baseURL)
 
 	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	transferRequest, err := http.NewRequest(http.MethodGet, baseURL+"/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", nil)
+	if err != nil {
+		t.Fatalf("build transfer request: %v", err)
+	}
+	transferRequest.Header.Set(gitTicketHeader, token)
 	bodyDone := make(chan struct {
 		body string
 		err  error
 	}, 1)
 	go func() {
-		response, err := client.Get(baseURL + "/" + token + "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack")
+		response, err := client.Do(transferRequest)
 		if err != nil {
 			bodyDone <- struct {
 				body string
@@ -878,7 +889,7 @@ func TestProxyAccessLogHasExactContractFields(t *testing.T) {
 		},
 	}, HandlerOptions{AccessLogger: NewJSONAccessLogger(&logs)})
 
-	request := httptest.NewRequest(http.MethodGet, "/"+token+"/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", nil)
+	request := ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", token, nil)
 	request.Header.Set("X-Request-ID", "req-access-log")
 	recorder := httptest.NewRecorder()
 	proxy.ServeHTTP(recorder, request)
@@ -969,13 +980,13 @@ func TestProxyEnforcesConnectionAndRequestBodyLimits(t *testing.T) {
 	firstDone := make(chan int, 1)
 	go func() {
 		recorder := httptest.NewRecorder()
-		proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/"+token+"/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", nil))
+		proxy.ServeHTTP(recorder, ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", token, nil))
 		firstDone <- recorder.Code
 	}()
 	<-entered
 
 	second := httptest.NewRecorder()
-	proxy.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/"+token+"/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", nil))
+	proxy.ServeHTTP(second, ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", token, nil))
 	if second.Code != http.StatusTooManyRequests {
 		t.Fatalf("second status = %d; want 429", second.Code)
 	}
@@ -992,7 +1003,7 @@ func TestProxyEnforcesConnectionAndRequestBodyLimits(t *testing.T) {
 			"tetral-ai/tetral": {Decision: DecisionAnonymous},
 		},
 	}, HandlerOptions{})
-	oversized := httptest.NewRequest(http.MethodPost, "/"+token+"/github.com/tetral-ai/tetral/git-receive-pack", stringsReader("pack"))
+	oversized := ticketedGitRequest(http.MethodPost, "/github.com/tetral-ai/tetral/git-receive-pack", token, stringsReader("pack"))
 	oversized.ContentLength = MaxRequestBodyBytes + 1
 	recorder := httptest.NewRecorder()
 	bodyCapProxy.ServeHTTP(recorder, oversized)
@@ -1026,7 +1037,7 @@ func TestProxyStreamsUnknownLengthRequestBodyWithCap(t *testing.T) {
 		MaxRequestBodyBytes: 4,
 	})
 
-	request := httptest.NewRequest(http.MethodPost, "/"+token+"/github.com/tetral-ai/tetral/git-receive-pack", stringsReader("1234"))
+	request := ticketedGitRequest(http.MethodPost, "/github.com/tetral-ai/tetral/git-receive-pack", token, stringsReader("1234"))
 	request.ContentLength = -1
 	recorder := httptest.NewRecorder()
 	proxy.ServeHTTP(recorder, request)
@@ -1038,7 +1049,7 @@ func TestProxyStreamsUnknownLengthRequestBodyWithCap(t *testing.T) {
 		t.Fatalf("upstreamCalls=%d bodies=%v; want one streamed unknown-length body", got, upstreamBodies)
 	}
 
-	oversized := httptest.NewRequest(http.MethodPost, "/"+token+"/github.com/tetral-ai/tetral/git-receive-pack", stringsReader("12345"))
+	oversized := ticketedGitRequest(http.MethodPost, "/github.com/tetral-ai/tetral/git-receive-pack", token, stringsReader("12345"))
 	oversized.ContentLength = -1
 	oversizedRecorder := httptest.NewRecorder()
 	proxy.ServeHTTP(oversizedRecorder, oversized)
@@ -1082,7 +1093,7 @@ func TestProxyMetricsExposeContractSeries(t *testing.T) {
 		},
 	}, HandlerOptions{Metrics: metrics})
 
-	proxy.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/"+token+"/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", nil))
+	proxy.ServeHTTP(httptest.NewRecorder(), ticketedGitRequest(http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", token, nil))
 	recorder := httptest.NewRecorder()
 	metrics.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 
@@ -1106,6 +1117,9 @@ func TestProxyMetricsExposeContractSeries(t *testing.T) {
 			t.Fatalf("metrics body missing contract alert condition %s:\n%s", alert, body)
 		}
 	}
+	if !strings.Contains(body, `tetral_operation_duration_seconds_count{operation="refs-upload",outcome="success",service="git-proxy"} 1`) {
+		t.Fatalf("missing owning duration: %s", body)
+	}
 	if !strings.Contains(body, `gitproxy_requests_total{endpoint="refs-upload",decision="injected",upstream_status="200"} 1`) {
 		t.Fatalf("metrics body missing injected request row:\n%s", body)
 	}
@@ -1123,10 +1137,11 @@ func testProxyWithTickets(t *testing.T, tickets map[string]*gitticket.Ticket, up
 }
 
 func testProxyWithTicketsAndOptions(t *testing.T, tickets map[string]*gitticket.Ticket, upstream http.HandlerFunc, authorizer RepositoryAuthorizer, options HandlerOptions) http.Handler {
-	return testProxyWithTicketsForCutover(t, tickets, upstream, authorizer, options, true)
+	t.Helper()
+	return testProxyWithTicketStore(t, fakeTicketStore{tickets: tickets}, upstream, authorizer, options)
 }
 
-func testProxyWithTicketsForCutover(t *testing.T, tickets map[string]*gitticket.Ticket, upstream http.HandlerFunc, authorizer RepositoryAuthorizer, options HandlerOptions, legacyPathCutover bool) http.Handler {
+func testProxyWithTicketStore(t *testing.T, store TicketStore, upstream http.HandlerFunc, authorizer RepositoryAuthorizer, options HandlerOptions) http.Handler {
 	t.Helper()
 	upstreamServer := httptest.NewServer(upstream)
 	t.Cleanup(upstreamServer.Close)
@@ -1144,12 +1159,30 @@ func testProxyWithTicketsForCutover(t *testing.T, tickets map[string]*gitticket.
 	if options.PublicBaseURL == nil {
 		options.PublicBaseURL = publicBase
 	}
-	options.LegacyPathCutover = legacyPathCutover
 	return NewHTTPHandler(TicketValidator{
-		Store:         fakeTicketStore{tickets: tickets},
+		Store:         store,
 		Now:           func() time.Time { return time.Date(2026, 7, 3, 18, 0, 0, 0, time.UTC) },
 		RotationGrace: time.Minute,
 	}, authorizer, options)
+}
+
+// ticketedGitRequest builds a smart-HTTP request carrying its ticket in
+// X-Tetral-Git-Ticket, the only place Git Proxy reads a ticket.
+func ticketedGitRequest(method, target, ticket string, body io.Reader) *http.Request {
+	request := httptest.NewRequest(method, target, body)
+	request.Header.Set(gitTicketHeader, ticket)
+	return request
+}
+
+// countingTicketStore records how many ticket lookups reached the store.
+type countingTicketStore struct {
+	tickets map[string]*gitticket.Ticket
+	lookups atomic.Int32
+}
+
+func (s *countingTicketStore) FindByTokenHash(ctx context.Context, tokenHash []byte) (*gitticket.Ticket, error) {
+	s.lookups.Add(1)
+	return fakeTicketStore{tickets: s.tickets}.FindByTokenHash(ctx, tokenHash)
 }
 
 type upstreamRewriteTransport struct {
@@ -1315,6 +1348,9 @@ func assertExactAccessLogFields(t *testing.T, record map[string]any) {
 		"time":                   {},
 		"level":                  {},
 		"msg":                    {},
+		"event":                  {},
+		"process.pid":            {},
+		"service.instance.id":    {},
 		"service.name":           {},
 		"service.version":        {},
 		"deployment.environment": {},
@@ -1345,6 +1381,17 @@ func assertExactAccessLogFields(t *testing.T, record map[string]any) {
 			t.Fatalf("access log has extra field %q: %#v", key, record)
 		}
 	}
+	assertLogString(t, record, "event", AccessLogEventKind)
+	assertLogString(t, record, "component", ServiceName)
+	if pid, ok := record["process.pid"].(float64); !ok || pid != float64(os.Getpid()) {
+		t.Fatalf("process.pid = %#v; want current process %d", record["process.pid"], os.Getpid())
+	}
+	instance, ok := record["service.instance.id"].(string)
+	validInstance := len(instance) == 32 && strings.Trim(instance, "0123456789abcdef") == "" || instance == strconv.Itoa(os.Getpid())
+	if !ok || !validInstance {
+		t.Fatalf("service.instance.id = %#v; want bounded shared process identity", record["service.instance.id"])
+	}
+
 }
 
 func assertLogString(t *testing.T, record map[string]any, key string, want string) {

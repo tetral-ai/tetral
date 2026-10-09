@@ -21,7 +21,7 @@ func TestParseGitRequestWhitelist(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			parsed, ok := parseGitRequest(httptest.NewRequest(tc.method, tc.target, nil), false)
+			parsed, ok := parseGitRequest(httptest.NewRequest(tc.method, tc.target, nil))
 			if !ok {
 				t.Fatal("parseGitRequest rejected a whitelisted smart-HTTP endpoint")
 			}
@@ -38,33 +38,31 @@ func TestParseGitRequestRejectsNonWhitelistedEndpoints(t *testing.T) {
 		method string
 		target string
 	}{
-		{"dumb refs", http.MethodGet, "/ticket/github.com/tetral-ai/tetral/info/refs"},
-		{"lfs batch", http.MethodPost, "/ticket/github.com/tetral-ai/tetral.git/info/lfs/objects/batch"},
-		{"wrong host segment", http.MethodGet, "/ticket/gitlab.com/tetral-ai/tetral/info/refs?service=git-upload-pack"},
-		{"owner traversal", http.MethodGet, "/ticket/github.com/../tetral/info/refs?service=git-upload-pack"},
-		{"repo traversal", http.MethodGet, "/ticket/github.com/tetral-ai/../info/refs?service=git-upload-pack"},
-		{"extra query", http.MethodGet, "/ticket/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack&extra=1"},
-		{"duplicate service query", http.MethodGet, "/ticket/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack&service=bad"},
-		{"malformed query separator", http.MethodGet, "/ticket/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack&bad=x;y"},
-		{"malformed query escape", http.MethodGet, "/ticket/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack&bad=%zz"},
-		{"unknown method", http.MethodPut, "/ticket/github.com/tetral-ai/tetral/git-upload-pack"},
+		{"dumb refs", http.MethodGet, "/github.com/tetral-ai/tetral/info/refs"},
+		{"lfs batch", http.MethodPost, "/github.com/tetral-ai/tetral.git/info/lfs/objects/batch"},
+		{"wrong host segment", http.MethodGet, "/gitlab.com/tetral-ai/tetral/info/refs?service=git-upload-pack"},
+		{"owner traversal", http.MethodGet, "/github.com/../tetral/info/refs?service=git-upload-pack"},
+		{"repo traversal", http.MethodGet, "/github.com/tetral-ai/../info/refs?service=git-upload-pack"},
+		{"extra query", http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack&extra=1"},
+		{"duplicate service query", http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack&service=bad"},
+		{"malformed query separator", http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack&bad=x;y"},
+		{"malformed query escape", http.MethodGet, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack&bad=%zz"},
+		{"unknown method", http.MethodPut, "/github.com/tetral-ai/tetral/git-upload-pack"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if parsed, ok := parseGitRequest(httptest.NewRequest(tc.method, tc.target, nil), true); ok {
+			if parsed, ok := parseGitRequest(httptest.NewRequest(tc.method, tc.target, nil)); ok {
 				t.Fatalf("parseGitRequest accepted %+v", parsed)
 			}
 		})
 	}
 }
 
-func TestParseGitRequestLegacyPathRequiresCutover(t *testing.T) {
+// A ticket is accepted only from X-Tetral-Git-Ticket; a ticket placed as the
+// leading URL segment is an unknown route and never reaches ticket validation.
+func TestParseGitRequestRejectsURLBorneTicket(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/ticket/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", nil)
-	if _, ok := parseGitRequest(request, false); ok {
-		t.Fatal("legacy ticket path parsed after cutover close")
-	}
-	parsed, ok := parseGitRequest(request, true)
-	if !ok || parsed.LegacyTicket != "ticket" {
-		t.Fatalf("legacy cutover parse = %+v, %v", parsed, ok)
+	if parsed, ok := parseGitRequest(request); ok {
+		t.Fatalf("URL-borne ticket path parsed as %+v", parsed)
 	}
 }

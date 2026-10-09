@@ -106,6 +106,7 @@ function validRunRequest(): RunMcpToolRequest {
     toolUseEventId: "sevt_tool_1",
     bindingId: "bind_1",
     bindingGeneration: 42,
+    runtimeProcessId: "process-test",
     runtimeBindingToken: signedRuntimeBindingToken(),
   };
 }
@@ -119,6 +120,7 @@ function signedRuntimeBindingToken(): string {
     binding_id: "bind_1",
     binding_generation: 42,
     runtime_pod_uid: RuntimePodUid,
+    runtime_process_id: "process-test",
     exp: Math.floor(new Date("2026-01-01T00:05:00Z").getTime() / 1000),
   })).toString("base64url");
   return `rtbt_v1.${payloadPart}.${createHmac("sha256", BindingTokenKey).update(payloadPart).digest("base64url")}`;

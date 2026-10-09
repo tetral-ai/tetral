@@ -2,15 +2,24 @@ package webconnector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"os/signal"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/workload"
+
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/internalgrpc"
 	providergatewayv1 "github.com/tetral-ai/tetral/services/gateway/gen/tetral/provider_gateway/v1"
@@ -42,12 +51,12 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 	}
 	grpcListener, err := listen("tcp", cfg.GRPCAddress)
 	if err != nil {
-		return err
+		return workload.LogStartupFailure(runtime.Logger, ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseListener, err), slog.String("startup.cause_category", "grpc"))
 	}
 	defer func() { _ = grpcListener.Close() }()
 	metricsListener, err := listen("tcp", cfg.MetricsAddress)
 	if err != nil {
-		return err
+		return workload.LogStartupFailure(runtime.Logger, ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseListener, err), slog.String("startup.cause_category", "metrics"))
 	}
 	defer func() { _ = metricsListener.Close() }()
 	if runtime.Logger != nil {
@@ -62,15 +71,52 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	serverCtx, cancel := context.WithCancel(ctx)
+	serverCtx, cancel := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+
 	var ready atomic.Bool
+	var draining atomic.Bool
+	var admission sync.Mutex
+	var active atomic.Int64
+	workCtx, cancelWork := context.WithCancel(context.WithoutCancel(serverCtx))
+	defer cancelWork()
+	server, healthServer, err := internalgrpc.NewServerWithHealth(internalgrpc.Config{Metrics: metrics.GRPC, ServiceName: ServiceName, Listener: grpcListener, Authenticator: runtime.Authenticator, MethodAuthorizer: MethodAuthorizer, Register: func(server *grpc.Server) { Register(server, service) }, Logger: runtime.Logger, ServerOptions: []grpc.ServerOption{
+		grpc.WaitForHandlers(true), grpc.MaxRecvMsgSize(maxRunWebRequestGRPCMessageBytes), grpc.MaxSendMsgSize(maxRunWebResponseGRPCMessageBytes), grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: 5 * time.Minute, MaxConnectionAgeGrace: 30 * time.Minute}),
+		grpc.ChainUnaryInterceptor(func(ctx context.Context, request any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+			admission.Lock()
+			if draining.Load() {
+				admission.Unlock()
+				return nil, status.Error(codes.Unavailable, "web connector draining")
+			}
+			active.Add(1)
+			admission.Unlock()
+			defer active.Add(-1)
+			requestCtx, cancelRequest := context.WithCancel(ctx)
+			stop := context.AfterFunc(workCtx, cancelRequest)
+			defer stop()
+			defer cancelRequest()
+			return handler(requestCtx, request)
+		}),
+	}})
+	if err != nil {
+		return err
+	}
 	grpcErr := make(chan error, 1)
 	go func() {
-		grpcErr <- internalgrpc.Run(serverCtx, internalgrpc.Config{ServiceName: ServiceName, Listener: grpcListener, Authenticator: runtime.Authenticator, MethodAuthorizer: MethodAuthorizer, Register: func(server *grpc.Server) { Register(server, service) }, OnServing: func() { ready.Store(true) }, ShutdownTimeout: 10 * time.Second, Logger: runtime.Logger, ServerOptions: []grpc.ServerOption{grpc.MaxRecvMsgSize(maxRunWebRequestGRPCMessageBytes), grpc.MaxSendMsgSize(maxRunWebResponseGRPCMessageBytes), grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: 5 * time.Minute, MaxConnectionAgeGrace: 30 * time.Minute})}})
+		admission.Lock()
+		if !draining.Load() {
+			ready.Store(true)
+		}
+		admission.Unlock()
+		grpcErr <- server.Serve(grpcListener)
+		close(grpcErr)
 	}()
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", metrics.Handler())
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		metrics.Handler().ServeHTTP(w, r)
+		_, _ = fmt.Fprintf(w, "# TYPE web_requests_active gauge\nweb_requests_active %d\n# TYPE web_draining gauge\nweb_draining %d\n", active.Load(), boolInt(draining.Load()))
+		_, _ = w.Write([]byte(workload.DiagnosticMetricsText(runtime.Logger)))
+	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -83,7 +129,7 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready"))
 	})
-	httpServer := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	httpServer := &http.Server{Handler: mux, ReadHeaderTimeout: DefaultOpsReadHeaderTimeout}
 	httpErr := make(chan error, 1)
 	go func() {
 		serveErr := httpServer.Serve(metricsListener)
@@ -92,17 +138,84 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 		}
 		httpErr <- serveErr
 	}()
+
 	var runErr error
+	grpcConsumed, httpConsumed := false, false
 	select {
 	case runErr = <-grpcErr:
+		grpcConsumed = true
 	case runErr = <-httpErr:
+		httpConsumed = true
 	case <-serverCtx.Done():
-		runErr = nil
 	}
+	workload.BeginProcessShutdown(ctx)
+	admission.Lock()
+	healthServer.SetServingStatus("", healthv1.HealthCheckResponse_NOT_SERVING)
+	draining.Store(true)
 	ready.Store(false)
-	cancel()
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	admission.Unlock()
+	if runtime.Logger != nil {
+		runtime.Logger.Info("web.drain.started", slog.String("operation", "workload.shutdown"), slog.String("shutdown.phase", "draining"), slog.Int64("closeout.active_count", active.Load()))
+	}
+	drainStarted := time.Now()
+	stopped := make(chan struct{})
+	go func() { server.GracefulStop(); close(stopped) }()
+	drain := cfg.DrainTimeout
+	if drain <= 0 {
+		drain = DefaultListenerShutdownTimeout
+	}
+	timer := time.NewTimer(drain)
+	defer timer.Stop()
+	select {
+	case <-stopped:
+		metrics.GRPC.Operations.ObserveShutdown(runtime.Logger, "shutdown_grpc_drain", "success", time.Since(drainStarted))
+	case <-timer.C:
+		metrics.GRPC.Operations.ObserveShutdown(runtime.Logger, "shutdown_grpc_drain", "timeout", time.Since(drainStarted))
+		joinStarted := time.Now()
+		cancelWork()
+		server.Stop()
+		<-stopped
+		outcome := "success"
+		joinBound := cfg.CancelJoinTimeout
+		if joinBound <= 0 {
+			joinBound = 5 * time.Second
+		}
+		if time.Since(joinStarted) > joinBound {
+			outcome = "timeout"
+		}
+		metrics.GRPC.Operations.ObserveShutdown(runtime.Logger, "shutdown_grpc_cancel_join", outcome, time.Since(joinStarted))
+	}
+	if !grpcConsumed {
+		err := <-grpcErr
+		if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			runErr = errors.Join(runErr, err)
+		}
+	}
+	joinTimeout := cfg.CancelJoinTimeout
+	if joinTimeout <= 0 {
+		joinTimeout = 5 * time.Second
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), joinTimeout)
 	defer shutdownCancel()
-	_ = httpServer.Shutdown(shutdownCtx)
+	httpDrainStarted := time.Now()
+	httpOutcome := "success"
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		httpOutcome = "timeout"
+		_ = httpServer.Close()
+		runErr = errors.Join(runErr, err)
+	}
+	metrics.GRPC.Operations.ObserveShutdown(runtime.Logger, "shutdown_http_drain", httpOutcome, time.Since(httpDrainStarted))
+	if !httpConsumed {
+		runErr = errors.Join(runErr, <-httpErr)
+	}
+	if runtime.Logger != nil {
+		runtime.Logger.Info("web.drain.joined", slog.String("operation", "workload.shutdown"), slog.String("shutdown.phase", "joined"), slog.Int64("closeout.active_count", active.Load()))
+	}
 	return runErr
+}
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }

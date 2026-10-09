@@ -6,6 +6,8 @@ option go_package = "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue
 
 service QueueService {
   rpc Lease(LeaseRequest) returns (LeaseResponse);
+  rpc LeaseJobRunnerJobs(LeaseJobRunnerJobsRequest) returns (LeaseJobRunnerJobsResponse);
+  rpc ReleaseUnstartedJob(ReleaseUnstartedJobRequest) returns (ReleaseUnstartedJobResponse);
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
   rpc Ack(AckRequest) returns (TransitionResponse);
   rpc Retry(RetryRequest) returns (TransitionResponse);
@@ -47,6 +49,31 @@ message LeaseRequest {
 
 message LeaseResponse {
   repeated QueueJob jobs = 1;
+}
+
+// Queue selects the workspaces and the five Job Runner kinds itself; the
+// caller supplies only its free capacity, label and lease duration.
+message LeaseJobRunnerJobsRequest {
+  int32 max_jobs = 1;
+  string lease_owner = 2;
+  int64 lease_duration_ms = 3;
+}
+
+// retry_after_ms is the Queue-owned delay before the next request when the
+// response does not fill the requested capacity.
+message LeaseJobRunnerJobsResponse {
+  repeated QueueJob jobs = 1;
+  int32 retry_after_ms = 2;
+}
+
+message ReleaseUnstartedJobRequest {
+  string workspace_id = 1;
+  string job_id = 2;
+  string lease_token = 3;
+}
+
+message ReleaseUnstartedJobResponse {
+  bool updated = 1;
 }
 
 message HeartbeatRequest {

@@ -54,7 +54,7 @@ const (
 	// UPDATE-WITH: internal/session sessionSelectSQL (read projection);
 	// services/bridge bridge_api_events.go (running/idle/
 	// rescheduling/terminated status writes); internal/session service.go and
-	// postgresql_store.go plus services/bridge
+	// postgresql_store.go plus services/job-runner
 	// runtime_session_cleanup.go (lifecycle_state branches).
 	createPostgreSQLSessionsTable = `CREATE TABLE IF NOT EXISTS sessions (
 		storage_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
@@ -315,12 +315,30 @@ const (
 	//
 	// insert_stream_position is the immutable session-global insert order: the
 	// stream_position of the event's revision-1 change in
-	// session_event_stream_changes, copied into this row once at insert (set
-	// once from 0, never updated) and used as the session-level list cursor.
+	// session_event_stream_changes. The writer reserves that identity value
+	// after taking its Session serialization and stores it in both stream
+	// positions with the event's one INSERT, then inserts the change at the
+	// same value; a later revision moves only latest_stream_position. It is the
+	// session-level list cursor. The no-feed Sandbox task notification keeps 0.
 	// Thread-level list paging uses the per-thread sequence column instead.
 	//
-	// UPDATE-WITH: services/bridge and internal/session event
-	// append/delivery paths; internal/eventstream list/cursor reader.
+	// model_tool_call_id and tool_use_event_id are the Tool relation. A Tool
+	// Use or MCP Tool Use carries its model call ID; an ordinary or MCP Tool
+	// Result carries the event ID of the Tool Use it answers; only the
+	// synthetic invalid-tool repair result carries a call ID and no Tool Use.
+	// The single writer of each row derives these columns, its payload and its
+	// projection from one validated fact. session_events_tool_relation_shape
+	// checks presence from scalar columns only: a PostgreSQL JSON field read
+	// fails on every key of a document containing an escaped U+0000.
+	// idx_session_events_model_tool_call_unique is the only Thread-scoped
+	// call-ID admission check; idx_session_events_tool_result_unique admits at
+	// most one result of either kind per Tool Use. Tool Use rows alone must stay
+	// JSONB-storable, because readers still cast their payload and projection.
+	//
+	// UPDATE-WITH: internal/sessioneventwrite and its event append/delivery
+	// callers; internal/eventstream list/cursor reader;
+	// internal/runtimecontrol, services/bridge and services/job-runner Tool
+	// relation writers and readers.
 	createPostgreSQLSessionEventsTable = `CREATE TABLE IF NOT EXISTS session_events (
 		workspace_id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
@@ -337,6 +355,8 @@ const (
 		runtime_write_id TEXT,
 		model_request_id TEXT,
 		projection_json TEXT NOT NULL DEFAULT '{}',
+		model_tool_call_id TEXT,
+		tool_use_event_id TEXT,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		processed_at TIMESTAMPTZ,
@@ -346,10 +366,36 @@ const (
 		CONSTRAINT session_events_attachment_scope_key UNIQUE (workspace_id, session_id, session_thread_id, event_id),
 		FOREIGN KEY (workspace_id, session_id) REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
+		CONSTRAINT session_events_tool_use_event_fkey
+			FOREIGN KEY (workspace_id, session_id, session_thread_id, tool_use_event_id)
+			REFERENCES session_events(workspace_id, session_id, session_thread_id, event_id) ON DELETE CASCADE,
 		CONSTRAINT session_events_revision_shape CHECK (revision > 0),
 		CONSTRAINT session_events_visibility_shape CHECK (visibility IN ('public', 'internal')),
 		CONSTRAINT session_events_latest_stream_position_shape CHECK (latest_stream_position >= 0),
-		CONSTRAINT session_events_insert_stream_position_shape CHECK (insert_stream_position >= 0)
+		CONSTRAINT session_events_insert_stream_position_shape CHECK (insert_stream_position >= 0),
+		CONSTRAINT session_events_tool_relation_shape CHECK (COALESCE(
+			(type IN ('agent.tool_use', 'agent.mcp_tool_use')
+				AND model_tool_call_id IS NOT NULL AND model_tool_call_id <> ''
+				AND tool_use_event_id IS NULL
+				AND session_thread_id IS NOT NULL
+				AND model_request_id IS NOT NULL AND model_request_id <> '')
+			OR (type = 'agent.tool_result'
+				AND ((model_tool_call_id IS NOT NULL AND model_tool_call_id <> '' AND tool_use_event_id IS NULL)
+					OR (model_tool_call_id IS NULL AND tool_use_event_id IS NOT NULL AND tool_use_event_id <> ''))
+				AND session_thread_id IS NOT NULL
+				AND model_request_id IS NOT NULL AND model_request_id <> '')
+			OR (type = 'agent.mcp_tool_result'
+				AND model_tool_call_id IS NULL
+				AND tool_use_event_id IS NOT NULL AND tool_use_event_id <> ''
+				AND session_thread_id IS NOT NULL
+				AND model_request_id IS NOT NULL AND model_request_id <> '')
+			OR (type NOT IN ('agent.tool_use', 'agent.mcp_tool_use', 'agent.tool_result', 'agent.mcp_tool_result')
+				AND model_tool_call_id IS NULL
+				AND tool_use_event_id IS NULL),
+			FALSE)),
+		CONSTRAINT session_events_tool_use_jsonb_storable CHECK (CASE WHEN type IN ('agent.tool_use','agent.mcp_tool_use')
+			THEN payload_json::jsonb IS NOT NULL AND projection_json::jsonb IS NOT NULL
+			ELSE TRUE END)
 	)`
 
 	createPostgreSQLSessionEventStreamChangesTable = `CREATE TABLE IF NOT EXISTS session_event_stream_changes (
@@ -376,7 +422,8 @@ const (
 	//   kind                   projects
 	//   user                   an accepted user-input context message
 	//   assistant              assistant output and tool state (agent.tool_use /
-	//                          agent.tool_result merge into the assistant row)
+	//                          agent.tool_result append parts to the model
+	//                          request's assistant message)
 	//   runtime_notification   an internal, model-visible runtime notice (e.g.
 	//                          background command completion); NOT a public
 	//                          user.message and NOT a second tool result
@@ -387,8 +434,20 @@ const (
 	// Usage, status, request/transport metadata, billing data, and raw
 	// attachment bytes never enter this table.
 	//
+	// content_storage says where a message's parts live. An embedded message
+	// (user, notification, compaction, and an assistant message without a
+	// model request) stores its whole {"parts":[...]} document in data_json.
+	// The assistant message of a model request is a parts-mode header: its
+	// parts are immutable session_message_parts rows, data_json is NULL, and
+	// the header holds only next_part_index (the part count and the next
+	// zero-based index) and the request's admitted reasoning count and bytes.
+	// An append locks the header, inserts the new parts at the next indexes
+	// and advances the counters once; no part is ever rewritten. The
+	// reasoning caps repeat the Bridge per-request budget.
+	//
 	// UPDATE-WITH: services/bridge projection, compaction, and
-	// fork writers and LoadContext.
+	// fork writers and LoadContext; internal/runtimecontrol part append;
+	// services/job-runner Pod-loss repair.
 	createPostgreSQLSessionMessagesTable = `CREATE TABLE IF NOT EXISTS session_messages (
 		workspace_id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
@@ -396,7 +455,11 @@ const (
 		message_id TEXT NOT NULL,
 		sequence BIGINT NOT NULL,
 		kind TEXT NOT NULL,
-		data_json TEXT NOT NULL,
+		content_storage TEXT NOT NULL DEFAULT 'embedded',
+		data_json TEXT,
+		next_part_index BIGINT NOT NULL DEFAULT 0,
+		reasoning_part_count INTEGER NOT NULL DEFAULT 0,
+		reasoning_bytes BIGINT NOT NULL DEFAULT 0,
 		source_event_id TEXT,
 		repair_key TEXT,
 		model_request_id TEXT,
@@ -404,11 +467,63 @@ const (
 		updated_at TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (workspace_id, message_id),
 		UNIQUE (workspace_id, session_id, session_thread_id, sequence),
+		CONSTRAINT session_messages_content_storage_key UNIQUE (workspace_id, session_id, session_thread_id, message_id, content_storage),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
 		CONSTRAINT session_messages_sequence_shape CHECK (sequence > 0),
 		CONSTRAINT session_messages_kind_shape CHECK (kind IN ('user', 'assistant', 'runtime_notification', 'compaction')),
 		CONSTRAINT session_messages_model_request_id_shape CHECK (
 			model_request_id IS NULL OR (kind = 'assistant' AND model_request_id <> '')
+		),
+		CONSTRAINT session_messages_content_storage_shape CHECK (
+			(content_storage = 'parts'
+				AND kind = 'assistant'
+				AND model_request_id IS NOT NULL AND model_request_id <> ''
+				AND data_json IS NULL
+				AND next_part_index > 0
+				AND reasoning_part_count BETWEEN 0 AND 16
+				AND reasoning_bytes BETWEEN 0 AND 2097152
+				AND reasoning_part_count <= next_part_index)
+			OR (content_storage = 'embedded'
+				AND NOT (kind = 'assistant' AND model_request_id IS NOT NULL)
+				AND data_json IS NOT NULL
+				AND next_part_index = 0
+				AND reasoning_part_count = 0
+				AND reasoning_bytes = 0)
+		)
+	)`
+
+	// session_message_parts holds the immutable parts of a parts-mode
+	// assistant message, one row per part at its zero-based index. data_json
+	// is the part exactly as its writer admitted it; readers assemble a
+	// message's parts in index order and never re-serialize them. part_kind
+	// and model_tool_call_id are scalar copies the writer derives from the
+	// same validated part: the identity CHECK reads no JSON, and
+	// idx_session_message_parts_tool_identity makes one call and one result
+	// per model call per message independently queryable. Tool events, not
+	// parts, remain settlement authority. Serving roles may only SELECT and
+	// INSERT; the foreign key binds a part to its message's scope and to
+	// parts mode.
+	//
+	// UPDATE-WITH: internal/runtimecontrol part append; services/bridge
+	// LoadContext and prefix readers; services/job-runner Pod-loss repair.
+	createPostgreSQLSessionMessagePartsTable = `CREATE TABLE IF NOT EXISTS session_message_parts (
+		workspace_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		session_thread_id TEXT NOT NULL,
+		message_id TEXT NOT NULL,
+		content_storage TEXT NOT NULL DEFAULT 'parts' CHECK (content_storage = 'parts'),
+		part_index BIGINT NOT NULL CHECK (part_index >= 0),
+		part_kind TEXT NOT NULL CHECK (part_kind IN ('text', 'reasoning', 'tool_call', 'tool_result')),
+		model_tool_call_id TEXT,
+		data_json TEXT NOT NULL,
+		PRIMARY KEY (workspace_id, message_id, part_index),
+		FOREIGN KEY (workspace_id, session_id, session_thread_id, message_id, content_storage)
+			REFERENCES session_messages(workspace_id, session_id, session_thread_id, message_id, content_storage)
+			ON DELETE CASCADE,
+		CONSTRAINT session_message_parts_identity_shape CHECK (
+			(part_kind IN ('tool_call', 'tool_result')
+				AND model_tool_call_id IS NOT NULL AND model_tool_call_id <> '')
+			OR (part_kind IN ('text', 'reasoning') AND model_tool_call_id IS NULL)
 		)
 	)`
 
@@ -596,13 +711,27 @@ const (
 					AND binding_generation IS NOT NULL AND binding_generation > 0
 					AND target_pod_uid IS NOT NULL AND target_pod_uid <> '')
 			))
+		),
+		mcp_discovery_attempts INTEGER NOT NULL DEFAULT 0,
+		mcp_discovery_deadline_at TIMESTAMPTZ,
+		mcp_discovery_diagnostic TEXT,
+		CONSTRAINT session_runtime_inbox_mcp_discovery_budget_shape CHECK (
+			(mcp_discovery_attempts = 0 AND mcp_discovery_deadline_at IS NULL)
+			OR (mcp_discovery_attempts > 0 AND mcp_discovery_deadline_at IS NOT NULL)
+		),
+		CONSTRAINT session_runtime_inbox_mcp_discovery_diagnostic_shape CHECK (
+			mcp_discovery_diagnostic IS NULL OR mcp_discovery_diagnostic IN (
+				'credential_unavailable', 'discovery_unavailable', 'manifest_invalid', 'internal'
+			)
 		)
 	)`
 
-	// session_event_idempotency_keys stores hashed idempotency state for accepted
-	// event-send responses. It deliberately stores only digests/hashes and
-	// response echo JSON, never raw Idempotency-Key values, auth headers, bearer
-	// tokens, provider credentials, or raw request bodies.
+	// session_event_idempotency_keys stores one receipt per client-supplied
+	// Idempotency-Key: the key's digest, the canonical request hash and the
+	// complete admitted response events a replay returns. It never stores raw
+	// Idempotency-Key values, auth headers, bearer tokens, provider credentials,
+	// or raw request bodies. A request without the header writes no receipt. A
+	// receipt is live for 24 hours after created_at, the database admission time.
 	createPostgreSQLSessionEventIdempotencyKeysTable = `CREATE TABLE IF NOT EXISTS session_event_idempotency_keys (
 		workspace_id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
@@ -611,7 +740,7 @@ const (
 		response_events_json TEXT NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
-		UNIQUE (workspace_id, session_id, idempotency_key_digest),
+		PRIMARY KEY (workspace_id, session_id, idempotency_key_digest),
 		FOREIGN KEY (workspace_id, session_id) REFERENCES sessions(workspace_id, id) ON DELETE CASCADE
 	)`
 
@@ -628,9 +757,11 @@ const (
 		agent_runtime_pod_name TEXT NOT NULL,
 		agent_runtime_pod_uid TEXT NOT NULL,
 		agent_runtime_pod_ip TEXT NOT NULL,
+		runtime_process_id TEXT NOT NULL CHECK (runtime_process_id <> ''),
 		bound_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (workspace_id, session_id),
+		FOREIGN KEY (agent_runtime_namespace, agent_runtime_pod_uid, runtime_process_id) REFERENCES runtime_processes(namespace, pod_uid, runtime_process_id),
 		FOREIGN KEY (workspace_id, session_id) REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
 		CONSTRAINT session_runtime_bindings_binding_id_shape CHECK (binding_id <> ''),
 		CONSTRAINT session_runtime_bindings_generation_shape CHECK (
@@ -1125,10 +1256,12 @@ const (
 		status TEXT NOT NULL,
 		payload_json TEXT NOT NULL,
 		priority INTEGER NOT NULL DEFAULT 0,
+		negative_priority BIGINT GENERATED ALWAYS AS (-(priority::bigint)) STORED,
 		lease_token TEXT,
 		leased_by TEXT,
 		leased_at TIMESTAMPTZ,
 		leased_until TIMESTAMPTZ,
+		lease_previous_attempt_count INTEGER,
 		attempt_count INTEGER NOT NULL DEFAULT 0,
 		defer_count INTEGER NOT NULL DEFAULT 0,
 		max_attempts INTEGER NOT NULL DEFAULT 10,
@@ -1159,6 +1292,11 @@ const (
 		CONSTRAINT queue_jobs_lease_shape CHECK (
 			(status = 'leased' AND lease_token IS NOT NULL AND leased_by IS NOT NULL AND leased_at IS NOT NULL AND leased_until IS NOT NULL)
 			OR (status <> 'leased')
+		),
+		CONSTRAINT queue_jobs_lease_previous_attempt_count_shape CHECK (lease_previous_attempt_count >= 0),
+		CONSTRAINT queue_jobs_lease_previous_attempt_custody_shape CHECK (
+			lease_previous_attempt_count IS NULL
+			OR (status = 'leased' AND kind IN ('runtime_input', 'runtime_recovery', 'runtime_config_update', 'cleanup_session', 'session_delete_cleanup'))
 		)
 	)`
 
@@ -1253,6 +1391,12 @@ const (
 		),
 		CONSTRAINT session_github_repository_authorization_token_required CHECK (
 			authorization_token_encrypted IS NOT NULL
+		),
+		git_identity_name TEXT,
+		git_identity_email TEXT,
+		CONSTRAINT session_github_repository_git_identity_shape CHECK (
+			(git_identity_name IS NULL AND git_identity_email IS NULL)
+			OR (git_identity_name IS NOT NULL AND git_identity_name <> '' AND git_identity_email IS NOT NULL AND git_identity_email <> '')
 		)
 	)`
 
@@ -1351,7 +1495,22 @@ const (
 			(status = 'building' AND lease_job_id IS NOT NULL AND lease_token IS NOT NULL AND lease_attempt_count > 0)
 			OR (status <> 'building' AND lease_job_id IS NULL AND lease_token IS NULL AND lease_attempt_count IS NULL)
 		),
-		CONSTRAINT environment_artifacts_provider_shape CHECK (provider = 'daytona')
+		CONSTRAINT environment_artifacts_provider_shape CHECK (provider = 'daytona'),
+		build_started_at TIMESTAMPTZ,
+		build_warn_at TIMESTAMPTZ,
+		build_deadline_at TIMESTAMPTZ,
+		build_warned_at TIMESTAMPTZ,
+		provider_build_ref TEXT,
+		provider_build_state TEXT,
+		CONSTRAINT environment_artifacts_build_timing_shape CHECK (
+			(build_started_at IS NULL AND build_warn_at IS NULL AND build_deadline_at IS NULL AND build_warned_at IS NULL)
+			OR (build_started_at IS NOT NULL AND build_warn_at IS NOT NULL AND build_deadline_at IS NOT NULL
+				AND build_warn_at > build_started_at AND build_deadline_at > build_warn_at)
+		),
+		CONSTRAINT environment_artifacts_build_ref_shape CHECK (length(provider_build_ref) BETWEEN 1 AND 128),
+		CONSTRAINT environment_artifacts_build_state_shape CHECK (
+			provider_build_state IN ('awaiting_visibility', 'pending', 'building', 'pulling', 'active', 'error', 'build_failed')
+		)
 	)`
 
 	//nolint:gosec // Schema credential identity constraint, not a secret value.
@@ -1569,11 +1728,13 @@ END $$`
 		created_api_key_id TEXT,
 		created_session_id TEXT,
 		created_user_id TEXT,
+		created_service_id TEXT,
 		redacted_at TIMESTAMPTZ,
 		redacted_actor_type TEXT,
 		redacted_api_key_id TEXT,
 		redacted_session_id TEXT,
 		redacted_user_id TEXT,
+		redacted_service_id TEXT,
 		PRIMARY KEY (memory_version_id),
 		UNIQUE (workspace_id, memory_store_id, memory_id, memory_version_id),
 		FOREIGN KEY (workspace_id, memory_store_id, memory_id) REFERENCES memories(workspace_id, memory_store_id, memory_id) ON DELETE CASCADE,
@@ -1581,16 +1742,18 @@ END $$`
 		FOREIGN KEY (workspace_id, redacted_api_key_id) REFERENCES api_keys(workspace_id, id),
 		CONSTRAINT memory_versions_operation_shape CHECK (operation IN ('created', 'modified', 'deleted')),
 		CONSTRAINT memory_versions_created_actor_shape CHECK (
-			(created_actor_type = 'api_actor' AND created_api_key_id IS NOT NULL AND created_session_id IS NULL AND created_user_id IS NULL)
-			OR (created_actor_type = 'session_actor' AND created_api_key_id IS NULL AND created_session_id IS NOT NULL AND created_user_id IS NULL)
-			OR (created_actor_type = 'user_actor' AND created_api_key_id IS NULL AND created_session_id IS NULL AND created_user_id IS NOT NULL)
+			(created_actor_type = 'api_actor' AND created_api_key_id IS NOT NULL AND created_session_id IS NULL AND created_user_id IS NULL AND created_service_id IS NULL)
+			OR (created_actor_type = 'session_actor' AND created_api_key_id IS NULL AND created_session_id IS NOT NULL AND created_user_id IS NULL AND created_service_id IS NULL)
+			OR (created_actor_type = 'service_actor' AND created_api_key_id IS NULL AND created_session_id IS NULL AND created_user_id IS NULL AND created_service_id IS NOT NULL)
+			OR (created_actor_type = 'user_actor' AND created_api_key_id IS NULL AND created_session_id IS NULL AND created_user_id IS NOT NULL AND created_service_id IS NULL)
 		),
-		CONSTRAINT memory_versions_redacted_actor_shape CHECK (
-			(redacted_at IS NULL AND redacted_actor_type IS NULL AND redacted_api_key_id IS NULL AND redacted_session_id IS NULL AND redacted_user_id IS NULL)
-			OR (redacted_at IS NOT NULL AND redacted_actor_type = 'api_actor' AND redacted_api_key_id IS NOT NULL AND redacted_session_id IS NULL AND redacted_user_id IS NULL)
-			OR (redacted_at IS NOT NULL AND redacted_actor_type = 'session_actor' AND redacted_api_key_id IS NULL AND redacted_session_id IS NOT NULL AND redacted_user_id IS NULL)
-			OR (redacted_at IS NOT NULL AND redacted_actor_type = 'user_actor' AND redacted_api_key_id IS NULL AND redacted_session_id IS NULL AND redacted_user_id IS NOT NULL)
-		),
+		CONSTRAINT memory_versions_redacted_actor_shape CHECK ((
+			(redacted_at IS NULL AND redacted_actor_type IS NULL AND redacted_api_key_id IS NULL AND redacted_session_id IS NULL AND redacted_user_id IS NULL AND redacted_service_id IS NULL)
+			OR (redacted_at IS NOT NULL AND redacted_actor_type = 'api_actor' AND redacted_api_key_id IS NOT NULL AND redacted_session_id IS NULL AND redacted_user_id IS NULL AND redacted_service_id IS NULL)
+			OR (redacted_at IS NOT NULL AND redacted_actor_type = 'session_actor' AND redacted_api_key_id IS NULL AND redacted_session_id IS NOT NULL AND redacted_user_id IS NULL AND redacted_service_id IS NULL)
+			OR (redacted_at IS NOT NULL AND redacted_actor_type = 'service_actor' AND redacted_api_key_id IS NULL AND redacted_session_id IS NULL AND redacted_user_id IS NULL AND redacted_service_id IS NOT NULL)
+			OR (redacted_at IS NOT NULL AND redacted_actor_type = 'user_actor' AND redacted_api_key_id IS NULL AND redacted_session_id IS NULL AND redacted_user_id IS NOT NULL AND redacted_service_id IS NULL)
+		) IS TRUE),
 		CONSTRAINT memory_versions_payload_shape CHECK (
 			(
 				redacted_at IS NOT NULL
@@ -1637,6 +1800,11 @@ END $$`
 	// (workspace_id) WHERE key_kind = 'bootstrap' enforces the
 	// "exactly one bootstrap key per workspace" invariant without
 	// blocking multiple standard keys.
+	//
+	// `last_used_at` is Auth's asynchronous, approximate usage sample. A
+	// trigger in postgresql_auth_schema.go advances `usage_generation` on
+	// every digest or revocation change, so a delayed sample of earlier
+	// credential material cannot update a later instance of the key.
 	createPostgreSQLApiKeysTable = `CREATE TABLE IF NOT EXISTS api_keys (
 		storage_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
 		id TEXT NOT NULL,
@@ -1646,9 +1814,29 @@ END $$`
 		key_prefix TEXT NOT NULL,
 		key_digest BYTEA NOT NULL UNIQUE,
 		key_kind TEXT NOT NULL CHECK (key_kind IN ('bootstrap','standard')),
+		authority_kind TEXT NOT NULL CHECK(authority_kind IN ('independent_key','identity_grant')),
+		federation_rule_id TEXT REFERENCES auth_federation_rules(id),
+		identity_id TEXT REFERENCES auth_identities(id),
+		grant_id TEXT,
+		rule_revision BIGINT,
+		identity_revision BIGINT,
+		grant_revision BIGINT,
+		role_version BIGINT,
+		issuance_operations JSONB,
+		parent_credential_id TEXT,
+		expires_at TIMESTAMPTZ,
+		FOREIGN KEY(workspace_id,grant_id) REFERENCES auth_workspace_grants(workspace_id,id),
+		CHECK(((authority_kind='independent_key' AND federation_rule_id IS NULL AND identity_id IS NULL
+		 AND grant_id IS NULL AND rule_revision IS NULL AND identity_revision IS NULL AND grant_revision IS NULL
+		 AND role_version IS NULL AND issuance_operations IS NULL AND parent_credential_id IS NULL)
+		 OR (authority_kind='identity_grant' AND federation_rule_id IS NOT NULL AND identity_id IS NOT NULL
+		 AND grant_id IS NOT NULL AND rule_revision>0 AND identity_revision>0 AND grant_revision>0 AND role_version>0
+		 AND jsonb_typeof(issuance_operations)='array' AND jsonb_array_length(issuance_operations)>0
+		 AND parent_credential_id IS NOT NULL)) IS TRUE),
 		created_at TIMESTAMPTZ NOT NULL,
 		last_used_at TIMESTAMPTZ,
 		revoked_at TIMESTAMPTZ,
+		usage_generation BIGINT NOT NULL DEFAULT 1 CHECK (usage_generation > 0),
 		PRIMARY KEY (id),
 		UNIQUE (workspace_id, id)
 	)`
@@ -1671,18 +1859,18 @@ END $$`
 	createPostgreSQLSessionEventsSessionSequenceIndex       = `CREATE INDEX IF NOT EXISTS idx_session_events_session_sequence ON session_events(workspace_id, session_id, sequence)`
 	createPostgreSQLSessionEventsInsertStreamPositionIndex  = `CREATE INDEX IF NOT EXISTS idx_session_events_insert_stream_position ON session_events(workspace_id, session_id, insert_stream_position)`
 	createPostgreSQLSessionEventsPendingClientIndex         = `CREATE INDEX IF NOT EXISTS idx_session_events_pending_client ON session_events(workspace_id, session_id, sequence) WHERE processed_at IS NULL`
-	createPostgreSQLSessionEventsThreadSequenceIndex        = `CREATE INDEX IF NOT EXISTS idx_session_events_thread_sequence ON session_events(workspace_id, session_id, session_thread_id, sequence)`
 	createPostgreSQLSessionEventsThreadTypeSequenceIndex    = `CREATE INDEX IF NOT EXISTS idx_session_events_thread_type_sequence ON session_events(workspace_id, session_id, session_thread_id, type, sequence)`
 	createPostgreSQLSessionEventsThreadRequestTypeIndex     = `CREATE INDEX IF NOT EXISTS idx_session_events_thread_request_type ON session_events(workspace_id, session_id, session_thread_id, model_request_id, type, sequence) WHERE model_request_id IS NOT NULL`
 	createPostgreSQLSessionEventsThreadRunningIndex         = `CREATE INDEX IF NOT EXISTS idx_session_events_thread_running_sequence ON session_events(workspace_id, session_id, session_thread_id, sequence) WHERE type IN ('session.status_running', 'session.thread_status_running')`
 	createPostgreSQLSessionEventsThreadCloseIndex           = `CREATE INDEX IF NOT EXISTS idx_session_events_thread_close_sequence ON session_events(workspace_id, session_id, session_thread_id, sequence) WHERE type IN ('session.status_idle', 'session.thread_status_idle', 'session.status_terminated', 'session.thread_status_terminated')`
-	createPostgreSQLSessionEventStreamChangesIndex          = `CREATE INDEX IF NOT EXISTS idx_session_event_stream_changes_session ON session_event_stream_changes(workspace_id, session_id, stream_position)`
+	createPostgreSQLSessionEventsModelToolCallUniqueIndex   = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_events_model_tool_call_unique ON session_events(workspace_id, session_id, session_thread_id, model_tool_call_id) WHERE model_tool_call_id IS NOT NULL`
+	createPostgreSQLSessionEventsToolResultUniqueIndex      = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_events_tool_result_unique ON session_events(workspace_id, session_id, session_thread_id, tool_use_event_id) WHERE tool_use_event_id IS NOT NULL`
 	createPostgreSQLSessionMessagesKindSeqIndex             = `CREATE INDEX IF NOT EXISTS idx_session_messages_kind_seq ON session_messages(workspace_id, session_id, session_thread_id, kind, sequence)`
-	createPostgreSQLSessionMessagesSeqIndex                 = `CREATE INDEX IF NOT EXISTS idx_session_messages_seq ON session_messages(workspace_id, session_id, session_thread_id, sequence)`
 	createPostgreSQLSessionMessagesSourceEventIndex         = `CREATE INDEX IF NOT EXISTS idx_session_messages_source_event ON session_messages(workspace_id, source_event_id)`
 	createPostgreSQLSessionMessagesSourceEventUniqueIndex   = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_source_event_unique ON session_messages(workspace_id, session_id, session_thread_id, source_event_id) WHERE source_event_id IS NOT NULL`
 	createPostgreSQLSessionMessagesRepairKeyIndex           = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_repair_key_unique ON session_messages(workspace_id, session_id, session_thread_id, repair_key) WHERE repair_key IS NOT NULL`
 	createPostgreSQLSessionMessagesModelRequestIndex        = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_model_request_unique ON session_messages(workspace_id, session_id, session_thread_id, model_request_id) WHERE model_request_id IS NOT NULL`
+	createPostgreSQLSessionMessagePartsToolIdentityIndex    = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_message_parts_tool_identity ON session_message_parts(workspace_id, message_id, part_kind, model_tool_call_id) WHERE model_tool_call_id IS NOT NULL`
 	createPostgreSQLSessionEventsPendingMediaIndex          = `CREATE INDEX IF NOT EXISTS session_events_pending_media_lookup ON session_events(workspace_id, session_id, session_thread_id, sequence, event_id) WHERE type = 'user.message' AND payload_json::jsonb @? '$.content[*] ? (@.type == "image" || @.type == "document")'`
 	createPostgreSQLSessionFileAttachmentPendingIndex       = `CREATE INDEX IF NOT EXISTS session_file_attachment_consumptions_pending_lookup ON session_file_attachment_consumptions(workspace_id, session_id, session_thread_id, source_event_id, file_id)`
 	createPostgreSQLSessionRuntimeInboxAttachmentIndex      = `CREATE INDEX IF NOT EXISTS session_runtime_inbox_attachment_authority_lookup ON session_runtime_inbox(workspace_id, session_id, session_thread_id, runtime_input_id) INCLUDE (input_kind, status)`
@@ -1690,7 +1878,6 @@ END $$`
 	createPostgreSQLPendingToolUsesStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_pending_tool_uses_status ON session_pending_tool_uses(workspace_id, session_id, session_thread_id, status)`
 	createPostgreSQLBackgroundTasksStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_background_tasks_status ON session_background_tasks(workspace_id, session_id, status, updated_at)`
 	createPostgreSQLSessionMCPManifestsGenerationIndex      = `CREATE INDEX IF NOT EXISTS idx_session_mcp_manifests_session_generation ON session_mcp_manifests(workspace_id, session_id, manifest_generation)`
-	createPostgreSQLRuntimeStatusCleanupDueIndex            = `CREATE INDEX IF NOT EXISTS idx_session_runtime_status_cleanup_due ON session_runtime_status(workspace_id, cleanup_after, cleanup_job_id) WHERE status = 'idle' AND binding_id IS NOT NULL`
 	createPostgreSQLBridgeOperationsRuntimeWriteIndex       = `CREATE INDEX IF NOT EXISTS idx_session_bridge_operations_runtime_write ON session_bridge_operations(workspace_id, session_id, runtime_write_id) WHERE runtime_write_id IS NOT NULL`
 	createPostgreSQLRuntimeToolResultsKindIndex             = `CREATE INDEX IF NOT EXISTS idx_session_runtime_tool_results_kind ON session_runtime_tool_results(workspace_id, session_id, tool_kind, updated_at)`
 	createPostgreSQLSessionResourcePrefixGCDueIndex         = `CREATE INDEX IF NOT EXISTS idx_session_resource_prefix_gc_due ON session_resource_prefix_gc(workspace_id, next_attempt_at, created_at) WHERE status IN ('pending', 'retryable_failed')`
@@ -1760,6 +1947,17 @@ END $$`
 
 )
 
+// Direct Job Runner discovery indexes, restricted to pending rows of the five
+// Job Runner kinds: tenant seeks and per-tenant raw windows ordered by the scan
+// key, and the next-future-job seek. The scan key leads with the stored
+// negative_priority column rather than an expression: unary minus is not
+// leakproof, so under row-level security a range bound on the expression would
+// run as a filter after the policy instead of an index condition.
+const (
+	createPostgreSQLQueueJobsJobRunnerScanIndex = `CREATE INDEX IF NOT EXISTS idx_queue_job_runner_scan ON queue_jobs(workspace_id, negative_priority, available_at, partition_key, queue_partition_sequence, id) WHERE status = 'pending' AND kind IN ('runtime_input', 'runtime_recovery', 'runtime_config_update', 'cleanup_session', 'session_delete_cleanup')`
+	createPostgreSQLQueueJobsJobRunnerDueIndex  = `CREATE INDEX IF NOT EXISTS idx_queue_job_runner_due ON queue_jobs(available_at, id) WHERE status = 'pending' AND kind IN ('runtime_input', 'runtime_recovery', 'runtime_config_update', 'cleanup_session', 'session_delete_cleanup')`
+)
+
 // postgresqlContract enumerates the workspace-owned tables on which Engine's
 // runtime traffic must be subject to RLS. Each table is enabled with
 // FORCE ROW LEVEL SECURITY so even the table owner is subject to RLS
@@ -1807,9 +2005,8 @@ func executePostgreSQLSchemaSteps(ctx context.Context, executor postgresqlSchema
 	return nil
 }
 
-// postgresqlBaselineSteps is the single ordered payload owned by migration
-// version 1, already applied by Alpha 1 installations. Keep its SQL bytes
-// immutable; later schema changes belong in new migration versions.
+// postgresqlBaselineSteps is the sole fresh schema payload. Initialization
+// rejects predecessor history and nonempty unregistered schemas before DDL.
 func postgresqlBaselineSteps() []postgresqlSchemaStep {
 	steps := []postgresqlSchemaStep{
 		// Tables. Order follows foreign-key ownership: workspaces before
@@ -1817,6 +2014,9 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		// before sessions, files/memory stores before Session resource details,
 		// and vaults before credentials.
 		{"create_workspaces", createPostgreSQLWorkspacesTable},
+	}
+	steps = append(steps, postgresqlAuthTableSteps()...)
+	steps = append(steps, []postgresqlSchemaStep{
 		{"create_environments", createPostgreSQLEnvironmentsTable},
 		{"create_environment_artifacts", createPostgreSQLEnvironmentArtifactsTable},
 		{"create_agents", createPostgreSQLAgentsTable},
@@ -1836,7 +2036,9 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"create_session_events", createPostgreSQLSessionEventsTable},
 		{"create_session_event_stream_changes", createPostgreSQLSessionEventStreamChangesTable},
 		{"create_session_event_idempotency_keys", createPostgreSQLSessionEventIdempotencyKeysTable},
+		{"create_session_event_feed_retention", createPostgreSQLSessionEventFeedRetentionTable},
 		{"create_session_messages", createPostgreSQLSessionMessagesTable},
+		{"create_session_message_parts", createPostgreSQLSessionMessagePartsTable},
 		{"create_session_file_attachment_consumptions", createPostgreSQLSessionFileAttachmentConsumptionsTable},
 		{"create_session_thread_context_prefixes", createPostgreSQLSessionThreadContextPrefixesTable},
 		{"create_session_turn_retries", createPostgreSQLSessionTurnRetriesTable},
@@ -1844,7 +2046,17 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"create_session_background_tasks", createPostgreSQLSessionBackgroundTasksTable},
 		{"create_session_runtime_inbox", createPostgreSQLSessionRuntimeInboxTable},
 		{"create_session_runtime_binding_generation_sequence", createPostgreSQLSessionRuntimeBindingGenerationSequence},
+		{"create_runtime_process_pods", createPostgreSQLRuntimeProcessPodsTable},
+		{"create_runtime_processes", createPostgreSQLRuntimeProcessesTable},
+		{"index_runtime_processes_current", createPostgreSQLRuntimeProcessesCurrentIndex},
+		{"create_runtime_process_liveness", createPostgreSQLRuntimeProcessLivenessTable},
+		{"create_runtime_process_lock", createPostgreSQLRuntimeProcessLockFunction},
+		{"revoke_runtime_process_lock_public", revokePostgreSQLRuntimeProcessLockPublic},
+		{"create_runtime_process_liveness_lock", createPostgreSQLRuntimeProcessLivenessLockFunction},
+		{"revoke_runtime_process_liveness_lock_public", revokePostgreSQLRuntimeProcessLivenessLockPublic},
 		{"create_session_runtime_bindings", createPostgreSQLSessionRuntimeBindingsTable},
+		{"create_session_runtime_handoffs", createPostgreSQLSessionRuntimeHandoffsTable},
+		{"create_session_runtime_handoff_threads", createPostgreSQLSessionRuntimeHandoffThreadsTable},
 		{"create_session_mcp_manifests", createPostgreSQLSessionMCPManifestsTable},
 		{"create_session_runtime_status", createPostgreSQLSessionRuntimeStatusTable},
 		{"create_session_bridge_operations", createPostgreSQLSessionBridgeOperationsTable},
@@ -1867,7 +2079,9 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"create_platform_provider_keys", createPostgreSQLPlatformProviderKeysTable},
 		{"create_queue_partition_counters", createPostgreSQLQueuePartitionCountersTable},
 		{"create_queue_jobs", createPostgreSQLQueueJobsTable},
-
+	}...)
+	steps = append(steps, postgresqlCleanupScheduleTableSteps()...)
+	steps = append(steps, []postgresqlSchemaStep{
 		// Current-state trigger that fills the immutable Agent version reference
 		// for Session rows created through the public API.
 		{"create_sessions_agent_version_id_function", createPostgreSQLSessionsAgentVersionIDFunction},
@@ -1888,26 +2102,27 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_session_events_session_sequence", createPostgreSQLSessionEventsSessionSequenceIndex},
 		{"index_session_events_insert_stream_position", createPostgreSQLSessionEventsInsertStreamPositionIndex},
 		{"index_session_events_pending_client", createPostgreSQLSessionEventsPendingClientIndex},
-		{"index_session_events_thread_sequence", createPostgreSQLSessionEventsThreadSequenceIndex},
 		{"index_session_events_thread_type_sequence", createPostgreSQLSessionEventsThreadTypeSequenceIndex},
 		{"index_session_events_thread_request_type", createPostgreSQLSessionEventsThreadRequestTypeIndex},
 		{"index_session_events_thread_running_sequence", createPostgreSQLSessionEventsThreadRunningIndex},
 		{"index_session_events_thread_close_sequence", createPostgreSQLSessionEventsThreadCloseIndex},
-		{"index_session_event_stream_changes_session", createPostgreSQLSessionEventStreamChangesIndex},
+		{"index_session_events_model_tool_call_unique", createPostgreSQLSessionEventsModelToolCallUniqueIndex},
+		{"index_session_events_tool_result_unique", createPostgreSQLSessionEventsToolResultUniqueIndex},
 		{"index_session_messages_kind_seq", createPostgreSQLSessionMessagesKindSeqIndex},
-		{"index_session_messages_seq", createPostgreSQLSessionMessagesSeqIndex},
 		{"index_session_messages_source_event", createPostgreSQLSessionMessagesSourceEventIndex},
 		{"index_session_messages_source_event_unique", createPostgreSQLSessionMessagesSourceEventUniqueIndex},
 		{"index_session_messages_repair_key", createPostgreSQLSessionMessagesRepairKeyIndex},
 		{"index_session_messages_model_request_unique", createPostgreSQLSessionMessagesModelRequestIndex},
+		{"index_session_message_parts_tool_identity", createPostgreSQLSessionMessagePartsToolIdentityIndex},
 		{"index_session_events_pending_media", createPostgreSQLSessionEventsPendingMediaIndex},
 		{"index_session_file_attachment_consumptions_pending", createPostgreSQLSessionFileAttachmentPendingIndex},
 		{"index_session_runtime_inbox_attachment_authority", createPostgreSQLSessionRuntimeInboxAttachmentIndex},
+		{"index_session_runtime_inbox_accepted_binding", createPostgreSQLSessionRuntimeInboxAcceptedBindingIndex},
 		{"index_session_events_agent_mail_delivery", createPostgreSQLSessionEventsAgentMailDeliveryIndex},
 		{"index_session_pending_tool_uses_status", createPostgreSQLPendingToolUsesStatusIndex},
 		{"index_session_background_tasks_status", createPostgreSQLBackgroundTasksStatusIndex},
 		{"index_session_mcp_manifests_generation", createPostgreSQLSessionMCPManifestsGenerationIndex},
-		{"index_session_runtime_status_cleanup_due", createPostgreSQLRuntimeStatusCleanupDueIndex},
+		{"index_session_runtime_status_cleanup_global_due", createPostgreSQLRuntimeStatusCleanupGlobalDueIndex},
 		{"index_session_bridge_operations_runtime_write", createPostgreSQLBridgeOperationsRuntimeWriteIndex},
 		{"index_session_runtime_tool_results_kind", createPostgreSQLRuntimeToolResultsKindIndex},
 		{"index_session_output_captures_session", createPostgreSQLSessionOutputCapturesIndex},
@@ -1923,6 +2138,8 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_queue_jobs_leased_session", createPostgreSQLQueueJobsLeasedSessionIndex},
 		{"index_queue_jobs_partition_sequence", createPostgreSQLQueueJobsPartitionSequenceIndex},
 		{"index_queue_jobs_available", createPostgreSQLQueueJobsAvailableIndex},
+		{"index_queue_job_runner_scan", createPostgreSQLQueueJobsJobRunnerScanIndex},
+		{"index_queue_job_runner_due", createPostgreSQLQueueJobsJobRunnerDueIndex},
 		{"index_queue_jobs_sandbox_terminal_retention", createPostgreSQLQueueJobsSandboxTerminalRetentionIndex},
 		{"index_queue_jobs_sandbox_session_cleanup", createPostgreSQLQueueJobsSandboxSessionCleanupIndex},
 		{"index_session_resources_session_seq", createPostgreSQLSessionResourcesSessionSeqIndex},
@@ -1951,7 +2168,8 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_memory_versions_memory", createPostgreSQLMemoryVersionsMemoryIndex},
 		{"index_memory_versions_operation", createPostgreSQLMemoryVersionsOperationIndex},
 		{"index_memory_versions_api_key", createPostgreSQLMemoryVersionsAPIKeyIndex},
-	}
+	}...)
+	steps = append(steps, postgresqlRetentionIndexSteps()...)
 
 	// RLS: enable + force on every workspace-owned table, then
 	// (re)create the workspace_isolation policy. Each ALTER TABLE is
@@ -1981,42 +2199,39 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		)
 	}
 
-	// Attachment-consumption rows are append-only accounting: Runtime may
-	// read and insert rows in its workspace, but no serving path may update or
-	// delete them.
-	steps = append(steps,
-		postgresqlSchemaStep{name: "rls_enable_session_file_attachment_consumptions", ddl: `ALTER TABLE session_file_attachment_consumptions ENABLE ROW LEVEL SECURITY`},
-		postgresqlSchemaStep{name: "rls_force_session_file_attachment_consumptions", ddl: `ALTER TABLE session_file_attachment_consumptions FORCE ROW LEVEL SECURITY`},
-		postgresqlSchemaStep{name: "rls_policy_workspace_select_session_file_attachment_consumptions_drop", ddl: `DROP POLICY IF EXISTS workspace_select ON session_file_attachment_consumptions`},
-		postgresqlSchemaStep{name: "rls_policy_workspace_insert_session_file_attachment_consumptions_drop", ddl: `DROP POLICY IF EXISTS workspace_insert ON session_file_attachment_consumptions`},
-		postgresqlSchemaStep{name: "rls_policy_workspace_select_session_file_attachment_consumptions", ddl: `CREATE POLICY workspace_select ON session_file_attachment_consumptions
+	// Append-only workspace tables (attachment-consumption accounting and
+	// assistant message parts): serving roles may read and insert rows in
+	// their workspace, but no policy admits an update or delete.
+	for _, table := range postgresqlContract.AppendOnlyWorkspaceTables {
+		quoted := quoteIdentifier(table)
+		steps = append(steps,
+			postgresqlSchemaStep{name: "rls_enable_" + table, ddl: fmt.Sprintf("ALTER TABLE %s ENABLE ROW LEVEL SECURITY", quoted)},
+			postgresqlSchemaStep{name: "rls_force_" + table, ddl: fmt.Sprintf("ALTER TABLE %s FORCE ROW LEVEL SECURITY", quoted)},
+			postgresqlSchemaStep{name: "rls_policy_workspace_select_" + table + "_drop", ddl: fmt.Sprintf("DROP POLICY IF EXISTS workspace_select ON %s", quoted)},
+			postgresqlSchemaStep{name: "rls_policy_workspace_insert_" + table + "_drop", ddl: fmt.Sprintf("DROP POLICY IF EXISTS workspace_insert ON %s", quoted)},
+			postgresqlSchemaStep{name: "rls_policy_workspace_select_" + table, ddl: fmt.Sprintf(`CREATE POLICY workspace_select ON %s
 		FOR SELECT
-		USING (workspace_id = current_setting('tetral.workspace_id', true))`},
-		postgresqlSchemaStep{name: "rls_policy_workspace_insert_session_file_attachment_consumptions", ddl: `CREATE POLICY workspace_insert ON session_file_attachment_consumptions
+		USING (workspace_id = current_setting('tetral.workspace_id', true))`, quoted)},
+			postgresqlSchemaStep{name: "rls_policy_workspace_insert_" + table, ddl: fmt.Sprintf(`CREATE POLICY workspace_insert ON %s
 		FOR INSERT
-		WITH CHECK (workspace_id = current_setting('tetral.workspace_id', true))`},
-	)
+		WITH CHECK (workspace_id = current_setting('tetral.workspace_id', true))`, quoted)},
+		)
+	}
 
-	// Narrow auth-lookup policy on api_keys: when
-	// `tetral.auth_lookup` is set to 'true' for the current
-	// transaction, SELECTs see every workspace's api_keys row. Used
-	// solely by the pre-workspace authentication lookup that resolves
-	// x-api-key → workspace_id. Every other access path leaves the
-	// setting unset and falls through to workspace_isolation. The
-	// policy is FOR SELECT only, so an auth-lookup transaction cannot
-	// insert/update/delete api_keys rows even by accident.
-	steps = append(steps,
-		postgresqlSchemaStep{
-			name: "rls_policy_auth_lookup_drop",
-			ddl:  "DROP POLICY IF EXISTS auth_lookup ON api_keys",
-		},
-		postgresqlSchemaStep{
-			name: "rls_policy_auth_lookup",
-			ddl: `CREATE POLICY auth_lookup ON api_keys
-			FOR SELECT
-			USING (current_setting('tetral.auth_lookup', true) = 'true')`,
-		},
-	)
+	// Only a fixed SECURITY DEFINER function executing as the actual table
+	// owner can use this path. A serving caller setting the same GUC gains
+	// neither global reads nor writes after the function returns.
+	for _, table := range []string{"api_keys", "auth_workspace_grants", "auth_access_tokens"} {
+		predicate := fmt.Sprintf("current_setting('tetral.auth_lookup', true) = 'true' AND current_user = (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'public.%s'::regclass)", table)
+		steps = append(steps,
+			postgresqlSchemaStep{name: "rls_policy_auth_lookup_drop_" + table, ddl: "DROP POLICY IF EXISTS auth_lookup ON " + table},
+			postgresqlSchemaStep{name: "rls_policy_auth_lookup_" + table, ddl: fmt.Sprintf("CREATE POLICY auth_lookup ON %s FOR ALL USING (%s) WITH CHECK (%s)", table, predicate, predicate)},
+		)
+	}
+	steps = append(steps, postgresqlAuthFunctionSteps()...)
+	steps = append(steps, postgresqlJobRunnerDiscoverySteps()...)
+	steps = append(steps, postgresqlCleanupDiscoverySteps()...)
+	steps = append(steps, postgresqlRetentionMaintenanceSteps()...)
 
 	// Narrow git-ticket lookup policy on session_git_tickets: the git
 	// proxy validates a capability ticket before it knows the workspace.

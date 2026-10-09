@@ -2,10 +2,10 @@ package internalgrpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -39,13 +39,26 @@ type Config struct {
 	Register              func(*grpc.Server)
 	OnServing             func()
 	ShutdownTimeout       time.Duration
-	Logger                *slog.Logger
-	Metrics               *workload.GRPCMetrics
-	ServerOptions         []grpc.ServerOption
+	// CancelJoinTimeout reports a forced-cancellation overrun. Run still joins
+	// handlers before returning so callers can safely close their dependencies.
+	CancelJoinTimeout time.Duration
+	Logger            *slog.Logger
+	Metrics           *workload.GRPCMetrics
+	ServerOptions     []grpc.ServerOption
 }
 
+// ErrCancelJoinTimeout reports a forced drain that joined after its budget.
+var ErrCancelJoinTimeout = errors.New("internal grpc cancellation join exceeded its budget")
+
 func Run(ctx context.Context, cfg Config) error {
-	server, listener, healthServer, err := buildServer(cfg)
+	if cfg.Logger == nil {
+		cfg.Logger = workload.ComponentLogger(cfg.ServiceName)
+	}
+	server, healthServer, err := buildServer(cfg)
+	if err != nil {
+		return err
+	}
+	listener, err := listenerFor(cfg)
 	if err != nil {
 		return err
 	}
@@ -64,10 +77,12 @@ func Run(ctx context.Context, cfg Config) error {
 	}()
 	select {
 	case <-ctx.Done():
+		workload.BeginProcessShutdown(ctx)
 		// Report NOT_SERVING before GracefulStop begins so health watchers and the
 		// readiness layer observe the drain honestly: GracefulStop keeps accepting the
 		// already-open Watch streams, so a stale SERVING status would otherwise linger
 		// for the entire drain window.
+		drainStarted := time.Now()
 		healthServer.SetServingStatus("", healthv1.HealthCheckResponse_NOT_SERVING)
 		stopped := make(chan struct{})
 		go func() {
@@ -80,40 +95,87 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 		timer := time.NewTimer(timeout)
 		defer timer.Stop()
+		var joinErr error
 		select {
 		case <-stopped:
+			if cfg.Metrics != nil {
+				cfg.Metrics.Operations.ObserveShutdown(cfg.Logger, "shutdown_grpc_drain", "success", time.Since(drainStarted))
+			}
 		case <-timer.C:
-			server.Stop()
+			if cfg.Metrics != nil {
+				cfg.Metrics.Operations.ObserveShutdown(cfg.Logger, "shutdown_grpc_drain", "timeout", time.Since(drainStarted))
+			}
+			joinErr = forceStopAndJoin(server, cfg)
 		}
-		return nil
+		<-stopped
+		<-done
+		return joinErr
 	case err := <-done:
-		return err
+		workload.BeginProcessShutdown(ctx)
+		return errors.Join(err, forceStopAndJoin(server, cfg))
 	}
 }
 
+// Stop cancels transports and, with WaitForHandlers, waits for every handler.
+// Budget exhaustion is observable while ownership stays with Run until join.
+func forceStopAndJoin(server *grpc.Server, cfg Config) error {
+	stopped := make(chan struct{})
+	go func() { server.Stop(); close(stopped) }()
+	timeout := cfg.CancelJoinTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	started := time.Now()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-stopped:
+		if cfg.Metrics != nil {
+			cfg.Metrics.Operations.ObserveShutdown(cfg.Logger, "shutdown_grpc_cancel_join", "success", time.Since(started))
+		}
+		return nil
+	case <-timer.C:
+		cfg.Logger.Error("internal.grpc.cancellation_join_timeout",
+			"operation", "internal.grpc.shutdown", "event.kind", "shutdown", "component", "internal-grpc",
+			"error.class", "shutdown_error", "error.code", "cancellation_join_timeout",
+			"duration.ms", time.Since(started).Milliseconds())
+		<-stopped
+		if cfg.Metrics != nil {
+			cfg.Metrics.Operations.ObserveShutdown(cfg.Logger, "shutdown_grpc_cancel_join", "timeout", time.Since(started))
+		}
+		return ErrCancelJoinTimeout
+	}
+}
+
+// NewServer builds the authenticated server without binding; the caller serves
+// its own listener. Run is the composition that binds and serves.
 func NewServer(cfg Config) (*grpc.Server, error) {
-	server, _, _, err := buildServer(cfg)
+	server, _, err := NewServerWithHealth(cfg)
 	return server, err
 }
 
-func buildServer(cfg Config) (*grpc.Server, net.Listener, *health.Server, error) {
+// NewServerWithHealth exposes the readiness owner to services that coordinate
+// admission and resource joins themselves. Health changes before graceful drain.
+// It never binds; the caller serves its own listener.
+func NewServerWithHealth(cfg Config) (*grpc.Server, *health.Server, error) {
+	return buildServer(cfg)
+}
+
+func buildServer(cfg Config) (*grpc.Server, *health.Server, error) {
 	if cfg.ServiceName == "" {
-		return nil, nil, nil, fmt.Errorf("service name is required")
+		return nil, nil, fmt.Errorf("service name is required")
 	}
 	if cfg.Authenticator == nil {
-		return nil, nil, nil, fmt.Errorf("authenticator is required")
+		return nil, nil, fmt.Errorf("authenticator is required")
 	}
 	if cfg.Register == nil {
-		return nil, nil, nil, fmt.Errorf("registration callback is required")
+		return nil, nil, fmt.Errorf("registration callback is required")
 	}
 	if cfg.Logger == nil {
-		cfg.Logger = slog.New(slog.NewJSONHandler(os.Stderr, nil)).With(
-			slog.String("service.name", cfg.ServiceName),
-			slog.String("deployment.environment", deploymentEnvironmentOrDefault(cfg.DeploymentEnvironment)),
-			slog.String("service.version", serviceVersionOrDefault(cfg.ServiceVersion)),
-		)
+		cfg.Logger = workload.ComponentLogger(cfg.ServiceName)
 	}
 	options := append(SessionRPCServerOptions(),
+		grpc.WaitForHandlers(true),
 		grpc.ChainUnaryInterceptor(recoveryUnaryInterceptor(cfg.Logger, cfg.Metrics), authUnaryInterceptor(cfg)),
 		grpc.ChainStreamInterceptor(recoveryStreamInterceptor(cfg.Logger, cfg.Metrics), authStreamInterceptor(cfg)),
 	)
@@ -123,37 +185,32 @@ func buildServer(cfg Config) (*grpc.Server, net.Listener, *health.Server, error)
 	healthServer.SetServingStatus("", healthv1.HealthCheckResponse_SERVING)
 	healthv1.RegisterHealthServer(server, healthServer)
 	cfg.Register(server)
-	listener := cfg.Listener
-	if listener == nil {
-		listen := cfg.Listen
-		if listen == nil {
-			listen = net.Listen
+	if cfg.Metrics != nil {
+		var methods []string
+		for service, info := range server.GetServiceInfo() {
+			for _, method := range info.Methods {
+				methods = append(methods, "/"+service+"/"+method.Name)
+			}
 		}
-		address := cfg.ListenAddress
-		if address == "" {
-			address = ":9090"
-		}
-		created, err := listen("tcp", address)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		listener = created
+		cfg.Metrics.Operations.SetOperations(methods)
 	}
-	return server, listener, healthServer, nil
+	return server, healthServer, nil
 }
 
-func deploymentEnvironmentOrDefault(value string) string {
-	if value == "" {
-		return "local"
+// listenerFor binds only for Run, which serves and closes what it binds.
+func listenerFor(cfg Config) (net.Listener, error) {
+	if cfg.Listener != nil {
+		return cfg.Listener, nil
 	}
-	return value
-}
-
-func serviceVersionOrDefault(value string) string {
-	if value == "" {
-		return "unknown"
+	listen := cfg.Listen
+	if listen == nil {
+		listen = net.Listen
 	}
-	return value
+	address := cfg.ListenAddress
+	if address == "" {
+		address = ":9090"
+	}
+	return listen("tcp", address)
 }
 
 func authUnaryInterceptor(cfg Config) grpc.UnaryServerInterceptor {
@@ -332,7 +389,16 @@ func logBoundary(logger *slog.Logger, metrics *workload.GRPCMetrics, method stri
 				slog.String("error.message_safe", "internal gRPC request failed"),
 			)
 		}
-		logger.LogAttrs(context.Background(), slog.LevelInfo, "internal.grpc.request", attrs...)
+		level := slog.LevelInfo
+		switch code {
+		case codes.OK, codes.Canceled:
+			level = slog.LevelDebug
+		case codes.Internal, codes.DataLoss:
+			level = slog.LevelError
+		case codes.Unavailable, codes.ResourceExhausted, codes.DeadlineExceeded:
+			level = slog.LevelWarn
+		}
+		logger.LogAttrs(context.Background(), level, "internal.grpc.request", attrs...)
 	}
 }
 

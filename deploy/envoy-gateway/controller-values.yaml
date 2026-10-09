@@ -1,0 +1,14 @@
+# Official controller release; independent from the Tetral application chart.
+crds:
+  enabled: false
+config:
+  envoyGateway:
+    gateway:
+      controllerName: gateway.envoyproxy.io/gatewayclass-controller
+    provider:
+      type: Kubernetes
+    extensionApis:
+      enableEnvoyPatchPolicy: true
+    logging:
+      level:
+        default: info

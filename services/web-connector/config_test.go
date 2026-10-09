@@ -2,6 +2,7 @@ package webconnector
 
 import (
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -52,3 +53,57 @@ func TestMethodAuthorizerAdmitsOnlyRuntimeServiceAccountToProviderMethods(t *tes
 type mapEnv map[string]string
 
 func (e mapEnv) Getenv(key string) string { return e[key] }
+
+func TestDrainBudgetLeavesRoomForJoinAndProxy(t *testing.T) {
+	for _, raw := range []string{"", "200", "20000", "0", "20001", "-1", "unbounded"} {
+		env := mapEnv{EnvAPIKeys: `["fixture"]`, EnvBindingHMACKey: "binding-verifier-key-with-at-least-32-bytes", EnvDrainTimeout: raw}
+		cfg, err := LoadConfig(env)
+		switch raw {
+		case "":
+			if err != nil || cfg.DrainTimeout != 10*time.Second {
+				t.Fatalf("default drain=%v/%v", cfg.DrainTimeout, err)
+			}
+		case "200", "20000":
+			if err != nil || cfg.DrainTimeout+10*time.Second > 30*time.Second {
+				t.Fatalf("drain/join/proxy exceeds Pod budget: %v/%v", cfg.DrainTimeout, err)
+			}
+		default:
+			if err == nil {
+				t.Fatalf("unbounded/invalid drain accepted: %q", raw)
+			}
+		}
+	}
+}
+
+func TestWebDrainUsesTheSharedApplicationDrainKey(t *testing.T) {
+	base := func() mapEnv {
+		return mapEnv{EnvAPIKeys: `["fixture"]`, EnvBindingHMACKey: "binding-verifier-key-with-at-least-32-bytes"}
+	}
+	env := base()
+	env["TETRAL_DRAIN_TIMEOUT_MS"] = "2000"
+	if cfg, err := LoadConfig(env); err != nil || cfg.DrainTimeout != 2*time.Second {
+		t.Fatalf("shared drain key=%v/%v", cfg.DrainTimeout, err)
+	}
+	env = base()
+	env["TETRAL_SERVICE_DRAIN_TIMEOUT_MS"] = "2000"
+	if cfg, err := LoadConfig(env); err != nil || cfg.DrainTimeout != 10*time.Second {
+		t.Fatalf("unrecognized drain key changed the default=%v/%v", cfg.DrainTimeout, err)
+	}
+}
+
+func TestWebLifecycleConfigFitsPodApplicationAllocation(t *testing.T) {
+	for _, tc := range []struct {
+		drain, join string
+		valid       bool
+	}{
+		{"2000", "3000", true}, {"20000", "5000", true}, {"20000", "5001", false}, {"2000", "0", false}, {"2000", "9223372036854775807", false},
+	} {
+		cfg, err := LoadConfig(mapEnv{"TETRAL_WEB_API_KEYS": `["fixture"]`, "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY": "binding-verifier-key-with-at-least-32-bytes", EnvDrainTimeout: tc.drain, "TETRAL_CANCEL_JOIN_TIMEOUT_MS": tc.join})
+		if (err == nil) != tc.valid {
+			t.Fatalf("%+v error=%v", tc, err)
+		}
+		if tc.valid && tc.join == "3000" && cfg.CancelJoinTimeout != 3*time.Second {
+			t.Fatal("join configuration lost")
+		}
+	}
+}

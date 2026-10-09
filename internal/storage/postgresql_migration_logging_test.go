@@ -19,11 +19,14 @@ import (
 )
 
 func TestMigrationLogsObserveRollbackAndRetryWithoutDriverDetails(t *testing.T) {
-	db := storagetest.NewPostgreSQLAdminDB(t)
-	rewindEnvironmentBuildMigration(t, db)
-	_, err := db.Exec(`CREATE FUNCTION reject_migration() RETURNS event_trigger LANGUAGE plpgsql AS $$
-BEGIN RAISE EXCEPTION 'private-migration-message' USING ERRCODE = '42501', DETAIL = 'private-migration-detail'; END $$;
-CREATE EVENT TRIGGER reject_migration ON ddl_command_start WHEN TAG IN ('ALTER TABLE') EXECUTE FUNCTION reject_migration()`)
+	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
+	_, err := db.Exec(`CREATE SCHEMA schema_fault; CREATE FUNCTION schema_fault.reject_migration() RETURNS event_trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM pg_event_trigger_ddl_commands() WHERE object_identity='public.idx_runtime_processes_current') THEN
+  RAISE EXCEPTION 'private-migration-message' USING ERRCODE = '42501', DETAIL = 'private-migration-detail';
+ END IF;
+END $$;
+CREATE EVENT TRIGGER reject_migration ON ddl_command_end WHEN TAG IN ('CREATE INDEX') EXECUTE FUNCTION schema_fault.reject_migration()`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,27 +43,27 @@ CREATE EVENT TRIGGER reject_migration ON ddl_command_start WHEN TAG IN ('ALTER T
 		t.Fatalf("records = %d; want start and failure", len(records))
 	}
 	failed := records[1]
-	if failed["msg"] != "schema.migration.failed" || failed["schema.version"] != float64(4) || failed["schema.step"] != "add_environment_build_observation" || failed["db.sqlstate"] != "42501" || failed["transaction.outcome"] != "rolled_back" {
+	if failed["msg"] != "schema.migration.failed" || failed["schema.version"] != float64(1) || failed["schema.step"] != "index_runtime_processes_current" || failed["db.sqlstate"] != "42501" || failed["transaction.outcome"] != "rolled_back" {
 		t.Fatalf("failure record = %#v", failed)
 	}
 	var stamps, columns int
-	if err := db.QueryRow(`SELECT count(*) FROM tetral_schema_migrations`).Scan(&stamps); err != nil {
+	if err := db.QueryRow(`SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace AND relname='tetral_schema_migrations'`).Scan(&stamps); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.QueryRow(`SELECT count(*) FROM information_schema.columns WHERE table_name='environment_artifacts' AND column_name LIKE 'build_%'`).Scan(&columns); err != nil {
 		t.Fatal(err)
 	}
-	if stamps != 3 || columns != 0 {
+	if stamps != 0 || columns != 0 {
 		t.Fatalf("rollback left stamps=%d columns=%d", stamps, columns)
 	}
-	if _, err := db.Exec(`DROP EVENT TRIGGER reject_migration; DROP FUNCTION reject_migration()`); err != nil {
+	if _, err := db.Exec(`DROP EVENT TRIGGER reject_migration; DROP FUNCTION schema_fault.reject_migration()`); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.MigrateSchema(ctx, db); err != nil {
 		t.Fatal(err)
 	}
 	records = migrationLogRecords(t, &logs)
-	if len(records) != 2 || records[1]["msg"] != "schema.migration.completed" || records[1]["transaction.outcome"] != "committed" || records[1]["schema.version"] != float64(4) {
+	if len(records) != 2 || records[1]["msg"] != "schema.migration.completed" || records[1]["transaction.outcome"] != "committed" || records[1]["schema.version"] != float64(1) {
 		t.Fatalf("retry records = %#v", records)
 	}
 	if err := storage.VerifySchema(ctx, db); err != nil {

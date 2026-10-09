@@ -4,7 +4,10 @@ Tetral needs one deployment-owned workspace row before Auth can register the
 bootstrap API key. Before starting workloads, the repository-owned PostgreSQL
 preparation command constructs the current schema, creates the separate migration
 and serving roles, and applies their exact grants. Seed the workspace before
-starting workloads; every service then only verifies database readiness.
+starting workloads; every service then only verifies database readiness. The target
+is a dedicated empty database and isolated object namespace. Preparation accepts
+only an empty catalog or the exact current schema; it does not upgrade a
+predecessor installation or erase unexpected state.
 
 ## 1. Choose the workspace ID
 
@@ -53,6 +56,18 @@ used for the installation.
 
 ## 3. Create every in-cluster Secret
 
+Create the application namespaces before placing Secrets or running one-shot
+commands, unless the installation's namespace owner already created them:
+
+```bash
+kubectl create namespace tetral-system
+kubectl create namespace tetral-agent-runtime
+```
+
+Istiod, Envoy Gateway and optional cert-manager namespaces belong to their
+separate prerequisite installation guides. Verify existing namespace ownership
+rather than silently adopting it.
+
 Create the following 15 Secrets in `tetral-system` before installation. Secret
 names may be changed through Helm values, but their keys are fixed by the
 workloads.
@@ -72,11 +87,20 @@ workloads.
 | `sandbox-daytona` | `DAYTONA_API_KEY` |
 | `sandbox-r2-parent` | `TETRAL_R2_PARENT_API_TOKEN`, `TETRAL_R2_PARENT_ACCESS_KEY` |
 | `tetral-blob` | `endpoint`, `region`, `bucket`, `access-key`, `secret-key` |
-| `tetral-database` | `bridge-url`, `cleanup-url`, `gateway-url`, `git-proxy-url`, `TETRAL_POSTGRES_DSN` |
+| `tetral-database` | `bridge-url`, `cleanup-url`, `git-proxy-url`, `job-runner-url`, `mcp-connector-url`, `provider-gateway-url`, `TETRAL_POSTGRES_DSN` |
 | `tetral-event-stream-database` | `url` |
 
-When `edge.enabled=true`, also create the TLS Secret selected by
-`edge.tlsSecretName` (`git-proxy-tls` by default) with `tls.crt` and `tls.key`.
+When `edge.enabled=true`, supply separate public API and Git TLS Secrets selected
+by `edge.apiTLSSecretName` and `edge.gitTLSSecretName`, each with `tls.crt` and
+`tls.key`. Public issuer/renewal ownership and hardened native role credentials
+are described in the [Envoy Gateway prerequisite](../deploy/envoy-gateway/README.md)
+and [native certificate prerequisite](../deploy/cert-manager/README.md).
+
+Each `tetral-database` key holds the serving DSN of one database workload role
+from `database/roles.json`; a workload receives only its own key. Every
+PostgreSQL and object-store consumer also mounts the `tetral-store-trust`
+ConfigMap with the public `database-ca.crt` and `object-store-ca.crt`; Helm
+selects it with `transport.storeTrustConfigMap`. Create it beside the Secrets.
 
 ### `sandbox-r2-parent` takes two different kinds of credential
 
@@ -138,12 +162,15 @@ with a safe error message.
 
 ```bash
 export TETRAL_DATABASE_ADMIN_URL
+export TETRAL_DATABASE_TLS_CA_PATH=/secure/path/database-ca.pem
+export TETRAL_DATABASE_TLS_SERVER_NAME=<database-server-dns>
 go run ./cmd/tetral-db-prepare \
   < /secure/path/tetral-postgresql-roles.json
 ```
 
-The idempotent command applies all pending versions, revokes public database/schema
-access, assigns catalog ownership to the migration role, and grants each
+The idempotent command initializes one canonical schema or verifies its exact
+identity, revokes public database/schema access, assigns catalog ownership to
+the migration role, and grants each
 serving role only its declared operations. Use the resulting role DSNs in the
 Secret inventory above; `api-database/url` is the API serving role. Keep the
 schema-owner credential out of serving Secrets. Runtime workloads reject
@@ -153,9 +180,13 @@ Secret.
 
 To run preparation inside Kubernetes using the release image, provision a
 separate operator-managed `database-preparation` Secret with key `url` containing
-the administrative DSN. The following one-shot Pod receives that Secret only;
-the role JSON is streamed over stdin. Keep the completed Pod available for
-`kubectl logs` and the cluster's Pod log collector, if configured:
+the administrative DSN. Provide a `database-trust` ConfigMap with the verified
+public CA in `ca.crt`, and substitute the expected database DNS name below.
+Every one-shot database command, including bootstrap and the Auth policy
+import, requires this trust; no database credentials are stored in the
+ConfigMap. The role JSON is streamed over stdin. Keep the completed Pod
+available for `kubectl logs` and the cluster's Pod log collector, if
+configured:
 
 ```bash
 kubectl -n tetral-system run tetral-db-prepare \
@@ -172,8 +203,14 @@ kubectl -n tetral-system run tetral-db-prepare \
           "valueFrom": {
             "secretKeyRef": {"name": "database-preparation", "key": "url"}
           }
-        }]
-      }]
+        }, {
+          "name": "TETRAL_DATABASE_TLS_CA_PATH", "value": "/etc/tetral/database/ca.crt"
+        }, {
+          "name": "TETRAL_DATABASE_TLS_SERVER_NAME", "value": "<database-server-dns>"
+        }],
+        "volumeMounts": [{"name": "database-trust", "mountPath": "/etc/tetral/database", "readOnly": true}]
+      }],
+      "volumes": [{"name": "database-trust", "configMap": {"name": "database-trust"}}]
     }
   }' \
   --command -- /usr/local/bin/tetral-db-prepare \
@@ -184,11 +221,14 @@ Inspect `kubectl -n tetral-system logs tetral-db-prepare` before deleting the
 completed Pod with `kubectl -n tetral-system delete pod tetral-db-prepare`;
 delete it before reusing the same name for another attempt.
 
-Proceed only after a zero exit. A failure after migration may leave that schema
-version committed; inspect the structured logs and rerun the same command after
-correcting the cause. Neither invocation deploys services or resets data. For
-existing installations, use the [upgrade sequence](../deploy/helm/tetral/README.md#upgrade-and-rollback)
-before invoking this command; do not replay from-zero bootstrap as an upgrade.
+Proceed only after a zero exit. Schema initialization and role installation use
+separate transactions, so a role failure may leave the canonical schema committed.
+Do not continue to the next step until the command succeeds; inspect the
+structured logs and rerun the same revision after repair. A predecessor or unknown nonempty schema is rejected without
+mutation. Neither command deploys services, resets data, or restores an older
+architecture. Compatible later workload updates must preserve this initialized
+state and durable custody; schema equality alone does not establish protocol
+compatibility.
 
 ## 4. Seed the workspace
 
@@ -212,8 +252,14 @@ kubectl -n tetral-system run tetral-bootstrap \
           "valueFrom": {
             "secretKeyRef": {"name": "api-database", "key": "url"}
           }
-        }]
-      }]
+        }, {
+          "name": "TETRAL_DATABASE_TLS_CA_PATH", "value": "/etc/tetral/database/ca.crt"
+        }, {
+          "name": "TETRAL_DATABASE_TLS_SERVER_NAME", "value": "<database-server-dns>"
+        }],
+        "volumeMounts": [{"name": "database-trust", "mountPath": "/etc/tetral/database", "readOnly": true}]
+      }],
+      "volumes": [{"name": "database-trust", "configMap": {"name": "database-trust"}}]
     }
   }' \
   --command -- /usr/local/bin/tetral-bootstrap \
@@ -224,18 +270,93 @@ kubectl -n tetral-system run tetral-bootstrap \
 The command reports either `created` or `already present`; rerunning it is
 safe. This seeds a workspace row, not an API key.
 
-## 5. Install the platform
+## 5. Import the declared Auth policy
+
+Apply the installation's explicit federation policy after its workspaces exist
+and before Auth starts. Use the exact installed revision and the protected
+administrative connection used for preparation; do not place that credential
+in serving Secrets. The release image ships the command as
+`/usr/local/bin/tetral-auth-policy`. Run it inside Kubernetes with the same
+`database-preparation` Secret and `database-trust` ConfigMap as preparation,
+streaming the policy document over stdin, and keep the completed Pod available
+for `kubectl logs`:
+
+```bash
+kubectl -n tetral-system run tetral-auth-policy \
+  -i --restart=Never \
+  --image=ghcr.io/tetral-ai/tetral@sha256:<tetral-image-digest> \
+  --override-type=strategic \
+  --overrides='{
+    "apiVersion": "v1",
+    "spec": {
+      "containers": [{
+        "name": "tetral-auth-policy",
+        "env": [{
+          "name": "TETRAL_DATABASE_ADMIN_URL",
+          "valueFrom": {
+            "secretKeyRef": {"name": "database-preparation", "key": "url"}
+          }
+        }, {
+          "name": "TETRAL_DATABASE_TLS_CA_PATH", "value": "/etc/tetral/database/ca.crt"
+        }, {
+          "name": "TETRAL_DATABASE_TLS_SERVER_NAME", "value": "<database-server-dns>"
+        }],
+        "volumeMounts": [{"name": "database-trust", "mountPath": "/etc/tetral/database", "readOnly": true}]
+      }],
+      "volumes": [{"name": "database-trust", "configMap": {"name": "database-trust"}}]
+    }
+  }' \
+  --command -- /usr/local/bin/tetral-auth-policy \
+  < /secure/path/tetral-auth-policy.json
+```
+
+Inspect `kubectl -n tetral-system logs tetral-auth-policy` for the sanitized
+change IDs and revisions before deleting the completed Pod with
+`kubectl -n tetral-system delete pod tetral-auth-policy`; delete it before
+reusing the same name for another attempt. Later change sets, including
+`revoke_workspace_grants` and `revoke_access_tokens`, use the same invocation.
+From a source checkout of the same revision, the equivalent command is:
+
+```bash
+export TETRAL_DATABASE_ADMIN_URL
+export TETRAL_DATABASE_TLS_CA_PATH=/secure/path/database-ca.pem
+export TETRAL_DATABASE_TLS_SERVER_NAME=<database-server-dns>
+go run ./services/auth/cmd/tetral-auth-policy \
+  < /secure/path/tetral-auth-policy.json
+```
+
+The [Auth contract](../services/auth/README.md) owns the policy document,
+issuer/audience/trust/private-destination validation and atomic import behavior.
+Import only explicit workspace grants. Configure the corresponding Auth HTTPS
+network destinations separately; network access never grants issuer authority.
+A failed import preserves prior authority and data; do not continue to the next
+step until the command succeeds.
+
+## 6. Install and verify the platform
 
 Set Helm's `bootstrapWorkspaceID` to the seeded ID, or set the corresponding
 environment value in the raw manifests, and install Tetral. Every database
 consumer verifies the schema and its serving role before becoming ready.
 Auth finds the workspace and registers the bootstrap API key from
-`auth-bootstrap/engine-api-key`.
+`auth-bootstrap/engine-api-key`. Keep
+[public admission](../deploy/managed/README.md#public-admission) closed during
+installation: do not publish the API and Git host names yet. Require ready
+prerequisites and workload schema/role checks, then exercise allowed/denied
+Check, exact token exchange, tenant/operation authorization and TLS/issuer
+controls through the
+[explicit test address and Host](../deploy/managed/README.md#public-admission).
+Validate the complete rendered installation inventory and retirement of
+superseded owned resources before opening public admission. An unresolved
+probe, resource or capacity failure keeps admission closed.
+
+The [managed installation contract](../deploy/managed/README.md) owns this
+prepare → bootstrap → policy import → closed installation → probes/inventory →
+open sequence, including idempotent repetition and failure preservation.
 
 See the [Helm chart instructions](../deploy/helm/tetral/README.md) for the
 remaining cluster prerequisites and install command.
 
-## 6. Register the sandbox snapshot with Daytona
+## 7. Register the sandbox snapshot with Daytona
 
 Tool execution runs inside Daytona-managed sandboxes. The sandbox service
 hands Daytona the environment's artifact reference verbatim as the snapshot
@@ -308,7 +429,7 @@ can reuse the old package snapshot. Existing-instance migration is separate.
 In-flight builds can still adopt their already-created snapshots, preserving
 the allocation that was chosen before the upgrade.
 
-## 7. Add a model provider key
+## 8. Add a model provider key
 
 After Auth is healthy, add the first model credential with
 [`services/gateway/scripts/platform-key.ts`](../services/gateway/scripts/platform-key.ts).

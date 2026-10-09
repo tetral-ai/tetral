@@ -1,14 +1,14 @@
 package sessionrpc
 
 // MaxRuntimeCommandGRPCMessageBytes bounds one gRPC message on the Runtime Pod
-// command channel (the Bridge dials the Pod to deliver a runtime input
+// command channel (Job Runner dials the Pod to deliver a runtime input
 // command). It is a fuse sized above the largest admission-legal payload plus
 // protobuf/envelope overhead, never a gate below legal traffic: the command
 // payload carrier is separately fused at 2 MiB (a 1 MiB admission-legal text
 // block plus JSON envelope headroom), and this 4 MiB value clears that 2 MiB
 // payload fuse with protobuf headroom.
 // UPDATE-WITH: internal/internalgrpc/session_rpc_options.go;
-// services/bridge/runtime_delivery.go;
+// services/job-runner/runtime_delivery.go;
 // services/agent-runtime/packages/runtime-pod/src/bounds.ts;
 // integration/static/runtime_transport_bounds_test.go;
 // internal/sessionrpc/bounds_test.go

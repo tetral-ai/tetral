@@ -13,15 +13,17 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/internalgrpc"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	providergatewayv1 "github.com/tetral-ai/tetral/services/gateway/gen/tetral/provider_gateway/v1"
 	webconnector "github.com/tetral-ai/tetral/services/web-connector"
-
-	"google.golang.org/grpc"
 )
 
 func TestPostgreSQLRuntimeWebFirstEffectAuthority(t *testing.T) {
@@ -43,18 +45,18 @@ func TestPostgreSQLRuntimeWebFirstEffectAuthority(t *testing.T) {
 		podUID      = "pod_web_effect_authority"
 		requestID   = "mreq_web_effect_authority"
 	)
-	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("web-effect-authority-signing-key")
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_web_effect_start", requestID, requestKindAgentProviderRequest, 0)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_web_effect_start", requestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 
 	writeWebTool := func(writeID, callID, query string) string {
 		t.Helper()
 		response, writeErr := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 			Scope: scope, RuntimeWriteId: writeID, ModelRequestId: requestID,
-			ToolDeclaration: bridgeToolDeclarationForTest(callID, "web", `{"search_query":[{"q":"`+query+`"}]}`, "allow", "web_execute"),
+			ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest(callID, "web", `{"search_query":[{"q":"`+query+`"}]}`, "allow", "web_execute"),
 		})
 		if writeErr != nil || response.GetCommitted() == nil {
 			t.Fatalf("write Web Tool %s = %#v/%v", callID, response, writeErr)
@@ -67,7 +69,7 @@ func TestPostgreSQLRuntimeWebFirstEffectAuthority(t *testing.T) {
 
 	settleCancelled := func(toolUseEventID string) {
 		t.Helper()
-		response, settleErr := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
+		response, settleErr := store.SettleToolResult(context.Background(), sessionfixture.BridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
 			ToolUseEventId: toolUseEventID,
 			Outcome:        &bridgev1.RuntimeToolSettlement_Cancelled{Cancelled: &bridgev1.RuntimeToolCancelled{}},
 		}))
@@ -96,7 +98,7 @@ func TestPostgreSQLRuntimeWebFirstEffectAuthority(t *testing.T) {
 			"mode": mode, "bridgeAddress": bridgeAddress, "webAddress": webAddress,
 			"tokenPath": tokenPath, "workspaceId": workspaceID, "sessionId": sessionID,
 			"sessionThreadId": threadID, "bindingId": bindingID, "bindingGeneration": 1,
-			"targetPodUid": podUID, "runtimeBindingToken": runtimeBindingToken,
+			"targetPodUid": podUID, "runtimeProcessId": "process_" + podUID, "runtimeBindingToken": runtimeBindingToken,
 			"modelRequestId": requestID, "modelToolCallId": callID,
 			"toolUseEventId": toolUseEventID, "query": query,
 		})

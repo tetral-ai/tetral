@@ -5,15 +5,21 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -45,7 +51,11 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 	if request.GetRuntimeWriteId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "invalid write event request")
 	}
-	var toolProjection runtimeToolProjectionPayload
+	if err := validatePreallocatedEventIdentity(request); err != nil {
+		return nil, err
+	}
+	var toolProjection runtimecontrol.ToolProjection
+	var preparedTool *preparedRuntimeToolDeclaration
 	toolDeclaration := request.GetToolDeclaration()
 	if toolDeclaration != nil {
 		if request.GetModelRequestId() == "" || request.GetEventType() != "" || request.GetPayloadJson() != "" ||
@@ -54,7 +64,10 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			return nil, status.Error(codes.InvalidArgument, "Tool declaration carries unrelated write event fields")
 		}
 		var err error
-		toolProjection, err = normalizeRuntimeToolDeclaration(toolDeclaration)
+		prepared, prepareErr := normalizeRuntimeToolDeclaration(toolDeclaration)
+		err = prepareErr
+		toolProjection = prepared.projection
+		preparedTool = &prepared
 		if err != nil {
 			return nil, err
 		}
@@ -109,7 +122,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 	evidence.Kind = "canonicality"
 	var declarationDigest string
 	if toolDeclaration != nil {
-		declarationDigest, err = writeToolDeclarationDigest(request, toolProjection)
+		declarationDigest, err = writeToolDeclarationDigest(request, *preparedTool)
 	} else {
 		declarationDigest, err = writeEventDeclarationDigest(request, payloadJSON, consumedFileAttachments.CanonicalJSON)
 	}
@@ -123,7 +136,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		duplicate bool
 	)
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.write_event", func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(
 			ctx,
 			tx,
 			request.GetScope().GetWorkspaceId(),
@@ -135,7 +148,8 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		proof, err := lockRuntimeReceiptScopeTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
 		evidence.Kind = "transaction"
@@ -158,23 +172,29 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			if err := json.Unmarshal([]byte(existing.ReceiptJSON), &facts); err != nil || !validWriteEventDurableFacts(facts) {
 				return status.Error(codes.FailedPrecondition, "stored write event result is invalid")
 			}
+			if request.PreallocatedEventId != nil && facts.EventID != request.GetPreallocatedEventId() {
+				return status.Error(codes.FailedPrecondition, "stored write event identity is invalid")
+			}
 			duplicate = true
 			return nil
 		}
+		if err := proof.requireCurrent(tx); err != nil {
+			return err
+		}
 		if requestStart != nil {
-			if err := requireThreadInputDeliveryAllowedTx(ctx, tx, request.GetScope()); err != nil {
+			if err := runtimecontrol.RequireThreadInputDeliveryAllowedTx(ctx, tx, request.GetScope()); err != nil {
 				return err
 			}
 		}
-		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
+		threadScope, err := runtimecontrol.LockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {
 			return err
 		}
-		evidence.ThreadRole = threadScope.role
-		if threadScope.status == "closed_for_runtime" || threadScope.status == "failed" || threadScope.status == "terminated" {
+		evidence.ThreadRole = threadScope.Role
+		if threadScope.Status == "closed_for_runtime" || threadScope.Status == "failed" || threadScope.Status == "terminated" {
 			return status.Error(codes.FailedPrecondition, "thread does not accept new Runtime events")
 		}
-		if assistantContextDelta != nil {
+		if assistantContextDelta != nil || eventType == "agent.thinking" {
 			if err := verifyModelRequestAcceptsMembersTx(ctx, tx, request.GetScope(), request.GetModelRequestId()); err != nil {
 				return err
 			}
@@ -196,7 +216,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		}
 		eventPayloadJSON := payloadJSON
 		if durableEventType != request.GetEventType() && toolDeclaration == nil {
-			eventPayloadJSON, err = threadStatusPayloadJSON(durableEventType, request.GetScope(), threadScope, "")
+			eventPayloadJSON, err = runtimecontrol.ThreadStatusPayloadJSON(durableEventType, request.GetScope(), threadScope, "")
 			if err != nil {
 				return err
 			}
@@ -204,15 +224,19 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 				return err
 			}
 		}
-		visibility, sessionVisible := threadScope.publicProjection(durableEventType)
-		eventID := id.New("evt_")
-		sequence, err := nextSessionEventSequenceTx(ctx, tx, request.GetScope())
+		visibility, sessionVisible := threadScope.PublicProjection(durableEventType)
+		eventID := request.GetPreallocatedEventId()
+		if request.PreallocatedEventId == nil {
+			eventID = id.New("evt_")
+		}
+		sequence, err := runtimecontrol.NextSessionEventSequenceTx(ctx, tx, request.GetScope())
 		if err != nil {
 			return err
 		}
 		projectionJSON := `{}`
+		modelToolCallID := ""
 		if requestStart != nil {
-			projectionJSON, err = marshalBridgeJSON(map[string]any{
+			projectionJSON, err = runtimecontrol.MarshalJSON(map[string]any{
 				"context_through_message_sequence": requestStart.ContextThroughMessageSequence,
 				"request_kind":                     requestStart.RequestKind,
 			})
@@ -220,35 +244,39 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 				return err
 			}
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO session_events (
-				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-				visibility, session_visible, runtime_write_id, model_request_id,
-				projection_json, created_at, updated_at, processed_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, ''), $12, $13, $13, $13)`,
-			request.GetScope().GetWorkspaceId(),
-			request.GetScope().GetSessionId(),
-			request.GetScope().GetSessionThreadId(),
-			eventID,
-			sequence,
-			durableEventType,
-			eventPayloadJSON,
-			visibility,
-			sessionVisible,
-			key,
-			request.GetModelRequestId(),
-			projectionJSON,
-			now,
-		); err != nil {
-			return err
+		if toolDeclaration != nil {
+			// The payload, the call-ID column, this complete projection and the
+			// appended Tool Call all come from the one normalized declaration.
+			projectionJSON, err = runtimeToolEventProjectionJSON(toolProjection)
+			if err != nil {
+				return err
+			}
+			modelToolCallID = toolProjection.ModelToolCallID
+		}
+		if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+			WorkspaceID: request.GetScope().GetWorkspaceId(), SessionID: request.GetScope().GetSessionId(),
+			SessionThreadID: request.GetScope().GetSessionThreadId(), EventID: eventID, Sequence: sequence, Type: durableEventType,
+			PayloadJSON: eventPayloadJSON, ProjectionJSON: projectionJSON, Visibility: visibility, SessionVisible: sessionVisible,
+			RuntimeWriteID: key, ModelRequestID: request.GetModelRequestId(), ModelToolCallID: modelToolCallID,
+			CreatedAt: now, ProcessedAt: &now,
+		}); err != nil {
+			// Event IDs are globally unique, while receipts are scoped. Only an
+			// exact operation replay can return a duplicate; an ID collision
+			// rolls back the whole declaration without revealing its owner. The
+			// Thread's call-ID index is the only call-ID admission check, and a
+			// Tool Use value that passed declaration validation but PostgreSQL
+			// JSONB cannot store fails its storability CHECK with a data
+			// exception.
+			var pgError *pgconn.PgError
+			if toolDeclaration != nil && errors.As(err, &pgError) && strings.HasPrefix(pgError.Code, "22") {
+				return status.Error(codes.InvalidArgument, "Tool declaration is not storable")
+			}
+			return runtimecontrol.ToolRelationInsertError(err)
 		}
 		if requestStart != nil && len(consumedFileAttachments.Pairs) > 0 {
 			if err := insertFileAttachmentConsumptionsTx(ctx, tx, request.GetScope(), eventID, consumedFileAttachments.Pairs); err != nil {
 				return err
 			}
-		}
-		if _, err := appendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
-			return err
 		}
 		facts, err = commitWriteEventContextTx(
 			ctx,
@@ -258,61 +286,30 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			eventID,
 			request.GetModelRequestId(),
 			assistantContextDelta,
+			preparedTool,
 			now,
 		)
 		if err != nil {
 			return err
 		}
-		if durableEventType == "agent.tool_use" || durableEventType == "agent.mcp_tool_use" {
-			if err := verifyModelToolCallIDUniqueTx(
+		if toolDeclaration != nil {
+			if err := applyToolUseBookkeepingTx(
 				ctx,
 				tx,
 				request.GetScope(),
-				toolProjection.ModelToolCallID,
-			); err != nil {
-				return err
-			}
-			projectionJSON, err := marshalBridgeJSON(map[string]any{
-				"canonical_execution_input": toolProjection.CanonicalExecutionInput,
-				"evaluated_permission":      toolProjection.EvaluatedPermission,
-				"event_type":                toolProjection.EventType,
-				"mcp_server_name":           toolProjection.MCPServerName,
-				"model_tool_call_id":        toolProjection.ModelToolCallID,
-				"provider_input":            toolProjection.ProviderInput,
-				"route_capability":          toolProjection.RouteCapability,
-				"tool_name":                 toolProjection.ToolName,
-			})
-			if err != nil {
-				return err
-			}
-			if _, err := tx.Exec(ctx,
-				`UPDATE session_events
-				    SET projection_json = $5
-				  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND event_id = $4`,
-				request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
-				request.GetScope().GetSessionThreadId(), eventID, projectionJSON,
+				eventID,
+				toolProjection,
+				now,
 			); err != nil {
 				return err
 			}
 		}
-		if err := applyToolEventBookkeepingTx(
-			ctx,
-			tx,
-			request.GetScope(),
-			eventID,
-			durableEventType,
-			eventPayloadJSON,
-			toolProjection,
-			now,
-		); err != nil {
-			return err
-		}
-		if threadScope.role == "main" && durableEventType == "session.status_running" {
+		if threadScope.Role == "main" && durableEventType == "session.status_running" {
 			if err := markPublicSessionRunningTx(ctx, tx, request.GetScope(), eventID, now); err != nil {
 				return err
 			}
 		}
-		resultJSON, err := marshalBridgeJSON(facts)
+		resultJSON, err := runtimecontrol.MarshalJSON(facts)
 		if err != nil {
 			return err
 		}
@@ -328,7 +325,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			now,
 		)
 	}); err != nil {
-		if isThreadInterruptBarrierStaleError(err) || (toolDeclaration != nil && isModelRequestSealedError(err)) {
+		if runtimecontrol.IsThreadInterruptBarrierStaleError(err) || (toolDeclaration != nil && runtimecontrol.IsModelRequestSealedError(err)) {
 			return &bridgev1.WriteEventResponse{Outcome: &bridgev1.WriteEventResponse_Stale{Stale: &bridgev1.WriteEventStale{}}}, nil
 		}
 		return nil, err
@@ -365,6 +362,28 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 
 func validWriteEventDurableFacts(facts writeEventDurableFacts) bool {
 	return facts.EventID != ""
+}
+
+// Validate before receipt lookup: missing Gateway identity cannot replay a
+// declaration from a retired protocol, and an ID never grants mutation custody.
+func validatePreallocatedEventIdentity(request *bridgev1.WriteEventRequest) error {
+	modelContent := request.GetToolDeclaration() == nil && (request.GetEventType() == "agent.message" || request.GetEventType() == "agent.thinking")
+	if !modelContent {
+		if request.PreallocatedEventId != nil {
+			return status.Error(codes.InvalidArgument, "event type does not accept a preallocated identity")
+		}
+		return nil
+	}
+	value := request.GetPreallocatedEventId()
+	if request.GetModelRequestId() == "" || len(value) != 36 || !strings.HasPrefix(value, "evt_") {
+		return status.Error(codes.InvalidArgument, "model content requires a valid preallocated event identity")
+	}
+	for _, digit := range value[4:] {
+		if (digit < '0' || digit > '9') && (digit < 'a' || digit > 'f') {
+			return status.Error(codes.InvalidArgument, "model content requires a valid preallocated event identity")
+		}
+	}
+	return nil
 }
 
 func verifyRequestStartUniqueTx(
@@ -453,91 +472,13 @@ func verifyModelRequestAcceptsMembersTx(
 		return status.Error(codes.FailedPrecondition, "model request start is not durable")
 	}
 	if ends != 0 {
-		return modelRequestSealedError(status.Error(codes.FailedPrecondition, "model request is already sealed"))
+		return runtimecontrol.ModelRequestSealedError(status.Error(codes.FailedPrecondition, "model request is already sealed"))
 	}
 	return nil
 }
 
-func verifyModelToolCallIDUniqueTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	modelToolCallID string,
-) error {
-	if modelToolCallID == "" {
-		return status.Error(codes.FailedPrecondition, "model tool call id is missing")
-	}
-	var occurrences int
-	if err := tx.QueryRow(ctx,
-		`SELECT count(*)
-		   FROM session_messages AS message
-		  CROSS JOIN LATERAL jsonb_array_elements(
-		    CASE
-		      WHEN jsonb_typeof(message.data_json::jsonb -> 'parts') = 'array'
-		      THEN message.data_json::jsonb -> 'parts'
-		      ELSE '[]'::jsonb
-		    END
-		  ) AS part
-		  WHERE message.workspace_id = $1
-		    AND message.session_id = $2
-		    AND message.session_thread_id = $3
-		    AND part ->> 'type' = 'tool_call'
-		    AND part ->> 'modelToolCallId' = $4`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		modelToolCallID,
-	).Scan(&occurrences); err != nil {
-		return err
-	}
-	if occurrences == 0 {
-		return status.Error(codes.FailedPrecondition, "model tool call projection is missing")
-	}
-	if occurrences != 1 {
-		return status.Error(codes.AlreadyExists, "model tool call id already has a durable declaration")
-	}
-	return nil
-}
-
-func verifyModelToolCallIDAvailableTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	modelToolCallID string,
-) error {
-	if modelToolCallID == "" {
-		return status.Error(codes.FailedPrecondition, "model tool call id is missing")
-	}
-	var exists bool
-	if err := tx.QueryRow(ctx,
-		`SELECT EXISTS (
-			SELECT 1
-			  FROM session_messages AS message
-			 CROSS JOIN LATERAL jsonb_array_elements(
-			   CASE
-			     WHEN jsonb_typeof(message.data_json::jsonb -> 'parts') = 'array'
-			     THEN message.data_json::jsonb -> 'parts'
-			     ELSE '[]'::jsonb
-			   END
-			 ) AS part
-			 WHERE message.workspace_id = $1
-			   AND message.session_id = $2
-			   AND message.session_thread_id = $3
-			   AND part ->> 'type' = 'tool_call'
-			   AND part ->> 'modelToolCallId' = $4
-		)`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelToolCallID,
-	).Scan(&exists); err != nil {
-		return err
-	}
-	if exists {
-		return status.Error(codes.AlreadyExists, "model tool call id already has a durable declaration")
-	}
-	return nil
-}
-
-func writeEventDurableEventType(eventType string, threadScope threadMutationScope) string {
-	if eventType == "session.status_running" && threadScope.role != "main" {
+func writeEventDurableEventType(eventType string, threadScope runtimecontrol.ThreadMutationScope) string {
+	if eventType == "session.status_running" && threadScope.Role != "main" {
 		return "session.thread_status_running"
 	}
 	return eventType
@@ -554,17 +495,15 @@ func consumeStagedMCPResultTx(
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	eventType string,
-	payloadJSON string,
+	toolUseEventID string,
 	now time.Time,
 ) (stagedMCPResultIdentity, error) {
 	if eventType != "agent.mcp_tool_result" {
 		return stagedMCPResultIdentity{}, status.Error(codes.InvalidArgument, "stored MCP result requires an mcp tool result")
 	}
-	var resultPayload durableToolResultEventPayload
-	if err := json.Unmarshal([]byte(payloadJSON), &resultPayload); err != nil || resultPayload.MCPToolUseID == "" {
+	if toolUseEventID == "" {
 		return stagedMCPResultIdentity{}, status.Error(codes.InvalidArgument, "mcp tool result target is invalid")
 	}
-	toolUseEventID := resultPayload.MCPToolUseID
 	stored, ok, err := readRuntimeToolResultTx(ctx, tx, scope, toolUseEventID)
 	if err != nil {
 		return stagedMCPResultIdentity{}, err
@@ -604,7 +543,7 @@ func consumeStagedMCPResultTx(
 		if err != nil {
 			return stagedMCPResultIdentity{}, err
 		}
-		if !rowsAffected(update) {
+		if !runtimecontrol.RowsAffected(update) {
 			return stagedMCPResultIdentity{}, status.Error(codes.FailedPrecondition, "mcp result attachment is not staged")
 		}
 	}
@@ -627,7 +566,7 @@ func consumeStagedMCPResultTx(
 	if err != nil {
 		return stagedMCPResultIdentity{}, err
 	}
-	if !rowsAffected(update) {
+	if !runtimecontrol.RowsAffected(update) {
 		return stagedMCPResultIdentity{}, status.Error(codes.FailedPrecondition, "staged mcp result consume failed")
 	}
 	return stagedMCPResultIdentity{
@@ -751,7 +690,7 @@ func incrementSessionServerToolUsageTx(
 	if err != nil {
 		return err
 	}
-	if !rowsAffected(result) {
+	if !runtimecontrol.RowsAffected(result) {
 		return status.Error(codes.FailedPrecondition, "runtime session is stale")
 	}
 	return nil
@@ -787,7 +726,7 @@ func normalizeRequestStartFact(request *bridgev1.WriteEventRequest) (*requestSta
 	if request.ContextThroughMessageSequence == nil || request.GetContextThroughMessageSequence() < 0 || request.GetRequestKind() == "" {
 		return nil, status.Error(codes.InvalidArgument, "model request start metadata is required")
 	}
-	requestKind, err := normalizeRequestKind(request.GetRequestKind())
+	requestKind, err := runtimecontrol.NormalizeRequestKind(request.GetRequestKind())
 	if err != nil {
 		return nil, err
 	}
@@ -822,95 +761,6 @@ func verifyRequestStartMessageBoundaryTx(
 	return nil
 }
 
-type threadMutationScope struct {
-	visibility string
-	role       string
-	status     string
-	taskName   sql.NullString
-}
-
-func (s threadMutationScope) publicProjection(eventType string) (string, bool) {
-	if s.visibility != "public" || s.role == "approval_reviewer" {
-		return "internal", false
-	}
-	if s.role == "main" {
-		return "public", true
-	}
-	switch eventType {
-	case "agent.thread_message_sent",
-		"agent.thread_message_received",
-		"session.thread_created",
-		"session.thread_status_running",
-		"session.thread_status_idle",
-		"session.thread_status_rescheduled",
-		"session.thread_status_terminated":
-		return "public", true
-	default:
-		return "public", false
-	}
-}
-
-func lockThreadMutationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (threadMutationScope, error) {
-	if err := requireThreadMutationAllowedTx(ctx, tx, scope); err != nil {
-		return threadMutationScope{}, err
-	}
-	return lockThreadMutationRowTx(ctx, tx, scope)
-}
-
-func lockThreadMutationRowTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (threadMutationScope, error) {
-	row := tx.QueryRow(ctx,
-		`SELECT visibility, role, status, task_name
-		   FROM session_threads
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND id = $3
-		  FOR UPDATE`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-	)
-	var result threadMutationScope
-	if err := row.Scan(&result.visibility, &result.role, &result.status, &result.taskName); dbconnect.IsNoRows(err) {
-		return threadMutationScope{}, closeoutUnrepairableError(status.Error(codes.FailedPrecondition, "runtime thread is stale"))
-	} else if err != nil {
-		return threadMutationScope{}, err
-	}
-	return result, nil
-}
-
-func sessionThreadCallableTaskNameTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	threadID string,
-) (sql.NullString, error) {
-	var role string
-	var taskName sql.NullString
-	err := tx.QueryRow(ctx,
-		`SELECT role, task_name
-		   FROM session_threads
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND id = $3`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		threadID,
-	).Scan(&role, &taskName)
-	if dbconnect.IsNoRows(err) {
-		return sql.NullString{}, status.Error(codes.FailedPrecondition, "inter-agent message endpoint thread is stale")
-	}
-	if err != nil {
-		return sql.NullString{}, err
-	}
-	if role == "main" {
-		return sql.NullString{}, nil
-	}
-	if !taskName.Valid || taskName.String == "" {
-		return sql.NullString{}, status.Error(codes.FailedPrecondition, "inter-agent message endpoint has no callable task name")
-	}
-	return taskName, nil
-}
-
 func verifyModelRequestStartTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, startEventID string, modelRequestID string, requestKind string) error {
 	row := tx.QueryRow(ctx,
 		`SELECT event_id, projection_json::jsonb ->> 'request_kind'
@@ -940,7 +790,7 @@ func verifyModelRequestStartTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 	return nil
 }
 
-func incrementSessionUsageTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, usage bridgeUsage, now time.Time) error {
+func incrementSessionUsageTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, usage runtimecontrol.Usage, now time.Time) error {
 	var current string
 	if err := tx.QueryRow(ctx,
 		`SELECT usage_json
@@ -973,7 +823,7 @@ func incrementSessionUsageTx(ctx context.Context, tx *dbconnect.Tx, scope *bridg
 	if err != nil {
 		return err
 	}
-	if !rowsAffected(result) {
+	if !runtimecontrol.RowsAffected(result) {
 		return status.Error(codes.FailedPrecondition, "runtime session is stale")
 	}
 	return nil
@@ -994,7 +844,7 @@ func markPublicSessionRunningTx(ctx context.Context, tx *dbconnect.Tx, scope *br
 	if err != nil {
 		return err
 	}
-	if !rowsAffected(result) {
+	if !runtimecontrol.RowsAffected(result) {
 		return status.Error(codes.FailedPrecondition, "runtime session is stale")
 	}
 	result, err = tx.Exec(ctx,
@@ -1014,7 +864,7 @@ func markPublicSessionRunningTx(ctx context.Context, tx *dbconnect.Tx, scope *br
 	if err != nil {
 		return err
 	}
-	if !rowsAffected(result) {
+	if !runtimecontrol.RowsAffected(result) {
 		return status.Error(codes.FailedPrecondition, "runtime thread is stale")
 	}
 	_, err = tx.Exec(ctx,
@@ -1063,7 +913,7 @@ func markPublicSessionIdleTx(ctx context.Context, tx *dbconnect.Tx, scope *bridg
 	if err != nil {
 		return err
 	}
-	if !rowsAffected(result) {
+	if !runtimecontrol.RowsAffected(result) {
 		return status.Error(codes.FailedPrecondition, "runtime session is stale")
 	}
 	result, err = tx.Exec(ctx,
@@ -1084,7 +934,7 @@ func markPublicSessionIdleTx(ctx context.Context, tx *dbconnect.Tx, scope *bridg
 	if err != nil {
 		return err
 	}
-	if !rowsAffected(result) {
+	if !runtimecontrol.RowsAffected(result) {
 		return status.Error(codes.FailedPrecondition, "runtime thread is stale")
 	}
 	return nil
@@ -1104,7 +954,7 @@ func markPublicSessionReschedulingTx(ctx context.Context, tx *dbconnect.Tx, scop
 	if err != nil {
 		return err
 	}
-	if !rowsAffected(result) {
+	if !runtimecontrol.RowsAffected(result) {
 		return status.Error(codes.FailedPrecondition, "runtime session is stale")
 	}
 	result, err = tx.Exec(ctx,
@@ -1123,134 +973,13 @@ func markPublicSessionReschedulingTx(ctx context.Context, tx *dbconnect.Tx, scop
 	if err != nil {
 		return err
 	}
-	if !rowsAffected(result) {
+	if !runtimecontrol.RowsAffected(result) {
 		return status.Error(codes.FailedPrecondition, "runtime thread is stale")
 	}
 	return nil
 }
 
-func nextSessionEventSequenceTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (int64, error) {
-	var sequence int64
-	err := tx.QueryRow(ctx,
-		`SELECT COALESCE(MAX(sequence), 0) + 1
-		   FROM session_events
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id IS NOT DISTINCT FROM $3`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-	).Scan(&sequence)
-	return sequence, err
-}
-
-func appendSessionEventStreamChangeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, eventID string, visibility string, sessionVisible bool, now time.Time) (int64, error) {
-	return appendSessionEventStreamChangeForRevisionTx(ctx, tx, scope, eventID, 1, visibility, sessionVisible, now)
-}
-
-func appendSessionEventStreamChangeForRevisionTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, eventID string, revision int64, visibility string, sessionVisible bool, now time.Time) (int64, error) {
-	var streamPosition int64
-	if err := tx.QueryRow(ctx,
-		`INSERT INTO session_event_stream_changes (
-			workspace_id, session_id, event_id, session_thread_id, revision, visibility, session_visible, changed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		RETURNING stream_position`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		eventID,
-		scope.GetSessionThreadId(),
-		revision,
-		visibility,
-		sessionVisible,
-		now,
-	).Scan(&streamPosition); err != nil {
-		return 0, err
-	}
-	_, err := tx.Exec(ctx,
-		`UPDATE session_events
-		    SET latest_stream_position = $4,
-		        insert_stream_position = CASE
-		            WHEN $5 = 1 AND insert_stream_position = 0 THEN $4
-		            ELSE insert_stream_position
-		        END
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND event_id = $3`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		eventID,
-		streamPosition,
-		revision,
-	)
-	return streamPosition, err
-}
-
-type durableToolResultEventPayload struct {
-	ToolUseID      string `json:"tool_use_id"`
-	ToolUseEventID string `json:"tool_use_event_id"`
-	MCPToolUseID   string `json:"mcp_tool_use_id"`
-	Content        []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	} `json:"content"`
-	IsError bool `json:"is_error"`
-}
-
-func durableToolResultUseEventID(eventType string, payload durableToolResultEventPayload) (string, error) {
-	switch eventType {
-	case "agent.tool_result":
-		if payload.MCPToolUseID != "" ||
-			(payload.ToolUseEventID != "" && payload.ToolUseID != "" && payload.ToolUseEventID != payload.ToolUseID) {
-			return "", status.Error(codes.FailedPrecondition, "tool result event identity is invalid")
-		}
-		toolUseEventID := defaultString(payload.ToolUseEventID, payload.ToolUseID)
-		if toolUseEventID == "" {
-			return "", status.Error(codes.FailedPrecondition, "tool result event is missing its tool-use identity")
-		}
-		return toolUseEventID, nil
-	case "agent.mcp_tool_result":
-		if payload.MCPToolUseID == "" || payload.ToolUseEventID != "" || payload.ToolUseID != "" {
-			return "", status.Error(codes.FailedPrecondition, "MCP tool result event identity is invalid")
-		}
-		return payload.MCPToolUseID, nil
-	default:
-		return "", status.Error(codes.FailedPrecondition, "tool result event type is invalid")
-	}
-}
-
-type runtimeToolProjectionPayload struct {
-	EventType               string                              `json:"event_type"`
-	EvaluatedPermission     string                              `json:"evaluated_permission"`
-	MCPServerName           string                              `json:"mcp_server_name,omitempty"`
-	ModelToolCallID         string                              `json:"model_tool_call_id"`
-	ToolName                string                              `json:"tool_name"`
-	ProviderInput           json.RawMessage                     `json:"provider_input"`
-	RouteCapability         string                              `json:"route_capability"`
-	CanonicalExecutionInput json.RawMessage                     `json:"canonical_execution_input"`
-	State                   string                              `json:"state"`
-	LeadingReasoning        []*bridgev1.RuntimeContextReasoning `json:"-"`
-	Output                  *struct {
-		Text      string `json:"text"`
-		Truncated bool   `json:"truncated"`
-	} `json:"output"`
-	Error *struct {
-		Type      string `json:"type"`
-		Message   string `json:"message"`
-		Retryable bool   `json:"retryable"`
-	} `json:"error"`
-}
-
-func runtimeToolRouteCapabilityAllowed(value string) bool {
-	switch value {
-	case "sandbox_execute", "background_command", "web_execute", "mcp_execute", "memory_execute",
-		"child_create", "child_message", "child_wait", "child_interrupt", "child_close", "child_resume", "child_list":
-		return true
-	default:
-		return false
-	}
-}
-
-func runtimeToolEventPayloadJSON(projection runtimeToolProjectionPayload) (string, error) {
+func runtimeToolEventPayloadJSON(projection runtimecontrol.ToolProjection) (string, error) {
 	payload := map[string]any{
 		"evaluated_permission": projection.EvaluatedPermission,
 		"input":                projection.CanonicalExecutionInput,
@@ -1260,50 +989,73 @@ func runtimeToolEventPayloadJSON(projection runtimeToolProjectionPayload) (strin
 	if projection.EventType == "agent.mcp_tool_use" {
 		payload["mcp_server_name"] = projection.MCPServerName
 	}
-	return marshalBridgeJSON(payload)
+	return runtimecontrol.MarshalJSON(payload)
 }
 
-func normalizeRuntimeToolDeclaration(declaration *bridgev1.RuntimeToolDeclaration) (runtimeToolProjectionPayload, error) {
-	if declaration == nil || !runtimeAlreadyCanonicalIdentifier(declaration.GetModelToolCallId()) ||
-		!runtimeAlreadyCanonicalIdentifier(declaration.GetToolName()) ||
-		!runtimeToolRouteCapabilityAllowed(declaration.GetRouteCapability()) {
-		return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool declaration identity is invalid")
+// runtimeToolEventProjectionJSON is the complete Tool Use projection written
+// by the declaration INSERT; no later statement rewrites it.
+func runtimeToolEventProjectionJSON(projection runtimecontrol.ToolProjection) (string, error) {
+	return runtimecontrol.MarshalJSON(map[string]any{
+		"canonical_execution_input": projection.CanonicalExecutionInput,
+		"evaluated_permission":      projection.EvaluatedPermission,
+		"event_type":                projection.EventType,
+		"mcp_server_name":           projection.MCPServerName,
+		"model_tool_call_id":        projection.ModelToolCallID,
+		"provider_input":            projection.ProviderInput,
+		"route_capability":          projection.RouteCapability,
+		"tool_name":                 projection.ToolName,
+	})
+}
+
+// preparedRuntimeToolDeclaration owns decoded context for one WriteEvent invocation.
+// Digest and append only read these fresh maps; raw projection fields remain unchanged.
+type preparedRuntimeToolDeclaration struct {
+	projection          runtimecontrol.ToolProjection
+	contextParts        []map[string]any
+	rawInputsNormalized bool
+}
+
+func normalizeRuntimeToolDeclaration(declaration *bridgev1.RuntimeToolDeclaration) (preparedRuntimeToolDeclaration, error) {
+	if declaration == nil || !runtimecontrol.RuntimeAlreadyCanonicalIdentifier(declaration.GetModelToolCallId()) ||
+		!runtimecontrol.RuntimeAlreadyCanonicalIdentifier(declaration.GetToolName()) ||
+		!runtimecontrol.RuntimeToolRouteCapabilityAllowed(declaration.GetRouteCapability()) {
+		return preparedRuntimeToolDeclaration{}, status.Error(codes.InvalidArgument, "Tool declaration identity is invalid")
 	}
-	inputJSON, err := canonicalRunToolJSON(declaration.GetPublicExecutionInputJson())
-	if err != nil || len(inputJSON) > runtimeToolInputJSONMaxBytes {
-		return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool declaration input is invalid")
+	inputJSON, err := runtimecontrol.CanonicalRunToolJSON(declaration.GetPublicExecutionInputJson())
+	if err != nil || len(inputJSON) > runtimecontrol.RuntimeToolInputJSONMaxBytes {
+		return preparedRuntimeToolDeclaration{}, status.Error(codes.InvalidArgument, "Tool declaration input is invalid")
 	}
 	var inputObject map[string]json.RawMessage
 	if json.Unmarshal([]byte(inputJSON), &inputObject) != nil || inputObject == nil {
-		return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool declaration input must be an object")
+		return preparedRuntimeToolDeclaration{}, status.Error(codes.InvalidArgument, "Tool declaration input must be an object")
 	}
 	providerInputJSON := inputJSON
 	if declaration.DistinctProviderInputJson != nil {
-		providerInputJSON, err = canonicalRunToolJSON(declaration.GetDistinctProviderInputJson())
-		if err != nil || len(providerInputJSON) > runtimeToolInputJSONMaxBytes {
-			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool declaration Provider input is invalid")
+		providerInputJSON, err = runtimecontrol.CanonicalRunToolJSON(declaration.GetDistinctProviderInputJson())
+		if err != nil || len(providerInputJSON) > runtimecontrol.RuntimeToolInputJSONMaxBytes {
+			return preparedRuntimeToolDeclaration{}, status.Error(codes.InvalidArgument, "Tool declaration Provider input is invalid")
 		}
 	}
 	if declaration.GetEvaluatedPermission() != "allow" && declaration.GetEvaluatedPermission() != "ask" && declaration.GetEvaluatedPermission() != "deny" {
-		return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool declaration permission is invalid")
+		return preparedRuntimeToolDeclaration{}, status.Error(codes.InvalidArgument, "Tool declaration permission is invalid")
 	}
 	eventType := "agent.tool_use"
 	mcpServerName := ""
 	switch declaration.GetEventKind() {
 	case bridgev1.RuntimeToolEventKind_RUNTIME_TOOL_EVENT_KIND_TOOL:
 		if declaration.McpServerName != nil {
-			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "ordinary Tool declaration has an MCP server")
+			return preparedRuntimeToolDeclaration{}, status.Error(codes.InvalidArgument, "ordinary Tool declaration has an MCP server")
 		}
 	case bridgev1.RuntimeToolEventKind_RUNTIME_TOOL_EVENT_KIND_MCP:
 		mcpServerName = declaration.GetMcpServerName()
-		if !runtimeAlreadyCanonicalIdentifier(mcpServerName) {
-			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "MCP Tool declaration server is invalid")
+		if !runtimecontrol.RuntimeAlreadyCanonicalIdentifier(mcpServerName) {
+			return preparedRuntimeToolDeclaration{}, status.Error(codes.InvalidArgument, "MCP Tool declaration server is invalid")
 		}
 		eventType = "agent.mcp_tool_use"
 	default:
-		return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool declaration kind is invalid")
+		return preparedRuntimeToolDeclaration{}, status.Error(codes.InvalidArgument, "Tool declaration kind is invalid")
 	}
-	projection := runtimeToolProjectionPayload{
+	projection := runtimecontrol.ToolProjection{
 		EventType:               eventType,
 		EvaluatedPermission:     declaration.GetEvaluatedPermission(),
 		MCPServerName:           mcpServerName,
@@ -1315,13 +1067,14 @@ func normalizeRuntimeToolDeclaration(declaration *bridgev1.RuntimeToolDeclaratio
 		State:                   "running",
 		LeadingReasoning:        declaration.GetLeadingReasoning(),
 	}
-	if _, err := canonicalRuntimeContextDelta(runtimeToolContextDelta(projection)); err != nil {
-		return runtimeToolProjectionPayload{}, err
+	parts, err := canonicalRuntimeContextParts(runtimeToolContextDelta(projection))
+	if err != nil {
+		return preparedRuntimeToolDeclaration{}, err
 	}
-	return projection, nil
+	return preparedRuntimeToolDeclaration{projection: projection, contextParts: parts, rawInputsNormalized: true}, nil
 }
 
-func runtimeToolContextDelta(projection runtimeToolProjectionPayload) *bridgev1.RuntimeContextDelta {
+func runtimeToolContextDelta(projection runtimecontrol.ToolProjection) *bridgev1.RuntimeContextDelta {
 	parts := make([]*bridgev1.RuntimeContextPart, 0, len(projection.LeadingReasoning)+1)
 	for _, reasoning := range projection.LeadingReasoning {
 		parts = append(parts, &bridgev1.RuntimeContextPart{Content: &bridgev1.RuntimeContextPart_Reasoning{Reasoning: reasoning}})
@@ -1334,61 +1087,60 @@ func runtimeToolContextDelta(projection runtimeToolProjectionPayload) *bridgev1.
 	return &bridgev1.RuntimeContextDelta{Parts: parts}
 }
 
-func applyToolEventBookkeepingTx(
+// applyToolUseBookkeepingTx opens the declared Tool's external-wait route.
+func applyToolUseBookkeepingTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	eventID string,
-	eventType string,
-	payloadJSON string,
-	projection runtimeToolProjectionPayload,
+	projection runtimecontrol.ToolProjection,
 	now time.Time,
 ) error {
-	switch eventType {
-	case "agent.tool_use", "agent.mcp_tool_use":
-		if projection.ModelToolCallID == "" || projection.ToolName == "" || len(projection.CanonicalExecutionInput) == 0 {
-			return status.Error(codes.FailedPrecondition, "tool use declaration is missing its tool part")
-		}
-		switch projection.EvaluatedPermission {
-		case "ask", "allow", "deny":
-			return upsertPendingToolRouteTx(
-				ctx,
-				tx,
-				scope,
-				eventID,
-				projection,
-				string(projection.CanonicalExecutionInput),
-				projection.EvaluatedPermission,
-				now,
-			)
-		default:
-			return status.Error(codes.FailedPrecondition, "tool use permission is invalid")
-		}
-	case "agent.tool_result", "agent.mcp_tool_result":
-		var payload durableToolResultEventPayload
-		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-			return status.Error(codes.FailedPrecondition, "tool result event payload is invalid")
-		}
-		toolUseEventID, err := durableToolResultUseEventID(eventType, payload)
-		if err != nil {
-			return err
-		}
-		if projection.ModelToolCallID == "" {
-			return status.Error(codes.FailedPrecondition, "tool result declaration is incomplete")
-		}
-		if projection.State != "completed" && projection.State != "error" && projection.State != "cancelled" {
-			return status.Error(codes.FailedPrecondition, "tool result declaration state is not terminal")
-		}
-		if err := resolveSettledToolRouteTx(ctx, tx, scope, toolUseEventID, eventID, now); err != nil {
-			return err
-		}
-		if eventType == "agent.tool_result" {
-			return consumeSandboxExecutionTx(ctx, tx, scope, toolUseEventID, eventID, projection, now)
-		}
-		return nil
-	default:
-		return nil
+	if projection.ModelToolCallID == "" || projection.ToolName == "" || len(projection.CanonicalExecutionInput) == 0 {
+		return status.Error(codes.FailedPrecondition, "tool use declaration is missing its tool part")
 	}
+	switch projection.EvaluatedPermission {
+	case "ask", "allow", "deny":
+		return upsertPendingToolRouteTx(
+			ctx,
+			tx,
+			scope,
+			eventID,
+			projection,
+			string(projection.CanonicalExecutionInput),
+			projection.EvaluatedPermission,
+			now,
+		)
+	default:
+		return status.Error(codes.FailedPrecondition, "tool use permission is invalid")
+	}
+}
+
+// applyToolResultBookkeepingTx resolves the route and consumes the Sandbox
+// execution of the Tool Use that the settled result references.
+func applyToolResultBookkeepingTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	resultEventID string,
+	resultEventType string,
+	toolUseEventID string,
+	projection runtimecontrol.ToolProjection,
+	now time.Time,
+) error {
+	if projection.ModelToolCallID == "" {
+		return status.Error(codes.FailedPrecondition, "tool result declaration is incomplete")
+	}
+	if projection.State != "completed" && projection.State != "error" && projection.State != "cancelled" {
+		return status.Error(codes.FailedPrecondition, "tool result declaration state is not terminal")
+	}
+	if err := runtimecontrol.ResolveSettledToolRouteTx(ctx, tx, scope, toolUseEventID, resultEventID, now); err != nil {
+		return err
+	}
+	if resultEventType == "agent.tool_result" {
+		return consumeSandboxExecutionTx(ctx, tx, scope, toolUseEventID, resultEventID, projection, now)
+	}
+	return nil
 }
 
 func consumeSandboxExecutionTx(
@@ -1397,7 +1149,7 @@ func consumeSandboxExecutionTx(
 	scope *bridgev1.RuntimeScope,
 	toolUseEventID string,
 	terminalEventID string,
-	projection runtimeToolProjectionPayload,
+	projection runtimecontrol.ToolProjection,
 	now time.Time,
 ) error {
 	var toolKind, toolName string
@@ -1434,7 +1186,7 @@ func consumeSandboxExecutionTx(
 		if err != nil {
 			return err
 		}
-		if !rowsAffected(updated) {
+		if !runtimecontrol.RowsAffected(updated) {
 			return status.Error(codes.FailedPrecondition, "sandbox background result consume failed")
 		}
 		return nil
@@ -1468,7 +1220,7 @@ func consumeSandboxExecutionTx(
 		if err != nil {
 			return err
 		}
-		if !rowsAffected(updated) {
+		if !runtimecontrol.RowsAffected(updated) {
 			return status.Error(codes.FailedPrecondition, "sandbox tool attachment is not staged")
 		}
 	}
@@ -1486,7 +1238,7 @@ func consumeSandboxExecutionTx(
 	if err != nil {
 		return err
 	}
-	if !rowsAffected(updated) {
+	if !runtimecontrol.RowsAffected(updated) {
 		return status.Error(codes.FailedPrecondition, "sandbox tool execution consume failed")
 	}
 	return nil
@@ -1498,55 +1250,6 @@ func validSandboxResultDigest(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
-}
-
-func consumeSandboxExecutionForTerminalWriterTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	toolUseEventID string,
-	terminalEventID string,
-	reason string,
-	now time.Time,
-) error {
-	if reason != "pod_lost" && reason != "runtime_terminated" && reason != "cleanup_wait_expired" && reason != "conversation_tool_result" {
-		return status.Error(codes.Internal, "sandbox execution terminal consumption reason is invalid")
-	}
-	var terminalPayloadJSON string
-	if err := tx.QueryRow(ctx,
-		`SELECT payload_json
-		   FROM session_events
-		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-		    AND event_id = $4`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), terminalEventID,
-	).Scan(&terminalPayloadJSON); err != nil {
-		return err
-	}
-	// A staged provider result is not the conversation's terminal Tool Result.
-	// The first terminal session event owns settlement; alternate terminal
-	// writers clear staged output and retain only its digest and execution record so a
-	// late provider result cannot rewrite terminal conversation history.
-	fallbackDigest := sha256Hex(terminalPayloadJSON)
-	result, err := tx.Exec(ctx,
-		`UPDATE session_runtime_tool_results
-		    SET execution_state = CASE WHEN tool_kind='sandbox_tool' THEN 'consumed' ELSE execution_state END,
-		        background_operation_state = CASE WHEN tool_kind='sandbox_background' THEN 'terminal' ELSE background_operation_state END,
-		        result_json = NULL,
-		        result_digest = COALESCE(NULLIF(result_digest, ''), $8),
-		        consumed_by_terminal_event_id = $5,
-		        consumption_reason = $6, updated_at = $7
-		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-		    AND tool_use_event_id = $4 AND tool_kind IN ('sandbox_tool','sandbox_background')
-		    AND (tool_kind='sandbox_tool' AND execution_state <> 'consumed'
-		      OR tool_kind='sandbox_background' AND consumed_by_terminal_event_id IS NULL)`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
-		toolUseEventID, terminalEventID, reason, now, fallbackDigest,
-	)
-	if err != nil {
-		return err
-	}
-	_ = result
-	return nil
 }
 
 func sandboxExecutionAttachmentRefs(resultJSON string) ([]string, error) {
@@ -1596,7 +1299,7 @@ func upsertPendingToolRouteTx(
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	eventID string,
-	projection runtimeToolProjectionPayload,
+	projection runtimecontrol.ToolProjection,
 	inputJSON string,
 	evaluatedPermission string,
 	now time.Time,
@@ -1631,74 +1334,4 @@ func upsertPendingToolRouteTx(
 		now,
 	)
 	return err
-}
-
-func resolveSettledToolRouteTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, resultEventID string, now time.Time) error {
-	result, err := tx.Exec(ctx,
-		`UPDATE session_pending_tool_uses
-		    SET status = 'resolved',
-		        result_event_id = $5,
-		        resolved_at = $6,
-		        updated_at = $6
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND tool_use_event_id = $4
-		    AND (status = 'cancelled' OR (status = 'resolving' AND decision IN ('allow','deny')))
-		    AND result_event_id IS NULL`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		toolUseEventID,
-		resultEventID,
-		now,
-	)
-	if err != nil {
-		return err
-	}
-	if !rowsAffected(result) {
-		return status.Error(codes.FailedPrecondition, "durable Tool route settlement did not close its exact route")
-	}
-	return nil
-}
-
-func userMessageContextDraftJSON(payloadJSON string) (string, error) {
-	var payload struct {
-		Content []struct {
-			Type   string `json:"type"`
-			Text   string `json:"text"`
-			Source *struct {
-				Type   string `json:"type"`
-				FileID string `json:"file_id"`
-			} `json:"source"`
-		} `json:"content"`
-	}
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-		return "", status.Error(codes.FailedPrecondition, "user message event payload is not projectable")
-	}
-	if len(payload.Content) == 0 {
-		return "", status.Error(codes.FailedPrecondition, "user message event payload is not projectable")
-	}
-	parts := make([]map[string]any, 0, len(payload.Content))
-	for _, item := range payload.Content {
-		switch item.Type {
-		case "text":
-			if item.Text == "" || item.Source != nil {
-				return "", status.Error(codes.FailedPrecondition, "user message event payload is not projectable")
-			}
-		case "image", "document":
-			if item.Text != "" || item.Source == nil || item.Source.Type != "file" || item.Source.FileID == "" {
-				return "", status.Error(codes.FailedPrecondition, "user message event payload is not projectable")
-			}
-			continue
-		default:
-			return "", status.Error(codes.FailedPrecondition, "user message event payload is not projectable")
-		}
-		parts = append(parts, map[string]any{
-			"type":      "text",
-			"text":      item.Text,
-			"truncated": false,
-		})
-	}
-	return marshalBridgeDataJSON(map[string]any{"parts": parts})
 }

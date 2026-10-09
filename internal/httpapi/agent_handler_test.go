@@ -48,9 +48,9 @@ func newAgentTestRouterWithStaticWorkspaceAuth(t *testing.T, db *sql.DB, pageTok
 	authenticator := auth.AuthenticatorFunc(func(_ context.Context, rawKey string) (auth.Principal, error) {
 		switch rawKey {
 		case testAPIKey:
-			return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_default"}, nil
+			return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_default"), nil
 		case "workspace-b-key":
-			return auth.Principal{Workspace: workspace.Workspace{ID: "workspace_b"}, APIKeyID: "ak_b"}, nil
+			return auth.IndependentKeyPrincipal(workspace.Workspace{ID: "workspace_b"}, "ak_b"), nil
 		default:
 			return auth.Principal{}, &auth.AuthenticationError{Message: "invalid api key"}
 		}

@@ -15,6 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 )
@@ -320,10 +322,10 @@ func TestSessionMessagesModelRequestAssociationIsAssistantOnlyAndScopedUnique(t 
 		_, err := admin.ExecContext(context.Background(),
 			`INSERT INTO session_messages (
 				workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-				data_json, model_request_id, created_at, updated_at
+				content_storage, data_json, next_part_index, model_request_id, created_at, updated_at
 			) VALUES (
 				'workspace_message_model', 'sesn_message_model', 'thr_message_model', $1, $2, $3,
-				'{}', $4, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+				'parts', NULL, 1, $4, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
 			)`,
 			messageID, sequence, kind, modelRequestID,
 		)
@@ -653,6 +655,8 @@ func TestSessionEventsSchemaMatchesDraftLedger(t *testing.T) {
 		"runtime_write_id",
 		"model_request_id",
 		"projection_json",
+		"model_tool_call_id",
+		"tool_use_event_id",
 		"created_at",
 		"updated_at",
 		"processed_at",
@@ -692,8 +696,13 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 		},
 		"session_messages": {
 			"workspace_id", "session_id", "session_thread_id", "message_id",
-			"sequence", "kind", "data_json", "source_event_id",
+			"sequence", "kind", "content_storage", "data_json", "next_part_index",
+			"reasoning_part_count", "reasoning_bytes", "source_event_id",
 			"repair_key", "model_request_id", "created_at", "updated_at",
+		},
+		"session_message_parts": {
+			"workspace_id", "session_id", "session_thread_id", "message_id",
+			"content_storage", "part_index", "part_kind", "model_tool_call_id", "data_json",
 		},
 		"session_pending_tool_uses": {
 			"workspace_id", "session_id", "session_thread_id", "tool_use_event_id",
@@ -779,8 +788,8 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 		"queue_jobs": {
 			"id", "workspace_id", "kind", "partition_key", "queue_partition_sequence",
 			"causal_session_id", "delivery_scope", "delivery_thread_id", "control_class", "dedupe_key",
-			"payload_version", "status", "payload_json", "priority",
-			"lease_token", "leased_by", "leased_at", "leased_until",
+			"payload_version", "status", "payload_json", "priority", "negative_priority",
+			"lease_token", "leased_by", "leased_at", "leased_until", "lease_previous_attempt_count",
 			"attempt_count", "defer_count", "max_attempts", "available_at", "created_at",
 			"updated_at", "acknowledged_at", "cancelled_at",
 			"dead_lettered_at", "last_error_kind", "last_error_message",
@@ -1566,6 +1575,7 @@ func TestSessionRuntimeBindingsSchemaShapeAndRLS(t *testing.T) {
 		"agent_runtime_pod_name",
 		"agent_runtime_pod_uid",
 		"agent_runtime_pod_ip",
+		"runtime_process_id",
 		"bound_at",
 		"updated_at",
 	}
@@ -1848,8 +1858,51 @@ func TestSessionEventIdempotencySchemaShapeAndRLS(t *testing.T) {
 		}
 	}
 	assertTableRLSForced(t, db, schema, "session_event_idempotency_keys")
-	assertUniqueConstraintColumns(t, db, schema, "session_event_idempotency_keys", []string{"workspace_id", "session_id", "idempotency_key_digest"})
+	assertPrimaryKeyColumns(t, db, schema, "session_event_idempotency_keys", []string{"workspace_id", "session_id", "idempotency_key_digest"})
 	assertForeignKeyCascade(t, db, schema, "session_event_idempotency_keys", "sessions")
+}
+
+// A feed watermark row names either the Session feed ('session', no Thread) or
+// exactly one existing Thread of its Session ('thread:<id>'), and only a
+// positive position.
+func TestSessionEventFeedRetentionShape(t *testing.T) {
+	_, admin, _ := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
+	seedStorageSchemaSession(t, admin, "workspace_feed", "sesn_feed")
+	if _, err := admin.Exec(`INSERT INTO session_threads (workspace_id, id, session_id, role, visibility, status, created_at, last_active_at, updated_at)
+		VALUES ('workspace_feed', 'thr_feed', 'sesn_feed', 'main', 'public', 'idle', now(), now(), now())`); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(feedKey string, threadID any, prunedThrough int64) error {
+		_, err := admin.Exec(`INSERT INTO session_event_feed_retention (workspace_id, session_id, feed_key, session_thread_id, pruned_through)
+			VALUES ('workspace_feed', 'sesn_feed', $1, $2, $3)`, feedKey, threadID, prunedThrough)
+		return err
+	}
+	for name, row := range map[string]struct {
+		feedKey string
+		thread  any
+	}{"session": {"session", nil}, "thread": {"thread:thr_feed", "thr_feed"}} {
+		if err := insert(row.feedKey, row.thread, 1); err != nil {
+			t.Fatalf("valid %s watermark: %v", name, err)
+		}
+	}
+	for name, row := range map[string]struct {
+		feedKey  string
+		thread   any
+		position int64
+		code     string
+	}{
+		"session key with thread":  {"session", "thr_feed", 1, "23514"},
+		"thread key without id":    {"thread:thr_feed", nil, 1, "23514"},
+		"thread key of another id": {"thread:thr_other", "thr_feed", 1, "23514"},
+		"empty thread":             {"thread:", "", 1, "23514"},
+		"zero position":            {"thread:thr_none", "thr_none", 0, "23514"},
+		"missing thread":           {"thread:thr_none", "thr_none", 1, "23503"},
+	} {
+		var pgErr *pgconn.PgError
+		if err := insert(row.feedKey, row.thread, row.position); !errors.As(err, &pgErr) || pgErr.Code != row.code {
+			t.Fatalf("%s: %v; want SQLSTATE %s", name, err, row.code)
+		}
+	}
 }
 
 func TestSessionRuntimeBindingsStateInvariants(t *testing.T) {
@@ -2057,11 +2110,11 @@ func TestSessionRuntimeBindingsWorkspaceIsolation(t *testing.T) {
 		result, err := tx.ExecContext(context.Background(),
 			`INSERT INTO session_runtime_bindings (
 				workspace_id, session_id, binding_id, binding_generation,
-				agent_runtime_namespace, agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip,
+				agent_runtime_namespace, agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip, runtime_process_id,
 				bound_at, updated_at
 			 )
 			 VALUES ('workspace_binding_b', 'sesn_binding_b', 'bind_b_cross', 3,
-				'runtime-ns', 'agent-runtime-b', 'uid-b', '10.0.0.6',
+				'runtime-ns', 'agent-runtime-b', 'uid-b', '10.0.0.6','process_uid-b',
 				'2026-06-09T10:01:00Z', '2026-06-09T10:01:00Z')
 			 ON CONFLICT (workspace_id, session_id) DO UPDATE SET updated_at = EXCLUDED.updated_at`)
 		if err == nil {
@@ -2244,6 +2297,7 @@ func mustInsertSessionRuntimeBinding(t *testing.T, db *sql.DB, row bindingRow) {
 
 func insertSessionRuntimeBinding(t *testing.T, db *sql.DB, row bindingRow) error {
 	t.Helper()
+	seedSchemaBindingProcess(t, db, row)
 	_, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_bindings (
 			workspace_id,
@@ -2254,9 +2308,10 @@ func insertSessionRuntimeBinding(t *testing.T, db *sql.DB, row bindingRow) error
 			agent_runtime_pod_name,
 			agent_runtime_pod_uid,
 			agent_runtime_pod_ip,
+ runtime_process_id,
 			bound_at,
 			updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $11, $9, $10)`,
 		row.workspaceID,
 		row.sessionID,
 		nullableString(row.bindingID, row.bindingIDPresent),
@@ -2267,12 +2322,14 @@ func insertSessionRuntimeBinding(t *testing.T, db *sql.DB, row bindingRow) error
 		nullableString(row.podIP, row.podIPPresent),
 		nullableString(row.boundAt, row.boundAtPresent),
 		row.updatedAt,
+		"process_"+row.podUID,
 	)
 	return err
 }
 
 func mustReplaceSessionRuntimeBinding(t *testing.T, db *sql.DB, row bindingRow) {
 	t.Helper()
+	seedSchemaBindingProcess(t, db, row)
 	result, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_bindings (
 			workspace_id,
@@ -2283,9 +2340,10 @@ func mustReplaceSessionRuntimeBinding(t *testing.T, db *sql.DB, row bindingRow) 
 			agent_runtime_pod_name,
 			agent_runtime_pod_uid,
 			agent_runtime_pod_ip,
+ runtime_process_id,
 			bound_at,
 			updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $11, $9, $10)
 		ON CONFLICT (workspace_id, session_id) DO UPDATE SET
 			binding_id = EXCLUDED.binding_id,
 			binding_generation = EXCLUDED.binding_generation,
@@ -2293,6 +2351,7 @@ func mustReplaceSessionRuntimeBinding(t *testing.T, db *sql.DB, row bindingRow) 
 			agent_runtime_pod_name = EXCLUDED.agent_runtime_pod_name,
 			agent_runtime_pod_uid = EXCLUDED.agent_runtime_pod_uid,
 			agent_runtime_pod_ip = EXCLUDED.agent_runtime_pod_ip,
+ runtime_process_id = EXCLUDED.runtime_process_id,
 			bound_at = EXCLUDED.bound_at,
 			updated_at = EXCLUDED.updated_at`,
 		row.workspaceID,
@@ -2305,6 +2364,7 @@ func mustReplaceSessionRuntimeBinding(t *testing.T, db *sql.DB, row bindingRow) 
 		row.podIP,
 		row.boundAt,
 		row.updatedAt,
+		"process_"+row.podUID,
 	)
 	if err != nil {
 		t.Fatalf("replace session runtime binding: %v", err)
@@ -2401,6 +2461,11 @@ func expectedVersionOneControlPlaneTables() []string {
 		"agent_versions",
 		"agents",
 		"api_keys",
+		"auth_access_tokens",
+		"auth_federation_rules",
+		"auth_identities",
+		"auth_workspace_grants",
+		"cleanup_schedule_cursor",
 		"credentials",
 		"environment_artifacts",
 		"environments",
@@ -2413,11 +2478,13 @@ func expectedVersionOneControlPlaneTables() []string {
 		"queue_jobs",
 		"queue_partition_counters",
 		"request_usage_details",
+		"runtime_process_liveness", "runtime_process_pods", "runtime_processes",
 		"sandbox_lifecycle_operations",
 		"sandbox_output_capture_blobs",
 		"sandbox_output_capture_operations",
 		"session_background_tasks",
 		"session_bridge_operations",
+		"session_event_feed_retention",
 		"session_event_idempotency_keys",
 		"session_event_stream_changes",
 		"session_events",
@@ -2427,6 +2494,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"session_github_repository_resources",
 		"session_mcp_manifests",
 		"session_memory_store_resources",
+		"session_message_parts",
 		"session_messages",
 		"session_output_captures",
 		"session_pending_tool_uses",
@@ -2434,6 +2502,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"session_resource_prefix_gc",
 		"session_resources",
 		"session_runtime_bindings",
+		"session_runtime_handoffs", "session_runtime_handoff_threads",
 		"session_runtime_inbox",
 		"session_runtime_status",
 		"session_runtime_tool_results",
@@ -2878,4 +2947,19 @@ func equalStringSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func seedSchemaBindingProcess(t *testing.T, db *sql.DB, row bindingRow) {
+	t.Helper()
+	if row.namespace == "" || row.podUID == "" {
+		return
+	}
+	identity := runtimecontrol.ProcessIdentity{Namespace: row.namespace, PodUID: row.podUID, ID: "process_" + row.podUID}
+	registered, err := runtimecontrol.RegisterProcess(context.Background(), dbconnect.NewClientForTesting(db), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runtimecontrol.ReportProcess(context.Background(), dbconnect.NewClientForTesting(db), identity, registered.RegistrationReceipt, runtimecontrol.ProcessAccepting); err != nil {
+		t.Fatal(err)
+	}
 }

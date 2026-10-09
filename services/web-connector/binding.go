@@ -25,6 +25,7 @@ type bindingPayload struct {
 	BindingID         string `json:"binding_id"`
 	BindingGeneration int64  `json:"binding_generation"`
 	RuntimePodUID     string `json:"runtime_pod_uid"`
+	RuntimeProcessID  string `json:"runtime_process_id"`
 	ExpiresAtUnix     int64  `json:"exp"`
 }
 
@@ -59,5 +60,6 @@ func (v *BindingVerifier) Verify(request *providergatewayv1.RunWebRequest, podUI
 	}
 	return payload.WorkspaceID == request.GetWorkspaceId() && payload.SessionID == request.GetSessionId() &&
 		payload.SessionThreadID == request.GetSessionThreadId() && payload.BindingID == request.GetBindingId() &&
-		payload.BindingGeneration == request.GetBindingGeneration() && payload.RuntimePodUID == podUID
+		payload.BindingGeneration == request.GetBindingGeneration() && payload.RuntimePodUID == podUID &&
+		payload.RuntimeProcessID != "" && payload.RuntimeProcessID == request.GetRuntimeProcessId()
 }

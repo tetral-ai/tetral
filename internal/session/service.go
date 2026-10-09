@@ -1198,3 +1198,40 @@ func (t filesTx) Query(ctx context.Context, query string, args ...any) (files.Ro
 func (t filesTx) QueryRow(ctx context.Context, query string, args ...any) files.Row {
 	return t.tx.QueryRowScanner(ctx, query, args...)
 }
+
+// LookupSession, LookupThread and LookupResource resolve only the canonical
+// identity a public mutation authorizes; they assemble no response and load no
+// usage, agent version or provider authentication. A lookup is not a lock: the
+// mutation rechecks eligibility in its own transaction.
+//
+// LookupSession admits every Session except a deleted one, so archived and
+// archiving Sessions keep their handler-owned archive and conflict results.
+func (s *Service) LookupSession(ctx context.Context, ws workspace.ID, sessionID string) (string, error) {
+	return s.store.LookupSession(ctx, ws, sessionID)
+}
+
+// LookupThread admits a public, non-reviewer Thread of the named nondeleted
+// Session, including an archived Thread, so repeated archive stays idempotent.
+func (s *Service) LookupThread(ctx context.Context, ws workspace.ID, sessionID, threadID string) (string, error) {
+	return s.store.LookupThread(ctx, ws, sessionID, threadID)
+}
+
+// LookupResource admits an attached Resource of the named nondeleted Session
+// whose deletion has not been requested; a file Resource also requires its
+// live Session-scoped file. Deletion resolves through LookupResourceDeletion.
+func (s *Service) LookupResource(ctx context.Context, ws workspace.ID, sessionID, resourceID string) (string, error) {
+	return s.store.LookupResource(ctx, ws, sessionID, resourceID)
+}
+
+// LookupSessionDeletion resolves a tenant-owned target without applying public
+// read visibility: an already deleted session still supports idempotent delete.
+// Delete owns lifecycle eligibility and rechecks the row in its transaction.
+func (s *Service) LookupSessionDeletion(ctx context.Context, ws workspace.ID, sessionID string) (string, error) {
+	return s.store.LookupSessionDeletion(ctx, ws, sessionID)
+}
+
+// LookupResourceDeletion preserves delete-requested resource visibility for
+// repeated deletion while proving its actual session/workspace relationship.
+func (s *Service) LookupResourceDeletion(ctx context.Context, ws workspace.ID, sessionID, resourceID string) (string, error) {
+	return s.store.LookupResourceDeletion(ctx, ws, sessionID, resourceID)
+}

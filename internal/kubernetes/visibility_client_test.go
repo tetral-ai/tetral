@@ -801,3 +801,108 @@ func waitForCondition(t *testing.T, name string, condition func() bool) {
 	}
 	t.Fatalf("timed out waiting for %s", name)
 }
+
+func TestWatchHandlesStopJoinsReplacementWatchesAcrossCopies(t *testing.T) {
+	cfg := newVisibilityTestConfig(t)
+	client := newRecordingVisibilityClient()
+	handles, err := SyncAndWatchWithOptions(context.Background(), client, cfg, NewWatcherCache(cfg.Namespace), SyncOptions{RestartInitialBackoff: time.Millisecond, RestartMaximumBackoff: time.Millisecond})
+	if err != nil {
+		t.Fatalf("SyncAndWatch: %v", err)
+	}
+	t.Cleanup(handles.Stop)
+	client.currentPodWatch().Stop()
+	client.currentEndpointSliceWatch().Stop()
+	waitForCondition(t, "replacement watches", func() bool { return client.podWatchCount() >= 2 && client.endpointSliceWatchCount() >= 2 })
+	pods, endpoints := client.currentPodWatch(), client.currentEndpointSliceWatch()
+	copied := handles
+	finished := make(chan struct{}, 2)
+	go func() { handles.Stop(); finished <- struct{}{} }()
+	go func() { copied.Stop(); finished <- struct{}{} }()
+	for range 2 {
+		select {
+		case <-finished:
+		case <-time.After(time.Second):
+			t.Fatal("concurrent copied Stop did not join watchers")
+		}
+	}
+	if !pods.IsStopped() || !endpoints.IsStopped() {
+		t.Fatal("Stop returned before replacement watches stopped")
+	}
+	// Empty and manually assembled handles preserve their supported behavior.
+	WatchHandles{}.Stop()
+	manual := watch.NewFake()
+	WatchHandles{Pods: manual}.Stop()
+	if !manual.IsStopped() {
+		t.Fatal("manual handle did not stop its watch")
+	}
+}
+
+type cancellationJoinVisibilityClient struct {
+	VisibilityClient
+	mu       sync.Mutex
+	lists    int
+	entered  chan struct{}
+	canceled chan struct{}
+	release  chan struct{}
+	exited   chan struct{}
+}
+
+func (c *cancellationJoinVisibilityClient) ListPods(ctx context.Context, namespace string, options metav1.ListOptions) (*corev1.PodList, error) {
+	c.mu.Lock()
+	c.lists++
+	count := c.lists
+	c.mu.Unlock()
+	if count == 1 {
+		return c.VisibilityClient.ListPods(ctx, namespace, options)
+	}
+	close(c.entered)
+	<-ctx.Done()
+	close(c.canceled)
+	<-c.release
+	close(c.exited)
+	return nil, ctx.Err()
+}
+func TestWatchHandlesStopJoinsContextBoundListRetry(t *testing.T) {
+	cfg := newVisibilityTestConfig(t)
+	recorded := newRecordingVisibilityClient()
+	client := &cancellationJoinVisibilityClient{VisibilityClient: recorded, entered: make(chan struct{}), canceled: make(chan struct{}), release: make(chan struct{}), exited: make(chan struct{})}
+	handles, err := SyncAndWatchWithOptions(context.Background(), client, cfg, NewWatcherCache(cfg.Namespace), SyncOptions{RestartInitialBackoff: time.Millisecond, RestartMaximumBackoff: time.Millisecond})
+	if err != nil {
+		t.Fatalf("SyncAndWatch: %v", err)
+	}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(client.release) }) }
+	t.Cleanup(func() { release(); handles.Stop() })
+	recorded.currentPodWatch().Stop()
+	select {
+	case <-client.entered:
+	case <-time.After(time.Second):
+		t.Fatal("replacement list did not start")
+	}
+	finished := make(chan struct{})
+	go func() { handles.Stop(); close(finished) }()
+	select {
+	case <-client.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not cancel context-bound list")
+	}
+	select {
+	case <-finished:
+		t.Fatal("Stop returned while the canceled list owner was still exiting")
+	default:
+	}
+	release()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not join completed list owner")
+	}
+	select {
+	case <-client.exited:
+	default:
+		t.Fatal("Stop returned before canceled list exited")
+	}
+	if !recorded.currentEndpointSliceWatch().IsStopped() {
+		t.Fatal("Stop returned before second watcher exited")
+	}
+}

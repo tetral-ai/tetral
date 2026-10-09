@@ -6,7 +6,7 @@ The request/response half of the platform's public API surface: every SDK
 route that answers immediately terminates here. The service validates the
 request, writes durable rows, and returns — it executes nothing. Every request
 arrives already authenticated: the edge called `auth`, stripped the raw
-API key, and injected a signed internal principal; this service verifies that
+API key or Bearer token, and injected a signed internal principal; this service verifies that
 principal and takes workspace authority from it alone. When admitted work needs
 anything to happen later — Sandbox lifecycle work, an environment build, cleanup — that
 fact leaves this service in exactly one vehicle: a queue job written in the same
@@ -20,6 +20,25 @@ PostgreSQL transaction as the business rows. The HTTP layer lives in
 under `services/api/internal/`; this service wires them together but does
 not own their trees.
 
+### Replica and request lifetime
+
+API replicas use the same durable database and object store with independent
+client pools. A Session created or updated through one replica is visible
+through another after commit; the signed principal and database workspace
+scope determine access on every request. The existing event append
+`Idempotency-Key` contract preserves the same event/inbox/Queue identity after
+a response is lost, for 24 hours after the original admission. It does not add replay rights to ordinary writes such as
+Session creation. An uncertain ordinary write must be reconciled through its
+existing read surface rather than automatically submitted again.
+
+Shutdown removes readiness and new HTTP admission, lets admitted requests
+finish within the service budget, then cancels and joins remaining handlers
+before closing shared-store clients. An event append canceled before commit
+rolls back its event, inbox and Queue writes together. The replica composition
+uses the pinned SDK, two Auth/API instances and independent database
+observations to exercise these boundaries; cluster routing remains deployment
+validation.
+
 ### Boot requirements
 
 Booting requires `TETRAL_DATABASE_URL`, `ENGINE_VAULT_KEY`,
@@ -29,7 +48,9 @@ as noted.
 
 | Variable | Purpose |
 |----------|---------|
-| `TETRAL_DATABASE_URL` | PostgreSQL DSN for the restricted API serving role. TLS settings are honored verbatim; the engine never overrides `sslmode`. PostgreSQL 18 is the tested target. |
+| `TETRAL_DATABASE_URL` | PostgreSQL DSN for the restricted API serving role. Production connections require verified TLS with the explicit CA and server name; a DSN cannot enable plaintext fallback. PostgreSQL 18 is the tested target. |
+| `TETRAL_DATABASE_TLS_CA_PATH` / `TETRAL_DATABASE_TLS_SERVER_NAME` | Required public CA bundle path and expected database DNS name. New connections use validated mounted trust. |
+| `TETRAL_BLOB_TLS_CA_PATH` / `TETRAL_BLOB_TLS_SERVER_NAME` | Required public CA bundle and expected endpoint name when production object storage is configured. |
 | `TETRAL_TEST_DATABASE_URL` | Test-only administrative DSN for focused `go test`; not read by the running server. The helper clones one immutable schema template into a private database and unique NOBYPASSRLS login per test. |
 | `ENGINE_DATA_DIR` | Optional; defaults to `/var/tetral`. Local filesystem state root — control-plane records never live here, so moving it migrates no SQL data. |
 | `ENGINE_VAULT_KEY` | 32-byte hex AES key encrypting vault credential secrets at rest; never carries request authentication. |
@@ -101,7 +122,8 @@ unauthenticated.
 
 | Step | Rule | Failure |
 | --- | --- | --- |
-| Principal | Verify the `auth` signed principal's signature, audience, expiry, method, and path. Workspace authority comes from `Principal.workspace_id` only. | `401 authentication_error` |
+| Principal | Verify the `auth` signed principal's signature, audience, expiry, method, and path. The token is at most 32 KiB of strict JSON, issued no more than five seconds ahead of the receiver clock, with a lifetime of at most five minutes. Workspace authority comes from `Principal.workspace_id` only. | `401 authentication_error` |
+| Operation | Every registered business route, including authenticated stubs, declares a semantic action from `internal/auth`. The common Authorizer checks the verified principal's explicit operation ceiling against its typed workspace before any resource lookup. | `403 permission_error` |
 | Selector binding | Client-supplied `workspace_id`, `session_id`, `vault_id`, etc. are selectors, never authority. Every query binds `Principal.workspace_id` plus the route selector. | — |
 | Cross-workspace / missing | Never falls back to another workspace, default resource, or default credential. | `404 not_found_error`, or `403 permission_error` where an authenticated-but-forbidden action exists |
 | Beta marker | Every `client.beta.*` route requires `beta=true`; omitted, repeated, or altered is rejected. `/v1/models` accepts the marker optionally. | `400 invalid_request_error` |
@@ -242,14 +264,27 @@ Target resolution:
 
 | Header state | Behavior |
 | --- | --- |
-| omitted | admission mints a random server-side key (`id.New("idem_")`); the request gets no cross-retry deduplication. |
+| omitted | admission reads and writes no idempotency receipt; every such request is a new admission with no cross-retry deduplication. |
 | supplied | must appear at most once, be non-blank, and be ≤ 255 bytes; a violation is `400 invalid_request_error`. |
-| replay — same key, identical canonical request | `200` with the stored admitted events; no new rows or queue jobs. |
-| same key, different canonical request | `409 invalid_request_error`. |
+| replay — same key, identical canonical request, receipt live | `200` with the stored admitted events; no new rows or queue jobs; the receipt's timestamps do not move. |
+| same key, different canonical request, receipt live | `409 invalid_request_error`. |
+| same key, receipt expired | an ordinary new admission that replaces the receipt in the same transaction. |
 
-Only digests are stored in `session_event_idempotency_keys`: the key's SHA-256
-digest plus a separate `canonical_request_hash` over the decoded batch (order,
-per-event thread selector, tool-use references, types, payloads). The selector
+A supplied key's receipt is locked `FOR UPDATE` after the Session fences, and
+only then is the database clock read, in a separate statement, as the
+admission time. The receipt is live precisely while admission time <
+`created_at + 24 hours`, whether or not Cleanup has deleted it yet. An expired
+receipt is deleted and the new receipt is written with `created_at =
+updated_at =` that admission time; a failed admission rolls both back. Cleanup
+deletes receipts older than 24 hours in bounded batches; when it holds a
+receipt first, admission waits and then finds none, and when admission holds
+it first, Cleanup skips it (`services/cleanup/README.md`).
+
+`session_event_idempotency_keys` stores the key's SHA-256 digest, never the
+raw key; a separate `canonical_request_hash` over the decoded batch (order,
+per-event thread selector, tool-use references, types, payloads); and the
+complete admitted response events — ID, Thread, sequence, type, payload and
+creation time — that a replay returns. The selector
 in that hash is the interrupt *intent* (`session`, `thread:<id>`,
 `tool_use:<id>`, or `primary`), never a resolved database identifier —
 idempotency lookup precedes main-thread resolution, so a bare interrupt replays identically
@@ -388,6 +423,18 @@ content), and `memory_versions` (immutable content, reached from
 | Optimistic concurrency | Update and delete may carry a content-hash precondition (`expected_content_sha256` / `MemoryPrecondition`); a mismatch is a `PreconditionFailedError` → `409 invalid_request_error`. |
 | Version redaction | `memory_versions` are redactable, but redacting the current live head is refused — an active memory always keeps non-NULL content. |
 
+Memory version actors describe the credential that performed each write and
+redaction. Independent and identity-derived API keys use `api_actor` with the
+actual `api_key_id`; direct human tokens use `user_actor` with `user_id`; direct
+service tokens use `service_actor` with `service_id`. Human/service IDs are stable
+Engine identity IDs. Runtime writes retain `session_actor` with `session_id`.
+Exactly one actor ID is valid for its discriminator in both the model and
+PostgreSQL constraints. Reads require a verified authorized identity and do
+not require an API-key ID. The SDK version pinned by this repository types all
+four actor variants, including `service_actor`; see
+[authentication](../../docs/authentication.md#verification) for the typed SDK
+verification.
+
 The store's soft-archive axis and its create-time-only attachment (a
 `memory_store` resource is attached by ID at session create, never defaulted and
 never added through `POST /resources`) are covered above.
@@ -399,8 +446,35 @@ never added through `POST /resources`) are covered above.
 - **Contract.** Requests reach this service only with a valid
   `X-Tetral-Internal-Principal` injected by the edge. This service verifies the
   signature, audience (`tetral-public-api`), expiry, method, and path, then
-  attaches `Principal { workspace_id, api_key_id }` to the request context.
-  Raw public API keys never reach this service.
+  attaches workspace, typed identity, credential and authority to the request
+  context. API-key credentials carry their actual key ID; direct human and
+  service tokens carry stable Engine identity IDs. Raw public API keys and
+  Bearer tokens never reach this service.
+- **Operation and resource ownership.** Actual router registrations declare
+  semantic actions and use the common Authorizer. A denied operation does not
+  query resources. Allowed collection/create actions use the verified typed
+  workspace. Individual reads authorize their canonical service result before
+  disclosure; nested lists authorize a parent proven by the successful
+  tenant-scoped list. Mutations resolve the target's trusted identity before
+  effects, then recheck eligibility in their own transactions; the lookup
+  takes no lock.
+  Session-family mutations resolve identity only: one read-only SELECT of the
+  canonical ID, without assembling the public object, usage, agent version or
+  provider authentication. Update, archive, event admission and resource
+  attachment accept any Session that is not deleted, so an archived or
+  archiving Session reaches its own archive or conflict result. Thread archive
+  accepts a public, non-reviewer Thread of that Session, archived or not.
+  Resource update accepts an attached Resource of that Session whose deletion
+  has not been requested; a file Resource also needs its live Session-scoped
+  file. A target outside these rules, including another workspace's row, is
+  `404` before any effect.
+  Session creation and resource attachment retain their service-owned checks
+  of all referenced agents, environments, vaults, files and memory stores.
+  Deletion lookups retain already-deleted Session rows and pending resource
+  deletion facts so authorization preserves the existing idempotent Session
+  delete and in-progress resource conflict behavior.
+  `workspace_full_access` is the only assignable role. Future resource policy
+  filtering and pagination semantics are not implemented by this boundary.
 - **Invariant a replacement must preserve.** No public handler may read identity
   from the request body or from client-supplied `X-Tetral-*` headers. Workspace
   authority is the verified principal alone.
@@ -564,7 +638,7 @@ the close fence rejects admission without persisting an event or Queue job.
 | `internal/memory/sdk_compatibility_test.go`, `internal/memory/memory_lifecycle_test.go`, `internal/memory/memory_conflict_precedence_test.go` | Memory Stores public surface, content bound, exact-and-prefix path conflict, precondition semantics |
 | `internal/files/postgresql_store_test.go`, `internal/files/postgresql_store_internal_test.go`, `internal/files/staging_test.go`, `internal/httpapi/file_handler_test.go` | upload caps and quotas, PDF page-count tri-state cache, attachment admission lock order, session-file identities, `/v1/files` routing |
 | `internal/skill/frontmatter_test.go`, `internal/skill/package_test.go`, `internal/skill/dependency_test.go`, `internal/httpapi/skill_handler_test.go` | SKILL.md frontmatter rules, normalized-package byte caps, YAML confinement, `/v1/skills` beta-gated routing |
-| `internal/httpapi/session_event_handler_test.go`, `internal/sessionevent/service_test.go` | batch-atomic event admission, per-type rejection and file-source ladder, targeted interrupt custody, idempotency-key mint/replay/conflict |
+| `internal/httpapi/session_event_handler_test.go`, `internal/sessionevent/service_test.go`, `internal/sessionevent/idempotency_retention_test.go` | batch-atomic event admission, per-type rejection and file-source ladder, targeted interrupt custody, idempotency-key replay/conflict, no receipt access without a key, the exact 24-hour expiry at the post-lock database admission time, rollback of a replacement, and replacement versus Cleanup pruning in either order |
 | `services/api/production_wiring_static_test.go`, `.../startup_config_error_test.go`, `.../startup_config_surface_test.go` | the assembled process wires the real domain services and fails closed on invalid startup config |
 | `services/api/tetralapi_test.go`, `.../startup_test.go` | end-to-end service bootstrap |
 
@@ -573,3 +647,44 @@ pagination or error contracts, the create-time-only field rules, the
 same-transaction enqueue pattern, the upload/attachment caps, the SKILL.md
 ingestion rules, or the memory content-bound/path-conflict/precondition rules in
 this folder, it updates the matching section here.
+
+## Process diagnostics
+
+The command follows the shared [Go process diagnostic contract](../../internal/workload/README.md#diagnostics)
+for the restart-only `TETRAL_LOG_*` controls, the default Info level, bounded
+suppression summaries, diagnostic drop and sink-failure metrics, and the
+diagnostic close after listeners and business resources.
+
+HTTP boundary records (server errors and slow requests) and authorization
+decision records carry `request.id`, the API's own `req_` ID that is also the
+`request-id` response header and error `request_id`. After the Auth-signed
+principal verifies, they also carry its signed request ID as `edge.request.id`,
+which equals the `request.id` of the Auth Check record for the same edge
+request. An incoming `X-Request-Id` header never supplies either value.
+
+The production application closes its database and object-client trust observers
+after HTTP requests join. A router returned by `BuildRouter` implements
+`io.Closer` for object clients it created; explicitly supplied test clients remain
+caller-owned. Construction failure closes any newly created object client.
+
+## Public backend TLS
+
+`TETRAL_HTTP_TRANSPORT` defaults to `plaintext` for the standard routed profile.
+The hardened profile selects `native-mtls` on the existing business listener and
+requires `TETRAL_HTTP_TLS_CA_PATH`, `TETRAL_HTTP_TLS_CERT_PATH`,
+`TETRAL_HTTP_TLS_KEY_PATH` and the exact `TETRAL_HTTP_TLS_EDGE_CLIENT_URI`.
+The server verifies the edge client certificate and full role URI before HTTP
+admission; Envoy verifies this service's DNS/server identity independently.
+There is no additional plaintext business listener. Health/metrics use their
+separate restricted listener.
+
+Mount the complete CA/certificate/key directories read-only without `subPath`.
+The shared validated loader activates valid generations for fresh TLS handshakes,
+preserves established requests during leaf renewal, and retains valid last-known-good
+material after malformed replacement. Its observer closes only after the public
+listener and admitted requests join. CA replacement follows the
+[native CA rotation order](../../deploy/cert-manager/README.md); at this
+receiver, old connections drain through the service's bounded drain/join and
+restart, because removing trust alone does not retire an established connection.
+The [deployment guide](../../deploy/helm/tetral/README.md) owns Secret
+projections, native role issuance and profile prerequisites.

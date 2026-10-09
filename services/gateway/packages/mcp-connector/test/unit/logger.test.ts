@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { semanticErrorOutcome } from "@tetral/ts-observability";
-import { createJsonLogger, logWorkloadStarted, recordMcpOAuthRefreshCompleted, startupFailureLogRecord, workloadStartedLogRecord } from "../../src/logger.js";
+import { createJsonLogger, mcpPhaseCompletedLogRecord, logWorkloadStarted, recordMcpOAuthRefreshCompleted, startupFailureLogRecord, workloadStartedLogRecord } from "../../src/logger.js";
 
 describe("MCP Connector logger", () => {
   test("emits shared resource fields through the TS observability wrapper", () => {
@@ -152,4 +152,17 @@ describe("MCP Connector logger", () => {
         durableWrite: "committed", durationMs: 1, refreshAttemptMetric: "success" },
     )).not.toThrow();
   });
+});
+
+
+test("owner phase records correlate claims and bound repeated diagnostics", () => {
+  const lines: string[] = [];
+  const logger = createJsonLogger({write: line => lines.push(line)});
+  logger.info(mcpPhaseCompletedLogRecord({workspaceId:"wksp_phase",sessionId:"sesn_phase",mcpServerName:"work-slack",claimId:"claim_phase",toolUseEventId:"sevt_phase",phase:"first_commit",outcome:"ack_received",durationMs:12}));
+  expect(lines).toHaveLength(1);
+  expect(JSON.parse(lines[0]!)).toMatchObject({event:"mcp_first_commit_completed",phase:"first_commit",outcome:"ack_received","duration.ms":12,"workspace.id":"wksp_phase","session.id":"sesn_phase","mcp.server.name":"work-slack","request.id":"claim_phase","mcp.tool_use_event_id":"sevt_phase"});
+  for(let i=0;i<100;i++) logger.info(mcpPhaseCompletedLogRecord({workspaceId:"w",sessionId:"s",phase:"readiness",outcome:"completed",durationMs:1}));
+  expect(logger.stats().suppressed).toBe(99);
+  logger.flush();
+  expect(JSON.parse(lines[2]!)).toMatchObject({event:"diagnostic.suppressed","event.original":"mcp_readiness_completed","suppressed.count":99});
 });

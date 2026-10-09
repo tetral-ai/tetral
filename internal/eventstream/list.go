@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
@@ -55,9 +53,60 @@ type ListResult struct {
 	NextPage *string `json:"next_page"`
 }
 
+// StreamChange is one change-feed row. The model-request fields are internal
+// correlation for End-group publication and preview closure; they never reach
+// the public event projection.
 type StreamChange struct {
 	StreamPosition int64
 	Event          Event
+	// Sequence is the event's thread-local sequence.
+	Sequence int64
+	// ModelRequestID is the producing model request, empty for other events.
+	ModelRequestID string
+	// RequestStartStreamPosition and RequestStartEventID identify that
+	// request's span.model_request_start by insert position and event ID.
+	RequestStartStreamPosition int64
+	RequestStartEventID        string
+	// RequestKind is the request kind recorded on that Start.
+	RequestKind string
+	// ThreadRole is the event thread's role, empty for session-level events.
+	ThreadRole string
+	// DeferredMessage marks a generated agent.message selected without its
+	// payload; its body is published only within its request's End group.
+	DeferredMessage bool
+}
+
+// ReadScope selects either the session-visible feed or one public thread.
+type ReadScope struct {
+	WorkspaceID workspace.ID
+	SessionID   string
+	ThreadID    string
+}
+
+// PreviewRequest is the database admission descriptor for a private
+// request_open frame, read from the exact scoped Start and its thread row.
+type PreviewRequest struct {
+	// StartStreamPosition is the Start's insert position, compared with a
+	// connection's opening mark.
+	StartStreamPosition int64
+	// RequestKind is the request kind recorded on the Start.
+	RequestKind string
+	// ThreadRole and ThreadVisibility come from the Start's thread row.
+	// ThreadVisibility is always public here because the thread readability
+	// gate admits only public threads, and IsPrimaryThread restates
+	// ThreadRole == "main"; both remain explicit admission facts.
+	ThreadRole       string
+	ThreadVisibility string
+	IsPrimaryThread  bool
+	// Ended reports whether the request's durable End exists.
+	Ended bool
+}
+
+// RequestFinalMessage is one complete committed agent.message of an End group.
+type RequestFinalMessage struct {
+	// Sequence is the message's thread-local sequence, used as the page cursor.
+	Sequence int64
+	Event    Event
 }
 
 type ListReader interface {
@@ -65,41 +114,11 @@ type ListReader interface {
 	ListThreadEvents(context.Context, workspace.ID, string, string, ListOptions) (ListResult, error)
 }
 
-type ListOption func(*listOptions)
-
-type listOptions struct {
-	logger         *slog.Logger
-	requestMetrics httpapi.RequestMetricsRecorder
-}
-
-func WithListLogger(logger *slog.Logger) ListOption {
-	return func(options *listOptions) { options.logger = logger }
-}
-
-func WithListRequestMetrics(metrics httpapi.RequestMetricsRecorder) ListOption {
-	return func(options *listOptions) { options.requestMetrics = metrics }
-}
-
-func NewListRouter(reader ListReader, verifier *auth.InternalPrincipalVerifier, opts ...ListOption) http.Handler {
-	options := newListOptions(opts...)
-	listHandler := NewListHandler(reader, opts...)
-	router := chi.NewRouter()
-	router.Use(httpapi.RequestIDMiddleware)
-	router.Use(httpapi.PublicRecoveryMiddleware(options.logger))
-	router.Use(httpapi.RequestLogMiddleware(options.logger, httpapi.DefaultSlowRequestThreshold, httpapi.WithRequestLogMetrics(options.requestMetrics)))
-	router.Route("/v1", func(router chi.Router) {
-		router.Use(internalPrincipalMiddleware(verifier))
-		router.Get("/sessions/{session_id}/events", listHandler.ServeSessionEvents)
-		router.Get("/sessions/{session_id}/threads/{thread_id}/events", listHandler.ServeThreadEvents)
-	})
-	return router
-}
-
 type ListHandler struct {
 	reader ListReader
 }
 
-func NewListHandler(reader ListReader, _ ...ListOption) *ListHandler {
+func NewListHandler(reader ListReader) *ListHandler {
 	return &ListHandler{reader: reader}
 }
 
@@ -120,6 +139,10 @@ func (handler *ListHandler) ServeSessionEvents(writer http.ResponseWriter, reque
 	}
 	result, err := handler.reader.ListSessionEvents(request.Context(), ws, chi.URLParam(request, "session_id"), options)
 	if err != nil {
+		httpapi.WriteError(writer, request, err)
+		return
+	}
+	if err := httpapi.AuthorizePublicRequest(request.Context(), auth.ResourceReference{WorkspaceID: ws, Type: "session", ID: chi.URLParam(request, "session_id")}); err != nil {
 		httpapi.WriteError(writer, request, err)
 		return
 	}
@@ -146,29 +169,11 @@ func (handler *ListHandler) ServeThreadEvents(writer http.ResponseWriter, reques
 		httpapi.WriteError(writer, request, err)
 		return
 	}
+	if err := httpapi.AuthorizePublicRequest(request.Context(), auth.ResourceReference{WorkspaceID: ws, Type: "thread", ID: chi.URLParam(request, "thread_id")}); err != nil {
+		httpapi.WriteError(writer, request, err)
+		return
+	}
 	writeJSON(writer, http.StatusOK, normalizeListResult(result))
-}
-
-func newListOptions(opts ...ListOption) *listOptions {
-	options := &listOptions{}
-	for _, option := range opts {
-		option(options)
-	}
-	if options.logger == nil {
-		options.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
-	}
-	return options
-}
-
-func internalPrincipalMiddleware(verifier *auth.InternalPrincipalVerifier) func(http.Handler) http.Handler {
-	if verifier != nil {
-		return auth.InternalPrincipalMiddleware(verifier, httpapi.WriteError, httpapi.RequestIDFromContext)
-	}
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-			httpapi.WriteError(writer, request, &auth.AuthenticationError{Message: "authentication unavailable"})
-		})
-	}
 }
 
 func decodeListOptions(request *http.Request, allowFilters bool) (ListOptions, error) {

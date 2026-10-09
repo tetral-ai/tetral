@@ -55,7 +55,7 @@ func TestSkillUploadAgentReferenceLifecycleEndToEnd(t *testing.T) {
 	agentService := agent.NewService(agent.NewPostgreSQLAgentStore(dbconnect.NewClientForTesting(runtimeDB)), skillService)
 	agentHandler := httpapi.NewAgentHandler(agentService)
 
-	authenticator := &auth.StoreAuthenticator{Store: apiKeyStore}
+	authenticator := auth.AuthenticatorFunc(auth.NewAuthorityResolver(runtimeDB, "", nil).AuthenticateKey)
 	router := httpapi.NewRouter(nil, "",
 		httpapi.WithAuthenticator(authenticator),
 		httpapi.WithAgentHandler(agentHandler),

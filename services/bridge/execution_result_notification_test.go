@@ -9,31 +9,28 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	sandboxmodel "github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
 
-// This file owns the AwaitSandboxExecution notification acceptance evidence:
-// real PostgreSQL LISTEN/NOTIFY for the wake path, explicit query-tracer
-// barriers for read/wait race placement, and per-statement accounting that
-// separates verification transactions from RPC entry validation and
-// transaction/setup commands.
+const awaitTraceVerificationRead = "FROM session_runtime_tool_results"
 
-const (
-	awaitTraceVerificationRead = "FROM session_runtime_tool_results"
-	awaitTraceEntryValidation  = "FROM session_runtime_bindings"
-	awaitTraceListen           = "LISTEN " + sandboxmodel.ExecutionResultNotificationChannel
-)
+// Admission validation has its own transaction; per-wake binding proof is
+// embedded in the existing result read, not a new validation transaction.
+const awaitTraceEntryValidation = "/* runtime receipt scope validation */"
+
+const awaitTraceListen = "LISTEN " + sandboxmodel.ExecutionResultNotificationChannel
 
 type bridgeTraceEntry struct {
 	sql string
@@ -171,9 +168,9 @@ func seedAwaitExecutionNotificationFixture(t *testing.T, store *PostgreSQLBridge
 	threadID := "thr_exec_notify_" + suffix
 	bindingID := "bind_exec_notify_" + suffix
 	podUID := "pod_exec_notify_" + suffix
-	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, podUID)
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	toolUseEventID := writeDurableOrdinaryToolUseForTest(
 		t, store, scope, "mreq_exec_notify_"+suffix, "call_exec_notify_"+suffix,
 		"exec_command", `{"cmd":"printf ok"}`,
@@ -203,7 +200,7 @@ func commitAwaitExecutionSettlement(t *testing.T, admin *sql.DB, scope *bridgev1
 		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
 		    AND tool_use_event_id=$4 AND execution_state NOT IN ('terminal_unconsumed','consumed')`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
-		resultJSON, sha256Hex(resultJSON),
+		resultJSON, runtimecontrol.Sha256Hex(resultJSON),
 	)
 	if err != nil {
 		_ = tx.Rollback()
@@ -373,7 +370,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionWakesOnResultNotification(
 	tracer := &bridgeExecutionQueryTracer{}
 	store := newAwaitNotificationTracedStore(t, runtime, tracer)
 	scope, toolUseEventID := seedAwaitExecutionNotificationFixture(t, store, admin, "wake")
-	seedReadySandboxForSharedToolExecution(t, admin, scope.GetWorkspaceId(), scope.GetSessionId())
+	sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, scope.GetWorkspaceId(), scope.GetSessionId())
 	startAwaitExecutionResultListener(t, store, tracer)
 
 	// Drive the accepted Queue job through the real runner and terminal writer.
@@ -586,7 +583,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionRepeatedCyclesVerifyDurabl
 		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(),
 		SessionThreadID: scope.GetSessionThreadId(), ToolUseEventID: toolUseEventID,
 	}
-	payload, err := marshalBridgeJSON(hint)
+	payload, err := runtimecontrol.MarshalJSON(hint)
 	if err != nil {
 		t.Fatalf("marshal hint fixture: %v", err)
 	}
@@ -622,7 +619,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionIgnoresUnrelatedAndMalform
 		WorkspaceID: "ws_other", SessionID: scope.GetSessionId(),
 		SessionThreadID: scope.GetSessionThreadId(), ToolUseEventID: toolUseEventID,
 	}
-	otherPayload, err := marshalBridgeJSON(otherWorkspaceHint)
+	otherPayload, err := runtimecontrol.MarshalJSON(otherWorkspaceHint)
 	if err != nil {
 		t.Fatalf("marshal other-workspace hint: %v", err)
 	}
@@ -782,7 +779,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionBoundedIdleLoad(t *testing
 		t.Fatalf("AwaitSandboxExecution idle wait error = %v; want DeadlineExceeded", err)
 	}
 	elapsed := time.Since(started)
-	if elapsed < sandboxExecutionWaitTimeout || elapsed > sandboxExecutionWaitTimeout+5*time.Second {
+	if elapsed < DefaultBridgeLifecyclePolicy().SandboxResultWait || elapsed > DefaultBridgeLifecyclePolicy().SandboxResultWait+5*time.Second {
 		t.Fatalf("idle wait elapsed = %s; want the existing 30s internal deadline", elapsed)
 	}
 	reads := tracer.countSQL(awaitTraceVerificationRead)
@@ -820,7 +817,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionFanOutAcrossAndWithinBridg
 	// advances.
 	otherWritten, err := storeOne.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_exec_notify_fanout_other_tool", ModelRequestId: "mreq_exec_notify_fanout",
-		ToolDeclaration: bridgeToolDeclarationWithRouteForTest("call_exec_notify_fanout_other", "exec_command", `{"cmd":"printf other"}`, "allow"),
+		ToolDeclaration: sessionfixture.BridgeToolDeclarationWithRouteForTest("call_exec_notify_fanout_other", "exec_command", `{"cmd":"printf other"}`, "allow"),
 	})
 	if err != nil || otherWritten.GetCommitted() == nil {
 		t.Fatalf("write sibling durable Tool use: response=%#v err=%v", otherWritten, err)
@@ -868,7 +865,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionFanOutAcrossAndWithinBridg
 		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(),
 		SessionThreadID: scope.GetSessionThreadId(), ToolUseEventID: otherToolUseEventID,
 	}
-	otherPayload, err := marshalBridgeJSON(otherHint)
+	otherPayload, err := runtimecontrol.MarshalJSON(otherHint)
 	if err != nil {
 		t.Fatalf("marshal sibling hint: %v", err)
 	}

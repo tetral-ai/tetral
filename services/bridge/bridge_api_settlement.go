@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 
 	"google.golang.org/grpc/codes"
@@ -17,40 +19,50 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
-	"github.com/tetral-ai/tetral/internal/queue"
-	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 )
 
 // This file owns the Bridge settlement protocol-family boundary.
 
 func validateStableReasoningBudget(parts []any) error {
 	count := 0
-	aggregateBytes := 0
+	var aggregateBytes int64
 	for _, rawPart := range parts {
 		part, ok := rawPart.(map[string]any)
 		if !ok || part["type"] != "reasoning" {
 			continue
 		}
 		count++
-		text, _ := part["text"].(string)
-		metadataValue := part["providerMetadata"]
-		if metadataValue == nil {
-			metadataValue = map[string]any{}
-		}
-		// Keep durable-draft accounting byte-identical to the transported
-		// metadata contract; HTML escaping would create a second size policy.
-		// UPDATE-WITH: services/agent-runtime/packages/core/src/contracts/runtime.ts
-		// (stableReasoningMetadataJSON).
-		metadata, err := marshalBridgeDataJSON(metadataValue)
+		charge, err := stableReasoningCharge(part)
 		if err != nil {
-			return status.Error(codes.FailedPrecondition, "stable reasoning metadata is invalid")
+			return err
 		}
-		aggregateBytes += len(text) + len(metadata)
+		aggregateBytes += charge
 	}
 	if count > MaxStableReasoningPartsPerRequest || aggregateBytes > MaxStableReasoningBytesPerRequest {
 		return status.Error(codes.InvalidArgument, "stable reasoning exceeds per-request budget")
 	}
 	return nil
+}
+
+// stableReasoningCharge is one admitted reasoning part's budget charge: its
+// UTF-8 text bytes plus its metadata JSON, an absent metadata object counting
+// as {}. The charge is fixed when the part is admitted and never recomputed.
+func stableReasoningCharge(part map[string]any) (int64, error) {
+	text, _ := part["text"].(string)
+	metadataValue := part["providerMetadata"]
+	if metadataValue == nil {
+		metadataValue = map[string]any{}
+	}
+	// Keep durable-draft accounting byte-identical to the transported
+	// metadata contract; HTML escaping would create a second size policy.
+	// UPDATE-WITH: services/agent-runtime/packages/core/src/contracts/runtime.ts
+	// (stableReasoningMetadataJSON).
+	metadata, err := runtimecontrol.MarshalDataJSON(metadataValue)
+	if err != nil {
+		return 0, status.Error(codes.FailedPrecondition, "stable reasoning metadata is invalid")
+	}
+	return int64(len(text) + len(runtimecontrol.RestoreJSONStringifySeparatorEscapes([]byte(metadata)))), nil
 }
 
 func requestEndInterruptCommitRequest(
@@ -89,7 +101,7 @@ func readRequestEndInterruptResultTx(
 		ctx,
 		tx,
 		scope,
-		bridgeOpCommitInputs,
+		runtimecontrol.OperationCommitInputs,
 		"interrupt_control",
 		runtimeInputID,
 	)
@@ -129,7 +141,7 @@ func (s *PostgreSQLBridgeAPIStore) loadWriteRequestEndStartFact(
 		} else if err != nil {
 			return err
 		}
-		requestKind, err := requestKindFromModelRequestStartProjection(projectionJSON)
+		requestKind, err := runtimecontrol.RequestKindFromModelRequestStartProjection(projectionJSON)
 		if err != nil {
 			return status.Error(codes.FailedPrecondition, "model request start projection is malformed")
 		}
@@ -171,7 +183,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 	if len(consumedTransientAttachments.Refs) > MaxProviderRequestAttachments {
 		return nil, status.Error(codes.InvalidArgument, "too many consumed attachments")
 	}
-	usageJSON := defaultString(request.GetUsageJson(), "{}")
+	usageJSON := runtimecontrol.DefaultString(request.GetUsageJson(), "{}")
 	if !json.Valid([]byte(usageJSON)) {
 		evidence.Kind = "schema"
 		return nil, status.Error(codes.InvalidArgument, "usage must be JSON")
@@ -185,7 +197,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		return nil, err
 	}
 	requestKind := requestStart.RequestKind
-	if requestKind == requestKindCompactionSummary &&
+	if requestKind == runtimecontrol.RequestKindCompactionSummary &&
 		len(consumedTransientAttachments.Refs) > 0 {
 		return nil, status.Error(codes.InvalidArgument, "compaction request end cannot consume attachments")
 	}
@@ -196,12 +208,12 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 	if err := validateProviderContextRetention(request); err != nil {
 		return nil, err
 	}
-	finishReason := defaultString(request.GetFinishReason(), "unknown")
+	finishReason := runtimecontrol.DefaultString(request.GetFinishReason(), "unknown")
 	usage, err := parseBridgeUsage(usageJSON)
 	if err != nil {
 		return nil, err
 	}
-	payloadJSON, err := modelRequestEndPayloadJSON(request, requestStart.EventID, requestKind, finishReason, usage)
+	payloadJSON, err := runtimecontrol.ModelRequestEndPayloadJSON(request, requestStart.EventID, requestKind, finishReason, usage)
 	if err != nil {
 		return nil, err
 	}
@@ -225,7 +237,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 	)
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.write_request_end", func(tx *dbconnect.Tx) error {
 		mutationCtx := ctx
-		if err := lockRuntimeMutationSessionTx(
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(
 			ctx,
 			tx,
 			request.GetScope().GetWorkspaceId(),
@@ -237,7 +249,8 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		proof, err := lockRuntimeReceiptScopeTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
 		evidence.Kind = "transaction"
@@ -280,16 +293,19 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 			observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
 			return err
 		}
+		if err := proof.requireCurrent(tx); err != nil {
+			return err
+		}
 		if interruptRequest != nil {
-			if err := validateInterruptLeaseRefTx(ctx, tx, request.GetScope(), interruptRequest.GetRuntimeInputId(), interruptRequest.GetInterruptLeaseRef()); err != nil {
+			if err := runtimecontrol.ValidateInterruptLeaseRefTx(ctx, tx, request.GetScope(), interruptRequest.GetRuntimeInputId(), interruptRequest.GetInterruptLeaseRef()); err != nil {
 				return err
 			}
-			mutationCtx = withInterruptCloseout(ctx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), interruptRequest.GetRuntimeInputId())
+			mutationCtx = runtimecontrol.WithInterruptCloseout(ctx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), interruptRequest.GetRuntimeInputId())
 		}
 		if err := verifyModelRequestStartTx(ctx, tx, request.GetScope(), requestStart.EventID, request.GetModelRequestId(), requestKind); err != nil {
 			return err
 		}
-		if _, exists, err := modelRequestEndExistsTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetModelRequestId()); err != nil {
+		if _, exists, err := runtimecontrol.ModelRequestEndExistsTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetModelRequestId()); err != nil {
 			return err
 		} else if exists {
 			return status.Error(codes.AlreadyExists, "model request is already closed")
@@ -297,12 +313,12 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		if err := verifyProviderContextRetentionReferencesTx(ctx, tx, request); err != nil {
 			return err
 		}
-		threadScope, err := lockThreadMutationTx(mutationCtx, tx, request.GetScope())
+		threadScope, err := runtimecontrol.LockThreadMutationTx(mutationCtx, tx, request.GetScope())
 		if err != nil {
 			return err
 		}
-		evidence.ThreadRole = threadScope.role
-		visibility, sessionVisible := threadScope.publicProjection("span.model_request_end")
+		evidence.ThreadRole = threadScope.Role
+		visibility, sessionVisible := threadScope.PublicProjection("span.model_request_end")
 		activeTransientAttachmentRefs, err := validateTransientAttachmentsForConsumptionTx(
 			ctx,
 			tx,
@@ -318,31 +334,16 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 			}
 		}
 		eventID := id.New("evt_")
-		sequence, err := nextSessionEventSequenceTx(ctx, tx, request.GetScope())
+		sequence, err := runtimecontrol.NextSessionEventSequenceTx(ctx, tx, request.GetScope())
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO session_events (
-				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-				visibility, session_visible, runtime_write_id, model_request_id,
-				projection_json, created_at, updated_at, processed_at
-			) VALUES ($1, $2, $3, $4, $5, 'span.model_request_end', $6, $7, $8, $9, $10, $6, $11, $11, $11)`,
-			request.GetScope().GetWorkspaceId(),
-			request.GetScope().GetSessionId(),
-			request.GetScope().GetSessionThreadId(),
-			eventID,
-			sequence,
-			payloadJSON,
-			visibility,
-			sessionVisible,
-			request.GetRuntimeWriteId(),
-			request.GetModelRequestId(),
-			now,
-		); err != nil {
-			return err
-		}
-		if _, err := appendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
+		if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+			WorkspaceID: request.GetScope().GetWorkspaceId(), SessionID: request.GetScope().GetSessionId(),
+			SessionThreadID: request.GetScope().GetSessionThreadId(), EventID: eventID, Sequence: sequence, Type: "span.model_request_end",
+			PayloadJSON: payloadJSON, ProjectionJSON: payloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+			RuntimeWriteID: request.GetRuntimeWriteId(), ModelRequestID: request.GetModelRequestId(), CreatedAt: now, ProcessedAt: &now,
+		}); err != nil {
 			return err
 		}
 		usageResult, err := tx.Exec(ctx,
@@ -377,7 +378,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		// its usage stops here — it never updates the parent thread's
 		// context-window usage hint and never projects into the parent
 		// session_messages.
-		if rowsAffected(usageResult) {
+		if runtimecontrol.RowsAffected(usageResult) {
 			if err := incrementSessionUsageTx(ctx, tx, request.GetScope(), usage, now); err != nil {
 				return err
 			}
@@ -413,7 +414,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 				ctx,
 				tx,
 				request.GetScope(),
-				bridgeOpCommitInputs,
+				runtimecontrol.OperationCommitInputs,
 				"interrupt_control",
 				interruptRequest.GetRuntimeInputId(),
 			)
@@ -452,7 +453,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 					ctx,
 					tx,
 					request.GetScope(),
-					bridgeOpCommitInputs,
+					runtimecontrol.OperationCommitInputs,
 					"interrupt_control",
 					interruptRequest.GetRuntimeInputId(),
 					interruptDigest,
@@ -484,7 +485,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
 		return err
 	}); err != nil {
-		if isThreadInterruptBarrierStaleError(err) {
+		if runtimecontrol.IsThreadInterruptBarrierStaleError(err) {
 			return &bridgev1.WriteRequestEndResponse{Outcome: &bridgev1.WriteRequestEndResponse_Stale{Stale: &bridgev1.WriteRequestEndStale{}}}, nil
 		}
 		return nil, err
@@ -534,12 +535,17 @@ func verifyProviderContextRetentionReferencesTx(ctx context.Context, tx *dbconne
 	for _, eventID := range selection.GetRepairEventIds() {
 		declaredRepairs[eventID] = struct{}{}
 	}
-	rows, err := tx.Query(ctx, `SELECT event_id,
-		CASE WHEN type IN ('agent.tool_use','agent.mcp_tool_use') THEN 'tool_use' ELSE 'repair' END
-		FROM session_events
-		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND model_request_id=$4
-		  AND (type IN ('agent.tool_use','agent.mcp_tool_use') OR
-		       (type='agent.tool_result' AND payload_json::jsonb ->> 'repair_kind'='invalid_tool'))`,
+	rows, err := tx.Query(ctx, `SELECT member.event_id,
+		CASE WHEN member.type IN ('agent.tool_use','agent.mcp_tool_use') THEN 'tool_use' ELSE 'repair' END,
+		EXISTS (SELECT 1 FROM session_events result
+		 WHERE result.workspace_id=member.workspace_id AND result.session_id=member.session_id
+		   AND result.session_thread_id=member.session_thread_id AND result.model_request_id=member.model_request_id
+		   AND result.type IN ('agent.tool_result','agent.mcp_tool_result')
+		   AND result.tool_use_event_id=member.event_id)
+		FROM session_events member
+		WHERE member.workspace_id=$1 AND member.session_id=$2 AND member.session_thread_id=$3 AND member.model_request_id=$4
+		  AND (member.type IN ('agent.tool_use','agent.mcp_tool_use') OR
+		       (member.type='agent.tool_result' AND member.model_tool_call_id IS NOT NULL))`,
 		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
 		request.GetScope().GetSessionThreadId(), request.GetModelRequestId())
 	if err != nil {
@@ -550,11 +556,18 @@ func verifyProviderContextRetentionReferencesTx(ctx context.Context, tx *dbconne
 	matchedRepairs := 0
 	for rows.Next() {
 		var eventID, memberKind string
-		if err := rows.Scan(&eventID, &memberKind); err != nil {
+		var terminal bool
+		if err := rows.Scan(&eventID, &memberKind, &terminal); err != nil {
 			return err
 		}
 		if memberKind == "tool_use" {
 			if _, ok := declaredToolUses[eventID]; !ok {
+				// Abnormal retention may exclude completed siblings from provider
+				// history. It must still name every unsettled Tool, whose custody
+				// and eventual result cannot be discarded by context selection.
+				if terminal && (selection.GetDisposition() == "failed" || selection.GetDisposition() == "interrupted" || selection.GetDisposition() == "rescheduled") {
+					continue
+				}
 				return status.Error(codes.FailedPrecondition, "provider-context retention omits a request Tool Use")
 			}
 			matchedToolUses++
@@ -692,7 +705,7 @@ func (s *PostgreSQLBridgeAPIStore) applyRequestEndRescheduleTx(
 	tx *dbconnect.Tx,
 	request *bridgev1.WriteRequestEndRequest,
 	requestKind string,
-	threadScope threadMutationScope,
+	threadScope runtimecontrol.ThreadMutationScope,
 	reschedule *normalizedRequestEndReschedule,
 	now time.Time,
 ) (*requestEndDispositionResult, error) {
@@ -702,7 +715,7 @@ func (s *PostgreSQLBridgeAPIStore) applyRequestEndRescheduleTx(
 	}
 	current := providerAttempts
 	budget := s.providerRescheduleBudget()
-	if requestKind == requestKindCompactionSummary {
+	if requestKind == runtimecontrol.RequestKindCompactionSummary {
 		current = compactionAttempts
 		budget = s.compactionRescheduleBudget()
 	}
@@ -732,7 +745,7 @@ func (s *PostgreSQLBridgeAPIStore) applyRequestEndRescheduleTx(
 		ProviderAttempts:   providerAttempts,
 		CompactionAttempts: compactionAttempts,
 	}
-	if requestKind == requestKindCompactionSummary {
+	if requestKind == runtimecontrol.RequestKindCompactionSummary {
 		accepted.CompactionAttempts++
 	} else {
 		accepted.ProviderAttempts++
@@ -780,7 +793,7 @@ func incrementTurnRetryCounterTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 		  WHERE workspace_id = $1
 		    AND session_id = $2
 		    AND session_thread_id = $3`
-	if requestKind == requestKindCompactionSummary {
+	if requestKind == runtimecontrol.RequestKindCompactionSummary {
 		statement = `UPDATE session_turn_retries
 		    SET compaction_attempts = compaction_attempts + 1,
 		        updated_at = $4
@@ -789,23 +802,6 @@ func incrementTurnRetryCounterTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 		    AND session_thread_id = $3`
 	}
 	_, err := tx.Exec(ctx, statement,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		now,
-	)
-	return err
-}
-
-func resetTurnRetryCountersTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, now time.Time) error {
-	_, err := tx.Exec(ctx,
-		`UPDATE session_turn_retries
-		    SET provider_attempts = 0,
-		        compaction_attempts = 0,
-		        updated_at = $4
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
@@ -832,16 +828,16 @@ func appendRequestRescheduledStatusTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	request *bridgev1.WriteRequestEndRequest,
-	threadScope threadMutationScope,
+	threadScope runtimecontrol.ThreadMutationScope,
 	accepted *requestEndDispositionResult,
 	now time.Time,
 ) error {
 	eventType := "session.status_rescheduled"
 	payloadJSON := `{"type":"session.status_rescheduled"}`
-	if threadScope.role != "main" {
+	if threadScope.Role != "main" {
 		eventType = "session.thread_status_rescheduled"
 		var err error
-		payloadJSON, err = threadStatusPayloadJSON(eventType, request.GetScope(), threadScope, "")
+		payloadJSON, err = runtimecontrol.ThreadStatusPayloadJSON(eventType, request.GetScope(), threadScope, "")
 		if err != nil {
 			return err
 		}
@@ -855,37 +851,21 @@ func appendRequestRescheduledStatusTx(
 	if err != nil {
 		return err
 	}
-	visibility, sessionVisible := threadScope.publicProjection(eventType)
+	visibility, sessionVisible := threadScope.PublicProjection(eventType)
 	eventID := id.New("evt_")
-	sequence, err := nextSessionEventSequenceTx(ctx, tx, request.GetScope())
+	sequence, err := runtimecontrol.NextSessionEventSequenceTx(ctx, tx, request.GetScope())
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, runtime_write_id, model_request_id, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $13)`,
-		request.GetScope().GetWorkspaceId(),
-		request.GetScope().GetSessionId(),
-		request.GetScope().GetSessionThreadId(),
-		eventID,
-		sequence,
-		eventType,
-		payloadJSON,
-		visibility,
-		sessionVisible,
-		request.GetRuntimeWriteId(),
-		request.GetModelRequestId(),
-		string(projectionJSON),
-		now,
-	); err != nil {
+	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: request.GetScope().GetWorkspaceId(), SessionID: request.GetScope().GetSessionId(),
+		SessionThreadID: request.GetScope().GetSessionThreadId(), EventID: eventID, Sequence: sequence, Type: eventType,
+		PayloadJSON: payloadJSON, ProjectionJSON: string(projectionJSON), Visibility: visibility, SessionVisible: sessionVisible,
+		RuntimeWriteID: request.GetRuntimeWriteId(), ModelRequestID: request.GetModelRequestId(), CreatedAt: now, ProcessedAt: &now,
+	}); err != nil {
 		return err
 	}
-	if _, err := appendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
-		return err
-	}
-	if threadScope.role == "main" {
+	if threadScope.Role == "main" {
 		return markPublicSessionReschedulingTx(ctx, tx, request.GetScope(), now)
 	}
 	return updateChildThreadStatusTx(ctx, tx, request.GetScope(), "rescheduling", now)
@@ -895,11 +875,11 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 	if request.GetDurableTurnId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "durable turn id is required")
 	}
-	stopReasonJSON := defaultString(request.GetStopReasonJson(), `{"type":"end_turn"}`)
+	stopReasonJSON := runtimecontrol.DefaultString(request.GetStopReasonJson(), `{"type":"end_turn"}`)
 	if !json.Valid([]byte(stopReasonJSON)) {
 		return nil, status.Error(codes.InvalidArgument, "idle stop reason must be JSON")
 	}
-	payloadJSON, err := idleStatusPayloadJSON(stopReasonJSON)
+	payloadJSON, err := runtimecontrol.IdleStatusPayloadJSON(stopReasonJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -912,14 +892,14 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 	now := s.now()
 	capture, err := s.ensureFinishIdleOutputCapture(ctx, request, sourceKind, key, declarationDigest, now)
 	if err != nil {
-		if isThreadInterruptBarrierStaleError(err) {
+		if runtimecontrol.IsThreadInterruptBarrierStaleError(err) {
 			return &bridgev1.FinishIdleResponse{Outcome: &bridgev1.FinishIdleResponse_Stale{Stale: &bridgev1.FinishIdleStale{}}}, nil
 		}
 		return nil, err
 	}
 	capture, err = s.waitForFinishIdleOutputCapture(ctx, request.GetScope(), key, capture)
 	if err != nil {
-		if isThreadInterruptBarrierStaleError(err) {
+		if runtimecontrol.IsThreadInterruptBarrierStaleError(err) {
 			return &bridgev1.FinishIdleResponse{Outcome: &bridgev1.FinishIdleResponse_Stale{Stale: &bridgev1.FinishIdleStale{}}}, nil
 		}
 		return nil, err
@@ -930,7 +910,7 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 	)
 	var adoptedCapture adoptedOutputCapture
 	err = s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.finish_idle", func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(
 			ctx,
 			tx,
 			request.GetScope().GetWorkspaceId(),
@@ -941,7 +921,8 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		proof, err := lockRuntimeReceiptScopeTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
 		if existing, ok, err := readBridgeDeclarationOperationTx(
@@ -966,92 +947,68 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 			duplicate = true
 			return nil
 		}
-		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
+		if err := proof.requireCurrent(tx); err != nil {
+			return err
+		}
+		threadScope, err := runtimecontrol.LockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {
 			return err
 		}
-		openDurableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, request.GetScope())
+		openDurableTurnID, err := runtimecontrol.LoadOpenDurableTurnIDTx(ctx, tx, request.GetScope())
 		if err != nil {
 			return err
 		}
 		if openDurableTurnID == nil || *openDurableTurnID != key {
-			return scopeSupersededError(status.Error(codes.FailedPrecondition, "durable turn is not open"))
+			return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "durable turn is not open"))
 		}
-		if threadScope.role != "subagent" && request.CompletionMailText != nil {
+		if threadScope.Role != "subagent" && request.CompletionMailText != nil {
 			return status.Error(codes.InvalidArgument, "completion mail is only valid for a sub-agent thread")
 		}
 		projectionEventType := "session.status_idle"
-		if threadScope.role != "main" {
+		if threadScope.Role != "main" {
 			projectionEventType = "session.thread_status_idle"
 		}
-		visibility, sessionVisible := threadScope.publicProjection(projectionEventType)
+		visibility, sessionVisible := threadScope.PublicProjection(projectionEventType)
 		adoptedCapture, err = adoptFinishIdleOutputCaptureTx(ctx, tx, request.GetScope(), key, capture.Generation, now)
 		if err != nil {
 			return err
 		}
 		if idleStopReasonSettlesTurn(stopReasonJSON) {
-			if err := resetTurnRetryCountersTx(ctx, tx, request.GetScope(), now); err != nil {
+			if err := runtimecontrol.ResetTurnRetryCountersTx(ctx, tx, request.GetScope(), now); err != nil {
 				return err
 			}
 		}
 		eventID := id.New("evt_")
-		sequence, err := nextSessionEventSequenceTx(ctx, tx, request.GetScope())
+		sequence, err := runtimecontrol.NextSessionEventSequenceTx(ctx, tx, request.GetScope())
 		if err != nil {
 			return err
 		}
-		if threadScope.role != "main" {
-			childPayloadJSON, err := threadStatusPayloadJSON("session.thread_status_idle", request.GetScope(), threadScope, stopReasonJSON)
+		if threadScope.Role != "main" {
+			childPayloadJSON, err := runtimecontrol.ThreadStatusPayloadJSON("session.thread_status_idle", request.GetScope(), threadScope, stopReasonJSON)
 			if err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx,
-				`INSERT INTO session_events (
-					workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-					visibility, session_visible, runtime_write_id, projection_json, created_at, updated_at, processed_at
-				) VALUES ($1, $2, $3, $4, $5, 'session.thread_status_idle', $6, $7, $8, $9, $6, $10, $10, $10)`,
-				request.GetScope().GetWorkspaceId(),
-				request.GetScope().GetSessionId(),
-				request.GetScope().GetSessionThreadId(),
-				eventID,
-				sequence,
-				childPayloadJSON,
-				visibility,
-				sessionVisible,
-				key,
-				now,
-			); err != nil {
-				return err
-			}
-			if _, err := appendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
+			if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+				WorkspaceID: request.GetScope().GetWorkspaceId(), SessionID: request.GetScope().GetSessionId(),
+				SessionThreadID: request.GetScope().GetSessionThreadId(), EventID: eventID, Sequence: sequence, Type: "session.thread_status_idle",
+				PayloadJSON: childPayloadJSON, ProjectionJSON: childPayloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+				RuntimeWriteID: key, CreatedAt: now, ProcessedAt: &now,
+			}); err != nil {
 				return err
 			}
 			if err := updateChildThreadStatusTx(ctx, tx, request.GetScope(), "idle", now); err != nil {
 				return err
 			}
 		} else {
-			if _, err := tx.Exec(ctx,
-				`INSERT INTO session_events (
-					workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-					visibility, session_visible, runtime_write_id, projection_json, created_at, updated_at, processed_at
-				) VALUES ($1, $2, $3, $4, $5, 'session.status_idle', $6, $7, $8, $9, $10, $11, $11, $11)`,
-				request.GetScope().GetWorkspaceId(),
-				request.GetScope().GetSessionId(),
-				request.GetScope().GetSessionThreadId(),
-				eventID,
-				sequence,
-				payloadJSON,
-				visibility,
-				sessionVisible,
-				key,
-				payloadJSON,
-				now,
-			); err != nil {
+			if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+				WorkspaceID: request.GetScope().GetWorkspaceId(), SessionID: request.GetScope().GetSessionId(),
+				SessionThreadID: request.GetScope().GetSessionThreadId(), EventID: eventID, Sequence: sequence, Type: "session.status_idle",
+				PayloadJSON: payloadJSON, ProjectionJSON: payloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+				RuntimeWriteID: key, CreatedAt: now, ProcessedAt: &now,
+			}); err != nil {
 				return err
 			}
-			if _, err := appendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
-				return err
-			}
-			cleanupAfter := now.Add(defaultIdleCleanupDelay)
+			cleanupAfter := now.Add(runtimecontrol.IdleCleanupDelay)
 			statusResult, err := tx.Exec(ctx,
 				`INSERT INTO session_runtime_status (
 					workspace_id, session_id, status, status_event_id, idle_since, running_since, active_seconds_total, cleanup_after,
@@ -1086,8 +1043,8 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 			if err != nil {
 				return err
 			}
-			if !rowsAffected(statusResult) {
-				return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime session is already terminal"))
+			if !runtimecontrol.RowsAffected(statusResult) {
+				return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime session is already terminal"))
 			}
 			if err := markPublicSessionIdleTx(ctx, tx, request.GetScope(), now, now); err != nil {
 				return err
@@ -1107,7 +1064,7 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 				return err
 			}
 		}
-		resultJSON, err := marshalBridgeJSON(facts)
+		resultJSON, err := runtimecontrol.MarshalJSON(facts)
 		if err != nil {
 			return err
 		}
@@ -1190,11 +1147,6 @@ func logOutputCaptureScanRecords(logger *slog.Logger, workspaceID string, sessio
 	}
 }
 
-type runtimeTerminationResult struct {
-	FailureEventID  string `json:"failure_event_id"`
-	CloseoutEventID string `json:"closeout_event_id"`
-}
-
 func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context, request *bridgev1.CommitRuntimeTerminationRequest) (*bridgev1.CommitRuntimeTerminationResponse, error) {
 	if request.GetRuntimeWriteId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "runtime write id is required")
@@ -1209,12 +1161,12 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 	}
 	now := s.now()
 	var (
-		result             runtimeTerminationResult
+		result             runtimecontrol.RuntimeTerminationResult
 		duplicate          bool
-		custodyTransitions runtimeTerminationCustodyTransitions
+		custodyTransitions runtimecontrol.RuntimeTerminationCustodyTransitions
 	)
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_runtime_termination", func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
@@ -1253,48 +1205,48 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 		if terminatingRole == "main" {
 			queueThreadIDs = nil
 		}
-		if err := lockRuntimeInputQueueCustodyTx(
+		if err := runtimecontrol.LockRuntimeInputQueueCustodyTx(
 			ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), queueThreadIDs,
 		); err != nil {
 			return err
 		}
-		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
+		threadScope, err := runtimecontrol.LockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {
 			return err
 		}
-		if threadScope.role != terminatingRole {
+		if threadScope.Role != terminatingRole {
 			return status.Error(codes.FailedPrecondition, "runtime termination Thread role changed during arbitration")
 		}
-		openDurableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, request.GetScope())
+		openDurableTurnID, err := runtimecontrol.LoadOpenDurableTurnIDTx(ctx, tx, request.GetScope())
 		if err != nil {
 			return err
 		}
 		if openDurableTurnID == nil || *openDurableTurnID != request.GetRuntimeWriteId() {
-			return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime termination durable turn is not open"))
+			return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime termination durable turn is not open"))
 		}
-		result, custodyTransitions, err = settleRuntimeTerminationTx(
+		result, custodyTransitions, err = runtimecontrol.SettleRuntimeTerminationTx(
 			ctx, tx, request.GetScope(), threadScope, request.GetRuntimeWriteId(), failure, failureJSON, now,
 		)
 		if err != nil {
 			return err
 		}
-		resultJSON, err := marshalBridgeJSON(result)
+		resultJSON, err := runtimecontrol.MarshalJSON(result)
 		if err != nil {
 			return err
 		}
-		return insertBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOperationInsert{
+		return runtimecontrol.InsertOperationTx(ctx, tx, request.GetScope(), runtimecontrol.OperationInsert{
 			Operation: bridgeOpCommitRuntimeTermination, SourceKind: bridgeOpCommitRuntimeTermination,
-			IdempotencyKey: request.GetRuntimeWriteId(), RequestHash: requestHash, AckStatus: bridgeAckCommitted,
+			IdempotencyKey: request.GetRuntimeWriteId(), RequestHash: requestHash, AckStatus: runtimecontrol.AckCommitted,
 			RuntimeWriteID: sql.NullString{String: request.GetRuntimeWriteId(), Valid: true}, ResultJSON: resultJSON, Now: now,
 		})
 	}); err != nil {
-		if isConversationMutationStaleError(err) {
+		if runtimecontrol.IsConversationMutationStaleError(err) {
 			return &bridgev1.CommitRuntimeTerminationResponse{Outcome: &bridgev1.CommitRuntimeTerminationResponse_Stale{Stale: &bridgev1.RuntimeTerminationStale{}}}, nil
 		}
 		return nil, err
 	}
-	logRuntimeInputCustodyTransition(s.Logger, request.GetScope(), "accepted_to_cancelled", custodyTransitions.accepted)
-	logRuntimeInputCustodyTransition(s.Logger, request.GetScope(), "parked_to_cancelled", custodyTransitions.parked)
+	runtimecontrol.LogRuntimeInputCustodyTransition(s.Logger, ServiceNameBridgeAPI, request.GetScope(), "accepted_to_cancelled", custodyTransitions.Accepted)
+	runtimecontrol.LogRuntimeInputCustodyTransition(s.Logger, ServiceNameBridgeAPI, request.GetScope(), "parked_to_cancelled", custodyTransitions.Parked)
 	if duplicate {
 		return &bridgev1.CommitRuntimeTerminationResponse{Outcome: &bridgev1.CommitRuntimeTerminationResponse_Duplicate{Duplicate: &bridgev1.RuntimeTerminationDuplicate{
 			FailureEventId: result.FailureEventID, CloseoutEventId: result.CloseoutEventID,
@@ -1303,71 +1255,6 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 	return &bridgev1.CommitRuntimeTerminationResponse{Outcome: &bridgev1.CommitRuntimeTerminationResponse_Committed{Committed: &bridgev1.RuntimeTerminationCommitted{
 		FailureEventId: result.FailureEventID, CloseoutEventId: result.CloseoutEventID,
 	}}}, nil
-}
-
-// settleRuntimeTerminationTx is the Session termination owner shared by a
-// Runtime-declared terminal failure and Bridge's exhausted interrupt fence.
-// Main-session termination also cancels queued and parked input: retaining the
-// binding for closeout replay must not leave delivery authority for a terminal
-// Session. Child termination remains scoped to active custody for that Thread.
-func settleRuntimeTerminationTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	threadScope threadMutationScope,
-	runtimeWriteID string,
-	failure runtimeTerminationFailure,
-	failureJSON string,
-	now time.Time,
-) (runtimeTerminationResult, runtimeTerminationCustodyTransitions, error) {
-	if err := closeRuntimeTerminationSpansTx(ctx, tx, scope, failure, now); err != nil {
-		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
-	}
-	if err := settleRuntimeTerminationDurableFactsTx(ctx, tx, scope, threadScope, runtimeWriteID, failure, now); err != nil {
-		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
-	}
-	orphanToolUses, err := runtimeTerminationOrphanToolUsesTx(ctx, tx, scope, false)
-	if err != nil {
-		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
-	}
-	if len(orphanToolUses) != 0 {
-		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, status.Error(codes.FailedPrecondition, "runtime termination has a live Tool use after derived settlement")
-	}
-	if threadScope.role == "main" {
-		rootCtx := withSessionRootTermination(
-			ctx, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), runtimeWriteID,
-		)
-		if err := closeRuntimeTerminatedSessionSiblingsTx(rootCtx, tx, scope, runtimeWriteID, now); err != nil {
-			return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
-		}
-	}
-	transitions, err := cancelRuntimeTerminationInputsTx(
-		ctx, tx, scope, threadScope.role == "main", true, now,
-	)
-	if err != nil {
-		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
-	}
-	// Runtime termination removes every current-thread and, for the main
-	// thread, sibling Sandbox blocker before release readiness is evaluated
-	// once for the Session. Queue custody is assigned in this transaction.
-	releaseJobs, err := sandboxrelease.ReadyRequestsTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), now, nil)
-	if err != nil {
-		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
-	}
-	if _, err := queue.EnqueueBatchTx(ctx, tx, releaseJobs); err != nil {
-		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
-	}
-	errorStamp, err := appendRuntimeTerminationErrorTx(ctx, tx, scope, threadScope, runtimeWriteID, failureJSON, now)
-	if err != nil {
-		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
-	}
-	statusStamp, err := appendRuntimeTerminatedStatusTx(ctx, tx, scope, threadScope, runtimeWriteID, now)
-	if err != nil {
-		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
-	}
-	return runtimeTerminationResult{
-		FailureEventID: errorStamp.EventID, CloseoutEventID: statusStamp.EventID,
-	}, transitions, nil
 }
 
 type requestEndDispositionResult struct {
@@ -1381,56 +1268,6 @@ type requestEndDispositionResult struct {
 
 type createChildThreadResult struct {
 	ChildThreadID string `json:"child_thread_id"`
-}
-
-func scopeForThread(scope *bridgev1.RuntimeScope, threadID string) *bridgev1.RuntimeScope {
-	return &bridgev1.RuntimeScope{
-		WorkspaceId:     scope.GetWorkspaceId(),
-		SessionId:       scope.GetSessionId(),
-		SessionThreadId: threadID,
-		Binding: &bridgev1.RuntimeBindingRef{
-			BindingId:         scope.GetBinding().GetBindingId(),
-			BindingGeneration: scope.GetBinding().GetBindingGeneration(),
-			TargetPodUid:      scope.GetBinding().GetTargetPodUid(),
-		},
-	}
-}
-
-func modelRequestEndPayloadJSON(request *bridgev1.WriteRequestEndRequest, requestStartEventID string, requestKind string, finishReason string, usage bridgeUsage) (string, error) {
-	cacheRead := int64(0)
-	if usage.InputCacheRead != nil {
-		cacheRead = *usage.InputCacheRead
-	}
-	cacheWrite := int64(0)
-	if usage.InputCacheWrite != nil {
-		cacheWrite = *usage.InputCacheWrite
-	}
-	payload := map[string]any{
-		"type":                   "span.model_request_end",
-		"model_request_id":       request.GetModelRequestId(),
-		"model_request_start_id": requestStartEventID,
-		"request_kind":           requestKind,
-		"is_error":               request.GetIsError(),
-		"finish_reason":          finishReason,
-		"model_usage": map[string]any{
-			"input_tokens":                usage.InputTotal,
-			"output_tokens":               usage.OutputTotal,
-			"cache_creation_input_tokens": cacheWrite,
-			"cache_read_input_tokens":     cacheRead,
-			"speed":                       nil,
-		},
-		"request_usage": json.RawMessage(defaultString(request.GetUsageJson(), "{}")),
-		"provider_context_retention": map[string]any{
-			"disposition":                request.GetProviderContextRetention().GetDisposition(),
-			"assistant_message_sequence": request.GetProviderContextRetention().AssistantMessageSequence,
-			"tool_use_event_ids":         request.GetProviderContextRetention().GetToolUseEventIds(),
-			"repair_event_ids":           request.GetProviderContextRetention().GetRepairEventIds(),
-		},
-	}
-	if request.GetErrorKind() != "" {
-		payload["error_kind"] = request.GetErrorKind()
-	}
-	return marshalBridgeJSON(payload)
 }
 
 func validateProviderContextRetention(request *bridgev1.WriteRequestEndRequest) error {
@@ -1457,19 +1294,6 @@ func validateProviderContextRetention(request *bridgev1.WriteRequestEndRequest) 
 		seen[identity] = struct{}{}
 	}
 	return nil
-}
-
-func normalizeRequestKind(value string) (string, error) {
-	switch defaultString(value, requestKindAgentProviderRequest) {
-	case requestKindAgentProviderRequest:
-		return requestKindAgentProviderRequest, nil
-	case requestKindCompactionSummary:
-		return requestKindCompactionSummary, nil
-	case requestKindApprovalReviewer:
-		return requestKindApprovalReviewer, nil
-	default:
-		return "", status.Error(codes.InvalidArgument, "request_kind is invalid")
-	}
 }
 
 func validateRequestEndErrorKind(request *bridgev1.WriteRequestEndRequest) error {
@@ -1504,7 +1328,7 @@ func normalizeRequestEndReschedule(request *bridgev1.WriteRequestEndRequest, req
 	if !request.GetIsError() {
 		return nil, status.Error(codes.InvalidArgument, "request end reschedule requires an error close")
 	}
-	if requestKind == requestKindApprovalReviewer {
+	if requestKind == runtimecontrol.RequestKindApprovalReviewer {
 		return nil, status.Error(codes.InvalidArgument, "approval reviewer requests cannot be rescheduled")
 	}
 	if reschedule.GetAttempt() <= 0 {
@@ -1544,30 +1368,11 @@ func effectiveRequestEndRescheduleDeadline(now time.Time, reschedule *normalized
 	return effective
 }
 
-func idleStatusPayloadJSON(stopReasonJSON string) (string, error) {
-	return marshalBridgeJSON(map[string]any{
-		"type":        "session.status_idle",
-		"stop_reason": json.RawMessage(stopReasonJSON),
-	})
-}
-
-func threadStatusPayloadJSON(eventType string, scope *bridgev1.RuntimeScope, threadScope threadMutationScope, stopReasonJSON string) (string, error) {
-	payload := map[string]any{
-		"type":              eventType,
-		"session_thread_id": scope.GetSessionThreadId(),
-		"task_name":         nullableJSONString(threadScope.taskName),
-	}
-	if stopReasonJSON != "" {
-		payload["stop_reason"] = json.RawMessage(stopReasonJSON)
-	}
-	return marshalBridgeJSON(payload)
-}
-
 func insertChildThreadIdleStatusEventTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
-	threadScope threadMutationScope,
+	threadScope runtimecontrol.ThreadMutationScope,
 	runtimeWriteID string,
 	stopReasonJSON string,
 	now time.Time,
@@ -1592,35 +1397,22 @@ func insertChildThreadIdleStatusEventTx(
 	if !dbconnect.IsNoRows(err) {
 		return err
 	}
-	payloadJSON, err := threadStatusPayloadJSON("session.thread_status_idle", scope, threadScope, stopReasonJSON)
+	payloadJSON, err := runtimecontrol.ThreadStatusPayloadJSON("session.thread_status_idle", scope, threadScope, stopReasonJSON)
 	if err != nil {
 		return err
 	}
-	visibility, sessionVisible := threadScope.publicProjection("session.thread_status_idle")
+	visibility, sessionVisible := threadScope.PublicProjection("session.thread_status_idle")
 	eventID := id.New("evt_")
-	sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
+	sequence, err := runtimecontrol.NextSessionEventSequenceTx(ctx, tx, scope)
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, runtime_write_id, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, 'session.thread_status_idle', $6, $7, $8, $9, $6, $10, $10, $10)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		eventID,
-		sequence,
-		payloadJSON,
-		visibility,
-		sessionVisible,
-		runtimeWriteID,
-		now,
-	); err != nil {
-		return err
-	}
-	_, err = appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now)
+	_, err = sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
+		EventID: eventID, Sequence: sequence, Type: "session.thread_status_idle",
+		PayloadJSON: payloadJSON, ProjectionJSON: payloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+		RuntimeWriteID: runtimeWriteID, CreatedAt: now, ProcessedAt: &now,
+	})
 	return err
 }
 
@@ -1644,7 +1436,7 @@ func updateChildThreadStatusTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 	if err != nil {
 		return err
 	}
-	if !rowsAffected(result) {
+	if !runtimecontrol.RowsAffected(result) {
 		var currentStatus string
 		if err := tx.QueryRow(ctx,
 			`SELECT status
@@ -1657,7 +1449,7 @@ func updateChildThreadStatusTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 			scope.GetSessionId(),
 			scope.GetSessionThreadId(),
 		).Scan(&currentStatus); dbconnect.IsNoRows(err) {
-			return closeoutUnrepairableError(status.Error(codes.FailedPrecondition, "child thread status update failed"))
+			return runtimecontrol.CloseoutUnrepairableError(status.Error(codes.FailedPrecondition, "child thread status update failed"))
 		} else if err != nil {
 			return err
 		}
@@ -1665,30 +1457,20 @@ func updateChildThreadStatusTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 			return nil
 		}
 		if currentStatus == "terminated" || currentStatus == "failed" || currentStatus == "archived" {
-			return scopeSupersededError(status.Error(codes.FailedPrecondition, "child thread is already terminal"))
+			return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "child thread is already terminal"))
 		}
-		return closeoutUnrepairableError(status.Error(codes.FailedPrecondition, "child thread status update failed"))
+		return runtimecontrol.CloseoutUnrepairableError(status.Error(codes.FailedPrecondition, "child thread status update failed"))
 	}
 	return nil
 }
 
-type bridgeUsage struct {
-	InputTotal      int64
-	InputUncached   int64
-	InputCacheRead  *int64
-	InputCacheWrite *int64
-	OutputTotal     int64
-	OutputReasoning *int64
-	Total           *int64
-}
-
-func parseBridgeUsage(raw string) (bridgeUsage, error) {
+func parseBridgeUsage(raw string) (runtimecontrol.Usage, error) {
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return bridgeUsage{}, status.Error(codes.InvalidArgument, "usage must be a JSON object")
+		return runtimecontrol.Usage{}, status.Error(codes.InvalidArgument, "usage must be a JSON object")
 	}
 	if payload == nil {
-		return bridgeUsage{}, status.Error(codes.InvalidArgument, "usage must be a JSON object")
+		return runtimecontrol.Usage{}, status.Error(codes.InvalidArgument, "usage must be a JSON object")
 	}
 	allowed := map[string]struct{}{
 		"input_tokens": {}, "input_uncached_tokens": {}, "cache_read_input_tokens": {},
@@ -1698,57 +1480,57 @@ func parseBridgeUsage(raw string) (bridgeUsage, error) {
 	}
 	for key := range payload {
 		if _, ok := allowed[key]; !ok {
-			return bridgeUsage{}, status.Error(codes.InvalidArgument, "usage contains an unknown field")
+			return runtimecontrol.Usage{}, status.Error(codes.InvalidArgument, "usage contains an unknown field")
 		}
 	}
 	inputTotal, _, err := nonnegativeUsageInteger(payload, "input_tokens")
 	if err != nil {
-		return bridgeUsage{}, err
+		return runtimecontrol.Usage{}, err
 	}
 	cacheRead, _, err := optionalNonnegativeUsageInteger(payload, "cache_read_input_tokens")
 	if err != nil {
-		return bridgeUsage{}, err
+		return runtimecontrol.Usage{}, err
 	}
 	cacheWrite, _, err := optionalNonnegativeUsageInteger(payload, "cache_creation_input_tokens")
 	if err != nil {
-		return bridgeUsage{}, err
+		return runtimecontrol.Usage{}, err
 	}
 	inputUncached, hasInputUncached, err := optionalNonnegativeUsageInteger(payload, "input_uncached_tokens")
 	if err != nil {
-		return bridgeUsage{}, err
+		return runtimecontrol.Usage{}, err
 	}
 	if inputUncached == nil {
 		value := inputTotal - optionalInt64Value(cacheRead) - optionalInt64Value(cacheWrite)
 		if value < 0 {
-			return bridgeUsage{}, status.Error(codes.InvalidArgument, "usage input token arithmetic is invalid")
+			return runtimecontrol.Usage{}, status.Error(codes.InvalidArgument, "usage input token arithmetic is invalid")
 		}
 		inputUncached = &value
 	}
 	if hasInputUncached && *inputUncached+optionalInt64Value(cacheRead)+optionalInt64Value(cacheWrite) != inputTotal {
-		return bridgeUsage{}, status.Error(codes.InvalidArgument, "usage input token arithmetic is invalid")
+		return runtimecontrol.Usage{}, status.Error(codes.InvalidArgument, "usage input token arithmetic is invalid")
 	}
 	outputTotal, _, err := nonnegativeUsageInteger(payload, "output_tokens")
 	if err != nil {
-		return bridgeUsage{}, err
+		return runtimecontrol.Usage{}, err
 	}
 	outputReasoning, _, err := optionalNonnegativeUsageInteger(payload, "reasoning_output_tokens")
 	if err != nil {
-		return bridgeUsage{}, err
+		return runtimecontrol.Usage{}, err
 	}
 	if optionalInt64Value(outputReasoning) > outputTotal {
-		return bridgeUsage{}, status.Error(codes.InvalidArgument, "usage output token arithmetic is invalid")
+		return runtimecontrol.Usage{}, status.Error(codes.InvalidArgument, "usage output token arithmetic is invalid")
 	}
 	total, hasTotal, err := optionalNonnegativeUsageInteger(payload, "total_tokens")
 	if err != nil {
-		return bridgeUsage{}, err
+		return runtimecontrol.Usage{}, err
 	}
 	if total == nil {
 		value := inputTotal + outputTotal
 		total = &value
 	} else if hasTotal && *total != inputTotal+outputTotal {
-		return bridgeUsage{}, status.Error(codes.InvalidArgument, "usage total token arithmetic is invalid")
+		return runtimecontrol.Usage{}, status.Error(codes.InvalidArgument, "usage total token arithmetic is invalid")
 	}
-	return bridgeUsage{
+	return runtimecontrol.Usage{
 		InputTotal:      inputTotal,
 		InputUncached:   *inputUncached,
 		InputCacheRead:  cacheRead,
@@ -1812,7 +1594,7 @@ func optionalInt64Value(value *int64) int64 {
 	return *value
 }
 
-func incrementSessionUsageJSON(current string, usage bridgeUsage) (string, error) {
+func incrementSessionUsageJSON(current string, usage runtimecontrol.Usage) (string, error) {
 	payload := make(map[string]any)
 	if strings.TrimSpace(current) != "" {
 		if err := json.Unmarshal([]byte(current), &payload); err != nil {
@@ -1839,7 +1621,7 @@ func incrementSessionUsageJSON(current string, usage bridgeUsage) (string, error
 		cacheCreation["ephemeral_5m_input_tokens"] = int64(0)
 	}
 	payload["cache_creation"] = cacheCreation
-	return marshalBridgeJSON(payload)
+	return runtimecontrol.MarshalJSON(payload)
 }
 
 func incrementSessionServerToolUsageJSON(current string, usage normalizedServerToolUseUsage) (string, error) {
@@ -1878,7 +1660,7 @@ func incrementSessionServerToolUsageJSON(current string, usage normalizedServerT
 	serverToolUse["web_search_requests"] = publicSearch
 	serverToolUse["web_fetch_requests"] = publicFetch
 	payload["server_tool_use"] = serverToolUse
-	return marshalBridgeJSON(payload)
+	return runtimecontrol.MarshalJSON(payload)
 }
 
 func checkedUsageCounterAdd(current any, delta int64) (int64, error) {

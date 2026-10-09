@@ -21,23 +21,10 @@ import postgresqlContractJSON from "../../../../../database/postgresql.json";
 
 /** Pins the checksum expected for PostgreSQL schema migration version one. */
 export const PostgreSQLSchemaVersionOneChecksum =
-	"d42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6";
-
-/** Pins the additive Git identity migration. */
-export const PostgreSQLSchemaVersionTwoChecksum =
-	"36b50e4c53b62e8a7b38b8d91b3128400ff06394bf71dcd3e1d992df32b55458";
-
-/** Pins durable input discovery budgets. */
-export const PostgreSQLSchemaVersionThreeChecksum = "be73f97aa7ebc41ec39ad270aed25a2b9d5228eb8ab49e814032283cb9dbd90f";
-
-/** Pins durable Environment build observation and deadlines. */
-export const PostgreSQLSchemaVersionFourChecksum = "ce7bda672824e406b569caaea79723ca0932150bd54f5d153b9f781ee426bb19";
+	"f600e78f7be8b4262b8317603fc4a3eb4b0fba3ab3602bf0d6575115514c54e0";
 
 const PostgreSQLSchemaRegistry = [
 	PostgreSQLSchemaVersionOneChecksum,
-	PostgreSQLSchemaVersionTwoChecksum,
-	PostgreSQLSchemaVersionThreeChecksum,
-	PostgreSQLSchemaVersionFourChecksum,
 ] as const;
 
 /** Enumerates the public-safe failure classifications produced by schema verification. */
@@ -103,7 +90,7 @@ interface CatalogPolicyRow {
 interface PostgreSQLContract {
 	readonly version: number;
 	readonly workspace_tables: readonly string[];
-	readonly append_only_workspace_table: string;
+	readonly append_only_workspace_tables: readonly string[];
 	readonly global_tables: readonly string[];
 	readonly special_policies: readonly {
 		readonly table: string;
@@ -181,7 +168,7 @@ async function verifyPostgreSQLRLS(sql: SchemaSQL): Promise<void> {
 function catalogTablesMatch(rows: readonly CatalogTableRow[]): boolean {
 	const expectedWorkspace = new Set([
 		...postgresqlContract.workspace_tables,
-		postgresqlContract.append_only_workspace_table,
+		...postgresqlContract.append_only_workspace_tables,
 	]);
 	const expectedGlobal = new Set(postgresqlContract.global_tables);
 	const actualWorkspace = new Set<string>();
@@ -220,9 +207,10 @@ function expectedPolicies(): Map<string, { command: string; using: string; check
 	for (const table of postgresqlContract.workspace_tables) {
 		result.set(`${table}\0workspace_isolation`, { command: "ALL", using: workspace, check: workspace });
 	}
-	const appendOnly = postgresqlContract.append_only_workspace_table;
-	result.set(`${appendOnly}\0workspace_select`, { command: "SELECT", using: workspace, check: "" });
-	result.set(`${appendOnly}\0workspace_insert`, { command: "INSERT", using: "", check: workspace });
+	for (const appendOnly of postgresqlContract.append_only_workspace_tables) {
+		result.set(`${appendOnly}\0workspace_select`, { command: "SELECT", using: workspace, check: "" });
+		result.set(`${appendOnly}\0workspace_insert`, { command: "INSERT", using: "", check: workspace });
+	}
 	for (const policy of postgresqlContract.special_policies) {
 		result.set(`${policy.table}\0${policy.name}`, policy);
 	}

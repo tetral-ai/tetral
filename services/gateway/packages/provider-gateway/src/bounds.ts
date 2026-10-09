@@ -1,3 +1,4 @@
+import { MaxProviderResponseFrameBytes } from "@tetral/gateway-protocol/src/bounds.js";
 /**
  * @packageDocumentation
  *
@@ -48,17 +49,24 @@ const MaxGrpcInboundMessageBytes = 64 * 1024 * 1024;
 // Provider stream events must fit the Runtime client's receive fuse.
 // UPDATE-WITH: services/agent-runtime/packages/runtime-pod/src/bounds.ts
 // (MaxGatewayStreamEventGrpcMessageBytes).
-const MaxGrpcOutboundMessageBytes = 8 * 1024 * 1024;
-// Connection-lifecycle bounds that drive per-call load balancing across replicas.
-// max_connection_age (5 min) forces clients to periodically drop and re-resolve
-// DNS so newly scaled-out replicas start receiving traffic; the grace (30 min)
-// exceeds the longest expected turn, so a stream in flight when GOAWAY is sent
-// finishes under grace rather than being severed. Both values are load-bearing
-// only together with the headless Gateway Service (per-pod DNS A records) and the
-// runtime-pod client's round_robin channel config; changing any one alone breaks
-// even distribution.
-// UPDATE-WITH: services/gateway/k8s (headless Service manifest),
+const MaxGrpcOutboundMessageBytes = MaxProviderResponseFrameBytes;
+// Connection-lifecycle bounds retire aged HTTP/2 connections through GOAWAY.
+// The grace preserves an admitted stream while the connection retires. Replica
+// selection is separately owned per RPC by the scoped Istiod/Envoy route through
+// the ordinary Provider Gateway ClusterIP Service; these timers do not require
+// per-Pod DNS records or a Runtime client load-balancing policy.
+// UPDATE-WITH: deploy/helm/tetral/templates/internal-routing.yaml,
 //              services/agent-runtime/packages/runtime-pod/src/gateway-client.ts
+/**
+ * Finite native HTTP2 response-session accounting budget, in MiB.
+ * grpc-js 1.14.5 otherwise passes MAX_SAFE_INTEGER. On declared Bun 1.3.14,
+ * four multiplexed 8 MiB responses reset three streams with that value; a
+ * server-only finite 256 MiB control completes all four. This does not identify
+ * the native mechanism or impose a JavaScript heap/RSS ceiling. Keep the
+ * explicit option when changing message or concurrency policy and recalibrate.
+ */
+export const GatewayHttp2SessionMemoryMiB = 256;
+
 const GatewayGrpcMaxConnectionAgeMs = 5 * 60 * 1000;
 const GatewayGrpcMaxConnectionAgeGraceMs = 30 * 60 * 1000;
 /** Active-call keepalive interval paired with Runtime Pod clients. */
@@ -127,6 +135,7 @@ export function grpcServerOptions() {
   return {
     "grpc.max_receive_message_length": MaxGrpcInboundMessageBytes,
     "grpc.max_send_message_length": MaxGrpcOutboundMessageBytes,
+    "grpc-node.max_session_memory": GatewayHttp2SessionMemoryMiB,
     "grpc.max_connection_age_ms": GatewayGrpcMaxConnectionAgeMs,
     "grpc.max_connection_age_grace_ms": GatewayGrpcMaxConnectionAgeGraceMs,
     "grpc.keepalive_time_ms": GatewayGrpcKeepaliveTimeMs,

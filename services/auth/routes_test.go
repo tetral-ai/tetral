@@ -14,109 +14,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-func TestAuthorizeMintsSignedInternalPrincipalAndTouchesKey(t *testing.T) {
-	router, adminDB, privateKey := newTestAuthRouter(t)
-
-	request := httptest.NewRequest(http.MethodPost, "/internal/auth/authorize", nil)
-	request.Header.Set("X-Api-Key", testBootstrapAPIKey())
-	request.Header.Set("X-Original-Method", http.MethodGet)
-	request.Header.Set("X-Original-Path", "/v1/api_keys")
-	request.Header.Set("X-Request-Id", "req_auth_test")
-	request.Header.Set("X-Forwarded-For", "203.0.113.10")
-	recorder := httptest.NewRecorder()
-
-	router.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("authorize status = %d body=%s; want 200", recorder.Code, recorder.Body.String())
-	}
-	token := recorder.Header().Get("X-Tetral-Internal-Principal")
-	if token == "" {
-		t.Fatal("authorize did not return X-Tetral-Internal-Principal")
-	}
-	signer, err := auth.NewInternalPrincipalSignerFromBase64(privateKey)
-	if err != nil {
-		t.Fatalf("signer: %v", err)
-	}
-	principal, claims, err := signer.Verify(token, http.MethodGet, "/v1/api_keys")
-	if err != nil {
-		t.Fatalf("verify minted token: %v", err)
-	}
-	if principal.Workspace.ID != "ws_auth_test" || principal.APIKeyID == "" || claims.RequestID != "req_auth_test" || claims.ForwardedFor != "203.0.113.10" {
-		t.Fatalf("principal=%#v claims=%#v; want ws/api key/request id/forwarded-for", principal, claims)
-	}
-	var touched sql.NullString
-	if err := adminDB.QueryRowContext(context.Background(),
-		`SELECT last_used_at FROM api_keys WHERE workspace_id = 'ws_auth_test' AND key_kind = 'bootstrap'`,
-	).Scan(&touched); err != nil {
-		t.Fatalf("read last_used_at: %v", err)
-	}
-	if !touched.Valid || touched.String == "" {
-		t.Fatal("authorize did not update last_used_at")
-	}
-}
-
-func TestAuthorizePathOnlyPrincipalVerifiesQueryBearingRequest(t *testing.T) {
-	router, _, privateKey := newTestAuthRouter(t)
-
-	request := httptest.NewRequest(http.MethodPost, "/internal/auth/authorize", nil)
-	request.Header.Set("X-Api-Key", testBootstrapAPIKey())
-	request.Header.Set("X-Original-Method", http.MethodGet)
-	request.Header.Set("X-Original-Path", "/v1/api_keys")
-	request.Header.Set("X-Request-Id", "req_path_only")
-	request.Header.Set("X-Forwarded-For", "203.0.113.11")
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("authorize status = %d body=%s; want 200", recorder.Code, recorder.Body.String())
-	}
-	signer, err := auth.NewInternalPrincipalSignerFromBase64(privateKey)
-	if err != nil {
-		t.Fatalf("signer: %v", err)
-	}
-	if _, _, err := signer.Verify(recorder.Header().Get("X-Tetral-Internal-Principal"), http.MethodGet, "/v1/api_keys"); err != nil {
-		t.Fatalf("path-only principal must verify target request path with query stripped: %v", err)
-	}
-	if _, _, err := signer.Verify(recorder.Header().Get("X-Tetral-Internal-Principal"), http.MethodGet, "/v1/api_keys?limit=1"); err == nil {
-		t.Fatal("internal principal unexpectedly verified against query-bearing request_uri")
-	}
-}
-
-func TestAuthorizeRequiresAuditRateLimitMetadata(t *testing.T) {
-	router, _, _ := newTestAuthRouter(t)
-	for _, tc := range []struct {
-		name         string
-		requestID    string
-		forwardedFor string
-	}{
-		{name: "missing request id", forwardedFor: "203.0.113.12"},
-		{name: "missing forwarded for", requestID: "req_missing_forwarded_for"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			request := httptest.NewRequest(http.MethodPost, "/internal/auth/authorize", nil)
-			request.Header.Set("X-Api-Key", testBootstrapAPIKey())
-			request.Header.Set("X-Original-Method", http.MethodGet)
-			request.Header.Set("X-Original-Path", "/v1/api_keys")
-			if tc.requestID != "" {
-				request.Header.Set("X-Request-Id", tc.requestID)
-			}
-			if tc.forwardedFor != "" {
-				request.Header.Set("X-Forwarded-For", tc.forwardedFor)
-			}
-			recorder := httptest.NewRecorder()
-
-			router.ServeHTTP(recorder, request)
-
-			if recorder.Code != http.StatusBadRequest {
-				t.Fatalf("authorize status = %d body=%s; want 400", recorder.Code, recorder.Body.String())
-			}
-			if !strings.Contains(recorder.Body.String(), "request id and forwarded-for are required") {
-				t.Fatalf("authorize body = %s; want audit metadata error", recorder.Body.String())
-			}
-		})
-	}
-}
-
 func TestAPIKeyManagementUsesSignedPrincipalAndManagedAgentsCursorShape(t *testing.T) {
 	router, _, privateKey := newTestAuthRouter(t)
 	token := mintTestPrincipal(t, privateKey, http.MethodPost, "/v1/api_keys")
@@ -175,9 +72,8 @@ func TestAPIKeyManagementErrorsUseSDKEnvelopeWithRequestID(t *testing.T) {
 		t.Fatalf("signer: %v", err)
 	}
 	router := NewRouter(RouterConfig{
-		Store:               auth.NewAPIKeyStore(nil),
-		Signer:              signer,
-		PrincipalTTLSeconds: 60,
+		Store:  auth.NewAPIKeyStore(nil),
+		Signer: signer,
 	})
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/api_keys", strings.NewReader(`{"name":"ci-key","unexpected":true}`))
@@ -203,14 +99,10 @@ func TestAPIKeyManagementTooLargeErrorsUseInvalidRequestEnvelope(t *testing.T) {
 		t.Fatalf("signer: %v", err)
 	}
 	router := NewRouter(RouterConfig{
-		Store:               auth.NewAPIKeyStore(nil),
-		Signer:              signer,
-		PrincipalTTLSeconds: 60,
+		Store:  auth.NewAPIKeyStore(nil),
+		Signer: signer,
 	})
-	token, err := signer.Mint(auth.Principal{ //nolint:gosec // Test principal token fixture.
-		Workspace: workspace.Workspace{ID: workspace.ID("ws_auth_test"), Type: "workspace"},
-		APIKeyID:  "ak_test_principal", //nolint:gosec // Test principal id, not a secret.
-	}, http.MethodPost, "/v1/api_keys", "req_large_test", 60_000_000_000)
+	token, err := signer.Mint(auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.ID("ws_auth_test"), Type: "workspace"}, "ak_test_principal"), http.MethodPost, "/v1/api_keys", "req_large_test", 60_000_000_000)
 	if err != nil {
 		t.Fatalf("mint principal: %v", err)
 	}
@@ -241,6 +133,14 @@ func newTestAuthRouter(t *testing.T) (http.Handler, *sql.DB, string) {
 	); err != nil {
 		t.Fatalf("seed workspace: %v", err)
 	}
+	rawFixtureKey, err := auth.GenerateAPIKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminDB.ExecContext(context.Background(), `INSERT INTO api_keys(id,workspace_id,name,key_prefix,key_digest,key_kind,authority_kind,created_at) VALUES('ak_test_principal','ws_auth_test','signed fixture','fixture',$1,'standard','independent_key',clock_timestamp())`, auth.DigestAPIKey(rawFixtureKey)); err != nil {
+		t.Fatal(err)
+	}
+
 	privateKey, err := auth.GenerateEd25519PrivateKeyBase64()
 	if err != nil {
 		t.Fatalf("generate signing key: %v", err)
@@ -266,10 +166,7 @@ func mintTestPrincipal(t *testing.T, privateKey string, method string, path stri
 	if err != nil {
 		t.Fatalf("signer: %v", err)
 	}
-	token, err := signer.Mint(auth.Principal{ //nolint:gosec // Test principal token fixture.
-		Workspace: workspace.Workspace{ID: workspace.ID("ws_auth_test"), Type: "workspace"},
-		APIKeyID:  "ak_test_principal", //nolint:gosec // Test principal id, not a secret.
-	}, method, path, "req_test", 60_000_000_000)
+	token, err := signer.Mint(auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.ID("ws_auth_test"), Type: "workspace"}, "ak_test_principal"), method, path, "req_test", 60_000_000_000)
 	if err != nil {
 		t.Fatalf("mint principal: %v", err)
 	}

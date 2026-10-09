@@ -14,12 +14,14 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 // newTestLogger captures JSON log lines into writer through the production handler,
-// carrying the Bridge service identity tests assert against.
+// carrying the Job Runner service identity that owns Runtime Pod visibility.
 func newTestLogger(writer io.Writer) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(writer, nil)).With(slog.String("service.name", "bridge"))
+	return slog.New(slog.NewJSONHandler(writer, nil)).With(slog.String("service.name", "job-runner"))
 }
 
 func TestWatcherCacheCandidateRules(t *testing.T) {
@@ -376,7 +378,7 @@ func TestWatcherCacheLogsRedactedFailure(t *testing.T) {
 			t.Fatalf("watch failure log leaked %q: %s", forbidden, logOutput)
 		}
 	}
-	for _, want := range []string{`"msg":"kubernetes.watch.failed"`, `"operation":"kubernetes_watch"`, `"event.kind":"kubernetes.watch.failed"`, `"component":"bridge"`, `"kubernetes.resource":"pods"`, `"kubernetes.namespace":"tetral-runtime"`, `"kubernetes.name":"runtime-a"`, `"kubernetes.uid":"pod-uid-a"`, `"kubernetes.status":"forbidden"`, `"error.class":"kubernetes_error"`, `"error.code":"forbidden"`, `"error.message_safe":"kubernetes watch failed"`} {
+	for _, want := range []string{`"msg":"kubernetes.watch.failed"`, `"operation":"kubernetes_watch"`, `"event.kind":"kubernetes.watch.failed"`, `"component":"kubernetes-visibility"`, `"kubernetes.resource":"pods"`, `"kubernetes.namespace":"tetral-runtime"`, `"kubernetes.name":"runtime-a"`, `"kubernetes.uid":"pod-uid-a"`, `"kubernetes.status":"forbidden"`, `"error.class":"kubernetes_error"`, `"error.code":"forbidden"`, `"error.message_safe":"kubernetes watch failed"`} {
 		if !strings.Contains(logOutput, want) {
 			t.Fatalf("watch failure log missing %s: %s", want, logOutput)
 		}
@@ -477,5 +479,67 @@ func endpointSliceWithAddressType(addressType discoveryv1.AddressType, endpoints
 		},
 		Endpoints:   endpoints,
 		AddressType: addressType,
+	}
+}
+
+func TestCacheActualFailureStormAndIndependentResourceRecovery(t *testing.T) {
+	var logs bytes.Buffer
+	logger := workload.NewLogger(&logs, "job-runner", "local", "unit")
+	cache := NewWatcherCache("tetral-runtime", WithLogger(logger))
+	cache.ReplacePods(nil)
+	cache.ReplaceEndpointSlices(nil)
+	for n := 0; n < 1000; n++ {
+		cache.MarkFailure(WatchFailure{Resource: "pods", Status: "watch_closed"})
+		cache.MarkFailure(WatchFailure{Resource: "endpointslices", Status: "watch_closed"})
+	}
+	if !strings.Contains(logs.String(), `"error.class":"kubernetes_watch_failure"`) {
+		t.Fatal("closed watch without an error object lost failure classification")
+	}
+	if cache.Ready() {
+		t.Fatal("failed cache reported ready")
+	}
+	cache.ReplacePods(nil)
+	if cache.Ready() {
+		t.Fatal("pods recovery cleared endpoint failure")
+	}
+	body := logs.String()
+	if strings.Count(body, `"event":"kubernetes.watch.failed"`) != 2 || strings.Count(body, `"event":"diagnostic.suppressed"`) != 1 || !strings.Contains(body, `"suppressed.count":999`) || !strings.Contains(body, `"kubernetes.resource":"pods"`) {
+		t.Fatalf("partial recovery records: %s", body)
+	}
+	cache.ReplaceEndpointSlices(nil)
+	if !cache.Ready() {
+		t.Fatal("successful replacements did not restore readiness")
+	}
+	body = logs.String()
+	if strings.Count(body, `"event":"diagnostic.suppressed"`) != 2 || strings.Count(body, `"event":"kubernetes.watch.recovered"`) != 2 {
+		t.Fatalf("resource recoveries = %s", body)
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, `"event":"kubernetes.watch.recovered"`) && !strings.Contains(line, `"component":"kubernetes-visibility"`) {
+			t.Fatalf("recovery record lost the visibility component: %s", line)
+		}
+	}
+	cache.MarkFailure(WatchFailure{Resource: "pods", Status: "watch_closed"})
+	if strings.Count(logs.String(), `"event":"kubernetes.watch.failed"`) != 3 {
+		t.Fatal("new degradation was hidden after recovery")
+	}
+}
+
+// A prompt injected sink fault cannot decide cache failure/freshness transitions.
+type watcherDiagnosticFaultWriter struct{}
+
+func (watcherDiagnosticFaultWriter) Write([]byte) (int, error) { panic("diagnostic sink failed") }
+func TestCacheRecoverySurvivesDiagnosticSinkFault(t *testing.T) {
+	logger := workload.NewLogger(watcherDiagnosticFaultWriter{}, "job-runner", "local", "unit")
+	cache := NewWatcherCache("tetral-runtime", WithLogger(logger))
+	cache.ReplacePods(nil)
+	cache.ReplaceEndpointSlices(nil)
+	cache.MarkFailure(WatchFailure{Resource: "pods", Status: "watch_closed"})
+	if cache.Ready() {
+		t.Fatal("sink fault lost failure state")
+	}
+	cache.UpsertPod(corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runtime-a"}})
+	if !cache.Ready() {
+		t.Fatal("sink fault replaced successful cache recovery")
 	}
 }

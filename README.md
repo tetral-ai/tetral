@@ -57,15 +57,38 @@ Tetral is compatible and complete:
 Tetral is self-hosted infrastructure for teams that operate their own
 Kubernetes. It deploys on any conformant cluster — from a single-node K3s
 machine to a full multi-node cluster, the same manifests and the same
-version. Prerequisites: a Kubernetes cluster, PostgreSQL 18, an
-S3-compatible bucket, and a credential for a Daytona Tier 3 or higher account
-for the current Sandbox provider implementation.
+version. Prerequisites:
+
+- Kubernetes 1.33–1.36.
+- A separately installed [Istiod](deploy/istio/README.md); internal routing
+  requires it in every profile, even with one replica.
+- [Envoy Gateway and the Gateway API CRDs](deploy/envoy-gateway/README.md) for
+  the public edge.
+- A [Core NATS broker](deploy/nats/README.md) while public previews are
+  enabled, which is the default.
+- PostgreSQL 18 reachable over verified TLS (CA and server name), plus a
+  separate administrative connection used only by the one-shot database
+  preparation and Auth policy import commands.
+- An S3-compatible bucket reached over verified HTTPS.
+- A credential for a Daytona Tier 3 or higher account for the current Sandbox
+  provider implementation.
+- [cert-manager](deploy/cert-manager/README.md) only for the hardened
+  profile's native-certificate automation.
+
+The [managed installation contract](deploy/managed/README.md) gives the ordered
+preparation, installation and admission sequence.
 
 Two install paths, one platform version:
 
-- **Helm** — reproducible, versioned installs: one `values.yaml` carries the
-  whole configuration contract; use plain `helm upgrade`, and roll back only
-  between releases with no schema migration.
+- **Helm** — reproducible, versioned installs: chart values, operator-created
+  Secrets and the separately installed prerequisites above make up the
+  configuration. The first installation of this architecture uses a dedicated
+  empty database; there is no in-place database upgrade from earlier releases.
+  The [service-stack upgrade guide](docs/upgrade-service-stack.md) lists what an
+  existing installation changes and what cannot be carried over. Later
+  compatible revisions follow the chart's
+  [database preparation and compatible rollout](deploy/helm/tetral/README.md#database-preparation-and-compatible-rollout)
+  procedure; `helm rollback` changes workloads, not database state.
 - **Source examples** — the raw manifests in
   [`deploy/kubernetes/`](deploy/kubernetes/) use an explicit development
   image identity. They are auditable deployment examples, not a versioned
@@ -86,8 +109,18 @@ Before the first install, follow the
 Secrets, install the database roles/schema contract, and seed the initial
 workspace.
 
+Configure client API keys or explicit OIDC federation with the
+[authentication guide](docs/authentication.md); Auth's operator contract covers
+registered issuers, Engine workspace grants and administrative provisioning.
+
 Each service's contract — responsibilities, lifecycle, seams, testing —
 lives in `services/<name>/README.md`.
+
+Bridge handles Runtime RPCs and durable settlement; Job Runner consumes Queue
+work and owns Runtime placement, delivery and recovery. They run in separate
+workloads with separate database pools and process resources. Provider Gateway,
+MCP Connector and Web Connector also deploy independently. See the
+[service map](AGENTS.md#service-map) for their owning packages and contracts.
 
 Repository test profiles, CI ownership, and evidence artifacts are documented
 in [docs/testing.md](docs/testing.md).

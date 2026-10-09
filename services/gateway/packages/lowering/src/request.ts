@@ -1273,25 +1273,6 @@ function invalidProviderToolContext(message: string): ProviderRequestLoweringErr
 }
 
 function sanitizeText(value: string): string {
-  let output = "";
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        output += value[index] ?? "";
-        output += value[index + 1] ?? "";
-        index += 1;
-      } else {
-        output += "\uFFFD";
-      }
-      continue;
-    }
-    if (code >= 0xdc00 && code <= 0xdfff) {
-      output += "\uFFFD";
-      continue;
-    }
-    output += value[index] ?? "";
-  }
-  return output;
+  // Preserve scalar replacement without building a per-character rope for valid text.
+  return value.toWellFormed();
 }

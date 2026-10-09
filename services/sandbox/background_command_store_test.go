@@ -207,13 +207,14 @@ func TestPostgreSQLBackgroundTaskSettlementParksAtomicallyBehindClosedChildFence
 			runtimeDB := workload.DB
 			seedSandboxExecutionStoreFixture(t, adminDB)
 			seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
+			registerSandboxFixtureProcess(t, adminDB, "runtime", "pod_uid_execution_store")
 			if _, err := adminDB.Exec(`INSERT INTO session_runtime_bindings (
 				workspace_id, session_id, binding_id, binding_generation,
 				agent_runtime_namespace, agent_runtime_pod_name, agent_runtime_pod_uid,
-				agent_runtime_pod_ip, bound_at, updated_at
+				agent_runtime_pod_ip, runtime_process_id, bound_at, updated_at
 			) VALUES (
 				'ws_execution_store', 'sesn_execution_store', 'bind_execution_store', 7,
-				'runtime', 'runtime-0', 'pod_uid_execution_store', '127.0.0.1', now(), now()
+				'runtime', 'runtime-0', 'pod_uid_execution_store', '127.0.0.1','process_pod_uid_execution_store', now(), now()
 			)`); err != nil {
 				t.Fatalf("seed Runtime binding: %v", err)
 			}
@@ -301,10 +302,10 @@ func TestPostgreSQLBackgroundCommandDuplicatePollPreservesConsumedReceipt(t *tes
 	now := time.Now().UTC()
 	if _, err := adminDB.Exec(`INSERT INTO session_events (
 		workspace_id, session_id, session_thread_id, event_id, sequence, type,
-		payload_json, created_at, updated_at
+		payload_json, model_request_id, model_tool_call_id, created_at, updated_at
 	) VALUES (
 		'ws_execution_store', 'sesn_execution_store', 'thr_execution_store', $1, 1,
-		'agent.tool_result', '{}', $2, $2
+		'agent.tool_result', '{}', 'mreq_' || $1, 'call_' || $1, $2, $2
 	)`, terminalEventID, now); err != nil {
 		t.Fatalf("seed terminal event: %v", err)
 	}

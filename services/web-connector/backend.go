@@ -78,6 +78,13 @@ func NewJinaBackend(client *http.Client, searchEndpoint, readerEndpoint string, 
 	}
 }
 
+// Close releases this backend's owned HTTP transport after callers have joined.
+func (b *JinaBackend) Close() {
+	if b != nil && b.client != nil {
+		b.client.CloseIdleConnections()
+	}
+}
+
 // MaxAttemptsPerCall reports the construction-fixed upper bound for one
 // logical provider call. Key health changes which keys are currently usable,
 // but never shortens the bound used by subsequently created durable claims.
@@ -271,12 +278,10 @@ func (b *JinaBackend) call(ctx context.Context, endpoint string, body any, heade
 				b.metrics.ObserveBackendCall(api, "tool_error")
 			}
 			if b.logger != nil {
-				var taxonomy struct {
-					Name   string `json:"name"`
-					Status int    `json:"status"`
-				}
-				_ = json.Unmarshal(responseRaw, &taxonomy)
-				b.logger.Warn("web.backend.unmatched_client_error", slog.String("operation", "web.backend.request"), slog.String("backend.api", api), slog.String("backend.error.name", taxonomy.Name), slog.Int("backend.error.status", taxonomy.Status))
+				b.logger.Warn("web.backend.unmatched_client_error",
+					slog.String("operation", "web.backend.request"), slog.String("backend.api", api),
+					slog.String("backend.error.name", "unknown_client_error"), slog.Int("backend.error.status", response.StatusCode),
+					slog.String("error.class", "backend_error"), slog.String("error.code", "unmatched_client_error"), slog.String("error.message_safe", "web backend rejected the request"))
 			}
 			return BackendOutcome{Kind: BackendToolError, Message: "Web backend rejected the request."}
 		}

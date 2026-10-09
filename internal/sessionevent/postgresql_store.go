@@ -13,6 +13,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/files"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -51,8 +52,20 @@ func NewPostgreSQLStore(client *dbconnect.Client, options ...PostgreSQLStoreOpti
 // target Thread lane. Delivery may bind that custody to a Runtime Pod, but it
 // never reconstructs an input from the event or turns admission into execution.
 //
-// The append path never scans, locks, or JSON-decodes stored session_events
-// rows; the only session_events read is the bounded MAX(sequence) aggregate.
+// With a supplied Idempotency-Key, after the Session locks it locks the key's
+// receipt and then reads the database clock as the admission time. A receipt
+// replays or conflicts only while admission time < created_at + 24 h; an
+// expired receipt, deleted by retention or not, is replaced by this admission
+// with created_at = updated_at = admission time. Without the header no receipt
+// is read, serialized or written.
+//
+// Besides the bounded MAX(sequence) aggregate, the append path reads stored
+// session_events only through childcontrol.ThreadOrAncestorClosingTx: it
+// share-locks and JSON-decodes every child-interrupt request event of the
+// target Thread and its ancestors to find pending ones and, for a committed
+// request, looks up the request's source Tool Use by event ID and joins its
+// result through the indexed tool_use_event_id relation; no result payload is
+// decoded.
 func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, workspaceID workspace.ID, sessionID string, events []preparedEvent, idempotency appendIdempotency, settings appendSettings) (*appendOutcome, error) {
 	if s == nil || s.client == nil {
 		return nil, &ValidationError{Message: "session event store is required"}
@@ -73,24 +86,45 @@ func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, wo
 			if err != nil {
 				return err
 			}
-			canonicalRequestHash, err := canonicalRequestHashForPreparedEvents(events)
-			if err != nil {
-				return err
-			}
-			existing, found, err := readSessionEventIdempotency(ctx, tx, workspaceID, sessionID, idempotency.keyDigest)
-			if err != nil {
-				return err
-			}
-			if found {
-				if !bytes.Equal(existing.canonicalRequestHash, canonicalRequestHash) {
-					return &ConflictError{Message: "idempotency key was used with a different request"}
-				}
-				replayedEvents, err := decodeSessionEventIdempotencyResponse(workspaceID, sessionID, existing.responseEventsJSON)
+			var canonicalRequestHash []byte
+			var admissionTime time.Time
+			if idempotency.supplied {
+				canonicalRequestHash, err = canonicalRequestHashForPreparedEvents(events)
 				if err != nil {
 					return err
 				}
-				outcome = &appendOutcome{events: replayedEvents, replayed: true}
-				return nil
+				existing, found, err := readSessionEventIdempotency(ctx, tx, workspaceID, sessionID, idempotency.keyDigest)
+				if err != nil {
+					return err
+				}
+				// The admission time is read only after the receipt lock is held,
+				// so a pruner or replacement that wins the lock is observed and a
+				// boundary crossed during the wait counts as expired.
+				if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&admissionTime); err != nil {
+					return err
+				}
+				if found && admissionTime.Before(existing.createdAt.Add(idempotencyReceiptLifetime)) {
+					if !bytes.Equal(existing.canonicalRequestHash, canonicalRequestHash) {
+						return &ConflictError{Message: "idempotency key was used with a different request"}
+					}
+					replayedEvents, err := decodeSessionEventIdempotencyResponse(workspaceID, sessionID, existing.responseEventsJSON)
+					if err != nil {
+						return err
+					}
+					outcome = &appendOutcome{events: replayedEvents, replayed: true}
+					return nil
+				}
+				if found {
+					// An expired receipt no longer deduplicates, whether or not
+					// retention has deleted it yet. This admission replaces it.
+					if _, err := tx.Exec(ctx,
+						`DELETE FROM session_event_idempotency_keys
+						  WHERE workspace_id = $1 AND session_id = $2 AND idempotency_key_digest = $3`,
+						string(workspaceID), sessionID, idempotency.keyDigest,
+					); err != nil {
+						return err
+					}
+				}
 			}
 			if admission.mainThreadArchived && preparedEventsContainType(events, EventTypeUserMessage) {
 				return &ConflictError{Message: "session primary thread is archived"}
@@ -154,24 +188,12 @@ func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, wo
 						return err
 					}
 					sessionVisible := publicEventSessionVisible(event.eventType, sessionThreadID, admission.mainThreadID)
-					if _, err := tx.Exec(ctx,
-						`INSERT INTO session_events (
-								workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-								visibility, session_visible, created_at, updated_at, processed_at
-							) VALUES ($1, $2, $3, $4, $5, $6, $7, 'public', $8, $9, $9, NULL)`,
-						string(workspaceID),
-						sessionID,
-						nullableString(sessionThreadID),
-						eventID,
-						nextSequence,
-						event.eventType,
-						string(event.payload),
-						sessionVisible,
-						settings.now,
-					); err != nil {
-						return err
-					}
-					if _, err := appendSessionEventStreamChange(ctx, tx, workspaceID, sessionID, sessionThreadID, eventID, sessionVisible, settings.now); err != nil {
+					// An admitted input stays unprocessed until Runtime commits it.
+					if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+						WorkspaceID: string(workspaceID), SessionID: sessionID, SessionThreadID: sessionThreadID,
+						EventID: eventID, Sequence: nextSequence, Type: event.eventType, PayloadJSON: string(event.payload),
+						Visibility: "public", SessionVisible: sessionVisible, CreatedAt: settings.now,
+					}); err != nil {
 						return err
 					}
 					appended = append(appended, &Event{
@@ -186,27 +208,29 @@ func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, wo
 					})
 				}
 			}
-			responseEventsJSON, err := encodeSessionEventIdempotencyResponse(appended)
-			if err != nil {
-				return err
-			}
-			if s.beforeIdempotencyInsert != nil {
-				if err := s.beforeIdempotencyInsert(); err != nil {
+			if idempotency.supplied {
+				responseEventsJSON, err := encodeSessionEventIdempotencyResponse(appended)
+				if err != nil {
 					return err
 				}
-			}
-			if _, err := tx.Exec(ctx,
-				`INSERT INTO session_event_idempotency_keys (
-				workspace_id, session_id, idempotency_key_digest, canonical_request_hash, response_events_json, created_at, updated_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $6)`,
-				string(workspaceID),
-				sessionID,
-				idempotency.keyDigest,
-				canonicalRequestHash,
-				responseEventsJSON,
-				settings.now,
-			); err != nil {
-				return err
+				if s.beforeIdempotencyInsert != nil {
+					if err := s.beforeIdempotencyInsert(); err != nil {
+						return err
+					}
+				}
+				if _, err := tx.Exec(ctx,
+					`INSERT INTO session_event_idempotency_keys (
+					workspace_id, session_id, idempotency_key_digest, canonical_request_hash, response_events_json, created_at, updated_at
+				) VALUES ($1, $2, $3, $4, $5, $6, $6)`,
+					string(workspaceID),
+					sessionID,
+					idempotency.keyDigest,
+					canonicalRequestHash,
+					responseEventsJSON,
+					admissionTime,
+				); err != nil {
+					return err
+				}
 			}
 			if err := s.enqueueRuntimeInputJobs(ctx, tx, workspaceID, sessionID, appended, settings.now); err != nil {
 				return err
@@ -543,42 +567,6 @@ func runtimeInputDedupeKey(workspaceID workspace.ID, sessionID string, runtimeIn
 	return RuntimeInputDedupeKey(workspaceID, sessionID, runtimeInputID)
 }
 
-func appendSessionEventStreamChange(ctx context.Context, tx *dbconnect.Tx, workspaceID workspace.ID, sessionID string, sessionThreadID string, eventID string, sessionVisible bool, now time.Time) (int64, error) {
-	var streamPosition int64
-	if err := tx.QueryRow(ctx,
-		`INSERT INTO session_event_stream_changes (
-			workspace_id, session_id, event_id, session_thread_id, revision, visibility, session_visible, changed_at
-		) VALUES ($1, $2, $3, $4, 1, 'public', $5, $6)
-		RETURNING stream_position`,
-		string(workspaceID),
-		sessionID,
-		eventID,
-		nullableString(sessionThreadID),
-		sessionVisible,
-		now,
-	).Scan(&streamPosition); err != nil {
-		return 0, err
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE session_events
-		    SET latest_stream_position = $4,
-		        insert_stream_position = CASE
-		            WHEN insert_stream_position = 0 THEN $4
-		            ELSE insert_stream_position
-		        END
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND event_id = $3`,
-		string(workspaceID),
-		sessionID,
-		eventID,
-		streamPosition,
-	); err != nil {
-		return 0, err
-	}
-	return streamPosition, nil
-}
-
 func publicEventSessionVisible(eventType string, sessionThreadID string, mainThreadID string) bool {
 	if sessionThreadID == "" || sessionThreadID == mainThreadID {
 		return true
@@ -690,14 +678,20 @@ func resolvePendingToolConfirmation(ctx context.Context, tx *dbconnect.Tx, works
 	return sessionThreadID, nil
 }
 
+// idempotencyReceiptLifetime is the exact receipt lifetime: a receipt is live
+// precisely while admission_time < created_at + 24 hours. Cleanup's receipt
+// retention uses the same age.
+const idempotencyReceiptLifetime = 24 * time.Hour
+
 type storedSessionEventIdempotency struct {
 	canonicalRequestHash []byte
 	responseEventsJSON   string
+	createdAt            time.Time
 }
 
 func readSessionEventIdempotency(ctx context.Context, tx *dbconnect.Tx, workspaceID workspace.ID, sessionID string, keyDigest []byte) (storedSessionEventIdempotency, bool, error) {
 	row := tx.QueryRow(ctx,
-		`SELECT canonical_request_hash, response_events_json
+		`SELECT canonical_request_hash, response_events_json, created_at
 		   FROM session_event_idempotency_keys
 		  WHERE workspace_id = $1
 		    AND session_id = $2
@@ -708,7 +702,7 @@ func readSessionEventIdempotency(ctx context.Context, tx *dbconnect.Tx, workspac
 		keyDigest,
 	)
 	var existing storedSessionEventIdempotency
-	if err := row.Scan(&existing.canonicalRequestHash, &existing.responseEventsJSON); dbconnect.IsNoRows(err) {
+	if err := row.Scan(&existing.canonicalRequestHash, &existing.responseEventsJSON, &existing.createdAt); dbconnect.IsNoRows(err) {
 		return storedSessionEventIdempotency{}, false, nil
 	} else if err != nil {
 		return storedSessionEventIdempotency{}, false, err

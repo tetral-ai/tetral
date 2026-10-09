@@ -143,10 +143,8 @@ func TestOpenPlainDSNContextCancellationAndTimeoutDiagnostics(t *testing.T) {
 	}
 }
 
-func TestOpenPlainDSNSuccessAndFromEnv(t *testing.T) {
+func TestOpenPlainDSNSuccess(t *testing.T) {
 	dsn := requirePostgreSQLTestDSN(t)
-	t.Setenv("TETRAL_DATABASE_URL", dsn)
-	t.Setenv("TETRAL_TEST_DATABASE_URL", "postgres://tetral:must-not-be-used@127.0.0.1:1/tetral")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -172,27 +170,6 @@ func TestOpenPlainDSNSuccessAndFromEnv(t *testing.T) {
 	if err := result.Client.Ping(ctx); err != nil {
 		t.Fatalf("Ping after open: %v", err)
 	}
-
-	envResult, err := OpenPlainDSNFromEnv(ctx)
-	if err != nil {
-		t.Fatalf("OpenPlainDSNFromEnv: %v", err)
-	}
-	defer func() { _ = envResult.Client.Close() }()
-	if err := envResult.Client.Ping(ctx); err != nil {
-		t.Fatalf("Ping env result: %v", err)
-	}
-	if envResult.Descriptor != expectedDescriptor {
-		t.Fatalf("env descriptor = %+v; want %+v", envResult.Descriptor, expectedDescriptor)
-	}
-}
-
-func TestOpenPlainDSNFromEnvDoesNotFallbackToTestVariable(t *testing.T) {
-	t.Setenv("TETRAL_DATABASE_URL", "")
-	t.Setenv("TETRAL_TEST_DATABASE_URL", requirePostgreSQLTestDSN(t))
-
-	_, err := OpenPlainDSNFromEnv(context.Background())
-	_ = assertDiagnostic(t, err, PhaseParseConfig, KindInvalidConfig)
-	assertPublicSafe(t, err, "TETRAL_TEST_DATABASE_URL")
 }
 
 func TestConfigurePlainDSNPreservesSecureSSLMode(t *testing.T) {

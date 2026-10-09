@@ -4,12 +4,10 @@
 package catalogtest
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"sort"
 )
 
 type querySnapshot struct {
@@ -20,10 +18,6 @@ type querySnapshot struct {
 // Snapshot returns catalog facts without catalog OIDs or other allocation-
 // order identities. Every query has an explicit semantic order.
 func Snapshot(ctx context.Context, db *sql.DB) ([]byte, error) {
-	return snapshot(ctx, db, nil)
-}
-
-func snapshot(ctx context.Context, db *sql.DB, replacements map[string]string) ([]byte, error) {
 	queries := []struct {
 		name string
 		sql  string
@@ -84,91 +78,5 @@ func snapshot(ctx context.Context, db *sql.DB, replacements map[string]string) (
 		}
 		result = append(result, item)
 	}
-	body, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	keys := make([]string, 0, len(replacements))
-	for source := range replacements {
-		keys = append(keys, source)
-	}
-	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) })
-	for _, source := range keys {
-		body = bytes.ReplaceAll(body, []byte(source), []byte(replacements[source]))
-	}
-	return body, nil
-}
-
-// HelperSnapshot captures the logical seed and privileges installed by the
-// ordinary storage-test bootstrap while normalizing generated role and schema
-// identities. Database-level clone isolation is proved by storagetest itself.
-func HelperSnapshot(ctx context.Context, runtimeDB, adminDB *sql.DB) ([]byte, error) {
-	var runtimeRole, schemaName, schemaOwner, objectOwner string
-	if err := runtimeDB.QueryRowContext(ctx, `SELECT current_user`).Scan(&runtimeRole); err != nil {
-		return nil, err
-	}
-	if err := adminDB.QueryRowContext(ctx, `SELECT current_schema()`).Scan(&schemaName); err != nil {
-		return nil, err
-	}
-	if err := adminDB.QueryRowContext(ctx, `SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname=current_schema()`).Scan(&schemaOwner); err != nil {
-		return nil, err
-	}
-	if err := adminDB.QueryRowContext(ctx, `SELECT current_user`).Scan(&objectOwner); err != nil {
-		return nil, err
-	}
-	catalog, err := snapshot(ctx, adminDB, map[string]string{
-		runtimeRole:      "<runtime-role>",
-		schemaName + ".": "<schema>.",
-		schemaOwner:      "<owner>",
-		objectOwner:      "<owner>",
-	})
-	if err != nil {
-		return nil, err
-	}
-	var workspaceType, workspaceName string
-	if err := adminDB.QueryRowContext(ctx, `SELECT type, name FROM workspaces WHERE id='default'`).Scan(&workspaceType, &workspaceName); err != nil {
-		return nil, err
-	}
-	var login, superuser, bypassRLS bool
-	if err := adminDB.QueryRowContext(ctx, `SELECT rolcanlogin, rolsuper, rolbypassrls FROM pg_roles WHERE rolname=$1`, runtimeRole).Scan(&login, &superuser, &bypassRLS); err != nil {
-		return nil, err
-	}
-	privileges, err := helperPrivileges(ctx, adminDB, runtimeRole)
-	if err != nil {
-		return nil, err
-	}
-	return json.MarshalIndent(struct {
-		Catalog     json.RawMessage `json:"catalog"`
-		Workspace   [2]string       `json:"workspace"`
-		RuntimeRole [3]bool         `json:"runtime_role"`
-		Privileges  [][]string      `json:"privileges"`
-	}{catalog, [2]string{workspaceType, workspaceName}, [3]bool{login, superuser, bypassRLS}, privileges}, "", "  ")
-}
-
-func helperPrivileges(ctx context.Context, db *sql.DB, role string) ([][]string, error) {
-	rows, err := db.QueryContext(ctx, `SELECT c.relname, privilege
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid=c.relnamespace
-		CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) privilege
-		WHERE n.nspname=current_schema() AND c.relkind IN ('r','p') AND has_table_privilege($1,c.oid,privilege)
-		UNION ALL
-		SELECT c.relname, privilege
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid=c.relnamespace
-		CROSS JOIN unnest(ARRAY['SELECT','UPDATE','USAGE']) privilege
-		WHERE n.nspname=current_schema() AND c.relkind='S' AND has_sequence_privilege($1,c.oid,privilege)
-		ORDER BY 1,2`, role)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var result [][]string
-	for rows.Next() {
-		var relation, privilege string
-		if err := rows.Scan(&relation, &privilege); err != nil {
-			return nil, err
-		}
-		result = append(result, []string{relation, privilege})
-	}
-	return result, rows.Err()
+	return json.MarshalIndent(result, "", "  ")
 }

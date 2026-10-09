@@ -8,6 +8,7 @@ out/
 coverage/
 coverage.out
 *.tsbuildinfo
+__pycache__/
 
 # Environment
 .env

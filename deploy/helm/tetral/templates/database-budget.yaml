@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tetral-database-connection-budget
+  namespace: tetral-system
+data:
+  status: {{ if and (ne .Values.transport.databaseCapacity nil) (ne .Values.transport.externalDatabaseConnections nil) }}"resolved"{{ else }}"unresolved"{{ end }}
+  maximumOwnedPoolSlots: {{ include "tetral.databasePoolSlots" . | quote }}
+  operatorReserveSlots: {{ .Values.transport.databaseReserve | quote }}
+  availableServerConnections: {{ if eq .Values.transport.databaseCapacity nil }}"unknown"{{ else }}{{ .Values.transport.databaseCapacity | quote }}{{ end }}
+  externalConsumerSlots: {{ if eq .Values.transport.externalDatabaseConnections nil }}"unknown"{{ else }}{{ .Values.transport.externalDatabaseConnections | quote }}{{ end }}

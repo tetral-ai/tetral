@@ -5,6 +5,9 @@ package tetral.bridge.v1;
 option go_package = "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1;bridgev1";
 
 service AgentRuntimeBridgeService {
+  rpc RegisterRuntimeProcess(RegisterRuntimeProcessRequest) returns (RegisterRuntimeProcessResponse);
+  rpc ReportRuntimeProcess(ReportRuntimeProcessRequest) returns (ReportRuntimeProcessResponse);
+  rpc ReleaseRuntimeBinding(ReleaseRuntimeBindingRequest) returns (ReleaseRuntimeBindingResponse);
   rpc LoadContext(LoadContextRequest) returns (LoadContextResponse);
   rpc RefreshRuntimeBindingToken(RefreshRuntimeBindingTokenRequest) returns (RefreshRuntimeBindingTokenResponse);
   rpc CommitInputs(CommitInputsRequest) returns (CommitInputsResponse);
@@ -155,6 +158,7 @@ message RuntimeBindingRef {
   string binding_id = 1;
   int64 binding_generation = 2;
   string target_pod_uid = 3;
+  string runtime_process_id = 4;
 }
 
 message RuntimeScope {
@@ -169,6 +173,8 @@ message RuntimeScope {
 message LoadContextRequest {
   RuntimeScope scope = 1;
   RecoveryLeaseRef recovery_lease_ref = 2;
+  string source_event_id = 3;
+  string handoff_id = 4;
 }
 
 message RecoveryLeaseRef {
@@ -394,6 +400,9 @@ message CommitInternalToolRepairRequest {
   string canonical_input_json = 5;
   RuntimeToolError error = 6;
   string repair_key = 7;
+  // Private stable reasoning immediately preceding this semantic repair member.
+  // Absent or empty means no prefix; nonempty parts must all be reasoning.
+  optional RuntimeContextDelta reasoning_prefix_context_delta = 8;
 }
 
 message CommitInternalToolRepairResponse {
@@ -552,6 +561,9 @@ message WriteEventRequest {
   reserved 17;
   reserved "canonical_execution_input_json";
   RuntimeToolDeclaration tool_declaration = 18;
+  // Gateway identity for agent.message and agent.thinking only. Required for
+  // those events and preserved through durable declaration replay.
+  optional string preallocated_event_id = 19;
 }
 
 enum RuntimeToolEventKind {
@@ -1155,3 +1167,51 @@ message MemoryRunDuplicate {
   string result_json = 1;
 }
 message MemoryRunStale {}
+
+// Process identity comes from one boot; Pod authority comes from authentication.
+enum RuntimeProcessPhase {
+  RUNTIME_PROCESS_PHASE_UNSPECIFIED = 0;
+  RUNTIME_PROCESS_PHASE_STARTING = 1;
+  RUNTIME_PROCESS_PHASE_ACCEPTING = 2;
+  RUNTIME_PROCESS_PHASE_DRAINING = 3;
+}
+message RegisterRuntimeProcessRequest { string runtime_process_id = 1; }
+message RegisterRuntimeProcessResponse {
+  string runtime_process_id = 1;
+  int64 registration_order = 2;
+  string registration_receipt = 3;
+}
+message ReportRuntimeProcessRequest {
+  string runtime_process_id = 1;
+  string registration_receipt = 2;
+  RuntimeProcessPhase phase = 3;
+}
+message ReportRuntimeProcessResponse {
+  string runtime_process_id = 1;
+  RuntimeProcessPhase phase = 2;
+  bool current = 3;
+}
+message ReleaseRuntimeBindingRequest {
+  string workspace_id = 1;
+  string session_id = 2;
+  string binding_id = 3;
+  int64 binding_generation = 4;
+  string runtime_process_id = 5;
+  string operation_id = 6;
+}
+message ReleaseRuntimeBindingResponse {
+  string operation_id = 1;
+  string handoff_id = 2;
+  RuntimeBindingRef released_binding = 3;
+  repeated RuntimeHandoffThread threads = 4;
+}
+enum RuntimeHandoffDisposition {
+  RUNTIME_HANDOFF_DISPOSITION_UNSPECIFIED = 0;
+  RUNTIME_HANDOFF_DISPOSITION_IDLE = 1;
+  RUNTIME_HANDOFF_DISPOSITION_RECOVER = 2;
+}
+message RuntimeHandoffThread {
+  string session_thread_id = 1;
+  RuntimeHandoffDisposition disposition = 2;
+  string queue_job_id = 3;
+}

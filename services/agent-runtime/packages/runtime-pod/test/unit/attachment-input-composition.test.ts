@@ -45,17 +45,18 @@ test("producer attachment receipt crosses Runtime ingress and starts one provide
 	) as AttachmentInputFixture;
 	const commands: RuntimeAcceptedInputState[] = [];
 	const service = new RuntimeControlService({
+	runtimeProcessId: fixture.acceptInput.runtimeProcessId,
 		ownPod: {
 			namespace: "engine",
 			name: "runtime-pod",
 			uid: fixture.acceptInput.targetPodUid,
 			ip: "127.0.0.1",
 		},
-		allowedBridge: { namespace: "engine", name: "bridge" },
+		allowedJobRunner: { namespace: "engine", name: "job-runner" },
 		authenticator: {
 			authenticate: async () => ({
 				ok: true as const,
-				serviceAccount: { namespace: "engine", name: "bridge" },
+				serviceAccount: { namespace: "engine", name: "job-runner" },
 			}),
 		} satisfies RuntimeAuthenticator,
 		runHost: {
@@ -122,7 +123,10 @@ test("producer attachment receipt crosses Runtime ingress and starts one provide
 		bindingId: command.bindingId,
 		bindingGeneration: command.bindingGeneration,
 		targetPodUid: command.targetPodUid,
+		runtimeProcessId: command.runtimeProcessId,
 		runtimeBindingToken: "binding-token",
+		threadRole: "main",
+		threadVisibility: "public",
 	});
 	session.state.enqueueAcceptedInput(command);
 	const requests: LLMRequest[] = [];

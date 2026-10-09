@@ -2,10 +2,8 @@ package httpapi
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -16,11 +14,11 @@ import (
 )
 
 // NewRouter builds a chi router with all middleware and routes
-// registered. Callers that serve /v1 routes must pass
-// WithAuthenticator(...) so the auth middleware can attach an
-// authenticated workspace to the request context. The apiKey
-// parameter is retained for source compatibility but no longer
-// creates a default-workspace production fallback.
+// registered. Production public services pass
+// WithInternalPrincipalVerifier so /v1 routes admit only the Auth-signed,
+// request-bound principal. Without it, /v1 routes use the raw x-api-key
+// test harness installed by WithAuthenticator. The apiKey parameter is
+// unused.
 func NewRouter(sessionHandler *SessionHandler, apiKey string, options ...RouterOption) http.Handler {
 	router := chi.NewRouter()
 
@@ -136,9 +134,9 @@ func WithSessionEventListHandler(h SessionEventListHandler) RouterOption {
 	return func(o *routerOptions) { o.sessionEventList = h }
 }
 
-// WithAuthenticator installs the auth.Authenticator used by /v1
-// routes. Production wiring uses this option so bootstrap and
-// standard PostgreSQL-backed keys authenticate.
+// WithAuthenticator installs the auth.Authenticator for the raw x-api-key
+// test harness. It applies only when no internal principal verifier is
+// installed; production public services use WithInternalPrincipalVerifier.
 func WithAuthenticator(a auth.Authenticator) RouterOption {
 	return func(o *routerOptions) { o.authenticator = a }
 }
@@ -160,19 +158,15 @@ func WithRequestMetrics(metrics RequestMetricsRecorder) RouterOption {
 
 func applyRouterOptionDefaults(opts *routerOptions) {
 	if opts.logger == nil {
-		opts.logger = defaultRouterLogger(os.Stderr)
+		opts.logger = workload.ComponentLogger("api")
 	}
 	if opts.slowRequestThreshold == 0 {
 		opts.slowRequestThreshold = DefaultSlowRequestThreshold
 	}
 }
 
-func defaultRouterLogger(writer io.Writer) *slog.Logger {
-	return workload.NewLogger(writer, "api", "", "")
-}
-
-// resolveAuthenticator picks the explicit authenticator supplied via
-// WithAuthenticator if present. Without one, /v1 routes fail closed
+// resolveAuthenticator picks the raw-key harness authenticator supplied via
+// WithAuthenticator if present. Without one, harness /v1 routes fail closed
 // during authentication rather than manufacturing workspace.DefaultID.
 func resolveAuthenticator(_ string, opts *routerOptions) auth.Authenticator {
 	if opts.authenticator != nil {
@@ -193,181 +187,181 @@ func registerRoutes(router chi.Router, sessionHandler *SessionHandler, authentic
 			r.Use(authMiddleware(authenticator, opts.logger))
 		}
 		// Sessions — real handlers
-		r.Post("/sessions", sessionHandler.createSession)
-		r.Get("/sessions", sessionHandler.listSessions)
-		r.Get("/sessions/{session_id}", sessionHandler.getSession)
-		r.Post("/sessions/{session_id}", sessionHandler.updateSession)
-		r.Delete("/sessions/{session_id}", sessionHandler.deleteSession)
-		r.Post("/sessions/{session_id}/archive", sessionHandler.archiveSession)
-		r.Get("/sessions/{session_id}/threads", sessionHandler.listThreads)
-		r.Get("/sessions/{session_id}/threads/{thread_id}", sessionHandler.getThread)
-		r.Post("/sessions/{session_id}/threads/{thread_id}/archive", sessionHandler.archiveThread)
+		registerPublicRoute(r, http.MethodPost, "/sessions", sessionHandler.createSession, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodGet, "/sessions", sessionHandler.listSessions, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodGet, "/sessions/{session_id}", sessionHandler.getSession, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodPost, "/sessions/{session_id}", sessionHandler.updateSession, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodDelete, "/sessions/{session_id}", sessionHandler.deleteSession, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodPost, "/sessions/{session_id}/archive", sessionHandler.archiveSession, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodGet, "/sessions/{session_id}/threads", sessionHandler.listThreads, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodGet, "/sessions/{session_id}/threads/{thread_id}", sessionHandler.getThread, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodPost, "/sessions/{session_id}/threads/{thread_id}/archive", sessionHandler.archiveThread, sessionHandler, opts, false)
 		if opts.sessionEventHandler != nil {
-			r.Post("/sessions/{session_id}/events", opts.sessionEventHandler.appendClientEvents)
+			registerPublicRoute(r, http.MethodPost, "/sessions/{session_id}/events", opts.sessionEventHandler.appendClientEvents, sessionHandler, opts, false)
 		} else {
-			r.Post("/sessions/{session_id}/events", stubHandler)
+			registerPublicRoute(r, http.MethodPost, "/sessions/{session_id}/events", stubHandler, sessionHandler, opts, true)
 		}
 		if opts.sessionEventList != nil {
-			r.Get("/sessions/{session_id}/events", opts.sessionEventList.ServeSessionEvents)
-			r.Get("/sessions/{session_id}/threads/{thread_id}/events", opts.sessionEventList.ServeThreadEvents)
+			registerPublicRoute(r, http.MethodGet, "/sessions/{session_id}/events", opts.sessionEventList.ServeSessionEvents, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/sessions/{session_id}/threads/{thread_id}/events", opts.sessionEventList.ServeThreadEvents, sessionHandler, opts, false)
 		}
 
 		// Models.
-		r.Get("/models", listModels)
-		r.Get("/models/{model_id}", retrieveModel)
+		registerPublicRoute(r, http.MethodGet, "/models", listModels, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodGet, "/models/{model_id}", retrieveModel, sessionHandler, opts, false)
 
 		// Resources
-		r.Post("/sessions/{session_id}/resources", sessionHandler.addResource)
-		r.Get("/sessions/{session_id}/resources", sessionHandler.listResources)
-		r.Get("/sessions/{session_id}/resources/{resource_id}", sessionHandler.getResource)
-		r.Post("/sessions/{session_id}/resources/{resource_id}", sessionHandler.updateResource)
-		r.Delete("/sessions/{session_id}/resources/{resource_id}", sessionHandler.deleteResource)
+		registerPublicRoute(r, http.MethodPost, "/sessions/{session_id}/resources", sessionHandler.addResource, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodGet, "/sessions/{session_id}/resources", sessionHandler.listResources, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodGet, "/sessions/{session_id}/resources/{resource_id}", sessionHandler.getResource, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodPost, "/sessions/{session_id}/resources/{resource_id}", sessionHandler.updateResource, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodDelete, "/sessions/{session_id}/resources/{resource_id}", sessionHandler.deleteResource, sessionHandler, opts, false)
 
 		// Agents
 		if opts.agentHandler != nil {
-			r.Post("/agents", opts.agentHandler.createAgent)
-			r.Get("/agents", opts.agentHandler.listAgents)
-			r.Get("/agents/{agent_id}", opts.agentHandler.getAgent)
-			r.Post("/agents/{agent_id}", opts.agentHandler.updateAgent)
-			r.Post("/agents/{agent_id}/archive", opts.agentHandler.archiveAgent)
-			r.Get("/agents/{agent_id}/versions", opts.agentHandler.listAgentVersions)
+			registerPublicRoute(r, http.MethodPost, "/agents", opts.agentHandler.createAgent, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/agents", opts.agentHandler.listAgents, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/agents/{agent_id}", opts.agentHandler.getAgent, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodPost, "/agents/{agent_id}", opts.agentHandler.updateAgent, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodPost, "/agents/{agent_id}/archive", opts.agentHandler.archiveAgent, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/agents/{agent_id}/versions", opts.agentHandler.listAgentVersions, sessionHandler, opts, false)
 		} else {
-			r.Post("/agents", stubHandler)
-			r.Get("/agents", stubHandler)
-			r.Get("/agents/{agent_id}", stubHandler)
-			r.Post("/agents/{agent_id}", stubHandler)
-			r.Post("/agents/{agent_id}/archive", stubHandler)
-			r.Get("/agents/{agent_id}/versions", stubHandler)
+			registerPublicRoute(r, http.MethodPost, "/agents", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/agents", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/agents/{agent_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodPost, "/agents/{agent_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodPost, "/agents/{agent_id}/archive", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/agents/{agent_id}/versions", stubHandler, sessionHandler, opts, true)
 		}
 
 		// Environments
 		if opts.environmentHandler != nil {
-			r.Post("/environments", opts.environmentHandler.createEnvironment)
-			r.Get("/environments", opts.environmentHandler.listEnvironments)
-			r.Get("/environments/{environment_id}", opts.environmentHandler.getEnvironment)
-			r.Post("/environments/{environment_id}", opts.environmentHandler.updateEnvironment)
-			r.Delete("/environments/{environment_id}", opts.environmentHandler.deleteEnvironment)
-			r.Post("/environments/{environment_id}/archive", opts.environmentHandler.archiveEnvironment)
+			registerPublicRoute(r, http.MethodPost, "/environments", opts.environmentHandler.createEnvironment, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/environments", opts.environmentHandler.listEnvironments, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/environments/{environment_id}", opts.environmentHandler.getEnvironment, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodPost, "/environments/{environment_id}", opts.environmentHandler.updateEnvironment, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodDelete, "/environments/{environment_id}", opts.environmentHandler.deleteEnvironment, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodPost, "/environments/{environment_id}/archive", opts.environmentHandler.archiveEnvironment, sessionHandler, opts, false)
 		} else {
-			r.Post("/environments", stubHandler)
-			r.Get("/environments", stubHandler)
-			r.Get("/environments/{environment_id}", stubHandler)
-			r.Post("/environments/{environment_id}", stubHandler)
-			r.Delete("/environments/{environment_id}", stubHandler)
-			r.Post("/environments/{environment_id}/archive", stubHandler)
+			registerPublicRoute(r, http.MethodPost, "/environments", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/environments", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/environments/{environment_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodPost, "/environments/{environment_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodDelete, "/environments/{environment_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodPost, "/environments/{environment_id}/archive", stubHandler, sessionHandler, opts, true)
 		}
 
 		// Vaults
 		if opts.vaultHandler != nil {
-			r.Post("/vaults", opts.vaultHandler.createVault)
-			r.Get("/vaults", opts.vaultHandler.listVaults)
-			r.Get("/vaults/{vault_id}", opts.vaultHandler.getVault)
-			r.Post("/vaults/{vault_id}", opts.vaultHandler.updateVault)
-			r.Delete("/vaults/{vault_id}", opts.vaultHandler.deleteVault)
+			registerPublicRoute(r, http.MethodPost, "/vaults", opts.vaultHandler.createVault, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/vaults", opts.vaultHandler.listVaults, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/vaults/{vault_id}", opts.vaultHandler.getVault, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodPost, "/vaults/{vault_id}", opts.vaultHandler.updateVault, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodDelete, "/vaults/{vault_id}", opts.vaultHandler.deleteVault, sessionHandler, opts, false)
 		} else {
-			r.Post("/vaults", stubHandler)
-			r.Get("/vaults", stubHandler)
-			r.Get("/vaults/{vault_id}", stubHandler)
-			r.Post("/vaults/{vault_id}", stubHandler)
-			r.Delete("/vaults/{vault_id}", stubHandler)
+			registerPublicRoute(r, http.MethodPost, "/vaults", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/vaults", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/vaults/{vault_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodPost, "/vaults/{vault_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodDelete, "/vaults/{vault_id}", stubHandler, sessionHandler, opts, true)
 		}
 		if opts.vaultHandler != nil {
-			r.Post("/vaults/{vault_id}/archive", opts.vaultHandler.archiveVault)
+			registerPublicRoute(r, http.MethodPost, "/vaults/{vault_id}/archive", opts.vaultHandler.archiveVault, sessionHandler, opts, false)
 		} else {
-			r.Post("/vaults/{vault_id}/archive", stubHandler)
+			registerPublicRoute(r, http.MethodPost, "/vaults/{vault_id}/archive", stubHandler, sessionHandler, opts, true)
 		}
 
 		// Credentials
 		if opts.vaultHandler != nil {
-			r.Post("/vaults/{vault_id}/credentials", opts.vaultHandler.createCredential)
-			r.Get("/vaults/{vault_id}/credentials", opts.vaultHandler.listCredentials)
-			r.Get("/vaults/{vault_id}/credentials/{credential_id}", opts.vaultHandler.getCredential)
-			r.Post("/vaults/{vault_id}/credentials/{credential_id}", opts.vaultHandler.updateCredential)
-			r.Post("/vaults/{vault_id}/credentials/{credential_id}/mcp_oauth_validate", opts.vaultHandler.validateMCPOAuthCredential)
-			r.Delete("/vaults/{vault_id}/credentials/{credential_id}", opts.vaultHandler.deleteCredential)
+			registerPublicRoute(r, http.MethodPost, "/vaults/{vault_id}/credentials", opts.vaultHandler.createCredential, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/vaults/{vault_id}/credentials", opts.vaultHandler.listCredentials, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/vaults/{vault_id}/credentials/{credential_id}", opts.vaultHandler.getCredential, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodPost, "/vaults/{vault_id}/credentials/{credential_id}", opts.vaultHandler.updateCredential, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodPost, "/vaults/{vault_id}/credentials/{credential_id}/mcp_oauth_validate", opts.vaultHandler.validateMCPOAuthCredential, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodDelete, "/vaults/{vault_id}/credentials/{credential_id}", opts.vaultHandler.deleteCredential, sessionHandler, opts, false)
 		} else {
-			r.Post("/vaults/{vault_id}/credentials", stubHandler)
-			r.Get("/vaults/{vault_id}/credentials", stubHandler)
-			r.Get("/vaults/{vault_id}/credentials/{credential_id}", stubHandler)
-			r.Post("/vaults/{vault_id}/credentials/{credential_id}", stubHandler)
-			r.Post("/vaults/{vault_id}/credentials/{credential_id}/mcp_oauth_validate", stubHandler)
-			r.Delete("/vaults/{vault_id}/credentials/{credential_id}", stubHandler)
+			registerPublicRoute(r, http.MethodPost, "/vaults/{vault_id}/credentials", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/vaults/{vault_id}/credentials", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/vaults/{vault_id}/credentials/{credential_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodPost, "/vaults/{vault_id}/credentials/{credential_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodPost, "/vaults/{vault_id}/credentials/{credential_id}/mcp_oauth_validate", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodDelete, "/vaults/{vault_id}/credentials/{credential_id}", stubHandler, sessionHandler, opts, true)
 		}
 		if opts.vaultHandler != nil {
-			r.Post("/vaults/{vault_id}/credentials/{credential_id}/archive", opts.vaultHandler.archiveCredential)
+			registerPublicRoute(r, http.MethodPost, "/vaults/{vault_id}/credentials/{credential_id}/archive", opts.vaultHandler.archiveCredential, sessionHandler, opts, false)
 		} else {
-			r.Post("/vaults/{vault_id}/credentials/{credential_id}/archive", stubHandler)
+			registerPublicRoute(r, http.MethodPost, "/vaults/{vault_id}/credentials/{credential_id}/archive", stubHandler, sessionHandler, opts, true)
 		}
 
 		// Files
 		if opts.fileHandler != nil {
-			r.Post("/files", opts.fileHandler.createFile)
-			r.Get("/files", opts.fileHandler.listFiles)
-			r.Get("/files/{file_id}", opts.fileHandler.getFile)
-			r.Delete("/files/{file_id}", opts.fileHandler.deleteFile)
-			r.Get("/files/{file_id}/content", opts.fileHandler.getFileContent)
+			registerPublicRoute(r, http.MethodPost, "/files", opts.fileHandler.createFile, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/files", opts.fileHandler.listFiles, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/files/{file_id}", opts.fileHandler.getFile, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodDelete, "/files/{file_id}", opts.fileHandler.deleteFile, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/files/{file_id}/content", opts.fileHandler.getFileContent, sessionHandler, opts, false)
 		} else {
-			r.Post("/files", stubHandler)
-			r.Get("/files", stubHandler)
-			r.Get("/files/{file_id}", stubHandler)
-			r.Delete("/files/{file_id}", stubHandler)
-			r.Get("/files/{file_id}/content", stubHandler)
+			registerPublicRoute(r, http.MethodPost, "/files", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/files", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/files/{file_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodDelete, "/files/{file_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/files/{file_id}/content", stubHandler, sessionHandler, opts, true)
 		}
 
 		// Memory stores.
 		if opts.memoryHandler != nil {
-			r.Post("/memory_stores", opts.memoryHandler.createStore)
-			r.Get("/memory_stores", opts.memoryHandler.listStores)
-			r.Get("/memory_stores/{memory_store_id}", opts.memoryHandler.getStore)
-			r.Post("/memory_stores/{memory_store_id}", opts.memoryHandler.updateStore)
-			r.Delete("/memory_stores/{memory_store_id}", opts.memoryHandler.deleteStore)
-			r.Post("/memory_stores/{memory_store_id}/archive", opts.memoryHandler.archiveStore)
-			r.Post("/memory_stores/{memory_store_id}/memories", opts.memoryHandler.createMemory)
-			r.Get("/memory_stores/{memory_store_id}/memories", opts.memoryHandler.listMemories)
-			r.Get("/memory_stores/{memory_store_id}/memories/{memory_id}", opts.memoryHandler.getMemory)
-			r.Post("/memory_stores/{memory_store_id}/memories/{memory_id}", opts.memoryHandler.updateMemory)
-			r.Delete("/memory_stores/{memory_store_id}/memories/{memory_id}", opts.memoryHandler.deleteMemory)
-			r.Get("/memory_stores/{memory_store_id}/memory_versions", opts.memoryHandler.listMemoryVersions)
-			r.Get("/memory_stores/{memory_store_id}/memory_versions/{memory_version_id}", opts.memoryHandler.getMemoryVersion)
-			r.Post("/memory_stores/{memory_store_id}/memory_versions/{memory_version_id}/redact", opts.memoryHandler.redactMemoryVersion)
+			registerPublicRoute(r, http.MethodPost, "/memory_stores", opts.memoryHandler.createStore, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/memory_stores", opts.memoryHandler.listStores, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/memory_stores/{memory_store_id}", opts.memoryHandler.getStore, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodPost, "/memory_stores/{memory_store_id}", opts.memoryHandler.updateStore, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodDelete, "/memory_stores/{memory_store_id}", opts.memoryHandler.deleteStore, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodPost, "/memory_stores/{memory_store_id}/archive", opts.memoryHandler.archiveStore, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodPost, "/memory_stores/{memory_store_id}/memories", opts.memoryHandler.createMemory, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/memory_stores/{memory_store_id}/memories", opts.memoryHandler.listMemories, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/memory_stores/{memory_store_id}/memories/{memory_id}", opts.memoryHandler.getMemory, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodPost, "/memory_stores/{memory_store_id}/memories/{memory_id}", opts.memoryHandler.updateMemory, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodDelete, "/memory_stores/{memory_store_id}/memories/{memory_id}", opts.memoryHandler.deleteMemory, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/memory_stores/{memory_store_id}/memory_versions", opts.memoryHandler.listMemoryVersions, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/memory_stores/{memory_store_id}/memory_versions/{memory_version_id}", opts.memoryHandler.getMemoryVersion, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodPost, "/memory_stores/{memory_store_id}/memory_versions/{memory_version_id}/redact", opts.memoryHandler.redactMemoryVersion, sessionHandler, opts, false)
 		} else {
-			r.Post("/memory_stores", stubHandler)
-			r.Get("/memory_stores", stubHandler)
-			r.Get("/memory_stores/{memory_store_id}", stubHandler)
-			r.Post("/memory_stores/{memory_store_id}", stubHandler)
-			r.Delete("/memory_stores/{memory_store_id}", stubHandler)
-			r.Post("/memory_stores/{memory_store_id}/archive", stubHandler)
-			r.Post("/memory_stores/{memory_store_id}/memories", stubHandler)
-			r.Get("/memory_stores/{memory_store_id}/memories", stubHandler)
-			r.Get("/memory_stores/{memory_store_id}/memories/{memory_id}", stubHandler)
-			r.Post("/memory_stores/{memory_store_id}/memories/{memory_id}", stubHandler)
-			r.Delete("/memory_stores/{memory_store_id}/memories/{memory_id}", stubHandler)
-			r.Get("/memory_stores/{memory_store_id}/memory_versions", stubHandler)
-			r.Get("/memory_stores/{memory_store_id}/memory_versions/{memory_version_id}", stubHandler)
-			r.Post("/memory_stores/{memory_store_id}/memory_versions/{memory_version_id}/redact", stubHandler)
+			registerPublicRoute(r, http.MethodPost, "/memory_stores", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/memory_stores", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/memory_stores/{memory_store_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodPost, "/memory_stores/{memory_store_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodDelete, "/memory_stores/{memory_store_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodPost, "/memory_stores/{memory_store_id}/archive", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodPost, "/memory_stores/{memory_store_id}/memories", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/memory_stores/{memory_store_id}/memories", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/memory_stores/{memory_store_id}/memories/{memory_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodPost, "/memory_stores/{memory_store_id}/memories/{memory_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodDelete, "/memory_stores/{memory_store_id}/memories/{memory_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/memory_stores/{memory_store_id}/memory_versions", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/memory_stores/{memory_store_id}/memory_versions/{memory_version_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodPost, "/memory_stores/{memory_store_id}/memory_versions/{memory_version_id}/redact", stubHandler, sessionHandler, opts, true)
 		}
 
 		// Skills
 		if opts.skillHandler != nil {
-			r.Post("/skills", opts.skillHandler.createSkill)
-			r.Get("/skills", opts.skillHandler.listSkills)
-			r.Get("/skills/{skill_id}", opts.skillHandler.getSkill)
-			r.Delete("/skills/{skill_id}", opts.skillHandler.deleteSkill)
-			r.Post("/skills/{skill_id}/versions", opts.skillHandler.createVersion)
-			r.Get("/skills/{skill_id}/versions", opts.skillHandler.listVersions)
-			r.Get("/skills/{skill_id}/versions/{version}", opts.skillHandler.getVersion)
-			r.Get("/skills/{skill_id}/versions/{version}/content", opts.skillHandler.getVersionContent)
-			r.Delete("/skills/{skill_id}/versions/{version}", opts.skillHandler.deleteVersion)
+			registerPublicRoute(r, http.MethodPost, "/skills", opts.skillHandler.createSkill, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/skills", opts.skillHandler.listSkills, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/skills/{skill_id}", opts.skillHandler.getSkill, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodDelete, "/skills/{skill_id}", opts.skillHandler.deleteSkill, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodPost, "/skills/{skill_id}/versions", opts.skillHandler.createVersion, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/skills/{skill_id}/versions", opts.skillHandler.listVersions, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/skills/{skill_id}/versions/{version}", opts.skillHandler.getVersion, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodGet, "/skills/{skill_id}/versions/{version}/content", opts.skillHandler.getVersionContent, sessionHandler, opts, false)
+			registerPublicRoute(r, http.MethodDelete, "/skills/{skill_id}/versions/{version}", opts.skillHandler.deleteVersion, sessionHandler, opts, false)
 		} else {
-			r.Post("/skills", stubHandler)
-			r.Get("/skills", stubHandler)
-			r.Get("/skills/{skill_id}", stubHandler)
-			r.Delete("/skills/{skill_id}", stubHandler)
-			r.Post("/skills/{skill_id}/versions", stubHandler)
-			r.Get("/skills/{skill_id}/versions", stubHandler)
-			r.Get("/skills/{skill_id}/versions/{version}", stubHandler)
-			r.Get("/skills/{skill_id}/versions/{version}/content", stubHandler)
-			r.Delete("/skills/{skill_id}/versions/{version}", stubHandler)
+			registerPublicRoute(r, http.MethodPost, "/skills", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/skills", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/skills/{skill_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodDelete, "/skills/{skill_id}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodPost, "/skills/{skill_id}/versions", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/skills/{skill_id}/versions", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/skills/{skill_id}/versions/{version}", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodGet, "/skills/{skill_id}/versions/{version}/content", stubHandler, sessionHandler, opts, true)
+			registerPublicRoute(r, http.MethodDelete, "/skills/{skill_id}/versions/{version}", stubHandler, sessionHandler, opts, true)
 		}
 
 		r.NotFound(unsupportedV1SurfaceHandler)

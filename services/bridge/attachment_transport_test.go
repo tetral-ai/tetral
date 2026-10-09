@@ -6,13 +6,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tetral-ai/tetral/internal/internalgrpc"
-	"github.com/tetral-ai/tetral/internal/sessionrpc"
-	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
+
+	"github.com/tetral-ai/tetral/internal/internalgrpc"
+	"github.com/tetral-ai/tetral/internal/sessionrpc"
+	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
 type attachmentTransportServer struct {

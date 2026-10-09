@@ -5,29 +5,36 @@
  * service identity and configuration-failure record shape. The process command
  * creates the logger here and uses the helper for rejected configuration;
  * connector components emit records through the returned interface. Other
- * uncaught startup failures remain owned by the process entry point and may
- * bypass this structured helper. Encoding and output delegate to the shared
+ * command and cleanup failures use fixed phase classifications at the process
+ * entry and signal boundaries. Encoding and output delegate to the shared
  * TypeScript observability package.
  */
 
 import { createTetralJsonLogger, semanticErrorFields } from "@tetral/ts-observability";
-import type { TetralJsonLogger, TetralLogRecord } from "@tetral/ts-observability";
+import type { DiagnosticConfig, TetralDiagnosticLogger, TetralJsonLogger, TetralLogRecord } from "@tetral/ts-observability";
 import type { McpOAuthRefreshCompletedEvent } from "./credential-update-path.js";
 
 /** Defines the structured record shape accepted by the connector logger. */
 export type McpConnectorLogRecord = TetralLogRecord;
 
-/** Defines the shared JSON logger specialized for connector records. */
-export type McpConnectorLogger = TetralJsonLogger<McpConnectorLogRecord>;
+/**
+ * Defines the shared JSON logger specialized for connector records. The
+ * process logger also supplies `warn`, which connector warnings use.
+ */
+export type McpConnectorLogger = TetralJsonLogger<McpConnectorLogRecord> & Partial<Pick<TetralDiagnosticLogger<McpConnectorLogRecord>, "warn">>;
 
 /** Creates a structured logger whose service identity is always `mcp-connector`. */
 export function createJsonLogger(options: {
-  readonly write: (line: string) => void;
+  readonly write: (line: string) => unknown;
+  readonly sinkFailures?: (() => number) | undefined;
+  readonly diagnostics?: DiagnosticConfig;
   readonly deploymentEnvironment?: string | undefined;
   readonly serviceVersion?: string | undefined;
-}): McpConnectorLogger {
+}): TetralDiagnosticLogger<McpConnectorLogRecord> {
   return createTetralJsonLogger<McpConnectorLogRecord>({
     write: options.write,
+    sinkFailures: options.sinkFailures,
+    diagnostics: options.diagnostics,
     serviceName: "mcp-connector",
     deploymentEnvironment: options.deploymentEnvironment,
     serviceVersion: options.serviceVersion,
@@ -95,4 +102,39 @@ export function logWorkloadStarted(logger: McpConnectorLogger): void {
   } catch {
     // Listener readiness, not observability delivery, determines startup success.
   }
+}
+
+export interface McpExecutionObservation {
+  readonly claimId: string; readonly toolUseEventId: string;
+  readonly elapsedMs: number; readonly remainingMs: number;
+}
+
+/**
+ * Fixed owner-phase observation; never derives diagnostics from dependency messages.
+ *
+ * A phase completion without a claim identity, such as a client phase of explicit
+ * discovery or notification re-listing that no claimed execution observes, carries
+ * the control-only `diagnostic.repeat` marker for every outcome: `completed`,
+ * `failed`, `mcp_timeout` and `mcp_authentication_failed`. The marker admits these
+ * Info records to the shared repeated-event limiter and is never written. Limiter
+ * windows are keyed by event and reason (here the outcome), so each distinct phase
+ * outcome emits its first record and later repeats in the window are summarized.
+ */
+export function mcpPhaseCompletedLogRecord(input: {
+  readonly workspaceId: string; readonly sessionId: string; readonly mcpServerName?: string;
+  readonly phase: string; readonly outcome: string; readonly durationMs: number;
+  readonly claimId?: string; readonly toolUseEventId?: string;
+  readonly elapsedMs?: number; readonly remainingMs?: number; readonly attempt?: number;
+}): McpConnectorLogRecord {
+  return {event: `mcp_${input.phase}_completed`, "event.kind": `mcp_${input.phase}_completed`,
+    operation: `mcp_${input.phase}`, component: "mcp-connector", phase: input.phase,
+    outcome: input.outcome, "duration.ms": Math.max(0,input.durationMs),
+    "workspace.id": input.workspaceId, "session.id": input.sessionId,
+    ...(input.mcpServerName === undefined ? {} : {"mcp.server.name": input.mcpServerName}),
+    ...(input.claimId === undefined ? {} : {"request.id": input.claimId}),
+    ...(input.toolUseEventId === undefined ? {} : {"mcp.tool_use_event_id": input.toolUseEventId}),
+    ...(input.elapsedMs === undefined ? {} : {"timeout.elapsed_ms": Math.max(0,input.elapsedMs)}),
+    ...(input.remainingMs === undefined ? {} : {"timeout.remaining_ms": Math.max(0,input.remainingMs)}),
+    ...(input.attempt === undefined ? {} : {attempt: input.attempt}),
+    "diagnostic.repeat": input.claimId === undefined};
 }

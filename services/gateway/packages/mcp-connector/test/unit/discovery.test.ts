@@ -1,3 +1,4 @@
+import { fixtureServerResolver } from "../fixtures/registered-server.js";
 import { afterEach, expect, test } from "bun:test";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -22,7 +23,7 @@ function fixture(pages: (params: ListToolsRequest["params"]) => ListToolsResult 
   const requests: Array<ListToolsRequest["params"]> = [];
   const calls: unknown[] = [];
   const logs: Record<string, unknown>[] = [];
-  const client = new McpSDKClient({
+  const client = new McpSDKClient({serverResolver: fixtureServerResolver,
     credentialResolver: { resolve: async () => credential, refresh: async () => credential },
     onToolsListChanged: async () => {},
     logger: { error: (record) => logs.push(record) },
@@ -87,7 +88,7 @@ test("a rejected list request preserves its error without claiming a pagination 
 test("catalog rejection before discovery does not claim an invalid page response", async () => {
   const f = fixture(() => ({ tools: [] }));
   await expect(f.client.listTools({ ...identity, mcpServerName: "unknown_test_server" })).rejects.toMatchObject({
-    code: "mcp_invalid_input", message: "MCP server is outside the curated catalog.",
+    code: "mcp_invalid_input", message: "Unsupported configured fixture server.",
   });
   expect(f.requests).toHaveLength(0);
   expect(f.logs).toEqual([]);
@@ -106,15 +107,14 @@ test("failed later page preserves the previous SDK metadata and publishes no par
   await expect(f.call("checked")).rejects.toMatchObject({ code: "mcp_invalid_input" });
 });
 
-test("authentication restart discards old-session pages and starts cursorless", async () => {
-  let rejected = false;
+test("JSON-RPC authentication-number errors discard partial discovery without token refresh", async () => {
   const f = fixture(params => {
-    if (rejected) return { tools: [tool("new_session")] };
-    if (params?.cursor) { rejected = true; throw new McpError(401, "authentication rejected"); }
-    return { tools: [tool("old_partial")], nextCursor: "old_session_cursor" };
+    if (params?.cursor) throw new McpError(401, "application rejection");
+    return {tools: [tool("partial")], nextCursor: "application_cursor"};
   });
-  expect((await f.client.listTools(identity)).map(t => t.name)).toEqual(["new_session"]);
-  expect(f.requests.map(p => p?.cursor)).toEqual([undefined, "old_session_cursor", undefined]);
+  await expect(f.client.listTools(identity)).rejects.toMatchObject({code: 401});
+  expect(f.requests.map(p => p?.cursor)).toEqual([undefined, "application_cursor"]);
+  expect(f.client.connectionCount()).toBe(0);
 });
 
 test("repeated cursor crosses actual gRPC as manifest_invalid with safe diagnostics", async () => {

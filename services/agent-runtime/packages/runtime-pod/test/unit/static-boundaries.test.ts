@@ -185,8 +185,6 @@ describe("Runtime Pod static boundaries", () => {
     const futureObligationMarker = ["TO", "DO"].join("");
 
     expect(lifecycle).not.toContain(futureObligationMarker);
-    expect(lifecycle).toContain("shutdownActiveRuns");
-    expect(lifecycle).toContain("drainTimeoutMs");
     expect(lifecycle).toContain("runtime pod shutdown drain timed out");
   });
 
@@ -238,8 +236,16 @@ describe("Runtime Pod static boundaries", () => {
     expect(command).not.toContain("RuntimePodBridgeReleaseBinding");
     expect(command).not.toContain("FailClosedRuntimeInternalToolRepairStore");
     expect(command).not.toContain("Gateway provider stream client is not wired yet");
-    expect(command).toContain('process.once("SIGTERM"');
-    expect(command).toContain('process.once("SIGINT"');
+    const sharedEntryUrl = new URL(import.meta.resolve("@tetral/ts-observability"));
+    const signalOwner = await readFile(new URL("./process-boundary.ts", sharedEntryUrl), "utf8");
+    const sharedEntry = await readFile(sharedEntryUrl, "utf8");
+    expect(importSpecifiers(command)).toContain("@tetral/ts-observability");
+    expect(sharedEntry).toContain('export { processFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "./process-boundary.js"');
+    expect(hasCallExpression(command, "registerProcessSignalHandlers", ["shutdown"])).toBe(true);
+    for (const signal of ["SIGTERM", "SIGINT"]) {
+      expect(hasCallExpression(signalOwner, "process.once", [JSON.stringify(signal), "stop"])).toBe(true);
+      expect(hasCallExpression(signalOwner, "process.off", [JSON.stringify(signal), "stop"])).toBe(true);
+    }
     expect(coreHosts).toContain("SessionManager.layer");
     expect(coreHosts).toContain("SessionRunHost.layer");
     expect(coreHosts).not.toContain("sessionBinding");
@@ -247,18 +253,42 @@ describe("Runtime Pod static boundaries", () => {
     expect(coreHosts).not.toContain("GrpcBackendSessionBindingClient");
   });
 
-  test("Runtime Pod uses headless Gateway DNS with grpc-js round-robin", async () => {
+  test("signal registration parsing requires executable once hooks and shutdown delegation", () => {
+    expect(hasCallExpression('// process.once("SIGTERM", stop);', "process.once", ['"SIGTERM"', "stop"])).toBe(false);
+    expect(hasCallExpression('process.on("SIGTERM", stop);', "process.once", ['"SIGTERM"', "stop"])).toBe(false);
+    expect(hasCallExpression('registerProcessSignalHandlers(otherClose);', "registerProcessSignalHandlers", ["shutdown"])).toBe(false);
+    expect(hasCallExpression('process.once("SIGTERM", stop);', "process.once", ['"SIGTERM"', "stop"])).toBe(true);
+  });
+
+  test("Runtime Pod uses the sole scoped Gateway proxy route and ordinary Service", async () => {
     const gatewayClient = await readFile(new URL("src/gateway-client.ts", podRoot), "utf8");
     const deployment = await readFile(new URL("../../k8s/deployment.yaml", podRoot), "utf8");
 
-    expect(gatewayClient).toContain("\"grpc.service_config\"");
-    expect(gatewayClient).toContain("round_robin");
+    expect(gatewayClient).not.toContain("grpc.service_config");
+    expect(gatewayClient).not.toContain("round_robin");
+    const repositoryRoot = new URL("../../", workspaceRoot);
+    const service = await readFile(new URL("services/gateway/k8s/provider-gateway/service.yaml", repositoryRoot), "utf8");
+    expect(service).toContain("type: ClusterIP");
+    expect(service).not.toContain("clusterIP: None");
+    const routing = await readFile(new URL("deploy/kubernetes/internal-routing.yaml", repositoryRoot), "utf8");
+    const providerRules = routing.split(/^---\s*$/m).filter((document) => document.includes("  name: tetral-runtime-provider\n"));
+    expect(providerRules).toHaveLength(2);
+    expect(routing.split(/^---\s*$/m).filter((document) => document.includes("provider-gateway.tetral-system.svc.cluster.local"))).toHaveLength(2);
+    const destination = providerRules.find((document) => document.includes("kind: DestinationRule"));
+    const virtualService = providerRules.find((document) => document.includes("kind: VirtualService"));
+    expect(destination).toContain("host: provider-gateway.tetral-system.svc.cluster.local");
+    expect(destination).toContain("workloadSelector:");
+    expect(destination).toContain("app.kubernetes.io/name: agent-runtime");
+    expect(destination).toContain("simple: LEAST_REQUEST");
+    expect(virtualService).toContain("sourceNamespace: tetral-agent-runtime");
+    expect(virtualService).toContain("app.kubernetes.io/name: agent-runtime");
+    expect(virtualService).toContain("attempts: 0");
     expect(deployment).toContain("TETRAL_GATEWAY_GRPC_ADDR");
-    expect(deployment).toContain("dns:///gateway.tetral-system.svc.cluster.local:9090");
+    expect(deployment).toContain("dns:///provider-gateway.tetral-system.svc.cluster.local:9090");
     expect(deployment).toContain("TETRAL_MCP_CONNECTOR_GRPC_ADDR");
-    expect(deployment).toContain("dns:///gateway.tetral-system.svc.cluster.local:9091");
+    expect(deployment).toContain("dns:///mcp-connector.tetral-system.svc.cluster.local:9091");
     expect(deployment).toContain("TETRAL_WEB_CONNECTOR_GRPC_ADDR");
-    expect(deployment).toContain("dns:///gateway.tetral-system.svc.cluster.local:9092");
+    expect(deployment).toContain("dns:///web-connector.tetral-system.svc.cluster.local:9092");
     // Presence is the invariant — the workload refuses to start without it.
     // Which model reviews approvals is an operator cost decision, so the value
     // is deliberately not pinned here.
@@ -322,6 +352,21 @@ describe("Runtime Pod static boundaries", () => {
     expect(threadLoop).not.toContain("yield* Effect.promise(async () =>");
   });
 });
+
+function hasCallExpression(text: string, callee: string, expectedArguments: readonly string[]): boolean {
+  const source = ts.createSourceFile("boundary.ts", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) && node.expression.getText(source) === callee &&
+      node.arguments.length === expectedArguments.length &&
+      node.arguments.every((argument, index) => argument.getText(source).replace(/\s+/g, "") === expectedArguments[index])
+    ) found = true;
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
 
 function hasNewExpression(
   text: string,

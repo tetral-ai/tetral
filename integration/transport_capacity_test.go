@@ -19,12 +19,16 @@ import (
 	"testing"
 	"time"
 
+	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
+
 	"google.golang.org/protobuf/proto"
 
+	"github.com/tetral-ai/tetral/internal/agent"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/sessionrpc"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -63,11 +67,18 @@ func runTransportAdmissionTraversal(t *testing.T, suffix string, bodyText func(i
 			return time.Date(2026, 1, 1, 0, 0, 10, 0, time.UTC)
 		}),
 	)
+	// Event admission uses the public gate's tenant-safe Session lookup before
+	// admitting work. Resolve the seeded Session through its real owning service.
+	sessionService := session.NewService(
+		agent.NewService(agent.NewPostgreSQLAgentStore(client), nil),
+		nil, nil, nil, nil,
+		session.NewPostgreSQLSessionStore(client), nil,
+	)
 	router := httpapi.NewRouter(
-		httpapi.NewSessionHandler(nil),
+		httpapi.NewSessionHandler(sessionService),
 		"",
 		httpapi.WithAuthenticator(auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
-			return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}}, nil
+			return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_transport_fixture"), nil
 		})),
 		httpapi.WithSessionEventHandler(httpapi.NewSessionEventHandler(eventService)),
 	)
@@ -92,25 +103,25 @@ func runTransportAdmissionTraversal(t *testing.T, suffix string, bodyText func(i
 	job := readTransportRuntimeJob(t, adminDB, sessionID)
 	bridgeStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(client)
 	sender := &settlingTransportSender{
-		transport: agentruntimebridge.NewRuntimePodCommandClient(fixedTransportTokenSource{}),
+		transport: fixtureRuntimeCommandClient(t, fixedTransportTokenSource{}),
 		bridge:    bridgeStore,
 		threadID:  threadID,
 		bindingID: bindingID,
 		podUID:    podUID,
 		suffix:    suffix,
 	}
-	deliveryStore := agentruntimebridge.NewPostgreSQLRuntimeDeliveryStore(client, runtimePort)
+	deliveryStore := fixtureRuntimeDeliveryStore(client, adminDB, runtimePort)
 	deliveryStore.Clock = func() time.Time {
 		return time.Date(2026, 1, 1, 0, 0, 20, 0, time.UTC)
 	}
-	result, err := (agentruntimebridge.RuntimePodDirectDeliverer{
+	result, err := (jobrunner.RuntimePodDirectDeliverer{
 		Store:  deliveryStore,
 		Sender: sender,
 	}).DeliverRuntimeJob(context.Background(), job)
 	if err != nil {
 		t.Fatalf("deliver runtime input: %v", err)
 	}
-	if result.Status != agentruntimebridge.RuntimeDeliveryAccepted || sender.request == nil {
+	if result.Status != jobrunner.RuntimeDeliveryAccepted || sender.request == nil {
 		t.Fatalf("delivery result/request = %+v/%v; want accepted command", result, sender.request != nil)
 	}
 	if commandBytes := proto.Size(sender.request); commandBytes > sessionrpc.MaxRuntimeCommandGRPCMessageBytes {
@@ -163,8 +174,8 @@ func runTransportAdmissionTraversal(t *testing.T, suffix string, bodyText func(i
 }
 
 type settlingTransportSender struct {
-	agentruntimebridge.RuntimeCommandSender
-	transport *agentruntimebridge.RuntimePodCommandClient
+	jobrunner.RuntimeCommandSender
+	transport *jobrunner.RuntimePodCommandClient
 	bridge    *agentruntimebridge.PostgreSQLBridgeAPIStore
 	threadID  string
 	bindingID string
@@ -175,7 +186,7 @@ type settlingTransportSender struct {
 
 func (s *settlingTransportSender) AcceptInput(
 	ctx context.Context,
-	target agentruntimebridge.RuntimePodTarget,
+	target jobrunner.RuntimePodTarget,
 	request *agentruntimev1.AcceptInputRequest,
 ) (*agentruntimev1.AcceptInputResponse, error) {
 	s.request = request
@@ -205,6 +216,7 @@ func (s *settlingTransportSender) AcceptInput(
 			BindingId:         s.bindingID,
 			BindingGeneration: request.GetBindingGeneration(),
 			TargetPodUid:      s.podUID,
+			RuntimeProcessId:  request.GetRuntimeProcessId(),
 		},
 	}
 	committed, err := s.bridge.CommitInputs(ctx, &bridgev1.CommitInputsRequest{
@@ -251,6 +263,7 @@ func (s *settlingTransportSender) AcceptInput(
 
 func seedTransportSession(t *testing.T, db *sql.DB, sessionID string, threadID string, bindingID string, podUID string) {
 	t.Helper()
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(db), "engine", podUID)
 	agentID := "agent_" + sessionID
 	environmentID := "env_" + sessionID
 	statements := []struct {
@@ -264,7 +277,7 @@ func seedTransportSession(t *testing.T, db *sql.DB, sessionID string, threadID s
 		{`INSERT INTO sessions (workspace_id, id, main_thread_id, type, status, lifecycle_state, agent_id, agent_version, environment_id, installed_tools_json, created_at, updated_at) VALUES ('default', $1, $2, 'session', 'idle', 'active', $3, 1, $4, '{"tools":[{"type":"tetral_agent_toolset","family":"claude"}]}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, []any{sessionID, threadID, agentID, environmentID}},
 		{`INSERT INTO session_threads (workspace_id, id, session_id, role, visibility, status, created_at, last_active_at, updated_at) VALUES ('default', $1, $2, 'main', 'public', 'idle', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, []any{threadID, sessionID}},
 		{`INSERT INTO session_runtime_status (workspace_id, session_id, status, idle_since, created_at, updated_at) VALUES ('default', $1, 'idle', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, []any{sessionID}},
-		{`INSERT INTO session_runtime_bindings (workspace_id, session_id, binding_id, binding_generation, agent_runtime_namespace, agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip, bound_at, updated_at) VALUES ('default', $1, $2, 1, 'engine', 'runtime-pod-a', $3, '127.0.0.1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, []any{sessionID, bindingID, podUID}},
+		{`INSERT INTO session_runtime_bindings (workspace_id, session_id, binding_id, binding_generation, agent_runtime_namespace, agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip, runtime_process_id, bound_at, updated_at) VALUES ('default', $1, $2, 1, 'engine', 'runtime-pod-a', $3, '127.0.0.1', 'process_' || $3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, []any{sessionID, bindingID, podUID}},
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(context.Background(), statement.query, statement.args...); err != nil {
@@ -273,7 +286,7 @@ func seedTransportSession(t *testing.T, db *sql.DB, sessionID string, threadID s
 	}
 }
 
-func readTransportRuntimeJob(t *testing.T, db *sql.DB, sessionID string) agentruntimebridge.RuntimeJob {
+func readTransportRuntimeJob(t *testing.T, db *sql.DB, sessionID string) jobrunner.RuntimeJob {
 	t.Helper()
 	var jobID string
 	var payloadJSON string
@@ -302,7 +315,7 @@ func readTransportRuntimeJob(t *testing.T, db *sql.DB, sessionID string) agentru
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 		t.Fatalf("decode runtime input job: %v", err)
 	}
-	return agentruntimebridge.RuntimeJob{
+	return jobrunner.RuntimeJob{
 		JobID:           jobID,
 		LeaseToken:      "lease_transport",
 		Kind:            queue.KindRuntimeInput,
@@ -371,7 +384,7 @@ func startTransportRuntimePodHarness(t *testing.T) int {
 	runtimeRoot := filepath.Join("..", "services", "agent-runtime")
 	command := exec.CommandContext(ctx, "bun", "run", "packages/runtime-pod/test/harness/grpc-harness.ts")
 	command.Dir = runtimeRoot
-	command.Env = append(os.Environ(), "TETRAL_TEST_RUNTIME_POD_IP=127.0.0.1")
+	command.Env = append(os.Environ(), "TETRAL_TEST_RUNTIME_POD_IP=127.0.0.1", "TETRAL_TEST_RUNTIME_PROCESS_ID=process_uid-a")
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		t.Fatalf("Runtime Pod harness stdout: %v", err)
@@ -409,9 +422,9 @@ func startTransportRuntimePodHarness(t *testing.T) int {
 	return port
 }
 
-// syncBuffer guards a child process's stderr. os/exec fills it from its own
-// goroutine while this test reads it for failure messages, so the two need a
-// lock between them.
+// syncBuffer guards a child process's output. os/exec fills it from its own
+// goroutine while tests read it for failure messages and readiness, so the two
+// need a lock between them.
 type syncBuffer struct {
 	mutex  sync.Mutex
 	buffer bytes.Buffer
@@ -427,4 +440,12 @@ func (b *syncBuffer) String() string {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 	return b.buffer.String()
+}
+
+// Bytes returns a copy, so callers never share the buffer's backing array
+// with a concurrent writer.
+func (b *syncBuffer) Bytes() []byte {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	return bytes.Clone(b.buffer.Bytes())
 }

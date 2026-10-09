@@ -37,14 +37,15 @@
 //     change (approval_mode or the Tools/MCPServers overlay); each advance enqueues
 //     exactly one runtime_config_update job.
 //   - archived_at is set exactly once, when LifecycleState reaches archived.
-//   - The public Status column is authored by the runtime bridge; this package seeds
-//     it to idle at create and never advances it thereafter.
+//   - The public Status column is authored by the Runtime control paths in Bridge
+//     and Job Runner; this package seeds it to idle at create and never advances
+//     it thereafter.
 //
 // UPDATE-WITH:
 //   - postgresql_store.go (CreateSession, ArchiveSession, DeleteSession, UpdateSession).
 //   - services/bridge/bridge_api_events.go (markPublicSessionRunningTx,
 //     markPublicSessionIdleTx, markPublicSessionReschedulingTx).
-//   - services/bridge/runtime_termination.go (appendRuntimeTerminatedStatusTx).
+//   - internal/runtimecontrol/termination.go (appendRuntimeTerminatedStatusTx).
 package session
 
 import (

@@ -250,6 +250,97 @@ func TestDeclaredGoDependenciesDriveProfileSelections(t *testing.T) {
 	}
 }
 
+// Every inventory-declared Go test with dependencies needs real infrastructure.
+// Fast must exclude it and record each declared dependency as a capability,
+// and the four Full Go race shards together must run it exactly once with its
+// dependencies on both its selection and its shard.
+func TestDeclaredGoTestsLeaveFastAndRunOnceAcrossRaceShards(t *testing.T) {
+	root := repositoryRootForTest(t)
+	inventory, err := LoadInventory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	packages, err := listGoPackages(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := map[string]listedPackage{}
+	for _, pkg := range packages {
+		listed[pkg.ImportPath] = pkg
+	}
+	declared := map[string][]GoTest{}
+	for _, contract := range inventory.GoTests {
+		if len(contract.Dependencies) > 0 {
+			declared[contract.Package] = append(declared[contract.Package], contract)
+		}
+	}
+	for importPath, contracts := range declared {
+		pkg, ok := listed[importPath]
+		if !ok {
+			t.Errorf("declared Go test package %s is not a listed package", importPath)
+			continue
+		}
+		fast, exclusions, err := noInfrastructureTests(pkg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, contract := range contracts {
+			if slices.Contains(fast, contract.Name) {
+				t.Errorf("Fast executes declared infrastructure test %s", contract.Name)
+			}
+			found := false
+			for _, exclusion := range exclusions {
+				if exclusion.Runnable != contract.Name {
+					continue
+				}
+				found = true
+				capabilities := append([]string{exclusion.Capability}, exclusion.Capabilities...)
+				for _, dependency := range contract.Dependencies {
+					if !slices.Contains(capabilities, dependency) {
+						t.Errorf("Fast exclusion of %s omits declared dependency %s", contract.Name, dependency)
+					}
+				}
+			}
+			if !found {
+				t.Errorf("Fast did not account for excluded declared test %s", contract.Name)
+			}
+		}
+	}
+	full, _, err := fullGoSelections(root, "declared dependency shard contract")
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for index := 0; index < 4; index++ {
+		shard, err := SelectPlan(Plan{Profile: ProfileFull, Selections: full}, []string{"go"}, index, 4)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, selection := range shard.Selections {
+			for _, contracts := range declared {
+				for _, contract := range contracts {
+					if !slices.Contains(selection.Packages, contract.Package) || !slices.Contains(selection.Tests, contract.Name) {
+						continue
+					}
+					counts[contract.Package+"."+contract.Name]++
+					for _, dependency := range contract.Dependencies {
+						if !slices.Contains(selection.Dependencies, dependency) || !slices.Contains(shard.Dependencies, dependency) {
+							t.Errorf("race shard omitted %s for %s", dependency, contract.Name)
+						}
+					}
+				}
+			}
+		}
+	}
+	for _, contracts := range declared {
+		for _, contract := range contracts {
+			if got := counts[contract.Package+"."+contract.Name]; got != 1 {
+				t.Errorf("Full race shards execute %s %d times", contract.Name, got)
+			}
+		}
+	}
+}
+
 func TestDeclaredGoDependenciesDoNotRequireSourceHints(t *testing.T) {
 	root := t.TempDir()
 	// This test has no environment reads or infrastructure helper calls.
@@ -267,6 +358,29 @@ func TestDeclaredGoDependenciesDoNotRequireSourceHints(t *testing.T) {
 	}
 	if got := dependenciesForCapabilities(excluded); !slices.Equal(got, contracts[0].Dependencies) {
 		t.Fatalf("execution dependencies = %v; want %v", got, contracts[0].Dependencies)
+	}
+}
+
+func TestFastGoClassificationExcludesTransportDockerFixtures(t *testing.T) {
+	root := t.TempDir()
+	source := `package fixture
+import (
+	"testing"
+	fixtures "github.com/tetral-ai/tetral/integration/transporttest"
+)
+func TestUndeclaredProxyPair(t *testing.T) { _ = fixtures.NewProxyPair(t) }
+func TestCertificateOnly(t *testing.T) { _, _ = fixtures.NewAuthority("fixture") }
+`
+	if err := os.WriteFile(filepath.Join(root, "transport_test.go"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pkg := listedPackage{ImportPath: "fixture", Dir: root, TestGoFiles: []string{"transport_test.go"}}
+	fast, excluded, err := classifyGoTests(pkg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(fast, []string{"TestCertificateOnly"}) || len(excluded) != 1 || excluded[0].Runnable != "TestUndeclaredProxyPair" || excluded[0].Capability != "docker" {
+		t.Fatalf("Fast disposition = selected %v, excluded %+v", fast, excluded)
 	}
 }
 

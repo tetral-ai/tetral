@@ -26,8 +26,8 @@ func TestMigrateSchemaCreatesAndStampsBaselineAtomically(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) FROM tetral_schema_migrations`).Scan(&count); err != nil {
 		t.Fatalf("read migration stamp count: %v", err)
 	}
-	if count != 4 {
-		t.Fatalf("migration stamp count = %d, want 4", count)
+	if count != 1 {
+		t.Fatalf("migration stamp count = %d, want 1", count)
 	}
 	assertTableExists(t, db, "sessions", true)
 	assertTableExists(t, db, "session_turn_retries", true)
@@ -110,8 +110,8 @@ func TestMigrateSchemaCreatesStableReasoningMessageAssociation(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM tetral_schema_migrations`).Scan(&stampCount); err != nil {
 		t.Fatalf("count migration stamps: %v", err)
 	}
-	if stampCount != 4 {
-		t.Fatalf("migration stamp count = %d, want 4", stampCount)
+	if stampCount != 1 {
+		t.Fatalf("migration stamp count = %d, want 1", stampCount)
 	}
 
 	var nullable string
@@ -157,7 +157,7 @@ func TestMigrateSchemaCreatesStableReasoningMessageAssociation(t *testing.T) {
 }
 
 func TestPostgreSQLSchemaVersionOneChecksumIsGolden(t *testing.T) {
-	const want = "d42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6"
+	const want = "f600e78f7be8b4262b8317603fc4a3eb4b0fba3ab3602bf0d6575115514c54e0"
 	if storage.PostgreSQLSchemaVersionOneChecksum != want {
 		t.Fatalf("PostgreSQLSchemaVersionOneChecksum = %q, want %q", storage.PostgreSQLSchemaVersionOneChecksum, want)
 	}
@@ -226,7 +226,7 @@ func TestSchemaHistoryValidationRejectsInvalidStateBeforeMutation(t *testing.T) 
 			name: "ahead",
 			setup: func(t *testing.T, db *sql.DB) {
 				migrateForHistoryTest(t, db)
-				if _, err := db.Exec(`INSERT INTO tetral_schema_migrations (version, checksum) VALUES (5, $1)`, strings.Repeat("a", 64)); err != nil {
+				if _, err := db.Exec(`INSERT INTO tetral_schema_migrations (version, checksum) VALUES (2, $1)`, strings.Repeat("a", 64)); err != nil {
 					t.Fatalf("insert ahead row: %v", err)
 				}
 			},
@@ -285,15 +285,9 @@ func TestSchemaHistoryValidationRejectsInvalidStateBeforeMutation(t *testing.T) 
 				{name: "verify", call: storage.VerifySchema},
 				{name: "migrate", call: storage.MigrateSchema},
 			}
-			// A behind registry is the sole valid mutation case for MigrateSchema
-			// and is covered separately by TestMigrateSchemaAppliesValidBehindRegistry.
-			if test.kind == storage.SchemaErrorBehind {
-				operations = operations[:1]
-			}
 			for _, operation := range operations {
 				t.Run(operation.name, func(t *testing.T) {
-					err := operation.call(context.Background(), db)
-					assertSchemaErrorKind(t, err, test.kind)
+					assertSchemaErrorKind(t, operation.call(context.Background(), db), test.kind)
 					if after := baseTableNames(t, db); strings.Join(after, "\x00") != strings.Join(before, "\x00") {
 						t.Fatalf("tables mutated before=%v after=%v", before, after)
 					}
@@ -303,84 +297,87 @@ func TestSchemaHistoryValidationRejectsInvalidStateBeforeMutation(t *testing.T) 
 	}
 }
 
-func TestMigrateSchemaAppliesValidBehindRegistry(t *testing.T) {
-	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
-	createMigrationRegistry(t, db)
-	if err := storage.MigrateSchema(context.Background(), db); err != nil {
-		t.Fatalf("MigrateSchema: %v", err)
-	}
-	if err := storage.VerifySchema(context.Background(), db); err != nil {
-		t.Fatalf("VerifySchema: %v", err)
-	}
-}
-
 func TestMigrateSchemaLateFailureRollsBackSchemaAndStampAndReleasesLock(t *testing.T) {
 	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
-	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, `CREATE TABLE workspaces (wrong_column TEXT)`); err != nil {
-		t.Fatalf("create incompatible legacy table: %v", err)
+	if _, err := db.Exec(`CREATE SCHEMA schema_fault;
+ CREATE FUNCTION schema_fault.reject_initialization() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private-ddl-rejection'; END $$;
+ CREATE EVENT TRIGGER reject_initialization ON ddl_command_start WHEN TAG IN ('CREATE INDEX') EXECUTE FUNCTION schema_fault.reject_initialization()`); err != nil {
+		t.Fatal(err)
 	}
-	err := storage.MigrateSchema(ctx, db)
+	err := storage.MigrateSchema(context.Background(), db)
 	assertSchemaErrorKind(t, err, storage.SchemaErrorApply)
 	assertTableExists(t, db, "tetral_schema_migrations", false)
 	assertTableExists(t, db, "environments", false)
-	assertSchemaErrorIsPublicSafe(t, err)
-
-	if _, err := db.ExecContext(ctx, `DROP TABLE workspaces`); err != nil {
-		t.Fatalf("remove incompatible table: %v", err)
+	if _, err := db.Exec(`DROP EVENT TRIGGER reject_initialization`); err != nil {
+		t.Fatal(err)
 	}
-	if err := storage.MigrateSchema(ctx, db); err != nil {
-		t.Fatalf("MigrateSchema after forced failure (lock must be released): %v", err)
+	if err := storage.MigrateSchema(context.Background(), db); err != nil {
+		t.Fatalf("retry after actual rollback/lock release: %v", err)
 	}
 }
 
 func TestMigrateSchemaCancellationRollsBackStampAndReleasesLock(t *testing.T) {
 	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
-	ctx := context.Background()
-	if err := storage.MigrateSchema(ctx, db); err != nil {
-		t.Fatalf("initial MigrateSchema: %v", err)
+	ctx, cancelAll := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelAll()
+	if _, err := db.Exec(`CREATE SCHEMA schema_fault;
+ CREATE FUNCTION schema_fault.block_initialization() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(709000); END $$;
+ CREATE EVENT TRIGGER block_initialization ON ddl_command_start WHEN TAG IN ('CREATE INDEX') EXECUTE FUNCTION schema_fault.block_initialization()`); err != nil {
+		t.Fatal(err)
 	}
-	rewindEnvironmentBuildMigration(t, db)
-	if _, err := db.ExecContext(ctx, `ALTER TABLE session_runtime_inbox DROP COLUMN mcp_discovery_attempts, DROP COLUMN mcp_discovery_deadline_at, DROP COLUMN mcp_discovery_diagnostic; DELETE FROM tetral_schema_migrations WHERE version=3; ALTER TABLE session_github_repository_resources DROP CONSTRAINT session_github_repository_git_identity_shape, DROP COLUMN git_identity_name, DROP COLUMN git_identity_email; DELETE FROM tetral_schema_migrations WHERE version = 2`); err != nil {
-		t.Fatalf("make version two pending for cancellation proof: %v", err)
-	}
-	blocker, err := db.BeginTx(ctx, nil)
+	blocker, err := db.Conn(ctx)
 	if err != nil {
-		t.Fatalf("begin blocker: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := blocker.ExecContext(ctx, `LOCK TABLE session_github_repository_resources IN ACCESS EXCLUSIVE MODE`); err != nil {
-		t.Fatalf("lock repository resources: %v", err)
+	defer func() {
+		if err := blocker.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if _, err := blocker.ExecContext(ctx, `SELECT pg_advisory_lock(709000)`); err != nil {
+		t.Fatal(err)
 	}
+	defer func() {
+		if _, err := blocker.ExecContext(context.Background(), `SELECT pg_advisory_unlock(709000)`); err != nil {
+			t.Error(err)
+		}
+	}()
 	cancelCtx, cancel := context.WithCancel(ctx)
 	result := make(chan error, 1)
-	go func() {
-		result <- storage.MigrateSchema(cancelCtx, db)
-	}()
-	time.Sleep(150 * time.Millisecond)
+	go func() { result <- storage.MigrateSchema(cancelCtx, db) }()
+	for {
+		var waiting bool
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'CREATE%INDEX%')`).Scan(&waiting); err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case err := <-result:
+			cancel()
+			t.Fatalf("initialization missed DDL barrier: %v", err)
+		case <-ctx.Done():
+			cancel()
+			t.Fatal("initialization DDL barrier not reached")
+		case <-time.After(time.Millisecond):
+		}
+	}
 	cancel()
 	select {
 	case err = <-result:
-	case <-time.After(2 * time.Second):
-		_ = blocker.Rollback()
-		t.Fatal("MigrateSchema did not honor cancellation while blocked in upgrade DDL")
-	}
-	if rollbackErr := blocker.Rollback(); rollbackErr != nil {
-		t.Fatalf("rollback blocker: %v", rollbackErr)
+	case <-ctx.Done():
+		t.Fatal("initialization did not cancel")
 	}
 	assertSchemaErrorKind(t, err, storage.SchemaErrorCanceled)
-	if err := db.PingContext(ctx); err != nil {
-		t.Fatalf("database after cancellation: %v", err)
-	}
-	assertTableExists(t, db, "tetral_schema_migrations", true)
-	var migrationRows int
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM tetral_schema_migrations`).Scan(&migrationRows); err != nil {
-		t.Fatalf("read migration rows after cancellation: %v", err)
-	}
-	if migrationRows != 1 {
-		t.Fatalf("migration rows after cancellation = %d; want 1", migrationRows)
+	assertTableExists(t, db, "tetral_schema_migrations", false)
+	assertTableExists(t, db, "runtime_processes", false)
+	if _, err := db.Exec(`DROP EVENT TRIGGER block_initialization`); err != nil {
+		t.Fatal(err)
 	}
 	if err := storage.MigrateSchema(ctx, db); err != nil {
-		t.Fatalf("MigrateSchema after cancellation (lock must be released): %v", err)
+		t.Fatalf("retry after cancellation/lock release: %v", err)
 	}
 }
 
@@ -425,8 +422,8 @@ func TestMigrateSchemaConcurrentReplicasSerialize(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) FROM tetral_schema_migrations`).Scan(&count); err != nil {
 		t.Fatalf("count stamps: %v", err)
 	}
-	if count != 4 {
-		t.Fatalf("stamp count = %d, want 4", count)
+	if count != 1 {
+		t.Fatalf("stamp count = %d, want 1", count)
 	}
 }
 
@@ -847,4 +844,61 @@ func baseTableNames(t *testing.T, db *sql.DB) []string {
 		t.Fatalf("list tables rows: %v", err)
 	}
 	return names
+}
+
+func TestMigrateSchemaRejectsUnregisteredObjectsAndPredecessorIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name, setup string
+		kind        storage.SchemaErrorKind
+	}{
+		{"table", `CREATE TABLE unregistered_table(id integer)`, storage.SchemaErrorUnexpectedState},
+		{"sequence", `CREATE SEQUENCE unregistered_sequence`, storage.SchemaErrorUnexpectedState},
+		{"function", `CREATE FUNCTION unregistered_function() RETURNS integer LANGUAGE sql AS 'SELECT 1'`, storage.SchemaErrorUnexpectedState},
+		{"enum", `CREATE TYPE unregistered_enum AS ENUM ('first','second')`, storage.SchemaErrorUnexpectedState},
+		{"domain", `CREATE DOMAIN unregistered_domain AS text DEFAULT 'private-domain-default' NOT NULL CHECK (VALUE <> '')`, storage.SchemaErrorUnexpectedState},
+		{"collation", `CREATE COLLATION unregistered_collation (provider=libc, locale='C')`, storage.SchemaErrorUnexpectedState},
+		{"predecessor", `CREATE TABLE tetral_schema_migrations(version bigint PRIMARY KEY,checksum text NOT NULL); INSERT INTO tetral_schema_migrations VALUES(1,'d42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6')`, storage.SchemaErrorChecksumDrift},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db := storagetest.NewEmptyPostgreSQLAdminDB(t)
+			if _, err := db.Exec(test.setup); err != nil {
+				t.Fatal(err)
+			}
+			before := baseTableNames(t, db)
+			catalogBefore := unregisteredNamespaceCatalog(t, db)
+			assertSchemaErrorKind(t, storage.MigrateSchema(context.Background(), db), test.kind)
+			if after := baseTableNames(t, db); strings.Join(before, "|") != strings.Join(after, "|") {
+				t.Fatal("rejected initialization changed predecessor objects")
+			}
+			if after := unregisteredNamespaceCatalog(t, db); after != catalogBefore {
+				t.Fatal("rejected initialization changed namespace or object catalog metadata")
+			}
+			if test.name != "predecessor" {
+				assertTableExists(t, db, "tetral_schema_migrations", false)
+			}
+			assertTableExists(t, db, "sessions", false)
+		})
+	}
+}
+
+// Snapshot object identities and definitions before a registry exists. Unlike
+// the canonical catalog helper, this never reads or fabricates migration rows.
+func unregisteredNamespaceCatalog(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var snapshot string
+	if err := db.QueryRow(`SELECT jsonb_build_object(
+		'namespace',to_jsonb(n),
+		'dependencies',(SELECT jsonb_agg(to_jsonb(d) ORDER BY d.classid,d.objid,d.objsubid,d.refclassid,d.refobjid,d.refobjsubid,d.deptype)
+			FROM pg_catalog.pg_depend d WHERE d.refclassid='pg_catalog.pg_namespace'::pg_catalog.regclass AND d.refobjid=n.oid),
+		'types',(SELECT jsonb_agg(to_jsonb(t) ORDER BY t.oid) FROM pg_catalog.pg_type t WHERE t.typnamespace=n.oid),
+		'enum_values',(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.enumtypid,e.enumsortorder)
+			FROM pg_catalog.pg_enum e JOIN pg_catalog.pg_type t ON t.oid=e.enumtypid WHERE t.typnamespace=n.oid),
+		'constraints',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.oid) FROM pg_catalog.pg_constraint c WHERE c.connamespace=n.oid),
+		'collations',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.oid) FROM pg_catalog.pg_collation c WHERE c.collnamespace=n.oid),
+		'relations',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.oid) FROM pg_catalog.pg_class c WHERE c.relnamespace=n.oid),
+		'routines',(SELECT jsonb_agg(to_jsonb(p) ORDER BY p.oid) FROM pg_catalog.pg_proc p WHERE p.pronamespace=n.oid)
+	)::text FROM pg_catalog.pg_namespace n WHERE n.nspname=pg_catalog.current_schema()`).Scan(&snapshot); err != nil {
+		t.Fatalf("snapshot unregistered namespace catalog: %v", err)
+	}
+	return snapshot
 }

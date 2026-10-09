@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ProviderStreamEventType } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { NormalizedProviderEventType } from "../../src/normalized-stream.js";
 import { MaxProviderErrorMessageBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import { ProviderStreamTimeoutError, classifyOpenAIProviderError, classifyProviderStreamError, providerErrorEvent } from "../../src/errors.js";
 
@@ -14,7 +14,7 @@ describe("Gateway provider error raising", () => {
     });
 
     expect(event).toMatchObject({
-      type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
+      type: NormalizedProviderEventType.ProviderError,
       providerError: {
         metadataJson: "{}",
         error: {

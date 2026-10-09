@@ -1,3 +1,4 @@
+import type { RuntimeBridgeDrainPhase } from "./lifecycle-policy.js";
 /**
  * Routes Runtime Core tool requests to the process or in-process boundary that
  * owns each tool kind. The runner preserves the accepted thread scope and
@@ -13,9 +14,11 @@
  * general tool callback plus the separate Sandbox acceptance and result-wait
  * callbacks into ThreadLoop. The runner calls Agent Runtime Bridge for durable
  * sandbox handoff, memory, command, event, and child-thread operations;
- * Provider Gateway for web tools; MCP Connector for MCP tools; and
+ * Web Connector for web tools; MCP Connector for MCP tools; and
  * `RuntimeSubAgentRunHost` for local child-thread execution.
  */
+import { bridgeUnaryCall, ownBridgeClient } from "./bridge-calls.js";
+import type { BridgeMethodPolicies } from "./bridge-policy.js";
 import { createHash } from "node:crypto";
 import type {
 	CallOptions,
@@ -121,6 +124,9 @@ import type { RuntimeSubAgentRunHost } from "./core-hosts.js";
 // delay paces only transport uncertainty; it is not an execution-attempt
 // budget and never authorizes the provider operation a second time.
 const DURABLE_TOOL_REJOIN_DELAY_MS = 300;
+// First and capped waits between polls of one pending child interrupt.
+const CHILD_INTERRUPT_PENDING_INITIAL_DELAY_MS = 300;
+const CHILD_INTERRUPT_PENDING_MAX_DELAY_MS = 1_000;
 // WEB_SEARCH_REQUESTS_MAX / WEB_FETCH_REQUESTS_MAX bound the per-call
 // server_tool_use counters accepted from a RunWebResponse usage block before that
 // block is attached to the durable web tool result (webServerToolUse below). They
@@ -187,18 +193,6 @@ type CancelCommandResult =
 	| { readonly type: "duplicate"; readonly resultJson: string }
 	| { readonly type: "stale" };
 
-const SandboxBackgroundCommandMaxAttempts = 5;
-const SandboxBackgroundProviderTimeoutMs = 45_000;
-const SandboxBackgroundQueueRetryCapMs = 60_000;
-const SandboxBackgroundResultCommitMarginMs = 30_000;
-// This is an observation bound, not a retry budget. It covers the Sandbox
-// runner's existing attempts, provider timeout, capped Queue backoff, and the
-// final durable-result commit margin before Runtime gives up observing it.
-const SandboxBackgroundCommandObservationTimeoutMs =
-	SandboxBackgroundCommandMaxAttempts * SandboxBackgroundProviderTimeoutMs +
-	(SandboxBackgroundCommandMaxAttempts - 1) * SandboxBackgroundQueueRetryCapMs +
-	SandboxBackgroundResultCommitMarginMs;
-
 type AuthorizeWebToolExecutionResult =
 	| { readonly type: "authorized" }
 	| { readonly type: "stale" };
@@ -219,6 +213,7 @@ type RunMemoryResult =
  */
 export interface RuntimePodToolRunnerOptions {
 	readonly bridgeAddress: string;
+	readonly methodPolicies?: BridgeMethodPolicies;
 	readonly webAddress: string;
 	readonly mcpConnectorAddress: string;
 	readonly tokenPath: string;
@@ -266,8 +261,8 @@ interface ChildTaskOperationQueueState {
 }
 
 /**
- * Implements the ThreadLoop tool callback across Bridge, Gateway Pod, and
- * in-process child-thread boundaries.
+ * Implements the ThreadLoop tool callback across Bridge, Web Connector, MCP
+ * Connector and in-process child-thread boundaries.
  *
  * Each instance owns its outbound clients and the ephemeral ordering state for
  * same-task child-agent sends and lifecycle controls. Durable idempotency
@@ -312,6 +307,25 @@ export class RuntimePodToolRunner {
 	>();
 	private nextChildTaskOperationSequence = 0;
 
+	beginDrain(deadline: RuntimeBridgeDrainPhase): void {
+		const owner = ownBridgeClient(this.bridgeClient as AgentRuntimeBridgeServiceClient);
+		owner.beginDrain(deadline);
+	}
+
+	async close(): Promise<void> {
+		await Promise.all([
+			ownBridgeClient(
+				this.bridgeClient as AgentRuntimeBridgeServiceClient,
+			).close(),
+			closeToolCalls(this.webClient),
+			closeToolCalls(this.mcpConnectorClient),
+		]);
+		if (this.webClient instanceof ProviderGatewayServiceClient)
+			this.webClient.close();
+		if (this.mcpConnectorClient instanceof McpConnectorServiceClient)
+			this.mcpConnectorClient.close();
+	}
+
 	/**
 	 * Creates a runner with injected adapters when present and dedicated gRPC
 	 * clients for the remaining Bridge, web-connector, and MCP boundaries.
@@ -324,6 +338,10 @@ export class RuntimePodToolRunner {
 				credentials.createInsecure(),
 				bridgeAttachmentGrpcChannelOptions(),
 			);
+		ownBridgeClient(
+			this.bridgeClient as AgentRuntimeBridgeServiceClient,
+			options.methodPolicies,
+		);
 		this.webClient =
 			options.webClient ??
 			new ProviderGatewayServiceClient(
@@ -347,9 +365,9 @@ export class RuntimePodToolRunner {
 	 * Executes one ThreadLoop tool request through the route declared by its tool
 	 * entry and returns the normalized completed, error, or cancelled outcome.
 	 *
-	 * Sandbox and memory routes call Bridge, web and MCP routes call Gateway Pod
-	 * services, and sub-agent routes coordinate durable Bridge state with the
-	 * local child-thread host.
+	 * Sandbox and memory routes call Bridge, web routes call Web Connector and
+	 * MCP routes call MCP Connector, and sub-agent routes coordinate durable
+	 * Bridge state with the local child-thread host.
 	 */
 	async runTool(
 		request: RuntimeToolExecutionRequest,
@@ -438,7 +456,9 @@ export class RuntimePodToolRunner {
 					this.bridgeClient,
 					durableRequest,
 					await this.metadata(),
-					request.abortSignal,
+					request.checkpointSignal === undefined
+						? request.abortSignal
+						: AbortSignal.any([request.abortSignal, request.checkpointSignal]),
 				);
 				const result = parseAwaitSandboxExecutionResult(response);
 				if (result.type === "stale") {
@@ -455,7 +475,11 @@ export class RuntimePodToolRunner {
 					withBackgroundTask(result.resultJson, result.taskId),
 				);
 			} catch (error) {
-				if (isToolRouteAborted(error) || request.abortSignal.aborted) {
+				if (
+					isToolRouteAborted(error) ||
+					request.abortSignal.aborted ||
+					request.checkpointSignal?.aborted
+				) {
 					return toolCancelled(
 						request,
 						"Sandbox tool execution was cancelled.",
@@ -661,6 +685,9 @@ export class RuntimePodToolRunner {
 			),
 		};
 		const cancellationSignal = new AbortController().signal;
+		// Each CancelCommand attempt is bounded by the Bridge method policy (35 seconds by
+		// default). Runtime observes the same cancellation operation for at most the writer
+		// retry policy's attempts and backoffs, then reports the result as unavailable.
 		for (
 			let attempt = 0;
 			attempt < SessionEventWriterRetryPolicy.attempts;
@@ -672,7 +699,6 @@ export class RuntimePodToolRunner {
 						this.bridgeClient,
 						durableRequest,
 						await this.metadata(),
-						SandboxBackgroundCommandObservationTimeoutMs,
 					),
 				);
 				if (result.type === "stale") {
@@ -815,6 +841,7 @@ export class RuntimePodToolRunner {
 					toolUseEventId: request.toolUseEventId,
 					bindingId: request.bindingId,
 					bindingGeneration: request.bindingGeneration,
+					runtimeProcessId: request.runtimeProcessId,
 					runtimeBindingToken: request.runtimeBindingToken,
 					input: validatedInput.input,
 				},
@@ -890,6 +917,7 @@ export class RuntimePodToolRunner {
 					toolUseEventId: request.toolUseEventId,
 					bindingId: request.bindingId,
 					bindingGeneration: request.bindingGeneration,
+					runtimeProcessId: request.runtimeProcessId,
 					runtimeBindingToken: request.runtimeBindingToken,
 				},
 				await this.metadata(),
@@ -1564,6 +1592,11 @@ export class RuntimePodToolRunner {
 			scope: parentScope,
 			controlOperationId,
 		};
+		// A pending interrupt arrives as DEADLINE_EXCEEDED and backs off 300, 600,
+		// then 1000 ms per poll; each newly invoked operation starts again at
+		// 300 ms. Other ambiguous transport failures replay the same awaitRequest
+		// inside replayActorTransport at their own delay without advancing it.
+		let pendingDelayMs = CHILD_INTERRUPT_PENDING_INITIAL_DELAY_MS;
 		while (true) {
 			throwIfToolRouteAborted(request.abortSignal);
 			try {
@@ -1576,6 +1609,7 @@ export class RuntimePodToolRunner {
 							metadata,
 							request.abortSignal,
 						),
+					isAmbiguousChildInterruptAwaitFailure,
 				);
 				if (!exactlyOneDefined(response.completed)) {
 					return {
@@ -1613,7 +1647,11 @@ export class RuntimePodToolRunner {
 						message: "Sub-agent interrupt completion is unavailable.",
 					};
 				}
-				await this.sleep(DURABLE_TOOL_REJOIN_DELAY_MS, request.abortSignal);
+				await this.sleep(pendingDelayMs, request.abortSignal);
+				pendingDelayMs = Math.min(
+					pendingDelayMs * 2,
+					CHILD_INTERRUPT_PENDING_MAX_DELAY_MS,
+				);
 			}
 		}
 	}
@@ -2099,6 +2137,9 @@ export class RuntimePodToolRunner {
 	private async replayActorTransport<Response>(
 		abortSignal: AbortSignal,
 		operation: () => Promise<Response>,
+		isReplayableFailure: (
+			error: unknown,
+		) => boolean = isAmbiguousActorTransportFailure,
 	): Promise<Response> {
 		for (;;) {
 			throwIfToolRouteAborted(abortSignal);
@@ -2108,7 +2149,7 @@ export class RuntimePodToolRunner {
 				if (
 					isToolRouteAborted(error) ||
 					abortSignal.aborted ||
-					!isAmbiguousActorTransportFailure(error)
+					!isReplayableFailure(error)
 				) {
 					throw error;
 				}
@@ -2126,6 +2167,7 @@ export class RuntimePodToolRunner {
 				bindingId: request.bindingId,
 				bindingGeneration: request.bindingGeneration,
 				targetPodUid: request.targetPodUid,
+				runtimeProcessId: request.runtimeProcessId,
 			},
 		};
 	}
@@ -2394,6 +2436,7 @@ function threadControlFromRequest(
 		bindingGeneration:
 			parentScope.binding?.bindingGeneration ?? request.bindingGeneration,
 		targetPodUid: parentScope.binding?.targetPodUid ?? "",
+		runtimeProcessId: parentScope.binding?.runtimeProcessId ?? "",
 	};
 }
 
@@ -2536,27 +2579,13 @@ function acceptSandboxExecution(
 	request: AcceptSandboxExecutionRequest,
 	metadata: Metadata,
 ): Promise<AcceptSandboxExecutionResponse> {
-	const options: CallOptions = {
-		deadline: Date.now() + SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
-	};
-	return new Promise((resolve, reject) => {
-		try {
-			client.acceptSandboxExecution(
-				request,
-				metadata,
-				options,
-				(error, response) => {
-					if (error !== null) {
-						reject(error);
-						return;
-					}
-					resolve(response);
-				},
-			);
-		} catch (error) {
-			reject(error);
-		}
-	});
+	return bridgeUnaryCall<AcceptSandboxExecutionResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"acceptSandboxExecution",
+		request,
+		metadata,
+		{},
+	);
 }
 
 function awaitSandboxExecution(
@@ -2565,13 +2594,16 @@ function awaitSandboxExecution(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<AwaitSandboxExecutionResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<AwaitSandboxExecutionResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"awaitSandboxExecution",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.awaitSandboxExecution(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function runMemory(
@@ -2580,13 +2612,16 @@ function runMemory(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<RunMemoryResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<RunMemoryResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"runMemory",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.runMemory(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function sendCommandInput(
@@ -2595,13 +2630,16 @@ function sendCommandInput(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<SendCommandInputResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<SendCommandInputResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"sendCommandInput",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.sendCommandInput(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function readCommandResult(
@@ -2610,37 +2648,30 @@ function readCommandResult(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<ReadCommandResultResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<ReadCommandResultResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"readCommandResult",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.readCommandResult(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function cancelCommand(
 	client: Pick<AgentRuntimeBridgeServiceClient, "cancelCommand">,
 	request: CancelCommandRequest,
 	metadata: Metadata,
-	timeoutMs: number,
 ): Promise<CancelCommandResponse> {
-	const options: CallOptions = {
-		deadline: Date.now() + timeoutMs,
-	};
-	return new Promise((resolve, reject) => {
-		try {
-			client.cancelCommand(request, metadata, options, (error, response) => {
-				if (error !== null) {
-					reject(error);
-					return;
-				}
-				resolve(response);
-			});
-		} catch (error) {
-			reject(error);
-		}
-	});
+	return bridgeUnaryCall<CancelCommandResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"cancelCommand",
+		request,
+		metadata,
+		{},
+	);
 }
 
 function authorizeWebToolExecution(
@@ -2649,17 +2680,16 @@ function authorizeWebToolExecution(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<AuthorizeWebToolExecutionResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<AuthorizeWebToolExecutionResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"authorizeWebToolExecution",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.authorizeWebToolExecution(
-				unaryRequest,
-				unaryMetadata,
-				callback,
-			),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function createSubagentThread(
@@ -2668,13 +2698,16 @@ function createSubagentThread(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<CreateSubagentThreadResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<CreateSubagentThreadResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"createSubagentThread",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.createSubagentThread(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function resolveChildThread(
@@ -2683,13 +2716,16 @@ function resolveChildThread(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<ResolveChildThreadResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<ResolveChildThreadResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"resolveChildThread",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.resolveChildThread(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function listChildThreads(
@@ -2698,13 +2734,16 @@ function listChildThreads(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<ListChildThreadsResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<ListChildThreadsResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"listChildThreads",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.listChildThreads(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function deliverInterAgentMail(
@@ -2713,13 +2752,16 @@ function deliverInterAgentMail(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<DeliverInterAgentMailResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<DeliverInterAgentMailResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"deliverInterAgentMail",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.deliverInterAgentMail(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function admitChildInterrupt(
@@ -2728,13 +2770,16 @@ function admitChildInterrupt(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<AdmitChildInterruptResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<AdmitChildInterruptResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"admitChildInterrupt",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.admitChildInterrupt(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function awaitChildInterrupt(
@@ -2743,13 +2788,16 @@ function awaitChildInterrupt(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<AwaitChildInterruptResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<AwaitChildInterruptResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"awaitChildInterrupt",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.awaitChildInterrupt(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function closeChildControl(
@@ -2758,13 +2806,16 @@ function closeChildControl(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<CloseChildControlResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<CloseChildControlResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"closeChildControl",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.closeChildControl(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function markChildThreadActive(
@@ -2773,13 +2824,16 @@ function markChildThreadActive(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<MarkChildThreadActiveResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<MarkChildThreadActiveResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"markChildThreadActive",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.markChildThreadActive(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function runWeb(
@@ -2789,6 +2843,7 @@ function runWeb(
 	abortSignal: AbortSignal,
 ): Promise<RunWebResponse> {
 	return cancellableUnaryCall(
+		client,
 		request,
 		metadata,
 		abortSignal,
@@ -2804,6 +2859,7 @@ function runMcpTool(
 	abortSignal: AbortSignal,
 ): Promise<RunMcpToolResponse> {
 	return cancellableUnaryCall(
+		client,
 		request,
 		metadata,
 		abortSignal,
@@ -2918,18 +2974,58 @@ function waitForPromiseOrAbort<T>(
 	});
 }
 
+// RunWeb and RunMcpTool are outside the Bridge method policy: their execution budgets belong to
+// the Web Connector and to the MCP Connector's shared execution budget, so Bridge per-attempt
+// deadlines and drain clipping must not apply. During quiesce these calls end with the Tool route
+// abort at the current-step deadline, and close() cancels and joins any remaining call before the
+// channel closes.
+const toolCallOwners = new WeakMap<
+	object,
+	{
+		closing: boolean;
+		calls: Map<ClientUnaryCall, Promise<void>>;
+		closed?: Promise<void>;
+	}
+>();
+function toolCallOwner(client: object) {
+	let owner = toolCallOwners.get(client);
+	if (owner === undefined) {
+		owner = { closing: false, calls: new Map() };
+		toolCallOwners.set(client, owner);
+	}
+	return owner;
+}
+function closeToolCalls(client: object): Promise<void> {
+	const owner = toolCallOwner(client);
+	if (owner.closed !== undefined) return owner.closed;
+	owner.closing = true;
+	owner.closed = (async () => {
+		const active = [...owner.calls.entries()];
+		for (const [call] of active) call.cancel();
+		await Promise.all(active.map(([, join]) => join));
+	})();
+	return owner.closed;
+}
+
 function cancellableUnaryCall<Request, Response>(
+	client: object,
 	request: Request,
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 	invoke: UnaryInvoker<Request, Response>,
 ): Promise<Response> {
+	const owner = toolCallOwner(client);
 	return new Promise((resolve, reject) => {
-		if (abortSignal.aborted) {
+		if (abortSignal.aborted || owner.closing) {
 			reject(new ToolRouteAborted());
 			return;
 		}
 		let settled = false;
+		let callbackJoined = false,
+			join!: () => void;
+		const joined = new Promise<void>((resolve) => {
+			join = resolve;
+		});
 		let call: ClientUnaryCall | undefined;
 		const cleanup = (): void => {
 			abortSignal.removeEventListener("abort", abort);
@@ -2952,6 +3048,9 @@ function cancellableUnaryCall<Request, Response>(
 				request,
 				metadata,
 				(error: ServiceError | null, response: Response) => {
+					callbackJoined = true;
+					join();
+					if (call !== undefined) owner.calls.delete(call);
 					if (error !== null) {
 						settle(() => reject(error));
 						return;
@@ -2959,7 +3058,10 @@ function cancellableUnaryCall<Request, Response>(
 					settle(() => resolve(response));
 				},
 			);
+			if (!callbackJoined) owner.calls.set(call, joined);
+			if (abortSignal.aborted || owner.closing) call.cancel();
 		} catch (error) {
+			join();
 			settle(() => reject(error));
 		}
 	});
@@ -3019,6 +3121,16 @@ function isAmbiguousActorTransportFailure(error: unknown): boolean {
 		default:
 			return false;
 	}
+}
+
+// AwaitChildInterrupt owns DEADLINE_EXCEEDED as its pending reply, so only the
+// remaining ambiguous transport failures replay inside replayActorTransport. A
+// local deadline on that RPC is indistinguishable and takes the pending backoff.
+function isAmbiguousChildInterruptAwaitFailure(error: unknown): boolean {
+	return (
+		!isGrpcStatus(error, status.DEADLINE_EXCEEDED) &&
+		isAmbiguousActorTransportFailure(error)
+	);
 }
 
 function resultJsonToExecutionResult(

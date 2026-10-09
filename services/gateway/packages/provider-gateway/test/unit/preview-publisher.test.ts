@@ -1,0 +1,233 @@
+import { describe, expect, test } from "bun:test";
+import fixture from "../../../../../../integration/testdata/public-streaming.json";
+import { PreviewPublisher } from "../../src/providers/preview-publisher.js";
+import { PreviewPublisherDefaults } from "../../src/providers/preview-config.js";
+import { encodePreviewFrame } from "../../src/providers/preview-protocol.js";
+import { ProviderRequestKind, ProviderThreadRole, ProviderThreadVisibility } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { deferred, ObservedPreviewConnection, observed, previewRequest, secondId, textId } from "./preview-publisher-fixtures.js";
+
+describe("bounded best-effort publisher", () => {
+  test("one flush holds batch bytes/count and blocks further client publication until settlement", async () => {
+    const connection = new ObservedPreviewConnection(); connection.autoFlush = false;
+    const publisher = new PreviewPublisher({ connect: async () => connection, policy: { ...PreviewPublisherDefaults, batchFrames: 2 } });
+    publisher.start(); await observed(() => publisher.metrics.connected);
+    const producer = publisher.createProducer(previewRequest());
+    producer.offer({ kind: "text_delta", eventId: textId, providerPartId: "A", delta: "alpha" });
+    await observed(() => connection.flushCalls === 1);
+    expect(connection.frames).toHaveLength(2);
+    expect(publisher.metrics.pendingFrames).toBe(3);
+    expect(publisher.metrics.clientPendingBytes).toBeGreaterThan(0);
+    expect(publisher.metrics.pendingBytes).toBeGreaterThan(connection.frames.reduce((sum, frame) => sum + frame.data.length, 0));
+    producer.offer({ kind: "text_delta", eventId: textId, providerPartId: "A", delta: " beta" });
+    expect(connection.frames).toHaveLength(2);
+    connection.flushing.resolve();
+    await observed(() => publisher.metrics.pendingFrames === 0);
+    expect(connection.flushCalls).toBe(2);
+    expect(connection.decoded().map(frame => frame.kind)).toEqual(["request_open", "event_start", "event_delta", "event_delta"]);
+    expect(publisher.metrics.pendingBytes).toBe(0); expect(publisher.metrics.clientPendingBytes).toBe(0);
+    producer.close(); await publisher.close();
+  });
+  test("event-specific count overflow removes unsent event frames and never forwards its suffix", async () => {
+    const connection = new ObservedPreviewConnection();
+    const publisher = new PreviewPublisher({ connect: async () => connection, policy: { ...PreviewPublisherDefaults, queueFrames: 2, batchFrames: 1 } });
+    publisher.start(); await observed(() => publisher.metrics.connected);
+    const producer = publisher.createProducer(previewRequest());
+    producer.offer({ kind: "text_delta", eventId: textId, providerPartId: "A", delta: "first" });
+    producer.offer({ kind: "text_delta", eventId: textId, providerPartId: "A", delta: "suffix" });
+    await observed(() => publisher.metrics.pendingFrames === 0);
+    expect(connection.decoded().map(frame => frame.kind)).toEqual(["request_open"]);
+    expect(publisher.metrics.disabledEvents).toBe(1);
+    producer.offer({ kind: "text_delta", eventId: secondId, providerPartId: "B", delta: "" });
+    await observed(() => publisher.metrics.pendingFrames === 0);
+    producer.offer({ kind: "text_delta", eventId: secondId, providerPartId: "B", delta: "healthy" });
+    await observed(() => publisher.metrics.pendingFrames === 0);
+    expect(connection.decoded().at(-1)?.text).toBe("healthy");
+    producer.close(); await publisher.close();
+  });
+  test("publisher byte budget includes reserved NATS copy at exact configured boundaries", async () => {
+    for (const offset of [-1, 0, 1]) {
+      const connection = new ObservedPreviewConnection(); connection.autoFlush = false;
+      const raw = { version: 1, workspace_id: "workspace", session_id: "session", thread_id: "thread", model_request_id: "model-request", model_request_start_event_id: "start-event", request_kind: "agent_provider_request", kind: "event_start", event_type: "agent.thinking", event_id: textId, preview_sequence: 0 };
+      const encoded = Buffer.byteLength(JSON.stringify(raw));
+      const charge = encoded * 2 + Buffer.byteLength(`PUB preview.v1.d29ya3NwYWNl.c2Vzc2lvbg ${encoded}\r\n`) + 8;
+      const { event_id, event_type, preview_sequence, ...base } = raw;
+      const openBytes = Buffer.byteLength(JSON.stringify({ ...base, kind: "request_open" }));
+      const openCharge = openBytes * 2 + Buffer.byteLength(`PUB preview.v1.d29ya3NwYWNl.c2Vzc2lvbg ${openBytes}\r\n`) + 8;
+      const reservations: number[] = [];
+      const publisher: PreviewPublisher = new PreviewPublisher({ connect: async () => connection, policy: { ...PreviewPublisherDefaults, batchBytes: 512, queueBytes: openCharge + charge + offset, batchFrames: 1 }, encodeFrame: frame => { reservations.push(publisher.metrics.pendingBytes); return encodePreviewFrame(frame); } });
+      publisher.start(); await observed(() => publisher.metrics.connected);
+      const producer = publisher.createProducer(previewRequest());
+      producer.offer({ kind: "thinking_started", eventId: textId, providerPartId: "reason" });
+      expect(publisher.metrics.disabledEvents).toBe(offset < 0 ? 1 : 0);
+      expect(reservations).toEqual(offset < 0 ? [openCharge] : [openCharge, openCharge + charge]);
+      connection.flushing.resolve(); producer.close(); await publisher.close();
+      expect(publisher.metrics.pendingBytes).toBe(0);
+    }
+  });
+  test("count and JSON expansion rejection never invoke the allocator and preserve later healthy events", async () => {
+    const connection = new ObservedPreviewConnection();
+    let encodes = 0;
+    const publisher = new PreviewPublisher({ connect: async () => connection, policy: { ...PreviewPublisherDefaults, queueFrames: 1, batchFrames: 1 }, encodeFrame: frame => { encodes++; return encodePreviewFrame(frame); } });
+    publisher.start(); await observed(() => publisher.metrics.connected);
+    const producer = publisher.createProducer(previewRequest());
+    producer.offer({ kind: "text_delta", eventId: textId, providerPartId: "A", delta: "rejected" });
+    expect(encodes).toBe(1); expect(publisher.metrics.disabledEvents).toBe(1);
+    await observed(() => publisher.metrics.pendingFrames === 0);
+    producer.offer({ kind: "text_delta", eventId: secondId, providerPartId: "B", delta: "" });
+    await observed(() => publisher.metrics.pendingFrames === 0);
+    expect(encodes).toBe(2);
+    producer.offer({ kind: "text_delta", eventId: secondId, providerPartId: "B", delta: "\x00".repeat(65536) });
+    producer.offer({ kind: "text_delta", eventId: secondId, providerPartId: "B", delta: "suffix" });
+    expect(encodes).toBe(2); expect(publisher.metrics.disabledEvents).toBe(2);
+    const healthyId = "evt_33333333333333333333333333333333";
+    producer.offer({ kind: "text_delta", eventId: healthyId, providerPartId: "C", delta: "" });
+    await observed(() => publisher.metrics.pendingFrames === 0);
+    producer.offer({ kind: "text_delta", eventId: healthyId, providerPartId: "C", delta: "healthy" });
+    await observed(() => publisher.metrics.pendingFrames === 0);
+    expect(connection.decoded().at(-1)?.text).toBe("healthy");
+    producer.close(); await publisher.close(); expect(publisher.metrics.pendingBytes).toBe(0);
+  });
+  test("uncertain flush disables active requests and discards all old frames before fresh connection", async () => {
+    const first = new ObservedPreviewConnection(); first.autoFlush = false;
+    const second = new ObservedPreviewConnection(); let connections = 0;
+    const publisher = new PreviewPublisher({ connect: async () => ++connections === 1 ? first : second, policy: { ...PreviewPublisherDefaults, flushTimeoutMs: 10, retryMaxMs: 1 } });
+    publisher.start(); await observed(() => publisher.metrics.connected);
+    const old = publisher.createProducer(previewRequest());
+    old.offer({ kind: "text_delta", eventId: textId, providerPartId: "A", delta: "first" });
+    await observed(() => connections === 2 && publisher.metrics.connected);
+    old.offer({ kind: "text_delta", eventId: textId, providerPartId: "A", delta: "old suffix" });
+    const fresh = publisher.createProducer({ ...previewRequest(), modelRequestId: "new-request" });
+    fresh.offer({ kind: "text_delta", eventId: secondId, providerPartId: "B", delta: "new" });
+    await observed(() => publisher.metrics.pendingFrames === 0);
+    expect(second.decoded().every(frame => frame.model_request_id === "new-request")).toBe(true);
+    expect(first.closeCalls).toBeGreaterThan(0); expect(publisher.metrics.disabledRequests).toBe(1);
+    old.close(); fresh.close(); await publisher.close();
+  });
+  test("late factory completion is closed and joined when shutdown begins during connect", async () => {
+    const pending = deferred<ObservedPreviewConnection>();
+    const connection = new ObservedPreviewConnection(); let started = false;
+    const publisher = new PreviewPublisher({ connect: () => { started = true; return pending.promise; } });
+    publisher.start(); await observed(() => started);
+    const stopping = publisher.close(); pending.resolve(connection); await stopping;
+    expect(connection.closeCalls).toBeGreaterThan(0); expect(publisher.metrics.connected).toBe(false);
+    expect(publisher.metrics.pendingBytes).toBe(0);
+  });
+  test("credential replacement wins an overlapping reconnect without leaking either client", async () => {
+    const first = new ObservedPreviewConnection(), replacement = new ObservedPreviewConnection(), stale = new ObservedPreviewConnection();
+    const dial = deferred<ObservedPreviewConnection>(); let calls = 0;
+    const publisher = new PreviewPublisher({ connect: () => ++calls === 1 ? Promise.resolve(first) : dial.promise, policy: { ...PreviewPublisherDefaults, retryMaxMs: 1 } });
+    publisher.start(); await observed(() => publisher.metrics.connected);
+    first.ended.resolve(); await observed(() => calls === 2);
+    await publisher.replaceConnection(replacement); dial.resolve(stale);
+    await observed(() => stale.closeCalls === 1);
+    const producer = publisher.createProducer(previewRequest());
+    producer.offer({ kind: "text_delta", eventId: textId, providerPartId: "A", delta: "replacement" });
+    await observed(() => publisher.metrics.pendingFrames === 0);
+    expect(replacement.decoded().at(-1)?.text).toBe("replacement"); expect(stale.frames).toHaveLength(0);
+    producer.close(); await publisher.close();
+    expect(first.closeCalls).toBe(1); expect(replacement.closeCalls).toBe(1); expect(stale.closeCalls).toBe(1);
+  });
+  test("a failed client close still joins the pending publisher worker", async () => {
+    const connection = new ObservedPreviewConnection(); connection.autoFlush = false;
+    const publisher = new PreviewPublisher({ connect: async () => connection, policy: { ...PreviewPublisherDefaults, flushTimeoutMs: 20 } });
+    publisher.start(); await observed(() => publisher.metrics.connected);
+    publisher.createProducer(previewRequest()); await observed(() => connection.flushCalls === 1);
+    connection.close = async () => { connection.closeCalls++; throw new Error("close failure"); };
+    await expect(publisher.close()).rejects.toThrow("close failure");
+    expect(connection.closeCalls).toBe(1); expect(publisher.metrics.pendingFrames).toBe(0); expect(publisher.metrics.pendingBytes).toBe(0);
+    expect(publisher.metrics.failures).toBe(1);
+  });
+  test("retired batch and client reservation stay charged through replacement saturation and both joins", async () => {
+    const first = new ObservedPreviewConnection(), candidate = new ObservedPreviewConnection();
+    const closeGate = deferred<void>(); let flushSettled = false;
+    first.flush = async () => { first.flushCalls++; await first.flushing.promise; flushSettled = true; };
+    first.close = async () => { first.closeCalls++; await closeGate.promise; first.ended.resolve(); };
+    const publisher = new PreviewPublisher({ connect: async () => first, policy: { ...PreviewPublisherDefaults, queueBytes: 4096, batchBytes: 2048 } });
+    publisher.start(); await observed(() => publisher.metrics.connected);
+    const old = publisher.createProducer(previewRequest());
+    old.offer({ kind: "text_delta", eventId: textId, providerPartId: "A", delta: "x".repeat(600) });
+    await observed(() => first.flushCalls === 1); expect(first.frames).toHaveLength(3);
+    const oldBytes = publisher.metrics.pendingBytes, oldClientBytes = publisher.metrics.clientPendingBytes;
+    const replacing = publisher.replaceConnection(candidate); await observed(() => first.closeCalls === 1);
+    expect(publisher.metrics.pendingBytes).toBe(oldBytes); expect(publisher.metrics.pendingFrames).toBe(3);
+    expect(publisher.metrics.clientPendingBytes).toBe(oldClientBytes);
+    const fresh = publisher.createProducer({ ...previewRequest(), modelRequestId: "new-request" });
+    fresh.offer({ kind: "text_delta", eventId: secondId, providerPartId: "B", delta: "cannot fit" });
+    expect(publisher.metrics.disabledEvents).toBe(1); expect(publisher.metrics.pendingBytes).toBeLessThanOrEqual(4096);
+    expect(publisher.metrics.pendingBytes).toBeGreaterThanOrEqual(oldBytes); expect(candidate.frames).toHaveLength(0);
+    first.flushing.resolve(); await observed(() => flushSettled);
+    expect(publisher.metrics.pendingBytes).toBeGreaterThanOrEqual(oldBytes); expect(candidate.frames).toHaveLength(0);
+    closeGate.resolve(); await replacing; await observed(() => publisher.metrics.pendingFrames === 0);
+    expect(publisher.metrics.pendingBytes).toBe(0); expect(publisher.metrics.clientPendingBytes).toBe(0);
+    expect(publisher.metrics.dropped).toBe(4); expect(publisher.metrics.flushed).toBe(1);
+    old.offer({ kind: "text_delta", eventId: textId, providerPartId: "A", delta: "old suffix" });
+    fresh.offer({ kind: "text_delta", eventId: "evt_33333333333333333333333333333333", providerPartId: "C", delta: "healthy" });
+    await observed(() => publisher.metrics.pendingFrames === 0);
+    expect(candidate.decoded().every(frame => frame.model_request_id === "new-request")).toBe(true);
+    expect(candidate.decoded().at(-1)?.text).toBe("healthy");
+    old.close(); fresh.close(); await publisher.close();
+    expect(first.closeCalls).toBe(1); expect(candidate.closeCalls).toBe(1);
+  });
+  test("retired close rejection releases batch reservation once and still joins shutdown", async () => {
+    const first = new ObservedPreviewConnection(), candidate = new ObservedPreviewConnection();
+    first.autoFlush = false;
+    const publisher = new PreviewPublisher({ connect: async () => first });
+    publisher.start(); await observed(() => publisher.metrics.connected);
+    publisher.createProducer(previewRequest()); await observed(() => first.flushCalls === 1);
+    first.close = async () => { first.closeCalls++; throw new Error("retired close rejected"); };
+    await expect(publisher.replaceConnection(candidate)).rejects.toThrow("retired close rejected");
+    expect(publisher.metrics.pendingFrames).toBe(1);
+    first.flushing.resolve(); await observed(() => publisher.metrics.pendingFrames === 0);
+    expect(publisher.metrics.pendingBytes).toBe(0); expect(publisher.metrics.clientPendingBytes).toBe(0); expect(publisher.metrics.dropped).toBe(1);
+    await expect(publisher.close()).rejects.toThrow("retired close rejected");
+    expect(first.closeCalls).toBe(1); expect(candidate.closeCalls).toBe(1);
+  });
+  test("absence, child/internal/compaction admission never creates a preview queue", async () => {
+    const connection = new ObservedPreviewConnection();
+    const publisher = new PreviewPublisher({ connect: async () => connection }); publisher.start(); await observed(() => publisher.metrics.connected);
+    for (const override of [{ threadRole: ProviderThreadRole.PROVIDER_THREAD_ROLE_SUBAGENT }, { threadVisibility: ProviderThreadVisibility.PROVIDER_THREAD_VISIBILITY_INTERNAL }, { requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_COMPACTION_SUMMARY }, { threadRole: ProviderThreadRole.PROVIDER_THREAD_ROLE_UNSPECIFIED }]) {
+      const producer = publisher.createProducer({ ...previewRequest(), ...override });
+      producer.offer({ kind: "text_delta", eventId: textId, providerPartId: "A", delta: "secret" }); producer.close();
+    }
+    expect(publisher.metrics.attempted).toBe(0); expect(connection.frames).toHaveLength(0); await publisher.close();
+  });
+  test("split UTF-16 scalar state stays per event through separate flush opportunities", async () => {
+    const connection = new ObservedPreviewConnection();
+    const publisher = new PreviewPublisher({ connect: async () => connection }); publisher.start(); await observed(() => publisher.metrics.connected);
+    const producer = publisher.createProducer(previewRequest());
+    for (const fragment of fixture.unicode.interleaved.fragments) {
+      producer.offer({ kind: "text_delta", eventId: fragment.block === "A" ? textId : secondId, providerPartId: fragment.block, delta: fragment.text });
+      await observed(() => publisher.metrics.pendingFrames === 0);
+    }
+    const deltas = connection.decoded().filter(frame => frame.kind === "event_delta");
+    expect(deltas.filter(frame => frame.event_id === textId).map(frame => frame.text).join("")).toBe(fixture.unicode.interleaved.complete.A);
+    expect(deltas.filter(frame => frame.event_id === secondId).map(frame => frame.text).join("")).toBe(fixture.unicode.interleaved.complete.B);
+    expect(JSON.stringify(deltas)).not.toContain("�");
+    producer.close(); await publisher.close();
+  });
+  test("invalid isolated surrogate stops only its event and no later suffix is encoded", async () => {
+    const connection = new ObservedPreviewConnection();
+    const publisher = new PreviewPublisher({ connect: async () => connection }); publisher.start(); await observed(() => publisher.metrics.connected);
+    const producer = publisher.createProducer(previewRequest());
+    producer.offer({ kind: "text_delta", eventId: textId, providerPartId: "A", delta: "\ude00" });
+    producer.offer({ kind: "text_delta", eventId: textId, providerPartId: "A", delta: "suffix" });
+    producer.offer({ kind: "text_delta", eventId: secondId, providerPartId: "B", delta: "healthy" });
+    await observed(() => publisher.metrics.pendingFrames === 0);
+    expect(connection.decoded().some(frame => frame.event_id === textId)).toBe(false);
+    expect(connection.decoded().at(-1)?.text).toBe("healthy");
+    producer.close(); await publisher.close();
+  });
+  test("4096 event identities bound one request and exhaustion cannot reopen an old event", async () => {
+    const connection = new ObservedPreviewConnection();
+    const publisher = new PreviewPublisher({ connect: async () => connection, policy: { ...PreviewPublisherDefaults, queueFrames: 5000 } }); publisher.start(); await observed(() => publisher.metrics.connected);
+    const producer = publisher.createProducer(previewRequest());
+    for (let index = 0; index < 4096; index++) producer.offer({ kind: "thinking_started", eventId: `evt_${index.toString(16).padStart(32, "0")}`, providerPartId: String(index) });
+    expect(publisher.metrics.disabledRequests).toBe(0);
+    producer.offer({ kind: "thinking_started", eventId: `evt_${(4096).toString(16).padStart(32, "0")}`, providerPartId: "overflow" });
+    expect(publisher.metrics.disabledRequests).toBe(1);
+    producer.offer({ kind: "thinking_started", eventId: textId, providerPartId: "old" });
+    await observed(() => publisher.metrics.pendingFrames === 0);
+    expect(connection.frames).toHaveLength(0); expect(publisher.metrics.pendingBytes).toBe(0);
+    producer.close(); await publisher.close();
+  });
+});

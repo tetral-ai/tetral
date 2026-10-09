@@ -1306,7 +1306,7 @@ func normalizeProviderOAuthAuth(auth CredentialAuth) (CredentialAuth, error) {
 }
 
 func providerOAuthValidationError(providerID string, member string, message string) error {
-	slog.Error("provider credential rejected",
+	slog.Debug("provider credential rejected",
 		"event", "provider_credential_rejected",
 		"event.kind", "provider_credential_rejected",
 		"component", "vault",

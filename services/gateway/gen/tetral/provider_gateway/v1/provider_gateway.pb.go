@@ -242,54 +242,36 @@ type ProviderStreamEventType int32
 
 const (
 	ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_UNSPECIFIED           ProviderStreamEventType = 0
-	ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_TEXT_START            ProviderStreamEventType = 1
-	ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA            ProviderStreamEventType = 2
-	ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_TEXT_END              ProviderStreamEventType = 3
-	ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_REASONING_START       ProviderStreamEventType = 4
-	ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA       ProviderStreamEventType = 5
-	ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_REASONING_END         ProviderStreamEventType = 6
-	ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START      ProviderStreamEventType = 7
-	ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA      ProviderStreamEventType = 8
-	ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END        ProviderStreamEventType = 9
-	ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL             ProviderStreamEventType = 10
 	ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_FINISH                ProviderStreamEventType = 11
 	ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR        ProviderStreamEventType = 12
 	ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS ProviderStreamEventType = 13
+	ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED      ProviderStreamEventType = 14
+	ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE         ProviderStreamEventType = 15
+	ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE    ProviderStreamEventType = 16
+	ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE    ProviderStreamEventType = 17
 )
 
 // Enum value maps for ProviderStreamEventType.
 var (
 	ProviderStreamEventType_name = map[int32]string{
 		0:  "PROVIDER_STREAM_EVENT_TYPE_UNSPECIFIED",
-		1:  "PROVIDER_STREAM_EVENT_TYPE_TEXT_START",
-		2:  "PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA",
-		3:  "PROVIDER_STREAM_EVENT_TYPE_TEXT_END",
-		4:  "PROVIDER_STREAM_EVENT_TYPE_REASONING_START",
-		5:  "PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA",
-		6:  "PROVIDER_STREAM_EVENT_TYPE_REASONING_END",
-		7:  "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START",
-		8:  "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA",
-		9:  "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END",
-		10: "PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL",
 		11: "PROVIDER_STREAM_EVENT_TYPE_FINISH",
 		12: "PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR",
 		13: "PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS",
+		14: "PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED",
+		15: "PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE",
+		16: "PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE",
+		17: "PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE",
 	}
 	ProviderStreamEventType_value = map[string]int32{
 		"PROVIDER_STREAM_EVENT_TYPE_UNSPECIFIED":           0,
-		"PROVIDER_STREAM_EVENT_TYPE_TEXT_START":            1,
-		"PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA":            2,
-		"PROVIDER_STREAM_EVENT_TYPE_TEXT_END":              3,
-		"PROVIDER_STREAM_EVENT_TYPE_REASONING_START":       4,
-		"PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA":       5,
-		"PROVIDER_STREAM_EVENT_TYPE_REASONING_END":         6,
-		"PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START":      7,
-		"PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA":      8,
-		"PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END":        9,
-		"PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL":             10,
 		"PROVIDER_STREAM_EVENT_TYPE_FINISH":                11,
 		"PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR":        12,
 		"PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS": 13,
+		"PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED":      14,
+		"PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE":         15,
+		"PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE":    16,
+		"PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE":    17,
 	}
 )
 
@@ -318,6 +300,108 @@ func (x ProviderStreamEventType) Number() protoreflect.EnumNumber {
 // Deprecated: Use ProviderStreamEventType.Descriptor instead.
 func (ProviderStreamEventType) EnumDescriptor() ([]byte, []int) {
 	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{4}
+}
+
+// Loaded thread identity; unspecified values never authorize previews.
+type ProviderThreadRole int32
+
+const (
+	ProviderThreadRole_PROVIDER_THREAD_ROLE_UNSPECIFIED       ProviderThreadRole = 0
+	ProviderThreadRole_PROVIDER_THREAD_ROLE_MAIN              ProviderThreadRole = 1
+	ProviderThreadRole_PROVIDER_THREAD_ROLE_SUBAGENT          ProviderThreadRole = 2
+	ProviderThreadRole_PROVIDER_THREAD_ROLE_APPROVAL_REVIEWER ProviderThreadRole = 3
+)
+
+// Enum value maps for ProviderThreadRole.
+var (
+	ProviderThreadRole_name = map[int32]string{
+		0: "PROVIDER_THREAD_ROLE_UNSPECIFIED",
+		1: "PROVIDER_THREAD_ROLE_MAIN",
+		2: "PROVIDER_THREAD_ROLE_SUBAGENT",
+		3: "PROVIDER_THREAD_ROLE_APPROVAL_REVIEWER",
+	}
+	ProviderThreadRole_value = map[string]int32{
+		"PROVIDER_THREAD_ROLE_UNSPECIFIED":       0,
+		"PROVIDER_THREAD_ROLE_MAIN":              1,
+		"PROVIDER_THREAD_ROLE_SUBAGENT":          2,
+		"PROVIDER_THREAD_ROLE_APPROVAL_REVIEWER": 3,
+	}
+)
+
+func (x ProviderThreadRole) Enum() *ProviderThreadRole {
+	p := new(ProviderThreadRole)
+	*p = x
+	return p
+}
+
+func (x ProviderThreadRole) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ProviderThreadRole) Descriptor() protoreflect.EnumDescriptor {
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[5].Descriptor()
+}
+
+func (ProviderThreadRole) Type() protoreflect.EnumType {
+	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[5]
+}
+
+func (x ProviderThreadRole) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ProviderThreadRole.Descriptor instead.
+func (ProviderThreadRole) EnumDescriptor() ([]byte, []int) {
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{5}
+}
+
+type ProviderThreadVisibility int32
+
+const (
+	ProviderThreadVisibility_PROVIDER_THREAD_VISIBILITY_UNSPECIFIED ProviderThreadVisibility = 0
+	ProviderThreadVisibility_PROVIDER_THREAD_VISIBILITY_PUBLIC      ProviderThreadVisibility = 1
+	ProviderThreadVisibility_PROVIDER_THREAD_VISIBILITY_INTERNAL    ProviderThreadVisibility = 2
+)
+
+// Enum value maps for ProviderThreadVisibility.
+var (
+	ProviderThreadVisibility_name = map[int32]string{
+		0: "PROVIDER_THREAD_VISIBILITY_UNSPECIFIED",
+		1: "PROVIDER_THREAD_VISIBILITY_PUBLIC",
+		2: "PROVIDER_THREAD_VISIBILITY_INTERNAL",
+	}
+	ProviderThreadVisibility_value = map[string]int32{
+		"PROVIDER_THREAD_VISIBILITY_UNSPECIFIED": 0,
+		"PROVIDER_THREAD_VISIBILITY_PUBLIC":      1,
+		"PROVIDER_THREAD_VISIBILITY_INTERNAL":    2,
+	}
+)
+
+func (x ProviderThreadVisibility) Enum() *ProviderThreadVisibility {
+	p := new(ProviderThreadVisibility)
+	*p = x
+	return p
+}
+
+func (x ProviderThreadVisibility) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ProviderThreadVisibility) Descriptor() protoreflect.EnumDescriptor {
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[6].Descriptor()
+}
+
+func (ProviderThreadVisibility) Type() protoreflect.EnumType {
+	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[6]
+}
+
+func (x ProviderThreadVisibility) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ProviderThreadVisibility.Descriptor instead.
+func (ProviderThreadVisibility) EnumDescriptor() ([]byte, []int) {
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{6}
 }
 
 type ProviderAttachmentRejectionReason int32
@@ -353,11 +437,11 @@ func (x ProviderAttachmentRejectionReason) String() string {
 }
 
 func (ProviderAttachmentRejectionReason) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[5].Descriptor()
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[7].Descriptor()
 }
 
 func (ProviderAttachmentRejectionReason) Type() protoreflect.EnumType {
-	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[5]
+	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[7]
 }
 
 func (x ProviderAttachmentRejectionReason) Number() protoreflect.EnumNumber {
@@ -366,7 +450,7 @@ func (x ProviderAttachmentRejectionReason) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ProviderAttachmentRejectionReason.Descriptor instead.
 func (ProviderAttachmentRejectionReason) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{5}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{7}
 }
 
 type ProviderFinishReason int32
@@ -417,11 +501,11 @@ func (x ProviderFinishReason) String() string {
 }
 
 func (ProviderFinishReason) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[6].Descriptor()
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[8].Descriptor()
 }
 
 func (ProviderFinishReason) Type() protoreflect.EnumType {
-	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[6]
+	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[8]
 }
 
 func (x ProviderFinishReason) Number() protoreflect.EnumNumber {
@@ -430,7 +514,7 @@ func (x ProviderFinishReason) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ProviderFinishReason.Descriptor instead.
 func (ProviderFinishReason) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{6}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{8}
 }
 
 type RunWebStatus int32
@@ -469,11 +553,11 @@ func (x RunWebStatus) String() string {
 }
 
 func (RunWebStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[7].Descriptor()
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[9].Descriptor()
 }
 
 func (RunWebStatus) Type() protoreflect.EnumType {
-	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[7]
+	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[9]
 }
 
 func (x RunWebStatus) Number() protoreflect.EnumNumber {
@@ -482,7 +566,7 @@ func (x RunWebStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RunWebStatus.Descriptor instead.
 func (RunWebStatus) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{7}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{9}
 }
 
 type RunMcpToolStatus int32
@@ -521,11 +605,11 @@ func (x RunMcpToolStatus) String() string {
 }
 
 func (RunMcpToolStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[8].Descriptor()
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[10].Descriptor()
 }
 
 func (RunMcpToolStatus) Type() protoreflect.EnumType {
-	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[8]
+	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[10]
 }
 
 func (x RunMcpToolStatus) Number() protoreflect.EnumNumber {
@@ -534,7 +618,7 @@ func (x RunMcpToolStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RunMcpToolStatus.Descriptor instead.
 func (RunMcpToolStatus) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{8}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{10}
 }
 
 type McpErrorKind int32
@@ -597,11 +681,11 @@ func (x McpErrorKind) String() string {
 }
 
 func (McpErrorKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[9].Descriptor()
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[11].Descriptor()
 }
 
 func (McpErrorKind) Type() protoreflect.EnumType {
-	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[9]
+	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[11]
 }
 
 func (x McpErrorKind) Number() protoreflect.EnumNumber {
@@ -610,7 +694,7 @@ func (x McpErrorKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use McpErrorKind.Descriptor instead.
 func (McpErrorKind) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{9}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{11}
 }
 
 type McpRetryStatus int32
@@ -649,11 +733,11 @@ func (x McpRetryStatus) String() string {
 }
 
 func (McpRetryStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[10].Descriptor()
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[12].Descriptor()
 }
 
 func (McpRetryStatus) Type() protoreflect.EnumType {
-	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[10]
+	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[12]
 }
 
 func (x McpRetryStatus) Number() protoreflect.EnumNumber {
@@ -662,7 +746,7 @@ func (x McpRetryStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use McpRetryStatus.Descriptor instead.
 func (McpRetryStatus) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{10}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{12}
 }
 
 type ProviderRequest struct {
@@ -683,8 +767,14 @@ type ProviderRequest struct {
 	Attachments         []*ProviderRequestAttachment `protobuf:"bytes,15,rep,name=attachments,proto3" json:"attachments,omitempty"`
 	Limits              *ProviderRequestLimits       `protobuf:"bytes,16,opt,name=limits,proto3" json:"limits,omitempty"`
 	OutputSchemaJson    *string                      `protobuf:"bytes,17,opt,name=output_schema_json,json=outputSchemaJson,proto3,oneof" json:"output_schema_json,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	RuntimeProcessId    string                       `protobuf:"bytes,18,opt,name=runtime_process_id,json=runtimeProcessId,proto3" json:"runtime_process_id,omitempty"`
+	// Version 2 is mandatory; there is no fragment-wire fallback.
+	OutputContractVersion    uint32                   `protobuf:"varint,19,opt,name=output_contract_version,json=outputContractVersion,proto3" json:"output_contract_version,omitempty"`
+	ModelRequestStartEventId string                   `protobuf:"bytes,20,opt,name=model_request_start_event_id,json=modelRequestStartEventId,proto3" json:"model_request_start_event_id,omitempty"`
+	ThreadRole               ProviderThreadRole       `protobuf:"varint,21,opt,name=thread_role,json=threadRole,proto3,enum=tetral.provider_gateway.v1.ProviderThreadRole" json:"thread_role,omitempty"`
+	ThreadVisibility         ProviderThreadVisibility `protobuf:"varint,22,opt,name=thread_visibility,json=threadVisibility,proto3,enum=tetral.provider_gateway.v1.ProviderThreadVisibility" json:"thread_visibility,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *ProviderRequest) Reset() {
@@ -827,6 +917,41 @@ func (x *ProviderRequest) GetOutputSchemaJson() string {
 		return *x.OutputSchemaJson
 	}
 	return ""
+}
+
+func (x *ProviderRequest) GetRuntimeProcessId() string {
+	if x != nil {
+		return x.RuntimeProcessId
+	}
+	return ""
+}
+
+func (x *ProviderRequest) GetOutputContractVersion() uint32 {
+	if x != nil {
+		return x.OutputContractVersion
+	}
+	return 0
+}
+
+func (x *ProviderRequest) GetModelRequestStartEventId() string {
+	if x != nil {
+		return x.ModelRequestStartEventId
+	}
+	return ""
+}
+
+func (x *ProviderRequest) GetThreadRole() ProviderThreadRole {
+	if x != nil {
+		return x.ThreadRole
+	}
+	return ProviderThreadRole_PROVIDER_THREAD_ROLE_UNSPECIFIED
+}
+
+func (x *ProviderRequest) GetThreadVisibility() ProviderThreadVisibility {
+	if x != nil {
+		return x.ThreadVisibility
+	}
+	return ProviderThreadVisibility_PROVIDER_THREAD_VISIBILITY_UNSPECIFIED
 }
 
 type ModelRef struct {
@@ -1968,12 +2093,14 @@ func (x *ProviderRequestLimits) GetTimeoutMs() int32 {
 type ProviderStreamEvent struct {
 	state protoimpl.MessageState  `protogen:"open.v1"`
 	Type  ProviderStreamEventType `protobuf:"varint,3,opt,name=type,proto3,enum=tetral.provider_gateway.v1.ProviderStreamEventType" json:"type,omitempty"`
+	// Consecutive from one across every frame of this RPC, including controls.
+	FrameSequence uint32 `protobuf:"varint,11,opt,name=frame_sequence,json=frameSequence,proto3" json:"frame_sequence,omitempty"`
 	// Types that are valid to be assigned to Payload:
 	//
-	//	*ProviderStreamEvent_Text
-	//	*ProviderStreamEvent_Reasoning
-	//	*ProviderStreamEvent_ToolInput
-	//	*ProviderStreamEvent_ToolCall
+	//	*ProviderStreamEvent_ThinkingStarted
+	//	*ProviderStreamEvent_TextComplete
+	//	*ProviderStreamEvent_ReasoningComplete
+	//	*ProviderStreamEvent_ToolCallComplete
 	//	*ProviderStreamEvent_Finish
 	//	*ProviderStreamEvent_ProviderError
 	//	*ProviderStreamEvent_AttachmentRejections
@@ -2019,6 +2146,13 @@ func (x *ProviderStreamEvent) GetType() ProviderStreamEventType {
 	return ProviderStreamEventType_PROVIDER_STREAM_EVENT_TYPE_UNSPECIFIED
 }
 
+func (x *ProviderStreamEvent) GetFrameSequence() uint32 {
+	if x != nil {
+		return x.FrameSequence
+	}
+	return 0
+}
+
 func (x *ProviderStreamEvent) GetPayload() isProviderStreamEvent_Payload {
 	if x != nil {
 		return x.Payload
@@ -2026,37 +2160,37 @@ func (x *ProviderStreamEvent) GetPayload() isProviderStreamEvent_Payload {
 	return nil
 }
 
-func (x *ProviderStreamEvent) GetText() *ProviderTextPayload {
+func (x *ProviderStreamEvent) GetThinkingStarted() *ProviderThinkingStartedPayload {
 	if x != nil {
-		if x, ok := x.Payload.(*ProviderStreamEvent_Text); ok {
-			return x.Text
+		if x, ok := x.Payload.(*ProviderStreamEvent_ThinkingStarted); ok {
+			return x.ThinkingStarted
 		}
 	}
 	return nil
 }
 
-func (x *ProviderStreamEvent) GetReasoning() *ProviderReasoningPayload {
+func (x *ProviderStreamEvent) GetTextComplete() *ProviderTextCompletePayload {
 	if x != nil {
-		if x, ok := x.Payload.(*ProviderStreamEvent_Reasoning); ok {
-			return x.Reasoning
+		if x, ok := x.Payload.(*ProviderStreamEvent_TextComplete); ok {
+			return x.TextComplete
 		}
 	}
 	return nil
 }
 
-func (x *ProviderStreamEvent) GetToolInput() *ProviderToolInputPayload {
+func (x *ProviderStreamEvent) GetReasoningComplete() *ProviderReasoningCompletePayload {
 	if x != nil {
-		if x, ok := x.Payload.(*ProviderStreamEvent_ToolInput); ok {
-			return x.ToolInput
+		if x, ok := x.Payload.(*ProviderStreamEvent_ReasoningComplete); ok {
+			return x.ReasoningComplete
 		}
 	}
 	return nil
 }
 
-func (x *ProviderStreamEvent) GetToolCall() *ProviderToolCallPayload {
+func (x *ProviderStreamEvent) GetToolCallComplete() *ProviderToolCallCompletePayload {
 	if x != nil {
-		if x, ok := x.Payload.(*ProviderStreamEvent_ToolCall); ok {
-			return x.ToolCall
+		if x, ok := x.Payload.(*ProviderStreamEvent_ToolCallComplete); ok {
+			return x.ToolCallComplete
 		}
 	}
 	return nil
@@ -2093,20 +2227,20 @@ type isProviderStreamEvent_Payload interface {
 	isProviderStreamEvent_Payload()
 }
 
-type ProviderStreamEvent_Text struct {
-	Text *ProviderTextPayload `protobuf:"bytes,4,opt,name=text,proto3,oneof"`
+type ProviderStreamEvent_ThinkingStarted struct {
+	ThinkingStarted *ProviderThinkingStartedPayload `protobuf:"bytes,12,opt,name=thinking_started,json=thinkingStarted,proto3,oneof"`
 }
 
-type ProviderStreamEvent_Reasoning struct {
-	Reasoning *ProviderReasoningPayload `protobuf:"bytes,5,opt,name=reasoning,proto3,oneof"`
+type ProviderStreamEvent_TextComplete struct {
+	TextComplete *ProviderTextCompletePayload `protobuf:"bytes,13,opt,name=text_complete,json=textComplete,proto3,oneof"`
 }
 
-type ProviderStreamEvent_ToolInput struct {
-	ToolInput *ProviderToolInputPayload `protobuf:"bytes,6,opt,name=tool_input,json=toolInput,proto3,oneof"`
+type ProviderStreamEvent_ReasoningComplete struct {
+	ReasoningComplete *ProviderReasoningCompletePayload `protobuf:"bytes,14,opt,name=reasoning_complete,json=reasoningComplete,proto3,oneof"`
 }
 
-type ProviderStreamEvent_ToolCall struct {
-	ToolCall *ProviderToolCallPayload `protobuf:"bytes,7,opt,name=tool_call,json=toolCall,proto3,oneof"`
+type ProviderStreamEvent_ToolCallComplete struct {
+	ToolCallComplete *ProviderToolCallCompletePayload `protobuf:"bytes,15,opt,name=tool_call_complete,json=toolCallComplete,proto3,oneof"`
 }
 
 type ProviderStreamEvent_Finish struct {
@@ -2121,13 +2255,13 @@ type ProviderStreamEvent_AttachmentRejections struct {
 	AttachmentRejections *ProviderAttachmentRejectionsPayload `protobuf:"bytes,10,opt,name=attachment_rejections,json=attachmentRejections,proto3,oneof"`
 }
 
-func (*ProviderStreamEvent_Text) isProviderStreamEvent_Payload() {}
+func (*ProviderStreamEvent_ThinkingStarted) isProviderStreamEvent_Payload() {}
 
-func (*ProviderStreamEvent_Reasoning) isProviderStreamEvent_Payload() {}
+func (*ProviderStreamEvent_TextComplete) isProviderStreamEvent_Payload() {}
 
-func (*ProviderStreamEvent_ToolInput) isProviderStreamEvent_Payload() {}
+func (*ProviderStreamEvent_ReasoningComplete) isProviderStreamEvent_Payload() {}
 
-func (*ProviderStreamEvent_ToolCall) isProviderStreamEvent_Payload() {}
+func (*ProviderStreamEvent_ToolCallComplete) isProviderStreamEvent_Payload() {}
 
 func (*ProviderStreamEvent_Finish) isProviderStreamEvent_Payload() {}
 
@@ -2269,29 +2403,29 @@ func (x *ProviderAttachmentRejectionsPayload) GetRejections() []*ProviderAttachm
 	return nil
 }
 
-type ProviderTextPayload struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Text          string                 `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
-	MetadataJson  string                 `protobuf:"bytes,3,opt,name=metadata_json,json=metadataJson,proto3" json:"metadata_json,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+// Public progress control: no reasoning body or provider metadata.
+type ProviderThinkingStartedPayload struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	ProviderPartId string                 `protobuf:"bytes,1,opt,name=provider_part_id,json=providerPartId,proto3" json:"provider_part_id,omitempty"`
+	EventId        string                 `protobuf:"bytes,2,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
-func (x *ProviderTextPayload) Reset() {
-	*x = ProviderTextPayload{}
+func (x *ProviderThinkingStartedPayload) Reset() {
+	*x = ProviderThinkingStartedPayload{}
 	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ProviderTextPayload) String() string {
+func (x *ProviderThinkingStartedPayload) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ProviderTextPayload) ProtoMessage() {}
+func (*ProviderThinkingStartedPayload) ProtoMessage() {}
 
-func (x *ProviderTextPayload) ProtoReflect() protoreflect.Message {
+func (x *ProviderThinkingStartedPayload) ProtoReflect() protoreflect.Message {
 	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -2303,55 +2437,48 @@ func (x *ProviderTextPayload) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ProviderTextPayload.ProtoReflect.Descriptor instead.
-func (*ProviderTextPayload) Descriptor() ([]byte, []int) {
+// Deprecated: Use ProviderThinkingStartedPayload.ProtoReflect.Descriptor instead.
+func (*ProviderThinkingStartedPayload) Descriptor() ([]byte, []int) {
 	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{22}
 }
 
-func (x *ProviderTextPayload) GetId() string {
+func (x *ProviderThinkingStartedPayload) GetProviderPartId() string {
 	if x != nil {
-		return x.Id
+		return x.ProviderPartId
 	}
 	return ""
 }
 
-func (x *ProviderTextPayload) GetText() string {
+func (x *ProviderThinkingStartedPayload) GetEventId() string {
 	if x != nil {
-		return x.Text
+		return x.EventId
 	}
 	return ""
 }
 
-func (x *ProviderTextPayload) GetMetadataJson() string {
-	if x != nil {
-		return x.MetadataJson
-	}
-	return ""
+type ProviderTextCompletePayload struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	ProviderPartId string                 `protobuf:"bytes,1,opt,name=provider_part_id,json=providerPartId,proto3" json:"provider_part_id,omitempty"`
+	EventId        string                 `protobuf:"bytes,2,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	Text           string                 `protobuf:"bytes,3,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
-type ProviderReasoningPayload struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Text          string                 `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
-	MetadataJson  string                 `protobuf:"bytes,3,opt,name=metadata_json,json=metadataJson,proto3" json:"metadata_json,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ProviderReasoningPayload) Reset() {
-	*x = ProviderReasoningPayload{}
+func (x *ProviderTextCompletePayload) Reset() {
+	*x = ProviderTextCompletePayload{}
 	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ProviderReasoningPayload) String() string {
+func (x *ProviderTextCompletePayload) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ProviderReasoningPayload) ProtoMessage() {}
+func (*ProviderTextCompletePayload) ProtoMessage() {}
 
-func (x *ProviderReasoningPayload) ProtoReflect() protoreflect.Message {
+func (x *ProviderTextCompletePayload) ProtoReflect() protoreflect.Message {
 	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -2363,56 +2490,56 @@ func (x *ProviderReasoningPayload) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ProviderReasoningPayload.ProtoReflect.Descriptor instead.
-func (*ProviderReasoningPayload) Descriptor() ([]byte, []int) {
+// Deprecated: Use ProviderTextCompletePayload.ProtoReflect.Descriptor instead.
+func (*ProviderTextCompletePayload) Descriptor() ([]byte, []int) {
 	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{23}
 }
 
-func (x *ProviderReasoningPayload) GetId() string {
+func (x *ProviderTextCompletePayload) GetProviderPartId() string {
 	if x != nil {
-		return x.Id
+		return x.ProviderPartId
 	}
 	return ""
 }
 
-func (x *ProviderReasoningPayload) GetText() string {
+func (x *ProviderTextCompletePayload) GetEventId() string {
+	if x != nil {
+		return x.EventId
+	}
+	return ""
+}
+
+func (x *ProviderTextCompletePayload) GetText() string {
 	if x != nil {
 		return x.Text
 	}
 	return ""
 }
 
-func (x *ProviderReasoningPayload) GetMetadataJson() string {
-	if x != nil {
-		return x.MetadataJson
-	}
-	return ""
+type ProviderReasoningCompletePayload struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	ProviderPartId       string                 `protobuf:"bytes,1,opt,name=provider_part_id,json=providerPartId,proto3" json:"provider_part_id,omitempty"`
+	ThinkingEventId      string                 `protobuf:"bytes,2,opt,name=thinking_event_id,json=thinkingEventId,proto3" json:"thinking_event_id,omitempty"`
+	Text                 string                 `protobuf:"bytes,3,opt,name=text,proto3" json:"text,omitempty"`
+	ProviderMetadataJson string                 `protobuf:"bytes,4,opt,name=provider_metadata_json,json=providerMetadataJson,proto3" json:"provider_metadata_json,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
-type ProviderToolInputPayload struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	Text          string                 `protobuf:"bytes,3,opt,name=text,proto3" json:"text,omitempty"`
-	MetadataJson  string                 `protobuf:"bytes,4,opt,name=metadata_json,json=metadataJson,proto3" json:"metadata_json,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ProviderToolInputPayload) Reset() {
-	*x = ProviderToolInputPayload{}
+func (x *ProviderReasoningCompletePayload) Reset() {
+	*x = ProviderReasoningCompletePayload{}
 	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ProviderToolInputPayload) String() string {
+func (x *ProviderReasoningCompletePayload) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ProviderToolInputPayload) ProtoMessage() {}
+func (*ProviderReasoningCompletePayload) ProtoMessage() {}
 
-func (x *ProviderToolInputPayload) ProtoReflect() protoreflect.Message {
+func (x *ProviderReasoningCompletePayload) ProtoReflect() protoreflect.Message {
 	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -2424,63 +2551,63 @@ func (x *ProviderToolInputPayload) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ProviderToolInputPayload.ProtoReflect.Descriptor instead.
-func (*ProviderToolInputPayload) Descriptor() ([]byte, []int) {
+// Deprecated: Use ProviderReasoningCompletePayload.ProtoReflect.Descriptor instead.
+func (*ProviderReasoningCompletePayload) Descriptor() ([]byte, []int) {
 	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{24}
 }
 
-func (x *ProviderToolInputPayload) GetId() string {
+func (x *ProviderReasoningCompletePayload) GetProviderPartId() string {
 	if x != nil {
-		return x.Id
+		return x.ProviderPartId
 	}
 	return ""
 }
 
-func (x *ProviderToolInputPayload) GetName() string {
+func (x *ProviderReasoningCompletePayload) GetThinkingEventId() string {
 	if x != nil {
-		return x.Name
+		return x.ThinkingEventId
 	}
 	return ""
 }
 
-func (x *ProviderToolInputPayload) GetText() string {
+func (x *ProviderReasoningCompletePayload) GetText() string {
 	if x != nil {
 		return x.Text
 	}
 	return ""
 }
 
-func (x *ProviderToolInputPayload) GetMetadataJson() string {
+func (x *ProviderReasoningCompletePayload) GetProviderMetadataJson() string {
 	if x != nil {
-		return x.MetadataJson
+		return x.ProviderMetadataJson
 	}
 	return ""
 }
 
-type ProviderToolCallPayload struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	InputJson     string                 `protobuf:"bytes,3,opt,name=input_json,json=inputJson,proto3" json:"input_json,omitempty"`
-	MetadataJson  string                 `protobuf:"bytes,4,opt,name=metadata_json,json=metadataJson,proto3" json:"metadata_json,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+type ProviderToolCallCompletePayload struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	ModelToolCallId      string                 `protobuf:"bytes,1,opt,name=model_tool_call_id,json=modelToolCallId,proto3" json:"model_tool_call_id,omitempty"`
+	Name                 string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	InputJson            string                 `protobuf:"bytes,3,opt,name=input_json,json=inputJson,proto3" json:"input_json,omitempty"`
+	ProviderMetadataJson string                 `protobuf:"bytes,4,opt,name=provider_metadata_json,json=providerMetadataJson,proto3" json:"provider_metadata_json,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
-func (x *ProviderToolCallPayload) Reset() {
-	*x = ProviderToolCallPayload{}
+func (x *ProviderToolCallCompletePayload) Reset() {
+	*x = ProviderToolCallCompletePayload{}
 	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ProviderToolCallPayload) String() string {
+func (x *ProviderToolCallCompletePayload) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ProviderToolCallPayload) ProtoMessage() {}
+func (*ProviderToolCallCompletePayload) ProtoMessage() {}
 
-func (x *ProviderToolCallPayload) ProtoReflect() protoreflect.Message {
+func (x *ProviderToolCallCompletePayload) ProtoReflect() protoreflect.Message {
 	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -2492,35 +2619,35 @@ func (x *ProviderToolCallPayload) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ProviderToolCallPayload.ProtoReflect.Descriptor instead.
-func (*ProviderToolCallPayload) Descriptor() ([]byte, []int) {
+// Deprecated: Use ProviderToolCallCompletePayload.ProtoReflect.Descriptor instead.
+func (*ProviderToolCallCompletePayload) Descriptor() ([]byte, []int) {
 	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{25}
 }
 
-func (x *ProviderToolCallPayload) GetId() string {
+func (x *ProviderToolCallCompletePayload) GetModelToolCallId() string {
 	if x != nil {
-		return x.Id
+		return x.ModelToolCallId
 	}
 	return ""
 }
 
-func (x *ProviderToolCallPayload) GetName() string {
+func (x *ProviderToolCallCompletePayload) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *ProviderToolCallPayload) GetInputJson() string {
+func (x *ProviderToolCallCompletePayload) GetInputJson() string {
 	if x != nil {
 		return x.InputJson
 	}
 	return ""
 }
 
-func (x *ProviderToolCallPayload) GetMetadataJson() string {
+func (x *ProviderToolCallCompletePayload) GetProviderMetadataJson() string {
 	if x != nil {
-		return x.MetadataJson
+		return x.ProviderMetadataJson
 	}
 	return ""
 }
@@ -2855,6 +2982,7 @@ type RunWebRequest struct {
 	BindingId           string                 `protobuf:"bytes,6,opt,name=binding_id,json=bindingId,proto3" json:"binding_id,omitempty"`
 	BindingGeneration   int64                  `protobuf:"varint,7,opt,name=binding_generation,json=bindingGeneration,proto3" json:"binding_generation,omitempty"`
 	RuntimeBindingToken string                 `protobuf:"bytes,8,opt,name=runtime_binding_token,json=runtimeBindingToken,proto3" json:"runtime_binding_token,omitempty"`
+	RuntimeProcessId    string                 `protobuf:"bytes,9,opt,name=runtime_process_id,json=runtimeProcessId,proto3" json:"runtime_process_id,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -2941,6 +3069,13 @@ func (x *RunWebRequest) GetBindingGeneration() int64 {
 func (x *RunWebRequest) GetRuntimeBindingToken() string {
 	if x != nil {
 		return x.RuntimeBindingToken
+	}
+	return ""
+}
+
+func (x *RunWebRequest) GetRuntimeProcessId() string {
+	if x != nil {
+		return x.RuntimeProcessId
 	}
 	return ""
 }
@@ -3446,6 +3581,7 @@ type RunMcpToolRequest struct {
 	BindingId           string                 `protobuf:"bytes,9,opt,name=binding_id,json=bindingId,proto3" json:"binding_id,omitempty"`
 	BindingGeneration   int64                  `protobuf:"varint,10,opt,name=binding_generation,json=bindingGeneration,proto3" json:"binding_generation,omitempty"`
 	RuntimeBindingToken string                 `protobuf:"bytes,11,opt,name=runtime_binding_token,json=runtimeBindingToken,proto3" json:"runtime_binding_token,omitempty"`
+	RuntimeProcessId    string                 `protobuf:"bytes,12,opt,name=runtime_process_id,json=runtimeProcessId,proto3" json:"runtime_process_id,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -3525,6 +3661,13 @@ func (x *RunMcpToolRequest) GetBindingGeneration() int64 {
 func (x *RunMcpToolRequest) GetRuntimeBindingToken() string {
 	if x != nil {
 		return x.RuntimeBindingToken
+	}
+	return ""
+}
+
+func (x *RunMcpToolRequest) GetRuntimeProcessId() string {
+	if x != nil {
+		return x.RuntimeProcessId
 	}
 	return ""
 }
@@ -3909,7 +4052,8 @@ var File_tetral_provider_gateway_v1_provider_gateway_proto protoreflect.FileDesc
 
 const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\n" +
-	"1tetral/provider_gateway/v1/provider_gateway.proto\x12\x1atetral.provider_gateway.v1\"\xb8\a\n" +
+	"1tetral/provider_gateway/v1/provider_gateway.proto\x12\x1atetral.provider_gateway.v1\"\x92\n" +
+	"\n" +
 	"\x0fProviderRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12(\n" +
@@ -3930,7 +4074,13 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\x05tools\x18\x0e \x03(\v21.tetral.provider_gateway.v1.RuntimeToolDefinitionR\x05tools\x12W\n" +
 	"\vattachments\x18\x0f \x03(\v25.tetral.provider_gateway.v1.ProviderRequestAttachmentR\vattachments\x12I\n" +
 	"\x06limits\x18\x10 \x01(\v21.tetral.provider_gateway.v1.ProviderRequestLimitsR\x06limits\x121\n" +
-	"\x12output_schema_json\x18\x11 \x01(\tH\x00R\x10outputSchemaJson\x88\x01\x01B\x15\n" +
+	"\x12output_schema_json\x18\x11 \x01(\tH\x00R\x10outputSchemaJson\x88\x01\x01\x12,\n" +
+	"\x12runtime_process_id\x18\x12 \x01(\tR\x10runtimeProcessId\x126\n" +
+	"\x17output_contract_version\x18\x13 \x01(\rR\x15outputContractVersion\x12>\n" +
+	"\x1cmodel_request_start_event_id\x18\x14 \x01(\tR\x18modelRequestStartEventId\x12O\n" +
+	"\vthread_role\x18\x15 \x01(\x0e2..tetral.provider_gateway.v1.ProviderThreadRoleR\n" +
+	"threadRole\x12a\n" +
+	"\x11thread_visibility\x18\x16 \x01(\x0e24.tetral.provider_gateway.v1.ProviderThreadVisibilityR\x10threadVisibilityB\x15\n" +
 	"\x13_output_schema_jsonJ\x04\b\a\x10\bR\x10parent_thread_id\"`\n" +
 	"\bModelRef\x12\x1f\n" +
 	"\vprovider_id\x18\x01 \x01(\tR\n" +
@@ -4007,20 +4157,21 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\x15ProviderRequestLimits\x12*\n" +
 	"\x11max_output_tokens\x18\x01 \x01(\x05R\x0fmaxOutputTokens\x12\x1d\n" +
 	"\n" +
-	"timeout_ms\x18\x02 \x01(\x05R\ttimeoutMs\"\xfb\x05\n" +
+	"timeout_ms\x18\x02 \x01(\x05R\ttimeoutMs\"\xad\a\n" +
 	"\x13ProviderStreamEvent\x12G\n" +
-	"\x04type\x18\x03 \x01(\x0e23.tetral.provider_gateway.v1.ProviderStreamEventTypeR\x04type\x12E\n" +
-	"\x04text\x18\x04 \x01(\v2/.tetral.provider_gateway.v1.ProviderTextPayloadH\x00R\x04text\x12T\n" +
-	"\treasoning\x18\x05 \x01(\v24.tetral.provider_gateway.v1.ProviderReasoningPayloadH\x00R\treasoning\x12U\n" +
-	"\n" +
-	"tool_input\x18\x06 \x01(\v24.tetral.provider_gateway.v1.ProviderToolInputPayloadH\x00R\ttoolInput\x12R\n" +
-	"\ttool_call\x18\a \x01(\v23.tetral.provider_gateway.v1.ProviderToolCallPayloadH\x00R\btoolCall\x12K\n" +
+	"\x04type\x18\x03 \x01(\x0e23.tetral.provider_gateway.v1.ProviderStreamEventTypeR\x04type\x12%\n" +
+	"\x0eframe_sequence\x18\v \x01(\rR\rframeSequence\x12g\n" +
+	"\x10thinking_started\x18\f \x01(\v2:.tetral.provider_gateway.v1.ProviderThinkingStartedPayloadH\x00R\x0fthinkingStarted\x12^\n" +
+	"\rtext_complete\x18\r \x01(\v27.tetral.provider_gateway.v1.ProviderTextCompletePayloadH\x00R\ftextComplete\x12m\n" +
+	"\x12reasoning_complete\x18\x0e \x01(\v2<.tetral.provider_gateway.v1.ProviderReasoningCompletePayloadH\x00R\x11reasoningComplete\x12k\n" +
+	"\x12tool_call_complete\x18\x0f \x01(\v2;.tetral.provider_gateway.v1.ProviderToolCallCompletePayloadH\x00R\x10toolCallComplete\x12K\n" +
 	"\x06finish\x18\b \x01(\v21.tetral.provider_gateway.v1.ProviderFinishPayloadH\x00R\x06finish\x12Y\n" +
 	"\x0eprovider_error\x18\t \x01(\v20.tetral.provider_gateway.v1.ProviderErrorPayloadH\x00R\rproviderError\x12v\n" +
 	"\x15attachment_rejections\x18\n" +
 	" \x01(\v2?.tetral.provider_gateway.v1.ProviderAttachmentRejectionsPayloadH\x00R\x14attachmentRejectionsB\t\n" +
-	"\apayloadJ\x04\b\x01\x10\x02J\x04\b\x02\x10\x03R\n" +
-	"request_idR\x10model_request_id\"\x98\x02\n" +
+	"\apayloadJ\x04\b\x01\x10\x02J\x04\b\x02\x10\x03J\x04\b\x04\x10\bR\n" +
+	"request_idR\x10model_request_idR\x04textR\treasoningR\n" +
+	"tool_inputR\ttool_call\"\x98\x02\n" +
 	"\x1bProviderAttachmentRejection\x12:\n" +
 	"\x18transient_attachment_ref\x18\x01 \x01(\tH\x00R\x16transientAttachmentRef\x12\\\n" +
 	"\vfile_backed\x18\x02 \x01(\v29.tetral.provider_gateway.v1.ProviderRequestFileAttachmentH\x00R\n" +
@@ -4030,26 +4181,25 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"#ProviderAttachmentRejectionsPayload\x12W\n" +
 	"\n" +
 	"rejections\x18\x01 \x03(\v27.tetral.provider_gateway.v1.ProviderAttachmentRejectionR\n" +
-	"rejections\"^\n" +
-	"\x13ProviderTextPayload\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
-	"\x04text\x18\x02 \x01(\tR\x04text\x12#\n" +
-	"\rmetadata_json\x18\x03 \x01(\tR\fmetadataJson\"c\n" +
-	"\x18ProviderReasoningPayload\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
-	"\x04text\x18\x02 \x01(\tR\x04text\x12#\n" +
-	"\rmetadata_json\x18\x03 \x01(\tR\fmetadataJson\"w\n" +
-	"\x18ProviderToolInputPayload\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
-	"\x04text\x18\x03 \x01(\tR\x04text\x12#\n" +
-	"\rmetadata_json\x18\x04 \x01(\tR\fmetadataJson\"\x81\x01\n" +
-	"\x17ProviderToolCallPayload\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"rejections\"e\n" +
+	"\x1eProviderThinkingStartedPayload\x12(\n" +
+	"\x10provider_part_id\x18\x01 \x01(\tR\x0eproviderPartId\x12\x19\n" +
+	"\bevent_id\x18\x02 \x01(\tR\aeventId\"v\n" +
+	"\x1bProviderTextCompletePayload\x12(\n" +
+	"\x10provider_part_id\x18\x01 \x01(\tR\x0eproviderPartId\x12\x19\n" +
+	"\bevent_id\x18\x02 \x01(\tR\aeventId\x12\x12\n" +
+	"\x04text\x18\x03 \x01(\tR\x04text\"\xc2\x01\n" +
+	" ProviderReasoningCompletePayload\x12(\n" +
+	"\x10provider_part_id\x18\x01 \x01(\tR\x0eproviderPartId\x12*\n" +
+	"\x11thinking_event_id\x18\x02 \x01(\tR\x0fthinkingEventId\x12\x12\n" +
+	"\x04text\x18\x03 \x01(\tR\x04text\x124\n" +
+	"\x16provider_metadata_json\x18\x04 \x01(\tR\x14providerMetadataJson\"\xb7\x01\n" +
+	"\x1fProviderToolCallCompletePayload\x12+\n" +
+	"\x12model_tool_call_id\x18\x01 \x01(\tR\x0fmodelToolCallId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1d\n" +
 	"\n" +
-	"input_json\x18\x03 \x01(\tR\tinputJson\x12#\n" +
-	"\rmetadata_json\x18\x04 \x01(\tR\fmetadataJson\"\x95\x04\n" +
+	"input_json\x18\x03 \x01(\tR\tinputJson\x124\n" +
+	"\x16provider_metadata_json\x18\x04 \x01(\tR\x14providerMetadataJson\"\x95\x04\n" +
 	"\fRequestUsage\x12,\n" +
 	"\x12input_total_tokens\x18\x01 \x01(\x03R\x10inputTotalTokens\x122\n" +
 	"\x15input_uncached_tokens\x18\x02 \x01(\x03R\x13inputUncachedTokens\x12:\n" +
@@ -4084,7 +4234,7 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\x0eretry_after_ms\x18\x06 \x01(\x05R\fretryAfterMs\"|\n" +
 	"\x14ProviderErrorPayload\x12?\n" +
 	"\x05error\x18\x01 \x01(\v2).tetral.provider_gateway.v1.ProviderErrorR\x05error\x12#\n" +
-	"\rmetadata_json\x18\x02 \x01(\tR\fmetadataJson\"\xea\x02\n" +
+	"\rmetadata_json\x18\x02 \x01(\tR\fmetadataJson\"\x98\x03\n" +
 	"\rRunWebRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1d\n" +
 	"\n" +
@@ -4095,7 +4245,8 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\n" +
 	"binding_id\x18\x06 \x01(\tR\tbindingId\x12-\n" +
 	"\x12binding_generation\x18\a \x01(\x03R\x11bindingGeneration\x122\n" +
-	"\x15runtime_binding_token\x18\b \x01(\tR\x13runtimeBindingToken\"\x84\x03\n" +
+	"\x15runtime_binding_token\x18\b \x01(\tR\x13runtimeBindingToken\x12,\n" +
+	"\x12runtime_process_id\x18\t \x01(\tR\x10runtimeProcessId\"\x84\x03\n" +
 	"\x0eRunWebResponse\x12@\n" +
 	"\x06status\x18\x01 \x01(\x0e2(.tetral.provider_gateway.v1.RunWebStatusR\x06status\x12\x1f\n" +
 	"\vresult_text\x18\x02 \x01(\tR\n" +
@@ -4147,7 +4298,7 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\x06_titleB\r\n" +
 	"\v_line_startB\v\n" +
 	"\t_line_endB\x0e\n" +
-	"\f_total_lines\"\xfa\x02\n" +
+	"\f_total_lines\"\xa8\x03\n" +
 	"\x11RunMcpToolRequest\x12!\n" +
 	"\fworkspace_id\x18\x02 \x01(\tR\vworkspaceId\x12\x1d\n" +
 	"\n" +
@@ -4158,7 +4309,8 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"binding_id\x18\t \x01(\tR\tbindingId\x12-\n" +
 	"\x12binding_generation\x18\n" +
 	" \x01(\x03R\x11bindingGeneration\x122\n" +
-	"\x15runtime_binding_token\x18\v \x01(\tR\x13runtimeBindingTokenJ\x04\b\x01\x10\x02J\x04\b\x06\x10\aJ\x04\b\a\x10\bJ\x04\b\b\x10\tR\n" +
+	"\x15runtime_binding_token\x18\v \x01(\tR\x13runtimeBindingToken\x12,\n" +
+	"\x12runtime_process_id\x18\f \x01(\tR\x10runtimeProcessIdJ\x04\b\x01\x10\x02J\x04\b\x06\x10\aJ\x04\b\a\x10\bJ\x04\b\b\x10\tR\n" +
 	"request_idR\x0fmcp_server_nameR\ttool_nameR\n" +
 	"input_json\"\xab\x03\n" +
 	"\x12RunMcpToolResponse\x12D\n" +
@@ -4215,23 +4367,26 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\x13ProviderContextRole\x12%\n" +
 	"!PROVIDER_CONTEXT_ROLE_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aPROVIDER_CONTEXT_ROLE_USER\x10\x01\x12#\n" +
-	"\x1fPROVIDER_CONTEXT_ROLE_ASSISTANT\x10\x02*\x99\x05\n" +
+	"\x1fPROVIDER_CONTEXT_ROLE_ASSISTANT\x10\x02*\xbc\x06\n" +
 	"\x17ProviderStreamEventType\x12*\n" +
-	"&PROVIDER_STREAM_EVENT_TYPE_UNSPECIFIED\x10\x00\x12)\n" +
-	"%PROVIDER_STREAM_EVENT_TYPE_TEXT_START\x10\x01\x12)\n" +
-	"%PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA\x10\x02\x12'\n" +
-	"#PROVIDER_STREAM_EVENT_TYPE_TEXT_END\x10\x03\x12.\n" +
-	"*PROVIDER_STREAM_EVENT_TYPE_REASONING_START\x10\x04\x12.\n" +
-	"*PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA\x10\x05\x12,\n" +
-	"(PROVIDER_STREAM_EVENT_TYPE_REASONING_END\x10\x06\x12/\n" +
-	"+PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START\x10\a\x12/\n" +
-	"+PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA\x10\b\x12-\n" +
-	")PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END\x10\t\x12(\n" +
-	"$PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL\x10\n" +
-	"\x12%\n" +
+	"&PROVIDER_STREAM_EVENT_TYPE_UNSPECIFIED\x10\x00\x12%\n" +
 	"!PROVIDER_STREAM_EVENT_TYPE_FINISH\x10\v\x12-\n" +
 	")PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR\x10\f\x124\n" +
-	"0PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS\x10\r*\xc3\x01\n" +
+	"0PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS\x10\r\x12/\n" +
+	"+PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED\x10\x0e\x12,\n" +
+	"(PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE\x10\x0f\x121\n" +
+	"-PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE\x10\x10\x121\n" +
+	"-PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE\x10\x11\"\x04\b\x01\x10\n" +
+	"*%PROVIDER_STREAM_EVENT_TYPE_TEXT_START*%PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA*#PROVIDER_STREAM_EVENT_TYPE_TEXT_END**PROVIDER_STREAM_EVENT_TYPE_REASONING_START**PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA*(PROVIDER_STREAM_EVENT_TYPE_REASONING_END*+PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START*+PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA*)PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END*$PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL*\xa8\x01\n" +
+	"\x12ProviderThreadRole\x12$\n" +
+	" PROVIDER_THREAD_ROLE_UNSPECIFIED\x10\x00\x12\x1d\n" +
+	"\x19PROVIDER_THREAD_ROLE_MAIN\x10\x01\x12!\n" +
+	"\x1dPROVIDER_THREAD_ROLE_SUBAGENT\x10\x02\x12*\n" +
+	"&PROVIDER_THREAD_ROLE_APPROVAL_REVIEWER\x10\x03*\x96\x01\n" +
+	"\x18ProviderThreadVisibility\x12*\n" +
+	"&PROVIDER_THREAD_VISIBILITY_UNSPECIFIED\x10\x00\x12%\n" +
+	"!PROVIDER_THREAD_VISIBILITY_PUBLIC\x10\x01\x12'\n" +
+	"#PROVIDER_THREAD_VISIBILITY_INTERNAL\x10\x02*\xc3\x01\n" +
 	"!ProviderAttachmentRejectionReason\x124\n" +
 	"0PROVIDER_ATTACHMENT_REJECTION_REASON_UNSPECIFIED\x10\x00\x120\n" +
 	",PROVIDER_ATTACHMENT_REJECTION_REASON_DELETED\x10\x01\x126\n" +
@@ -4294,7 +4449,7 @@ func file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP() []byte
 	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescData
 }
 
-var file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes = make([]protoimpl.EnumInfo, 11)
+var file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes = make([]protoimpl.EnumInfo, 13)
 var file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 45)
 var file_tetral_provider_gateway_v1_provider_gateway_proto_goTypes = []any{
 	(ProviderRequestKind)(0),                    // 0: tetral.provider_gateway.v1.ProviderRequestKind
@@ -4302,121 +4457,125 @@ var file_tetral_provider_gateway_v1_provider_gateway_proto_goTypes = []any{
 	(SystemCacheHint)(0),                        // 2: tetral.provider_gateway.v1.SystemCacheHint
 	(ProviderContextRole)(0),                    // 3: tetral.provider_gateway.v1.ProviderContextRole
 	(ProviderStreamEventType)(0),                // 4: tetral.provider_gateway.v1.ProviderStreamEventType
-	(ProviderAttachmentRejectionReason)(0),      // 5: tetral.provider_gateway.v1.ProviderAttachmentRejectionReason
-	(ProviderFinishReason)(0),                   // 6: tetral.provider_gateway.v1.ProviderFinishReason
-	(RunWebStatus)(0),                           // 7: tetral.provider_gateway.v1.RunWebStatus
-	(RunMcpToolStatus)(0),                       // 8: tetral.provider_gateway.v1.RunMcpToolStatus
-	(McpErrorKind)(0),                           // 9: tetral.provider_gateway.v1.McpErrorKind
-	(McpRetryStatus)(0),                         // 10: tetral.provider_gateway.v1.McpRetryStatus
-	(*ProviderRequest)(nil),                     // 11: tetral.provider_gateway.v1.ProviderRequest
-	(*ModelRef)(nil),                            // 12: tetral.provider_gateway.v1.ModelRef
-	(*SystemSegment)(nil),                       // 13: tetral.provider_gateway.v1.SystemSegment
-	(*ProviderContextEntry)(nil),                // 14: tetral.provider_gateway.v1.ProviderContextEntry
-	(*ProviderContextItem)(nil),                 // 15: tetral.provider_gateway.v1.ProviderContextItem
-	(*ProviderContextText)(nil),                 // 16: tetral.provider_gateway.v1.ProviderContextText
-	(*ProviderContextReasoning)(nil),            // 17: tetral.provider_gateway.v1.ProviderContextReasoning
-	(*ProviderToolCall)(nil),                    // 18: tetral.provider_gateway.v1.ProviderToolCall
-	(*ProviderToolResult)(nil),                  // 19: tetral.provider_gateway.v1.ProviderToolResult
-	(*ProviderCompletedToolResult)(nil),         // 20: tetral.provider_gateway.v1.ProviderCompletedToolResult
-	(*ProviderErrorToolResult)(nil),             // 21: tetral.provider_gateway.v1.ProviderErrorToolResult
-	(*ProviderCancelledToolResult)(nil),         // 22: tetral.provider_gateway.v1.ProviderCancelledToolResult
-	(*RuntimeToolDefinition)(nil),               // 23: tetral.provider_gateway.v1.RuntimeToolDefinition
-	(*RuntimeFunctionToolDefinition)(nil),       // 24: tetral.provider_gateway.v1.RuntimeFunctionToolDefinition
-	(*RuntimeFreeformToolDefinition)(nil),       // 25: tetral.provider_gateway.v1.RuntimeFreeformToolDefinition
-	(*ProviderRequestAttachment)(nil),           // 26: tetral.provider_gateway.v1.ProviderRequestAttachment
-	(*ProviderRequestTransientAttachment)(nil),  // 27: tetral.provider_gateway.v1.ProviderRequestTransientAttachment
-	(*ProviderRequestFileAttachment)(nil),       // 28: tetral.provider_gateway.v1.ProviderRequestFileAttachment
-	(*ProviderRequestLimits)(nil),               // 29: tetral.provider_gateway.v1.ProviderRequestLimits
-	(*ProviderStreamEvent)(nil),                 // 30: tetral.provider_gateway.v1.ProviderStreamEvent
-	(*ProviderAttachmentRejection)(nil),         // 31: tetral.provider_gateway.v1.ProviderAttachmentRejection
-	(*ProviderAttachmentRejectionsPayload)(nil), // 32: tetral.provider_gateway.v1.ProviderAttachmentRejectionsPayload
-	(*ProviderTextPayload)(nil),                 // 33: tetral.provider_gateway.v1.ProviderTextPayload
-	(*ProviderReasoningPayload)(nil),            // 34: tetral.provider_gateway.v1.ProviderReasoningPayload
-	(*ProviderToolInputPayload)(nil),            // 35: tetral.provider_gateway.v1.ProviderToolInputPayload
-	(*ProviderToolCallPayload)(nil),             // 36: tetral.provider_gateway.v1.ProviderToolCallPayload
-	(*RequestUsage)(nil),                        // 37: tetral.provider_gateway.v1.RequestUsage
-	(*ProviderFinishPayload)(nil),               // 38: tetral.provider_gateway.v1.ProviderFinishPayload
-	(*ProviderError)(nil),                       // 39: tetral.provider_gateway.v1.ProviderError
-	(*ProviderErrorPayload)(nil),                // 40: tetral.provider_gateway.v1.ProviderErrorPayload
-	(*RunWebRequest)(nil),                       // 41: tetral.provider_gateway.v1.RunWebRequest
-	(*RunWebResponse)(nil),                      // 42: tetral.provider_gateway.v1.RunWebResponse
-	(*WebUsage)(nil),                            // 43: tetral.provider_gateway.v1.WebUsage
-	(*WebToolInput)(nil),                        // 44: tetral.provider_gateway.v1.WebToolInput
-	(*WebSearchQuery)(nil),                      // 45: tetral.provider_gateway.v1.WebSearchQuery
-	(*WebOpenRequest)(nil),                      // 46: tetral.provider_gateway.v1.WebOpenRequest
-	(*WebFindRequest)(nil),                      // 47: tetral.provider_gateway.v1.WebFindRequest
-	(*WebRef)(nil),                              // 48: tetral.provider_gateway.v1.WebRef
-	(*RunMcpToolRequest)(nil),                   // 49: tetral.provider_gateway.v1.RunMcpToolRequest
-	(*RunMcpToolResponse)(nil),                  // 50: tetral.provider_gateway.v1.RunMcpToolResponse
-	(*McpAttachmentRef)(nil),                    // 51: tetral.provider_gateway.v1.McpAttachmentRef
-	(*ListMcpToolsRequest)(nil),                 // 52: tetral.provider_gateway.v1.ListMcpToolsRequest
-	(*ListMcpToolsResponse)(nil),                // 53: tetral.provider_gateway.v1.ListMcpToolsResponse
-	(*McpToolDefinition)(nil),                   // 54: tetral.provider_gateway.v1.McpToolDefinition
-	(*McpOmittedTool)(nil),                      // 55: tetral.provider_gateway.v1.McpOmittedTool
+	(ProviderThreadRole)(0),                     // 5: tetral.provider_gateway.v1.ProviderThreadRole
+	(ProviderThreadVisibility)(0),               // 6: tetral.provider_gateway.v1.ProviderThreadVisibility
+	(ProviderAttachmentRejectionReason)(0),      // 7: tetral.provider_gateway.v1.ProviderAttachmentRejectionReason
+	(ProviderFinishReason)(0),                   // 8: tetral.provider_gateway.v1.ProviderFinishReason
+	(RunWebStatus)(0),                           // 9: tetral.provider_gateway.v1.RunWebStatus
+	(RunMcpToolStatus)(0),                       // 10: tetral.provider_gateway.v1.RunMcpToolStatus
+	(McpErrorKind)(0),                           // 11: tetral.provider_gateway.v1.McpErrorKind
+	(McpRetryStatus)(0),                         // 12: tetral.provider_gateway.v1.McpRetryStatus
+	(*ProviderRequest)(nil),                     // 13: tetral.provider_gateway.v1.ProviderRequest
+	(*ModelRef)(nil),                            // 14: tetral.provider_gateway.v1.ModelRef
+	(*SystemSegment)(nil),                       // 15: tetral.provider_gateway.v1.SystemSegment
+	(*ProviderContextEntry)(nil),                // 16: tetral.provider_gateway.v1.ProviderContextEntry
+	(*ProviderContextItem)(nil),                 // 17: tetral.provider_gateway.v1.ProviderContextItem
+	(*ProviderContextText)(nil),                 // 18: tetral.provider_gateway.v1.ProviderContextText
+	(*ProviderContextReasoning)(nil),            // 19: tetral.provider_gateway.v1.ProviderContextReasoning
+	(*ProviderToolCall)(nil),                    // 20: tetral.provider_gateway.v1.ProviderToolCall
+	(*ProviderToolResult)(nil),                  // 21: tetral.provider_gateway.v1.ProviderToolResult
+	(*ProviderCompletedToolResult)(nil),         // 22: tetral.provider_gateway.v1.ProviderCompletedToolResult
+	(*ProviderErrorToolResult)(nil),             // 23: tetral.provider_gateway.v1.ProviderErrorToolResult
+	(*ProviderCancelledToolResult)(nil),         // 24: tetral.provider_gateway.v1.ProviderCancelledToolResult
+	(*RuntimeToolDefinition)(nil),               // 25: tetral.provider_gateway.v1.RuntimeToolDefinition
+	(*RuntimeFunctionToolDefinition)(nil),       // 26: tetral.provider_gateway.v1.RuntimeFunctionToolDefinition
+	(*RuntimeFreeformToolDefinition)(nil),       // 27: tetral.provider_gateway.v1.RuntimeFreeformToolDefinition
+	(*ProviderRequestAttachment)(nil),           // 28: tetral.provider_gateway.v1.ProviderRequestAttachment
+	(*ProviderRequestTransientAttachment)(nil),  // 29: tetral.provider_gateway.v1.ProviderRequestTransientAttachment
+	(*ProviderRequestFileAttachment)(nil),       // 30: tetral.provider_gateway.v1.ProviderRequestFileAttachment
+	(*ProviderRequestLimits)(nil),               // 31: tetral.provider_gateway.v1.ProviderRequestLimits
+	(*ProviderStreamEvent)(nil),                 // 32: tetral.provider_gateway.v1.ProviderStreamEvent
+	(*ProviderAttachmentRejection)(nil),         // 33: tetral.provider_gateway.v1.ProviderAttachmentRejection
+	(*ProviderAttachmentRejectionsPayload)(nil), // 34: tetral.provider_gateway.v1.ProviderAttachmentRejectionsPayload
+	(*ProviderThinkingStartedPayload)(nil),      // 35: tetral.provider_gateway.v1.ProviderThinkingStartedPayload
+	(*ProviderTextCompletePayload)(nil),         // 36: tetral.provider_gateway.v1.ProviderTextCompletePayload
+	(*ProviderReasoningCompletePayload)(nil),    // 37: tetral.provider_gateway.v1.ProviderReasoningCompletePayload
+	(*ProviderToolCallCompletePayload)(nil),     // 38: tetral.provider_gateway.v1.ProviderToolCallCompletePayload
+	(*RequestUsage)(nil),                        // 39: tetral.provider_gateway.v1.RequestUsage
+	(*ProviderFinishPayload)(nil),               // 40: tetral.provider_gateway.v1.ProviderFinishPayload
+	(*ProviderError)(nil),                       // 41: tetral.provider_gateway.v1.ProviderError
+	(*ProviderErrorPayload)(nil),                // 42: tetral.provider_gateway.v1.ProviderErrorPayload
+	(*RunWebRequest)(nil),                       // 43: tetral.provider_gateway.v1.RunWebRequest
+	(*RunWebResponse)(nil),                      // 44: tetral.provider_gateway.v1.RunWebResponse
+	(*WebUsage)(nil),                            // 45: tetral.provider_gateway.v1.WebUsage
+	(*WebToolInput)(nil),                        // 46: tetral.provider_gateway.v1.WebToolInput
+	(*WebSearchQuery)(nil),                      // 47: tetral.provider_gateway.v1.WebSearchQuery
+	(*WebOpenRequest)(nil),                      // 48: tetral.provider_gateway.v1.WebOpenRequest
+	(*WebFindRequest)(nil),                      // 49: tetral.provider_gateway.v1.WebFindRequest
+	(*WebRef)(nil),                              // 50: tetral.provider_gateway.v1.WebRef
+	(*RunMcpToolRequest)(nil),                   // 51: tetral.provider_gateway.v1.RunMcpToolRequest
+	(*RunMcpToolResponse)(nil),                  // 52: tetral.provider_gateway.v1.RunMcpToolResponse
+	(*McpAttachmentRef)(nil),                    // 53: tetral.provider_gateway.v1.McpAttachmentRef
+	(*ListMcpToolsRequest)(nil),                 // 54: tetral.provider_gateway.v1.ListMcpToolsRequest
+	(*ListMcpToolsResponse)(nil),                // 55: tetral.provider_gateway.v1.ListMcpToolsResponse
+	(*McpToolDefinition)(nil),                   // 56: tetral.provider_gateway.v1.McpToolDefinition
+	(*McpOmittedTool)(nil),                      // 57: tetral.provider_gateway.v1.McpOmittedTool
 }
 var file_tetral_provider_gateway_v1_provider_gateway_proto_depIdxs = []int32{
 	0,  // 0: tetral.provider_gateway.v1.ProviderRequest.request_kind:type_name -> tetral.provider_gateway.v1.ProviderRequestKind
-	12, // 1: tetral.provider_gateway.v1.ProviderRequest.model:type_name -> tetral.provider_gateway.v1.ModelRef
-	13, // 2: tetral.provider_gateway.v1.ProviderRequest.system:type_name -> tetral.provider_gateway.v1.SystemSegment
-	14, // 3: tetral.provider_gateway.v1.ProviderRequest.context:type_name -> tetral.provider_gateway.v1.ProviderContextEntry
-	23, // 4: tetral.provider_gateway.v1.ProviderRequest.tools:type_name -> tetral.provider_gateway.v1.RuntimeToolDefinition
-	26, // 5: tetral.provider_gateway.v1.ProviderRequest.attachments:type_name -> tetral.provider_gateway.v1.ProviderRequestAttachment
-	29, // 6: tetral.provider_gateway.v1.ProviderRequest.limits:type_name -> tetral.provider_gateway.v1.ProviderRequestLimits
-	1,  // 7: tetral.provider_gateway.v1.SystemSegment.kind:type_name -> tetral.provider_gateway.v1.SystemSegmentKind
-	2,  // 8: tetral.provider_gateway.v1.SystemSegment.cache_hint:type_name -> tetral.provider_gateway.v1.SystemCacheHint
-	3,  // 9: tetral.provider_gateway.v1.ProviderContextEntry.role:type_name -> tetral.provider_gateway.v1.ProviderContextRole
-	15, // 10: tetral.provider_gateway.v1.ProviderContextEntry.content:type_name -> tetral.provider_gateway.v1.ProviderContextItem
-	16, // 11: tetral.provider_gateway.v1.ProviderContextItem.text:type_name -> tetral.provider_gateway.v1.ProviderContextText
-	17, // 12: tetral.provider_gateway.v1.ProviderContextItem.reasoning:type_name -> tetral.provider_gateway.v1.ProviderContextReasoning
-	18, // 13: tetral.provider_gateway.v1.ProviderContextItem.tool_call:type_name -> tetral.provider_gateway.v1.ProviderToolCall
-	19, // 14: tetral.provider_gateway.v1.ProviderContextItem.tool_result:type_name -> tetral.provider_gateway.v1.ProviderToolResult
-	20, // 15: tetral.provider_gateway.v1.ProviderToolResult.completed:type_name -> tetral.provider_gateway.v1.ProviderCompletedToolResult
-	21, // 16: tetral.provider_gateway.v1.ProviderToolResult.error:type_name -> tetral.provider_gateway.v1.ProviderErrorToolResult
-	22, // 17: tetral.provider_gateway.v1.ProviderToolResult.cancelled:type_name -> tetral.provider_gateway.v1.ProviderCancelledToolResult
-	24, // 18: tetral.provider_gateway.v1.RuntimeToolDefinition.function:type_name -> tetral.provider_gateway.v1.RuntimeFunctionToolDefinition
-	25, // 19: tetral.provider_gateway.v1.RuntimeToolDefinition.freeform:type_name -> tetral.provider_gateway.v1.RuntimeFreeformToolDefinition
-	27, // 20: tetral.provider_gateway.v1.ProviderRequestAttachment.transient:type_name -> tetral.provider_gateway.v1.ProviderRequestTransientAttachment
-	28, // 21: tetral.provider_gateway.v1.ProviderRequestAttachment.file_backed:type_name -> tetral.provider_gateway.v1.ProviderRequestFileAttachment
-	4,  // 22: tetral.provider_gateway.v1.ProviderStreamEvent.type:type_name -> tetral.provider_gateway.v1.ProviderStreamEventType
-	33, // 23: tetral.provider_gateway.v1.ProviderStreamEvent.text:type_name -> tetral.provider_gateway.v1.ProviderTextPayload
-	34, // 24: tetral.provider_gateway.v1.ProviderStreamEvent.reasoning:type_name -> tetral.provider_gateway.v1.ProviderReasoningPayload
-	35, // 25: tetral.provider_gateway.v1.ProviderStreamEvent.tool_input:type_name -> tetral.provider_gateway.v1.ProviderToolInputPayload
-	36, // 26: tetral.provider_gateway.v1.ProviderStreamEvent.tool_call:type_name -> tetral.provider_gateway.v1.ProviderToolCallPayload
-	38, // 27: tetral.provider_gateway.v1.ProviderStreamEvent.finish:type_name -> tetral.provider_gateway.v1.ProviderFinishPayload
-	40, // 28: tetral.provider_gateway.v1.ProviderStreamEvent.provider_error:type_name -> tetral.provider_gateway.v1.ProviderErrorPayload
-	32, // 29: tetral.provider_gateway.v1.ProviderStreamEvent.attachment_rejections:type_name -> tetral.provider_gateway.v1.ProviderAttachmentRejectionsPayload
-	28, // 30: tetral.provider_gateway.v1.ProviderAttachmentRejection.file_backed:type_name -> tetral.provider_gateway.v1.ProviderRequestFileAttachment
-	5,  // 31: tetral.provider_gateway.v1.ProviderAttachmentRejection.reason:type_name -> tetral.provider_gateway.v1.ProviderAttachmentRejectionReason
-	31, // 32: tetral.provider_gateway.v1.ProviderAttachmentRejectionsPayload.rejections:type_name -> tetral.provider_gateway.v1.ProviderAttachmentRejection
-	6,  // 33: tetral.provider_gateway.v1.ProviderFinishPayload.reason:type_name -> tetral.provider_gateway.v1.ProviderFinishReason
-	37, // 34: tetral.provider_gateway.v1.ProviderFinishPayload.usage:type_name -> tetral.provider_gateway.v1.RequestUsage
-	39, // 35: tetral.provider_gateway.v1.ProviderErrorPayload.error:type_name -> tetral.provider_gateway.v1.ProviderError
-	44, // 36: tetral.provider_gateway.v1.RunWebRequest.input:type_name -> tetral.provider_gateway.v1.WebToolInput
-	7,  // 37: tetral.provider_gateway.v1.RunWebResponse.status:type_name -> tetral.provider_gateway.v1.RunWebStatus
-	48, // 38: tetral.provider_gateway.v1.RunWebResponse.refs:type_name -> tetral.provider_gateway.v1.WebRef
-	43, // 39: tetral.provider_gateway.v1.RunWebResponse.usage:type_name -> tetral.provider_gateway.v1.WebUsage
-	45, // 40: tetral.provider_gateway.v1.WebToolInput.search_query:type_name -> tetral.provider_gateway.v1.WebSearchQuery
-	46, // 41: tetral.provider_gateway.v1.WebToolInput.open:type_name -> tetral.provider_gateway.v1.WebOpenRequest
-	47, // 42: tetral.provider_gateway.v1.WebToolInput.find:type_name -> tetral.provider_gateway.v1.WebFindRequest
-	8,  // 43: tetral.provider_gateway.v1.RunMcpToolResponse.status:type_name -> tetral.provider_gateway.v1.RunMcpToolStatus
-	51, // 44: tetral.provider_gateway.v1.RunMcpToolResponse.attachments:type_name -> tetral.provider_gateway.v1.McpAttachmentRef
-	9,  // 45: tetral.provider_gateway.v1.RunMcpToolResponse.error_kind:type_name -> tetral.provider_gateway.v1.McpErrorKind
-	10, // 46: tetral.provider_gateway.v1.RunMcpToolResponse.retry_status:type_name -> tetral.provider_gateway.v1.McpRetryStatus
-	54, // 47: tetral.provider_gateway.v1.ListMcpToolsResponse.tools:type_name -> tetral.provider_gateway.v1.McpToolDefinition
-	55, // 48: tetral.provider_gateway.v1.ListMcpToolsResponse.omitted_tools:type_name -> tetral.provider_gateway.v1.McpOmittedTool
-	11, // 49: tetral.provider_gateway.v1.ProviderGatewayService.StreamProviderRequest:input_type -> tetral.provider_gateway.v1.ProviderRequest
-	41, // 50: tetral.provider_gateway.v1.ProviderGatewayService.RunWeb:input_type -> tetral.provider_gateway.v1.RunWebRequest
-	49, // 51: tetral.provider_gateway.v1.McpConnectorService.RunMcpTool:input_type -> tetral.provider_gateway.v1.RunMcpToolRequest
-	52, // 52: tetral.provider_gateway.v1.McpConnectorService.ListMcpTools:input_type -> tetral.provider_gateway.v1.ListMcpToolsRequest
-	30, // 53: tetral.provider_gateway.v1.ProviderGatewayService.StreamProviderRequest:output_type -> tetral.provider_gateway.v1.ProviderStreamEvent
-	42, // 54: tetral.provider_gateway.v1.ProviderGatewayService.RunWeb:output_type -> tetral.provider_gateway.v1.RunWebResponse
-	50, // 55: tetral.provider_gateway.v1.McpConnectorService.RunMcpTool:output_type -> tetral.provider_gateway.v1.RunMcpToolResponse
-	53, // 56: tetral.provider_gateway.v1.McpConnectorService.ListMcpTools:output_type -> tetral.provider_gateway.v1.ListMcpToolsResponse
-	53, // [53:57] is the sub-list for method output_type
-	49, // [49:53] is the sub-list for method input_type
-	49, // [49:49] is the sub-list for extension type_name
-	49, // [49:49] is the sub-list for extension extendee
-	0,  // [0:49] is the sub-list for field type_name
+	14, // 1: tetral.provider_gateway.v1.ProviderRequest.model:type_name -> tetral.provider_gateway.v1.ModelRef
+	15, // 2: tetral.provider_gateway.v1.ProviderRequest.system:type_name -> tetral.provider_gateway.v1.SystemSegment
+	16, // 3: tetral.provider_gateway.v1.ProviderRequest.context:type_name -> tetral.provider_gateway.v1.ProviderContextEntry
+	25, // 4: tetral.provider_gateway.v1.ProviderRequest.tools:type_name -> tetral.provider_gateway.v1.RuntimeToolDefinition
+	28, // 5: tetral.provider_gateway.v1.ProviderRequest.attachments:type_name -> tetral.provider_gateway.v1.ProviderRequestAttachment
+	31, // 6: tetral.provider_gateway.v1.ProviderRequest.limits:type_name -> tetral.provider_gateway.v1.ProviderRequestLimits
+	5,  // 7: tetral.provider_gateway.v1.ProviderRequest.thread_role:type_name -> tetral.provider_gateway.v1.ProviderThreadRole
+	6,  // 8: tetral.provider_gateway.v1.ProviderRequest.thread_visibility:type_name -> tetral.provider_gateway.v1.ProviderThreadVisibility
+	1,  // 9: tetral.provider_gateway.v1.SystemSegment.kind:type_name -> tetral.provider_gateway.v1.SystemSegmentKind
+	2,  // 10: tetral.provider_gateway.v1.SystemSegment.cache_hint:type_name -> tetral.provider_gateway.v1.SystemCacheHint
+	3,  // 11: tetral.provider_gateway.v1.ProviderContextEntry.role:type_name -> tetral.provider_gateway.v1.ProviderContextRole
+	17, // 12: tetral.provider_gateway.v1.ProviderContextEntry.content:type_name -> tetral.provider_gateway.v1.ProviderContextItem
+	18, // 13: tetral.provider_gateway.v1.ProviderContextItem.text:type_name -> tetral.provider_gateway.v1.ProviderContextText
+	19, // 14: tetral.provider_gateway.v1.ProviderContextItem.reasoning:type_name -> tetral.provider_gateway.v1.ProviderContextReasoning
+	20, // 15: tetral.provider_gateway.v1.ProviderContextItem.tool_call:type_name -> tetral.provider_gateway.v1.ProviderToolCall
+	21, // 16: tetral.provider_gateway.v1.ProviderContextItem.tool_result:type_name -> tetral.provider_gateway.v1.ProviderToolResult
+	22, // 17: tetral.provider_gateway.v1.ProviderToolResult.completed:type_name -> tetral.provider_gateway.v1.ProviderCompletedToolResult
+	23, // 18: tetral.provider_gateway.v1.ProviderToolResult.error:type_name -> tetral.provider_gateway.v1.ProviderErrorToolResult
+	24, // 19: tetral.provider_gateway.v1.ProviderToolResult.cancelled:type_name -> tetral.provider_gateway.v1.ProviderCancelledToolResult
+	26, // 20: tetral.provider_gateway.v1.RuntimeToolDefinition.function:type_name -> tetral.provider_gateway.v1.RuntimeFunctionToolDefinition
+	27, // 21: tetral.provider_gateway.v1.RuntimeToolDefinition.freeform:type_name -> tetral.provider_gateway.v1.RuntimeFreeformToolDefinition
+	29, // 22: tetral.provider_gateway.v1.ProviderRequestAttachment.transient:type_name -> tetral.provider_gateway.v1.ProviderRequestTransientAttachment
+	30, // 23: tetral.provider_gateway.v1.ProviderRequestAttachment.file_backed:type_name -> tetral.provider_gateway.v1.ProviderRequestFileAttachment
+	4,  // 24: tetral.provider_gateway.v1.ProviderStreamEvent.type:type_name -> tetral.provider_gateway.v1.ProviderStreamEventType
+	35, // 25: tetral.provider_gateway.v1.ProviderStreamEvent.thinking_started:type_name -> tetral.provider_gateway.v1.ProviderThinkingStartedPayload
+	36, // 26: tetral.provider_gateway.v1.ProviderStreamEvent.text_complete:type_name -> tetral.provider_gateway.v1.ProviderTextCompletePayload
+	37, // 27: tetral.provider_gateway.v1.ProviderStreamEvent.reasoning_complete:type_name -> tetral.provider_gateway.v1.ProviderReasoningCompletePayload
+	38, // 28: tetral.provider_gateway.v1.ProviderStreamEvent.tool_call_complete:type_name -> tetral.provider_gateway.v1.ProviderToolCallCompletePayload
+	40, // 29: tetral.provider_gateway.v1.ProviderStreamEvent.finish:type_name -> tetral.provider_gateway.v1.ProviderFinishPayload
+	42, // 30: tetral.provider_gateway.v1.ProviderStreamEvent.provider_error:type_name -> tetral.provider_gateway.v1.ProviderErrorPayload
+	34, // 31: tetral.provider_gateway.v1.ProviderStreamEvent.attachment_rejections:type_name -> tetral.provider_gateway.v1.ProviderAttachmentRejectionsPayload
+	30, // 32: tetral.provider_gateway.v1.ProviderAttachmentRejection.file_backed:type_name -> tetral.provider_gateway.v1.ProviderRequestFileAttachment
+	7,  // 33: tetral.provider_gateway.v1.ProviderAttachmentRejection.reason:type_name -> tetral.provider_gateway.v1.ProviderAttachmentRejectionReason
+	33, // 34: tetral.provider_gateway.v1.ProviderAttachmentRejectionsPayload.rejections:type_name -> tetral.provider_gateway.v1.ProviderAttachmentRejection
+	8,  // 35: tetral.provider_gateway.v1.ProviderFinishPayload.reason:type_name -> tetral.provider_gateway.v1.ProviderFinishReason
+	39, // 36: tetral.provider_gateway.v1.ProviderFinishPayload.usage:type_name -> tetral.provider_gateway.v1.RequestUsage
+	41, // 37: tetral.provider_gateway.v1.ProviderErrorPayload.error:type_name -> tetral.provider_gateway.v1.ProviderError
+	46, // 38: tetral.provider_gateway.v1.RunWebRequest.input:type_name -> tetral.provider_gateway.v1.WebToolInput
+	9,  // 39: tetral.provider_gateway.v1.RunWebResponse.status:type_name -> tetral.provider_gateway.v1.RunWebStatus
+	50, // 40: tetral.provider_gateway.v1.RunWebResponse.refs:type_name -> tetral.provider_gateway.v1.WebRef
+	45, // 41: tetral.provider_gateway.v1.RunWebResponse.usage:type_name -> tetral.provider_gateway.v1.WebUsage
+	47, // 42: tetral.provider_gateway.v1.WebToolInput.search_query:type_name -> tetral.provider_gateway.v1.WebSearchQuery
+	48, // 43: tetral.provider_gateway.v1.WebToolInput.open:type_name -> tetral.provider_gateway.v1.WebOpenRequest
+	49, // 44: tetral.provider_gateway.v1.WebToolInput.find:type_name -> tetral.provider_gateway.v1.WebFindRequest
+	10, // 45: tetral.provider_gateway.v1.RunMcpToolResponse.status:type_name -> tetral.provider_gateway.v1.RunMcpToolStatus
+	53, // 46: tetral.provider_gateway.v1.RunMcpToolResponse.attachments:type_name -> tetral.provider_gateway.v1.McpAttachmentRef
+	11, // 47: tetral.provider_gateway.v1.RunMcpToolResponse.error_kind:type_name -> tetral.provider_gateway.v1.McpErrorKind
+	12, // 48: tetral.provider_gateway.v1.RunMcpToolResponse.retry_status:type_name -> tetral.provider_gateway.v1.McpRetryStatus
+	56, // 49: tetral.provider_gateway.v1.ListMcpToolsResponse.tools:type_name -> tetral.provider_gateway.v1.McpToolDefinition
+	57, // 50: tetral.provider_gateway.v1.ListMcpToolsResponse.omitted_tools:type_name -> tetral.provider_gateway.v1.McpOmittedTool
+	13, // 51: tetral.provider_gateway.v1.ProviderGatewayService.StreamProviderRequest:input_type -> tetral.provider_gateway.v1.ProviderRequest
+	43, // 52: tetral.provider_gateway.v1.ProviderGatewayService.RunWeb:input_type -> tetral.provider_gateway.v1.RunWebRequest
+	51, // 53: tetral.provider_gateway.v1.McpConnectorService.RunMcpTool:input_type -> tetral.provider_gateway.v1.RunMcpToolRequest
+	54, // 54: tetral.provider_gateway.v1.McpConnectorService.ListMcpTools:input_type -> tetral.provider_gateway.v1.ListMcpToolsRequest
+	32, // 55: tetral.provider_gateway.v1.ProviderGatewayService.StreamProviderRequest:output_type -> tetral.provider_gateway.v1.ProviderStreamEvent
+	44, // 56: tetral.provider_gateway.v1.ProviderGatewayService.RunWeb:output_type -> tetral.provider_gateway.v1.RunWebResponse
+	52, // 57: tetral.provider_gateway.v1.McpConnectorService.RunMcpTool:output_type -> tetral.provider_gateway.v1.RunMcpToolResponse
+	55, // 58: tetral.provider_gateway.v1.McpConnectorService.ListMcpTools:output_type -> tetral.provider_gateway.v1.ListMcpToolsResponse
+	55, // [55:59] is the sub-list for method output_type
+	51, // [51:55] is the sub-list for method input_type
+	51, // [51:51] is the sub-list for extension type_name
+	51, // [51:51] is the sub-list for extension extendee
+	0,  // [0:51] is the sub-list for field type_name
 }
 
 func init() { file_tetral_provider_gateway_v1_provider_gateway_proto_init() }
@@ -4446,10 +4605,10 @@ func file_tetral_provider_gateway_v1_provider_gateway_proto_init() {
 		(*ProviderRequestAttachment_FileBacked)(nil),
 	}
 	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[19].OneofWrappers = []any{
-		(*ProviderStreamEvent_Text)(nil),
-		(*ProviderStreamEvent_Reasoning)(nil),
-		(*ProviderStreamEvent_ToolInput)(nil),
-		(*ProviderStreamEvent_ToolCall)(nil),
+		(*ProviderStreamEvent_ThinkingStarted)(nil),
+		(*ProviderStreamEvent_TextComplete)(nil),
+		(*ProviderStreamEvent_ReasoningComplete)(nil),
+		(*ProviderStreamEvent_ToolCallComplete)(nil),
 		(*ProviderStreamEvent_Finish)(nil),
 		(*ProviderStreamEvent_ProviderError)(nil),
 		(*ProviderStreamEvent_AttachmentRejections)(nil),
@@ -4470,7 +4629,7 @@ func file_tetral_provider_gateway_v1_provider_gateway_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc), len(file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc)),
-			NumEnums:      11,
+			NumEnums:      13,
 			NumMessages:   45,
 			NumExtensions: 0,
 			NumServices:   2,

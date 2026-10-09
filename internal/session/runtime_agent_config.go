@@ -29,12 +29,12 @@ import (
 //	        actually changes; an effective no-op advances
 //	        neither the generation nor a job.
 //
-// The runtime bridge reads config_generation + approval_mode + installed_tools_json
+// Job Runner reads config_generation + approval_mode + installed_tools_json
 // to deliver the change.
 //
 // UPDATE-WITH: postgresql_store.go (UpdateSession, rejectRuntimeConfigUpdateRaces,
 // enqueueRuntimeConfigUpdate), service.go (Create, Update),
-// services/bridge/runtime_delivery.go.
+// services/job-runner/runtime_delivery.go.
 type RuntimeAgentConfig struct {
 	Tools      []json.RawMessage `json:"tools"`
 	MCPServers []json.RawMessage `json:"mcp_servers"`

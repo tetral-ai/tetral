@@ -26,6 +26,7 @@ type RoleContract struct {
 type WorkloadRole struct {
 	Tables    map[string][]string `json:"tables"`
 	Sequences []string            `json:"sequences,omitempty"`
+	Functions []string            `json:"functions,omitempty"`
 }
 
 func LoadRoleContract() (RoleContract, error) {
@@ -40,8 +41,8 @@ func LoadRoleContract() (RoleContract, error) {
 	if err != nil {
 		return RoleContract{}, err
 	}
-	knownTables := map[string]bool{postgresql.AppendOnlyWorkspaceTable: true}
-	for _, table := range append(append([]string(nil), postgresql.WorkspaceTables...), postgresql.GlobalTables...) {
+	knownTables := map[string]bool{}
+	for _, table := range append(append(append([]string(nil), postgresql.WorkspaceTables...), postgresql.AppendOnlyWorkspaceTables...), postgresql.GlobalTables...) {
 		knownTables[table] = true
 	}
 	allowedPrivileges := map[string]bool{"SELECT": true, "INSERT": true, "UPDATE": true, "DELETE": true}
@@ -60,6 +61,28 @@ func LoadRoleContract() (RoleContract, error) {
 				}
 				seen[privilege] = true
 			}
+		}
+		for _, function := range role.Functions {
+			allowed := (function == "tetral_lock_runtime_process(text, text, text)" && (workload == "bridge" || workload == "job_runner")) ||
+				(function == "tetral_lock_runtime_process_liveness(text, text, text)" && workload == "job_runner") ||
+				(function == "tetral_job_runner_binding_upper()" && workload == "job_runner") ||
+				(function == "tetral_job_runner_binding_page(text, text, text, text, integer)" && workload == "job_runner") ||
+				(function == "tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer)" && workload == "cleanup") ||
+				(function == "tetral_prune_event_idempotency(timestamptz, timestamptz, text, text, bytea, integer)" && workload == "cleanup") ||
+				(function == "tetral_prune_event_changes(timestamptz, timestamptz, text, text, bigint, integer)" && workload == "cleanup") ||
+				(function == "tetral_prune_job_runner_jobs(text, timestamptz, integer)" && workload == "queue")
+			if workload == "auth" {
+				switch function {
+				case "tetral_auth_lookup_key(bytea)", "tetral_auth_lookup_token(bytea)", "tetral_auth_lookup_grants(text, text)", "tetral_auth_lock_authority(text, text, text, text)", "tetral_auth_prune_tokens(integer)":
+					allowed = true
+				}
+			}
+			if !allowed {
+				return RoleContract{}, fmt.Errorf("invalid function grant for workload %q", workload)
+			}
+		}
+		if duplicate(role.Functions) {
+			return RoleContract{}, fmt.Errorf("duplicate function grant for workload %q", workload)
 		}
 		if duplicate(role.Sequences) {
 			return RoleContract{}, fmt.Errorf("duplicate sequence grant for workload %q", workload)

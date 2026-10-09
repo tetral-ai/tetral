@@ -690,6 +690,8 @@ export interface RecoverThreadRequest {
   targetPodUid: string;
   sourceEventId: string;
   recoveryLeaseRef: RecoveryLeaseRef | undefined;
+  runtimeProcessId: string;
+  handoffId: string;
 }
 
 export interface RecoveryLeaseRef {
@@ -727,6 +729,7 @@ export interface AcceptInputRequest {
   inputOrder: number;
   messagesJson?: string | undefined;
   rejection?: AcceptInputRejection | undefined;
+  runtimeProcessId: string;
 }
 
 export interface AcceptInputRejection {
@@ -760,6 +763,7 @@ export interface AcceptAgentMailRequest {
   runtimeInputId: string;
   deliveryId: string;
   content: string;
+  runtimeProcessId: string;
 }
 
 export interface AcceptAgentMailResponse {
@@ -789,6 +793,7 @@ export interface AcceptTaskNotificationRequest {
   runtimeInputId: string;
   inputOrder: number;
   notificationJson: string;
+  runtimeProcessId: string;
 }
 
 export interface AcceptTaskNotificationResponse {
@@ -818,6 +823,7 @@ export interface InterruptRequest {
   runtimeInputId: string;
   origin: InterruptOrigin;
   interruptLeaseRef: InterruptLeaseRef | undefined;
+  runtimeProcessId: string;
 }
 
 export interface InterruptLeaseRef {
@@ -855,6 +861,7 @@ export interface ResolveToolConfirmationRequest {
   toolUseEventId: string;
   decision: ToolConfirmationDecision;
   denyMessage?: string | undefined;
+  runtimeProcessId: string;
 }
 
 export interface ResolveToolConfirmationResponse {
@@ -886,6 +893,7 @@ export interface ApplyRuntimeConfigRequest {
   targetPodUid: string;
   sessionConfig?: RuntimeSessionConfig | undefined;
   mcpManifest?: RuntimeMcpManifestConfig | undefined;
+  runtimeProcessId: string;
 }
 
 export interface RuntimeSessionConfig {
@@ -928,6 +936,7 @@ export interface CleanupSessionRequest {
   targetPodUid: string;
   cleanupOperationId: string;
   reason: CleanupSessionReason;
+  runtimeProcessId: string;
 }
 
 export interface CleanupSessionResponse {
@@ -957,6 +966,8 @@ function createBaseRecoverThreadRequest(): RecoverThreadRequest {
     targetPodUid: "",
     sourceEventId: "",
     recoveryLeaseRef: undefined,
+    runtimeProcessId: "",
+    handoffId: "",
   };
 }
 
@@ -985,6 +996,12 @@ export const RecoverThreadRequest: MessageFns<RecoverThreadRequest> = {
     }
     if (message.recoveryLeaseRef !== undefined) {
       RecoveryLeaseRef.encode(message.recoveryLeaseRef, writer.uint32(74).fork()).join();
+    }
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(90).string(message.runtimeProcessId);
+    }
+    if (message.handoffId !== "") {
+      writer.uint32(82).string(message.handoffId);
     }
     return writer;
   },
@@ -1060,6 +1077,22 @@ export const RecoverThreadRequest: MessageFns<RecoverThreadRequest> = {
           message.recoveryLeaseRef = RecoveryLeaseRef.decode(reader, reader.uint32());
           continue;
         }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.handoffId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1111,6 +1144,16 @@ export const RecoverThreadRequest: MessageFns<RecoverThreadRequest> = {
         : isSet(object.recovery_lease_ref)
         ? RecoveryLeaseRef.fromJSON(object.recovery_lease_ref)
         : undefined,
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
+      handoffId: isSet(object.handoffId)
+        ? globalThis.String(object.handoffId)
+        : isSet(object.handoff_id)
+        ? globalThis.String(object.handoff_id)
+        : "",
     };
   },
 
@@ -1140,6 +1183,12 @@ export const RecoverThreadRequest: MessageFns<RecoverThreadRequest> = {
     if (message.recoveryLeaseRef !== undefined) {
       obj.recoveryLeaseRef = RecoveryLeaseRef.toJSON(message.recoveryLeaseRef);
     }
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
+    if (message.handoffId !== "") {
+      obj.handoffId = message.handoffId;
+    }
     return obj;
   },
 
@@ -1158,6 +1207,8 @@ export const RecoverThreadRequest: MessageFns<RecoverThreadRequest> = {
     message.recoveryLeaseRef = (object.recoveryLeaseRef !== undefined && object.recoveryLeaseRef !== null)
       ? RecoveryLeaseRef.fromPartial(object.recoveryLeaseRef)
       : undefined;
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
+    message.handoffId = object.handoffId ?? "";
     return message;
   },
 };
@@ -1558,6 +1609,7 @@ function createBaseAcceptInputRequest(): AcceptInputRequest {
     inputOrder: 0,
     messagesJson: undefined,
     rejection: undefined,
+    runtimeProcessId: "",
   };
 }
 
@@ -1592,6 +1644,9 @@ export const AcceptInputRequest: MessageFns<AcceptInputRequest> = {
     }
     if (message.rejection !== undefined) {
       AcceptInputRejection.encode(message.rejection, writer.uint32(82).fork()).join();
+    }
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(90).string(message.runtimeProcessId);
     }
     return writer;
   },
@@ -1683,6 +1738,14 @@ export const AcceptInputRequest: MessageFns<AcceptInputRequest> = {
           message.rejection = AcceptInputRejection.decode(reader, reader.uint32());
           continue;
         }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1740,6 +1803,11 @@ export const AcceptInputRequest: MessageFns<AcceptInputRequest> = {
         ? globalThis.String(object.messages_json)
         : undefined,
       rejection: isSet(object.rejection) ? AcceptInputRejection.fromJSON(object.rejection) : undefined,
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
     };
   },
 
@@ -1775,6 +1843,9 @@ export const AcceptInputRequest: MessageFns<AcceptInputRequest> = {
     if (message.rejection !== undefined) {
       obj.rejection = AcceptInputRejection.toJSON(message.rejection);
     }
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
     return obj;
   },
 
@@ -1795,6 +1866,7 @@ export const AcceptInputRequest: MessageFns<AcceptInputRequest> = {
     message.rejection = (object.rejection !== undefined && object.rejection !== null)
       ? AcceptInputRejection.fromPartial(object.rejection)
       : undefined;
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
     return message;
   },
 };
@@ -2128,6 +2200,7 @@ function createBaseAcceptAgentMailRequest(): AcceptAgentMailRequest {
     runtimeInputId: "",
     deliveryId: "",
     content: "",
+    runtimeProcessId: "",
   };
 }
 
@@ -2159,6 +2232,9 @@ export const AcceptAgentMailRequest: MessageFns<AcceptAgentMailRequest> = {
     }
     if (message.content !== "") {
       writer.uint32(74).string(message.content);
+    }
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(82).string(message.runtimeProcessId);
     }
     return writer;
   },
@@ -2242,6 +2318,14 @@ export const AcceptAgentMailRequest: MessageFns<AcceptAgentMailRequest> = {
           message.content = reader.string();
           continue;
         }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2294,6 +2378,11 @@ export const AcceptAgentMailRequest: MessageFns<AcceptAgentMailRequest> = {
         ? globalThis.String(object.delivery_id)
         : "",
       content: isSet(object.content) ? globalThis.String(object.content) : "",
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
     };
   },
 
@@ -2326,6 +2415,9 @@ export const AcceptAgentMailRequest: MessageFns<AcceptAgentMailRequest> = {
     if (message.content !== "") {
       obj.content = message.content;
     }
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
     return obj;
   },
 
@@ -2343,6 +2435,7 @@ export const AcceptAgentMailRequest: MessageFns<AcceptAgentMailRequest> = {
     message.runtimeInputId = object.runtimeInputId ?? "";
     message.deliveryId = object.deliveryId ?? "";
     message.content = object.content ?? "";
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
     return message;
   },
 };
@@ -2618,6 +2711,7 @@ function createBaseAcceptTaskNotificationRequest(): AcceptTaskNotificationReques
     runtimeInputId: "",
     inputOrder: 0,
     notificationJson: "",
+    runtimeProcessId: "",
   };
 }
 
@@ -2649,6 +2743,9 @@ export const AcceptTaskNotificationRequest: MessageFns<AcceptTaskNotificationReq
     }
     if (message.notificationJson !== "") {
       writer.uint32(74).string(message.notificationJson);
+    }
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(82).string(message.runtimeProcessId);
     }
     return writer;
   },
@@ -2732,6 +2829,14 @@ export const AcceptTaskNotificationRequest: MessageFns<AcceptTaskNotificationReq
           message.notificationJson = reader.string();
           continue;
         }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2788,6 +2893,11 @@ export const AcceptTaskNotificationRequest: MessageFns<AcceptTaskNotificationReq
         : isSet(object.notification_json)
         ? globalThis.String(object.notification_json)
         : "",
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
     };
   },
 
@@ -2820,6 +2930,9 @@ export const AcceptTaskNotificationRequest: MessageFns<AcceptTaskNotificationReq
     if (message.notificationJson !== "") {
       obj.notificationJson = message.notificationJson;
     }
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
     return obj;
   },
 
@@ -2839,6 +2952,7 @@ export const AcceptTaskNotificationRequest: MessageFns<AcceptTaskNotificationReq
     message.runtimeInputId = object.runtimeInputId ?? "";
     message.inputOrder = object.inputOrder ?? 0;
     message.notificationJson = object.notificationJson ?? "";
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
     return message;
   },
 };
@@ -3118,6 +3232,7 @@ function createBaseInterruptRequest(): InterruptRequest {
     runtimeInputId: "",
     origin: 0,
     interruptLeaseRef: undefined,
+    runtimeProcessId: "",
   };
 }
 
@@ -3149,6 +3264,9 @@ export const InterruptRequest: MessageFns<InterruptRequest> = {
     }
     if (message.interruptLeaseRef !== undefined) {
       InterruptLeaseRef.encode(message.interruptLeaseRef, writer.uint32(82).fork()).join();
+    }
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(90).string(message.runtimeProcessId);
     }
     return writer;
   },
@@ -3232,6 +3350,14 @@ export const InterruptRequest: MessageFns<InterruptRequest> = {
           message.interruptLeaseRef = InterruptLeaseRef.decode(reader, reader.uint32());
           continue;
         }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3284,6 +3410,11 @@ export const InterruptRequest: MessageFns<InterruptRequest> = {
         : isSet(object.interrupt_lease_ref)
         ? InterruptLeaseRef.fromJSON(object.interrupt_lease_ref)
         : undefined,
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
     };
   },
 
@@ -3316,6 +3447,9 @@ export const InterruptRequest: MessageFns<InterruptRequest> = {
     if (message.interruptLeaseRef !== undefined) {
       obj.interruptLeaseRef = InterruptLeaseRef.toJSON(message.interruptLeaseRef);
     }
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
     return obj;
   },
 
@@ -3335,6 +3469,7 @@ export const InterruptRequest: MessageFns<InterruptRequest> = {
     message.interruptLeaseRef = (object.interruptLeaseRef !== undefined && object.interruptLeaseRef !== null)
       ? InterruptLeaseRef.fromPartial(object.interruptLeaseRef)
       : undefined;
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
     return message;
   },
 };
@@ -3735,6 +3870,7 @@ function createBaseResolveToolConfirmationRequest(): ResolveToolConfirmationRequ
     toolUseEventId: "",
     decision: 0,
     denyMessage: undefined,
+    runtimeProcessId: "",
   };
 }
 
@@ -3769,6 +3905,9 @@ export const ResolveToolConfirmationRequest: MessageFns<ResolveToolConfirmationR
     }
     if (message.denyMessage !== undefined) {
       writer.uint32(82).string(message.denyMessage);
+    }
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(90).string(message.runtimeProcessId);
     }
     return writer;
   },
@@ -3860,6 +3999,14 @@ export const ResolveToolConfirmationRequest: MessageFns<ResolveToolConfirmationR
           message.denyMessage = reader.string();
           continue;
         }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3917,6 +4064,11 @@ export const ResolveToolConfirmationRequest: MessageFns<ResolveToolConfirmationR
         : isSet(object.deny_message)
         ? globalThis.String(object.deny_message)
         : undefined,
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
     };
   },
 
@@ -3952,6 +4104,9 @@ export const ResolveToolConfirmationRequest: MessageFns<ResolveToolConfirmationR
     if (message.denyMessage !== undefined) {
       obj.denyMessage = message.denyMessage;
     }
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
     return obj;
   },
 
@@ -3972,6 +4127,7 @@ export const ResolveToolConfirmationRequest: MessageFns<ResolveToolConfirmationR
     message.toolUseEventId = object.toolUseEventId ?? "";
     message.decision = object.decision ?? 0;
     message.denyMessage = object.denyMessage ?? undefined;
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
     return message;
   },
 };
@@ -4314,6 +4470,7 @@ function createBaseApplyRuntimeConfigRequest(): ApplyRuntimeConfigRequest {
     targetPodUid: "",
     sessionConfig: undefined,
     mcpManifest: undefined,
+    runtimeProcessId: "",
   };
 }
 
@@ -4339,6 +4496,9 @@ export const ApplyRuntimeConfigRequest: MessageFns<ApplyRuntimeConfigRequest> = 
     }
     if (message.mcpManifest !== undefined) {
       RuntimeMcpManifestConfig.encode(message.mcpManifest, writer.uint32(58).fork()).join();
+    }
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(66).string(message.runtimeProcessId);
     }
     return writer;
   },
@@ -4406,6 +4566,14 @@ export const ApplyRuntimeConfigRequest: MessageFns<ApplyRuntimeConfigRequest> = 
           message.mcpManifest = RuntimeMcpManifestConfig.decode(reader, reader.uint32());
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4452,6 +4620,11 @@ export const ApplyRuntimeConfigRequest: MessageFns<ApplyRuntimeConfigRequest> = 
         : isSet(object.mcp_manifest)
         ? RuntimeMcpManifestConfig.fromJSON(object.mcp_manifest)
         : undefined,
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
     };
   },
 
@@ -4478,6 +4651,9 @@ export const ApplyRuntimeConfigRequest: MessageFns<ApplyRuntimeConfigRequest> = 
     if (message.mcpManifest !== undefined) {
       obj.mcpManifest = RuntimeMcpManifestConfig.toJSON(message.mcpManifest);
     }
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
     return obj;
   },
 
@@ -4497,6 +4673,7 @@ export const ApplyRuntimeConfigRequest: MessageFns<ApplyRuntimeConfigRequest> = 
     message.mcpManifest = (object.mcpManifest !== undefined && object.mcpManifest !== null)
       ? RuntimeMcpManifestConfig.fromPartial(object.mcpManifest)
       : undefined;
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
     return message;
   },
 };
@@ -5015,6 +5192,7 @@ function createBaseCleanupSessionRequest(): CleanupSessionRequest {
     targetPodUid: "",
     cleanupOperationId: "",
     reason: 0,
+    runtimeProcessId: "",
   };
 }
 
@@ -5040,6 +5218,9 @@ export const CleanupSessionRequest: MessageFns<CleanupSessionRequest> = {
     }
     if (message.reason !== 0) {
       writer.uint32(56).int32(message.reason);
+    }
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(66).string(message.runtimeProcessId);
     }
     return writer;
   },
@@ -5107,6 +5288,14 @@ export const CleanupSessionRequest: MessageFns<CleanupSessionRequest> = {
           message.reason = reader.int32() as any;
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5149,6 +5338,11 @@ export const CleanupSessionRequest: MessageFns<CleanupSessionRequest> = {
         ? globalThis.String(object.cleanup_operation_id)
         : "",
       reason: isSet(object.reason) ? cleanupSessionReasonFromJSON(object.reason) : 0,
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
     };
   },
 
@@ -5175,6 +5369,9 @@ export const CleanupSessionRequest: MessageFns<CleanupSessionRequest> = {
     if (message.reason !== 0) {
       obj.reason = cleanupSessionReasonToJSON(message.reason);
     }
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
     return obj;
   },
 
@@ -5190,6 +5387,7 @@ export const CleanupSessionRequest: MessageFns<CleanupSessionRequest> = {
     message.targetPodUid = object.targetPodUid ?? "";
     message.cleanupOperationId = object.cleanupOperationId ?? "";
     message.reason = object.reason ?? 0;
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
     return message;
   },
 };

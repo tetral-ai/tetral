@@ -1,7 +1,33 @@
 import { describe, expect, test } from "bun:test";
-import { loadMcpConnectorConfigFromEnv } from "../../src/config.js";
+import { McpBridgePolicyDefaults, McpClientPolicyDefaults, loadMcpConnectorConfigFromEnv } from "../../src/config.js";
 
 describe("MCP connector config", () => {
+  test("preserves configured business drain and separate join within Pod grace",()=>{
+    const result=loadMcpConnectorConfigFromEnv({...validEnv(),TETRAL_DRAIN_TIMEOUT_MS:"200",TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS:"1000"});
+    expect(result.ok).toBe(true);if(result.ok){expect(result.config.drainTimeoutMs).toBe(200);expect(result.config.cancelJoinTimeoutMs).toBe(1000);}
+    for(const join of ["0","-1","55000","bad"])expect(loadMcpConnectorConfigFromEnv({...validEnv(),TETRAL_DRAIN_TIMEOUT_MS:"200",TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS:join}).ok).toBe(false);
+  });
+
+  test("reads the application drain only from the shared drain key",()=>{
+    const result=loadMcpConnectorConfigFromEnv({...validEnv(),TETRAL_SERVICE_DRAIN_TIMEOUT_MS:"200"});
+    expect(result.ok).toBe(true);if(result.ok)expect(result.config.drainTimeoutMs).toBe(30000);
+  });
+
+  test("Bridge policy defaults match the owning Runtime descriptor and preserve discovery", async () => {
+    const descriptor = await Bun.file(new URL("../../../../../agent-runtime/packages/runtime-pod/src/bridge-method-policy.json", import.meta.url)).json() as Array<{method:string;timeoutMs:number}>;
+    for (const [method, timeout] of Object.entries(McpBridgePolicyDefaults)) {
+      expect(descriptor.find(entry => entry.method === method[0]!.toUpperCase()+method.slice(1))?.timeoutMs).toBe(timeout);
+    }
+    expect(McpClientPolicyDefaults.discoveryTimeoutMs).toBe(120000);
+    const configured = loadMcpConnectorConfigFromEnv({...validEnv(), TETRAL_BRIDGE_CLAIM_MCP_TOOL_RESULT_TIMEOUT_MS:"7000", TETRAL_MCP_CONNECT_TIMEOUT_MS:"8000", TETRAL_MCP_DISCOVERY_TIMEOUT_MS:"45000"});
+    expect(configured.ok).toBe(true);
+    if (configured.ok) {
+      expect(configured.config.bridgePolicies.claimMcpToolResult).toBe(7000);
+      expect(configured.config.clientPolicies.connectTimeoutMs).toBe(8000);
+      expect(configured.config.clientPolicies.discoveryTimeoutMs).toBe(45000);
+    }
+  });
+
   test("projects only connector-owned environment", () => {
     const config = loadMcpConnectorConfigFromEnv({
       ...validEnv(),
@@ -19,10 +45,10 @@ describe("MCP connector config", () => {
         namespace: "tetral-agent-runtime",
         serviceAccount: "agent-runtime",
       });
-      expect(config.config.allowedBridge).toEqual({
-        namespace: "tetral-system",
-        serviceAccount: "bridge",
-      });
+      expect(config.config.allowedDiscoveryCallers).toEqual([
+ {namespace:"tetral-system",serviceAccount:"bridge"},
+ {namespace:"tetral-system",serviceAccount:"job-runner"},
+ ]);
       expect(config.config.bridgeApiGrpcAddress).toBe("bridge.tetral-system.svc.cluster.local:9090");
       expect(config.config.bridgeTokenPath).toBe("/var/run/secrets/tetral-internal-grpc/bridge/token");
       expect(config.config.runtimeBindingTokenHMACKey).toBe("gateway-runtime-binding-token-test-key-32");
@@ -65,7 +91,7 @@ describe("MCP connector config", () => {
       "TETRAL_DATABASE_POOL_CONNECTION_TIMEOUT_SECONDS",
       "TETRAL_DATABASE_STATEMENT_TIMEOUT_MS",
     ] as const) {
-      for (const value of ["0", "-1"]) {
+      for (const value of ["0","-1","1.5"," 1","01","9007199254740992",""]) {
         expect(loadMcpConnectorConfigFromEnv({
           ...validEnv(),
           [key]: value,
@@ -80,10 +106,16 @@ describe("MCP connector config", () => {
         ...validEnv(),
         TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS: allowed,
       }).ok).toBe(false);
-      expect(loadMcpConnectorConfigFromEnv({
-        ...validEnv(),
-        TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS: allowed,
-      }).ok).toBe(false);
+
+    }
+  });
+
+  test("discovery preserves explicit namespace overrides and rejects malformed or duplicate lists", () => {
+    const configured = loadMcpConnectorConfigFromEnv({...validEnv(),TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS:"custom-system/bridge,custom-system/job-runner"});
+    expect(configured.ok).toBe(true);
+    if(configured.ok) expect(configured.config.allowedDiscoveryCallers).toEqual([{namespace:"custom-system",serviceAccount:"bridge"},{namespace:"custom-system",serviceAccount:"job-runner"}]);
+    for(const value of ["","*","tetral-system/*","tetral-system/bridge,","tetral-system/bridge,tetral-system/bridge","wrong namespace/bridge","tetral-system/ bridge",",tetral-system/bridge"]){
+      expect(loadMcpConnectorConfigFromEnv({...validEnv(),TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS:value}).ok).toBe(false);
     }
   });
 
@@ -99,6 +131,12 @@ describe("MCP connector config", () => {
   });
 });
 
+test("execution total clips larger phase ceilings and rejects invalid phase/lease policies",()=>{
+ const shorter=loadMcpConnectorConfigFromEnv({...validEnv(),TETRAL_MCP_EXECUTION_TIMEOUT_MS:"60000"});expect(shorter.ok).toBe(true);if(shorter.ok){expect(shorter.config.clientPolicies.executionTimeoutMs).toBe(60000);expect(shorter.config.clientPolicies.callTimeoutMs).toBe(120000);}
+ for(const key of ["TETRAL_MCP_EXECUTION_TIMEOUT_MS","TETRAL_MCP_CALL_TIMEOUT_MS","TETRAL_MCP_CREDENTIAL_TIMEOUT_MS","TETRAL_MCP_CONNECT_TIMEOUT_MS","TETRAL_MCP_DISCOVERY_TIMEOUT_MS","TETRAL_BRIDGE_CLAIM_MCP_TOOL_RESULT_TIMEOUT_MS","TETRAL_BRIDGE_COMMIT_MCP_TOOL_RESULT_TIMEOUT_MS"])for(const invalid of ["0","-1","1.5","2147483648","bad"])expect(loadMcpConnectorConfigFromEnv({...validEnv(),[key]:invalid}).ok).toBe(false);
+ expect(loadMcpConnectorConfigFromEnv({...validEnv(),TETRAL_MCP_EXECUTION_TIMEOUT_MS:"170001"}).ok).toBe(false);expect(loadMcpConnectorConfigFromEnv({...validEnv(),TETRAL_BRIDGE_COMMIT_MCP_TOOL_RESULT_TIMEOUT_MS:"10001"}).ok).toBe(false);
+});
+
 function validEnv(): Record<string, string> {
   return {
     TETRAL_MCP_CONNECTOR_GRPC_ADDR: "127.0.0.1:0",
@@ -107,7 +145,7 @@ function validEnv(): Record<string, string> {
     TETRAL_SERVICE_VERSION: "test",
     TETRAL_INTERNAL_GRPC_AUDIENCE: "tetral-internal-grpc",
     TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS: "tetral-agent-runtime/agent-runtime",
-    TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS: "tetral-system/bridge",
+    TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS: "tetral-system/bridge,tetral-system/job-runner",
     TETRAL_BRIDGE_API_GRPC_ADDR: "bridge.tetral-system.svc.cluster.local:9090",
     TETRAL_MCP_CONNECTOR_BRIDGE_TOKEN_PATH: "/var/run/secrets/tetral-internal-grpc/bridge/token",
     TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY: "gateway-runtime-binding-token-test-key-32",

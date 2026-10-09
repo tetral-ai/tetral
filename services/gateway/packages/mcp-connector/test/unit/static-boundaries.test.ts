@@ -70,7 +70,7 @@ describe("mcp-connector static boundaries", () => {
   test("credential resolver delegates OAuth write-back to the Vault update path", () => {
     const credential = readFileSync(join(import.meta.dir, "../../src/credential.ts"), "utf8");
 
-    expect(credential).toContain("SQLVaultGitHubMcpCredentialUpdatePath");
+    expect(credential).toContain("SQLVaultMcpCredentialUpdatePath");
     expect(credential).toContain("refreshWriter.refreshOAuthCredential");
     for (const forbidden of [
       "FOR UPDATE",
@@ -84,7 +84,8 @@ describe("mcp-connector static boundaries", () => {
     ]) {
       expect(credential).not.toContain(forbidden);
     }
-    expect(credential).toContain("this.sql.begin");
+    expect(credential).toContain("this.sqlSource.withSQL(async (sql)");
+    expect(credential).toContain("sql.begin");
     expect(credential).toContain("set_config('tetral.workspace_id'");
     expect(credential).not.toMatch(/\bencrypted_auth\s*=\s*\$/);
   });
@@ -130,10 +131,13 @@ describe("mcp-connector static boundaries", () => {
   });
 
   test("kubernetes manifest exposes the MCP connector internal metrics port", () => {
-    const deployment = readFileSync(join(import.meta.dir, "../../../../k8s/deployment.yaml"), "utf8");
-    const service = readFileSync(join(import.meta.dir, "../../../../k8s/service.yaml"), "utf8");
-    const networkPolicy = readFileSync(join(import.meta.dir, "../../../../k8s/networkpolicy.yaml"), "utf8");
+    const deployment = readFileSync(join(import.meta.dir, "../../../../k8s/mcp-connector/deployment.yaml"), "utf8");
+    const service = readFileSync(join(import.meta.dir, "../../../../k8s/mcp-connector/service.yaml"), "utf8");
+    const networkPolicy = readFileSync(join(import.meta.dir, "../../../../k8s/mcp-connector/networkpolicy.yaml"), "utf8");
 
+    expect(deployment).toContain("serviceAccountName: mcp-connector");
+    expect(service).toContain("selector:\n    app.kubernetes.io/name: mcp-connector");
+    expect(networkPolicy).toContain("app.kubernetes.io/name: mcp-connector");
     expect(deployment).toContain("TETRAL_MCP_CONNECTOR_HTTP_ADDR");
     expect(deployment).toContain("TETRAL_MCP_CONNECTOR_GRPC_ADDR");
     expect(deployment).toContain("name: mcp-http");

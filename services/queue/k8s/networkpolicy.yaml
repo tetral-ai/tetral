@@ -20,7 +20,7 @@ spec:
               app.kubernetes.io/name: api
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: bridge
+              app.kubernetes.io/name: job-runner
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: sandbox
@@ -33,7 +33,7 @@ spec:
               app.kubernetes.io/name: api
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: bridge
+              app.kubernetes.io/name: job-runner
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: sandbox

@@ -1,248 +1,75 @@
-/**
- * @packageDocumentation
- * Provider-history projection for durable turn outcomes. This module selects
- * the exact retained Assistant and terminal Tool members; lifecycle derivation
- * remains in load/reducer and hot message ownership remains in ContextManager.
- */
-
-import type {
-	RuntimeContextEntry,
-	RuntimeOpenRequestDraft,
-} from "../../contracts/runtime.js";
-import {
-	RuntimeContextEntrySchema,
-	RuntimeOpenRequestDraftSchema,
-} from "../../contracts/runtime.js";
+/** Committed message normalization from the reducer's durable retention decision. */
+import type { RuntimeContextEntry } from "../../contracts/runtime.js";
 import type { ThreadTurnCheckpoint } from "./checkpoint.js";
-import { parseThreadTurnCheckpoint } from "./checkpoint.js";
-import {
-	extractNewestRequest,
-	ThreadTurnLoadFactsSchema,
-} from "./load.js";
+import { extractNewestRequest, ThreadTurnLoadFactsSchema } from "./load.js";
 import type { ThreadTurnLoadFacts } from "./load.js";
-
-/**
- * Converts the durable Assistant projection of one failed Request into the
- * Runtime-owned provider view. Text from the failed attempt is never replayed;
- * exact terminal Tool Call/Result pairs and their signed reasoning remain
- * provider-visible, while a nonterminal Tool Call stays in the private open
- * draft until its existing settlement route completes.
- */
-export function projectFailedRequestProviderContext(input: {
-	readonly contextEntries: readonly RuntimeContextEntry[];
-	readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
+export function normalizeRequestMessages(input: {
+	readonly messages: readonly RuntimeContextEntry[];
 	readonly checkpoint: ThreadTurnCheckpoint;
-}): {
-	readonly contextEntries: readonly RuntimeContextEntry[];
-	readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
-} {
-	const checkpoint = parseThreadTurnCheckpoint(input.checkpoint);
-	const request = checkpoint.request;
-	if (
-		request?.requestEnd === undefined ||
-		request.requestEnd.providerContextRetention.disposition === "completed" ||
-		request.requestEnd.providerContextRetention.disposition === "compacted"
-	) {
-		return {
-			contextEntries: input.contextEntries,
-			...(input.openRequestDraft === undefined
-				? {}
-				: { openRequestDraft: input.openRequestDraft }),
-		};
-	}
-	const sequence =
-		request.requestEnd.providerContextRetention.assistantMessageSequence ??
-		(input.openRequestDraft?.modelRequestId === request.modelRequestId
-			? input.openRequestDraft.messageSequence
-			: undefined);
+	readonly currentRequestMessage?: {
+		readonly modelRequestId: string;
+		readonly assistantMessageSequence: number;
+	};
+}): readonly RuntimeContextEntry[] {
+	const request = input.checkpoint.request;
+	const retention = request?.requestEnd?.providerContextRetention;
+	if (request === undefined || retention === undefined || retention.disposition === "completed" || retention.disposition === "compacted")
+		return input.messages;
+	const sequence = retention.assistantMessageSequence ?? (input.currentRequestMessage?.modelRequestId === request.modelRequestId ? input.currentRequestMessage.assistantMessageSequence : undefined);
 	if (sequence === undefined) {
-		return {
-			contextEntries: input.contextEntries,
-			...(input.openRequestDraft === undefined
-				? {}
-				: { openRequestDraft: input.openRequestDraft }),
-		};
+		if (request.toolMembers.length > 0)
+			throw new Error("retained Tool members have no committed Assistant");
+		return input.messages;
 	}
-	const sealed = input.contextEntries.find(
-		(entry) =>
-			entry.contextKind === "assistant" && entry.messageSequence === sequence,
-	);
-	const open =
-		input.openRequestDraft?.messageSequence === sequence
-			? RuntimeOpenRequestDraftSchema.parse(input.openRequestDraft)
-			: undefined;
-	const unrelatedOpenRequestDraft =
-		open === undefined ? input.openRequestDraft : undefined;
-	if (sealed === undefined && open === undefined) {
-		if (request.toolMembers.length !== 0) {
-			throw new Error(
-				"failed Request Tool projection has no resident Assistant owner",
-			);
-		}
-		return {
-			contextEntries: input.contextEntries,
-			...(input.openRequestDraft === undefined
-				? {}
-				: { openRequestDraft: input.openRequestDraft }),
-		};
-	}
-	if (sealed !== undefined && open !== undefined) {
-		throw new Error(
-			"failed Request Assistant projection must have exactly one resident owner",
-		);
-	}
-	if (open !== undefined && open.modelRequestId !== request.modelRequestId) {
-		throw new Error("failed Request draft identity does not match its checkpoint");
-	}
-	const retainedToolUseIds = new Set(
-		request.requestEnd.providerContextRetention.toolUseEventIds,
-	);
-	const retainedRepairIds = new Set(
-		request.requestEnd.providerContextRetention.repairEventIds,
-	);
-	const retainedMembers = request.toolMembers.filter((member) =>
-		member.memberKind === "public_tool_use"
-			? retainedToolUseIds.has(member.toolUseEventId)
-			: retainedRepairIds.has(member.repairEventId),
-	);
-	const memberIds = new Set(
-		retainedMembers.map((member) => member.modelToolCallId),
-	);
-	const terminalIds = new Set(
-		retainedMembers.flatMap((member) =>
-			member.memberKind === "internal_tool_repair" ||
-			member.terminalResult !== undefined
-				? [member.modelToolCallId]
-				: [],
-		),
-	);
-	const incomplete = retainedMembers.some(
-		(member) =>
-			member.memberKind === "public_tool_use" &&
-			member.terminalResult === undefined,
-	);
-	const sourceParts = sealed?.parts ?? open!.parts;
-	const retainedReasoningIndexes = new Set<number>();
-	for (let index = 0; index < sourceParts.length; index += 1) {
-		const part = sourceParts[index];
-		if (
-			part?.type !== "tool_call" ||
-			!memberIds.has(part.modelToolCallId)
-		) {
+	const message = input.messages.find(candidate => candidate.messageSequence === sequence);
+	if (message === undefined && retention.toolUseEventIds.length === 0 && retention.repairEventIds.length === 0)
+		return input.messages;
+	if (message?.contextKind !== "assistant")
+		throw new Error("retained request has no committed Assistant owner");
+	const tools = new Set(retention.toolUseEventIds), repairs = new Set(retention.repairEventIds);
+	const members = request.toolMembers.filter(member => member.memberKind === "public_tool_use" ? tools.has(member.toolUseEventId) : repairs.has(member.repairEventId));
+	const calls = new Set(members.map(member => member.modelToolCallId));
+	const reasoning = new Set<number>();
+	for (let index = 0; index < message.parts.length; index++) {
+		const part = message.parts[index];
+		if (part?.type !== "tool_call" || !calls.has(part.modelToolCallId))
 			continue;
-		}
-		for (let ownerIndex = index - 1; ownerIndex >= 0; ownerIndex -= 1) {
-			const owner = sourceParts[ownerIndex];
-			if (owner?.type === "text" || owner?.type === "tool_result") {
+		for (let prefix = index - 1; prefix >= 0; prefix--) {
+			const preceding = message.parts[prefix];
+			if (preceding?.type !== "reasoning")
 				break;
-			}
-			if (owner?.type === "reasoning") {
-				retainedReasoningIndexes.add(ownerIndex);
-			}
+			reasoning.add(prefix);
 		}
 	}
-	const retainedParts = sourceParts.filter((part, index) => {
-		switch (part.type) {
-		case "reasoning":
-			return retainedReasoningIndexes.has(index);
-			case "tool_call":
-				return memberIds.has(part.modelToolCallId);
-			case "tool_result":
-				return terminalIds.has(part.modelToolCallId);
-			case "text":
-				return false;
+	const parts = message.parts.filter((part, index) => part.type === "reasoning" ? reasoning.has(index) : (part.type === "tool_call" || part.type === "tool_result") && calls.has(part.modelToolCallId));
+	return input.messages.flatMap(candidate => candidate.messageSequence !== sequence ? [
+		candidate
+	] : parts.length === 0 ? [] : [
+		{
+			...candidate, parts
 		}
-	});
-	const contextEntries = input.contextEntries.filter(
-		(entry) => entry.messageSequence !== sequence,
-	);
-	if (incomplete) {
-		if (unrelatedOpenRequestDraft !== undefined) {
-			throw new Error("failed Request cannot replace an unrelated open draft");
-		}
-		return {
-			contextEntries,
-			openRequestDraft: RuntimeOpenRequestDraftSchema.parse({
-				modelRequestId: request.modelRequestId,
-				messageSequence: sequence,
-				parts: retainedParts,
-			}),
-		};
-	}
-	if (retainedParts.length === 0) {
-		return {
-			contextEntries,
-			...(unrelatedOpenRequestDraft === undefined
-				? {}
-				: { openRequestDraft: unrelatedOpenRequestDraft }),
-		};
-	}
-	return {
-		contextEntries: [
-			...contextEntries,
-			RuntimeContextEntrySchema.parse({
-				messageSequence: sequence,
-				contextKind: "assistant",
-				parts: retainedParts,
-			}),
-		].sort((left, right) => left.messageSequence - right.messageSequence),
-		...(unrelatedOpenRequestDraft === undefined
-			? {}
-			: { openRequestDraft: unrelatedOpenRequestDraft }),
-	};
+	]);
 }
-
-/** Applies failed-request eligibility to every durable Request represented by LoadContext facts. */
-export function projectFailedRequestsProviderContext(input: {
-	readonly contextEntries: readonly RuntimeContextEntry[];
-	readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
+export function normalizeLoadedMessages(input: {
+	readonly messages: readonly RuntimeContextEntry[];
 	readonly facts: ThreadTurnLoadFacts;
-}): {
-	readonly contextEntries: readonly RuntimeContextEntry[];
-	readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
-} {
+}): readonly RuntimeContextEntry[] {
 	const facts = ThreadTurnLoadFactsSchema.parse(input.facts);
-	const starts = new Map(
-		facts.events
-			.filter((event) => event.type === "span.model_request_start")
-			.map((event) => [event.modelRequestId!, event] as const),
-	);
-	let projected: {
-		readonly contextEntries: readonly RuntimeContextEntry[];
-		readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
-	} = {
-		contextEntries: input.contextEntries,
-		...(input.openRequestDraft === undefined
-			? {}
-			: { openRequestDraft: input.openRequestDraft }),
-	};
+	const starts = new Map(facts.events.filter(event => event.type === "span.model_request_start").map(event => [
+		event.modelRequestId!, event
+	]));
+	let messages = input.messages;
 	for (const end of facts.events) {
-		if (
-			end.type !== "span.model_request_end" ||
-			end.requestEnd!.providerContextRetention.disposition === "completed" ||
-			end.requestEnd!.providerContextRetention.disposition === "compacted"
-		) {
+		if (end.type !== "span.model_request_end")
 			continue;
-		}
 		const start = starts.get(end.modelRequestId!);
-		if (start === undefined) {
-			throw new Error("failed Request End has no matching Request Start");
-		}
-		projected = projectFailedRequestProviderContext({
-			contextEntries: projected.contextEntries,
-			...(projected.openRequestDraft === undefined
-				? {}
-				: { openRequestDraft: projected.openRequestDraft }),
-			checkpoint: {
-				pendingInputContextSequences: [],
-				request: extractNewestRequest(
-					start,
-					end,
-					facts.events,
-					facts.internalRepairs,
-				),
-			},
+		if (start === undefined)
+			throw new Error("Request End has no Request Start");
+		messages = normalizeRequestMessages({
+			messages, checkpoint: {
+				pendingInputContextSequences: [], request: extractNewestRequest(start, end, facts.events, facts.internalRepairs)
+			}
 		});
 	}
-	return projected;
+	return messages;
 }

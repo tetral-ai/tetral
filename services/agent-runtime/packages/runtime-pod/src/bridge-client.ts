@@ -1,3 +1,9 @@
+import { RuntimeCurrentRequestMessageSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type { RuntimeCurrentRequestMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { bridgeUnaryCall, ownBridgeClient } from "./bridge-calls.js";
+import type { RuntimeBridgeDrainPhase } from "./lifecycle-policy.js";
+import type { FinishIdleOperationControls } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type { BridgeMethodPolicies } from "./bridge-policy.js";
 /**
  * @packageDocumentation
  * Adapts Runtime Core persistence and lifecycle ports to authenticated Agent Runtime Bridge
@@ -27,7 +33,6 @@ import type {
 	RuntimeInternalToolRepairCommit,
 	RuntimeInternalToolRepairCommitResult,
 	RuntimeInterruptToolResult,
-	RuntimeOpenRequestDraft,
 	RuntimeProviderAttachment,
 	RuntimeToolSettlementDeclaration,
 	SessionEventEnvelope,
@@ -49,7 +54,6 @@ import {
 	normalizeSessionEventWriterError,
 	RuntimeContextEntrySchema,
 	RuntimeJsonValueSchema,
-	RuntimeOpenRequestDraftSchema,
 	RuntimeToolErrorSchema,
 	runtimeToolErrorFromFailure,
 	SessionEventWriterRetryPolicy,
@@ -138,6 +142,7 @@ export interface BridgeAPIControlInputCommitterOptions {
 		config: ServiceAccountTokenConfig,
 	) => Promise<Metadata>;
 	readonly client?: AgentRuntimeBridgeServiceClient;
+	readonly methodPolicies?: BridgeMethodPolicies;
 	readonly sleep?: (durationMs: number) => Promise<void>;
 }
 
@@ -149,6 +154,14 @@ export interface BridgeAPIControlInputCommitterOptions {
 export class BridgeAPIControlInputCommitter
 	implements RuntimeControlInputCommitter
 {
+	beginDrain(deadline: RuntimeBridgeDrainPhase): void {
+		ownBridgeClient(this.client).beginDrain(deadline);
+	}
+
+	close(): Promise<void> {
+		return ownBridgeClient(this.client).close();
+	}
+
 	private readonly client: AgentRuntimeBridgeServiceClient;
 	private readonly metadataFactory: (
 		config: ServiceAccountTokenConfig,
@@ -163,6 +176,7 @@ export class BridgeAPIControlInputCommitter
 				credentials.createInsecure(),
 				grpcClientChannelOptions(),
 			);
+		ownBridgeClient(this.client, options.methodPolicies);
 		this.metadataFactory =
 			options.metadataFactory ?? buildOutboundBearerMetadata;
 		this.sleep =
@@ -297,6 +311,7 @@ export interface BridgeAPITaskNotificationCommitterOptions {
 		config: ServiceAccountTokenConfig,
 	) => Promise<Metadata>;
 	readonly client?: AgentRuntimeBridgeServiceClient;
+	readonly methodPolicies?: BridgeMethodPolicies;
 }
 
 /**
@@ -304,6 +319,14 @@ export interface BridgeAPITaskNotificationCommitterOptions {
  * closing custody or return stale/rejected durable outcomes; malformed results fail without retry.
  */
 export class BridgeAPITaskNotificationCommitter {
+	beginDrain(deadline: RuntimeBridgeDrainPhase): void {
+		ownBridgeClient(this.client).beginDrain(deadline);
+	}
+
+	close(): Promise<void> {
+		return ownBridgeClient(this.client).close();
+	}
+
 	private readonly client: AgentRuntimeBridgeServiceClient;
 	private readonly metadataFactory: (
 		config: ServiceAccountTokenConfig,
@@ -319,6 +342,7 @@ export class BridgeAPITaskNotificationCommitter {
 				credentials.createInsecure(),
 				grpcClientChannelOptions(),
 			);
+		ownBridgeClient(this.client, options.methodPolicies);
 		this.metadataFactory =
 			options.metadataFactory ?? buildOutboundBearerMetadata;
 	}
@@ -350,6 +374,7 @@ export class BridgeAPITaskNotificationCommitter {
 					bindingId: input.scope.bindingId,
 					bindingGeneration: input.scope.bindingGeneration,
 					targetPodUid: input.scope.targetPodUid,
+					runtimeProcessId: input.scope.runtimeProcessId,
 				},
 			},
 			runtimeInputId: input.runtimeInputId,
@@ -470,6 +495,7 @@ export interface BridgeAPIApprovalReviewerThreadCreatorOptions {
 		config: ServiceAccountTokenConfig,
 	) => Promise<Metadata>;
 	readonly client?: AgentRuntimeBridgeServiceClient;
+	readonly methodPolicies?: BridgeMethodPolicies;
 }
 
 /**
@@ -479,6 +505,14 @@ export interface BridgeAPIApprovalReviewerThreadCreatorOptions {
 export class BridgeAPIApprovalReviewerThreadCreator
 	implements RuntimeApprovalReviewerThreadCreator
 {
+	beginDrain(deadline: RuntimeBridgeDrainPhase): void {
+		ownBridgeClient(this.client).beginDrain(deadline);
+	}
+
+	close(): Promise<void> {
+		return ownBridgeClient(this.client).close();
+	}
+
 	private readonly client: AgentRuntimeBridgeServiceClient;
 	private readonly metadataFactory: (
 		config: ServiceAccountTokenConfig,
@@ -494,6 +528,7 @@ export class BridgeAPIApprovalReviewerThreadCreator
 				credentials.createInsecure(),
 				grpcClientChannelOptions(),
 			);
+		ownBridgeClient(this.client, options.methodPolicies);
 		this.metadataFactory =
 			options.metadataFactory ?? buildOutboundBearerMetadata;
 	}
@@ -700,6 +735,7 @@ export interface BridgeAPIContextLoaderOptions {
 		config: ServiceAccountTokenConfig,
 	) => Promise<Metadata>;
 	readonly client?: AgentRuntimeBridgeServiceClient;
+	readonly methodPolicies?: BridgeMethodPolicies;
 	readonly logger?: RuntimePodLogger | undefined;
 	readonly nowEpochMs?: () => number;
 	readonly refreshMarginMs?: number;
@@ -721,6 +757,18 @@ const RuntimeBindingTokenRefreshPolicy = {
  * It coalesces concurrent binding-token refreshes for the same binding identity.
  */
 export class BridgeAPIContextLoader implements ContextLoader {
+	beginDrain(deadline: RuntimeBridgeDrainPhase): void {
+		ownBridgeClient(this.client).beginDrain(deadline);
+		this.taskNotificationCommitter.beginDrain(deadline);
+	}
+
+	close(): Promise<void> {
+		return Promise.all([
+			ownBridgeClient(this.client).close(),
+			this.taskNotificationCommitter.close(),
+		]).then(() => undefined);
+	}
+
 	private readonly client: AgentRuntimeBridgeServiceClient;
 	private readonly metadataFactory: (
 		config: ServiceAccountTokenConfig,
@@ -739,6 +787,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
 				credentials.createInsecure(),
 				bridgeDurableContextGrpcChannelOptions(),
 			);
+		ownBridgeClient(this.client, options.methodPolicies);
 		this.metadataFactory =
 			options.metadataFactory ?? buildOutboundBearerMetadata;
 		this.nowEpochMs = options.nowEpochMs ?? (() => Date.now());
@@ -847,8 +896,8 @@ export class BridgeAPIContextLoader implements ContextLoader {
 		command: RuntimeThreadAddressState,
 		options?: RuntimeContextLoadOptions,
 	): Promise<{
-		readonly contextEntries: readonly RuntimeContextEntry[];
-		readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
+		readonly messages: readonly RuntimeContextEntry[];
+		readonly currentRequestMessage: RuntimeCurrentRequestMessage | null;
 		readonly turnFacts: ThreadTurnLoadFacts;
 		readonly threadContextPrefix?: ThreadContextPrefix | undefined;
 		readonly durableTurnId?: string | undefined;
@@ -1046,8 +1095,8 @@ export class BridgeAPIContextLoader implements ContextLoader {
 		input: RuntimeThreadAddressState,
 		options?: RuntimeContextLoadOptions,
 	): Promise<{
-		readonly contextEntries: readonly RuntimeContextEntry[];
-		readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
+		readonly messages: readonly RuntimeContextEntry[];
+		readonly currentRequestMessage: RuntimeCurrentRequestMessage | null;
 		readonly turnFacts: ThreadTurnLoadFacts;
 		readonly threadContextPrefix?: ThreadContextPrefix | undefined;
 		readonly durableTurnId?: string | undefined;
@@ -1072,6 +1121,8 @@ export class BridgeAPIContextLoader implements ContextLoader {
 			{
 				scope: bridgeScope(input),
 				recoveryLeaseRef: options?.recovery,
+				sourceEventId: options?.sourceEventId ?? "",
+				handoffId: options?.handoffId ?? "",
 			},
 			metadata,
 		);
@@ -1098,6 +1149,7 @@ export interface BridgeAPIEventWriterOptions {
 		config: ServiceAccountTokenConfig,
 	) => Promise<Metadata>;
 	readonly client?: AgentRuntimeBridgeServiceClient;
+	readonly methodPolicies?: BridgeMethodPolicies;
 	readonly sleep?: ((durationMs: number) => Promise<void>) | undefined;
 }
 
@@ -1108,6 +1160,14 @@ export interface BridgeAPIEventWriterOptions {
  * rejections are deterministic and stop the shared writer retry policy.
  */
 export class BridgeAPIEventWriter implements SessionEventWriter {
+	beginDrain(deadline: RuntimeBridgeDrainPhase): void {
+		ownBridgeClient(this.client).beginDrain(deadline);
+	}
+
+	close(): Promise<void> {
+		return ownBridgeClient(this.client).close();
+	}
+
 	private readonly client: AgentRuntimeBridgeServiceClient;
 	private readonly metadataFactory: (
 		config: ServiceAccountTokenConfig,
@@ -1122,6 +1182,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 				credentials.createInsecure(),
 				bridgeDurableContextGrpcChannelOptions(),
 			);
+		ownBridgeClient(this.client, options.methodPolicies);
 		this.metadataFactory =
 			options.metadataFactory ?? buildOutboundBearerMetadata;
 		this.sleep =
@@ -1163,6 +1224,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 			const request: WriteEventRequest = {
 				scope: bridgeScope(envelope),
 				runtimeWriteId: envelope.writeId,
+    preallocatedEventId:envelope.preallocatedEventId,
 				modelRequestId: envelope.modelRequestId ?? modelRequestIdForEvent(event),
 				eventType: toolEvent ? "" : event.type,
 				payloadJson: toolEvent ? "" : JSON.stringify(event),
@@ -1248,6 +1310,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 			if (
 				result === undefined ||
 				result.eventId.length === 0 ||
+    (envelope.preallocatedEventId!==undefined&&result.eventId!==envelope.preallocatedEventId)||
 				(envelope.assistantContextAppend === undefined &&
 					result.assignedMessageSequence !== undefined) ||
 				(envelope.assistantContextAppend !== undefined &&
@@ -1522,7 +1585,10 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 	/** Persists one database-named running interval's idle closeout. */
 	async finishIdle(
 		envelope: SessionEventWriterFinishIdleEnvelope,
+		controls: FinishIdleOperationControls = {},
 	): Promise<SessionEventWriterFinishIdleResult> {
+		const callOptions =
+			controls.deadlineEpochMs === undefined ? {} : { deadline: controls.deadlineEpochMs };
 		try {
 			const metadata = await this.metadataFactory({
 				tokenPath: this.options.tokenPath,
@@ -1533,7 +1599,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 				stopReasonJson: JSON.stringify(envelope.stopReason),
 				completionMailText: envelope.completionMailText,
 			};
-			const response = await finishIdle(this.client, request, metadata);
+			const response = await finishIdle(this.client, request, metadata, callOptions);
 			if (
 				!exactlyOneDefined(
 					response.committed,
@@ -1560,11 +1626,14 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 				idleEventId: result.idleEventId,
 			};
 		} catch (error) {
-			return eventWriterOperationTransportFailure(
+			const failure = eventWriterOperationTransportFailure(
 				envelope.sessionId,
 				envelope.durableTurnId,
 				error,
 			);
+			return ownBridgeClient(this.client).operationStopped(callOptions)
+				? { ...failure, error: { ...failure.error, retryable: false } }
+				: failure;
 		}
 	}
 
@@ -1625,6 +1694,7 @@ export interface BridgeAPIInternalToolRepairCommitterOptions {
 		config: ServiceAccountTokenConfig,
 	) => Promise<Metadata>;
 	readonly client?: AgentRuntimeBridgeServiceClient;
+	readonly methodPolicies?: BridgeMethodPolicies;
 }
 
 /**
@@ -1632,6 +1702,14 @@ export interface BridgeAPIInternalToolRepairCommitterOptions {
  * authentication, transport, and conflicting ACKs into the message-store result vocabulary.
  */
 export class BridgeAPIInternalToolRepairCommitter {
+	beginDrain(deadline: RuntimeBridgeDrainPhase): void {
+		ownBridgeClient(this.client).beginDrain(deadline);
+	}
+
+	close(): Promise<void> {
+		return ownBridgeClient(this.client).close();
+	}
+
 	private readonly client: AgentRuntimeBridgeServiceClient;
 	private readonly metadataFactory: (
 		config: ServiceAccountTokenConfig,
@@ -1647,6 +1725,7 @@ export class BridgeAPIInternalToolRepairCommitter {
 				credentials.createInsecure(),
 				grpcClientChannelOptions(),
 			);
+		ownBridgeClient(this.client, options.methodPolicies);
 		this.metadataFactory =
 			options.metadataFactory ?? buildOutboundBearerMetadata;
 	}
@@ -1674,6 +1753,7 @@ export class BridgeAPIInternalToolRepairCommitter {
 				serverToolUse: undefined,
 			},
 			repairKey: repair.repairKey,
+			reasoningPrefixContextDelta: repair.reasoningPrefixContextDelta === undefined ? undefined : runtimeContextDeltaForBridge(repair.reasoningPrefixContextDelta),
 		};
 		let response: CommitInternalToolRepairResponse;
 		try {
@@ -1715,22 +1795,12 @@ function commitTaskNotificationResult(
 	>[0],
 	metadata: Metadata,
 ): Promise<CommitTaskNotificationResultResponse> {
-	return new Promise((resolve, reject) => {
-		client.commitTaskNotificationResult(
-			request,
-			metadata,
-			(
-				error: ServiceError | null,
-				response: CommitTaskNotificationResultResponse,
-			) => {
-				if (error !== null) {
-					reject(error);
-					return;
-				}
-				resolve(response);
-			},
-		);
-	});
+	return bridgeUnaryCall(
+		client,
+		"commitTaskNotificationResult",
+		request,
+		metadata,
+	);
 }
 
 function commitInternalToolRepair(
@@ -1738,22 +1808,7 @@ function commitInternalToolRepair(
 	request: CommitInternalToolRepairRequest,
 	metadata: Metadata,
 ): Promise<CommitInternalToolRepairResponse> {
-	return new Promise((resolve, reject) => {
-		client.commitInternalToolRepair(
-			request,
-			metadata,
-			(
-				error: ServiceError | null,
-				response: CommitInternalToolRepairResponse,
-			) => {
-				if (error !== null) {
-					reject(error);
-					return;
-				}
-				resolve(response);
-			},
-		);
-	});
+	return bridgeUnaryCall(client, "commitInternalToolRepair", request, metadata);
 }
 
 function commitInputs(
@@ -1761,23 +1816,7 @@ function commitInputs(
 	request: CommitInputsRequest,
 	metadata: Metadata,
 ): Promise<CommitInputsResponse> {
-	return new Promise((resolve, reject) => {
-		const options: CallOptions = {
-			deadline: Date.now() + SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
-		};
-		client.commitInputs(
-			request,
-			metadata,
-			options,
-			(error: ServiceError | null, response: CommitInputsResponse) => {
-				if (error !== null) {
-					reject(error);
-					return;
-				}
-				resolve(response);
-			},
-		);
-	});
+	return bridgeUnaryCall(client, "commitInputs", request, metadata);
 }
 
 function ensureApprovalReviewerTrunk(
@@ -1785,22 +1824,12 @@ function ensureApprovalReviewerTrunk(
 	request: EnsureApprovalReviewerTrunkRequest,
 	metadata: Metadata,
 ): Promise<EnsureApprovalReviewerTrunkResponse> {
-	return new Promise((resolve, reject) => {
-		client.ensureApprovalReviewerTrunk(
-			request,
-			metadata,
-			(
-				error: ServiceError | null,
-				response: EnsureApprovalReviewerTrunkResponse,
-			) => {
-				if (error !== null) {
-					reject(error);
-					return;
-				}
-				resolve(response);
-			},
-		);
-	});
+	return bridgeUnaryCall(
+		client,
+		"ensureApprovalReviewerTrunk",
+		request,
+		metadata,
+	);
 }
 
 function ensureApprovalReviewerSidecar(
@@ -1808,22 +1837,12 @@ function ensureApprovalReviewerSidecar(
 	request: EnsureApprovalReviewerSidecarRequest,
 	metadata: Metadata,
 ): Promise<EnsureApprovalReviewerSidecarResponse> {
-	return new Promise((resolve, reject) => {
-		client.ensureApprovalReviewerSidecar(
-			request,
-			metadata,
-			(
-				error: ServiceError | null,
-				response: EnsureApprovalReviewerSidecarResponse,
-			) => {
-				if (error !== null) {
-					reject(error);
-					return;
-				}
-				resolve(response);
-			},
-		);
-	});
+	return bridgeUnaryCall(
+		client,
+		"ensureApprovalReviewerSidecar",
+		request,
+		metadata,
+	);
 }
 
 function admitApprovalReviewInput(
@@ -1831,22 +1850,7 @@ function admitApprovalReviewInput(
 	request: AdmitApprovalReviewInputRequest,
 	metadata: Metadata,
 ): Promise<AdmitApprovalReviewInputResponse> {
-	return new Promise((resolve, reject) => {
-		client.admitApprovalReviewInput(
-			request,
-			metadata,
-			(
-				error: ServiceError | null,
-				response: AdmitApprovalReviewInputResponse,
-			) => {
-				if (error !== null) {
-					reject(error);
-					return;
-				}
-				resolve(response);
-			},
-		);
-	});
+	return bridgeUnaryCall(client, "admitApprovalReviewInput", request, metadata);
 }
 
 function closeApprovalReviewer(
@@ -1854,19 +1858,7 @@ function closeApprovalReviewer(
 	request: CloseApprovalReviewerRequest,
 	metadata: Metadata,
 ): Promise<CloseApprovalReviewerResponse> {
-	return new Promise((resolve, reject) => {
-		client.closeApprovalReviewer(
-			request,
-			metadata,
-			(error: ServiceError | null, response: CloseApprovalReviewerResponse) => {
-				if (error !== null) {
-					reject(error);
-					return;
-				}
-				resolve(response);
-			},
-		);
-	});
+	return bridgeUnaryCall(client, "closeApprovalReviewer", request, metadata);
 }
 
 function readAgentMail(
@@ -1874,19 +1866,7 @@ function readAgentMail(
 	request: ReadAgentMailRequest,
 	metadata: Metadata,
 ): Promise<ReadAgentMailResponse> {
-	return new Promise((resolve, reject) => {
-		client.readAgentMail(
-			request,
-			metadata,
-			(error: ServiceError | null, response: ReadAgentMailResponse) => {
-				if (error !== null) {
-					reject(error);
-					return;
-				}
-				resolve(response);
-			},
-		);
-	});
+	return bridgeUnaryCall(client, "readAgentMail", request, metadata);
 }
 
 function loadContext(
@@ -1894,19 +1874,7 @@ function loadContext(
 	request: LoadContextRequest,
 	metadata: Metadata,
 ): Promise<LoadContextResponse> {
-	return new Promise((resolve, reject) => {
-		client.loadContext(
-			request,
-			metadata,
-			(error: ServiceError | null, response: LoadContextResponse) => {
-				if (error !== null) {
-					reject(error);
-					return;
-				}
-				resolve(response);
-			},
-		);
-	});
+	return bridgeUnaryCall(client, "loadContext", request, metadata);
 }
 
 function runtimeContextDeltaForBridge(
@@ -2039,19 +2007,7 @@ function writeEvent(
 	request: WriteEventRequest,
 	metadata: Metadata,
 ): Promise<WriteEventResponse> {
-	return new Promise((resolve, reject) => {
-		client.writeEvent(
-			request,
-			metadata,
-			(error: ServiceError | null, response: WriteEventResponse) => {
-				if (error !== null) {
-					reject(error);
-					return;
-				}
-				resolve(response);
-			},
-		);
-	});
+	return bridgeUnaryCall(client, "writeEvent", request, metadata);
 }
 
 function settleToolResult(
@@ -2059,23 +2015,7 @@ function settleToolResult(
 	request: SettleToolResultRequest,
 	metadata: Metadata,
 ): Promise<SettleToolResultResponse> {
-	return new Promise((resolve, reject) => {
-		const options: CallOptions = {
-			deadline: Date.now() + SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
-		};
-		client.settleToolResult(
-			request,
-			metadata,
-			options,
-			(error: ServiceError | null, response: SettleToolResultResponse) => {
-				if (error !== null) {
-					reject(error);
-					return;
-				}
-				resolve(response);
-			},
-		);
-	});
+	return bridgeUnaryCall(client, "settleToolResult", request, metadata);
 }
 
 function writeRequestEnd(
@@ -2083,39 +2023,16 @@ function writeRequestEnd(
 	request: WriteRequestEndRequest,
 	metadata: Metadata,
 ): Promise<WriteRequestEndResponse> {
-	return new Promise((resolve, reject) => {
-		client.writeRequestEnd(
-			request,
-			metadata,
-			(error: ServiceError | null, response: WriteRequestEndResponse) => {
-				if (error !== null) {
-					reject(error);
-					return;
-				}
-				resolve(response);
-			},
-		);
-	});
+	return bridgeUnaryCall(client, "writeRequestEnd", request, metadata);
 }
 
 function finishIdle(
 	client: AgentRuntimeBridgeServiceClient,
 	request: FinishIdleRequest,
 	metadata: Metadata,
+	options: { readonly deadline?: number },
 ): Promise<FinishIdleResponse> {
-	return new Promise((resolve, reject) => {
-		client.finishIdle(
-			request,
-			metadata,
-			(error: ServiceError | null, response: FinishIdleResponse) => {
-				if (error !== null) {
-					reject(error);
-					return;
-				}
-				resolve(response);
-			},
-		);
-	});
+	return bridgeUnaryCall(client, "finishIdle", request, metadata, options);
 }
 
 function commitRuntimeTermination(
@@ -2123,22 +2040,7 @@ function commitRuntimeTermination(
 	request: CommitRuntimeTerminationRequest,
 	metadata: Metadata,
 ): Promise<CommitRuntimeTerminationResponse> {
-	return new Promise((resolve, reject) => {
-		client.commitRuntimeTermination(
-			request,
-			metadata,
-			(
-				error: ServiceError | null,
-				response: CommitRuntimeTerminationResponse,
-			) => {
-				if (error !== null) {
-					reject(error);
-					return;
-				}
-				resolve(response);
-			},
-		);
-	});
+	return bridgeUnaryCall(client, "commitRuntimeTermination", request, metadata);
 }
 
 function refreshRuntimeBindingToken(
@@ -2146,22 +2048,12 @@ function refreshRuntimeBindingToken(
 	request: RefreshRuntimeBindingTokenRequest,
 	metadata: Metadata,
 ): Promise<RefreshRuntimeBindingTokenResponse> {
-	return new Promise((resolve, reject) => {
-		client.refreshRuntimeBindingToken(
-			request,
-			metadata,
-			(
-				error: ServiceError | null,
-				response: RefreshRuntimeBindingTokenResponse,
-			) => {
-				if (error !== null) {
-					reject(error);
-					return;
-				}
-				resolve(response);
-			},
-		);
-	});
+	return bridgeUnaryCall(
+		client,
+		"refreshRuntimeBindingToken",
+		request,
+		metadata,
+	);
 }
 
 function bridgeScope(input: {
@@ -2171,6 +2063,7 @@ function bridgeScope(input: {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 }): RuntimeScope {
 	return {
 		workspaceId: input.workspaceId,
@@ -2180,6 +2073,7 @@ function bridgeScope(input: {
 			bindingId: input.bindingId,
 			bindingGeneration: input.bindingGeneration,
 			targetPodUid: input.targetPodUid,
+			runtimeProcessId: input.runtimeProcessId,
 		},
 	};
 }
@@ -2195,6 +2089,7 @@ function bindingTokenRefreshScope(
 			bindingId: identity.bindingId,
 			bindingGeneration: identity.bindingGeneration,
 			targetPodUid: identity.targetPodUid,
+			runtimeProcessId: identity.runtimeProcessId,
 		},
 	};
 }
@@ -2258,6 +2153,7 @@ function approvalReviewerParentScope(
 			bindingId: input.request.bindingId,
 			bindingGeneration: input.request.bindingGeneration,
 			targetPodUid: input.request.targetPodUid,
+			runtimeProcessId: input.request.runtimeProcessId,
 		},
 	};
 }
@@ -2321,8 +2217,8 @@ function parseContextPayload(
 	input: RuntimeThreadAddressState,
 	logger?: RuntimePodLogger | undefined,
 ): {
-	readonly contextEntries: readonly RuntimeContextEntry[];
-	readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
+	readonly messages: readonly RuntimeContextEntry[];
+	readonly currentRequestMessage: RuntimeCurrentRequestMessage | null;
 	readonly turnFacts: ThreadTurnLoadFacts;
 	readonly threadContextPrefix?: ThreadContextPrefix | undefined;
 	readonly thread: RuntimeAcceptedThreadMetadataState;
@@ -2363,30 +2259,29 @@ function parseContextPayload(
 				return value;
 			},
 		);
-		const contextEntries = parseContextLoadPhase(
+		const messages = parseContextLoadPhase(
 			logger,
 			input,
 			"durable_context_parse",
 			"invalid_durable_context_shape",
 			() => {
-				if (!Array.isArray(parsed.contextEntries)) {
+				if (!Array.isArray(parsed.messages)) {
 					throw new Error("load context entries are malformed");
 				}
-				return parsed.contextEntries.map((entry) =>
+				return parsed.messages.map((entry) =>
 					RuntimeContextEntrySchema.parse(entry),
 				);
 			},
 		);
-		const openRequestDraft = parseContextLoadPhase(
+		const currentRequestMessage = parseContextLoadPhase(
 			logger,
 			input,
-			"open_request_draft_parse",
-			"invalid_open_request_draft_shape",
+			"current_request_message_parse",
+			"invalid_current_request_message_shape",
 			() =>
-				parsed.openRequestDraft === undefined ||
-				parsed.openRequestDraft === null
-					? undefined
-					: RuntimeOpenRequestDraftSchema.parse(parsed.openRequestDraft),
+				parsed.currentRequestMessage === null
+					? null
+					: RuntimeCurrentRequestMessageSchema.parse(parsed.currentRequestMessage),
 		);
 		const turnFacts = parseContextLoadPhase(
 			logger,
@@ -2452,8 +2347,8 @@ function parseContextPayload(
 			() => parsePendingAgentMail(parsed.pendingAgentMail),
 		);
 		return {
-			contextEntries,
-			...(openRequestDraft !== undefined ? { openRequestDraft } : {}),
+			messages,
+			currentRequestMessage,
 			turnFacts,
 			...(threadContextPrefix !== undefined ? { threadContextPrefix } : {}),
 			thread,
@@ -2477,8 +2372,8 @@ function parseContextPayload(
 }
 
 const LoadContextPayloadKeys = new Set([
-	"contextEntries",
-	"openRequestDraft",
+	"messages",
+	"currentRequestMessage",
 	"turnFacts",
 	"threadContextPrefix",
 	"thread",

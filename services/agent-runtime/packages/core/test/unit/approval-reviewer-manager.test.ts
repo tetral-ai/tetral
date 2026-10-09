@@ -187,7 +187,7 @@ describe("ContextManager parent-list generation", () => {
 		manager.appendEntry(userEntry("msg_2", 2, "second"));
 		expect(manager.entryListSnapshot().generation).toBe(initial.generation);
 
-		manager.replaceEntries([
+		manager.replaceMessages([
 			userEntry("msg_1", 1, "first"),
 			userEntry("msg_2", 2, "second"),
 			userEntry("msg_3", 3, "third"),
@@ -202,7 +202,7 @@ describe("ContextManager parent-list generation", () => {
 		]);
 		expect(manager.entryListSnapshot().generation).toBe(initial.generation + 2);
 
-		manager.replaceEntries([userEntry("reload", 1, "reload")]);
+		manager.replaceMessages([userEntry("reload", 1, "reload")]);
 		expect(manager.entryListSnapshot().generation).toBe(initial.generation + 3);
 	});
 });

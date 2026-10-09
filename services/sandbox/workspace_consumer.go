@@ -38,12 +38,19 @@ func (p *WorkspaceConsumerPool) run(ctx context.Context, consume WorkspaceConsum
 	if p == nil {
 		return false, errors.New("sandbox workspace consumer pool is required")
 	}
+	acquire := acquisitionContext(ctx)
+	if err := acquire.Err(); err != nil {
+		return false, err
+	}
 	select {
 	case p.slots <- struct{}{}:
 		defer func() { <-p.slots }()
+		if err := acquire.Err(); err != nil {
+			return false, err
+		}
 		return consume(ctx, workspaceID)
-	case <-ctx.Done():
-		return false, ctx.Err()
+	case <-acquire.Done():
+		return false, acquire.Err()
 	}
 }
 
@@ -54,12 +61,15 @@ func RunWorkspaceConsumerCycle(ctx context.Context, lister WorkspaceLister, cons
 	if consume == nil {
 		return false, errors.New("sandbox workspace consumer is required")
 	}
-	workspaceIDs, err := lister.ListIDs(ctx)
+	workspaceIDs, err := lister.ListIDs(acquisitionContext(ctx))
 	if err != nil {
 		return false, err
 	}
 	hadWork := false
 	for _, workspaceID := range workspaceIDs {
+		if err := acquisitionContext(ctx).Err(); err != nil {
+			return hadWork, err
+		}
 		if workspaceID == "" {
 			return hadWork, errors.New("sandbox discovered an empty workspace id")
 		}
@@ -111,7 +121,9 @@ func RunWorkspaceConsumerGroup(
 		}()
 	}
 	firstErr := <-errorsByContender
-	cancel()
+	if acquisitionContext(ctx).Err() == nil {
+		cancel()
+	}
 	contendersDone.Wait()
 	return firstErr
 }
@@ -134,7 +146,7 @@ func runWorkspaceConsumerLoop(
 		hadWork, err := RunWorkspaceConsumerCycle(ctx, lister, consume)
 		delay := backoff.Next(hadWork)
 		if logger != nil {
-			if err != nil && ctx.Err() == nil {
+			if err != nil && acquisitionContext(ctx).Err() == nil {
 				logger.Warn("sandbox.queue.consume.failed",
 					slog.String("operation", "sandbox.queue.consume"),
 					slog.String("event.kind", "queue_consume_failed"),
@@ -152,10 +164,10 @@ func runWorkspaceConsumerLoop(
 				slog.Bool("notification.enabled", wake != nil),
 			)
 		}
-		waitErr := wait(ctx, delay, wakeSnapshot)
+		waitErr := wait(acquisitionContext(ctx), delay, wakeSnapshot)
 		if waitErr != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
+			if acquisitionContext(ctx).Err() != nil {
+				return acquisitionContext(ctx).Err()
 			}
 			return waitErr
 		}

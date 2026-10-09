@@ -6,7 +6,7 @@
       "name": "@tetral/agent-runtime-workspace",
       "dependencies": {
         "@bufbuild/protobuf": "2.12.0",
-        "@grpc/grpc-js": "1.14.4",
+        "@grpc/grpc-js": "1.14.5",
         "@tetral/gateway-protocol": "file:../gateway/packages/protocol",
         "effect": "4.0.0-beta.66",
         "zod": "4.4.3",
@@ -33,14 +33,14 @@
       "version": "0.1.0",
       "dependencies": {
         "@bufbuild/protobuf": "2.12.0",
-        "@grpc/grpc-js": "1.14.4",
+        "@grpc/grpc-js": "1.14.5",
       },
     },
     "packages/runtime-pod": {
       "name": "@tetral/agent-runtime",
       "version": "0.1.0",
       "dependencies": {
-        "@grpc/grpc-js": "1.14.4",
+        "@grpc/grpc-js": "1.14.5",
         "@tetral/agent-runtime-core": "workspace:*",
         "@tetral/agent-runtime-protocol": "workspace:*",
         "@tetral/gateway-protocol": "file:../../../gateway/packages/protocol",
@@ -56,7 +56,7 @@
   "packages": {
     "@bufbuild/protobuf": ["@bufbuild/protobuf@2.12.0", "", {}, "sha512-B/XlCaFIP8LOwzo+bz5uFzATYokcwCKQcghqnlfwSmM5eX/qTkvDBnDPs+gXtX/RyjxJ4DRikECcPJbyALA8FA=="],
 
-    "@grpc/grpc-js": ["@grpc/grpc-js@1.14.4", "", { "dependencies": { "@grpc/proto-loader": "^0.8.0", "@js-sdsl/ordered-map": "^4.4.2" } }, "sha512-k9Dj3DV/itK9D06Y8f190Qgop7/Ui+D0njFV3LHMPwPT75DpXLQohE9Wmz0QElrJnzsjB7KPWiKJbOl7IPDArQ=="],
+    "@grpc/grpc-js": ["@grpc/grpc-js@1.14.5", "", { "dependencies": { "@grpc/proto-loader": "^0.8.0", "@js-sdsl/ordered-map": "^4.4.2" } }, "sha512-7VZM+SVdEcUUqSQeNI3zM8Qs/BhQKZndPo2h5VkYkAM8Iz0wJIa8mKV5ekQGqG8UUsnkQ0NMxIxwkIHYvj0qOw=="],
 
     "@grpc/proto-loader": ["@grpc/proto-loader@0.8.1", "", { "dependencies": { "lodash.camelcase": "^4.3.0", "long": "^5.0.0", "protobufjs": "^7.5.5", "yargs": "^17.7.2" }, "bin": { "proto-loader-gen-types": "build/bin/proto-loader-gen-types.js" } }, "sha512-wtF6h+DY6M3YaDBPAmvuuA6jV8Sif9MjtOI5euKFWRgCDl5PeDpPsHR9u2l6St5ceY8AZgoNDww5+HvEsXFsGg=="],
 
@@ -100,7 +100,7 @@
 
     "@tetral/agent-runtime-protocol": ["@tetral/agent-runtime-protocol@workspace:packages/protocol"],
 
-    "@tetral/gateway-protocol": ["@tetral/gateway-protocol@file:../gateway/packages/protocol", { "dependencies": { "@bufbuild/protobuf": "2.12.0", "@grpc/grpc-js": "1.14.4" } }],
+    "@tetral/gateway-protocol": ["@tetral/gateway-protocol@file:../gateway/packages/protocol", { "dependencies": { "@bufbuild/protobuf": "2.12.0", "@grpc/grpc-js": "1.14.5" } }],
 
     "@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
 
@@ -190,11 +190,11 @@
 
     "zod": ["zod@4.4.3", "", {}, "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="],
 
-    "@tetral/agent-runtime/@tetral/gateway-protocol": ["@tetral/gateway-protocol@file:../gateway/packages/protocol", { "dependencies": { "@bufbuild/protobuf": "2.12.0", "@grpc/grpc-js": "1.14.4" } }],
+    "@tetral/agent-runtime/@tetral/gateway-protocol": ["@tetral/gateway-protocol@file:../gateway/packages/protocol", { "dependencies": { "@bufbuild/protobuf": "2.12.0", "@grpc/grpc-js": "1.14.5" } }],
 
     "@tetral/agent-runtime/@tetral/ts-observability": ["@tetral/ts-observability@file:../../internal/ts-observability", {}],
 
-    "@tetral/agent-runtime-core/@tetral/gateway-protocol": ["@tetral/gateway-protocol@file:../gateway/packages/protocol", { "dependencies": { "@bufbuild/protobuf": "2.12.0", "@grpc/grpc-js": "1.14.4" } }],
+    "@tetral/agent-runtime-core/@tetral/gateway-protocol": ["@tetral/gateway-protocol@file:../gateway/packages/protocol", { "dependencies": { "@bufbuild/protobuf": "2.12.0", "@grpc/grpc-js": "1.14.5" } }],
 
     "node-gyp-build-optional-packages/detect-libc": ["detect-libc@2.1.2", "", {}, "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ=="],
   }

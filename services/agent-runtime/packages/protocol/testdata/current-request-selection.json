@@ -1,0 +1,687 @@
+[
+  {
+    "name": "open-acknowledged-assistant",
+    "events": [
+      {
+        "eventId": "running",
+        "eventSequence": 1,
+        "type": "session.status_running"
+      },
+      {
+        "eventId": "start-a",
+        "eventSequence": 2,
+        "type": "span.model_request_start",
+        "modelRequestId": "request-a",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 0
+        }
+      }
+    ],
+    "messages": [
+      {
+        "messageSequence": 1,
+        "contextKind": "assistant",
+        "modelRequestId": "request-a"
+      }
+    ],
+    "expectedRequestId": "request-a",
+    "expected": {
+      "modelRequestId": "request-a",
+      "assistantMessageSequence": 1
+    }
+  },
+  {
+    "name": "success-end-pending-tool",
+    "events": [
+      {
+        "eventId": "running",
+        "eventSequence": 1,
+        "type": "session.status_running"
+      },
+      {
+        "eventId": "start-a",
+        "eventSequence": 2,
+        "type": "span.model_request_start",
+        "modelRequestId": "request-a",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 0
+        }
+      },
+      {
+        "eventId": "tool-a",
+        "eventSequence": 3,
+        "type": "agent.tool_use",
+        "modelRequestId": "request-a",
+        "toolUse": {
+          "modelToolCallId": "call-a",
+          "toolName": "Read"
+        }
+      },
+      {
+        "eventId": "end-a",
+        "eventSequence": 4,
+        "type": "span.model_request_end",
+        "modelRequestId": "request-a",
+        "requestEnd": {
+          "requestStartEventId": "start-a",
+          "isError": false,
+          "providerContextRetention": {
+            "disposition": "completed",
+            "assistantMessageSequence": 1,
+            "toolUseEventIds": [
+              "tool-a"
+            ],
+            "repairEventIds": []
+          }
+        }
+      }
+    ],
+    "messages": [
+      {
+        "messageSequence": 1,
+        "contextKind": "assistant",
+        "modelRequestId": "request-a"
+      }
+    ],
+    "expectedRequestId": "request-a",
+    "expected": {
+      "modelRequestId": "request-a",
+      "assistantMessageSequence": 1
+    }
+  },
+  {
+    "name": "abnormal-end-retained-pending-tool",
+    "events": [
+      {
+        "eventId": "running",
+        "eventSequence": 1,
+        "type": "session.status_running"
+      },
+      {
+        "eventId": "start-a",
+        "eventSequence": 2,
+        "type": "span.model_request_start",
+        "modelRequestId": "request-a",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 0
+        }
+      },
+      {
+        "eventId": "tool-a",
+        "eventSequence": 3,
+        "type": "agent.tool_use",
+        "modelRequestId": "request-a",
+        "toolUse": {
+          "modelToolCallId": "call-a",
+          "toolName": "Read"
+        }
+      },
+      {
+        "eventId": "end-a",
+        "eventSequence": 4,
+        "type": "span.model_request_end",
+        "modelRequestId": "request-a",
+        "requestEnd": {
+          "requestStartEventId": "start-a",
+          "isError": true,
+          "providerContextRetention": {
+            "disposition": "failed",
+            "assistantMessageSequence": 1,
+            "toolUseEventIds": [
+              "tool-a"
+            ],
+            "repairEventIds": []
+          },
+          "errorKind": "provider_error"
+        }
+      }
+    ],
+    "messages": [
+      {
+        "messageSequence": 1,
+        "contextKind": "assistant",
+        "modelRequestId": "request-a"
+      }
+    ],
+    "expectedRequestId": "request-a",
+    "expected": {
+      "modelRequestId": "request-a",
+      "assistantMessageSequence": 1
+    }
+  },
+  {
+    "name": "reasoning-only-first-assistant-after-end",
+    "events": [
+      {
+        "eventId": "running",
+        "eventSequence": 1,
+        "type": "session.status_running"
+      },
+      {
+        "eventId": "start-a",
+        "eventSequence": 2,
+        "type": "span.model_request_start",
+        "modelRequestId": "request-a",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 0
+        }
+      },
+      {
+        "eventId": "end-reasoning",
+        "eventSequence": 3,
+        "type": "span.model_request_end",
+        "modelRequestId": "request-a",
+        "requestEnd": {
+          "requestStartEventId": "start-a",
+          "isError": false,
+          "providerContextRetention": {
+            "disposition": "completed",
+            "toolUseEventIds": [],
+            "repairEventIds": []
+          }
+        }
+      }
+    ],
+    "messages": [
+      {
+        "messageSequence": 1,
+        "contextKind": "assistant",
+        "modelRequestId": "request-a"
+      }
+    ],
+    "expectedRequestId": "request-a",
+    "expected": {
+      "modelRequestId": "request-a",
+      "assistantMessageSequence": 1
+    }
+  },
+  {
+    "name": "open-no-content",
+    "events": [
+      {
+        "eventId": "running",
+        "eventSequence": 1,
+        "type": "session.status_running"
+      },
+      {
+        "eventId": "start-a",
+        "eventSequence": 2,
+        "type": "span.model_request_start",
+        "modelRequestId": "request-a",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 0
+        }
+      }
+    ],
+    "messages": [],
+    "expectedRequestId": "request-a",
+    "expected": null
+  },
+  {
+    "name": "ordinary-idle-closes-request",
+    "events": [
+      {
+        "eventId": "running",
+        "eventSequence": 1,
+        "type": "session.status_running"
+      },
+      {
+        "eventId": "start-a",
+        "eventSequence": 2,
+        "type": "span.model_request_start",
+        "modelRequestId": "request-a",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 0
+        }
+      },
+      {
+        "eventId": "end-a",
+        "eventSequence": 4,
+        "type": "span.model_request_end",
+        "modelRequestId": "request-a",
+        "requestEnd": {
+          "requestStartEventId": "start-a",
+          "isError": false,
+          "providerContextRetention": {
+            "disposition": "completed",
+            "assistantMessageSequence": 1,
+            "toolUseEventIds": [
+              "tool-a"
+            ],
+            "repairEventIds": []
+          }
+        }
+      },
+      {
+        "eventId": "idle",
+        "eventSequence": 5,
+        "type": "session.status_idle",
+        "idle": {
+          "stopReason": "completed"
+        }
+      }
+    ],
+    "messages": [
+      {
+        "messageSequence": 1,
+        "contextKind": "assistant",
+        "modelRequestId": "request-a"
+      }
+    ],
+    "expectedRequestId": null,
+    "expected": null
+  },
+  {
+    "name": "terminal-closes-request",
+    "events": [
+      {
+        "eventId": "running",
+        "eventSequence": 1,
+        "type": "session.status_running"
+      },
+      {
+        "eventId": "start-a",
+        "eventSequence": 2,
+        "type": "span.model_request_start",
+        "modelRequestId": "request-a",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 0
+        }
+      },
+      {
+        "eventId": "end-a",
+        "eventSequence": 4,
+        "type": "span.model_request_end",
+        "modelRequestId": "request-a",
+        "requestEnd": {
+          "requestStartEventId": "start-a",
+          "isError": false,
+          "providerContextRetention": {
+            "disposition": "completed",
+            "assistantMessageSequence": 1,
+            "toolUseEventIds": [
+              "tool-a"
+            ],
+            "repairEventIds": []
+          }
+        }
+      },
+      {
+        "eventId": "failure",
+        "eventSequence": 5,
+        "type": "session.error",
+        "failure": {
+          "errorType": "provider_error",
+          "retryStatus": "terminal"
+        }
+      },
+      {
+        "eventId": "terminated",
+        "eventSequence": 6,
+        "type": "session.status_terminated"
+      }
+    ],
+    "messages": [
+      {
+        "messageSequence": 1,
+        "contextKind": "assistant",
+        "modelRequestId": "request-a"
+      }
+    ],
+    "expectedRequestId": null,
+    "expected": null
+  },
+  {
+    "name": "requires-action-keeps-request",
+    "events": [
+      {
+        "eventId": "running",
+        "eventSequence": 1,
+        "type": "session.status_running"
+      },
+      {
+        "eventId": "start-a",
+        "eventSequence": 2,
+        "type": "span.model_request_start",
+        "modelRequestId": "request-a",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 0
+        }
+      },
+      {
+        "eventId": "tool-a",
+        "eventSequence": 3,
+        "type": "agent.tool_use",
+        "modelRequestId": "request-a",
+        "toolUse": {
+          "modelToolCallId": "call-a",
+          "toolName": "Read"
+        }
+      },
+      {
+        "eventId": "end-a",
+        "eventSequence": 4,
+        "type": "span.model_request_end",
+        "modelRequestId": "request-a",
+        "requestEnd": {
+          "requestStartEventId": "start-a",
+          "isError": false,
+          "providerContextRetention": {
+            "disposition": "completed",
+            "assistantMessageSequence": 1,
+            "toolUseEventIds": [
+              "tool-a"
+            ],
+            "repairEventIds": []
+          }
+        }
+      },
+      {
+        "eventId": "requires-action",
+        "eventSequence": 5,
+        "type": "session.status_idle",
+        "idle": {
+          "stopReason": "requires_action"
+        }
+      }
+    ],
+    "messages": [
+      {
+        "messageSequence": 1,
+        "contextKind": "assistant",
+        "modelRequestId": "request-a"
+      }
+    ],
+    "expectedRequestId": "request-a",
+    "expected": {
+      "modelRequestId": "request-a",
+      "assistantMessageSequence": 1
+    }
+  },
+  {
+    "name": "requires-action-reopened-preserves-request",
+    "events": [
+      {
+        "eventId": "running",
+        "eventSequence": 1,
+        "type": "session.status_running"
+      },
+      {
+        "eventId": "start-a",
+        "eventSequence": 2,
+        "type": "span.model_request_start",
+        "modelRequestId": "request-a",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 0
+        }
+      },
+      {
+        "eventId": "tool-a",
+        "eventSequence": 3,
+        "type": "agent.tool_use",
+        "modelRequestId": "request-a",
+        "toolUse": {
+          "modelToolCallId": "call-a",
+          "toolName": "Read"
+        }
+      },
+      {
+        "eventId": "end-a",
+        "eventSequence": 4,
+        "type": "span.model_request_end",
+        "modelRequestId": "request-a",
+        "requestEnd": {
+          "requestStartEventId": "start-a",
+          "isError": false,
+          "providerContextRetention": {
+            "disposition": "completed",
+            "assistantMessageSequence": 1,
+            "toolUseEventIds": [
+              "tool-a"
+            ],
+            "repairEventIds": []
+          }
+        }
+      },
+      {
+        "eventId": "requires-action",
+        "eventSequence": 5,
+        "type": "session.status_idle",
+        "idle": {
+          "stopReason": "requires_action"
+        }
+      },
+      {
+        "eventId": "running-reopened",
+        "eventSequence": 6,
+        "type": "session.status_running"
+      }
+    ],
+    "messages": [
+      {
+        "messageSequence": 1,
+        "contextKind": "assistant",
+        "modelRequestId": "request-a"
+      }
+    ],
+    "expectedRequestId": "request-a",
+    "expected": {
+      "modelRequestId": "request-a",
+      "assistantMessageSequence": 1
+    }
+  },
+  {
+    "name": "ordinary-new-run-excludes-old-request",
+    "events": [
+      {
+        "eventId": "running",
+        "eventSequence": 1,
+        "type": "session.status_running"
+      },
+      {
+        "eventId": "start-a",
+        "eventSequence": 2,
+        "type": "span.model_request_start",
+        "modelRequestId": "request-a",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 0
+        }
+      },
+      {
+        "eventId": "end-a",
+        "eventSequence": 4,
+        "type": "span.model_request_end",
+        "modelRequestId": "request-a",
+        "requestEnd": {
+          "requestStartEventId": "start-a",
+          "isError": false,
+          "providerContextRetention": {
+            "disposition": "completed",
+            "assistantMessageSequence": 1,
+            "toolUseEventIds": [
+              "tool-a"
+            ],
+            "repairEventIds": []
+          }
+        }
+      },
+      {
+        "eventId": "idle",
+        "eventSequence": 5,
+        "type": "session.status_idle",
+        "idle": {
+          "stopReason": "completed"
+        }
+      },
+      {
+        "eventId": "running-reopened",
+        "eventSequence": 6,
+        "type": "session.status_running"
+      }
+    ],
+    "messages": [
+      {
+        "messageSequence": 1,
+        "contextKind": "assistant",
+        "modelRequestId": "request-a"
+      }
+    ],
+    "expectedRequestId": null,
+    "expected": null
+  },
+  {
+    "name": "latest-no-content-does-not-fall-back",
+    "events": [
+      {
+        "eventId": "running",
+        "eventSequence": 1,
+        "type": "session.status_running"
+      },
+      {
+        "eventId": "start-a",
+        "eventSequence": 2,
+        "type": "span.model_request_start",
+        "modelRequestId": "request-a",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 0
+        }
+      },
+      {
+        "eventId": "end-a",
+        "eventSequence": 4,
+        "type": "span.model_request_end",
+        "modelRequestId": "request-a",
+        "requestEnd": {
+          "requestStartEventId": "start-a",
+          "isError": false,
+          "providerContextRetention": {
+            "disposition": "completed",
+            "assistantMessageSequence": 1,
+            "toolUseEventIds": [
+              "tool-a"
+            ],
+            "repairEventIds": []
+          }
+        }
+      },
+      {
+        "eventId": "idle",
+        "eventSequence": 5,
+        "type": "session.status_idle",
+        "idle": {
+          "stopReason": "completed"
+        }
+      },
+      {
+        "eventId": "running-reopened",
+        "eventSequence": 6,
+        "type": "session.status_running"
+      },
+      {
+        "eventId": "start-b",
+        "eventSequence": 7,
+        "type": "span.model_request_start",
+        "modelRequestId": "request-b",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 1
+        }
+      }
+    ],
+    "messages": [
+      {
+        "messageSequence": 1,
+        "contextKind": "assistant",
+        "modelRequestId": "request-a"
+      }
+    ],
+    "expectedRequestId": "request-b",
+    "expected": null
+  },
+  {
+    "name": "duplicate-selected-assistant-fails",
+    "events": [
+      {
+        "eventId": "running",
+        "eventSequence": 1,
+        "type": "session.status_running"
+      },
+      {
+        "eventId": "start-a",
+        "eventSequence": 2,
+        "type": "span.model_request_start",
+        "modelRequestId": "request-a",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 0
+        }
+      }
+    ],
+    "messages": [
+      {
+        "messageSequence": 1,
+        "contextKind": "assistant",
+        "modelRequestId": "request-a"
+      },
+      {
+        "messageSequence": 2,
+        "contextKind": "assistant",
+        "modelRequestId": "request-a"
+      }
+    ],
+    "expectedRequestId": "request-a",
+    "expected": null,
+    "error": true
+  },
+  {
+    "name": "duplicate-request-start-fails",
+    "events": [
+      {
+        "eventId": "running",
+        "eventSequence": 1,
+        "type": "session.status_running"
+      },
+      {
+        "eventId": "start-a",
+        "eventSequence": 2,
+        "type": "span.model_request_start",
+        "modelRequestId": "request-a",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 0
+        }
+      },
+      {
+        "eventId": "duplicate-start",
+        "eventSequence": 3,
+        "type": "span.model_request_start",
+        "modelRequestId": "request-a",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 0
+        }
+      }
+    ],
+    "messages": [
+      {
+        "messageSequence": 1,
+        "contextKind": "assistant",
+        "modelRequestId": "request-a"
+      }
+    ],
+    "expectedRequestId": null,
+    "expected": null,
+    "error": true
+  }
+]

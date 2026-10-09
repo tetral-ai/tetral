@@ -1,3 +1,5 @@
+import { NormalizedProviderEventType as FragmentType } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import type { NormalizedProviderEvent, NormalizedTextEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
 import { credentials, Metadata, status } from "@grpc/grpc-js";
@@ -20,19 +22,28 @@ describe("ProviderGatewayApp lifecycle", () => {
   test("graceful shutdown flips readiness before draining in-flight gRPC streams", async () => {
     let releaseStream = (): void => undefined;
     let shutdownPromise: Promise<void> | undefined;
+    let previewCloseStarted = false;
+    let releasePreviewClose = (): void => undefined;
+    const previewCloseGate = new Promise<void>(resolve => { releasePreviewClose = resolve; });
     const logs: unknown[] = [];
     const request = validAnthropicProviderRequest();
     const app = createProviderGatewayApp({
       config: validConfig(),
       logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
       tokenReviewClient: new AllowingTokenReviewClient(),
+      previewPublisher: {
+        start: () => undefined,
+        createProducer: () => ({ offer: () => undefined, close: () => undefined }),
+        metrics: { render: () => "" },
+        close: async () => { previewCloseStarted = true; await previewCloseGate; },
+      },
       providerStreamer: {
         stream: async function* () {
-          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+          yield {type:FragmentType.ReasoningStart,reasoning:{id:"thinking",text:"",metadataJson:"{}"}};
           await new Promise<void>((resolve) => {
             releaseStream = resolve;
           });
-          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, "");
+          yield {type:FragmentType.ReasoningEnd,reasoning:{id:"thinking",text:"",metadataJson:"{}"}};
           yield finishEvent();
         },
       },
@@ -61,6 +72,10 @@ describe("ProviderGatewayApp lifecycle", () => {
 
       shutdownPromise = app.shutdown();
       await waitUntil(() => !app.ready().ready);
+      // Both drains begin while the actual provider stream is positively held.
+      await waitUntil(() => previewCloseStarted);
+      let shutdownJoined = false;
+      void shutdownPromise.then(() => { shutdownJoined = true; });
       const rejectedRequest = {
         ...request,
         requestId: "req_not_ready",
@@ -70,11 +85,13 @@ describe("ProviderGatewayApp lifecycle", () => {
 
       releaseStream();
       const events = await eventsPromise;
+      expect(shutdownJoined).toBe(false);
+      releasePreviewClose();
       await shutdownPromise;
 
       expect(events.map((event) => event.type)).toEqual([
-        ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-        ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
+        ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED,
+        ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE,
         ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
       ]);
       expect(logs).toContainEqual(expect.objectContaining({
@@ -109,6 +126,7 @@ describe("ProviderGatewayApp lifecycle", () => {
       }));
     } finally {
       releaseStream();
+      releasePreviewClose();
       await shutdownPromise?.catch(() => undefined);
       client.close();
       await app.shutdown();
@@ -138,6 +156,7 @@ describe("ProviderGatewayApp lifecycle", () => {
 function validConfig(): ProviderGatewayConfig {
   return {
     deploymentEnvironment: "test",
+    diagnostics: { level: "info", maxRecordBytes: 16384, summaryIntervalMs: 30000, burst: 1 },
     serviceVersion: "test",
     grpcBindAddress: "127.0.0.1:0",
     httpBindAddress: "127.0.0.1:0",
@@ -147,6 +166,7 @@ function validConfig(): ProviderGatewayConfig {
     },
     runtimeBindingTokenHMACKey: BindingTokenKey,
     databaseUrl: "postgres://gateway-readonly.example/tetral",
+    drainTimeoutMs: 30000,cancelJoinTimeoutMs:5000,
     databasePool: {
       max: 10,
       idleTimeout: 30,
@@ -182,9 +202,9 @@ function metadata(): Metadata {
 }
 
 function textEvent(
-  type: ProviderStreamEventType,
+  type: NormalizedTextEventType,
   text: string,
-): ProviderStreamEvent {
+): NormalizedProviderEvent {
   return {
     type,
     text: {
@@ -195,9 +215,9 @@ function textEvent(
   };
 }
 
-function finishEvent(): ProviderStreamEvent {
+function finishEvent(): NormalizedProviderEvent {
   return {
-    type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+    type: FragmentType.Finish,
     finish: {
       reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
       usage: {
@@ -284,6 +304,7 @@ function signedRuntimeBindingToken(request: {
     binding_id: request.bindingId,
     binding_generation: request.bindingGeneration,
     runtime_pod_uid: runtimePodUid,
+    runtime_process_id: "process-test",
     exp: Math.floor(new Date(expiresAt).getTime() / 1000),
   });
   const payloadPart = Buffer.from(payload, "utf8").toString("base64url");

@@ -1,3 +1,7 @@
+import {
+  ServiceLifecycleDefaults,
+  validServiceLifecycle,
+} from "@tetral/gateway-protocol/src/service-lifecycle.js";
 /**
  * @packageDocumentation
  *
@@ -12,10 +16,18 @@
  */
 
 import { z } from "zod/v4";
+import { diagnosticEnvKeys, parseDiagnosticConfig, parseWorkloadResourceConfig, workloadResourceEnvKeys } from "@tetral/ts-observability";
+import type { DiagnosticConfig } from "@tetral/ts-observability";
+import { parseDatabasePoolConfig } from "@tetral/ts-dbconnect";
+import type { DatabasePoolConfig } from "@tetral/ts-dbconnect";
+import { PreviewNatsEnvKeys, parsePreviewNatsConfig } from "./providers/preview-config.js";
+import type { PreviewNatsConfig } from "./providers/preview-config.js";
+export type { DatabasePoolConfig } from "@tetral/ts-dbconnect";
 
 /** Contains the complete validated configuration needed to compose one provider-gateway process. */
 export interface ProviderGatewayConfig {
   readonly deploymentEnvironment: string;
+  readonly diagnostics: DiagnosticConfig;
   readonly serviceVersion: string;
   readonly grpcBindAddress: string;
   readonly httpBindAddress: string;
@@ -26,6 +38,12 @@ export interface ProviderGatewayConfig {
   readonly runtimeBindingTokenHMACKey: string;
   readonly databaseUrl: string;
   readonly databasePool: DatabasePoolConfig;
+  readonly databaseTLS?: {
+    readonly caPath: string;
+    readonly serverName: string;
+  };
+  readonly drainTimeoutMs: number;
+  readonly cancelJoinTimeoutMs: number;
   readonly vaultKeyHex: string;
   readonly kubernetesApiServerUrl: string;
   readonly kubernetesApiCaCertPath: string;
@@ -33,15 +51,7 @@ export interface ProviderGatewayConfig {
   readonly bridgeApiGrpcAddress: string;
   readonly bridgeTokenPath: string;
   readonly maxConcurrentTurns: number;
-}
-
-/** Contains the validated Bun PostgreSQL pool and statement lifetime bounds. */
-export interface DatabasePoolConfig {
-  readonly max: number;
-  readonly idleTimeout: number;
-  readonly maxLifetime: number;
-  readonly connectionTimeout: number;
-  readonly statementTimeoutMs: number;
+  readonly previewNats?: PreviewNatsConfig;
 }
 
 /** Describes a bounded configuration or startup failure suitable for structured startup logging. */
@@ -63,6 +73,11 @@ const ServiceAccountSchema = z
   .max(511)
   .refine((value) => parseSingleServiceAccount(value) !== undefined);
 const ConfigSchema = z.strictObject({
+  ...Object.fromEntries(PreviewNatsEnvKeys.map(key => [key, z.string().optional()])),
+  TETRAL_LOG_LEVEL: z.string().optional(),
+  TETRAL_LOG_MAX_RECORD_BYTES: z.string().optional(),
+  TETRAL_LOG_SUMMARY_INTERVAL_MS: z.string().optional(),
+  TETRAL_LOG_BURST: z.string().optional(),
   TETRAL_PROVIDER_GATEWAY_GRPC_ADDR: AddressSchema,
   TETRAL_PROVIDER_GATEWAY_HTTP_ADDR: AddressSchema,
   TETRAL_DEPLOYMENT_ENVIRONMENT: IdentityFieldSchema,
@@ -70,6 +85,10 @@ const ConfigSchema = z.strictObject({
   TETRAL_INTERNAL_GRPC_AUDIENCE: z.literal("tetral-internal-grpc"),
   TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS: ServiceAccountSchema,
   TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY: z.string().min(32).max(4096),
+  TETRAL_DATABASE_TLS_CA_PATH: AddressSchema.optional(),
+  TETRAL_DATABASE_TLS_SERVER_NAME: AddressSchema.optional(),
+  TETRAL_DRAIN_TIMEOUT_MS: z.string().optional(),
+  TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS: z.string().optional(),
   TETRAL_DATABASE_URL: z.string().min(1).max(4096),
   TETRAL_DATABASE_POOL_MAX: z.string().optional(),
   TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS: z.string().optional(),
@@ -85,14 +104,19 @@ const ConfigSchema = z.strictObject({
   TETRAL_GATEWAY_MAX_CONCURRENT_TURNS: z.string().optional(),
 });
 const ProviderGatewayEnvKeys = [
+  ...PreviewNatsEnvKeys,
+  ...diagnosticEnvKeys,
   "TETRAL_PROVIDER_GATEWAY_GRPC_ADDR",
   "TETRAL_PROVIDER_GATEWAY_HTTP_ADDR",
-  "TETRAL_DEPLOYMENT_ENVIRONMENT",
-  "TETRAL_SERVICE_VERSION",
+  ...workloadResourceEnvKeys,
   "TETRAL_INTERNAL_GRPC_AUDIENCE",
   "TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS",
   "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY",
   "TETRAL_DATABASE_URL",
+  "TETRAL_DATABASE_TLS_CA_PATH",
+  "TETRAL_DATABASE_TLS_SERVER_NAME",
+  "TETRAL_DRAIN_TIMEOUT_MS",
+  "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS",
   "TETRAL_DATABASE_POOL_MAX",
   "TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS",
   "TETRAL_DATABASE_POOL_MAX_LIFETIME_SECONDS",
@@ -115,24 +139,55 @@ const ProviderGatewayEnvKeys = [
  * eight; a supplied value must be a positive safe integer.
  */
 export function loadProviderGatewayConfig(env: Record<string, string | undefined>): ProviderGatewayConfigResult {
+  let previewNats: PreviewNatsConfig | undefined;
+  try { previewNats = parsePreviewNatsConfig(env); }
+  catch { return { ok: false, error: { kind: "config_error", message: "invalid gateway preview config" } }; }
+  const resource = parseWorkloadResourceConfig(env, 253);
+  const diagnostics = parseDiagnosticConfig(env);
   const parsed = ConfigSchema.safeParse(env);
-  if (!parsed.success) {
+  if (!parsed.success || diagnostics === undefined || resource === undefined) {
     return { ok: false, error: { kind: "config_error", message: "invalid gateway config" } };
   }
   const allowedRuntimePod = parseSingleServiceAccount(parsed.data.TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS);
   if (allowedRuntimePod === undefined) {
     return { ok: false, error: { kind: "config_error", message: "invalid gateway config" } };
   }
-  const maxConcurrentTurns = parsePositiveInteger(parsed.data.TETRAL_GATEWAY_MAX_CONCURRENT_TURNS, 8);
-  const databasePool = parseDatabasePoolConfig(parsed.data);
+  const maxConcurrentTurns = parsePositiveInteger(
+    parsed.data.TETRAL_GATEWAY_MAX_CONCURRENT_TURNS,
+    8,
+  );
+  const caPath = parsed.data.TETRAL_DATABASE_TLS_CA_PATH,
+    serverName = parsed.data.TETRAL_DATABASE_TLS_SERVER_NAME;
+  const drainTimeoutMs = parsePositiveInteger(
+    parsed.data.TETRAL_DRAIN_TIMEOUT_MS,
+    ServiceLifecycleDefaults.drainTimeoutMs,
+  );
+  const cancelJoinTimeoutMs = parsePositiveInteger(
+    parsed.data.TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS,
+    ServiceLifecycleDefaults.cancelJoinTimeoutMs,
+  );
+  if (
+    cancelJoinTimeoutMs === undefined ||
+    drainTimeoutMs === undefined ||
+    !validServiceLifecycle(drainTimeoutMs, cancelJoinTimeoutMs) ||
+    (caPath === undefined) !== (serverName === undefined)
+  )
+    return {
+      ok: false,
+      error: { kind: "config_error", message: "invalid gateway config" },
+    };
+  const databasePool = parseDatabasePoolConfig(parsed.data, {
+    empty: "default",
+  });
   if (maxConcurrentTurns === undefined || databasePool === undefined) {
     return { ok: false, error: { kind: "config_error", message: "invalid gateway config" } };
   }
   return {
     ok: true,
     config: {
-      deploymentEnvironment: parsed.data.TETRAL_DEPLOYMENT_ENVIRONMENT,
-      serviceVersion: parsed.data.TETRAL_SERVICE_VERSION,
+      diagnostics,
+      deploymentEnvironment: resource.deploymentEnvironment,
+      serviceVersion: resource.serviceVersion,
       grpcBindAddress: parsed.data.TETRAL_PROVIDER_GATEWAY_GRPC_ADDR,
       httpBindAddress: parsed.data.TETRAL_PROVIDER_GATEWAY_HTTP_ADDR,
       allowedRuntimePod: {
@@ -142,6 +197,11 @@ export function loadProviderGatewayConfig(env: Record<string, string | undefined
       runtimeBindingTokenHMACKey: parsed.data.TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY,
       databaseUrl: parsed.data.TETRAL_DATABASE_URL,
       databasePool,
+      drainTimeoutMs,
+      cancelJoinTimeoutMs,
+      ...(caPath !== undefined && serverName !== undefined
+        ? { databaseTLS: { caPath, serverName } }
+        : {}),
       vaultKeyHex: parsed.data.ENGINE_VAULT_KEY,
       kubernetesApiServerUrl: parsed.data.KUBERNETES_API_SERVER_URL,
       kubernetesApiCaCertPath: parsed.data.KUBERNETES_API_CA_CERT_PATH,
@@ -149,32 +209,9 @@ export function loadProviderGatewayConfig(env: Record<string, string | undefined
       bridgeApiGrpcAddress: parsed.data.TETRAL_BRIDGE_API_GRPC_ADDR,
       bridgeTokenPath: parsed.data.TETRAL_PROVIDER_GATEWAY_BRIDGE_TOKEN_PATH,
       maxConcurrentTurns,
+      ...(previewNats === undefined ? {} : { previewNats }),
     },
   };
-}
-
-function parseDatabasePoolConfig(env: {
-  readonly TETRAL_DATABASE_POOL_MAX?: string | undefined;
-  readonly TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS?: string | undefined;
-  readonly TETRAL_DATABASE_POOL_MAX_LIFETIME_SECONDS?: string | undefined;
-  readonly TETRAL_DATABASE_POOL_CONNECTION_TIMEOUT_SECONDS?: string | undefined;
-  readonly TETRAL_DATABASE_STATEMENT_TIMEOUT_MS?: string | undefined;
-}): DatabasePoolConfig | undefined {
-  const max = parsePositiveInteger(env.TETRAL_DATABASE_POOL_MAX, 10);
-  const idleTimeout = parsePositiveInteger(env.TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS, 30);
-  const maxLifetime = parsePositiveInteger(env.TETRAL_DATABASE_POOL_MAX_LIFETIME_SECONDS, 1_800);
-  const connectionTimeout = parsePositiveInteger(env.TETRAL_DATABASE_POOL_CONNECTION_TIMEOUT_SECONDS, 30);
-  const statementTimeoutMs = parsePositiveInteger(env.TETRAL_DATABASE_STATEMENT_TIMEOUT_MS, 30_000);
-  if (
-    max === undefined ||
-    idleTimeout === undefined ||
-    maxLifetime === undefined ||
-    connectionTimeout === undefined ||
-    statementTimeoutMs === undefined
-  ) {
-    return undefined;
-  }
-  return { max, idleTimeout, maxLifetime, connectionTimeout, statementTimeoutMs };
 }
 
 /** Loads provider-gateway startup configuration from the current process environment. */

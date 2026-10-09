@@ -30,10 +30,10 @@ spec:
               kubernetes.io/metadata.name: tetral-system
           podSelector:
             matchLabels:
-              app.kubernetes.io/name: bridge
+              app.kubernetes.io/name: job-runner
       ports:
         - protocol: TCP
-          port: 9090
+          port: 19090
   egress:
     - to:
         - namespaceSelector:
@@ -51,12 +51,28 @@ spec:
               kubernetes.io/metadata.name: tetral-system
           podSelector:
             matchLabels:
-              app.kubernetes.io/name: gateway
+              app.kubernetes.io/name: provider-gateway
       ports:
         - protocol: TCP
           port: 9090
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp-connector
+      ports:
         - protocol: TCP
           port: 9091
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: web-connector
+      ports:
         - protocol: TCP
           port: 9092
     - to:
@@ -77,25 +93,3 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
----
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: agent-runtime-apiserver-egress
-  namespace: tetral-agent-runtime
-  labels:
-    app.kubernetes.io/name: agent-runtime
-    app.kubernetes.io/part-of: tetral
-spec:
-  endpointSelector:
-    matchLabels:
-      app.kubernetes.io/name: agent-runtime
-  egress:
-    - toEntities:
-        - kube-apiserver
-      toPorts:
-        - ports:
-            - port: "443"
-              protocol: TCP
-            - port: "6443"
-              protocol: TCP

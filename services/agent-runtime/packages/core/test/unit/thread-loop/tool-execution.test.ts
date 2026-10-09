@@ -42,7 +42,7 @@ import type {
 	LLMServiceError,
 	Interface as LLMServiceInterface,
 } from "../../../src/llm/llm-service.js";
-import { ProviderStreamAccumulator } from "../../../src/runtime/accumulator.js";
+import { RequestContentProcessor } from "../../../src/runtime/accumulator.js";
 import { AutoApprovalReviewerManager } from "../../../src/session/approval-reviewer-manager.js";
 import * as SessionManager from "../../../src/session/session-manager.js";
 import * as ThreadLoop from "../../../src/thread-loop/thread-loop.js";
@@ -127,8 +127,8 @@ describe("ThreadLoop", () => {
 		modelToolCallId?: string,
 	): string | undefined {
 		const parts = [
-			...session.state.contextManager.entries().flatMap((entry) => entry.parts),
-			...(session.state.contextManager.openRequestDraft()?.parts ?? []),
+			...session.state.contextManager.historyMessages().flatMap((entry) => entry.parts),
+			...(session.state.contextManager.currentAssistantMessage()?.parts ?? []),
 		];
 		const matches = (part: { readonly modelToolCallId?: string }): boolean =>
 			modelToolCallId === undefined || part.modelToolCallId === modelToolCallId;
@@ -190,6 +190,7 @@ describe("ThreadLoop", () => {
 						const threadLoop = yield* ThreadLoop.Service;
 						session.state.markPersistentContextLoaded();
 						threadLoop.seedRuntimeModel(session);
+						session.state.contextManager.replaceMessages([message]);
 						installRecoveredToolTurn(session, modelRequestId, [
 							{
 								modelToolCallId: `call_patch_${suffix}`,
@@ -214,7 +215,6 @@ describe("ThreadLoop", () => {
 										},
 									],
 									[message],
-									undefined,
 								)
 							: yield* threadLoop.installLoadedSandboxExecutions(
 									session,
@@ -229,7 +229,6 @@ describe("ThreadLoop", () => {
 										},
 									],
 									[message],
-									undefined,
 								);
 					}).pipe(
 						Effect.provide(
@@ -285,7 +284,7 @@ describe("ThreadLoop", () => {
 						}),
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "call-patch-producer",
 								toolName: "apply_patch",
 								input: patch,
@@ -423,7 +422,7 @@ describe("ThreadLoop", () => {
 								[
 									[
 										{
-											type: "tool-call",
+											type: "tool-call-complete",
 											id: "call-tool-use-ack-loss",
 											toolName: "lookup_ack_loss",
 											input: { query: "durable" },
@@ -435,13 +434,9 @@ describe("ThreadLoop", () => {
 										{ type: "finish", finishReason },
 									],
 									[
-										{ type: "text-start", id: "text-after-tool" },
-										{
-											type: "text-delta",
-											id: "text-after-tool",
-											text_delta: "continued",
-										},
-										{ type: "text-end", id: "text-after-tool" },
+
+
+										{type:"text-complete" as const,providerPartId:"text-after-tool",eventId:"evt_876ed1eeab33488881de8e94cd38d0a1",text:("continued")},
 										{ type: "finish", finishReason: "stop" },
 									],
 								],
@@ -481,10 +476,11 @@ describe("ThreadLoop", () => {
 			sessionId: "sesn_1",
 			sessionThreadId: "thrd_reviewer",
 			parentThreadId: "thrd_main",
-			threadRole: "approval_reviewer",
+			threadRole: "approval_reviewer",threadVisibility:"internal",
 			bindingId: "bind_reviewer",
 			bindingGeneration: 1,
 			targetPodUid: "pod_reviewer",
+			runtimeProcessId: "process-test",
 			runtimeBindingToken: "binding-token-reviewer",
 		});
 		session.state.enqueueAcceptedInput(approvalReviewAcceptedInput());
@@ -508,9 +504,9 @@ describe("ThreadLoop", () => {
 		const llm = queuedLLMService(
 			[
 				[
-					{ type: "text-start", id: "text-1" },
-					{ type: "text-delta", id: "text-1", text_delta: "allow" },
-					{ type: "text-end", id: "text-1" },
+
+
+					{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_8c903019157cea7069ca39eb2da59183",text:("allow")},
 					{
 						type: "finish",
 						finishReason: "stop",
@@ -591,10 +587,11 @@ describe("ThreadLoop", () => {
 			sessionId: "sesn_reviewer_receipt",
 			sessionThreadId: "thrd_reviewer_receipt",
 			parentThreadId: "thrd_main",
-			threadRole: "approval_reviewer",
+			threadRole: "approval_reviewer",threadVisibility:"internal",
 			bindingId: "bind_reviewer_receipt",
 			bindingGeneration: 1,
 			targetPodUid: "pod_reviewer_receipt",
+			runtimeProcessId: "process-test",
 			runtimeBindingToken: "binding-token-reviewer-receipt",
 		});
 		const reviewerInput = {
@@ -605,6 +602,7 @@ describe("ThreadLoop", () => {
 			bindingId: session.identity.bindingId,
 			bindingGeneration: session.identity.bindingGeneration,
 			targetPodUid: session.identity.targetPodUid,
+			runtimeProcessId: session.identity.runtimeProcessId,
 		};
 		expect(session.state.enqueueAcceptedInput(reviewerInput)).toBe("applied");
 		expect(session.state.threadTurnTransition().nextStep).toEqual({
@@ -688,10 +686,11 @@ describe("ThreadLoop", () => {
 			sessionId: "sesn_reviewer_tools",
 			sessionThreadId: "thrd_reviewer_tools",
 			parentThreadId: "thrd_main",
-			threadRole: "approval_reviewer",
+			threadRole: "approval_reviewer",threadVisibility:"internal",
 			bindingId: "bind_reviewer_tools",
 			bindingGeneration: 1,
 			targetPodUid: "pod_reviewer_tools",
+			runtimeProcessId: "process-test",
 			runtimeBindingToken: "binding-token-reviewer-tools",
 		});
 		session.state.enqueueAcceptedInput(
@@ -702,7 +701,7 @@ describe("ThreadLoop", () => {
 			[
 				[
 					{
-						type: "tool-call",
+						type: "tool-call-complete",
 						id: "call_reviewer_read",
 						toolName: "Read",
 						input: { file_path: "README.md" },
@@ -711,13 +710,9 @@ describe("ThreadLoop", () => {
 					{ type: "finish", finishReason: "tool-calls" },
 				],
 				[
-					{ type: "text-start", id: "decision" },
-					{
-						type: "text-delta",
-						id: "decision",
-						text_delta: '{"decision":"allow"}',
-					},
-					{ type: "text-end", id: "decision" },
+
+
+					{type:"text-complete" as const,providerPartId:"decision",eventId:"evt_c31a899a5b92b901786c8618f330d7ab",text:('{"decision":"allow"}')},
 					{ type: "finish", finishReason: "stop" },
 				],
 			],
@@ -765,10 +760,11 @@ describe("ThreadLoop", () => {
 			sessionId: "sesn_1",
 			sessionThreadId: "thrd_reviewer",
 			parentThreadId: "thrd_main",
-			threadRole: "approval_reviewer",
+			threadRole: "approval_reviewer",threadVisibility:"internal",
 			bindingId: "bind_reviewer",
 			bindingGeneration: 1,
 			targetPodUid: "pod_reviewer",
+			runtimeProcessId: "process-test",
 			runtimeBindingToken: "binding-token-before-commit",
 		});
 		session.state.recordLastRequestCompletion(
@@ -807,9 +803,9 @@ describe("ThreadLoop", () => {
 		const llm = queuedLLMService(
 			[
 				[
-					{ type: "text-start", id: "text-1" },
-					{ type: "text-delta", id: "text-1", text_delta: "allow" },
-					{ type: "text-end", id: "text-1" },
+
+
+					{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_c4daf9a74eb1ae4b4d9ca0467fd53d1c",text:("allow")},
 					{ type: "finish", finishReason: "stop" },
 				],
 			],
@@ -828,7 +824,7 @@ describe("ThreadLoop", () => {
 		expect(result).toMatchObject({ type: "completed", modelMessageCount: 1 });
 		expect(session.identity).toMatchObject({
 			parentThreadId: "thrd_main",
-			threadRole: "approval_reviewer",
+			threadRole: "approval_reviewer",threadVisibility:"internal",
 			runtimeBindingToken: "binding-token-before-commit",
 		});
 		expect(requests[0]?.requestKind).toBe(
@@ -860,7 +856,7 @@ describe("ThreadLoop", () => {
 				if (requests.length === 1) {
 					return Stream.fromIterable([
 						{
-							type: "tool-call" as const,
+							type: "tool-call-complete" as const,
 							id: "tool-reschedule",
 							toolName: "mutate_record",
 							input: { record_id: "reschedule", value: "committed" },
@@ -874,19 +870,11 @@ describe("ThreadLoop", () => {
 				}
 				if (requests.length === 2) {
 					return Stream.fromIterable([
-						{ type: "reasoning-start", id: "reasoning-reschedule-failed" },
-						{
-							type: "reasoning-delta",
-							id: "reasoning-reschedule-failed",
-							text_delta: failedReasoning,
-						},
-						{ type: "reasoning-end", id: "reasoning-reschedule-failed" },
-						{ type: "text-start", id: "text-reschedule-failed" },
-						{
-							type: "text-delta",
-							id: "text-reschedule-failed",
-							text_delta: failedDraft,
-						},
+						{type:"thinking-started" as const,providerPartId:"reasoning-reschedule-failed",eventId:"evt_eb60aa272b2d813ea5550463145a2b42"},
+
+						{type:"reasoning-complete" as const,providerPartId:"reasoning-reschedule-failed",thinkingEventId:"evt_eb60aa272b2d813ea5550463145a2b42",text:(failedReasoning)},
+
+
 						{
 							type: "provider-error",
 							error: runtimeFailureFromProviderError(
@@ -902,20 +890,12 @@ describe("ThreadLoop", () => {
 					]);
 				}
 				return Stream.fromIterable([
-					{ type: "reasoning-start", id: "reasoning-reschedule-success" },
-					{
-						type: "reasoning-delta",
-						id: "reasoning-reschedule-success",
-						text_delta: successfulReasoning,
-					},
-					{ type: "reasoning-end", id: "reasoning-reschedule-success" },
-					{ type: "text-start", id: "text-reschedule-success" },
-					{
-						type: "text-delta",
-						id: "text-reschedule-success",
-						text_delta: "mutation confirmed",
-					},
-					{ type: "text-end", id: "text-reschedule-success" },
+					{type:"thinking-started" as const,providerPartId:"reasoning-reschedule-success",eventId:"evt_5aaf352b3dea66e6dbc7bd7a47fcf5db"},
+
+					{type:"reasoning-complete" as const,providerPartId:"reasoning-reschedule-success",thinkingEventId:"evt_5aaf352b3dea66e6dbc7bd7a47fcf5db",text:(successfulReasoning)},
+
+
+					{type:"text-complete" as const,providerPartId:"text-reschedule-success",eventId:"evt_f7e0d44bcc7846556af580e4dfe01e4d",text:("mutation confirmed")},
 					{ type: "finish", finishReason: "stop" },
 				]);
 			},
@@ -941,7 +921,7 @@ describe("ThreadLoop", () => {
 				requestEnds.push(envelope);
 				if (envelope.reschedule !== undefined) {
 					const parkedHotContext = JSON.stringify(
-						session.state.contextManager.entries(),
+						session.state.contextManager.historyMessages(),
 					);
 					expect(parkedHotContext).not.toContain(failedDraft);
 					expect(parkedHotContext).not.toContain(failedReasoning);
@@ -977,7 +957,7 @@ describe("ThreadLoop", () => {
 		);
 		const requestTwoContext = JSON.stringify(requests[1]?.context);
 		const requestThreeContext = JSON.stringify(requests[2]?.context);
-		const hotContext = JSON.stringify(session.state.contextManager.entries());
+		const hotContext = JSON.stringify(session.state.contextManager.historyMessages());
 		const durableAppendEvents = JSON.stringify(appended);
 		const occurrenceCount = (value: string, needle: string) =>
 			value.split(needle).length - 1;
@@ -1077,20 +1057,16 @@ describe("ThreadLoop", () => {
 					requests.push(request);
 					if (requests.length !== 1) {
 						return Stream.fromIterable([
-							{ type: "text-start" as const, id: "after-spawn" },
-							{
-								type: "text-delta" as const,
-								id: "after-spawn",
-								text_delta: "child confirmed",
-							},
-							{ type: "text-end" as const, id: "after-spawn" },
+
+
+							{type:"text-complete" as const,providerPartId:"after-spawn",eventId:"evt_b2efa3b32e00fe255baa57b9cfbb5b3b",text:("child confirmed")},
 							{ type: "finish" as const, finishReason: "stop" as const },
 						]);
 					}
 					return Stream.fromAsyncIterable(
 						(async function* () {
 							yield {
-								type: "tool-call" as const,
+								type: "tool-call-complete" as const,
 								id: "call_spawn_live",
 								toolName: "spawn_agent",
 								input: {
@@ -1191,21 +1167,11 @@ describe("ThreadLoop", () => {
 				if (requests.length === 1) {
 					return Stream.fromAsyncIterable(
 						(async function* () {
+							yield {type:"thinking-started" as const,providerPartId:"reasoning-same-request",eventId:"evt_cb523d983261cb93df3fba1d3d0fb734"};
+
+							yield {type:"reasoning-complete" as const,providerPartId:"reasoning-same-request",thinkingEventId:"evt_cb523d983261cb93df3fba1d3d0fb734",text:("reason before mutation")};
 							yield {
-								type: "reasoning-start" as const,
-								id: "reasoning-same-request",
-							};
-							yield {
-								type: "reasoning-delta" as const,
-								id: "reasoning-same-request",
-								text_delta: "reason before mutation",
-							};
-							yield {
-								type: "reasoning-end" as const,
-								id: "reasoning-same-request",
-							};
-							yield {
-								type: "tool-call" as const,
+								type: "tool-call-complete" as const,
 								id: "tool-same-request",
 								toolName: "mutate_record",
 								input: { id: "one" },
@@ -1227,9 +1193,9 @@ describe("ThreadLoop", () => {
 					);
 				}
 				return Stream.fromIterable([
-					{ type: "text-start" as const, id: "text-retry" },
-					{ type: "text-delta" as const, id: "text-retry", text_delta: "done" },
-					{ type: "text-end" as const, id: "text-retry" },
+
+
+					{type:"text-complete" as const,providerPartId:"text-retry",eventId:"evt_dde33372773b7330987d395e1483e600",text:("done")},
 					{ type: "finish" as const, finishReason: "stop" as const },
 				]);
 			},
@@ -1361,7 +1327,7 @@ describe("ThreadLoop", () => {
 						),
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-1",
 								toolName: "search",
 								input: { q: "x" },
@@ -1412,7 +1378,7 @@ describe("ThreadLoop", () => {
 						writer,
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-1",
 								toolName: "search",
 								input: { q: "x" },
@@ -1449,7 +1415,7 @@ describe("ThreadLoop", () => {
 			"task done",
 			Math.max(
 				...session.state.contextManager
-					.entries()
+					.historyMessages()
 					.map((entry) => entry.messageSequence),
 			) + 1,
 		);
@@ -1467,7 +1433,7 @@ describe("ThreadLoop", () => {
 				committedEntry: projection,
 			}),
 		).toBe("applied");
-		expect(session.state.contextManager.entries().at(-1)).toEqual(projection);
+		expect(session.state.contextManager.historyMessages().at(-1)).toEqual(projection);
 	});
 	test("served request consumes its exact mixed-origin ride and preserves attachments appended in flight", async () => {
 		const session = new ThreadRuntime("sesn_1");
@@ -1532,9 +1498,9 @@ describe("ThreadLoop", () => {
 					session.state.addPendingAttachments([lateAttachment]);
 				}
 				return Stream.fromIterable([
-					{ type: "text-start", id: "text-1" },
-					{ type: "text-delta", id: "text-1", text_delta: "done" },
-					{ type: "text-end", id: "text-1" },
+
+
+					{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_9c089670fcd4b29a5bd3c7f684547d16",text:("done")},
 					{ type: "finish", finishReason: "stop" },
 				]);
 			},
@@ -1627,9 +1593,9 @@ describe("ThreadLoop", () => {
 			stream(request) {
 				capturedRequests.push(request);
 				return Stream.fromIterable([
-					{ type: "text-start", id: "text-1" },
-					{ type: "text-delta", id: "text-1", text_delta: "done" },
-					{ type: "text-end", id: "text-1" },
+
+
+					{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_2d1b9bca28aaead478bc10986301be02",text:("done")},
 					{ type: "finish", finishReason: "stop" },
 				]);
 			},
@@ -1672,9 +1638,9 @@ describe("ThreadLoop", () => {
 		const llm: LLMServiceInterface = {
 			stream() {
 				return Stream.fromIterable([
-					{ type: "text-start", id: "text-1" },
-					{ type: "text-delta", id: "text-1", text_delta: "done" },
-					{ type: "text-end", id: "text-1" },
+
+
+					{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_992339aff83f9f4537d18d00eb9aeb01",text:("done")},
 					{ type: "finish", finishReason: "stop" },
 				]);
 			},
@@ -1799,7 +1765,7 @@ describe("ThreadLoop", () => {
 								return Stream.fromAsyncIterable(
 									(async function* () {
 										yield {
-											type: "tool-call" as const,
+											type: "tool-call-complete" as const,
 											id: "tool-live",
 											toolName: "Write",
 											input: { file_path: "src/a.ts", content: "ok" },
@@ -1914,20 +1880,16 @@ describe("ThreadLoop", () => {
 								providerRequests += 1;
 								if (providerRequests > 1) {
 									return Stream.fromIterable([
-										{ type: "text-start" as const, id: "text-final" },
-										{
-											type: "text-delta" as const,
-											id: "text-final",
-											text_delta: "done",
-										},
-										{ type: "text-end" as const, id: "text-final" },
+
+
+										{type:"text-complete" as const,providerPartId:"text-final",eventId:"evt_a862507401e3e01e550429b452a53bb6",text:("done")},
 										{ type: "finish" as const, finishReason: "stop" as const },
 									]);
 								}
 								return Stream.fromAsyncIterable(
 									(async function* () {
 										yield {
-											type: "tool-call" as const,
+											type: "tool-call-complete" as const,
 											id: "tool-live",
 											toolName: "Read",
 											input: { file_path: "src/a.ts" },
@@ -2046,13 +2008,9 @@ describe("ThreadLoop", () => {
 					]);
 				}
 				return Stream.fromIterable([
-					{ type: "text-start", id: "text-1" },
-					{
-						type: "text-delta",
-						id: "text-1",
-						text_delta: "I will continue without the plot.",
-					},
-					{ type: "text-end", id: "text-1" },
+
+
+					{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_e0527b750b317b212641502503c373a6",text:("I will continue without the plot.")},
 					{ type: "finish", finishReason: "stop" },
 				]);
 			},
@@ -2200,7 +2158,7 @@ describe("ThreadLoop", () => {
 						writer,
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-1",
 								toolName: "search",
 								input: { q: "x" },
@@ -2294,7 +2252,7 @@ describe("ThreadLoop", () => {
 							[
 								[
 									{
-										type: "tool-call",
+										type: "tool-call-complete",
 										id: "tool-read",
 										toolName: "Read",
 										input: { file_path: "src/a.ts" },
@@ -2307,7 +2265,7 @@ describe("ThreadLoop", () => {
 								],
 								[
 									{
-										type: "tool-call",
+										type: "tool-call-complete",
 										id: "tool-read-second",
 										toolName: "Read",
 										input: { file_path: "src/b.ts" },
@@ -2319,9 +2277,9 @@ describe("ThreadLoop", () => {
 									{ type: "finish", finishReason: "tool-calls" },
 								],
 								[
-									{ type: "text-start", id: "text-final" },
-									{ type: "text-delta", id: "text-final", text_delta: "done" },
-									{ type: "text-end", id: "text-final" },
+
+
+									{type:"text-complete" as const,providerPartId:"text-final",eventId:"evt_109a6f677788f58013dd6d88b56018aa",text:("done")},
 									{ type: "finish", finishReason: "stop" },
 								],
 							],
@@ -2361,7 +2319,7 @@ describe("ThreadLoop", () => {
 		expect(JSON.stringify(requests[2]?.context)).toContain(
 			"file contents tool-read-second",
 		);
-		expect(session.state.contextManager.entries().at(-1)?.parts).toEqual([
+		expect(session.state.contextManager.historyMessages().at(-1)?.parts).toEqual([
 			{ type: "text", text: "done" },
 		]);
 		expect(
@@ -2385,6 +2343,7 @@ describe("ThreadLoop", () => {
 			bindingId: session.identity.bindingId,
 			bindingGeneration: session.identity.bindingGeneration,
 			targetPodUid: session.identity.targetPodUid,
+			runtimeProcessId: session.identity.runtimeProcessId,
 			runtimeInputId: "agent_mail:delivery_mixed_agent_mail",
 			kind: "inter_agent_message",
 			deliveryId: "delivery_mixed_agent_mail",
@@ -2409,7 +2368,7 @@ describe("ThreadLoop", () => {
 							[
 								[
 									{
-										type: "tool-call",
+										type: "tool-call-complete",
 										id: "tool-mixed",
 										toolName: "Read",
 										input: { file_path: "src/mixed.ts" },
@@ -2421,13 +2380,9 @@ describe("ThreadLoop", () => {
 									{ type: "finish", finishReason: "tool-calls" },
 								],
 								[
-									{ type: "text-start", id: "text-mixed-final" },
-									{
-										type: "text-delta",
-										id: "text-mixed-final",
-										text_delta: "combined",
-									},
-									{ type: "text-end", id: "text-mixed-final" },
+
+
+									{type:"text-complete" as const,providerPartId:"text-mixed-final",eventId:"evt_b6a67c83d7f97358e8777518a1afaca3",text:("combined")},
 									{ type: "finish", finishReason: "stop" },
 								],
 							],
@@ -2505,7 +2460,7 @@ describe("ThreadLoop", () => {
 							llmService: queuedLLMService([
 								[
 									{
-										type: "tool-call",
+										type: "tool-call-complete",
 										id: "tool-other-family",
 										toolName: tc.absentTool,
 										input: {},
@@ -2514,13 +2469,9 @@ describe("ThreadLoop", () => {
 									{ type: "finish", finishReason: "tool-calls" },
 								],
 								[
-									{ type: "text-start", id: "text-repaired" },
-									{
-										type: "text-delta",
-										id: "text-repaired",
-										text_delta: "repaired",
-									},
-									{ type: "text-end", id: "text-repaired" },
+
+
+									{type:"text-complete" as const,providerPartId:"text-repaired",eventId:"evt_71c57c078a382449aace1dcdee720ab1",text:("repaired")},
 									{ type: "finish", finishReason: "stop" },
 								],
 							]),
@@ -2583,14 +2534,14 @@ describe("ThreadLoop", () => {
 								[
 									[
 										{
-											type: "tool-call",
+											type: "tool-call-complete",
 											id: "call-invalid-cross-family",
 											toolName: "exec_command",
 											input: {},
 											inputPreview: { preview: "{}", truncated: false },
 										},
 										{
-											type: "tool-call",
+											type: "tool-call-complete",
 											id: "call-public-read",
 											toolName: "Read",
 											input: { file_path: "README.md" },
@@ -2602,13 +2553,9 @@ describe("ThreadLoop", () => {
 										{ type: "finish", finishReason: "tool-calls" },
 									],
 									[
-										{ type: "text-start", id: "text-after-mixed" },
-										{
-											type: "text-delta",
-											id: "text-after-mixed",
-											text_delta: "continued after both",
-										},
-										{ type: "text-end", id: "text-after-mixed" },
+
+
+										{type:"text-complete" as const,providerPartId:"text-after-mixed",eventId:"evt_62fa8849a5ccfcdeadc289d435d5ed75",text:("continued after both")},
 										{ type: "finish", finishReason: "stop" },
 									],
 								],
@@ -2668,7 +2615,7 @@ describe("ThreadLoop", () => {
 					runtimeThreadLoopLayer(loader, {
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-1",
 								toolName: "Write",
 								input: { file_path: "src/a.ts", content: "one" },
@@ -2678,7 +2625,7 @@ describe("ThreadLoop", () => {
 								},
 							},
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-2",
 								toolName: "Write",
 								input: { file_path: "/workspace/src/a.ts", content: "two" },
@@ -2764,40 +2711,36 @@ describe("ThreadLoop", () => {
 								providerCalls += 1;
 								if (providerCalls === 2) {
 									return Stream.fromIterable([
-										{ type: "text-start" as const, id: "final" },
-										{
-											type: "text-delta" as const,
-											id: "final",
-											text_delta: "done",
-										},
-										{ type: "text-end" as const, id: "final" },
+
+
+										{type:"text-complete" as const,providerPartId:"final",eventId:"evt_6018edf79ba5f33a513c789129ea7a53",text:("done")},
 										{ type: "finish" as const, finishReason: "stop" as const },
 									]);
 								}
 								return Stream.fromIterable([
 									{
-										type: "tool-call" as const,
+										type: "tool-call-complete" as const,
 										id: "write-1",
 										toolName: "Write",
 										input: { file_path: "same.txt", content: "one" },
 										inputPreview: { preview: "{}", truncated: false },
 									},
 									{
-										type: "tool-call" as const,
+										type: "tool-call-complete" as const,
 										id: "read-1",
 										toolName: "Read",
 										input: { file_path: "one.txt" },
 										inputPreview: { preview: "{}", truncated: false },
 									},
 									{
-										type: "tool-call" as const,
+										type: "tool-call-complete" as const,
 										id: "write-2",
 										toolName: "Write",
 										input: { file_path: "same.txt", content: "two" },
 										inputPreview: { preview: "{}", truncated: false },
 									},
 									{
-										type: "tool-call" as const,
+										type: "tool-call-complete" as const,
 										id: "read-2",
 										toolName: "Read",
 										input: { file_path: "two.txt" },
@@ -2897,15 +2840,11 @@ describe("ThreadLoop", () => {
 					runtimeThreadLoopLayer(loader, {
 						writer,
 						events: [
-							{ type: "reasoning-start", id: "reasoning-1" },
+							{type:"thinking-started" as const,providerPartId:"reasoning-1",eventId:"evt_3b7cceb899589bf7ec4b63ca83d0a699"},
+
+							{type:"reasoning-complete" as const,providerPartId:"reasoning-1",thinkingEventId:"evt_3b7cceb899589bf7ec4b63ca83d0a699",text:("first completed reasoning part")},
 							{
-								type: "reasoning-delta",
-								id: "reasoning-1",
-								text_delta: "first completed reasoning part",
-							},
-							{ type: "reasoning-end", id: "reasoning-1" },
-							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-1",
 								toolName: "Read",
 								input: { file_path: "src/a.ts" },
@@ -2915,7 +2854,7 @@ describe("ThreadLoop", () => {
 								},
 							},
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-2",
 								toolName: "Read",
 								input: { file_path: "src/b.ts" },
@@ -2924,22 +2863,18 @@ describe("ThreadLoop", () => {
 									truncated: false,
 								},
 							},
-							{ type: "reasoning-start", id: "reasoning-2" },
+							{type:"thinking-started" as const,providerPartId:"reasoning-2",eventId:"evt_75d3fbdcd235902802039c36e9b49bd6"},
+
+							{type:"reasoning-complete" as const,providerPartId:"reasoning-2",thinkingEventId:"evt_75d3fbdcd235902802039c36e9b49bd6",text:("second completed reasoning part")},
 							{
-								type: "reasoning-delta",
-								id: "reasoning-2",
-								text_delta: "second completed reasoning part",
-							},
-							{ type: "reasoning-end", id: "reasoning-2" },
-							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-3",
 								toolName: "Read",
 								input: { file_path: "src/c.ts", query: "x".repeat(9000) },
 								inputPreview: { preview: "x".repeat(8192), truncated: true },
 							},
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-4",
 								toolName: "Read",
 								input: { file_path: "src/d.ts" },
@@ -3053,7 +2988,7 @@ describe("ThreadLoop", () => {
 						writer,
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-1",
 								toolName: "Read",
 								input: { file_path: "src/a.ts" },
@@ -3063,7 +2998,7 @@ describe("ThreadLoop", () => {
 								},
 							},
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-2",
 								toolName: "Read",
 								input: { file_path: "src/b.ts" },
@@ -3153,7 +3088,7 @@ describe("ThreadLoop", () => {
 						writer,
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-1",
 								toolName: "Read",
 								input: { file_path: "src/a.ts" },
@@ -3163,7 +3098,7 @@ describe("ThreadLoop", () => {
 								},
 							},
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-2",
 								toolName: "Read",
 								input: { file_path: "src/b.ts" },
@@ -3229,12 +3164,14 @@ describe("ThreadLoop", () => {
 	test("separate thread provider requests share session-wide tool admission", async () => {
 		const coordinator = new SessionToolCoordinator({ maxConcurrentTools: 8 });
 		const identity = (sessionThreadId: string) => ({
+			threadRole:"main" as const,threadVisibility:"public" as const,
 			workspaceId: "wksp_1",
 			sessionId: "sesn_1",
 			sessionThreadId,
 			bindingId: "bind_1",
 			bindingGeneration: 1,
 			targetPodUid: "pod_1",
+			runtimeProcessId: "process-test",
 			runtimeBindingToken: "runtime-token",
 		});
 		const firstSession = new ThreadRuntime(
@@ -3252,7 +3189,7 @@ describe("ThreadLoop", () => {
 		const starts: string[] = [];
 		const events: readonly LLMEvent[] = [
 			{
-				type: "tool-call",
+				type: "tool-call-complete",
 				id: "tool-memory",
 				toolName: "memory",
 				input: { action: "view", path: "notes" },
@@ -3373,7 +3310,7 @@ describe("ThreadLoop", () => {
 						writer,
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-memory",
 								toolName: "memory",
 								input: {
@@ -3492,7 +3429,7 @@ describe("ThreadLoop", () => {
 					return Stream.fromAsyncIterable(
 						(async function* () {
 							yield {
-								type: "tool-call" as const,
+								type: "tool-call-complete" as const,
 								id: "tool-gated",
 								toolName: "Write",
 								input: { file_path: "src/gated.ts", content: "one" },
@@ -3564,7 +3501,7 @@ describe("ThreadLoop", () => {
 				manager.preloadThread({
 					...input,
 					runtimeBindingToken: "runtime-binding-token",
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					thread: {
 						role: "main",
 						visibility: "public",
@@ -3686,7 +3623,7 @@ describe("ThreadLoop", () => {
 					return Stream.fromAsyncIterable(
 						(async function* () {
 							yield {
-								type: "tool-call" as const,
+								type: "tool-call-complete" as const,
 								id: "tool-invalid",
 								toolName: "MissingTool",
 								input: {},
@@ -3751,7 +3688,7 @@ describe("ThreadLoop", () => {
 				manager.preloadThread({
 					...input,
 					runtimeBindingToken: "runtime-binding-token",
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					thread: {
 						role: "main",
 						visibility: "public",
@@ -3880,7 +3817,7 @@ describe("ThreadLoop", () => {
 						},
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-post-success-cooperative-failure",
 								toolName: "Write",
 								input: { file_path: "src/failure.ts", content: "one" },
@@ -3995,7 +3932,7 @@ describe("ThreadLoop", () => {
 						},
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-post-success-interrupt-failure",
 								toolName: "Write",
 								input: { file_path: "src/failure.ts", content: "one" },
@@ -4048,7 +3985,7 @@ describe("ThreadLoop", () => {
 		const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
 		const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
 		let assistantBeforeEnd:
-			| NonNullable<ReturnType<typeof session.state.contextManager.openRequestDraft>>
+			| NonNullable<ReturnType<typeof session.state.contextManager.currentAssistantMessage>>
 			| undefined;
 		let hotRequestBeforeIdle: NonNullable<ThreadTurnCheckpoint["request"]> | undefined;
 		const closeoutOrder: string[] = [];
@@ -4059,22 +3996,14 @@ describe("ThreadLoop", () => {
 			stream(_request, options) {
 				return Stream.fromAsyncIterable(
 					(async function* () {
-						yield { type: "text-start" as const, id: "text-memory" };
+
+
+						yield {type:"text-complete" as const,providerPartId:"text-memory",eventId:"evt_35f92146c1ea38d8df543cf014b9eb99",text:("partial response that must not survive")};
+						yield {type:"thinking-started" as const,providerPartId:"reasoning-memory",eventId:"evt_83d30414389926af7cd39fc981f514a5"};
+
+						yield {type:"reasoning-complete" as const,providerPartId:"reasoning-memory",thinkingEventId:"evt_83d30414389926af7cd39fc981f514a5",text:("reasoning attached to the Tool call")};
 						yield {
-							type: "text-delta" as const,
-							id: "text-memory",
-							text_delta: "partial response that must not survive",
-						};
-						yield { type: "text-end" as const, id: "text-memory" };
-						yield { type: "reasoning-start" as const, id: "reasoning-memory" };
-						yield {
-							type: "reasoning-delta" as const,
-							id: "reasoning-memory",
-							text_delta: "reasoning attached to the Tool call",
-						};
-						yield { type: "reasoning-end" as const, id: "reasoning-memory" };
-						yield {
-							type: "tool-call" as const,
+							type: "tool-call-complete" as const,
 							id: "tool-memory",
 							toolName: "memory",
 							input: {
@@ -4133,7 +4062,7 @@ describe("ThreadLoop", () => {
 			},
 			async (envelope) => {
 				assistantBeforeEnd = structuredClone(
-					session.state.contextManager.openRequestDraft(),
+					session.state.contextManager.currentAssistantMessage(),
 				);
 				requestEnds.push(envelope);
 				closeoutOrder.push("event:span.model_request_end");
@@ -4251,7 +4180,7 @@ describe("ThreadLoop", () => {
 			toolUseEventIds: ["sevt_memory_projection_cancel"],
 			repairEventIds: [],
 		});
-		expect(JSON.stringify(session.state.contextManager.entries())).not.toContain(
+		expect(JSON.stringify(session.state.contextManager.historyMessages())).not.toContain(
 			"partial response that must not survive",
 		);
 		});
@@ -4387,20 +4316,16 @@ describe("ThreadLoop", () => {
 					providerCalls++;
 					if (providerCalls > 1) {
 						return Stream.fromIterable([
-							{ type: "text-start" as const, id: "follow-up" },
-							{
-								type: "text-delta" as const,
-								id: "follow-up",
-								text_delta: "continued",
-							},
-							{ type: "text-end" as const, id: "follow-up" },
+
+
+							{type:"text-complete" as const,providerPartId:"follow-up",eventId:"evt_e31fcb25a454ed6a5dc6ddb9c17461ae",text:("continued")},
 							{ type: "finish" as const, finishReason: "stop" as const },
 						]);
 					}
 					return Stream.fromAsyncIterable(
 						(async function* () {
 							yield {
-								type: "tool-call" as const,
+								type: "tool-call-complete" as const,
 								id: "tool-terminal",
 								toolName: "Read",
 								input: { file_path: "src/shared.ts", content: "terminal" },
@@ -4408,7 +4333,7 @@ describe("ThreadLoop", () => {
 							};
 							await releaseNextProviderTool.promise;
 							yield {
-								type: "tool-call" as const,
+								type: "tool-call-complete" as const,
 								id: "tool-running",
 								toolName: "Write",
 								input: { file_path: "src/shared.ts", content: "running" },
@@ -4416,7 +4341,7 @@ describe("ThreadLoop", () => {
 							};
 							await pendingToolUseAppendStarted.promise;
 							yield {
-								type: "tool-call" as const,
+								type: "tool-call-complete" as const,
 								id: "tool-uncommitted",
 								toolName: "UncommittedWrite",
 								input: {
@@ -4477,7 +4402,7 @@ describe("ThreadLoop", () => {
 				manager.preloadThread({
 					...initialInput,
 					runtimeBindingToken: "runtime-binding-token",
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					thread: {
 						role: "main",
 						visibility: "public",
@@ -4720,19 +4645,15 @@ describe("ThreadLoop", () => {
 					order.push(`provider:${providerCalls}`);
 					if (providerCalls > 1) {
 						return Stream.fromIterable([
-							{ type: "text-start" as const, id: "follow-up" },
-							{
-								type: "text-delta" as const,
-								id: "follow-up",
-								text_delta: "continued",
-							},
-							{ type: "text-end" as const, id: "follow-up" },
+
+
+							{type:"text-complete" as const,providerPartId:"follow-up",eventId:"evt_1215df3d946206e8b7fc960aa58b8b2e",text:("continued")},
 							{ type: "finish" as const, finishReason: "stop" as const },
 						]);
 					}
 					return Stream.fromIterable([
 						{
-							type: "tool-call" as const,
+							type: "tool-call-complete" as const,
 							id: "tool-non-cooperative-route",
 							toolName: "Write",
 							input: { file_path: "src/non-cooperative.ts", content: "late" },
@@ -4785,7 +4706,7 @@ describe("ThreadLoop", () => {
 				manager.preloadThread({
 					...initialInput,
 					runtimeBindingToken: "runtime-binding-token",
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					thread: {
 						role: "main",
 						visibility: "public",
@@ -5088,7 +5009,7 @@ describe("ThreadLoop", () => {
 				manager.preloadThread({
 					...input,
 					runtimeBindingToken: "runtime-binding-token",
-					contextEntries: [
+					currentRequestMessage:{modelRequestId:"mrq_rehydrated_approved",assistantMessageSequence:2},messages: [
 						userMessage("user-rehydrated-approved", 1, "resume approved tools"),
 						loadedMessage,
 					],
@@ -5265,7 +5186,7 @@ describe("ThreadLoop", () => {
 					runtimeThreadLoopLayer(loader, {
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-accept-fence",
 								toolName: "Write",
 								input: { file_path: "src/a.ts", content: "one" },
@@ -5361,7 +5282,7 @@ describe("ThreadLoop", () => {
 			),
 			events: [
 				{
-					type: "tool-call",
+					type: "tool-call-complete",
 					id: "tool-interrupt-acceptance",
 					toolName: "Write",
 					input: { file_path: "src/a.ts", content: "one" },
@@ -5421,7 +5342,7 @@ describe("ThreadLoop", () => {
 				manager.preloadThread({
 					...input,
 					runtimeBindingToken: "runtime-binding-token",
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					thread: {
 						role: "main",
 						visibility: "public",
@@ -5514,7 +5435,7 @@ describe("ThreadLoop", () => {
 								return Stream.fromAsyncIterable(
 									(async function* () {
 										yield {
-											type: "tool-call" as const,
+											type: "tool-call-complete" as const,
 											id: "tool-provider-closeout",
 											toolName: "Write",
 											input: { file_path: "src/a.ts", content: "one" },
@@ -5608,7 +5529,7 @@ describe("ThreadLoop", () => {
 				return Stream.fromAsyncIterable(
 					(async function* () {
 						yield {
-							type: "tool-call" as const,
+							type: "tool-call-complete" as const,
 							id: "tool-1",
 							toolName: "Write",
 							input: { file_path: "src/a.ts", content: "one" },
@@ -5763,7 +5684,7 @@ describe("ThreadLoop", () => {
 						approvalMode: "approve_for_me",
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-1",
 								toolName: "Write",
 								input: { file_path: "src/a.ts", content: "ok" },
@@ -5855,7 +5776,7 @@ describe("ThreadLoop", () => {
 						approvalMode: "approve_for_me",
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-1",
 								toolName: "Write",
 								input: { file_path: "src/a.ts", content: "ok" },
@@ -5936,7 +5857,7 @@ describe("ThreadLoop", () => {
 						approvalMode: "approve_for_me",
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-1",
 								toolName: "Write",
 								input: { file_path: "src/a.ts", content: "ok" },
@@ -6010,7 +5931,7 @@ describe("ThreadLoop", () => {
 						approvalMode: "approve_for_me",
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-1",
 								toolName: "Write",
 								input: { file_path: "src/a.ts", content: "ok" },
@@ -6087,7 +6008,7 @@ describe("ThreadLoop", () => {
 						approvalMode: "approve_for_me",
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-1",
 								toolName: "Write",
 								input: { file_path: "src/a.ts", content: "ok" },
@@ -6168,7 +6089,7 @@ describe("ThreadLoop", () => {
 						approvalMode: "approve_for_me",
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-1",
 								toolName: "Write",
 								input: { file_path: "src/a.ts", content: "ok" },
@@ -6255,7 +6176,7 @@ describe("ThreadLoop", () => {
 						approvalMode: "approve_for_me",
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-1",
 								toolName: "Write",
 								input: { file_path: "src/a.ts", content: "ok" },
@@ -6330,22 +6251,14 @@ describe("ThreadLoop", () => {
 						writer,
 						approvalMode: "approve_for_me",
 						events: [
-							{ type: "text-start", id: "text-1" },
+
+
+							{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_50e0373cfd32b21e72069b2cf7bf85c0",text:("I will update the file before calling the tool.")},
+							{type:"thinking-started" as const,providerPartId:"reasoning-1",eventId:"evt_04bc70826e2aa7436fd26a1c7d3a043e"},
+
+							{type:"reasoning-complete" as const,providerPartId:"reasoning-1",thinkingEventId:"evt_04bc70826e2aa7436fd26a1c7d3a043e",text:("Need to patch one file.")},
 							{
-								type: "text-delta",
-								id: "text-1",
-								text_delta: "I will update the file before calling the tool.",
-							},
-							{ type: "text-end", id: "text-1" },
-							{ type: "reasoning-start", id: "reasoning-1" },
-							{
-								type: "reasoning-delta",
-								id: "reasoning-1",
-								text_delta: "Need to patch one file.",
-							},
-							{ type: "reasoning-end", id: "reasoning-1" },
-							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-1",
 								toolName: "Write",
 								input: { file_path: "src/a.ts", content: "ok" },
@@ -6439,7 +6352,7 @@ describe("ThreadLoop", () => {
 		const requests: LLMRequest[] = [];
 		const runToolCalls: string[] = [];
 		const sandboxAcceptanceCalls: string[] = [];
-		const processors: ProviderStreamAccumulator[] = [];
+		const processors: RequestContentProcessor[] = [];
 		const store = new ThreadLoopRuntimeStore([]);
 		const layer = runtimeThreadLoopLayer(loader, {
 			store,
@@ -6448,7 +6361,7 @@ describe("ThreadLoop", () => {
 				[
 					[
 						{
-							type: "tool-call",
+							type: "tool-call-complete",
 							id: "tool-1",
 							toolName: "Write",
 							input: { file_path: "src/a.ts", content: "ok" },
@@ -6460,9 +6373,9 @@ describe("ThreadLoop", () => {
 						{ type: "finish", finishReason: "tool-calls" },
 					],
 					[
-						{ type: "text-start", id: "text-1" },
-						{ type: "text-delta", id: "text-1", text_delta: "after approval" },
-						{ type: "text-end", id: "text-1" },
+
+
+						{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_bfbb21688cf1520f47b80d0c0d4b0fdc",text:("after approval")},
 						{ type: "finish", finishReason: "stop" },
 					],
 				],
@@ -6512,7 +6425,7 @@ describe("ThreadLoop", () => {
 				return { type: "accepted" };
 			},
 			createProcessor: (options) => {
-				const processor = new ProviderStreamAccumulator(options);
+				const processor = new RequestContentProcessor(options);
 				processors.push(processor);
 				return processor;
 			},
@@ -6530,7 +6443,7 @@ describe("ThreadLoop", () => {
 		expect(processors).toHaveLength(1);
 		const pendingApproval = session.state.pendingApprovalToolJobs()[0];
 		const pendingAssistant = session.state.contextManager
-			.entries()
+			.historyMessages()
 			.find((message) =>
 				message.parts.some(
 					(part) =>
@@ -6551,6 +6464,7 @@ describe("ThreadLoop", () => {
 				bindingId: session.identity.bindingId,
 				bindingGeneration: session.identity.bindingGeneration,
 				targetPodUid: session.identity.targetPodUid,
+				runtimeProcessId: session.identity.runtimeProcessId,
 				runtimeInputId: "rin_confirm",
 				toolUseEventId: "sevt_tool_1",
 				decision: "allow",
@@ -6627,7 +6541,7 @@ describe("ThreadLoop", () => {
 					[
 						[
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-partial-1",
 								toolName: "Write",
 								input: { file_path: "src/a.ts", content: "a" },
@@ -6637,7 +6551,7 @@ describe("ThreadLoop", () => {
 								},
 							},
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-partial-2",
 								toolName: "Write",
 								input: { file_path: "src/b.ts", content: "b" },
@@ -6688,6 +6602,7 @@ describe("ThreadLoop", () => {
 					bindingId: session.identity.bindingId,
 					bindingGeneration: session.identity.bindingGeneration,
 					targetPodUid: session.identity.targetPodUid,
+					runtimeProcessId: session.identity.runtimeProcessId,
 					runtimeInputId: `rin_partial_${decision}`,
 					toolUseEventId: toolUseEventIds[0]!,
 					decision,
@@ -6778,13 +6693,9 @@ describe("ThreadLoop", () => {
 			llmService: queuedLLMService(
 				[
 					[
-						{ type: "text-start", id: "text-1" },
-						{
-							type: "text-delta",
-							id: "text-1",
-							text_delta: "after cold approval",
-						},
-						{ type: "text-end", id: "text-1" },
+
+
+						{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_98351e6264f29800a86835bf0b907bcf",text:("after cold approval")},
 						{ type: "finish", finishReason: "stop" },
 					],
 				],
@@ -6818,7 +6729,7 @@ describe("ThreadLoop", () => {
 		const first = await Effect.runPromise(
 			Effect.gen(function* () {
 				const threadLoop = yield* ThreadLoop.Service;
-				session.state.contextManager.replaceEntries(loadedMessages);
+				session.state.contextManager.replaceMessages(loadedMessages);
 				session.state.markPersistentContextLoaded();
 				threadLoop.seedRuntimeModel(session);
 				installRecoveredToolTurn(session, "mrq_cold_restore", [
@@ -6833,7 +6744,6 @@ describe("ThreadLoop", () => {
 						session,
 						pendingToolUses,
 						loadedMessages,
-						undefined,
 					),
 				).toEqual({ ok: true });
 				return yield* threadLoop.run(session, testRunCustody());
@@ -6846,7 +6756,7 @@ describe("ThreadLoop", () => {
 		expect(appended).toEqual([]);
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.find(
 					(entry) => entry.messageSequence === pendingMessage.messageSequence,
 				)?.parts[0],
@@ -6862,6 +6772,7 @@ describe("ThreadLoop", () => {
 				bindingId: session.identity.bindingId,
 				bindingGeneration: session.identity.bindingGeneration,
 				targetPodUid: session.identity.targetPodUid,
+				runtimeProcessId: session.identity.runtimeProcessId,
 				runtimeInputId: "rin_confirm_cold",
 				toolUseEventId: "sevt_tool_1",
 				decision: "allow",
@@ -6957,13 +6868,9 @@ describe("ThreadLoop", () => {
 			llmService: queuedLLMService(
 				[
 					[
-						{ type: "text-start", id: "text-1" },
-						{
-							type: "text-delta",
-							id: "text-1",
-							text_delta: "after sandbox recovery",
-						},
-						{ type: "text-end", id: "text-1" },
+
+
+						{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_da1ec8c5e3c6983eac377342ac6c4a23",text:("after sandbox recovery")},
 						{ type: "finish", finishReason: "stop" },
 					],
 				],
@@ -7010,7 +6917,7 @@ describe("ThreadLoop", () => {
 		const result = await Effect.runPromise(
 			Effect.gen(function* () {
 				const threadLoop = yield* ThreadLoop.Service;
-				session.state.contextManager.replaceEntries(loadedMessages);
+				session.state.contextManager.replaceMessages(loadedMessages);
 				session.state.markPersistentContextLoaded();
 				threadLoop.seedRuntimeModel(session);
 				installRecoveredToolTurn(session, "mrq_cold_sandbox", [
@@ -7026,7 +6933,6 @@ describe("ThreadLoop", () => {
 						session,
 						pendingSandboxExecutions,
 						loadedMessages,
-						undefined,
 					),
 				).toEqual({ ok: true });
 				return yield* threadLoop.run(session, testRunCustody());
@@ -7157,15 +7063,15 @@ describe("ThreadLoop", () => {
 		const result = await Effect.runPromise(
 			Effect.gen(function* () {
 				const threadLoop = yield* ThreadLoop.Service;
-				session.state.contextManager.replaceEntries(loadedMessages);
+				session.state.contextManager.replaceMessages(loadedMessages);
 				session.state.markPersistentContextLoaded();
 				threadLoop.seedRuntimeModel(session);
+                installRecoveredToolTurn(session,"mrq_cold_sandbox_stale",[{modelToolCallId:"tool-sandbox-stale",toolUseEventId:"sevt_sandbox_tool_stale",toolName:"Write",disposition:"resume_sandbox_execution"}]);
 				expect(
 					yield* threadLoop.installLoadedSandboxExecutions(
 						session,
 						pendingSandboxExecutions,
 						loadedMessages,
-						undefined,
 					),
 				).toEqual({ ok: true });
 				return yield* threadLoop.run(session, testRunCustody());
@@ -7284,7 +7190,7 @@ describe("ThreadLoop", () => {
 		const result = await Effect.runPromise(
 			Effect.gen(function* () {
 				const threadLoop = yield* ThreadLoop.Service;
-				session.state.contextManager.replaceEntries(loadedMessages);
+				session.state.contextManager.replaceMessages(loadedMessages);
 				session.state.markPersistentContextLoaded();
 				threadLoop.seedRuntimeModel(session);
 				installRecoveredToolTurn(session, "mrq_cold_mixed", [
@@ -7305,7 +7211,6 @@ describe("ThreadLoop", () => {
 						session,
 						pendingToolUses,
 						loadedMessages,
-						undefined,
 					),
 				).toEqual({ ok: true });
 				expect(
@@ -7313,7 +7218,6 @@ describe("ThreadLoop", () => {
 						session,
 						pendingSandboxExecutions,
 						loadedMessages,
-						undefined,
 					),
 				).toEqual({ ok: true });
 				return yield* threadLoop.run(session, testRunCustody());
@@ -7377,13 +7281,9 @@ describe("ThreadLoop", () => {
 			llmService: queuedLLMService(
 				[
 					[
-						{ type: "text-start", id: "recovered-text" },
-						{
-							type: "text-delta",
-							id: "recovered-text",
-							text_delta: "recovered",
-						},
-						{ type: "text-end", id: "recovered-text" },
+
+
+						{type:"text-complete" as const,providerPartId:"recovered-text",eventId:"evt_7e4c665433fb57fdd40d77523d769644",text:("recovered")},
 						{ type: "finish", finishReason: "stop" },
 					],
 				],
@@ -7414,15 +7314,10 @@ describe("ThreadLoop", () => {
 		const result = await Effect.runPromise(
 			Effect.gen(function* () {
 				const threadLoop = yield* ThreadLoop.Service;
-				session.state.contextManager.replaceEntries([loadedMessages[0]!]);
-				session.state.contextManager.installOpenRequestDraft({
-					modelRequestId,
-					messageSequence: pendingMessage.messageSequence,
-					parts: pendingMessage.parts,
-				});
+				session.state.contextManager.replaceMessages(loadedMessages);
 				session.state.markPersistentContextLoaded();
 				threadLoop.seedRuntimeModel(session);
-				session.state.installThreadTurn(
+				session.state.installThreadCheckpoint(
 					{
 						pendingInputContextSequences: [],
 						request: {
@@ -7457,12 +7352,8 @@ describe("ThreadLoop", () => {
 							},
 						},
 					},
-					{
-						routes: [
-							{ toolUseEventId, disposition: "resume_sandbox_execution" },
-						],
-					},
 				);
+				session.state.installCurrentRequestMessage({modelRequestId,assistantMessageSequence:pendingMessage.messageSequence});
 				expect(
 					yield* threadLoop.installLoadedSandboxExecutions(
 						session,
@@ -7477,7 +7368,6 @@ describe("ThreadLoop", () => {
 							},
 						],
 						loadedMessages,
-						undefined,
 					),
 				).toEqual({ ok: true });
 				return yield* threadLoop.run(session, testRunCustody());
@@ -7549,9 +7439,9 @@ describe("ThreadLoop", () => {
 			llmService: queuedLLMService(
 				[
 					[
-						{ type: "text-start", id: "text-1" },
-						{ type: "text-delta", id: "text-1", text_delta: "denied" },
-						{ type: "text-end", id: "text-1" },
+
+
+						{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_e06a644723b6d2d44a8733d03e6c92c2",text:("denied")},
 						{ type: "finish", finishReason: "stop" },
 					],
 				],
@@ -7573,7 +7463,7 @@ describe("ThreadLoop", () => {
 		const result = await Effect.runPromise(
 			Effect.gen(function* () {
 				const threadLoop = yield* ThreadLoop.Service;
-				session.state.contextManager.replaceEntries(loadedMessages);
+				session.state.contextManager.replaceMessages(loadedMessages);
 				session.state.markPersistentContextLoaded();
 				threadLoop.seedRuntimeModel(session);
 				installRecoveredToolTurn(session, "mrq_cold_deny_restore", [
@@ -7589,7 +7479,6 @@ describe("ThreadLoop", () => {
 						session,
 						pendingToolUses,
 						loadedMessages,
-						undefined,
 					),
 				).toEqual({ ok: true });
 				expect(session.state.pendingApprovalToolJobs()).toEqual([]);
@@ -7647,7 +7536,7 @@ describe("ThreadLoop", () => {
 				[
 					[
 						{
-							type: "tool-call",
+							type: "tool-call-complete",
 							id: "tool-1",
 							toolName: "Write",
 							input: { file_path: "src/shared.ts", content: "one" },
@@ -7657,7 +7546,7 @@ describe("ThreadLoop", () => {
 							},
 						},
 						{
-							type: "tool-call",
+							type: "tool-call-complete",
 							id: "tool-2",
 							toolName: "Write",
 							input: { file_path: "/workspace/src/shared.ts", content: "two" },
@@ -7669,9 +7558,9 @@ describe("ThreadLoop", () => {
 						{ type: "finish", finishReason: "tool-calls" },
 					],
 					[
-						{ type: "text-start", id: "text-1" },
-						{ type: "text-delta", id: "text-1", text_delta: "all approved" },
-						{ type: "text-end", id: "text-1" },
+
+
+						{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_8423b4c1209d335dded3e1932b27b61c",text:("all approved")},
 						{ type: "finish", finishReason: "stop" },
 					],
 				],
@@ -7714,6 +7603,7 @@ describe("ThreadLoop", () => {
 				bindingId: session.identity.bindingId,
 				bindingGeneration: session.identity.bindingGeneration,
 				targetPodUid: session.identity.targetPodUid,
+				runtimeProcessId: session.identity.runtimeProcessId,
 				runtimeInputId: "rin_confirm_1",
 				toolUseEventId: "sevt_tool_1",
 				decision: "allow",
@@ -7735,6 +7625,7 @@ describe("ThreadLoop", () => {
 				bindingId: session.identity.bindingId,
 				bindingGeneration: session.identity.bindingGeneration,
 				targetPodUid: session.identity.targetPodUid,
+				runtimeProcessId: session.identity.runtimeProcessId,
 				runtimeInputId: "rin_confirm_2",
 				toolUseEventId: "sevt_tool_2",
 				decision: "allow",
@@ -7821,7 +7712,7 @@ describe("ThreadLoop", () => {
 						providerCalls === 1
 							? [
 									{
-										type: "tool-call",
+										type: "tool-call-complete",
 										id: "tool-uncommitted",
 										toolName: "search",
 										input: { q: "x" },
@@ -7833,13 +7724,9 @@ describe("ThreadLoop", () => {
 									{ type: "provider-error", error: providerError },
 								]
 							: [
-									{ type: "text-start", id: "retry-text" },
-									{
-										type: "text-delta",
-										id: "retry-text",
-										text_delta: "done",
-									},
-									{ type: "text-end", id: "retry-text" },
+
+
+									{type:"text-complete" as const,providerPartId:"retry-text",eventId:"evt_2dd9e285e43b2938c1b4b36a9e4c988e",text:("done")},
 									{ type: "finish", finishReason: "stop" },
 								],
 					);
@@ -7883,6 +7770,7 @@ describe("ThreadLoop", () => {
 				bindingId: session.identity.bindingId,
 				bindingGeneration: session.identity.bindingGeneration,
 				targetPodUid: session.identity.targetPodUid,
+				runtimeProcessId: session.identity.runtimeProcessId,
 				runtimeInputId: "rin_provider_failure_confirm",
 				toolUseEventId: pendingToolUseEventId!,
 				decision: "allow",
@@ -7941,7 +7829,7 @@ describe("ThreadLoop", () => {
 						}),
 						events: [
 							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-internal-repair",
 								toolName: "Bash",
 								input: {},
@@ -7960,7 +7848,7 @@ describe("ThreadLoop", () => {
 			),
 		);
 		const repairMessage = session.state.contextManager
-			.entries()
+			.historyMessages()
 			.find((message) =>
 				message.parts.some(
 					(part) => part.type === "tool_result" && part.result.type === "error",

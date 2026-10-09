@@ -77,12 +77,14 @@ if (results.join(",") !== wanted.join(",")) {
 function providerConfig(url: string): ProviderGatewayConfig {
 	return {
 		deploymentEnvironment: "test",
+    diagnostics: { level: "info", maxRecordBytes: 16384, summaryIntervalMs: 30000, burst: 1 },
 		serviceVersion: "fixture",
 		grpcBindAddress: "127.0.0.1:9090",
 		httpBindAddress: "127.0.0.1:8080",
 		allowedRuntimePod: { namespace: "tetral", serviceAccount: "runtime" },
 		runtimeBindingTokenHMACKey: "x".repeat(32),
 		databaseUrl: url,
+		drainTimeoutMs: 30000,cancelJoinTimeoutMs:5000,
 		databasePool: { max: 2, idleTimeout: 1, maxLifetime: 10, connectionTimeout: 2, statementTimeoutMs: 5_000 },
 		vaultKeyHex: "01".repeat(32),
 		kubernetesApiServerUrl: "https://kubernetes.default.svc",

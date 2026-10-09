@@ -7,9 +7,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 type GitProxyMetrics struct {
+	Operations       *workload.OperationMetrics
 	mu               sync.Mutex
 	active           int64
 	bytesIn          int64
@@ -29,6 +32,7 @@ type requestMetricKey struct {
 
 func NewGitProxyMetrics() *GitProxyMetrics {
 	return &GitProxyMetrics{
+		Operations:       workload.NewOperationMetrics("git-proxy", "refs-upload", "refs-receive", "upload-pack", "receive-pack"),
 		requests:         make(map[requestMetricKey]uint64),
 		latencyBuckets:   make([]uint64, len(gitProxyLatencyBuckets)),
 		ticketRejections: map[string]uint64{"malformed": 0, "unauthorized": 0},
@@ -59,6 +63,13 @@ func (m *GitProxyMetrics) ObserveRequest(endpoint string, decision string, upstr
 	if m == nil {
 		return
 	}
+	outcome := "success"
+	if upstreamStatus >= 500 {
+		outcome = "error"
+	} else if upstreamStatus >= 400 {
+		outcome = "rejected"
+	}
+	m.Operations.Observe(endpoint, outcome, duration)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.requests[requestMetricKey{endpoint: endpoint, decision: decision, upstreamStatus: upstreamStatus}]++
@@ -105,6 +116,7 @@ func (m *GitProxyMetrics) render() string {
 	defer m.mu.Unlock()
 
 	var b strings.Builder
+	b.WriteString(m.Operations.Text())
 	b.WriteString("# TYPE gitproxy_active_connections gauge\n")
 	fmt.Fprintf(&b, "gitproxy_active_connections %d\n", m.active)
 	b.WriteString("# TYPE gitproxy_bytes_relayed_total counter\n")

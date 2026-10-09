@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/workload"
@@ -49,6 +51,9 @@ func TestTetralAuthConfigAndRunnerExposeMetricsOnSeparateListener(t *testing.T) 
 	if err != nil {
 		t.Fatalf("ConfigFromEnv: %v", err)
 	}
+	if cfg.InternalPrincipalTTL != 60*time.Second || cfg.DeploymentEnvironment != "local" || cfg.ServiceVersion != "unknown" {
+		t.Fatalf("boot defaults = %+v", cfg)
+	}
 	if cfg.HTTPAddress != "127.0.0.1:18080" || cfg.MetricsAddress != "127.0.0.1:18081" {
 		t.Fatalf("listen config = %+v", cfg)
 	}
@@ -67,11 +72,13 @@ func TestTetralAuthConfigAndRunnerExposeMetricsOnSeparateListener(t *testing.T) 
 	var (
 		mu     sync.Mutex
 		events []string
+		tlsBy  = map[string]*tls.Config{}
 	)
 	previousRunWorkload := runWorkload
 	runWorkload = func(_ context.Context, config workload.Config) error {
 		mu.Lock()
 		events = append(events, config.ListenConfigKey+":"+config.ListenAddress)
+		tlsBy[config.ListenConfigKey] = config.TLSConfig
 		mu.Unlock()
 		if config.ListenConfigKey != tetralauth.EnvHTTPAddress && config.ListenConfigKey != tetralauth.EnvMetricsAddress {
 			t.Fatalf("ListenConfigKey = %q; want public or metrics key", config.ListenConfigKey)
@@ -80,6 +87,9 @@ func TestTetralAuthConfigAndRunnerExposeMetricsOnSeparateListener(t *testing.T) 
 	}
 	t.Cleanup(func() { runWorkload = previousRunWorkload })
 
+	// The public listener's TLS comes only from the bound native transport; the
+	// metrics listener never serves it.
+	publicTLS := &tls.Config{MinVersion: tls.VersionTLS13, ServerName: "auth-public-sentinel"}
 	err = runPublicAndMetricsHTTP(
 		context.Background(),
 		cfg,
@@ -87,6 +97,7 @@ func TestTetralAuthConfigAndRunnerExposeMetricsOnSeparateListener(t *testing.T) 
 		workload.NewLogger(nil, "auth", cfg.DeploymentEnvironment, cfg.ServiceVersion),
 		http.NotFoundHandler(),
 		workload.HealthRouter(readiness),
+		boundHTTPListeners{tls: publicTLS, operationMetrics: workload.NewOperationMetrics("auth")},
 	)
 	if err != nil {
 		t.Fatalf("runPublicAndMetricsHTTP: %v", err)
@@ -100,6 +111,12 @@ func TestTetralAuthConfigAndRunnerExposeMetricsOnSeparateListener(t *testing.T) 
 		if !stringSliceContains(events, want) {
 			t.Fatalf("events = %v; missing %s", events, want)
 		}
+	}
+	if tlsBy[tetralauth.EnvHTTPAddress] != publicTLS {
+		t.Fatalf("public listener TLS = %p; want the bound transport config %p", tlsBy[tetralauth.EnvHTTPAddress], publicTLS)
+	}
+	if tlsBy[tetralauth.EnvMetricsAddress] != nil {
+		t.Fatal("metrics listener received the public TLS config")
 	}
 }
 

@@ -8,23 +8,26 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
-
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 )
 
 func TestPostgreSQLRuntimeAbortCancelsJoinedBackgroundCommand(t *testing.T) {
@@ -58,9 +61,9 @@ func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion 
 		podUID      = "pod_background_abort_composition"
 		taskID      = "task_background_abort_composition"
 	)
-	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, podUID)
-	seedReadySandboxForSharedToolExecution(t, admin, workspaceID, sessionID)
+	sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, workspaceID, sessionID)
 	client := dbconnect.NewClientForTesting(runtimeDB)
 	store := NewPostgreSQLBridgeAPIStore(client)
 	startAwaitExecutionResultListener(t, store, nil)
@@ -84,13 +87,13 @@ func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion 
 	}
 
 	const startRequestID = "mreq_background_start_composition"
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_background_start_request", startRequestID, requestKindAgentProviderRequest, 0)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_background_start_request", startRequestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 	startInputPath := filepath.Join(t.TempDir(), "background-start.json")
 	startInput, err := json.Marshal(map[string]any{
 		"address": bridgeAddress, "tokenPath": tokenPath, "workspaceId": workspaceID,
 		"sessionId": sessionID, "sessionThreadId": threadID, "bindingId": bindingID,
-		"bindingGeneration": 1, "targetPodUid": podUID, "modelRequestId": startRequestID,
+		"bindingGeneration": 1, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID, "modelRequestId": startRequestID,
 		"modelToolCallId": "call_background_start_composition", "toolName": "exec_command",
 		"providerInput": map[string]any{"cmd": "sleep 60", "yield_time_ms": 1000},
 	})
@@ -183,7 +186,7 @@ func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion 
 		Scope: scope, RuntimeWriteId: "rwrite_background_start_end", ModelRequestId: startRequestID,
 		FinishReason: "tool-calls", UsageJson: `{}`,
 		ProviderContextRetention: &bridgev1.ProviderContextRetention{
-			Disposition: "completed", AssistantMessageSequence: bridgeAPIInt64(startMessageSequence),
+			Disposition: "completed", AssistantMessageSequence: sessionfixture.BridgeAPIInt64(startMessageSequence),
 			ToolUseEventIds: []string{startResult.ToolUseEventID},
 		},
 	}); err != nil || response.GetCommitted() == nil {
@@ -191,7 +194,7 @@ func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion 
 	}
 
 	const controlRequestID = "mreq_background_abort_control"
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_background_control_start", controlRequestID, requestKindAgentProviderRequest, startMessageSequence)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_background_control_start", controlRequestID, runtimecontrol.RequestKindAgentProviderRequest, startMessageSequence)
 	runtimeBindingToken, err := store.runtimeBindingToken(scope)
 	if err != nil {
 		t.Fatalf("mint background composition binding token: %v", err)
@@ -201,7 +204,7 @@ func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion 
 	controlInputValue := map[string]any{
 		"address": bridgeAddress, "tokenPath": tokenPath, "abortPath": abortPath,
 		"workspaceId": workspaceID, "sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID,
+		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID,
 		"runtimeBindingToken": runtimeBindingToken, "modelRequestId": controlRequestID,
 		"modelToolCallId": "call_background_abort_control", "taskId": taskID,
 	}
@@ -254,6 +257,8 @@ func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion 
 			t.Fatalf("shutdown cancellation rows = %d/%v; want zero", cancelRows, err)
 		}
 		controlInputValue["mode"] = "rejoin"
+		rejoinReadyPath := filepath.Join(t.TempDir(), "background-rejoin-ready.json")
+		controlInputValue["rejoinReadyPath"] = rejoinReadyPath
 		replacementInput, err := json.Marshal(controlInputValue)
 		if err != nil {
 			t.Fatalf("marshal replacement background control: %v", err)
@@ -264,6 +269,53 @@ func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion 
 		}
 		replacementCommand, replacementStdout, replacementStderr := startBunComposition(t, runtimeRoot, bunPath,
 			"packages/runtime-pod/test/fixtures/background-command-abort-composition.ts", replacementInputPath)
+		var controlMessageSequence int64
+		if err := admin.QueryRowContext(context.Background(), `SELECT sequence FROM session_messages
+			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND model_request_id=$4`,
+			workspaceID, sessionID, threadID, controlRequestID).Scan(&controlMessageSequence); err != nil {
+			t.Fatalf("read original control Assistant identity: %v", err)
+		}
+		var readyJSON []byte
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+			readyJSON, err = os.ReadFile(rejoinReadyPath)
+			if err == nil {
+				break
+			}
+			if !os.IsNotExist(err) {
+				t.Fatalf("read replacement background readiness: %v", err)
+			}
+			select {
+			case commandErr := <-replacementCommand:
+				t.Fatalf("replacement exited before nonterminal owner readiness: %v\nstdout=%s\nstderr=%s", commandErr, replacementStdout.String(), replacementStderr.String())
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		var ready any
+		if err != nil || json.Unmarshal(readyJSON, &ready) != nil {
+			t.Fatalf("replacement did not publish nonterminal owner readiness: %v", err)
+		}
+		canonicalInput := map[string]any{"session_id": taskID, "chars": ""}
+		expectedReady := map[string]any{
+			"currentRequestMessage": map[string]any{
+				"modelRequestId": controlRequestID, "assistantMessageSequence": float64(controlMessageSequence),
+			},
+			"reference": map[string]any{
+				"toolUseEventId": controlToolUseEventID, "modelRequestId": controlRequestID,
+				"modelToolCallId": "call_background_abort_control", "assistantMessageSequence": float64(controlMessageSequence),
+				"disposition": "hot_execution",
+			},
+			"message": map[string]any{
+				"messageSequence": float64(controlMessageSequence), "contextKind": "assistant",
+				"parts": []any{map[string]any{
+					"type": "tool_call", "modelToolCallId": "call_background_abort_control",
+					"toolName": "write_stdin", "canonicalInput": canonicalInput,
+				}},
+			},
+			"input": canonicalInput,
+		}
+		if !reflect.DeepEqual(ready, expectedReady) {
+			t.Fatalf("replacement background owner = %s; want exact original nonterminal call: %#v", readyJSON, expectedReady)
+		}
 		provider.pollCompletes.Store(true)
 		backgroundRunner := &tetralsandbox.SandboxBackgroundCommandJobRunner{
 			Queue: tetralsandbox.SandboxQueueFromGRPC(queuev1.NewQueueServiceClient(queueConnection)),
@@ -399,10 +451,16 @@ func startBunComposition(t *testing.T, workdir, bunPath, fixture, inputPath stri
 		t.Fatalf("start %s: %v", fixture, err)
 	}
 	finished := make(chan error, 1)
+	joined := make(chan struct{})
 	go func() {
+		defer close(joined)
 		defer cancel()
 		finished <- command.Wait()
 	}()
+	t.Cleanup(func() {
+		cancel()
+		<-joined
+	})
 	return finished, stdout, stderr
 }
 
@@ -414,6 +472,10 @@ type backgroundAbortBridgeServer struct {
 	cancelRequests   []*bridgev1.CancelCommandRequest
 	cancelACKDropped bool
 	replayDelay      time.Duration
+}
+
+func (s *backgroundAbortBridgeServer) LoadContext(ctx context.Context, request *bridgev1.LoadContextRequest) (*bridgev1.LoadContextResponse, error) {
+	return s.store.LoadContext(ctx, request)
 }
 
 func (s *backgroundAbortBridgeServer) WriteEvent(ctx context.Context, request *bridgev1.WriteEventRequest) (*bridgev1.WriteEventResponse, error) {

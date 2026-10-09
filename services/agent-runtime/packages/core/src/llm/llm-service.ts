@@ -1,7 +1,7 @@
 /**
  * @packageDocumentation
  * Adapts the validated Gateway provider stream into Runtime LLM event shapes.
- * It guards request identity, fragment ordering, attachment-rejection placement, terminal
+ * It guards request identity, completed member identity and ordering, attachment-rejection placement, terminal
  * uniqueness, and protocol completeness before any event reaches request-turn orchestration.
  * The Runtime host constructs a concrete adapter backed by GatewayClient and injects it through
  * the Interface boundary into ThreadLoop, which calls stream. The adapter validates
@@ -94,126 +94,64 @@ export interface Interface {
 /** Effect service tag used by request-turn orchestration. */
 export class Service extends Context.Service<Service, Interface>()("tetral-agent/LLMService") {}
 
-interface FragmentState {
-  readonly name?: string | undefined;
-  ended: boolean;
-  consumed?: boolean | undefined;
-}
-
 type RuntimeFinishReason = Exclude<Extract<LLMEvent, { readonly type: "finish" }>["finishReason"], undefined>;
 
 class ProviderStreamValidator {
-  private readonly textFragments = new Map<string, FragmentState>();
-  private readonly reasoningFragments = new Map<string, FragmentState>();
-  private readonly toolInputFragments = new Map<string, FragmentState>();
-  private readonly toolCalls = new Set<string>();
-  private attachmentRejectionsSeen = false;
-  private providerStreamingStarted = false;
-  private terminal = false;
-
-  constructor(private readonly request: ProviderRequest) {}
-
-  map(event: ProviderStreamEvent): LLMEvent | RuntimeFailure {
-    const failure = this.validateEnvelope(event);
-    if (failure !== undefined) {
-      return failure;
-    }
-    if (event.type === ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS) {
-      return this.attachmentRejections(event);
-    }
-    this.providerStreamingStarted = true;
-    switch (event.type) {
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START:
-        return this.startFragment(this.textFragments, event.text?.id, () => ({ type: "text-start", id: event.text?.id ?? "" }));
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA:
-        return this.deltaFragment(this.textFragments, event.text?.id, () => ({
-          type: "text-delta",
-          id: event.text?.id ?? "",
-          text_delta: event.text?.text ?? "",
-        }));
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END:
-        return this.endFragment(this.textFragments, event.text?.id, () => ({ type: "text-end", id: event.text?.id ?? "" }));
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START:
-        return this.startFragment(this.reasoningFragments, event.reasoning?.id, () => ({
-          type: "reasoning-start",
-          id: event.reasoning?.id ?? "",
-          ...(metadataFromJson(event.reasoning?.metadataJson) !== undefined
-            ? { providerMetadata: metadataFromJson(event.reasoning?.metadataJson) }
-            : {}),
-        }));
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA:
-        return this.deltaFragment(this.reasoningFragments, event.reasoning?.id, () => ({
-          type: "reasoning-delta",
-          id: event.reasoning?.id ?? "",
-          text_delta: event.reasoning?.text ?? "",
-          ...(metadataFromJson(event.reasoning?.metadataJson) !== undefined
-            ? { providerMetadata: metadataFromJson(event.reasoning?.metadataJson) }
-            : {}),
-        }));
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END:
-        return this.endFragment(this.reasoningFragments, event.reasoning?.id, () => ({
-          type: "reasoning-end",
-          id: event.reasoning?.id ?? "",
-          ...(metadataFromJson(event.reasoning?.metadataJson) !== undefined
-            ? { providerMetadata: metadataFromJson(event.reasoning?.metadataJson) }
-            : {}),
-        }));
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START:
-        if (event.toolInput !== undefined && this.toolCalls.has(event.toolInput.id)) {
-          return gatewayProtocolFailure(this.request);
-        }
-        return this.startFragment(this.toolInputFragments, event.toolInput?.id, () => {
-          const id = event.toolInput?.id ?? "";
-          const name = event.toolInput?.name ?? "";
-          this.toolInputFragments.set(id, { name, ended: false, consumed: false });
-          return { type: "tool-input-start", id, toolName: name };
-        });
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA:
-        return this.toolInputDelta(event);
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END:
-        return this.toolInputEnd(event);
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL:
-        return this.toolCall(event);
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH:
-        if (this.hasOpenFragments()) {
-          return gatewayProtocolFailure(this.request);
-        }
-        if (
-          event.finish?.usage === undefined
-          || event.finish.contextWindowTokens === undefined
-          || event.finish.outputTokenLimit === undefined
-        ) {
-          return gatewayProtocolFailure(this.request);
-        }
-        this.terminal = true;
-        return {
-          type: "finish",
-          finishReason: runtimeFinishReason(event.finish?.reason),
-          usage: runtimeUsage(event.finish.usage),
-          modelLimits: {
-            contextWindowTokens: event.finish.contextWindowTokens,
-            ...(event.finish.inputLimitTokens !== undefined ? { inputLimitTokens: event.finish.inputLimitTokens } : {}),
-            outputTokenLimit: event.finish.outputTokenLimit,
-          },
-          ...(metadataFromJson(event.finish?.metadataJson) !== undefined
-            ? { providerMetadata: metadataFromJson(event.finish?.metadataJson) }
-            : {}),
-        };
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR:
-        this.textFragments.clear();
-        this.reasoningFragments.clear();
-        this.toolInputFragments.clear();
-        this.toolCalls.clear();
-        this.terminal = true;
-        return {
-          type: "provider-error",
-          error: runtimeFailureFromGatewayProviderError(event.providerError?.error),
-        };
-      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_UNSPECIFIED:
-      case ProviderStreamEventType.UNRECOGNIZED:
-        return gatewayProtocolFailure(this.request);
-    }
+ private readonly providerParts = new Set<string>();
+ private readonly eventIds = new Set<string>();
+ private readonly thinking = new Map<string, string>();
+ private readonly toolCalls = new Set<string>();
+ private attachmentRejectionsSeen = false;
+ private providerStreamingStarted = false;
+ private terminal = false;
+ private nextFrameSequence = 1;
+ constructor(private readonly request: ProviderRequest) {}
+ map(event: ProviderStreamEvent): LLMEvent | RuntimeFailure {
+  if (this.terminal || event.frameSequence !== this.nextFrameSequence || !validateProviderStreamEvent(event).ok) return gatewayProtocolFailure(this.request);
+  this.nextFrameSequence++;
+  if (event.type === ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS) return this.attachmentRejections(event);
+  this.providerStreamingStarted = true;
+  switch(event.type) {
+   case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED: {
+    const part=event.thinkingStarted!;
+    if(this.providerParts.has(`reasoning:${part.providerPartId}`)||this.eventIds.has(part.eventId)) return gatewayProtocolFailure(this.request);
+    this.providerParts.add(`reasoning:${part.providerPartId}`);this.eventIds.add(part.eventId);this.thinking.set(part.providerPartId,part.eventId);
+    return {type:"thinking-started",providerPartId:part.providerPartId,eventId:part.eventId};
+   }
+   case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE: {
+    const part=event.textComplete!;
+    if(this.providerParts.has(`text:${part.providerPartId}`)||this.eventIds.has(part.eventId)) return gatewayProtocolFailure(this.request);
+    this.providerParts.add(`text:${part.providerPartId}`);this.eventIds.add(part.eventId);
+    return {type:"text-complete",providerPartId:part.providerPartId,eventId:part.eventId,text:part.text};
+   }
+   case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE: {
+    const part=event.reasoningComplete!;
+    if(this.thinking.get(part.providerPartId)!==part.thinkingEventId) return gatewayProtocolFailure(this.request);
+    this.thinking.delete(part.providerPartId);
+    const metadata=metadataFromJson(part.providerMetadataJson);
+    return {type:"reasoning-complete",providerPartId:part.providerPartId,thinkingEventId:part.thinkingEventId,text:part.text,...(metadata===undefined?{}:{providerMetadata:metadata})};
+   }
+   case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE: {
+    const part=event.toolCallComplete!;
+    if(this.toolCalls.has(part.modelToolCallId)) return gatewayProtocolFailure(this.request);
+    const input=runtimeJsonFromString(part.inputJson);
+    if(input===undefined) return gatewayProtocolFailure(this.request);
+    this.toolCalls.add(part.modelToolCallId);
+    const metadata=metadataFromJson(part.providerMetadataJson);
+    return {type:"tool-call-complete",id:part.modelToolCallId,toolName:part.name,input:input.input,inputPreview:input.inputPreview,...(metadata===undefined?{}:{providerMetadata:metadata})};
+   }
+   case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH: {
+    if(this.thinking.size>0 || event.finish?.usage===undefined || event.finish.contextWindowTokens===undefined || event.finish.outputTokenLimit===undefined) return gatewayProtocolFailure(this.request);
+    this.terminal=true;
+    const metadata=metadataFromJson(event.finish.metadataJson);
+    return {type:"finish",finishReason:runtimeFinishReason(event.finish.reason),usage:runtimeUsage(event.finish.usage),modelLimits:{contextWindowTokens:event.finish.contextWindowTokens,outputTokenLimit:event.finish.outputTokenLimit,...(event.finish.inputLimitTokens===undefined?{}:{inputLimitTokens:event.finish.inputLimitTokens})},...(metadata===undefined?{}:{providerMetadata:metadata})};
+   }
+   case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR:
+    this.terminal=true;this.thinking.clear();
+    return {type:"provider-error",error:runtimeFailureFromGatewayProviderError(event.providerError?.error)};
+   default: return gatewayProtocolFailure(this.request);
   }
+ }
 
   private attachmentRejections(event: ProviderStreamEvent): LLMEvent | RuntimeFailure {
     if (this.providerStreamingStarted || this.attachmentRejectionsSeen) {
@@ -256,120 +194,6 @@ class ProviderStreamValidator {
     };
   }
 
-  private validateEnvelope(event: ProviderStreamEvent): RuntimeFailure | undefined {
-    if (this.terminal) {
-      return gatewayProtocolFailure(this.request);
-    }
-    const validation = validateProviderStreamEvent(event);
-    if (!validation.ok) {
-      return gatewayProtocolFailure(this.request);
-    }
-    return undefined;
-  }
-
-  private startFragment(
-    fragments: Map<string, FragmentState>,
-    id: string | undefined,
-    build: () => LLMEvent,
-  ): LLMEvent | RuntimeFailure {
-    if (id === undefined || id.length === 0) {
-      return gatewayProtocolFailure(this.request);
-    }
-    const existing = fragments.get(id);
-    if (existing !== undefined) {
-      return gatewayProtocolFailure(this.request);
-    }
-    fragments.set(id, { ended: false });
-    return build();
-  }
-
-  private deltaFragment(
-    fragments: Map<string, FragmentState>,
-    id: string | undefined,
-    build: () => LLMEvent,
-  ): LLMEvent | RuntimeFailure {
-    const existing = id === undefined ? undefined : fragments.get(id);
-    if (id === undefined || id.length === 0 || existing === undefined || existing.ended) {
-      return gatewayProtocolFailure(this.request);
-    }
-    return build();
-  }
-
-  private endFragment(
-    fragments: Map<string, FragmentState>,
-    id: string | undefined,
-    build: () => LLMEvent,
-  ): LLMEvent | RuntimeFailure {
-    const existing = id === undefined ? undefined : fragments.get(id);
-    if (id === undefined || id.length === 0 || existing === undefined || existing.ended) {
-      return gatewayProtocolFailure(this.request);
-    }
-    existing.ended = true;
-    return build();
-  }
-
-  private toolCall(event: ProviderStreamEvent): LLMEvent | RuntimeFailure {
-    const toolCall = event.toolCall;
-    if (toolCall === undefined || toolCall.id.length === 0 || toolCall.name.length === 0 || this.toolCalls.has(toolCall.id)) {
-      return gatewayProtocolFailure(this.request);
-    }
-    const streamedInput = this.toolInputFragments.get(toolCall.id);
-    if (
-      streamedInput !== undefined &&
-      (streamedInput.name !== toolCall.name || !streamedInput.ended || streamedInput.consumed === true)
-    ) {
-      return gatewayProtocolFailure(this.request);
-    }
-    const toolInput = runtimeJsonFromString(toolCall.inputJson);
-    if (toolInput === undefined) {
-      return gatewayProtocolFailure(this.request);
-    }
-    this.toolCalls.add(toolCall.id);
-    if (streamedInput !== undefined) {
-      streamedInput.consumed = true;
-    }
-    return {
-      type: "tool-call",
-      id: toolCall.id,
-      toolName: toolCall.name,
-      input: toolInput.input,
-      inputPreview: toolInput.inputPreview,
-    };
-  }
-
-  private toolInputDelta(event: ProviderStreamEvent): LLMEvent | RuntimeFailure {
-    const toolInput = event.toolInput;
-    const existing = toolInput === undefined ? undefined : this.toolInputFragments.get(toolInput.id);
-    if (toolInput === undefined || existing === undefined || existing.ended || existing.name !== toolInput.name) {
-      return gatewayProtocolFailure(this.request);
-    }
-    return {
-      type: "tool-input-delta",
-      id: toolInput.id,
-      toolName: toolInput.name,
-      text_delta: toolInput.text,
-    };
-  }
-
-  private toolInputEnd(event: ProviderStreamEvent): LLMEvent | RuntimeFailure {
-    const toolInput = event.toolInput;
-    const existing = toolInput === undefined ? undefined : this.toolInputFragments.get(toolInput.id);
-    if (toolInput === undefined || existing === undefined || existing.ended || existing.name !== toolInput.name) {
-      return gatewayProtocolFailure(this.request);
-    }
-    existing.ended = true;
-    return {
-      type: "tool-input-end",
-      id: toolInput.id,
-      toolName: toolInput.name,
-    };
-  }
-
-  private hasOpenFragments(): boolean {
-    return hasOpenFragment(this.textFragments) ||
-      hasOpenFragment(this.reasoningFragments) ||
-      hasUnconsumedToolInput(this.toolInputFragments);
-  }
 }
 
 function providerAttachmentOriginIdentity(attachment: ProviderRequest["attachments"][number]): string {
@@ -388,24 +212,6 @@ function runtimeAttachmentRejectionOriginIdentity(
   return origin.type === "transient"
     ? JSON.stringify(["transient", origin.attachmentRef])
     : JSON.stringify(["file-backed", origin.sourceEventId, origin.fileId]);
-}
-
-function hasOpenFragment(fragments: ReadonlyMap<string, FragmentState>): boolean {
-  for (const fragment of fragments.values()) {
-    if (!fragment.ended) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function hasUnconsumedToolInput(fragments: ReadonlyMap<string, FragmentState>): boolean {
-  for (const fragment of fragments.values()) {
-    if (!fragment.ended || fragment.consumed !== true) {
-      return true;
-    }
-  }
-  return false;
 }
 
 /** Builds the LLM service around a concrete Gateway streaming client. */

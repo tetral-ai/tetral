@@ -71,21 +71,57 @@ func OpenWorkloadDB(t testing.TB, admin *sql.DB, workload string) *WorkloadDB {
 		}
 	})
 	w.apply(t)
+	w.DB = w.openWorkload(t, workload, nil)
+	return w
+}
+
+// OpenWorkload opens an independent pool authenticated as another serving
+// workload of the same installed contract, so one composition can run several
+// production owners, each with only its declared privileges, against one clone.
+// It does not install roles or change privileges. tracer may be nil. The pool is
+// registered like DB, so OpenRuntimeRoleDBWithTracer derives further pools of
+// the same role, and it closes at test cleanup.
+func (w *WorkloadDB) OpenWorkload(t testing.TB, workload string, tracer pgx.QueryTracer) *sql.DB {
+	t.Helper()
+	if _, ok := w.contract.Workloads[workload]; !ok {
+		t.Fatalf("unknown serving workload %q", workload)
+		return nil
+	}
+	db := w.openWorkload(t, workload, tracer)
+	t.Cleanup(func() {
+		unregisterHandle(db)
+		_ = db.Close()
+	})
+	return db
+}
+
+func (w *WorkloadDB) openWorkload(t testing.TB, workload string, tracer pgx.QueryTracer) *sql.DB {
+	t.Helper()
+	handleMu.RLock()
+	handle := handles[w.admin]
+	handleMu.RUnlock()
+	if handle == nil {
+		t.Fatal("storagetest: workload connection requires a live clone handle")
+		return nil
+	}
 	credential := w.declarations.Roles[workload]
 	config := handle.adminConfig.Copy()
 	config.User, config.Password = credential.Name, credential.Password
-	w.DB = openPool(config)
-	if err := w.DB.PingContext(context.Background()); err != nil {
-		t.Fatal("storagetest: connect workload database")
-	}
 	workloadHandle := *handle
-	workloadHandle.runtimeRole, workloadHandle.runtimeConfig = credential.Name, config
+	workloadHandle.runtimeRole, workloadHandle.runtimeConfig = credential.Name, config.Copy()
+	var err error
 	workloadHandle.runtimeURL, err = connectionURLWithIdentity(handle.adminURL, handle.database, credential.Name, credential.Password)
 	if err != nil {
 		t.Fatal("storagetest: construct workload connection identity")
 	}
-	registerHandle(w.DB, &workloadHandle)
-	return w
+	config.Tracer = tracer
+	db := openPool(config)
+	if err := db.PingContext(context.Background()); err != nil {
+		_ = db.Close()
+		t.Fatal("storagetest: connect workload database")
+	}
+	registerHandle(db, &workloadHandle)
+	return db
 }
 
 // RequirePrivilege removes exactly one declared grant and calls a production

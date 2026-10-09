@@ -13,9 +13,13 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 func TestConsumerClassForKindCoversEveryKnownKind(t *testing.T) {
+	if ConsumerClassJobRunner != "bridge" {
+		t.Fatal("Job Runner notification payload must preserve established bridge vocabulary")
+	}
 	kinds := []string{
 		KindRuntimeInput, KindRuntimeConfigUpdate, KindCleanupSession, KindSessionDeleteCleanup,
 		KindEnvironmentBuild, KindEnvironmentReadyFanout, KindSandboxToolExecute,
@@ -25,7 +29,7 @@ func TestConsumerClassForKindCoversEveryKnownKind(t *testing.T) {
 	}
 	for _, kind := range kinds {
 		consumerClass, ok := ConsumerClassForKind(kind)
-		if !ok || (consumerClass != ConsumerClassBridge && consumerClass != ConsumerClassSandbox) {
+		if !ok || (consumerClass != ConsumerClassJobRunner && consumerClass != ConsumerClassSandbox) {
 			t.Fatalf("ConsumerClassForKind(%q) = %q,%t; want a known class", kind, consumerClass, ok)
 		}
 	}
@@ -60,7 +64,7 @@ func TestNotificationListenerFailureLogsSafePermanentAndTransientCategories(t *t
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			logNotificationListenerFailure(slog.New(slog.NewJSONHandler(&logs, nil)), ConsumerClassBridge, test.err)
+			logNotificationListenerFailure(slog.New(slog.NewJSONHandler(&logs, nil)), ConsumerClassJobRunner, test.err)
 			for _, want := range []string{
 				`"error.code":"` + test.code + `"`,
 				`"retryable":` + map[bool]string{true: "true", false: "false"}[test.retryable],
@@ -116,7 +120,7 @@ func TestRunNotificationListenerBroadcastsCatchupAndRelevantPayloadAfterReconnec
 	})
 	initial := wake.Snapshot()
 	go func() {
-		done <- RunNotificationListener(ctx, listener, ConsumerClassBridge, wake, nil)
+		done <- RunNotificationListener(ctx, listener, ConsumerClassJobRunner, wake, nil)
 	}()
 
 	waitForGeneration := func(after WakeSnapshot) {
@@ -161,7 +165,7 @@ func TestRunNotificationListenerBroadcastsCatchupAndRelevantPayloadAfterReconnec
 		t.Fatalf("unrelated payload wait = %v; want deadline", err)
 	}
 	unchangedCancel()
-	listener.notify(ConsumerClassBridge)
+	listener.notify(ConsumerClassJobRunner)
 	waitForGeneration(payload)
 }
 
@@ -179,12 +183,13 @@ func (l *scriptedNotificationListener) Listen(ctx context.Context, _ string, onR
 	call := l.count
 	l.onNotify = onNotification
 	l.mu.Unlock()
+	// A published fixture call means its readiness callback has completed.
+	onReady()
 	select {
 	case l.calls <- call:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	onReady()
 	if call == 1 {
 		select {
 		case <-l.allowDisconnect:
@@ -272,5 +277,97 @@ func TestRunListenerReconnectsWithReadinessAndRawPayloads(t *testing.T) {
 	}
 	if len(payloads) != 1 || payloads[0] != `{"workspace_id":"ws_1"}` {
 		t.Fatalf("payloads = %v; want the raw payload passed through unfiltered", payloads)
+	}
+}
+
+func TestNotificationListenerExistingReconnectEmitsFailureThenRecovery(t *testing.T) {
+	var logs bytes.Buffer
+	listener := &scriptedNotificationListener{calls: make(chan int, 2), allowDisconnect: make(chan struct{})}
+	wake := NewWakeSignal()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- RunNotificationListener(ctx, listener, ConsumerClassJobRunner, wake, workload.NewLogger(&logs, "queue", "local", "unit"))
+	}()
+	waitCall := func(want int) {
+		t.Helper()
+		select {
+		case got := <-listener.calls:
+			if got != want {
+				t.Fatalf("listen call = %d", got)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("listener did not connect")
+		}
+	}
+	waitCall(1)
+	close(listener.allowDisconnect)
+	waitCall(2)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listener failed to stop")
+	}
+	body := logs.String()
+	if strings.Count(body, `"event":"queue.notification_listener.disconnected"`) != 1 || strings.Count(body, `"event":"queue.notification_listener.recovered"`) != 1 || !strings.Contains(body, `"outcome":"recovered"`) || strings.Contains(body, "connection lost") {
+		t.Fatalf("reconnect records = %s", body)
+	}
+}
+
+type notificationDiagnosticFaultWriter struct{}
+
+func (notificationDiagnosticFaultWriter) Write([]byte) (int, error) { panic("diagnostic sink failed") }
+func TestNotificationReconnectWakeSurvivesDiagnosticSinkFault(t *testing.T) {
+	owner := workload.NewProcessLogger(notificationDiagnosticFaultWriter{}, "queue", "local", "unit", workload.DefaultDiagnosticConfig())
+	defer owner.CloseWithBudget()
+	listener := &scriptedNotificationListener{calls: make(chan int, 2), allowDisconnect: make(chan struct{})}
+	wake := NewWakeSignal()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		done <- RunNotificationListener(ctx, listener, ConsumerClassJobRunner, wake, owner.Logger)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("listener did not stop")
+		}
+	})
+	for call := 1; call <= 2; call++ {
+		select {
+		case got := <-listener.calls:
+			if got != call {
+				t.Fatalf("listen call = %d", got)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("listener failed to connect")
+		}
+		if call == 1 {
+			close(listener.allowDisconnect)
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listener did not stop")
+	}
+	owner.CloseWithBudget()
+	if wake.Snapshot().generation != 2 {
+		t.Fatal("sink fault changed initial/reconnect catch-up wakes")
+	}
+	if owner.Stats().SinkFailures != 2 {
+		t.Fatalf("sink failures = %+v", owner.Stats())
 	}
 }

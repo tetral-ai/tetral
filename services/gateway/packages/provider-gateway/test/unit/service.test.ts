@@ -1,5 +1,8 @@
+import { NormalizedProviderEventType as FragmentType } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import type { NormalizedProviderEvent, NormalizedTextEventType, NormalizedReasoningEventType, NormalizedToolInputEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import { Metadata, status } from "@grpc/grpc-js";
 import {
@@ -18,12 +21,15 @@ import { encryptAES256GCM } from "../../src/providers/crypto.js";
 import { classifyProviderFailure, PlatformKeyPool, ProviderKeyFailureError } from "../../src/providers/pool.js";
 import { ProviderRequestLoweringError } from "@tetral/gateway-lowering/src/errors.js";
 import { ProviderGatewayServiceShell } from "../../src/service.js";
-import { validFileBackedProviderAttachment, validProviderAttachment, validProviderRequest, validRunWebRequest } from "./fixtures.js";
+import { writeProviderStreamEvents } from "../../src/grpc-server.js";
+import { unusedProviderFetch, validFileBackedProviderAttachment, validProviderAttachment, validProviderRequest, validRunWebRequest } from "./fixtures.js";
+import { createJsonLogger } from "../../src/logger.js";
 import type { GatewayLogger } from "../../src/logger.js";
 import type { GatewayAuthenticator, ProviderAttachmentResolver, ProviderRequestStreamer } from "../../src/service.js";
 import type { RuntimeBindingRequestIdentity, RuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
-import type { ProviderStreamEvent } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { ProviderRequest, ProviderStreamEvent } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { GatewayCredentialStore, PlatformCredentialPool } from "../../src/providers/credentials.js";
+import type { PreviewRequestProducer } from "../../src/providers/preview-publisher.js";
 import type { EncryptedPlatformProviderKeyRow, PlatformHostedProviderId, PlatformKeySelectionOptions, ProviderFailureClassification } from "../../src/providers/pool.js";
 
 const RuntimePodUid = "pod_uid_gateway_service";
@@ -35,6 +41,129 @@ const approvalReviewerOutputSchemaJson = await readFile(
 );
 
 describe("ProviderGatewayServiceShell", () => {
+  test("preview factory follows validation and binding admission and never gates complete frames", async () => {
+    let opens = 0, closes = 0, offers = 0, providerCalls = 0;
+    const factory = () => { opens++; return { offer: () => { offers++; throw new Error("preview sink failed"); }, close: () => { closes++; } }; };
+    const request = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
+    for (const [malformed, binding] of [[{ ...request, outputContractVersion: 0 }, true], [request, false]] as const) {
+      const denied = createService(new RecordingAuthenticator(), true, { verify: () => binding }, { previewProducerFactory: factory });
+      await expectGrpcCode(collectEvents(denied.streamProviderRequest(malformed, metadata())), binding ? status.INVALID_ARGUMENT : status.PERMISSION_DENIED);
+    }
+    expect(opens).toBe(0);
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      previewProducerFactory: factory,
+      credentialResolver: sessionCredentialResolver(),
+      providerStreamer: { stream: async function* () {
+        providerCalls++; expect(opens).toBe(1);
+        yield textEvent(FragmentType.TextStart, "");
+        yield textEvent(FragmentType.TextDelta, "exact reply");
+        yield textEvent(FragmentType.TextEnd, "");
+        yield finishEvent();
+      } },
+    });
+    const events = await collectEvents(service.streamProviderRequest(request, metadata()));
+    expect(events.map(event => event.type)).toEqual([ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH]);
+    expect(events[0]?.textComplete?.text).toBe("exact reply");
+    expect(providerCalls).toBe(1); expect(offers).toBe(1); expect(closes).toBe(1);
+  });
+  test("shutdown rejects an unjoined authentication worker and keeps its completion owned", async () => {
+    const lines: string[] = [];
+    const logger = createJsonLogger({ write: line => lines.push(line) });
+    let release!: () => void;
+    const held = new Promise<void>(resolve=>{release=resolve;});
+    const auth = new RecordingAuthenticator();
+    const service=createService({authenticate:async (...args)=>{await held;return auth.authenticate(...args);}},true,undefined,{logger});
+    const worker=collectEvents(service.streamProviderRequest({...validProviderRequest(),requestId:""},metadata()));
+    const outcome=worker.catch(error=>error);
+    await Promise.resolve();
+    let completed=false;
+    // Release the worker only after shutdown has declared the join window expired.
+    let joinExpired!: () => void;
+    const expired=new Promise<void>(resolve=>{joinExpired=resolve;});
+    const shutdown=service.shutdown(new Date(Date.now()+30),undefined,()=>joinExpired());
+    const observed=shutdown.then(()=>{completed=true;},error=>{completed=true;return error;});
+    // Yield one macrotask so that a shutdown which skipped the join would have settled.
+    await expired;await new Promise(resolve=>setImmediate(resolve));expect(completed).toBe(false);
+    release();expect(await observed).toBeInstanceOf(Error);
+    expect(service.metricsText()).toContain('operation="shutdown_drain",outcome="timeout"} 1');
+    expect(service.metricsText()).toContain('operation="shutdown_cancel_join",outcome="timeout"} 1');
+    const phases = lines.map(line => JSON.parse(line)).filter(record => record.event === "workload.shutdown.phase_completed");
+    expect(phases.map(record => record.operation)).toEqual(["shutdown_drain", "shutdown_cancel_join"]);
+    for (const record of phases) {
+      expect(record["service.instance.id"]).toBeString();
+      expect(record["metric.observation.count"]).toBe(1);
+      expect(record["duration.seconds"]).toBeGreaterThan(0);
+      expect(service.metricsText()).toContain(`tetral_operation_duration_seconds_sum{service="provider-gateway",operation="${record.operation}",outcome="timeout"} ${record["duration.seconds"]}`);
+    }
+    logger.close();
+    expect(await outcome).toMatchObject({code:status.UNAVAILABLE});
+    await service.shutdown(new Date(Date.now()+30));
+  });
+  test("closes a stream held by flow control only after the cancellation join window and joins its worker", async () => {
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      providerStreamer: {
+        stream: async function* () {
+          yield textEvent(FragmentType.TextStart, "");
+          yield textEvent(FragmentType.TextDelta, "visible");
+          yield textEvent(FragmentType.TextEnd, "");
+          await never();
+        },
+      },
+    });
+    // The transport never drains, so the worker stays suspended on its first write.
+    const stream = new ProviderStreamFixture(false);
+    const written = writeProviderStreamEvents(stream, service.streamProviderRequest(signedProviderRequest(), metadata()));
+    await stream.waitForWrites(1);
+    const closedAt: number[] = [];
+    const started = Date.now();
+    const outcome = await service
+      .shutdown(new Date(started + 150), new Date(started + 50), () => {
+        closedAt.push(Date.now());
+        stream.cancel();
+      })
+      .then(() => undefined, (error: unknown) => error);
+
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toBe("Provider workers did not join before shutdown deadline");
+    expect(closedAt).toHaveLength(1);
+    expect(closedAt[0]! - started).toBeGreaterThanOrEqual(145);
+    expect(Date.now() - started).toBeLessThan(150 + 1000);
+    await written;
+    expect(stream.writes).toHaveLength(1);
+    expect(service.metricsText()).toContain("providergateway_provider_streams_active 0");
+  });
+
+  test("a cooperative worker aborted at the drain cutoff writes its terminal error without forced stream closure", async () => {
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      providerStreamer: {
+        stream: async function* () {
+          yield textEvent(FragmentType.TextStart, "");
+          yield textEvent(FragmentType.TextDelta, "visible");
+          yield textEvent(FragmentType.TextEnd, "");
+          await never();
+        },
+      },
+    });
+    const stream = new ProviderStreamFixture(true);
+    const written = writeProviderStreamEvents(stream, service.streamProviderRequest(signedProviderRequest(), metadata()));
+    await stream.waitForWrites(1);
+    let closes = 0;
+    const started = Date.now();
+    await service.shutdown(new Date(started + 1000), new Date(started + 50), () => {
+      closes++;
+    });
+    await written;
+
+    expect(closes).toBe(0);
+    expect(stream.writes.at(-1)?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR);
+    expect(service.metricsText()).toContain("providergateway_provider_streams_active 0");
+  });
+
+  test("a throwing shutdown diagnostic sink does not change the joined phase result", async () => {
+    const service = createService(new RecordingAuthenticator(),true,undefined,{logger:{ info: () => { throw new Error("sink"); }, error: () => undefined }});
+    await service.shutdown(new Date(Date.now()+1000));
+    expect(service.metricsText()).toContain('operation="shutdown_drain",outcome="success"} 1');
+  });
   test("authorizes before request validation or provider-unavailable response construction", async () => {
     const authenticator = new RecordingAuthenticator({ ok: false, code: "Unauthenticated", message: "unauthenticated" });
     const service = createService(authenticator);
@@ -44,6 +173,14 @@ describe("ProviderGatewayServiceShell", () => {
     expect(authenticator.calls).toEqual(["/tetral.provider_gateway.v1.ProviderGatewayService/StreamProviderRequest"]);
   });
 
+  test("ordinary validation denial remains Info with the safe failure tuple", async () => {
+    const lines: string[] = []; const logger = createJsonLogger({write: (line) => lines.push(line)});
+    const service = createService(new RecordingAuthenticator(),true,{verify: () => true},{logger});
+    try {
+      await expectGrpcCode(collectEvents(service.streamProviderRequest({...validProviderRequest(),requestId: ""},metadata())),status.INVALID_ARGUMENT);
+      expect(JSON.parse(lines[0]!)).toMatchObject({level: "info",event: "provider_request_streamed","request.outcome": "failed","error.class": "request_validation"});
+    } finally { logger.close(); }
+  });
   test("rejects invalid request-kind output-schema combinations before credential resolution", async () => {
     const pool = new RecordingPlatformCredentialPool(["pfk_reviewer"]);
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
@@ -82,9 +219,9 @@ describe("ProviderGatewayServiceShell", () => {
       metadata(),
     )), status.INVALID_ARGUMENT);
 
-    expect(infoLogs).toEqual([]);
-    expect(JSON.stringify(errorLogs)).not.toContain(hostileIdentity);
-    expect(errorLogs).toEqual([
+    expect(errorLogs).toEqual([]);
+    expect(JSON.stringify(infoLogs)).not.toContain(hostileIdentity);
+    expect(infoLogs).toEqual([
       expect.objectContaining({
         event: "provider_request_streamed",
         "request.outcome": "failed",
@@ -97,7 +234,7 @@ describe("ProviderGatewayServiceShell", () => {
         "model_request.id": "mreq_1",
       }),
     ]);
-    expect(errorLogs[0]).not.toHaveProperty("workspace.id");
+    expect(infoLogs[0]).not.toHaveProperty("workspace.id");
   });
 
   test("valid ProviderRequest streams catalog-gated provider-unavailable terminal event", async () => {
@@ -137,7 +274,7 @@ describe("ProviderGatewayServiceShell", () => {
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
       providerStreamer: {
         stream: async function* () {
-          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "not-a-delta");
+          yield textEvent(FragmentType.TextStart, "not-a-delta");
         },
       },
     });
@@ -169,7 +306,7 @@ describe("ProviderGatewayServiceShell", () => {
     await collectEvents(service.streamProviderRequest(request, metadata()));
 
     expect(JSON.stringify(logs)).not.toContain(hostileCode);
-    expect(logs).toEqual([
+    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
       expect.objectContaining({
         event: "provider_request_streamed",
         "request.outcome": "failed",
@@ -184,6 +321,7 @@ describe("ProviderGatewayServiceShell", () => {
     let providerFactoryCalls = 0;
     let platformFailureRecords = 0;
     const providerStreamer = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       openAIProviderFactory: () => {
         providerFactoryCalls += 1;
         return { responses: (modelId) => ({ provider: "openai", modelId }) };
@@ -212,7 +350,7 @@ describe("ProviderGatewayServiceShell", () => {
         }),
       }),
     ]);
-    expect(logs).toEqual([
+    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
       expect.objectContaining({
         event: "provider_request_streamed",
         "request.outcome": "failed",
@@ -257,7 +395,7 @@ describe("ProviderGatewayServiceShell", () => {
     await collectEvents(service.streamProviderRequest(request, metadata()));
     await service.runWeb(webRequest, metadata()).catch(() => undefined);
 
-    expect(logs).toEqual([
+    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
       expect.objectContaining({
         event: "provider_request_streamed",
         "event.kind": "provider_request_streamed",
@@ -398,7 +536,11 @@ describe("ProviderGatewayServiceShell", () => {
       retryable: true,
       fatal: false,
     });
+    expect(service.metricsText()).toContain("providergateway_provider_stream_capacity 1");
+    expect(service.metricsText()).toContain("providergateway_admission_rejections_total 1");
+    expect(service.metricsText()).toContain('tetral_operation_duration_seconds_count{service="provider-gateway",operation="StreamProviderRequest",outcome="rejected"} 1');
     await first;
+    expect(service.metricsText()).toContain('tetral_operation_duration_seconds_count{service="provider-gateway",operation="StreamProviderRequest",outcome="error"} 1');
     expect(logs.filter((record) =>
       (record as { readonly event?: unknown }).event === "provider_request_streamed"
       && (record as { readonly "model_request.id"?: unknown })["model_request.id"] === "mreq_2"
@@ -479,7 +621,7 @@ describe("ProviderGatewayServiceShell", () => {
       providerStreamTimeouts: { firstByteTimeoutMs: 500, interChunkTimeoutMs: 5 },
       providerStreamer: {
         stream: async function* (input) {
-          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+          yield textEvent(FragmentType.TextStart, "");
           input.abortSignal?.addEventListener("abort", () => {
             aborted = true;
             release();
@@ -493,9 +635,8 @@ describe("ProviderGatewayServiceShell", () => {
 
     const events = await collectEvents(service.streamProviderRequest(request, metadata()));
 
-    expect(events).toHaveLength(2);
-    expect(events[0]?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START);
-    expect(events[1]?.providerError?.error).toMatchObject({
+    expect(events).toHaveLength(1);
+    expect(events[0]?.providerError?.error).toMatchObject({
       code: "provider_timeout",
       message: "Provider stream stalled before the next chunk.",
       retryable: true,
@@ -503,7 +644,7 @@ describe("ProviderGatewayServiceShell", () => {
       statusCode: 504,
     });
     expect(aborted).toBe(true);
-    expect(logs).toEqual([
+    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
       expect.objectContaining({
         event: "gateway_provider_timeout",
         "timeout.kind": "inter_event",
@@ -533,11 +674,11 @@ describe("ProviderGatewayServiceShell", () => {
       providerStreamer: {
         stream: async function* (input) {
           yield textEvent(
-            ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+            FragmentType.TextStart,
             "",
           );
           yield textEvent(
-            ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
+            FragmentType.TextDelta,
             "visible",
           );
           for (let index = 0; index < 20; index += 1) {
@@ -559,7 +700,7 @@ describe("ProviderGatewayServiceShell", () => {
       retryable: true,
       fatal: false,
     });
-    expect(events.filter((event) => event.providerError === undefined)).toHaveLength(2);
+    expect(events.filter((event) => event.providerError === undefined)).toHaveLength(0);
   });
 
   test("semantic watchdog before the first normalized event stays on the stream-timeout path", async () => {
@@ -619,16 +760,16 @@ describe("ProviderGatewayServiceShell", () => {
       },
       providerStreamer: {
         stream: async function* () {
-          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
-          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "visible");
-          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, "");
+          yield textEvent(FragmentType.TextStart, "");
+          yield textEvent(FragmentType.TextDelta, "visible");
+          yield textEvent(FragmentType.TextEnd, "");
           await new Promise((resolve) => setTimeout(resolve, 30));
-          yield reasoningEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START, "");
-          yield reasoningEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA, "thinking");
-          yield reasoningEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END, "");
+          yield reasoningEvent(FragmentType.ReasoningStart, "");
+          yield reasoningEvent(FragmentType.ReasoningDelta, "thinking");
+          yield reasoningEvent(FragmentType.ReasoningEnd, "");
           await new Promise((resolve) => setTimeout(resolve, 30));
-          yield toolInputEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, "Read", "", "call_1");
-          yield toolInputEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, "Read", "", "call_1");
+          yield toolInputEvent(FragmentType.ToolInputStart, "Read", "", "call_1");
+          yield toolInputEvent(FragmentType.ToolInputEnd, "Read", "", "call_1");
           yield toolCallEvent("call_1", "Read", "{}");
           await new Promise((resolve) => setTimeout(resolve, 30));
           yield finishEvent();
@@ -638,16 +779,10 @@ describe("ProviderGatewayServiceShell", () => {
 
     const events = await collectEvents(service.streamProviderRequest(request, metadata()));
 
-    expect(events.map((event) => event.type)).toEqual([
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+    expect(events.map((event) => event.type)).toEqual([      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE,
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED,
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE,
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE,
       ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
     ]);
   });
@@ -664,7 +799,7 @@ describe("ProviderGatewayServiceShell", () => {
       providerStreamTimeouts: { firstByteTimeoutMs: 500, interChunkTimeoutMs: 500 },
       providerStreamer: {
         stream: async function* () {
-          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+          yield reasoningEvent(FragmentType.ReasoningStart, "");
           await never();
         },
       },
@@ -676,7 +811,7 @@ describe("ProviderGatewayServiceShell", () => {
     const second = await iterator.next();
     const third = await iterator.next();
 
-    expect(first.value?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START);
+    expect(first.value?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED);
     expect(second.value?.providerError?.error).toMatchObject({
       code: "provider_cancelled",
       retryable: false,
@@ -700,7 +835,7 @@ describe("ProviderGatewayServiceShell", () => {
       providerStreamer: {
         stream: async function* () {
           try {
-            yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+            yield reasoningEvent(FragmentType.ReasoningStart, "");
             await never();
           } finally {
             providerClosed = true;
@@ -710,11 +845,11 @@ describe("ProviderGatewayServiceShell", () => {
     });
     const iterator = service.streamProviderRequest(request, metadata())[Symbol.asyncIterator]();
 
-    expect((await iterator.next()).value?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START);
+    expect((await iterator.next()).value?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED);
     await iterator.return?.();
 
     expect(providerClosed).toBe(true);
-    expect(logs).toEqual([
+    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
       expect.objectContaining({
         event: "provider_request_streamed",
         "request.outcome": "failed",
@@ -771,8 +906,8 @@ describe("ProviderGatewayServiceShell", () => {
           if (keyID === "pfk_rate_limited") {
             throw new ProviderKeyFailureError(retryableProviderFailure());
           }
-          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
-          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, "");
+          yield textEvent(FragmentType.TextStart, "");
+          yield textEvent(FragmentType.TextEnd, "");
           yield finishEvent();
         },
       },
@@ -782,10 +917,7 @@ describe("ProviderGatewayServiceShell", () => {
 
     expect(attempts).toEqual(["pfk_rate_limited", "pfk_success"]);
     expect(pool.recordedFailures.map((failure) => failure.keyId)).toEqual(["pfk_rate_limited"]);
-    expect(events.map((event) => event.type)).toEqual([
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+    expect(events.map((event) => event.type)).toEqual([      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
     ]);
   });
 
@@ -819,7 +951,7 @@ describe("ProviderGatewayServiceShell", () => {
       retryable: true,
       fatal: false,
     });
-    expect(logs).toEqual([
+    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
       expect.objectContaining({
         event: "provider_request_streamed",
         "error.class": "provider_transport_failure",
@@ -840,8 +972,9 @@ describe("ProviderGatewayServiceShell", () => {
     const logs: unknown[] = [];
     const pool = new RecordingPlatformCredentialPool(["pfk_1"]);
     const providerStreamer = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       anthropicProviderFactory: () => () => ({}),
-      streamText: () => {
+      streamModel: () => {
         attempts += 1;
         return {
           fullStream: (async function* () {
@@ -866,7 +999,7 @@ describe("ProviderGatewayServiceShell", () => {
       retryable: true,
       fatal: false,
     });
-    expect(logs).toEqual([expect.objectContaining({
+    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([expect.objectContaining({
       event: "provider_request_streamed",
       "error.class": "provider_transport_failure",
       "error.code": "provider_stream_error",
@@ -927,7 +1060,7 @@ describe("ProviderGatewayServiceShell", () => {
           const keyID = input.credential?.source === "platform" ? input.credential.platformKey.keyId : "missing";
           attempts.push(keyID);
           if (keyID === "pfk_balance") {
-            yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+            yield textEvent(FragmentType.TextStart, "");
             throw new ProviderKeyFailureError(
               classifyProviderFailure("deepseek", {
                 body: { message: "Insufficient Balance" },
@@ -944,9 +1077,7 @@ describe("ProviderGatewayServiceShell", () => {
     const failed = await collectEvents(service.streamProviderRequest(request, metadata()));
     expect(attempts).toEqual(["pfk_balance"]);
     expect(pool.quarantined.has("pfk_balance")).toBe(true);
-    expect(failed.map((event) => event.type)).toEqual([
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
+    expect(failed.map((event) => event.type)).toEqual([      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
     ]);
     expect(failed.at(-1)?.providerError?.error).toMatchObject({
       code: "provider_unavailable",
@@ -1020,8 +1151,9 @@ describe("ProviderGatewayServiceShell", () => {
       const request = validProviderRequest({ ...base, runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid) });
       const pool = new RecordingPlatformCredentialPool(["pfk_opaque"]);
       const providerStreamer = new ProviderClientRegistry({
+        fetch: unusedProviderFetch,
         openAICompatibleProviderFactory: () => (modelId) => ({ provider: "deepseek", modelId }),
-        streamText: () => ({
+        streamModel: () => ({
           fullStream: (async function* () {
             yield { type: "error" as const, error: { data: body } };
           })(),
@@ -1075,7 +1207,7 @@ describe("ProviderGatewayServiceShell", () => {
           const keyID = input.credential?.source === "platform" ? input.credential.platformKey.keyId : "missing";
           attempts.push(keyID);
           if (keyID === "pfk_1") {
-            yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+            yield textEvent(FragmentType.TextStart, "");
             throw new ProviderKeyFailureError({
               action: "quarantine",
               providerError: {
@@ -1097,9 +1229,8 @@ describe("ProviderGatewayServiceShell", () => {
     expect(attempts).toEqual(["pfk_1"]);
     expect(quarantineAlerts).toBe(1);
     expect(pool.isQuarantined("pfk_1")).toBe(true);
-    expect(failed).toHaveLength(2);
-    expect(failed[0]?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START);
-    expect(failed[1]?.providerError?.error).toMatchObject({
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.providerError?.error).toMatchObject({
       code: "provider_unavailable",
       message: "Provider is unavailable.",
       retryable: false,
@@ -1122,7 +1253,7 @@ describe("ProviderGatewayServiceShell", () => {
       credentialResolver: platformCredentialResolver(pool),
       providerStreamer: {
         stream: async function* () {
-          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+          yield textEvent(FragmentType.TextStart, "");
           throw new ProviderKeyFailureError({
             action: "quarantine",
             providerError: {
@@ -1165,9 +1296,9 @@ describe("ProviderGatewayServiceShell", () => {
       credentialResolver: platformCredentialResolver(new RecordingPlatformCredentialPool(["pfk_1"])),
       providerStreamer: {
         stream: async function* () {
-          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
-          yield reasoningEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START, "");
-          yield toolInputEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, "lookup", "");
+          yield textEvent(FragmentType.TextStart, "");
+          yield reasoningEvent(FragmentType.ReasoningStart, "");
+          yield toolInputEvent(FragmentType.ToolInputStart, "lookup", "");
           throw new ProviderKeyFailureError(retryableProviderFailure());
         },
       },
@@ -1175,13 +1306,10 @@ describe("ProviderGatewayServiceShell", () => {
 
     const events = await collectEvents(service.streamProviderRequest(request, metadata()));
 
-    expect(events.map((event) => event.type)).toEqual([
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START,
+    expect(events.map((event) => event.type)).toEqual([      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED,
       ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
     ]);
-    expect(events[3]?.providerError?.error).toMatchObject({
+    expect(events[1]?.providerError?.error).toMatchObject({
       code: "provider_stream_error",
       retryable: true,
     });
@@ -1196,15 +1324,15 @@ describe("ProviderGatewayServiceShell", () => {
     const cases = [
       {
         name: "open text at finish",
-        events: [textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, ""), finishEvent()],
+        events: [textEvent(FragmentType.TextStart, ""), finishEvent()],
         category: "finish",
         counts: { text: 1, reasoning: 0, toolInput: 0 },
       },
       {
         name: "ended tool input without call",
         events: [
-          toolInputEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, "lookup", ""),
-          toolInputEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, "lookup", ""),
+          toolInputEvent(FragmentType.ToolInputStart, "lookup", ""),
+          toolInputEvent(FragmentType.ToolInputEnd, "lookup", ""),
           finishEvent(),
         ],
         category: "finish",
@@ -1247,7 +1375,7 @@ describe("ProviderGatewayServiceShell", () => {
       logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
       providerStreamer: {
         stream: async function* () {
-          yield toolInputEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, "lookup", "", "tool_early");
+          yield toolInputEvent(FragmentType.ToolInputStart, "lookup", "", "tool_early");
           yield toolCallEvent("tool_early", "lookup", '{"query":"hello"}');
         },
       },
@@ -1255,9 +1383,7 @@ describe("ProviderGatewayServiceShell", () => {
 
     const events = await collectEvents(service.streamProviderRequest(request, metadata()));
 
-    expect(events.map((event) => event.type)).toEqual([
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
+    expect(events.map((event) => event.type)).toEqual([      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
     ]);
     expect(events.at(-1)?.providerError?.error).toMatchObject({
       code: "provider_stream_error",
@@ -1278,13 +1404,13 @@ describe("ProviderGatewayServiceShell", () => {
       runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid),
     });
     const streamEvents = [
-      toolInputEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, "lookup_a", "", "tool_a"),
-      toolInputEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, "lookup_b", "", "tool_b"),
-      toolInputEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA, "lookup_b", '{"b":1}', "tool_b"),
-      toolInputEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, "lookup_b", "", "tool_b"),
+      toolInputEvent(FragmentType.ToolInputStart, "lookup_a", "", "tool_a"),
+      toolInputEvent(FragmentType.ToolInputStart, "lookup_b", "", "tool_b"),
+      toolInputEvent(FragmentType.ToolInputDelta, "lookup_b", '{"b":1}', "tool_b"),
+      toolInputEvent(FragmentType.ToolInputEnd, "lookup_b", "", "tool_b"),
       toolCallEvent("tool_b", "lookup_b", '{"b":1}'),
-      toolInputEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA, "lookup_a", '{"a":1}', "tool_a"),
-      toolInputEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, "lookup_a", "", "tool_a"),
+      toolInputEvent(FragmentType.ToolInputDelta, "lookup_a", '{"a":1}', "tool_a"),
+      toolInputEvent(FragmentType.ToolInputEnd, "lookup_a", "", "tool_a"),
       toolCallEvent("tool_a", "lookup_a", '{"a":1}'),
       finishEvent(),
     ];
@@ -1294,7 +1420,11 @@ describe("ProviderGatewayServiceShell", () => {
 
     const events = await collectEvents(service.streamProviderRequest(request, metadata()));
 
-    expect(events).toEqual(streamEvents);
+    expect(events).toEqual([
+      {frameSequence:1,type:17,toolCallComplete:{modelToolCallId:"tool_b",name:"lookup_b",inputJson:'{"b":1}',providerMetadataJson:"{}"}},
+      {frameSequence:2,type:17,toolCallComplete:{modelToolCallId:"tool_a",name:"lookup_a",inputJson:'{"a":1}',providerMetadataJson:"{}"}},
+      {frameSequence:3,type:11,finish:finishEvent().finish},
+    ]);
     expect(events.at(-1)?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH);
   });
 
@@ -1337,7 +1467,7 @@ describe("ProviderGatewayServiceShell", () => {
       fatal: true,
       statusCode: 422,
     });
-    expect(logs).toEqual([
+    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
       expect.objectContaining({
         event: "provider_request_streamed",
         "error.class": "provider_http_rejection",
@@ -1425,7 +1555,7 @@ describe("ProviderGatewayServiceShell", () => {
       statusCode: 400,
     }));
     expect(JSON.stringify(failed)).not.toMatch(/anthropic|platform|key|balance|billing|credit|private-billing-canary/i);
-    expect(logs).toEqual([expect.objectContaining({
+    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([expect.objectContaining({
       event: "provider_request_streamed",
       "error.class": "provider_http_rejection",
       "error.code": "provider_unavailable",
@@ -1790,7 +1920,7 @@ describe("ProviderGatewayServiceShell", () => {
         resolveTransientAttachment: () => {
           throw new Error("unexpected transient attachment resolution");
         },
-        resolveFileAttachmentMetadata: (_request, _metadata, callback) => {
+        resolveFileAttachmentMetadata: (_request, _metadata, _options, callback) => {
           callback(Object.assign(new Error("bridge internal"), {
             code: status.INTERNAL,
             details: "bridge internal",
@@ -1918,7 +2048,7 @@ describe("ProviderGatewayServiceShell", () => {
     });
 
     await expectGrpcCode(collectEvents(service.streamProviderRequest(validProviderRequest(), metadata())), status.UNAVAILABLE);
-    expect(logs).toEqual([
+    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
       expect.objectContaining({
         event: "provider_request_streamed",
         "request.outcome": "failed",
@@ -1944,6 +2074,7 @@ function createService(
       readonly semanticProgressTimeoutMs?: number | undefined;
     } | undefined;
     readonly logger?: GatewayLogger | undefined;
+    readonly previewProducerFactory?: (request: ProviderRequest) => PreviewRequestProducer;
   } = {},
 ): ProviderGatewayServiceShell {
   const { logger, ...shellOverrides } = overrides;
@@ -2074,9 +2205,9 @@ async function collectEvents(events: AsyncIterable<ProviderStreamEvent>): Promis
 }
 
 function textEvent(
-  type: ProviderStreamEventType,
+  type: NormalizedTextEventType,
   text: string,
-): ProviderStreamEvent {
+): NormalizedProviderEvent {
   return {
     type,
     text: {
@@ -2088,9 +2219,9 @@ function textEvent(
 }
 
 function reasoningEvent(
-  type: ProviderStreamEventType,
+  type: NormalizedReasoningEventType,
   text: string,
-): ProviderStreamEvent {
+): NormalizedProviderEvent {
   return {
     type,
     reasoning: {
@@ -2102,11 +2233,11 @@ function reasoningEvent(
 }
 
 function toolInputEvent(
-  type: ProviderStreamEventType,
+  type: NormalizedToolInputEventType,
   name: string,
   text: string,
   id = "tool_1",
-): ProviderStreamEvent {
+): NormalizedProviderEvent {
   return {
     type,
     toolInput: {
@@ -2122,16 +2253,16 @@ function toolCallEvent(
   id: string,
   name: string,
   inputJson: string,
-): ProviderStreamEvent {
+): NormalizedProviderEvent {
   return {
-    type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+    type: FragmentType.ToolCall,
     toolCall: { id, name, inputJson, metadataJson: "{}" },
   };
 }
 
-function providerError(code: string, retryable: boolean): ProviderStreamEvent {
+function providerError(code: string, retryable: boolean): NormalizedProviderEvent {
   return {
-    type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
+    type: FragmentType.ProviderError,
     providerError: {
       metadataJson: "{}",
       error: {
@@ -2146,9 +2277,9 @@ function providerError(code: string, retryable: boolean): ProviderStreamEvent {
   };
 }
 
-function finishEvent(): ProviderStreamEvent {
+function finishEvent(): NormalizedProviderEvent {
   return {
-    type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+    type: FragmentType.Finish,
     finish: {
       reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
       usage: {
@@ -2161,6 +2292,45 @@ function finishEvent(): ProviderStreamEvent {
       metadataJson: "{}",
     },
   };
+}
+
+/** Minimal writable provider stream; a non-draining fixture models HTTP/2 flow-control backpressure. */
+class ProviderStreamFixture extends EventEmitter {
+  cancelled = false;
+  readonly writes: ProviderStreamEvent[] = [];
+  private waiters: Array<() => void> = [];
+
+  constructor(private readonly accepting: boolean) {
+    super();
+  }
+
+  // An accepting transport completes each write; a transport held by flow
+  // control never calls back, as a stalled HTTP/2 stream does.
+  write(event: ProviderStreamEvent, callback?: (error?: Error | null) => void): boolean {
+    this.writes.push(event);
+    for (const waiter of this.waiters.splice(0)) waiter();
+    if (this.accepting) callback?.();
+    return this.accepting;
+  }
+
+  cancel(): void {
+    this.cancelled = true;
+    this.emit("cancelled");
+  }
+
+  async waitForWrites(count: number): Promise<void> {
+    while (this.writes.length < count) {
+      await new Promise<void>((resolve) => this.waiters.push(resolve));
+    }
+  }
+}
+
+function signedProviderRequest() {
+  const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
+  return validProviderRequest({
+    ...base,
+    runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid),
+  });
 }
 
 function never(): Promise<never> {
@@ -2258,6 +2428,7 @@ function signedRuntimeBindingToken(request: RuntimeBindingRequestIdentity, runti
     binding_id: request.bindingId,
     binding_generation: request.bindingGeneration,
     runtime_pod_uid: runtimePodUid,
+    runtime_process_id: "process-test",
     exp: Math.floor(new Date(expiresAt).getTime() / 1000),
   });
   const payloadPart = Buffer.from(payload, "utf8").toString("base64url");

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -357,6 +358,29 @@ func affectedSelections(root string, inventory Inventory, revision *Revision) ([
 			selected[group.ID] = group
 		}
 	}
+	// These owners share durable configuration, manifest and control contracts.
+	// Go import traversal cannot see RPC edges or the Bun children in their
+	// composition tests. Keep that evidence relation explicit after separation.
+	serviceContract := separatedServiceContractChange(revision.ChangedPaths)
+	authContract := authenticationContractChange(revision.ChangedPaths)
+	if serviceContract {
+		for _, id := range []string{"go", "runtime", "gateway"} {
+			group, ok := inventory.Group(id)
+			if !ok {
+				return nil, fmt.Errorf("service contract evidence group %q is missing", id)
+			}
+			selected[id] = group
+		}
+	}
+	integrationInput := integrationInputChange(revision.ChangedPaths)
+	brokerPolicy := slices.ContainsFunc(revision.ChangedPaths, natsBrokerPolicyInput)
+	if integrationInput {
+		group, ok := inventory.Group("go")
+		if !ok {
+			return nil, fmt.Errorf("integration input evidence group %q is missing", "go")
+		}
+		selected["go"] = group
+	}
 	var groups []Group
 	for _, group := range selected {
 		groups = append(groups, group)
@@ -365,16 +389,116 @@ func affectedSelections(root string, inventory Inventory, revision *Revision) ([
 	selections := selectionsForGroups(groups, "affected path closure")
 	for index := range selections {
 		if selections[index].Group == "go" {
-			packages, err := affectedGoPackages(root, revision.ChangedPaths)
+			paths := append([]string(nil), revision.ChangedPaths...)
+			if serviceContract {
+				paths = append(paths, "services/bridge", "services/job-runner", "integration")
+			} else if integrationInput {
+				paths = append(paths, "integration")
+			}
+			if brokerPolicy {
+				// The runner's broker and its ACL proof project the same values.
+				paths = append(paths, "internal/testinfra")
+			}
+			if authContract {
+				// Signed identity/authority and Memory actor persistence cross
+				// process/HTTP boundaries that Go imports do not fully describe.
+				paths = append(paths, "internal/auth", "services/auth", "internal/httpapi", "internal/memory", "internal/eventstream", "services/event-stream", "integration")
+			}
+			packages, err := affectedGoPackages(root, paths)
 			if err != nil || len(packages) == 0 {
 				revision.FullFallbackCause = "Go dependency closure unavailable"
 				return selectionsForGroups(inventory.GroupsForProfile("full"), "full fallback: "+revision.FullFallbackCause), nil
 			}
 			selections[index].Packages = packages
 			selections[index].Reason = "changed Go owners and repository-local reverse dependencies"
+			if serviceContract {
+				selections[index].Reason = "shared service contract, Go owners, Bun fixture consumers, cross-service compositions and reverse dependencies"
+			} else if integrationInput {
+				selections[index].Reason = "rendered, executed or projected input consumed by integration and broker fixture compositions"
+			}
+			if authContract && !serviceContract {
+				selections[index].Reason = "authentication contract, public actor/protocol consumers and repository-local reverse dependencies"
+			}
 		}
 	}
 	return selections, nil
+}
+
+func authenticationContractChange(paths []string) bool {
+	for _, path := range paths {
+		for _, owner := range []string{"internal/auth", "services/auth"} {
+			if path == owner || strings.HasPrefix(path, owner+"/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func separatedServiceContractChange(paths []string) bool {
+	for _, path := range paths {
+		for _, owner := range []string{
+			"services/event-stream", "internal/eventstream", "internal/eventwire",
+			"internal/runtimeconfig", "internal/mcpmanifest", "internal/runtimecontrol",
+			"internal/schemaidentity",
+			"internal/internalgrpc", "internal/transportsecurity", "internal/dbconnect", "internal/blob", "internal/ts-dbconnect",
+			"services/agent-runtime/packages/core", "services/queue", "services/sandbox", "internal/kubernetes",
+			"deploy/istio",
+			"services/bridge", "services/job-runner",
+			"services/web-connector",
+			"services/agent-runtime/k8s", "services/gateway/k8s",
+			"services/agent-runtime/packages/runtime-pod",
+			"services/agent-runtime/packages/protocol", "services/agent-runtime/proto",
+			"services/gateway/packages/provider-gateway", "services/gateway/packages/mcp-connector",
+			"services/gateway/packages/protocol", "services/gateway/proto",
+			"services/gateway/packages/schema",
+		} {
+			if path == owner || strings.HasPrefix(path, owner+"/") {
+				return true
+			}
+		}
+		if strings.HasPrefix(path, "integration/service_") || strings.HasPrefix(path, "integration/testdata/service-") ||
+			strings.HasPrefix(path, "integration/public_streaming") || strings.HasPrefix(path, "integration/testdata/public-streaming") ||
+			path == "integration/sdk_integration_compatibility_test.go" ||
+			path == "integration/preview_tls_test.go" || strings.HasPrefix(path, "integration/preview_tls_") ||
+			path == "integration/static/public_preview_sdk_projection_test.go" || path == "integration/static/public_event_sdk_projection_test.go" ||
+			strings.HasPrefix(path, "integration/replica_") || strings.HasPrefix(path, "integration/testdata/replica-") ||
+			strings.HasPrefix(path, "integration/content_") ||
+			strings.HasPrefix(path, "integration/transport") || path == "integration/runtime_direct_tls_test.go" ||
+			path == "integration/protected_store_test.go" ||
+			path == "integration/protected_object_store_test.go" ||
+			path == "internal/storage/postgresql_runtime_schema.go" ||
+			path == "deploy/dependencies.lock.json" {
+			return true
+		}
+	}
+	return false
+}
+
+// integrationInputChange reports non-Go inputs that integration compositions
+// render or execute, which Go import traversal cannot see: the direct Runtime
+// TLS and Envoy Gateway fixtures render deploy/helm/tetral, the Envoy Gateway
+// translation reads the deploy/envoy-gateway prerequisite resources, the OIDC
+// SDK composition runs the integration/testdata/oidc-* Bun driver, and every
+// local NATS broker projects its client policy from the NATS release values.
+func integrationInputChange(paths []string) bool {
+	for _, path := range paths {
+		for _, prefix := range []string{"deploy/helm/tetral/", "deploy/envoy-gateway/", "integration/testdata/oidc-"} {
+			if strings.HasPrefix(path, prefix) {
+				return true
+			}
+		}
+		if natsBrokerPolicyInput(path) {
+			return true
+		}
+	}
+	return false
+}
+
+// natsBrokerPolicyInput reports the NATS release values that testinfra
+// projects into the runner's broker and the integration TLS cluster.
+func natsBrokerPolicyInput(path string) bool {
+	return path == "deploy/nats/values.yaml" || path == "deploy/nats/values-hardened.yaml"
 }
 
 func selectionsForGroups(groups []Group, reason string) []Selection {

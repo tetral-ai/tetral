@@ -1,5 +1,5 @@
 /**
- * Method-specific bounds for the authenticated Bridge-to-Runtime Pod ingress.
+ * Method-specific bounds for the authenticated Job Runner-to-Runtime Pod ingress.
  *
  * Each validator accepts only the fields owned by its RPC. The gRPC method is
  * the command discriminator; no universal command envelope, Event range, or
@@ -52,6 +52,7 @@ interface ThreadBindingScope {
   readonly bindingId: string;
   readonly bindingGeneration: number;
   readonly targetPodUid: string;
+  readonly runtimeProcessId: string;
 }
 
 /** Validates one durable lost-custody recovery trigger. */
@@ -59,7 +60,7 @@ export function validateRecoverThreadRequest(input: RecoverThreadRequest): Valid
   const scope = validateThreadBindingScope(input);
   if (
     !scope.ok ||
-    !validId(input.sourceEventId) ||
+    (validId(input.sourceEventId) === validId(input.handoffId)) ||
     input.recoveryLeaseRef === undefined ||
     !validId(input.recoveryLeaseRef.jobId) ||
     !validId(input.recoveryLeaseRef.leaseToken) ||
@@ -77,6 +78,7 @@ interface SessionBindingScope {
   readonly bindingId: string;
   readonly bindingGeneration: number;
   readonly targetPodUid: string;
+  readonly runtimeProcessId: string;
 }
 
 /** Validates a normal or bounded-rejection input request. */
@@ -209,6 +211,7 @@ function validateSessionBindingScope(input: SessionBindingScope): ValidationResu
     !validId(input.sessionId) ||
     !validId(input.bindingId) ||
     invalidBytes(input.targetPodUid, MaxPodIdentityBytes) ||
+    !validId(input.runtimeProcessId) ||
     !validPositiveInteger(input.bindingGeneration) ||
     input.bindingGeneration > MaxBindingGeneration
   ) {
@@ -217,8 +220,8 @@ function validateSessionBindingScope(input: SessionBindingScope): ValidationResu
   return { ok: true };
 }
 
-function validId(value: string): boolean {
-  return !invalidBytes(value, MaxIdBytes);
+function validId(value: string | undefined): boolean {
+	return typeof value === "string" && !invalidBytes(value, MaxIdBytes);
 }
 
 function validQueueKey(value: string, maxBytes: number): boolean {

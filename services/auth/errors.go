@@ -38,11 +38,10 @@ func writeAuthError(w http.ResponseWriter, r *http.Request, err error) {
 	})
 }
 
+// authRequestID returns the ID that RequestIDMiddleware generated. Auth never
+// echoes a client-supplied X-Request-Id into its error envelope.
 func authRequestID(r *http.Request) string {
-	if requestID := httpapi.RequestIDFromContext(r.Context()); requestID != "" {
-		return requestID
-	}
-	return r.Header.Get("X-Request-Id")
+	return httpapi.RequestIDFromContext(r.Context())
 }
 
 func writeAuthJSON(w http.ResponseWriter, status int, value any) {
@@ -57,7 +56,16 @@ func classifyAuthError(err error) (int, string, string) {
 	var notFoundErr *auth.NotFoundError
 	var weakBootstrapErr *auth.WeakBootstrapKeyError
 	var tooLarge requestTooLargeError
+	var unavailable *auth.UnavailableError
+	var permission *auth.PermissionError
+	var rate exchangeRateError
 	switch {
+	case errors.As(err, &unavailable):
+		return http.StatusServiceUnavailable, "api_error", "authentication unavailable"
+	case errors.As(err, &permission):
+		return http.StatusForbidden, "permission_error", "permission denied"
+	case errors.As(err, &rate):
+		return http.StatusTooManyRequests, "rate_limit_error", "token exchange rate exceeded"
 	case errors.As(err, &authErr):
 		return http.StatusUnauthorized, "authentication_error", authErr.Message
 	case errors.Is(err, workspace.ErrNoWorkspaceInContext):

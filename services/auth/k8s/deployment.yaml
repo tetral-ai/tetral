@@ -10,6 +10,11 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: auth
@@ -30,6 +35,22 @@ spec:
           command:
             - /usr/local/bin/tetral-auth
           env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
+            - name: TETRAL_DATABASE_TLS_CA_PATH
+              value: /var/run/tetral/store-trust/database-ca.crt
+            - name: TETRAL_DATABASE_TLS_SERVER_NAME
+              value: "tetral-postgres.tetral-system.svc.cluster.local"
+            - name: TETRAL_DB_MAX_OPEN_CONNS
+              value: "20"
+            - name: TETRAL_HTTP_TRANSPORT
+              value: "plaintext"
             - name: TETRAL_AUTH_HTTP_ADDR
               valueFrom:
                 configMapKeyRef:
@@ -63,21 +84,25 @@ spec:
             - name: ENGINE_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: auth-bootstrap
+                  name: "auth-bootstrap"
                   key: engine-api-key
             - name: TETRAL_AUTH_INTERNAL_PRINCIPAL_PRIVATE_KEY_B64
               valueFrom:
                 secretKeyRef:
-                  name: auth-internal-principal
+                  name: "auth-internal-principal"
                   key: private_key_b64
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
             - name: TETRAL_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: auth-database
+                  name: "auth-database"
                   key: url
+            - name: TETRAL_AUTH_GRPC_ADDR
+              value: ":9095"
+            - name: TETRAL_AUTH_GRPC_TRANSPORT
+              value: "plaintext"
           ports:
+            - name: grpc-check
+              containerPort: 9095
             - name: http
               containerPort: 8080
             - name: metrics
@@ -85,20 +110,26 @@ spec:
           livenessProbe:
             httpGet:
               path: /health
-              port: http
+              port: metrics
           readinessProbe:
             httpGet:
               path: /ready
-              port: http
+              port: metrics
+          volumeMounts:
+
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
           resources:
-            requests:
-              cpu: 50m
-              memory: 128Mi
-              ephemeral-storage: 64Mi
+
             limits:
               cpu: 500m
-              memory: 512Mi
               ephemeral-storage: 512Mi
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              ephemeral-storage: 64Mi
+              memory: 128Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -106,3 +137,8 @@ spec:
             capabilities:
               drop:
                 - ALL
+      volumes:
+
+        - name: store-trust
+          configMap:
+            name: "tetral-store-trust"

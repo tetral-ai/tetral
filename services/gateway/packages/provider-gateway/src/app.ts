@@ -1,3 +1,4 @@
+import { diagnosticMetricsText } from "@tetral/ts-observability";
 /**
  * @packageDocumentation
  *
@@ -17,6 +18,7 @@ import { createGatewayGrpcServer } from "./grpc-server.js";
 import { createGatewayHttpServer } from "./http-server.js";
 import { logWorkloadStarted, startupFailureLogRecord } from "./logger.js";
 import { ProviderGatewayServiceShell } from "./service.js";
+import type { ProviderAssemblyBounds, ProviderAssemblyResources } from "./providers/block-assembler.js";
 import type { GatewayTokenReviewClient } from "./auth.js";
 import type { GatewayGrpcServer } from "./grpc-server.js";
 import type { GatewayHttpServer } from "./http-server.js";
@@ -24,6 +26,8 @@ import type { ProviderGatewayConfig } from "./config.js";
 import type { GatewayLogger } from "./logger.js";
 import type { ProviderCredentialResolver } from "./providers/credentials.js";
 import type { ProviderAttachmentResolver, ProviderRequestStreamer } from "./service.js";
+import type { PreviewRequestProducer } from "./providers/preview-publisher.js";
+import type { ProviderRequest } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 
 /** Supplies validated process configuration and collaborators to the provider-gateway application. */
 export interface ProviderGatewayAppOptions {
@@ -34,6 +38,14 @@ export interface ProviderGatewayAppOptions {
   readonly attachmentResolver?: ProviderAttachmentResolver | undefined;
   readonly providerStreamer?: ProviderRequestStreamer | undefined;
   readonly bootstrap?: () => Promise<void>;
+  readonly assemblyBounds?: ProviderAssemblyBounds;
+  readonly previewPublisher?: {
+    start(): void | Promise<void>;
+    close(): Promise<void>;
+    createProducer(request: ProviderRequest): PreviewRequestProducer;
+    metrics: { render(): string };
+  };
+  readonly observeAssemblyResources?: (resources:ProviderAssemblyResources,requestId:string)=>void;
 }
 
 /** Exposes the composed service shell together with process health, readiness, and listener lifecycle. */
@@ -41,8 +53,11 @@ export interface ProviderGatewayApp {
   readonly service: ProviderGatewayServiceShell;
   readonly health: () => { readonly ok: true };
   readonly ready: () => { readonly ready: boolean };
-  readonly start: () => Promise<{ readonly grpcPort: number; readonly httpUrl: URL }>;
-  readonly shutdown: () => Promise<void>;
+  readonly start: () => Promise<{
+    readonly grpcPort: number;
+    readonly httpUrl: URL;
+  }>;
+  readonly shutdown: (deadline?: Date, drainDeadline?: Date) => Promise<void>;
 }
 
 /**
@@ -73,6 +88,9 @@ export function createProviderGatewayApp(options: ProviderGatewayAppOptions): Pr
     attachmentResolver: options.attachmentResolver,
     providerStreamer: options.providerStreamer,
     maxConcurrentTurns: options.config.maxConcurrentTurns,
+    ...(options.assemblyBounds === undefined ? {} : {assemblyBounds:options.assemblyBounds}),
+    ...(options.previewPublisher === undefined ? {} : {previewProducerFactory:(request:ProviderRequest)=>options.previewPublisher!.createProducer(request)}),
+    ...(options.observeAssemblyResources === undefined ? {} : {observeAssemblyResources:options.observeAssemblyResources}),
     authenticator: {
       authenticate: async ({ metadata, method }) =>
         await authenticateGatewayCaller({
@@ -86,7 +104,7 @@ export function createProviderGatewayApp(options: ProviderGatewayAppOptions): Pr
   const state = {
     health: () => ({ ok: true as const }),
     ready: () => ({ ready: readyFlag }),
-    metricsText: () => service.metricsText(),
+    metricsText: () => service.metricsText() + (options.previewPublisher?.metrics.render() ?? "") + diagnosticMetricsText(options.logger),
   };
   return {
     service,
@@ -96,6 +114,7 @@ export function createProviderGatewayApp(options: ProviderGatewayAppOptions): Pr
       let causeCategory: "dependency_readiness" | "listener" = "dependency_readiness";
       try {
         await options.bootstrap?.();
+        await options.previewPublisher?.start();
         causeCategory = "listener";
         grpcServer = createGatewayGrpcServer(service);
         boundGrpcPort = await grpcServer.bind(options.config.grpcBindAddress);
@@ -104,11 +123,11 @@ export function createProviderGatewayApp(options: ProviderGatewayAppOptions): Pr
         logWorkloadStarted(options.logger);
       } catch {
         readyFlag = false;
-        options.logger.error(startupFailureLogRecord({
+        try { options.logger.error(startupFailureLogRecord({
           kind: "startup_error",
           message: "gateway service startup failed",
           causeCategory,
-        }));
+        })); } catch { /* diagnostics do not replace startup failure */ }
         throw new Error("gateway service startup failed");
       }
       if (boundGrpcPort === undefined || httpServer === undefined) {
@@ -116,10 +135,51 @@ export function createProviderGatewayApp(options: ProviderGatewayAppOptions): Pr
       }
       return { grpcPort: boundGrpcPort, httpUrl: httpServer.url };
     },
-    shutdown: async () => {
+    shutdown: async (
+      deadline = new Date(
+        Date.now() +
+          options.config.drainTimeoutMs +
+          options.config.cancelJoinTimeoutMs,
+      ),
+      drainDeadline = new Date(
+        deadline.getTime() - options.config.cancelJoinTimeoutMs,
+      ),
+    ) => {
       readyFlag = false;
-      await httpServer?.stop();
-      await grpcServer?.shutdown();
+      let failed = false,
+        firstFailure: unknown;
+      // Preview drain shares the existing workload deadline with model drain.
+      // Contain its rejection immediately, then join after provider workers.
+      const previewClose = Promise.resolve().then(() => options.previewPublisher?.close()).then(
+        () => ({ ok: true as const }),
+        error => ({ ok: false as const, error }),
+      );
+      try {
+        await service.shutdown(deadline, drainDeadline, () =>
+          grpcServer?.server.forceShutdown(),
+        );
+      } catch (error) {
+        failed = true;
+        firstFailure = error;
+      }
+      const previewResult = await previewClose;
+      if (!previewResult.ok) {
+        if (!failed) firstFailure = previewResult.error;
+        failed = true;
+      }
+      try {
+        await httpServer?.stop();
+      } catch (error) {
+        if (!failed) firstFailure = error;
+        failed = true;
+      }
+      try {
+        await grpcServer?.shutdown(deadline);
+      } catch (error) {
+        if (!failed) firstFailure = error;
+        failed = true;
+      }
+      if (failed) throw firstFailure;
     },
   };
 }

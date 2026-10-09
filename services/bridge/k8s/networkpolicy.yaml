@@ -36,20 +36,13 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: gateway
+              app.kubernetes.io/name: provider-gateway
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp-connector
       ports:
         - protocol: TCP
           port: 9090
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: tetral-system
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/part-of: tetral
-      ports:
-        - protocol: TCP
-          port: 8081
   egress:
     - to:
         - podSelector:
@@ -61,27 +54,10 @@ spec:
     - to:
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: queue
-      ports:
-        - protocol: TCP
-          port: 9090
-    - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: gateway
+              app.kubernetes.io/name: mcp-connector
       ports:
         - protocol: TCP
           port: 9091
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: tetral-agent-runtime
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: agent-runtime
-      ports:
-        - protocol: TCP
-          port: 9090
     - to:
         - ipBlock:
             cidr: 10.96.0.1/32
@@ -106,25 +82,3 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
----
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: bridge-apiserver-egress
-  namespace: tetral-system
-  labels:
-    app.kubernetes.io/name: bridge
-    app.kubernetes.io/part-of: tetral
-spec:
-  endpointSelector:
-    matchLabels:
-      app.kubernetes.io/name: bridge
-  egress:
-    - toEntities:
-        - kube-apiserver
-      toPorts:
-        - ports:
-            - port: "443"
-              protocol: TCP
-            - port: "6443"
-              protocol: TCP

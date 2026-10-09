@@ -13,6 +13,7 @@ describe("MCP connector response bounds", () => {
       toolUseEventId: "event-1",
       bindingId: "binding-1",
       bindingGeneration: 1,
+      runtimeProcessId: "process-test",
       runtimeBindingToken: "token-1",
     };
     expect(validateRunMcpToolRequest(request)).toEqual({ ok: true });

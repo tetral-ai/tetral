@@ -84,6 +84,9 @@ func (h *EnvironmentHandler) getEnvironment(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	if !authorizeReadResource(w, r, ws, "environment", result.ID) {
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 

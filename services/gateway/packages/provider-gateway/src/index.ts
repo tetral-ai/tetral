@@ -62,3 +62,6 @@ export { loadProviderGatewayConfig, loadProviderGatewayConfigFromEnv } from "./c
 export { createGatewayGrpcServer } from "./grpc-server.js";
 export { createJsonLogger } from "./logger.js";
 export { ProviderGatewayServiceShell } from "./service.js";
+export { PreviewPublisher } from "./providers/preview-publisher.js";
+export { createNatsPreviewPublisher } from "./providers/preview-nats.js";
+export { parsePreviewNatsConfig, PreviewPublisherDefaults } from "./providers/preview-config.js";

@@ -3,6 +3,8 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -31,7 +33,7 @@ func testAuthenticator(apiKey string) auth.Authenticator {
 		if rawKey != apiKey {
 			return auth.Principal{}, &auth.AuthenticationError{Message: "invalid api key"}
 		}
-		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID, Type: "workspace", Name: "Default"}, APIKeyID: "ak_test"}, nil
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID, Type: "workspace", Name: "Default"}, "ak_test"), nil
 	})
 }
 
@@ -191,6 +193,60 @@ func TestRequestLoggingRedactsSensitiveHTTPBoundaryInputs(t *testing.T) {
 				t.Fatalf("request log missing safe request fields: %#v", fields)
 			}
 		})
+	}
+}
+
+// Backend records keep the service's own req_ request.id and add the verified
+// principal's signed request_id as edge.request.id, so they join the Auth Check
+// record of the same edge request. A forged X-Request-Id header is never logged.
+func TestRequestRecordsCarryVerifiedEdgeRequestID(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := auth.NewInternalPrincipalSigner(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := auth.NewInternalPrincipalVerifier(public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_edge")
+	token, err := signer.Mint(principal, http.MethodPost, "/v1/sessions", "edge-request-signed", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buffer bytes.Buffer
+	logger := newTestLogger(&buffer)
+	handler := RequestIDMiddleware(RequestLogMiddleware(logger, time.Hour)(internalPrincipalMiddleware(verifier)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth.RecordDecision(r.Context(), "operation", &auth.PermissionError{}, auth.AuditFacts(principal))
+		w.WriteHeader(http.StatusInternalServerError)
+	}))))
+	request := httptest.NewRequest(http.MethodPost, "/v1/sessions", nil)
+	request.Header.Set("X-Tetral-Internal-Principal", token)
+	request.Header.Set("X-Request-Id", "edge-request-forged")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if strings.Contains(buffer.String(), "edge-request-forged") {
+		t.Fatalf("forged request ID header reached logs: %s", buffer.String())
+	}
+	lines := strings.Split(strings.TrimSpace(buffer.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("log lines = %d; want decision and boundary records: %s", len(lines), buffer.String())
+	}
+	for index, wantMessage := range []string{"auth.operation.denied", "http.request"} {
+		fields := decodeHTTPLogLine(t, lines[index])
+		if fields["msg"] != wantMessage {
+			t.Fatalf("record %d msg = %v; want %s", index, fields["msg"], wantMessage)
+		}
+		if fields["request.id"] != recorder.Header().Get("request-id") || !strings.HasPrefix(recorder.Header().Get("request-id"), "req_") {
+			t.Fatalf("%s request.id = %v; want the response request-id %q", wantMessage, fields["request.id"], recorder.Header().Get("request-id"))
+		}
+		if fields["edge.request.id"] != "edge-request-signed" {
+			t.Fatalf("%s edge.request.id = %v; want the signed principal request_id", wantMessage, fields["edge.request.id"])
+		}
 	}
 }
 

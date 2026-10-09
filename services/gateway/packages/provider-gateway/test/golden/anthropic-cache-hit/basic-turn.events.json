@@ -1,9 +1,9 @@
 {
   "eventTypes": [
-    "PROVIDER_STREAM_EVENT_TYPE_TEXT_START",
-    "PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA",
-    "PROVIDER_STREAM_EVENT_TYPE_TEXT_END",
-    "PROVIDER_STREAM_EVENT_TYPE_FINISH"
+    "text-start",
+    "text-delta",
+    "text-end",
+    "finish"
   ],
   "text": "ok",
   "finish": {

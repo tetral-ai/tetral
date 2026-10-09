@@ -1,7 +1,7 @@
 /**
- * Projects sealed Runtime context into the provider-only carrier. Open Request
- * drafts are not accepted here: ContextManager exposes them through a separate
- * active-lifecycle slot until Request End seals the entry.
+ * Projects the provider-eligible committed messages selected by ContextManager.
+ * Request lifecycle and unfinished Tool ownership are validated before this
+ * content-only carrier is assembled.
  */
 
 import type {

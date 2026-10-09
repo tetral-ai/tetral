@@ -12,6 +12,10 @@ import type {
 export function validProviderRequest(overrides: Partial<ProviderRequest> = {}): ProviderRequest {
   const request: ProviderRequest = {
     requestId: "req_1",
+    outputContractVersion: 2,
+    modelRequestStartEventId: "evt_00000000000000000000000000000000",
+    threadRole: 1,
+    threadVisibility: 1,
     modelRequestId: "mreq_1",
     requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST,
     workspaceId: "wksp_1",
@@ -19,6 +23,7 @@ export function validProviderRequest(overrides: Partial<ProviderRequest> = {}): 
     sessionThreadId: "thrd_1",
     bindingId: "bind_1",
     bindingGeneration: 42,
+    runtimeProcessId: "process-test",
     runtimeBindingToken: "binding-token",
     model: {
       providerId: "openai",
@@ -77,6 +82,7 @@ export function validRunWebRequest(): RunWebRequest {
     sessionThreadId: "thrd_1",
     bindingId: "bind_1",
     bindingGeneration: 42,
+    runtimeProcessId: "process-test",
     runtimeBindingToken: "binding-token",
     toolUseEventId: "sevt_tool_1",
     input: {

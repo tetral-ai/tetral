@@ -10,10 +10,15 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
     tetral.ai/exposure: public
 spec:
+  sessionAffinity: None
   type: ClusterIP
   selector:
     app.kubernetes.io/name: auth
   ports:
+    - name: grpc-check
+      port: 9095
+      targetPort: grpc-check
+      appProtocol: kubernetes.io/h2c
     - name: http
       port: 8080
       targetPort: http

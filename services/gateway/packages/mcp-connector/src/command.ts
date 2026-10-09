@@ -1,3 +1,7 @@
+import type { ExecutableProcessBoundary } from "@tetral/ts-observability";
+import { ServiceLifecycleDefaults } from "@tetral/gateway-protocol/src/service-lifecycle.js";
+import { openPostgresSQLOwner } from "@tetral/ts-dbconnect";
+import { createDiagnosticStreamSink, diagnosticMetricsText, processFailureLogRecord, processShutdownFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
 /**
  * @packageDocumentation
  *
@@ -15,7 +19,8 @@ import { authenticateMcpCaller, KubernetesTokenReviewClient, validateKubernetesT
 import { BridgeAPIManifestChangeNotifier, BridgeAPIMcpToolResultIdempotencyStore } from "./bridge-client.js";
 import { McpSDKClient } from "./client.js";
 import { loadMcpConnectorConfigFromProcessEnv } from "./config.js";
-import { SQLGitHubMcpCredentialResolver } from "./credential.js";
+import { SQLMcpServerResolver } from "./server-resolver.js";
+import { SQLMcpCredentialResolver } from "./credential.js";
 import { createMcpConnectorHttpServer } from "./http-server.js";
 import { createJsonLogger, logWorkloadStarted, recordMcpOAuthRefreshCompleted, startupFailureLogRecord } from "./logger.js";
 import { McpConnectorMetricsRegistry } from "./metrics.js";
@@ -26,7 +31,8 @@ import { verifyPostgreSQLReadiness } from "../../schema/src/verify.js";
 import type { McpClient, McpManifestChangeNotifier } from "./service.js";
 import type { SchemaSQL } from "../../schema/src/verify.js";
 import type { McpConnectorHttpServer } from "./http-server.js";
-import type { McpConnectorLogger } from "./logger.js";
+import type { ProcessFailurePhase } from "@tetral/ts-observability";
+import type { McpConnectorLogRecord, McpConnectorLogger } from "./logger.js";
 import type { McpConnectorGrpcServer } from "./server.js";
 
 /**
@@ -39,6 +45,7 @@ import type { McpConnectorGrpcServer } from "./server.js";
  * schema and reviewer-material checks pass and both listeners bind.
  */
 export async function runMcpConnectorCommand(options: {
+  readonly processBoundary?: ExecutableProcessBoundary;
   readonly bindAddress?: string | undefined;
   readonly httpBindAddress?: string | undefined;
   readonly waitForever?: () => Promise<never>;
@@ -56,138 +63,295 @@ export async function runMcpConnectorCommand(options: {
   ) => McpConnectorHttpServer) | undefined;
   readonly registerSignalHandlers?: ((shutdown: () => Promise<void>) => void) | undefined;
 } = {}): Promise<void> {
-  const config = loadMcpConnectorConfigFromProcessEnv();
-  const startupLogger = createJsonLogger({ write: (line) => process.stderr.write(line) });
-  if (!config.ok) {
-    startupLogger.error(startupFailureLogRecord(config.error));
-    throw new Error("mcp connector config error");
-  }
-  const logger = options.logger ?? createJsonLogger({
-    write: (line) => process.stderr.write(line),
-    deploymentEnvironment: config.config.deploymentEnvironment,
-    serviceVersion: config.config.serviceVersion,
-  });
-  const metrics = new McpConnectorMetricsRegistry();
-  let ready = false;
-  let service: McpConnectorServiceShell;
-  const sqlOptions = databasePoolOptions(config.config);
-  const sql = options.sql ?? options.sqlFactory?.(sqlOptions) ?? new Bun.SQL(sqlOptions);
-  try {
-    await (options.schemaVerifier ?? verifyPostgreSQLReadiness)(sql);
-  } catch (error) {
-    await closeSQLAfterStartupFailure(sql);
-    throw error;
-  }
-  const client = options.client ?? new McpSDKClient({
-    credentialResolver: new SQLGitHubMcpCredentialResolver(
-      sql, config.config.vaultKeyHex, undefined, undefined, undefined, undefined,
-      (event) => recordMcpOAuthRefreshCompleted(logger, (outcome) => metrics.recordRefreshAttempt(outcome), event),
-    ),
-    logger,
-    onToolsListChanged: async (input) => {
-      await service.handleToolsListChangedNotification(input);
-    },
-  });
-  const tokenReviewClient = new KubernetesTokenReviewClient({
-    apiServerUrl: config.config.kubernetesApiServerUrl,
-    reviewerTokenPath: config.config.tokenReviewReviewerTokenPath,
-    apiServerCaCertPath: config.config.kubernetesApiCaCertPath,
-  });
-  service = new McpConnectorServiceShell({
-    ready: () => ready,
-    client,
-    logger,
-    runtimeBindingTokenVerifier: createRuntimeBindingTokenVerifier({
-      hmacKey: config.config.runtimeBindingTokenHMACKey,
-    }),
-    metrics,
-    idempotencyStore: new BridgeAPIMcpToolResultIdempotencyStore({
-      address: config.config.bridgeApiGrpcAddress,
-      tokenPath: config.config.bridgeTokenPath,
-    }),
-    activeSessionCount: () => typeof client.connectionCount === "function" ? client.connectionCount() : 0,
-    manifestChangeNotifier: options.manifestChangeNotifier ?? new BridgeAPIManifestChangeNotifier({
-      address: config.config.bridgeApiGrpcAddress,
-      tokenPath: config.config.bridgeTokenPath,
-    }),
-    authenticator: {
-      authenticate: async ({ metadata, method }) =>
-        await authenticateMcpCaller({
-          metadata,
-          method,
-          tokenReviewClient,
-          allowedRuntimePod: {
-            namespace: config.config.allowedRuntimePod.namespace,
-            name: config.config.allowedRuntimePod.serviceAccount,
-          },
-          allowedBridge: {
-            namespace: config.config.allowedBridge.namespace,
-            name: config.config.allowedBridge.serviceAccount,
-          },
-        }),
-    },
-  });
-  const server = (options.serverFactory ?? createMcpConnectorGrpcServer)(service);
-  let httpServer: ReturnType<typeof createMcpConnectorHttpServer> | undefined;
-  await (options.reviewerMaterialValidator ?? validateKubernetesTokenReviewReviewerMaterial)({
-    reviewerTokenPath: config.config.tokenReviewReviewerTokenPath,
-    apiServerCaCertPath: config.config.kubernetesApiCaCertPath,
-  });
-  await server.bind(options.bindAddress ?? config.config.grpcBindAddress);
-  httpServer = (options.httpServerFactory ?? createMcpConnectorHttpServer)(options.httpBindAddress ?? config.config.httpBindAddress, {
-    health: () => ({ ok: true }),
-    ready: () => ({ ready }),
-    metricsText: () => service.metricsText(),
-  });
-  ready = true;
-  logWorkloadStarted(logger);
-  const shutdown = async () => {
-    ready = false;
-    await httpServer?.stop();
-    await server.shutdown();
-    if (client instanceof McpSDKClient) {
-      await client.closeAll();
+  const diagnosticSink = options.logger === undefined ? createDiagnosticStreamSink(process.stderr) : undefined;
+  const diagnosticOwners: object[] = [];
+  const diagnosticReleases: (() => void)[] = [];
+  const registerDiagnosticCleanup = (owner: object): void => {
+    if (diagnosticOwners.includes(owner)) return;
+    diagnosticOwners.push(owner);
+    try { if ("flush" in owner && typeof owner.flush === "function") diagnosticReleases.push(owner.flush.bind(owner)); } catch { /* best effort */ }
+  };
+  let logger: McpConnectorLogger | undefined;
+  const report = (record: McpConnectorLogRecord): void => {
+    try {
+      logger?.error(record);
+    } catch {
+      /* observability does not own lifecycle */
     }
-    await sql?.close?.();
   };
-  (options.registerSignalHandlers ?? registerProcessSignalHandlers)(shutdown);
-  await (options.waitForever ?? waitForever)();
-}
-
-async function closeSQLAfterStartupFailure(
-  sql: { readonly close?: (options?: { readonly timeout?: number }) => Promise<void> },
-): Promise<void> {
+  let drainTimeoutMs: number = ServiceLifecycleDefaults.drainTimeoutMs,
+    cancelJoinTimeoutMs: number = ServiceLifecycleDefaults.cancelJoinTimeoutMs;
+  let shutdownDeadline: Date | undefined;
+  let drainDeadline: Date | undefined;
+  const closes: {
+    phase: ProcessFailurePhase;
+    close: () => void | Promise<void>;
+  }[] = [];
+  let ready = false,
+    stopping: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => {
+    ready = false;
+    if (stopping !== undefined) return stopping;
+    drainDeadline = new Date(Date.now() + drainTimeoutMs);
+    shutdownDeadline = new Date(drainDeadline.getTime() + cancelJoinTimeoutMs);
+    const disarmExit = options.processBoundary?.beginShutdown(
+      shutdownDeadline.getTime(), () => report(processShutdownFailureLogRecord()),
+    );
+    let resolveShutdown!: () => void, rejectShutdown!: (error: unknown) => void;
+    stopping = new Promise<void>((resolve, reject) => { resolveShutdown = resolve; rejectShutdown = reject; });
+    void (async () => {
+      let failed = false;
+      let firstFailure: unknown;
+      try {
+        for (const step of closes.slice().reverse()) {
+          try {
+            await step.close();
+          } catch (error) {
+            if (!failed) firstFailure = error;
+            failed = true;
+            report(processFailureLogRecord(step.phase, true));
+          }
+        }
+      } finally {
+        disarmExit?.();
+        for (const release of diagnosticReleases) { try { release(); } catch { /* best effort */ } }
+        diagnosticSink?.close();
+      }
+      if (failed) throw firstFailure;
+    })().then(resolveShutdown, rejectShutdown);
+    return stopping;
+  };
+  let phase: ProcessFailurePhase = "configuration", failed = false, failureReported = false;
+  let releaseSignals: (() => void) | void = undefined;
   try {
-    await sql.close?.({ timeout: 1 });
-  } catch {
-    // The verified public-safe startup error remains authoritative.
+    logger = options.logger ?? createJsonLogger({ write: (line) => diagnosticSink?.write(line), sinkFailures: () => diagnosticSink?.stats().failures ?? 0 });
+    registerDiagnosticCleanup(logger);
+    const config = loadMcpConnectorConfigFromProcessEnv();
+    if (!config.ok) {
+      failureReported = true; report(startupFailureLogRecord(config.error));
+      throw new Error("mcp connector config error");
+    }
+    logger = options.logger ?? createJsonLogger({ write: (line) => diagnosticSink?.write(line), sinkFailures: () => diagnosticSink?.stats().failures ?? 0, deploymentEnvironment: config.config.deploymentEnvironment, diagnostics: config.config.diagnostics, serviceVersion: config.config.serviceVersion });
+    registerDiagnosticCleanup(logger);
+    phase = "dependency";
+    const metrics = new McpConnectorMetricsRegistry();
+    const configuredLogger = logger;
+    let service: McpConnectorServiceShell;
+    drainTimeoutMs = config.config.drainTimeoutMs;
+    cancelJoinTimeoutMs = config.config.cancelJoinTimeoutMs;
+    let schemaFailure: unknown;
+    let sql;
+    try {
+      sql = await openPostgresSQLOwner({
+        url: config.config.databaseUrl,
+        pool: config.config.databasePool,
+        observe: (event) => {
+          if (
+            event.kind !== "reload_failed" &&
+            event.kind !== "reload_recovered"
+          )
+            return;
+          const failed = event.kind === "reload_failed";
+          try {
+            logger?.[failed ? "error" : "info"]({
+              event: failed
+                ? "transport.credential_reload_failed"
+                : "transport.credential_reload_recovered",
+              "event.kind": failed
+                ? "transport.credential_reload_failed"
+                : "transport.credential_reload_recovered",
+              component: "database",
+              "transport.stage": "credential_reload",
+              "transport.outcome": !failed
+                ? "recovered"
+                : event.reason === "candidate_verification_failed"
+                  ? "candidate_verification_failed"
+                  : "invalid_generation",
+              "failed.count": event.failedCount ?? 0,
+            });
+          } catch {
+            /* sink failure cannot alter SQL generation custody */
+          }
+        },
+        ...(config.config.databaseTLS !== undefined
+          ? { tls: config.config.databaseTLS }
+          : {}),
+        ...(options.sql !== undefined
+          ? {
+              sqlFactory: (() => options.sql) as unknown as (
+                options: Bun.SQL.PostgresOrMySQLOptions,
+              ) => Bun.SQL,
+            }
+          : options.sqlFactory !== undefined
+            ? {
+                sqlFactory: options.sqlFactory as unknown as (
+                  options: Bun.SQL.PostgresOrMySQLOptions,
+                ) => Bun.SQL,
+              }
+            : {}),
+        verify: async (actual) => {
+          try {
+            await (options.schemaVerifier ?? verifyPostgreSQLReadiness)(actual);
+          } catch (error) {
+            schemaFailure = error;
+            throw error;
+          }
+        },
+      });
+    } catch (error) {
+      throw schemaFailure ?? error;
+    }
+    closes.push({
+      phase: "database",
+      close: () =>
+        sql.close({
+          deadline: shutdownDeadline ?? new Date(Date.now() + 5000),
+        }),
+    });
+    const client =
+      options.client ??
+      new McpSDKClient({
+        ...config.config.clientPolicies,
+        serverResolver: new SQLMcpServerResolver(sql),
+        credentialResolver: new SQLMcpCredentialResolver(
+          sql,
+          config.config.vaultKeyHex,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          (event) =>
+            recordMcpOAuthRefreshCompleted(
+              configuredLogger,
+              (outcome) => metrics.recordRefreshAttempt(outcome),
+              event,
+            ),
+        ),
+        logger,
+        onConnectionReady: async (input, tools, options) => { await service.handleConnectionReady(input, tools, options); },
+        onToolsListChanged: async (input) => {
+          await service.handleToolsListChangedNotification(input);
+        },
+      });
+    if (client instanceof McpSDKClient)
+      closes.push({
+        phase: "mcp_clients",
+        close: () =>
+          client.closeAll(shutdownDeadline ?? new Date(Date.now() + 5000)),
+      });
+    const tokenReviewClient = new KubernetesTokenReviewClient({
+      apiServerUrl: config.config.kubernetesApiServerUrl,
+      reviewerTokenPath: config.config.tokenReviewReviewerTokenPath,
+      apiServerCaCertPath: config.config.kubernetesApiCaCertPath,
+    });
+    const idempotencyStore = new BridgeAPIMcpToolResultIdempotencyStore({
+      logger,
+      address: config.config.bridgeApiGrpcAddress,
+      tokenPath: config.config.bridgeTokenPath,
+      claimTimeoutMs: config.config.bridgePolicies.claimMcpToolResult,
+      commitTimeoutMs: config.config.bridgePolicies.commitMcpToolResult,
+      relinquishTimeoutMs: config.config.bridgePolicies.relinquishMcpToolResult,
+    });
+    const manifestChangeNotifier =
+      options.manifestChangeNotifier ??
+      new BridgeAPIManifestChangeNotifier({
+        address: config.config.bridgeApiGrpcAddress,
+        tokenPath: config.config.bridgeTokenPath,
+        timeoutMs: config.config.bridgePolicies.mcpManifestChanged,
+      });
+    closes.push({
+      phase: "grpc",
+      close: async () => {
+        await Promise.all([
+          idempotencyStore.close(),
+          ...(manifestChangeNotifier instanceof BridgeAPIManifestChangeNotifier
+            ? [manifestChangeNotifier.close()]
+            : []),
+        ]);
+      },
+    });
+    service = new McpConnectorServiceShell({
+      ready: () => ready,
+      client,
+      logger,
+      runtimeBindingTokenVerifier: createRuntimeBindingTokenVerifier({
+        hmacKey: config.config.runtimeBindingTokenHMACKey,
+      }),
+      metrics,
+      idempotencyStore,
+      executionTimeoutMs: config.config.clientPolicies.executionTimeoutMs,
+      activeSessionCount: () => typeof client.connectionCount === "function" ? client.connectionCount() : 0,
+      manifestChangeNotifier,
+      authenticator: {
+        authenticate: async ({ metadata, method }) =>
+          await authenticateMcpCaller({
+            metadata,
+            method,
+            tokenReviewClient,
+            allowedRuntimePod: {
+              namespace: config.config.allowedRuntimePod.namespace,
+              name: config.config.allowedRuntimePod.serviceAccount,
+            },
+            allowedDiscoveryCallers: config.config.allowedDiscoveryCallers.map((caller) => ({
+              namespace: caller.namespace, name: caller.serviceAccount,
+            })),
+          }),
+      },
+    });
+    const server = (options.serverFactory ?? createMcpConnectorGrpcServer)(
+      service,
+    );
+    closes.push({
+      phase: "grpc",
+      close: () => server.shutdown(shutdownDeadline),
+    });
+    let httpServer: ReturnType<typeof createMcpConnectorHttpServer> | undefined;
+    await (options.reviewerMaterialValidator ?? validateKubernetesTokenReviewReviewerMaterial)({
+      reviewerTokenPath: config.config.tokenReviewReviewerTokenPath,
+      apiServerCaCertPath: config.config.kubernetesApiCaCertPath,
+    });
+    phase = "listener";
+    await server.bind(options.bindAddress ?? config.config.grpcBindAddress);
+    httpServer = (options.httpServerFactory ?? createMcpConnectorHttpServer)(options.httpBindAddress ?? config.config.httpBindAddress, {
+      health: () => ({ ok: true }),
+      ready: () => ({ ready }),
+      metricsText: () => service.metricsText() + diagnosticMetricsText(configuredLogger),
+    });
+    closes.push({ phase: "http", close: () => httpServer?.stop() });
+    closes.push({
+      phase: "app",
+      close: () => {
+        const deadline =
+          shutdownDeadline ?? new Date(Date.now() + drainTimeoutMs);
+        idempotencyStore.beginDrain(deadline);
+        if (manifestChangeNotifier instanceof BridgeAPIManifestChangeNotifier)
+          manifestChangeNotifier.beginDrain(deadline);
+        return service.shutdown(deadline, drainDeadline);
+      },
+    });
+    ready = true;
+    logWorkloadStarted(logger);
+    releaseSignals = options.registerSignalHandlers === undefined ? registerProcessSignalHandlers(shutdown) : options.registerSignalHandlers(shutdown);
+    phase = "wait";
+    await (options.waitForever ?? waitForever)();
+  } catch (error) {
+    failed = true;
+    if (!failureReported) report(processFailureLogRecord(phase));
+    throw error;
+  } finally {
+    releaseSignals?.();
+    try {
+      await shutdown();
+    } catch (error) {
+      if (!failed) throw error;
+    }
   }
-}
-
-function databasePoolOptions(config: Extract<ReturnType<typeof loadMcpConnectorConfigFromProcessEnv>, { readonly ok: true }>["config"]): Bun.SQL.PostgresOrMySQLOptions {
-  return {
-    url: config.databaseUrl,
-    max: config.databasePool.max,
-    idleTimeout: config.databasePool.idleTimeout,
-    maxLifetime: config.databasePool.maxLifetime,
-    connectionTimeout: config.databasePool.connectionTimeout,
-    connection: { statement_timeout: config.databasePool.statementTimeoutMs },
-  };
 }
 
 async function waitForever(): Promise<never> {
   return await new Promise<never>(() => undefined);
 }
 
-function registerProcessSignalHandlers(shutdown: () => Promise<void>): void {
-  process.once("SIGTERM", () => {
-    void shutdown().then(() => process.exit(0));
-  });
-  process.once("SIGINT", () => {
-    void shutdown().then(() => process.exit(0));
-  });
-}
-
 if (import.meta.main) {
-  await runMcpConnectorCommand();
+  await runProcessEntry((processBoundary) => runMcpConnectorCommand({ processBoundary }));
 }

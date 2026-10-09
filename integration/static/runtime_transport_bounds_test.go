@@ -1,6 +1,7 @@
 package static
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -71,7 +72,7 @@ func TestRuntimeCommandAndBridgeFusesStayAlignedAcrossGoAndTypeScript(t *testing
 		`export const MaxAttachmentGrpcMessageBytes\s*=\s*32\s*\*\s*1024\s*\*\s*1024;`,
 		`export const MaxBridgeDurableContextGrpcMessageBytes\s*=\s*64\s*\*\s*1024\s*\*\s*1024;`,
 		`export const MaxGatewayRequestGrpcMessageBytes\s*=\s*64\s*\*\s*1024\s*\*\s*1024;`,
-		`export const MaxGatewayStreamEventGrpcMessageBytes\s*=\s*8\s*\*\s*1024\s*\*\s*1024;`,
+		`export const MaxGatewayStreamEventGrpcMessageBytes\s*=\s*MaxProviderResponseFrameBytes;`,
 	} {
 		if !regexp.MustCompile(required).Match(tsBody) {
 			t.Fatalf("TypeScript transport bounds missing %q", required)
@@ -97,11 +98,47 @@ func TestRuntimeCommandAndBridgeFusesStayAlignedAcrossGoAndTypeScript(t *testing
 	if required := `MaxGrpcInboundMessageBytes\s*=\s*64\s*\*\s*1024\s*\*\s*1024`; !regexp.MustCompile(required).Match(gatewayBody) {
 		t.Fatalf("Gateway transport bounds missing %q", required)
 	}
-	if required := `export const MaxProviderContextTextJsonBytes\s*=\s*16\s*\*\s*1024\s*\*\s*1024;`; !regexp.MustCompile(required).Match(gatewayProtocolBody) {
+	if required := `export const MaxProviderContextTextJsonBytes\s*=\s*ContentLimits\.MaxProviderContextTextJsonBytes;`; !regexp.MustCompile(required).Match(gatewayProtocolBody) {
 		t.Fatalf("Gateway protocol bounds missing %q", required)
 	}
-	if required := `export const MaxProviderRequestToolOutputJsonBytes\s*=\s*512\s*\*\s*1024;`; !regexp.MustCompile(required).Match(gatewayProtocolBody) {
+	if required := `export const MaxProviderRequestToolOutputJsonBytes\s*=\s*ContentLimits\.MaxProviderRequestToolOutputJsonBytes;`; !regexp.MustCompile(required).Match(gatewayProtocolBody) {
 		t.Fatalf("Gateway protocol bounds missing %q", required)
+	}
+	// Complete events use one shared encoded-frame fuse at both transport ends.
+	// Check the owning data and reference chain; inline numeric duplication would
+	// allow the sender and receiver to drift when the shared contract changes.
+	limitsBody, err := os.ReadFile(filepath.Join(root, "services", "gateway", "packages", "protocol", "src", "content-limits.json")) //nolint:gosec // repository-local source path.
+	if err != nil {
+		t.Fatalf("read shared content limits: %v", err)
+	}
+	var limits map[string]int
+	if err := json.Unmarshal(limitsBody, &limits); err != nil {
+		t.Fatalf("decode shared content limits: %v", err)
+	}
+	for name, expected := range map[string]int{
+		"MaxProviderResponseFrameBytes":         32 * 1024 * 1024,
+		"MaxProviderContextTextJsonBytes":       16 * 1024 * 1024,
+		"MaxProviderRequestToolOutputJsonBytes": 512 * 1024,
+	} {
+		if limits[name] != expected {
+			t.Errorf("shared %s = %d; want %d", name, limits[name], expected)
+		}
+	}
+	for _, required := range []string{
+		`import ContentLimits from "\./content-limits\.json";`,
+		`export const MaxProviderResponseFrameBytes\s*=\s*ContentLimits\.MaxProviderResponseFrameBytes;`,
+	} {
+		if !regexp.MustCompile(required).Match(gatewayProtocolBody) {
+			t.Fatalf("Gateway protocol shared bounds missing %q", required)
+		}
+	}
+	for name, body := range map[string][]byte{"Runtime": tsBody, "Gateway": gatewayBody} {
+		if required := `import\s*\{\s*MaxProviderResponseFrameBytes\s*\}\s*from "@tetral/gateway-protocol/src/bounds\.js";`; !regexp.MustCompile(required).Match(body) {
+			t.Fatalf("%s transport does not import the shared provider response fuse", name)
+		}
+	}
+	if required := `const MaxGrpcOutboundMessageBytes\s*=\s*MaxProviderResponseFrameBytes;`; !regexp.MustCompile(required).Match(gatewayBody) {
+		t.Fatalf("Gateway send fuse does not use the shared provider response bound")
 	}
 	for _, pair := range []struct {
 		goPattern string

@@ -35,3 +35,117 @@ that silently permits more than the default did.
 {{- if and .Values.cilium.gitProxyFQDNPolicy (not .Values.cilium.enabled) }}
 {{- fail "cilium.gitProxyFQDNPolicy=true requires cilium.enabled=true." }}
 {{- end }}
+{{- range $key := list "api" "auth" "bridge" "jobRunner" "sandbox" "providerGateway" "mcpConnector" "webConnector" }}
+{{- $replicas := get $.Values.replicas $key }}
+{{- if or (not (has (kindOf $replicas) $numericKinds)) (not (regexMatch "^[1-9][0-9]*$" (toString $replicas))) }}
+{{- fail (printf "replicas.%s must be a positive integer." $key) }}
+{{- end }}
+{{- end }}
+{{- if not (kindIs "bool" .Values.autoscaling.providerGateway.enabled) }}
+{{- fail "autoscaling.providerGateway.enabled must be a boolean." }}
+{{- end }}
+{{- if ne .Values.routing.revision "1-31-1" }}{{ fail "routing.revision must match the locked Istio revision" }}{{ end }}
+{{- if not (has .Values.transport.profile (list "standard-routed" "hardened")) }}{{ fail "transport.profile must be standard-routed or hardened" }}{{ end }}
+{{- if not (regexMatch "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$" .Values.routing.trustDomain) }}{{ fail "routing.trustDomain must be a concrete DNS trust domain" }}{{ end }}
+{{- range $key := list "storeTrustConfigMap" "databaseServerName" "blobServerName" }}
+{{- if not (get $.Values.transport $key) }}{{ fail (printf "transport.%s is required for protected stores" $key) }}{{ end }}
+{{- end }}
+{{- if eq .Values.transport.profile "hardened" }}
+{{- range $key := list "runtimeDirectTrustConfigMap" "runtimeDirectLeafSecret" "runnerDirectLeafSecret" "runtimeServerName" }}
+{{- if not (get $.Values.transport $key) }}{{ fail (printf "transport.%s is required for the direct protected Runtime endpoint" $key) }}{{ end }}
+{{- end }}{{ end }}
+{{- range $key := list "databaseReserve" "goPoolMax" "bunPoolMax" }}
+{{- if not (regexMatch "^[1-9][0-9]*$" (toString (get $.Values.transport $key))) }}{{ fail (printf "transport.%s must be a bounded positive integer" $key) }}{{ end }}
+{{- end }}
+{{- if not (regexMatch "^([1-9][0-9]*|[1-9][0-9]*%)$" (toString .Values.rollout.maxSurge)) }}{{ fail "rollout.maxSurge must be a bounded positive integer or percentage" }}{{ end }}
+{{- if not (regexMatch "^[1-9][0-9]*$" (toString .Values.autoscaling.providerGateway.maxReplicas)) }}{{ fail "autoscaling.providerGateway.maxReplicas must be bounded" }}{{ end }}
+{{- if and .Values.autoscaling.providerGateway.enabled (lt (int .Values.autoscaling.providerGateway.maxReplicas) (int (include "tetral.providerGatewayMinReplicas" .))) }}{{ fail "autoscaling.providerGateway.maxReplicas must be at least the enabled HPA minimum of 2" }}{{ end }}
+{{- if and (ne .Values.transport.databaseCapacity nil) (not (regexMatch "^[1-9][0-9]*$" (toString .Values.transport.databaseCapacity))) }}{{ fail "transport.databaseCapacity must be a bounded positive integer or unknown" }}{{ end }}
+{{- if and (ne .Values.transport.externalDatabaseConnections nil) (not (regexMatch "^(0|[1-9][0-9]*)$" (toString .Values.transport.externalDatabaseConnections))) }}{{ fail "transport.externalDatabaseConnections must declare a bounded nonnegative count or unknown" }}{{ end }}
+{{- if and (ne .Values.transport.databaseCapacity nil) (ne .Values.transport.externalDatabaseConnections nil) }}
+{{- $required := add (int (include "tetral.databasePoolSlots" .)) (int .Values.transport.databaseReserve) (int .Values.transport.externalDatabaseConnections) }}
+{{- if lt (int .Values.transport.databaseCapacity) (int $required) }}{{ fail (printf "transport.databaseCapacity is below the required aggregate connection budget %d" $required) }}{{ end }}
+{{- end }}
+
+{{- range $key := list "runtimeDrainMs" "runtimeSettlementMs" "settlementAttemptTimeoutMs" "runtimeLocalJoinMs" "runtimeProxyJoinMs" "runtimeGraceSeconds" "bridgeDrainMs" "runnerDrainMs" "sandboxDrainMs" "cancelJoinMs" "providerDrainMs" "providerJoinMs" "mcpDrainMs" "mcpJoinMs" "webDrainMs" "queueDrainMs" }}
+{{- if not (regexMatch "^[1-9][0-9]*$" (toString (get $.Values.lifecycle $key))) }}{{ fail (printf "lifecycle.%s must be a bounded positive number of milliseconds" $key) }}{{ end }}
+{{- end }}
+{{- if gt (float64 .Values.lifecycle.settlementAttemptTimeoutMs) (float64 2147483647) }}{{ fail "lifecycle.settlementAttemptTimeoutMs must not exceed 2147483647 milliseconds" }}{{ end }}
+{{- $runtimeRequired := add (int .Values.lifecycle.runtimeDrainMs) (int .Values.lifecycle.runtimeSettlementMs) (int .Values.lifecycle.runtimeLocalJoinMs) (int .Values.lifecycle.runtimeProxyJoinMs) (int (include "tetral.runtimeShutdownMarginMs" .)) -}}
+{{- if gt $runtimeRequired (mul (int .Values.lifecycle.runtimeGraceSeconds) 1000) }}{{ fail "Runtime current step, settlement, local/proxy joins and 5s signal margin must fit configured Pod grace" }}{{ end }}
+{{- if gt (add (int .Values.lifecycle.bridgeDrainMs) (int .Values.lifecycle.cancelJoinMs) 10000) 60000 }}{{ fail "Bridge drain, cancellation join, resource/proxy margin must fit 60s Pod grace" }}{{ end }}
+{{- if gt (add (int .Values.lifecycle.runnerDrainMs) (int .Values.lifecycle.cancelJoinMs) 10000) 45000 }}{{ fail "Runner drain, cancellation join, resource/proxy margin must fit 45s Pod grace" }}{{ end }}
+{{- if gt (add (int .Values.lifecycle.sandboxDrainMs) (int .Values.lifecycle.cancelJoinMs) 10000) 60000 }}{{ fail "Sandbox drain, cancellation join, resource/proxy margin must fit 60s Pod grace" }}{{ end }}
+{{- if ge (add (int .Values.lifecycle.providerDrainMs) (int .Values.lifecycle.providerJoinMs) 5000) 60000 }}{{ fail "Provider Gateway business drain, cancellation join and proxy margin must remain below 60s Pod grace" }}{{ end }}
+{{- if ge (add (int .Values.lifecycle.mcpDrainMs) (int .Values.lifecycle.mcpJoinMs) 5000) 60000 }}{{ fail "MCP business drain, cancellation join and proxy margin must remain below 60s Pod grace" }}{{ end }}
+{{- if gt (int .Values.lifecycle.webDrainMs) 20000 }}{{ fail "Web drain must remain within its typed 20s limit" }}{{ end }}
+{{- if gt (add (int .Values.lifecycle.webDrainMs) (int .Values.lifecycle.cancelJoinMs)) 25000 }}{{ fail "Web drain and cancellation join must fit 25s application allocation, reserving 5s proxy margin" }}{{ end }}
+{{- if gt (int .Values.lifecycle.queueDrainMs) 25000 }}{{ fail "Queue drain must remain within its typed 25s limit" }}{{ end }}
+{{- if gt (add (int .Values.lifecycle.queueDrainMs) (int .Values.lifecycle.cancelJoinMs)) 25000 }}{{ fail "Queue drain and cancellation join must fit 25s application allocation, reserving 5s signal/proxy margin in 30s Pod grace" }}{{ end }}
+{{- if not (regexMatch "^[1-9][0-9]*$" (toString .Values.replicas.eventStream)) }}{{ fail "replicas.eventStream must be a positive integer" }}{{ end }}
+{{- if .Values.preview.enabled }}
+{{- if not (regexMatch "^[A-Za-z0-9.-]+:4222$" .Values.preview.brokerAddress) }}{{ fail "preview.brokerAddress must be a broker DNS name on port 4222 without credentials" }}{{ end }}
+{{- range $key := list "publisherSecret" "subscriberSecret" }}{{- if not (get $.Values.preview $key) }}{{ fail (printf "preview.%s is required" $key) }}{{ end }}{{ end }}
+{{- if eq .Values.transport.profile "hardened" }}
+{{- range $key := list "trustConfigMap" "publisherLeafSecret" "subscriberLeafSecret" }}{{- if not (get $.Values.preview $key) }}{{ fail (printf "preview.%s is required in the protected profile" $key) }}{{ end }}{{ end }}
+{{- end }}
+{{- end }}
+{{- if not (kindIs "bool" .Values.preview.enabled) }}{{ fail "preview.enabled must be a boolean" }}{{ end }}
+{{- $groups := list (dict "path" "eventStream" "values" .Values.eventStream "maxima" (dict "pollIntervalMs" 60000 "heartbeatIntervalMs" 60000 "writeTimeoutMs" 60000 "previewSetupTimeoutMs" 10000 "hubMaxBytes" 67108864 "hubMaxFrames" 16384 "viewerMaxBytes" 8388608 "viewerMaxFrames" 4096 "subscriptionMaxBytes" 67108864 "subscriptionMaxFrames" 16384 "activeRequests" 4096)) }}
+{{- if .Values.preview.enabled }}
+{{- $groups = append $groups (dict "path" "preview.gateway" "values" .Values.preview.gateway "maxima" (dict "queueBytes" 9007199254740991 "queueFrames" 9007199254740991 "batchBytes" 262144 "batchFrames" 9007199254740991 "connectTimeoutMs" 60000 "flushTimeoutMs" 60000 "retryMaxMs" 60000 "credentialPollMs" 60000 "pingIntervalMs" 60000 "maxPingOut" 16)) }}
+{{- $groups = append $groups (dict "path" "preview.subscriber" "values" .Values.preview.subscriber "maxima" (dict "connectTimeoutMs" 5000 "reconnectWaitMs" 5000 "pingIntervalMs" 3600000 "maxPingOut" 16)) }}
+{{- end }}
+{{- range $group := $groups }}
+{{- range $key, $maximum := $group.maxima }}
+{{- $value := get $group.values $key }}
+{{- if or (not (has (kindOf $value) $numericKinds)) (le (float64 $value) 0.0) (ne (float64 $value) (floor (float64 $value))) (gt (float64 $value) (float64 $maximum)) }}{{ fail (printf "%s.%s must be a positive integer within its typed service bound" $group.path $key) }}{{ end }}
+{{- end }}
+{{- end }}
+{{- if or (gt (int .Values.eventStream.viewerMaxBytes) (int .Values.eventStream.hubMaxBytes)) (gt (int .Values.eventStream.viewerMaxFrames) (int .Values.eventStream.hubMaxFrames)) }}{{ fail "eventStream viewer bounds must fit hub bounds" }}{{ end }}
+{{- if .Values.preview.enabled }}
+{{- if or (lt (float64 .Values.preview.gateway.queueBytes) (mul 2 (int .Values.preview.gateway.batchBytes) | float64)) (gt (float64 .Values.preview.gateway.batchFrames) (float64 .Values.preview.gateway.queueFrames)) }}{{ fail "preview.gateway batches must fit the bounded publisher queue" }}{{ end }}
+{{- end }}
+
+{{/* Public API and Git routing carry different credential contracts. */}}
+{{- if not (kindIs "bool" .Values.edge.enabled) }}{{ fail "edge.enabled must be a boolean" }}{{ end }}
+{{- if .Values.edge.enabled }}
+{{- range $entry := list (dict "key" "edge.apiHost" "value" .Values.edge.apiHost) (dict "key" "gitProxyHost" "value" .Values.gitProxyHost) }}
+{{- if or (not (kindIs "string" $entry.value)) (gt (len $entry.value) 253) (not (regexMatch "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$" $entry.value)) }}{{ fail (printf "%s must be a concrete lowercase DNS hostname without a wildcard or port" $entry.key) }}{{ end }}
+{{- end }}
+{{- if eq .Values.edge.apiHost .Values.gitProxyHost }}{{ fail "edge.apiHost and gitProxyHost must differ to preserve API and Git credential boundaries" }}{{ end }}
+{{- range $key := list "gatewayClassName" "apiTLSSecretName" "gitTLSSecretName" }}
+{{- if not (get $.Values.edge $key) }}{{ fail (printf "edge.%s is required" $key) }}{{ end }}
+{{- end }}
+{{- if eq .Values.transport.profile "hardened" }}
+{{- range $key := list "trustConfigMap" "clientLeafSecret" }}
+{{- if not (get $.Values.edge $key) }}{{ fail (printf "edge.%s is required for native edge TLS" $key) }}{{ end }}
+{{- end }}
+{{- range $role := list "auth" "api" "event-stream" "git-proxy" }}
+{{- if not (get $.Values.edge.serverLeafSecrets $role) }}{{ fail (printf "edge.serverLeafSecrets.%s is required for native edge TLS" $role) }}{{ end }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{- if not (regexMatch "^([1-9][0-9]*)$" (toString .Values.network.apiServerPort)) }}{{ fail "network.apiServerPort must be a concrete TCP port" }}{{ end }}
+{{- if gt (int .Values.network.apiServerPort) 65535 }}{{ fail "network.apiServerPort must be at most 65535" }}{{ end }}
+{{- if not (kindIs "bool" .Values.authIssuerNetwork.enabled) }}{{ fail "authIssuerNetwork.enabled must be a boolean" }}{{ end }}
+{{- if .Values.authIssuerNetwork.enabled }}
+{{- if or (not (kindIs "slice" .Values.authIssuerNetwork.peers)) (not .Values.authIssuerNetwork.peers) }}{{ fail "authIssuerNetwork.peers must explicitly name issuer destinations" }}{{ end }}
+{{- range $peer := .Values.authIssuerNetwork.peers }}
+{{- if or (not (kindIs "map" $peer)) (not $peer) }}{{ fail "authIssuerNetwork.peers cannot contain an empty allow-all peer" }}{{ end }}
+{{- if hasKey $peer "ipBlock" }}
+{{- if or (not $peer.ipBlock.cidr) (has $peer.ipBlock.cidr (list "0.0.0.0/0" "::/0")) }}{{ fail "authIssuerNetwork.peers must use explicit destination CIDRs rather than universal egress" }}{{ end }}
+{{- else if or (not $peer.namespaceSelector) (not $peer.podSelector) }}{{ fail "private issuer peers must explicitly select both namespace and Pods" }}{{ end }}
+{{- end }}
+{{- if or (not (kindIs "slice" .Values.authIssuerNetwork.ports)) (not .Values.authIssuerNetwork.ports) }}{{ fail "authIssuerNetwork.ports must name explicit HTTPS ports" }}{{ end }}
+{{- range $port := .Values.authIssuerNetwork.ports }}
+{{- if or (not (regexMatch "^[1-9][0-9]*$" (toString $port))) (gt (int $port) 65535) }}{{ fail "authIssuerNetwork.ports must be concrete TCP ports" }}{{ end }}
+{{- end }}
+{{- end }}
+{{- if not (kindIs "bool" .Values.nativeCertificates.enabled) }}{{ fail "nativeCertificates.enabled must be a boolean" }}{{ end }}
+{{- if .Values.nativeCertificates.enabled }}
+{{- if eq .Values.transport.profile "standard-routed" }}{{ fail "nativeCertificates.enabled requires the hardened native-certificate profile" }}{{ end }}
+{{- if not (regexMatch "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$" .Values.transport.runtimeServerName) }}{{ fail "transport.runtimeServerName must be a concrete DNS identity for native issuance" }}{{ end }}
+{{- if not .Values.nativeCertificates.issuerName }}{{ fail "nativeCertificates.issuerName must reference the operator-bound intermediate ClusterIssuer" }}{{ end }}
+{{- end }}

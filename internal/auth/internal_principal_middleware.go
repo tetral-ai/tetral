@@ -11,15 +11,19 @@ func InternalPrincipalMiddleware(verifier *InternalPrincipalVerifier, errorWrite
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			token := r.Header.Get("X-Tetral-Internal-Principal")
 			if token == "" {
-				errorWriter(w, r, &AuthenticationError{Message: "missing internal principal"})
-				return
-			}
-			principal, _, err := verifier.Verify(token, r.Method, r.URL.Path)
-			if err != nil {
+				err := &AuthenticationError{Message: "missing internal principal"}
+				RecordDecision(r.Context(), "signed_principal", err, AuditEvent{})
 				errorWriter(w, r, err)
 				return
 			}
-			ctx := WithPrincipal(r.Context(), principal)
+			principal, claims, err := verifier.Verify(token, r.Method, r.URL.Path)
+			if err != nil {
+				RecordDecision(r.Context(), "signed_principal", err, AuditEvent{})
+				errorWriter(w, r, err)
+				return
+			}
+			ctx := WithVerifiedEdgeRequestID(r.Context(), claims)
+			ctx = WithPrincipal(ctx, principal)
 			ctx = workspace.WithContext(ctx, principal.Workspace)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})

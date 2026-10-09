@@ -17,6 +17,9 @@ import type {
 	RuntimeTerminalSettlementObservation,
 } from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import type {
+	DiagnosticConfig,
+	ProcessFailurePhase,
+	TetralDiagnosticLogger,
 	TetralJsonLogger,
 	TetralLogRecord,
 } from "@tetral/ts-observability";
@@ -26,14 +29,15 @@ import {
 } from "@tetral/ts-observability";
 
 /** Structured JSON logger accepted by Runtime Pod composition and runtime services. */
-export type RuntimePodLogger = TetralJsonLogger<RuntimePodLogRecord>;
+export type RuntimePodLogger = TetralJsonLogger<RuntimePodLogRecord> &
+	Partial<Pick<TetralDiagnosticLogger<RuntimePodLogRecord>, "debug">>;
 
 /** Stable phases for strict parsing of one Bridge cold-context response. */
 export type RuntimeContextLoadParsePhase =
 	| "context_json_parse"
 	| "context_envelope_parse"
 	| "durable_context_parse"
-	| "open_request_draft_parse"
+	| "current_request_message_parse"
 	| "turn_facts_parse"
 	| "thread_context_prefix_parse"
 	| "thread_metadata_parse"
@@ -49,7 +53,7 @@ export type RuntimeContextLoadParseReason =
 	| "invalid_context_json"
 	| "invalid_context_envelope_shape"
 	| "invalid_durable_context_shape"
-	| "invalid_open_request_draft_shape"
+	| "invalid_current_request_message_shape"
 	| "invalid_turn_facts_shape"
 	| "invalid_thread_context_prefix_shape"
 	| "invalid_thread_metadata_shape"
@@ -60,7 +64,7 @@ export type RuntimeContextLoadParseReason =
 	| "invalid_pending_attachments_shape"
 	| "invalid_pending_agent_mail_shape";
 
-/** Closed diagnostic phases for the authenticated Bridge-to-Runtime ingress. */
+/** Closed diagnostic phases for the authenticated Job Runner-to-Runtime ingress. */
 export type RuntimeIngressRejectionPhase =
 	| "authentication"
 	| "lifecycle"
@@ -77,6 +81,7 @@ export type RuntimeIngressRejectionReason =
 	| "runtime_not_accepting"
 	| "invalid_request"
 	| "selected_pod_mismatch"
+	| "runtime_process_mismatch"
 	| "binding_mismatch"
 	| "identity_conflict"
 	| "invalid_content"
@@ -88,7 +93,7 @@ export type RuntimeIngressRejectionReason =
 /** Enumerates Runtime Pod-specific fields layered on the shared structured log record. */
 export type RuntimePodLogRecord = TetralLogRecord & {
 	readonly event: string;
-	readonly kind?: "config_error" | "startup_error" | "shutdown_error";
+	readonly kind?: "config_error" | "startup_error" | "shutdown_error" | import("@tetral/agent-runtime-core/src/runtime/metrics.js").RuntimeContentKind;
 	readonly "grpc.method"?: string;
 	readonly "grpc.code"?: string;
 	readonly "caller.service_account"?: string;
@@ -110,7 +115,7 @@ export type RuntimePodLogRecord = TetralLogRecord & {
 	readonly "mcp.tool_catalog.eligible"?: boolean;
 	readonly "reconstruction.phase"?: "cold_checkpoint";
 	readonly "failure.kind"?: "invalid_durable_facts";
-	readonly phase?: RuntimeContextLoadParsePhase | RuntimeIngressRejectionPhase;
+	readonly phase?: RuntimeContextLoadParsePhase | RuntimeIngressRejectionPhase | ProcessFailurePhase;
 	readonly reason?:
 		| RuntimeContextLoadParseReason
 		| RuntimeIngressRejectionReason;
@@ -180,7 +185,9 @@ export function recordContextLoadParseFailure(
 
 /** Configures the JSON sink and optional service resource attributes for Runtime Pod logs. */
 export interface JsonLoggerOptions {
-	readonly write: (line: string) => void;
+	readonly write: (line: string) => unknown;
+  readonly sinkFailures?: (() => number) | undefined;
+	readonly diagnostics?: DiagnosticConfig;
 	readonly serviceName?: string;
 	readonly deploymentEnvironment?: string;
 	readonly serviceVersion?: string;
@@ -188,9 +195,11 @@ export interface JsonLoggerOptions {
 }
 
 /** Creates a Runtime Pod JSON logger backed by the shared observability serializer. */
-export function createJsonLogger(options: JsonLoggerOptions): RuntimePodLogger {
+export function createJsonLogger(options: JsonLoggerOptions): TetralDiagnosticLogger<RuntimePodLogRecord> {
 	return createTetralJsonLogger<RuntimePodLogRecord>({
 		write: options.write,
+    sinkFailures: options.sinkFailures,
+		diagnostics: options.diagnostics,
 		serviceName: options.serviceName ?? "agent-runtime",
 		deploymentEnvironment: options.deploymentEnvironment,
 		serviceVersion: options.serviceVersion,
@@ -358,9 +367,14 @@ function startupCauseClass(cause: unknown): string {
 	return "unknown";
 }
 
-/** Builds a typed shutdown failure record for active-run settlement or drain timeout failure. */
+/**
+ * Builds a typed shutdown failure record for checkpoint expiry, an incomplete binding handoff,
+ * active-run settlement failure or drain timeout.
+ */
 export function shutdownFailureLogRecord(input: {
 	readonly event:
+		| "runtime_checkpoint_expired"
+		| "runtime_binding_handoff_incomplete"
 		| "shutdown_active_run_settlement_failed"
 		| "shutdown_drain_timeout";
 	readonly message: string;
@@ -376,6 +390,28 @@ export function shutdownFailureLogRecord(input: {
 			errorClass: "shutdown_error",
 			errorCode: input.event,
 			messageSafe: input.message,
+		}),
+	};
+}
+
+/**
+ * Builds the bounded record for a failed steady-state process report. The first failure and each
+ * later summary carry the consecutive failure count; recovery is recorded separately.
+ */
+export function runtimeProcessReportFailureLogRecord(input: {
+	readonly failedCount: number;
+}): RuntimePodLogRecord {
+	return {
+		event: "runtime_process_report_failed",
+		"event.kind": "runtime_process_report_failed",
+		operation: "runtime_process.report",
+		component: "agent-runtime",
+		message: "runtime process report failed",
+		"failed.count": input.failedCount,
+		...semanticErrorFields({
+			errorClass: "dependency_error",
+			errorCode: "runtime_process_report_failed",
+			messageSafe: "runtime process report failed",
 		}),
 	};
 }
@@ -399,6 +435,30 @@ export function runtimeCloseoutLogRecord(
 			errorCode: input.errorCode ?? input.event,
 			messageSafe: input.event,
 		}),
+	};
+}
+
+/** Healthy ACK/application records are Debug-only and contain no content or provider part IDs. */
+export function runtimeContentCommitLogRecord(input:Parameters<NonNullable<import("@tetral/agent-runtime-core/src/thread-loop/thread-loop.js").ThreadLoopRuntimeOptions["recordContentCommit"]>>[0]):RuntimePodLogRecord {
+ return {event:"runtime_content_commit","event.kind":"runtime_content_commit",component:"agent-runtime",operation:input.phase,message:"Runtime completed content commit observed","workspace.id":input.workspaceId,"session.id":input.sessionId,"thread.id":input.sessionThreadId,"model_request.id":input.modelRequestId,kind:input.kind,"request.kind":input.requestKind,"settlement.outcome":input.outcome,"duration.ms":input.durationMs,...(input.canonicalJsonBytes===undefined?{}:{"output.size_bytes":input.canonicalJsonBytes})};
+}
+
+/** Raw stage samples support distributions without exposing operation payloads. */
+export function runtimeOperationLogRecord(input:import("@tetral/agent-runtime-core/src/runtime/metrics.js").RuntimeOperationObservation):RuntimePodLogRecord {
+	return {
+		event: input.timingUnavailable ? "runtime_operation_timing_unavailable" : "runtime_operation_completed",
+		"event.kind": input.timingUnavailable ? "runtime_operation_timing_unavailable" : "runtime_operation_completed",
+		component: "agent-runtime",
+		operation: input.operation,
+		message: input.timingUnavailable ? "Cold approval has no local timing origin" : "Runtime owning operation completed",
+		"workspace.id": input.workspaceId,
+		"session.id": input.sessionId,
+		"thread.id": input.sessionThreadId,
+		...(input.modelRequestId === undefined ? {} : { "model_request.id": input.modelRequestId }),
+		"request.kind": input.requestKind,
+		...(input.approvalSource === undefined ? {} : { "approval.source": input.approvalSource }),
+		outcome: input.outcome,
+		...(input.timingUnavailable ? {} : { "duration.ms": input.durationMs }),
 	};
 }
 

@@ -7,6 +7,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -14,11 +16,10 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
-
-const childInterruptRequestedEventType = "agent.thread_interrupt_requested"
 
 type childInterruptEventPayload struct {
 	Type                 string `json:"type"`
@@ -63,7 +64,7 @@ func (s *PostgreSQLBridgeAPIStore) AdmitChildInterrupt(ctx context.Context, requ
 	}
 	duplicate := false
 	err = s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.admit_child_interrupt", func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
@@ -130,7 +131,7 @@ func (s *PostgreSQLBridgeAPIStore) AwaitChildInterrupt(ctx context.Context, requ
 	}
 	var outcomes []*bridgev1.ChildInterruptTargetOutcome
 	err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.await_child_interrupt", func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
@@ -264,7 +265,7 @@ func (s *PostgreSQLBridgeAPIStore) logCommittedThreadInterrupt(ctx context.Conte
 		if err := tx.QueryRow(ctx, `SELECT payload_json FROM session_events
 			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND type=$4
 			  AND payload_json::jsonb->>'runtime_input_id'=$5`,
-			request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), childInterruptRequestedEventType, request.GetRuntimeInputId(),
+			request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), runtimecontrol.ChildInterruptRequestedEventType, request.GetRuntimeInputId(),
 		).Scan(&payloadJSON); err != nil {
 			return err
 		}
@@ -275,7 +276,7 @@ func (s *PostgreSQLBridgeAPIStore) logCommittedThreadInterrupt(ctx context.Conte
 		return tx.QueryRow(ctx, `SELECT count(*) FROM session_events
 			WHERE workspace_id=$1 AND session_id=$2 AND type=$3
 			  AND payload_json::jsonb->>'source_tool_use_event_id'=$4`,
-			request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), childInterruptRequestedEventType, payload.SourceToolUseEventID,
+			request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), runtimecontrol.ChildInterruptRequestedEventType, payload.SourceToolUseEventID,
 		).Scan(&targetCount)
 	}); err != nil {
 		return
@@ -319,7 +320,7 @@ func declaredChildControlCommand(scope *bridgev1.RuntimeScope, sourceID, targetI
 	return childControlCommand{
 		scope: scope, sourceToolUseEventID: sourceID, rootChildThreadID: targetID,
 		action: action, includeDescendants: includeDescendants,
-		declarationDigest: bridgeRequestHash("child_control", sourceID, targetID, action.String()),
+		declarationDigest: runtimecontrol.RequestHash("child_control", sourceID, targetID, action.String()),
 	}, nil
 }
 
@@ -349,7 +350,7 @@ func loadCommittedChildControlCommandTx(ctx context.Context, tx *dbconnect.Tx, s
 		WHERE event.workspace_id=$1 AND event.session_id=$2 AND event.type=$4
 		 AND event.payload_json::jsonb ->> 'control_operation_id'=$5
 		ORDER BY event.event_id LIMIT 1 FOR SHARE OF event`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), childInterruptRequestedEventType, operationID,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), runtimecontrol.ChildInterruptRequestedEventType, operationID,
 	).Scan(&payloadJSON); dbconnect.IsNoRows(err) {
 		return childControlCommand{}, status.Error(codes.FailedPrecondition, "child interrupt control operation is unknown")
 	} else if err != nil {
@@ -376,7 +377,7 @@ func loadCommittedChildControlCommandTx(ctx context.Context, tx *dbconnect.Tx, s
 
 func childControlSourceTerminalTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sourceID string) (bool, error) {
 	var terminal bool
-	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND type IN ('agent.tool_result','agent.mcp_tool_result') AND (payload_json::jsonb ->> 'tool_use_event_id'=$4 OR payload_json::jsonb ->> 'tool_use_id'=$4 OR payload_json::jsonb ->> 'mcp_tool_use_id'=$4))`,
+	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND type IN ('agent.tool_result','agent.mcp_tool_result') AND tool_use_event_id=$4)`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), sourceID).Scan(&terminal)
 	return terminal, err
 }
@@ -397,14 +398,14 @@ func insertChildInterruptTargetTx(ctx context.Context, tx *dbconnect.Tx, command
 	case "terminated":
 		disposition, dispositionName = bridgev1.ChildInterruptDisposition_CHILD_INTERRUPT_DISPOSITION_PRESERVED_TERMINATED, "preserved_terminated"
 	}
-	eventID := stableRuntimeID("child_interrupt_event", command.scope.GetWorkspaceId(), command.scope.GetSessionId(), command.sourceToolUseEventID, targetID)
-	runtimeInputID := stableRuntimeID("child_interrupt_input", command.scope.GetWorkspaceId(), command.scope.GetSessionId(), command.sourceToolUseEventID, targetID)
-	sequence, err := nextSessionEventSequenceTx(ctx, tx, scopeForThread(command.scope, targetID))
+	eventID := runtimecontrol.StableRuntimeID("child_interrupt_event", command.scope.GetWorkspaceId(), command.scope.GetSessionId(), command.sourceToolUseEventID, targetID)
+	runtimeInputID := runtimecontrol.StableRuntimeID("child_interrupt_input", command.scope.GetWorkspaceId(), command.scope.GetSessionId(), command.sourceToolUseEventID, targetID)
+	sequence, err := runtimecontrol.NextSessionEventSequenceTx(ctx, tx, runtimecontrol.ScopeForThread(command.scope, targetID))
 	if err != nil {
 		return nil, err
 	}
 	payload := childInterruptEventPayload{
-		Type: childInterruptRequestedEventType, SourceToolUseEventID: command.sourceToolUseEventID,
+		Type: runtimecontrol.ChildInterruptRequestedEventType, SourceToolUseEventID: command.sourceToolUseEventID,
 		ControlOperationID: command.controlOperationID,
 		RootChildThreadID:  command.rootChildThreadID, Action: childControlActionName(command.action),
 		IncludeDescendants: command.includeDescendants, TargetThreadID: targetID,
@@ -414,19 +415,19 @@ func insertChildInterruptTargetTx(ctx context.Context, tx *dbconnect.Tx, command
 	if disposition == bridgev1.ChildInterruptDisposition_CHILD_INTERRUPT_DISPOSITION_PENDING_CONTROL {
 		payload.RuntimeInputID = runtimeInputID
 	}
-	payloadJSON, err := marshalBridgeJSON(payload)
+	payloadJSON, err := runtimecontrol.MarshalJSON(payload)
 	if err != nil {
 		return nil, err
 	}
-	processedAt := any(now)
+	processedAt := &now
 	if disposition == bridgev1.ChildInterruptDisposition_CHILD_INTERRUPT_DISPOSITION_PENDING_CONTROL {
 		processedAt = nil
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO session_events (workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,visibility,session_visible,runtime_write_id,processed_at,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,'internal',false,$4,$8,$9,$9)`,
-		command.scope.GetWorkspaceId(), command.scope.GetSessionId(), targetID, eventID, sequence, childInterruptRequestedEventType, payloadJSON, processedAt, now); err != nil {
-		return nil, err
-	}
-	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scopeForThread(command.scope, targetID), eventID, "internal", false, now); err != nil {
+	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: command.scope.GetWorkspaceId(), SessionID: command.scope.GetSessionId(), SessionThreadID: targetID,
+		EventID: eventID, Sequence: sequence, Type: runtimecontrol.ChildInterruptRequestedEventType, PayloadJSON: payloadJSON,
+		Visibility: "internal", SessionVisible: false, RuntimeWriteID: eventID, CreatedAt: now, ProcessedAt: processedAt,
+	}); err != nil {
 		return nil, err
 	}
 	target := &bridgev1.ChildInterruptTarget{ChildThreadId: targetID, Disposition: disposition}
@@ -441,7 +442,7 @@ func insertChildInterruptTargetTx(ctx context.Context, tx *dbconnect.Tx, command
 		command.scope.GetWorkspaceId(), command.scope.GetSessionId(), targetID, runtimeInputID, string(eventIDs), sequence, now); err != nil {
 		return nil, err
 	}
-	payloadBytes, err := json.Marshal(runtimeInputQueuePayload{
+	payloadBytes, err := json.Marshal(runtimecontrol.InputQueuePayload{
 		WorkspaceID: command.scope.GetWorkspaceId(), SessionID: command.scope.GetSessionId(), SessionThreadID: targetID,
 		RuntimeInputID: runtimeInputID, EventIDs: []string{eventID}, SequenceFrom: sequence, SequenceTo: sequence, InputKind: "interrupt_control",
 	})
@@ -465,7 +466,7 @@ func readChildInterruptCensusTx(ctx context.Context, tx *dbconnect.Tx, scope *br
 		WHERE event.workspace_id=$1 AND event.session_id=$2 AND event.type=$4
 		 AND event.payload_json::jsonb ->> 'control_operation_id'=$5
 		ORDER BY event.session_thread_id FOR UPDATE OF event`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), childInterruptRequestedEventType, operationID)
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), runtimecontrol.ChildInterruptRequestedEventType, operationID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -508,7 +509,7 @@ func readChildInterruptCensusBySourceTx(ctx context.Context, tx *dbconnect.Tx, s
 		WHERE event.workspace_id=$1 AND event.session_id=$2 AND event.type=$4
 		 AND event.payload_json::jsonb ->> 'source_tool_use_event_id'=$5
 		ORDER BY event.event_id LIMIT 1 FOR UPDATE OF event`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), childInterruptRequestedEventType, sourceID,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), runtimecontrol.ChildInterruptRequestedEventType, sourceID,
 	).Scan(&operationID)
 	if dbconnect.IsNoRows(err) {
 		return nil, "", false, nil
@@ -532,7 +533,7 @@ func validateStoredChildInterruptRequestTx(ctx context.Context, tx *dbconnect.Tx
 		 AND root.parent_thread_id=$3
 		WHERE event.workspace_id=$1 AND event.session_id=$2 AND event.type=$4
 		 AND event.payload_json::jsonb ->> 'source_tool_use_event_id'=$5 FOR SHARE OF event`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), childInterruptRequestedEventType, sourceID)
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), runtimecontrol.ChildInterruptRequestedEventType, sourceID)
 	if err != nil {
 		return err
 	}
@@ -672,12 +673,12 @@ func deferTargetTaskNotificationsTx(ctx context.Context, tx *dbconnect.Tx, scope
 		if err := inboxRows.Close(); err != nil {
 			return err
 		}
-		binding := runtimeBindingForDelivery{
+		binding := runtimecontrol.Binding{
 			BindingID: scope.GetBinding().GetBindingId(), BindingGeneration: scope.GetBinding().GetBindingGeneration(),
 			PodUID: scope.GetBinding().GetTargetPodUid(),
 		}
 		for _, runtimeInputID := range runtimeInputIDs {
-			parked, err := parkTaskNotificationInboxTx(
+			parked, err := runtimecontrol.ParkTaskNotificationInboxTx(
 				ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), targetID, runtimeInputID, binding, now,
 			)
 			if err != nil {

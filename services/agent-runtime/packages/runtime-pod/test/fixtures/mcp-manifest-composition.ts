@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import type { LLMRequest } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
 import { Metadata } from "@grpc/grpc-js";
 import { RunMcpToolStatus } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import * as SessionManager from "@tetral/agent-runtime-core/src/session/session-manager.js";
@@ -18,13 +20,14 @@ import type {
 	ApplyRuntimeConfigResponse,
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import type { AgentRuntimeBridgeServiceClient } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
-import { Context, Effect, Exit, Layer, Scope } from "effect";
+import { Cause, Context, Effect, Exit, Layer, Scope, Stream } from "effect";
 import {
 	RecordingContextLoader,
 	runtimeThreadLoopLayer,
 	testRunCustody,
 } from "../../../core/test/unit/thread-loop/thread-loop-test-support.js";
-import { BridgeAPIContextLoader } from "../../src/bridge-client.js";
+import { createRuntimeGrpcServer } from "../../src/grpc-server.js";
+import { BridgeAPIEventWriter, BridgeAPIContextLoader } from "../../src/bridge-client.js";
 import {
 	runtimeMCPManifestEligibilityFromPatchPayloads,
 	runtimeToolPolicyForThread,
@@ -35,6 +38,7 @@ import { RuntimePodToolRunner } from "../../src/tool-runner.js";
 
 interface CompositionInput {
 	readonly recovery?: boolean;
+	readonly durableMode?: { readonly bridgeAddress:string; readonly tokenPath:string; readonly threadId:string; readonly bindingId:string; readonly podUid:string; readonly runtimeProcessId:string; readonly serverName:string };
 	readonly workspaceId: string;
 	readonly sessionId: string;
 	readonly runtimeConfigPayloadJson: string;
@@ -53,6 +57,9 @@ if (inputPath === undefined) {
 }
 const input = JSON.parse(await readFile(inputPath, "utf8")) as CompositionInput;
 
+if (input.durableMode !== undefined) {
+ await serveDurableRuntime(input);
+} else {
 const warm = await applyWarmTransition(input);
 assertCatalogState(input, warm.events[0], warm.catalogs[0], !input.recovery);
 assertCatalogState(input, warm.events[1], warm.catalogs[1], input.recovery === true);
@@ -102,6 +109,8 @@ process.stdout.write(
 	}),
 );
 
+}
+
 async function proveNextProviderToolVisibility(
 	input: CompositionInput,
 	toolCatalog: ToolCatalog,
@@ -137,12 +146,15 @@ async function proveNextProviderToolVisibility(
 		],
 	});
 	const thread = new ThreadRuntime({
+		threadRole: "main",
+		threadVisibility: "public",
 		workspaceId: input.workspaceId,
 		sessionId: input.sessionId,
 		sessionThreadId: `thrd_${input.sessionId}`,
 		bindingId: "bind_manifest_composition",
 		bindingGeneration: 1,
 		targetPodUid: "pod_manifest_composition",
+		runtimeProcessId: "process-test",
 		runtimeBindingToken: "runtime-binding-token",
 	});
 	const result = await Effect.runPromise(
@@ -154,7 +166,7 @@ async function proveNextProviderToolVisibility(
 				runtimeThreadLoopLayer(loader, {
 					events: [
 						{
-							type: "tool-call",
+							type: "tool-call-complete",
 							id: "stale-manifest-tool-call",
 							toolName: input.toolName,
 							input: { query: "tetral" },
@@ -259,6 +271,7 @@ async function loadReplacement(
 				loadContext: (
 					_request: unknown,
 					_metadata: Metadata,
+					_options: unknown,
 					callback: (error: Error | null, response: unknown) => void,
 				) => {
 					callback(null, {
@@ -272,7 +285,7 @@ async function loadReplacement(
 			controlState(input, "rin_manifest_cold_load"),
 		);
 		const turnCheckpoint = extractThreadTurnCheckpoint({
-			contextEntries: loaded.contextEntries,
+			messages: loaded.messages,
 			facts: loaded.turnFacts,
 		});
 		const turnToolRouteView = extractColdThreadToolRouteView({
@@ -284,10 +297,7 @@ async function loadReplacement(
 			manager.preloadThread({
 				...controlState(input, "rin_manifest_cold_load"),
 				runtimeBindingToken: loaded.runtimeBindingToken,
-				contextEntries: loaded.contextEntries,
-				...(loaded.openRequestDraft === undefined
-					? {}
-					: { openRequestDraft: loaded.openRequestDraft }),
+				currentRequestMessage:loaded.currentRequestMessage,messages: loaded.messages,
 				turnCheckpoint,
 				turnToolRouteView,
 				thread: loaded.thread,
@@ -308,7 +318,7 @@ async function loadReplacement(
 	}
 }
 
-async function buildManager(): Promise<{
+async function buildManager(ownedThreadLoopLayer?: Layer.Layer<ThreadLoop.Service>): Promise<{
 	readonly manager: SessionManager.Interface;
 	readonly scope: Scope.Scope;
 	readonly events: SessionManager.RuntimeMCPManifestUpdateEvent[];
@@ -347,7 +357,7 @@ async function buildManager(): Promise<{
 				serverName,
 			);
 		},
-	}).pipe(Layer.provide(threadLoopLayer));
+	}).pipe(Layer.provide(ownedThreadLoopLayer ?? threadLoopLayer));
 	return await Effect.runPromise(
 		Effect.gen(function* () {
 			const scope = yield* Scope.make();
@@ -378,17 +388,18 @@ function runtimeControlService(
 			),
 	} as unknown as RuntimeSessionRunHost;
 	return new RuntimeControlService({
+	runtimeProcessId: request.runtimeProcessId,
 		ownPod: {
 			namespace: "engine",
 			name: "runtime-pod-composition",
 			uid: request.targetPodUid,
 			ip: "127.0.0.1",
 		},
-		allowedBridge: { namespace: "tetral-system", name: "bridge" },
+		allowedJobRunner: { namespace: "tetral-system", name: "job-runner" },
 		authenticator: {
 			authenticate: async () => ({
 				ok: true as const,
-				serviceAccount: { namespace: "tetral-system", name: "bridge" },
+				serviceAccount: { namespace: "tetral-system", name: "job-runner" },
 			}),
 		},
 		runHost,
@@ -411,7 +422,7 @@ function preloadState(
 	return {
 		...controlState(input, "rin_preload"),
 		runtimeBindingToken: "runtime-binding-token",
-		contextEntries: [],
+		currentRequestMessage:null,messages: [],
 		runtimeConfigPatch: {
 			...addressState(input),
 			configIdentity: "session:1",
@@ -441,6 +452,7 @@ function manifestPatch(
 }
 
 function addressState(input: CompositionInput) {
+ if(input.durableMode!==undefined)return {workspaceId:input.workspaceId,sessionId:input.sessionId,sessionThreadId:input.durableMode.threadId,bindingId:input.durableMode.bindingId,bindingGeneration:1,targetPodUid:input.durableMode.podUid,runtimeProcessId:input.durableMode.runtimeProcessId};
 	return {
 		workspaceId: input.workspaceId,
 		sessionId: input.sessionId,
@@ -448,6 +460,7 @@ function addressState(input: CompositionInput) {
 		bindingId: "bind_manifest_composition",
 		bindingGeneration: 1,
 		targetPodUid: "pod_manifest_composition",
+		runtimeProcessId: "process-test",
 	};
 }
 
@@ -480,4 +493,92 @@ function assertCatalogState(
 			`MCP tool presence ${present} does not match expected ${expectedPresent}`,
 		);
 	}
+}
+
+/** Actual Runtime command listener and Core owner for cross-service composition. */
+async function serveDurableRuntime(input: CompositionInput): Promise<void> {
+    const mode = input.durableMode!;
+    const loader = new BridgeAPIContextLoader({ address: mode.bridgeAddress, tokenPath: mode.tokenPath });
+    const writer = new BridgeAPIEventWriter({ address: mode.bridgeAddress, tokenPath: mode.tokenPath });
+    const providerRequests: {
+        toolNames: string[];
+        modelRequestId: string;
+        generation: number;
+    }[] = [];
+    const runtimeRecords: unknown[] = [];
+    let holdProvider = false, releaseProvider: () => void = () => { }, activeProviders = 0;
+    const provider = { stream(request: LLMRequest) {
+            providerRequests.push({ toolNames: request.tools.map(tool => tool.name), modelRequestId: request.modelRequestId, generation: currentThread?.configuration.manifestGeneration(mode.serverName) ?? 0 });
+            const blocked = holdProvider ? new Promise<void>(resolve => { releaseProvider = resolve; }) : Promise.resolve();
+            activeProviders++;
+            return Stream.fromEffect(Effect.promise(() => blocked)).pipe(Stream.flatMap(() => { activeProviders--; runtimeRecords.push({ phase: "provider-stream-released" }); return Stream.fromIterable([  {type:"text-complete" as const,providerPartId:"manifest-text",eventId:`evt_${createHash("sha256").update(JSON.stringify(["mcp-manifest-composition.ts", request.sessionId, request.modelRequestId, "manifest-text"])).digest("hex").slice(0,32)}`,text:("manifest applied")}, { type: "finish" as const, finishReason: "stop" as const }]); }));
+        } };
+    let currentThread: ThreadRuntime | undefined;
+    // Legacy helper-only context APIs must never substitute a durable read.
+    const actualLoader = Object.assign(loader, { buildContext: async () => { throw new Error("legacy context read reached"); }, loadPendingInput: async () => { throw new Error("legacy pending read reached"); } });
+    const coreLayer = runtimeThreadLoopLayer(actualLoader, { writer, llmService: provider, installLoaderState: false, runtime: { now: () => new Date().toISOString(), monotonicMs: () => performance.now(), createId: prefix => `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`, sleep: async (milliseconds, signal) => { await new Promise<void>(resolve => { const timer = setTimeout(resolve, milliseconds); signal?.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true }); }); return !signal?.aborted; } }, recordAcceptedInputCommit: event => runtimeRecords.push({ phase: "accepted-input-commit", ...event }), recordRuntimeTerminalSettlement: event => runtimeRecords.push({ phase: "terminal-settlement", ...event }), runtimePolicy: thread => runtimeToolPolicyForThread(thread.identity.threadRole, thread.configuration.patches().map(patch => patch.contentJson), thread.configuration.installedBuiltinFamily()), runtimeModel: () => ({ providerId: "anthropic", modelId: "claude-opus-4-8" }) });
+    const capturingLayer = Layer.effect(ThreadLoop.Service, Effect.gen(function* () { const owned = yield* ThreadLoop.Service; return ThreadLoop.Service.of({ ...owned, run: (thread, custody) => { currentThread = thread; return owned.run(thread, custody).pipe(Effect.onExit(exit => Effect.sync(() => runtimeRecords.push(Exit.isFailure(exit) ? { phase: "core-run-failed", cause: Cause.pretty(exit.cause).slice(0, 160) } : { phase: "core-run-completed", result: exit.value })))); } }); }).pipe(Effect.provide(coreLayer)));
+    const { manager, scope, events, catalogs } = await buildManager(capturingLayer);
+    async function coldLoad() {
+        const loaded = await loader.loadThreadContext(controlState(input, "rin_actual_cold_load"));
+        const turnCheckpoint = extractThreadTurnCheckpoint({ messages: loaded.messages, facts: loaded.turnFacts });
+        const turnToolRouteView = extractColdThreadToolRouteView({ checkpoint: turnCheckpoint, pendingToolUses: loaded.pendingToolUses ?? [], pendingSandboxExecutions: loaded.pendingSandboxExecutions ?? [] });
+        const response = await Effect.runPromise(manager.preloadThread({ ...controlState(input, "rin_actual_cold_load"), runtimeBindingToken: loaded.runtimeBindingToken, currentRequestMessage:loaded.currentRequestMessage,messages: loaded.messages, turnCheckpoint, turnToolRouteView, thread: loaded.thread, ...(loaded.runtimeConfigPatch === undefined ? {} : { runtimeConfigPatch: loaded.runtimeConfigPatch }), ...(loaded.mcpManifests === undefined ? {} : { mcpManifests: loaded.mcpManifests }) }));
+        if (!response.ok || !response.applied)
+            throw new Error("actual Bridge cold preload failed");
+        return { response, manifestGenerations: loaded.mcpManifests?.map(patch => ({ server: patch.mcpServerName, generation: patch.generation })) };
+    }
+    const cold = await coldLoad();
+    const request: ApplyRuntimeConfigRequest = { workspaceId: input.workspaceId, sessionId: input.sessionId, bindingId: mode.bindingId, bindingGeneration: 1, targetPodUid: mode.podUid, runtimeProcessId: mode.runtimeProcessId };
+    const service = runtimeControlService(request, manager);
+    const server = createRuntimeGrpcServer(service);
+    const port = await server.bind("127.0.0.1:0");
+    const control = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 0, fetch: async (incoming) => {
+            try {
+                const action = await incoming.json() as {
+                    kind: string;
+                    runtimeInputId?: string;
+                    inputOrder?: number;
+                    hold?: boolean;
+                };
+                if (action.kind === "observe")
+                    return Response.json({ cold, events, catalogNames: catalogs.map(catalog => catalog.entries.map(entry => entry.name)), catalogRoutes: currentThread === undefined ? [] : [runtimeToolPolicyForThread(currentThread.identity.threadRole, currentThread.configuration.patches().map(patch => patch.contentJson), currentThread.configuration.installedBuiltinFamily()).toolCatalog.entries.map(entry => ({ name: entry.name, route: entry.route }))], providerRequests, activeProviders, runtimeRecords, currentGeneration: currentThread?.configuration.manifestGeneration(mode.serverName) ?? events.findLast(event => event.mcpServerName === mode.serverName)?.currentGeneration });
+                if (action.kind === "start-provider") {
+                    holdProvider = action.hold === true;
+                    const result = await Effect.runPromise(manager.acceptInput({ ...addressState(input), runtimeInputId: action.runtimeInputId!, inputOrder: action.inputOrder!, kind: "messages", contentJson: JSON.stringify({ messages: [{ parts: [{ type: "text", text: "observe manifest catalog" }] }] }) }));
+                    return Response.json({ result });
+                }
+                if (action.kind === "release-provider") {
+                    holdProvider = false;
+                    releaseProvider();
+                    return Response.json({ released: true });
+                }
+                if (action.kind === "wait-idle") {
+                    const deadline = Date.now() + 5000;
+                    let snapshot;
+                    do {
+                        snapshot = await Effect.runPromise(manager.inspectThread(addressState(input)));
+                        if (snapshot.ok && snapshot.status === "idle")
+                            break;
+                        if (Date.now() >= deadline)
+                            return Response.json({ failed: true, snapshot: { status: snapshot.ok ? snapshot.status : "unavailable" }, runtimeRecords: runtimeRecords.slice(-8), activeProviders }, { status: 500 });
+                        await Bun.sleep(1);
+                    } while (true);
+                    return Response.json({ snapshot });
+                }
+                if (action.kind === "shutdown") {
+                    setTimeout(() => { void close(); }, 10);
+                    return Response.json({ shutdown: true });
+                }
+                throw new Error("unknown owned Runtime control action");
+            }
+            catch {
+                return Response.json({ failed: true }, { status: 500 });
+            }
+        } });
+    process.stdout.write(`${JSON.stringify({ runtimePort: port, controlAddress: control.url.origin, versions: { bun: Bun.version }, cold })}\n`);
+    let finish!: () => void;
+    const stopped = new Promise<void>(resolve => { finish = resolve; });
+    async function close() { holdProvider = false; releaseProvider(); await server.shutdown(); await Effect.runPromise(Scope.close(scope, Exit.void)); await Promise.all([writer.close(), loader.close()]); await control.stop(); finish(); }
+    await stopped;
 }

@@ -1,10 +1,11 @@
 /**
  * @packageDocumentation
  * Provides Runtime's session-event normalization and a generic retrying writer.
- * It guards envelope validation, stable write identity, bounded retry and timeout
+ * It guards envelope validation, stable write identity and bounded retry
  * behavior, ACK matching, and public session.error projection at durable emission.
- * Unit-level callers exercise the generic writer; the production BridgeAPI writer
- * reuses sessionEventForDurableWrite while owning its transport policy directly.
+ * The production reviewer failure host wraps the BridgeAPI writer here. The
+ * transport owns its parsed deadline and cancellation; an observer cannot join
+ * an arbitrary adapter by abandoning its raw promise.
  */
 import type {
 	RuntimeFailure,
@@ -51,7 +52,7 @@ export function createSessionEventWriter(
 				attempt <= SessionEventWriterRetryPolicy.attempts;
 				attempt += 1
 			) {
-				const result = await appendWithTimeout(options, envelope);
+				const result = await appendOnce(options, envelope);
 				if (result.ok) {
 					return result;
 				}
@@ -117,10 +118,10 @@ export function sessionEventForDurableWrite(
 // retry_status (publicRetryStatus): ThreadLoop stamps exhausted on RuntimeFailure
 // values when its retry lifecycle spends the budget; this mapper preserves that
 // stamp, recognizes real termination as terminal, and otherwise defaults to
-// retrying because it has no settlement-disposition input. Bridge-owned exhaustion
+// retrying because it has no settlement-disposition input. Job Runner exhaustion
 // paths emit their public errors independently.
-// UPDATE-WITH: services/bridge/runtime_pod_lost.go,
-//              services/bridge/runtime_termination.go
+// UPDATE-WITH: services/job-runner/runtime_pod_lost.go,
+//              internal/runtimecontrol/termination.go
 function publicSessionError(failure: RuntimeFailure): {
 	readonly type:
 		| "model_overloaded_error"
@@ -163,25 +164,6 @@ function publicRetryStatus(failure: RuntimeFailure): {
 	// Unstamped non-terminal failures reach this mapper only from in-run emissions.
 	// Idle-accompanying closeout paths stamp exhausted before they write.
 	return { type: "retrying" };
-}
-
-async function appendWithTimeout(
-	options: SessionEventWriterOptions,
-	envelope: SessionEventEnvelope,
-): Promise<SessionEventWriterAppendResult> {
-	return await Promise.race([
-		appendOnce(options, envelope),
-		options.sleep(SessionEventWriterRetryPolicy.timeoutPerAttemptMs).then(
-			(): SessionEventWriterAppendResult => ({
-				ok: false,
-				error: normalizeSessionEventWriterError({
-					code: "timeout",
-					sessionId: envelope.sessionId,
-					writeId: envelope.writeId,
-				}),
-			}),
-		),
-	]);
 }
 
 async function appendOnce(

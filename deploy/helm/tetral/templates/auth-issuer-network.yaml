@@ -1,0 +1,23 @@
+{{- if .Values.authIssuerNetwork.enabled }}
+# This permits transport destinations, not hostnames. The native Auth client
+# independently validates its imported issuer origin, CIDRs and CA trust.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: auth-issuer-https
+  namespace: tetral-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: auth
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+{{- toYaml .Values.authIssuerNetwork.peers | nindent 8 }}
+      ports:
+{{- range .Values.authIssuerNetwork.ports }}
+        - protocol: TCP
+          port: {{ . }}
+{{- end }}
+{{- end }}

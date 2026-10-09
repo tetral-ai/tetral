@@ -56,6 +56,19 @@ func observeProviderOutcome[T any](ctx context.Context, logger *slog.Logger, ope
 }
 
 func logProviderOutcomeCompletion[T any](ctx context.Context, logger *slog.Logger, operation string, identity providerOperationIdentity, duration time.Duration, outcome ProviderOutcome[T]) {
+	metricOutcome := "success"
+	if outcome.Failed() {
+		metricOutcome = "error"
+		if ctx.Err() == context.Canceled {
+			metricOutcome = "cancelled"
+		} else if ctx.Err() == context.DeadlineExceeded {
+			metricOutcome = "timeout"
+		}
+	}
+	if build, ok := any(outcome.Value).(sandbox.BuildArtifactResult); ok && build.State == sandbox.ArtifactBuildFailed {
+		metricOutcome = "error"
+	}
+	operationMetrics(ctx).Observe(operation, metricOutcome, duration)
 	if logger == nil {
 		return
 	}
@@ -100,6 +113,16 @@ func logProviderOutcomeCompletion[T any](ctx context.Context, logger *slog.Logge
 }
 
 func logProviderCompletion(ctx context.Context, logger *slog.Logger, operation string, identity providerOperationIdentity, duration time.Duration, err error) {
+	metricOutcome := "success"
+	if err != nil {
+		metricOutcome = "error"
+		if errors.Is(err, context.Canceled) {
+			metricOutcome = "cancelled"
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			metricOutcome = "timeout"
+		}
+	}
+	operationMetrics(ctx).Observe(operation, metricOutcome, duration)
 	if logger == nil {
 		return
 	}

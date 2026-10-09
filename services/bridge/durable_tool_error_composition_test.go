@@ -17,8 +17,10 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
@@ -32,7 +34,7 @@ func TestPostgreSQLInvalidToolRepairRunsFromRuntimeClassificationThroughProvider
 		bindingID = "bind_invalid_tool_production"
 		podUID    = "pod_invalid_tool_production"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_invalid_tool_production", "sevt_invalid_tool_production", 1)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
 		SET data_json='{"parts":[{"type":"text","text":"continue"}]}'
@@ -53,7 +55,8 @@ func TestPostgreSQLInvalidToolRepairRunsFromRuntimeClassificationThroughProvider
 
 	runtimeRepair := runRuntimeInvalidToolRepairComposition(t, listener.Addr().String(), map[string]any{
 		"workspaceId": "default", "sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID,
+		"threadRole": "main", "threadVisibility": "public",
+		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID,
 		"runtimeBindingToken": "fixture-binding-token",
 	})
 	if runtimeRepair.ResultType != "completed" || len(runtimeRepair.StoreOrder) != 1 ||
@@ -83,7 +86,7 @@ func TestPostgreSQLInvalidToolRepairRunsFromRuntimeClassificationThroughProvider
 	}
 
 	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+		Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
 	})
 	if err != nil {
 		t.Fatalf("cold-load invalid-tool repair: %v", err)
@@ -231,13 +234,13 @@ func runInvalidToolProviderWireComposition(t *testing.T, requests []json.RawMess
 
 func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_durable_error", "sthr_durable_error")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_durable_error", "sthr_durable_error")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_durable_error", "bind_durable_error", 1, "pod_durable_error")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("durable-error-test-signing-key")
 	client := startActorProductionBridge(t, runtimeDB)
-	scope := bridgeAPIScope("sesn_durable_error", "sthr_durable_error", "bind_durable_error", 1, "pod_durable_error")
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_durable_error_start", "mreq_durable_error", requestKindAgentProviderRequest, 0)
+	scope := sessionfixture.BridgeAPIScope("sesn_durable_error", "sthr_durable_error", "bind_durable_error", 1, "pod_durable_error")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_durable_error_start", "mreq_durable_error", runtimecontrol.RequestKindAgentProviderRequest, 0)
 
 	toolUse, err := client.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_durable_error_use", ModelRequestId: "mreq_durable_error",
@@ -273,7 +276,7 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 
 	adapter := runRuntimeDurableToolErrorDeclaration(t, map[string]any{
 		"workspaceId": "default", "sessionId": "sesn_durable_error", "sessionThreadId": "sthr_durable_error",
-		"bindingId": "bind_durable_error", "bindingGeneration": 1, "targetPodUid": "pod_durable_error",
+		"bindingId": "bind_durable_error", "bindingGeneration": 1, "targetPodUid": "pod_durable_error", "runtimeProcessId": "process_pod_durable_error",
 		"modelRequestId": "mreq_durable_error", "modelToolCallId": "call_durable_error",
 		"toolUseEventId": toolUse.GetCommitted().GetEventId(),
 	})
@@ -281,7 +284,7 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 		adapter.RuntimeSettlement.Type != "error" || adapter.ErrorJSON == "" {
 		t.Fatalf("ordinary missing-file Read adapter = %+v", adapter)
 	}
-	settlementRequest := bridgeToolSettlementRequestForTest(
+	settlementRequest := sessionfixture.BridgeToolSettlementRequestForTest(
 		scope,
 		&bridgev1.RuntimeToolSettlement{
 			ToolUseEventId: toolUse.GetCommitted().GetEventId(),
@@ -292,20 +295,20 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("settle durable Tool error: %v", err)
 	}
-	bridgeRequireToolSettlementOutcomeForTest(t, settled, "committed")
+	sessionfixture.BridgeRequireToolSettlementOutcomeForTest(t, settled, "committed")
 	replayed, err := client.SettleToolResult(context.Background(), settlementRequest)
 	if err != nil {
 		t.Fatalf("replay durable Tool error after lost acknowledgement: %v", err)
 	}
-	bridgeRequireToolSettlementOutcomeForTest(t, replayed, "duplicate")
+	sessionfixture.BridgeRequireToolSettlementOutcomeForTest(t, replayed, "duplicate")
 
 	var dataJSON string
-	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages
+	if err := admin.QueryRowContext(context.Background(), `SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m
 		WHERE workspace_id='default' AND session_id='sesn_durable_error'
 		  AND session_thread_id='sthr_durable_error' AND model_request_id='mreq_durable_error'`).Scan(&dataJSON); err != nil {
 		t.Fatalf("read durable Tool error context: %v", err)
 	}
-	parts, err := decodeStoredRuntimeContextParts(dataJSON)
+	parts, err := runtimecontrol.DecodeStoredRuntimeContextParts(dataJSON)
 	if err != nil || len(parts) != 3 {
 		t.Fatalf("durable Tool error context = %s err=%v", dataJSON, err)
 	}
@@ -340,11 +343,18 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode cold context: %v", err)
 	}
-	if payload.OpenRequestDraft != nil || len(payload.ContextEntries) != 1 || len(payload.ContextEntries[0].Parts) != 3 {
-		t.Fatalf("cold durable Tool context = entries=%#v draft=%#v", payload.ContextEntries, payload.OpenRequestDraft)
+	// End seals the selected Assistant; settling its Tool does not finish the
+	// durable turn. Until FinishIdle, the reference still names that same row.
+	wantMessageSequence := toolUse.GetCommitted().GetAssignedMessageSequence()
+	if payload.CurrentRequestMessage == nil ||
+		payload.CurrentRequestMessage.ModelRequestID != "mreq_durable_error" ||
+		payload.CurrentRequestMessage.AssistantMessageSequence != wantMessageSequence ||
+		len(payload.Messages) != 1 || payload.Messages[0].ContextKind != "assistant" ||
+		payload.Messages[0].MessageSequence != wantMessageSequence || len(payload.Messages[0].Parts) != 3 {
+		t.Fatalf("cold durable Tool context = entries=%#v currentRequestMessage=%#v; want sealed mreq_durable_error Assistant sequence %d", payload.Messages, payload.CurrentRequestMessage, wantMessageSequence)
 	}
-	if string(payload.ContextEntries[0].Parts[2]) != string(parts[2]) {
-		t.Fatalf("cold durable Tool result = %s; stored=%s", payload.ContextEntries[0].Parts[2], parts[2])
+	if string(payload.Messages[0].Parts[2]) != string(parts[2]) {
+		t.Fatalf("cold durable Tool result = %s; stored=%s", payload.Messages[0].Parts[2], parts[2])
 	}
 	assertRuntimeHotColdToolComposition(
 		t,
@@ -408,16 +418,16 @@ func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *te
 		truncationNotice = "\n\n[Tool output was truncated to fit the provider context limit.]"
 		finalText        = originalText + truncationNotice
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("durable-truncation-test-signing-key")
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_durable_truncation_start", modelRequestID, requestKindAgentProviderRequest, 0)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_durable_truncation_start", modelRequestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_durable_truncation_use", ModelRequestId: modelRequestID,
-		ToolDeclaration: bridgeToolDeclarationForTest(modelToolCallID, "Read", `{}`, "allow", "sandbox_execute"),
+		ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest(modelToolCallID, "Read", `{}`, "allow", "sandbox_execute"),
 	})
 	if err != nil || toolUse.GetCommitted() == nil {
 		t.Fatalf("write truncated Tool Use: response=%#v err=%v", toolUse, err)
@@ -445,7 +455,7 @@ func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *te
 		t.Fatalf("LoadContext pending truncated Tool: %v", err)
 	}
 
-	settled, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
+	settled, err := store.SettleToolResult(context.Background(), sessionfixture.BridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
 		ToolUseEventId: toolUse.GetCommitted().GetEventId(),
 		Outcome: &bridgev1.RuntimeToolSettlement_Completed{Completed: &bridgev1.RuntimeToolCompleted{
 			OutputJson: `{"text":"partial output\n\n[Tool output was truncated to fit the provider context limit.]","truncated":true}`,
@@ -456,7 +466,7 @@ func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *te
 	}
 
 	var dataJSON, projectionJSON string
-	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages
+	if err := admin.QueryRowContext(context.Background(), `SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m
 		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
 		sessionID, threadID, modelRequestID).Scan(&dataJSON); err != nil {
 		t.Fatalf("read durable truncated Tool context: %v", err)
@@ -466,7 +476,7 @@ func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *te
 		sessionID, threadID).Scan(&projectionJSON); err != nil {
 		t.Fatalf("read truncated Tool Event projection: %v", err)
 	}
-	parts, err := decodeStoredRuntimeContextParts(dataJSON)
+	parts, err := runtimecontrol.DecodeStoredRuntimeContextParts(dataJSON)
 	if err != nil || len(parts) != 2 {
 		t.Fatalf("durable truncated Tool context = %s err=%v", dataJSON, err)
 	}
@@ -499,8 +509,8 @@ func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *te
 	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode cold truncated Tool context: %v", err)
 	}
-	if len(payload.ContextEntries) != 1 || len(payload.ContextEntries[0].Parts) != 2 || string(payload.ContextEntries[0].Parts[1]) != string(parts[1]) {
-		t.Fatalf("cold truncated Tool result diverged: cold=%#v stored=%s", payload.ContextEntries, parts[1])
+	if len(payload.Messages) != 1 || len(payload.Messages[0].Parts) != 2 || string(payload.Messages[0].Parts[1]) != string(parts[1]) {
+		t.Fatalf("cold truncated Tool result diverged: cold=%#v stored=%s", payload.Messages, parts[1])
 	}
 	assertRuntimeHotColdToolComposition(
 		t,
@@ -521,15 +531,15 @@ func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t 
 		podUID         = "pod_durable_cancel"
 		modelRequestID = "mreq_durable_cancel"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("durable-cancellation-test-signing-key")
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_durable_cancel_start", modelRequestID, requestKindAgentProviderRequest, 0)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_durable_cancel_start", modelRequestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_durable_cancel_use", ModelRequestId: modelRequestID,
-		ToolDeclaration: bridgeToolDeclarationForTest("call_durable_cancel", "Read", `{}`, "allow", "sandbox_execute"),
+		ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest("call_durable_cancel", "Read", `{}`, "allow", "sandbox_execute"),
 	})
 	if err != nil || toolUse.GetCommitted() == nil {
 		t.Fatalf("write cancelled Tool Use: response=%#v err=%v", toolUse, err)
@@ -557,7 +567,7 @@ func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t 
 		t.Fatalf("LoadContext pending cancelled Tool: %v", err)
 	}
 	const cancellationError = `{"type":"runtime_shutdown","message":"internal cancellation detail","retryable":false}`
-	settled, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
+	settled, err := store.SettleToolResult(context.Background(), sessionfixture.BridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
 		ToolUseEventId: toolUse.GetCommitted().GetEventId(),
 		Outcome: &bridgev1.RuntimeToolSettlement_Cancelled{Cancelled: &bridgev1.RuntimeToolCancelled{
 			ErrorJson: bridgeString(cancellationError),
@@ -568,7 +578,7 @@ func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t 
 	}
 
 	var dataJSON, projectionJSON string
-	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages
+	if err := admin.QueryRowContext(context.Background(), `SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m
 		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
 		sessionID, threadID, modelRequestID).Scan(&dataJSON); err != nil {
 		t.Fatalf("read cancelled Tool context: %v", err)
@@ -578,7 +588,7 @@ func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t 
 		sessionID, threadID).Scan(&projectionJSON); err != nil {
 		t.Fatalf("read cancelled Tool projection: %v", err)
 	}
-	parts, err := decodeStoredRuntimeContextParts(dataJSON)
+	parts, err := runtimecontrol.DecodeStoredRuntimeContextParts(dataJSON)
 	if err != nil || len(parts) != 2 {
 		t.Fatalf("cancelled Tool context = %s err=%v", dataJSON, err)
 	}
@@ -599,8 +609,8 @@ func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t 
 		t.Fatalf("LoadContext cancelled Tool: %v", err)
 	}
 	var payload bridgeLoadContextPayload
-	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil || len(payload.ContextEntries) != 1 || len(payload.ContextEntries[0].Parts) != 2 || string(payload.ContextEntries[0].Parts[1]) != string(parts[1]) {
-		t.Fatalf("cold cancellation context diverged: entries=%#v err=%v", payload.ContextEntries, err)
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil || len(payload.Messages) != 1 || len(payload.Messages[0].Parts) != 2 || string(payload.Messages[0].Parts[1]) != string(parts[1]) {
+		t.Fatalf("cold cancellation context diverged: entries=%#v err=%v", payload.Messages, err)
 	}
 	assertRuntimeHotColdToolComposition(
 		t,
@@ -625,14 +635,14 @@ func TestPostgreSQLToolSettlementUsesDirectDurableToolAuthority(t *testing.T) {
 		threadID       = "sthr_direct_tool_authority"
 		modelRequestID = "mreq_direct_tool_authority"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_direct_tool_authority", 1, "pod_direct_tool_authority")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
-	scope := bridgeAPIScope(sessionID, threadID, "bind_direct_tool_authority", 1, "pod_direct_tool_authority")
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_direct_tool_start", modelRequestID, requestKindAgentProviderRequest, 0)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_direct_tool_authority", 1, "pod_direct_tool_authority")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_direct_tool_start", modelRequestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_direct_tool_use", ModelRequestId: modelRequestID,
-		ToolDeclaration: bridgeToolDeclarationForTest(
+		ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest(
 			"call_direct_tool_authority", "Read", `{"file_path":"/owned.txt"}`, "allow", "sandbox_execute",
 		),
 	})
@@ -640,14 +650,16 @@ func TestPostgreSQLToolSettlementUsesDirectDurableToolAuthority(t *testing.T) {
 		t.Fatalf("write direct Tool authority: %#v/%v", toolUse, err)
 	}
 	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_messages
-		    SET data_json=jsonb_set(data_json::jsonb,'{parts,0,toolName}','"non_authoritative"'::jsonb)::text
-		  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
+		`UPDATE session_message_parts part
+		    SET data_json=jsonb_set(part.data_json::jsonb,'{toolName}','"non_authoritative"'::jsonb)::text
+		   FROM session_messages m
+		  WHERE m.workspace_id='default' AND m.session_id=$1 AND m.session_thread_id=$2 AND m.model_request_id=$3
+		    AND part.workspace_id=m.workspace_id AND part.message_id=m.message_id AND part.part_index=0`,
 		sessionID, threadID, modelRequestID,
 	); err != nil {
 		t.Fatalf("mutate non-authoritative Assistant projection: %v", err)
 	}
-	settled, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
+	settled, err := store.SettleToolResult(context.Background(), sessionfixture.BridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
 		ToolUseEventId: toolUse.GetCommitted().GetEventId(),
 		Outcome: &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{
 			ErrorJson: `{"type":"provider_tool_protocol_error","message":"read failed","retryable":false}`,
@@ -775,7 +787,17 @@ type runtimeProviderComposition struct {
 }
 
 type runtimeColdContextComposition struct {
-	NextStep struct {
+	ColdProductionEntries               json.RawMessage `json:"coldProductionEntries"`
+	ColdProductionCurrentRequestMessage json.RawMessage `json:"coldProductionCurrentRequestMessage"`
+	ColdProductionActiveToolReferences  json.RawMessage `json:"coldProductionActiveToolReferences"`
+	ToolRouteView                       struct {
+		Routes []struct {
+			ToolUseEventID string `json:"toolUseEventId"`
+			Disposition    string `json:"disposition"`
+		} `json:"routes"`
+	} `json:"toolRouteView"`
+	ColdProductionPreloaded bool `json:"coldProductionPreloaded"`
+	NextStep                struct {
 		Action          string   `json:"action"`
 		ToolUseEventIDs []string `json:"toolUseEventIds"`
 	} `json:"nextStep"`
@@ -806,6 +828,9 @@ func runRuntimeColdContextComposition(t *testing.T, contextJSON string, composeP
 	var composed runtimeColdContextComposition
 	if err := json.Unmarshal(output, &composed); err != nil {
 		t.Fatalf("decode Runtime cold context composition: %v: %s", err, output)
+	}
+	if !composed.ColdProductionPreloaded {
+		t.Fatal("actual Runtime cold preload was not observed")
 	}
 	return composed
 }
@@ -1003,7 +1028,7 @@ func settleSandboxExecutionForHotReceiptProof(
 	resultJSON string,
 ) {
 	t.Helper()
-	seedReadySandboxForSharedToolExecution(t, adminDB, scope.GetWorkspaceId(), scope.GetSessionId())
+	sessionfixture.SeedReadySandboxForSharedToolExecution(t, adminDB, scope.GetWorkspaceId(), scope.GetSessionId())
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))
 	queueConnection := startBackgroundNotificationQueueServer(t, queueStore)
 	provider := &hotReceiptSandboxProvider{
@@ -1045,18 +1070,16 @@ func (p *hotReceiptSandboxProvider) ExecuteTool(context.Context, tetralsandbox.T
 	return tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution]{Value: sandboxdriver.ToolExecution{ResultJSON: p.resultJSON}}
 }
 
-var _ tetralsandbox.ProviderAdapter = (*hotReceiptSandboxProvider)(nil)
-
 func TestPostgreSQLBridgeRejectsNonDurableToolErrorBeforeMutation(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_reject_error", "sthr_reject_error")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_reject_error", "sthr_reject_error")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_reject_error", "bind_reject_error", 1, "pod_reject_error")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
-	scope := bridgeAPIScope("sesn_reject_error", "sthr_reject_error", "bind_reject_error", 1, "pod_reject_error")
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_reject_error_start", "mreq_reject_error", requestKindAgentProviderRequest, 0)
+	scope := sessionfixture.BridgeAPIScope("sesn_reject_error", "sthr_reject_error", "bind_reject_error", 1, "pod_reject_error")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_reject_error_start", "mreq_reject_error", runtimecontrol.RequestKindAgentProviderRequest, 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_reject_error_use", ModelRequestId: "mreq_reject_error",
-		ToolDeclaration: bridgeToolDeclarationForTest("call_reject_error", "Read", `{}`, "allow", "sandbox_execute"),
+		ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest("call_reject_error", "Read", `{}`, "allow", "sandbox_execute"),
 	})
 	if err != nil || toolUse.GetCommitted() == nil {
 		t.Fatalf("write Tool Use: response=%#v err=%v", toolUse, err)
@@ -1066,12 +1089,12 @@ func TestPostgreSQLBridgeRejectsNonDurableToolErrorBeforeMutation(t *testing.T) 
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id='sesn_reject_error'),
 		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id='sesn_reject_error'),
-		(SELECT data_json FROM session_messages WHERE workspace_id='default' AND session_id='sesn_reject_error'
+		(SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m WHERE workspace_id='default' AND session_id='sesn_reject_error'
 		  AND model_request_id='mreq_reject_error')`).Scan(&beforeEvents, &beforeOperations, &beforeContext); err != nil {
 		t.Fatalf("read pre-rejection state: %v", err)
 	}
 
-	_, err = store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
+	_, err = store.SettleToolResult(context.Background(), sessionfixture.BridgeToolSettlementRequestForTest(
 		scope,
 		&bridgev1.RuntimeToolSettlement{
 			ToolUseEventId: toolUse.GetCommitted().GetEventId(),
@@ -1088,7 +1111,7 @@ func TestPostgreSQLBridgeRejectsNonDurableToolErrorBeforeMutation(t *testing.T) 
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id='sesn_reject_error'),
 		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id='sesn_reject_error'),
-		(SELECT data_json FROM session_messages WHERE workspace_id='default' AND session_id='sesn_reject_error'
+		(SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m WHERE workspace_id='default' AND session_id='sesn_reject_error'
 		  AND model_request_id='mreq_reject_error')`).Scan(&afterEvents, &afterOperations, &afterContext); err != nil {
 		t.Fatalf("read post-rejection state: %v", err)
 	}
@@ -1105,17 +1128,17 @@ func TestPostgreSQLMultiToolOutOfOrderSettlementColdComposition(t *testing.T) {
 		bindingID = "bind_multi_tool_cold"
 		podUID    = "pod_multi_tool_cold"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_multi_start", "mreq_multi", requestKindAgentProviderRequest, 0)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_multi_start", "mreq_multi", runtimecontrol.RequestKindAgentProviderRequest, 0)
 	client := startActorProductionBridge(t, runtimeDB)
 	writeCall := func(writeID, callID, toolName string) *bridgev1.WriteEventResponse {
 		t.Helper()
 		response, err := client.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 			Scope: scope, RuntimeWriteId: writeID, ModelRequestId: "mreq_multi",
-			ToolDeclaration: bridgeToolDeclarationForTest(callID, toolName, `{}`, "allow", "sandbox_execute"),
+			ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest(callID, toolName, `{}`, "allow", "sandbox_execute"),
 		})
 		if err != nil || response.GetCommitted() == nil {
 			t.Fatalf("write %s: response=%#v err=%v", callID, response, err)
@@ -1146,12 +1169,12 @@ func TestPostgreSQLMultiToolOutOfOrderSettlementColdComposition(t *testing.T) {
 			t.Fatalf("LoadContext multi-Tool state: %v", err)
 		}
 		var payload bridgeLoadContextPayload
-		if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil || len(payload.ContextEntries) != 1 {
-			t.Fatalf("decode multi-Tool context: entries=%#v err=%v", payload.ContextEntries, err)
+		if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil || len(payload.Messages) != 1 {
+			t.Fatalf("decode multi-Tool context: entries=%#v err=%v", payload.Messages, err)
 		}
 		calls := make([]string, 0, 2)
 		results := make([]string, 0, 2)
-		for _, raw := range payload.ContextEntries[0].Parts {
+		for _, raw := range payload.Messages[0].Parts {
 			var part struct {
 				Type            string `json:"type"`
 				ModelToolCallID string `json:"modelToolCallId"`
@@ -1172,8 +1195,8 @@ func TestPostgreSQLMultiToolOutOfOrderSettlementColdComposition(t *testing.T) {
 	if !reflect.DeepEqual(calls, []string{"call_multi_a", "call_multi_b"}) || len(results) != 0 {
 		t.Fatalf("pending multi-Tool state calls/results = %v/%v", calls, results)
 	}
-	if settled, err := client.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
-		scope, bridgeCompletedToolSettlementForTest(callB.GetCommitted().GetEventId(), "B complete"),
+	if settled, err := client.SettleToolResult(context.Background(), sessionfixture.BridgeToolSettlementRequestForTest(
+		scope, sessionfixture.BridgeCompletedToolSettlementForTest(callB.GetCommitted().GetEventId(), "B complete"),
 	)); err != nil || settled.GetCommitted() == nil {
 		t.Fatalf("settle B first: response=%#v err=%v", settled, err)
 	}
@@ -1181,8 +1204,8 @@ func TestPostgreSQLMultiToolOutOfOrderSettlementColdComposition(t *testing.T) {
 	if !reflect.DeepEqual(results, []string{"call_multi_b"}) {
 		t.Fatalf("out-of-order intermediate results = %v; want only B", results)
 	}
-	if settled, err := client.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
-		scope, bridgeCompletedToolSettlementForTest(callA.GetCommitted().GetEventId(), "A complete"),
+	if settled, err := client.SettleToolResult(context.Background(), sessionfixture.BridgeToolSettlementRequestForTest(
+		scope, sessionfixture.BridgeCompletedToolSettlementForTest(callA.GetCommitted().GetEventId(), "A complete"),
 	)); err != nil || settled.GetCommitted() == nil {
 		t.Fatalf("settle A second: response=%#v err=%v", settled, err)
 	}

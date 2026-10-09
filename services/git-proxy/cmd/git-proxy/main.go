@@ -12,7 +12,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/workload"
 )
 
-var openDatabase = dbconnect.OpenPlainDSN
+var openDatabase = dbconnect.OpenProtectedDSN
 var verifySchema = func(ctx context.Context, client *dbconnect.Client) error { return client.VerifySchema(ctx) }
 var newEncryptor = vault.NewEncryptor
 var runGitProxy = gitproxy.Run
@@ -23,22 +23,30 @@ type osEnv struct{}
 func (osEnv) Getenv(key string) string { return os.Getenv(key) }
 
 func main() {
-	if err := run(context.Background(), osEnv{}); err != nil {
+	if err := workload.RunProcess(func(ctx context.Context) error { return run(ctx, osEnv{}) }); err != nil {
 		os.Exit(1)
 	}
 }
 
 func run(ctx context.Context, env gitproxy.Env) error {
-	logger := workload.NewLogger(os.Stderr, gitproxy.ServiceName, env.Getenv(gitproxy.EnvDeploymentEnvironment), env.Getenv(gitproxy.EnvServiceVersion))
+	diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(env.Getenv)
+	diagnosticOwner := workload.NewProcessLogger(os.Stderr, gitproxy.ServiceName, env.Getenv(gitproxy.EnvDeploymentEnvironment), env.Getenv(gitproxy.EnvServiceVersion), diagnostics)
+	defer diagnosticOwner.CloseWithBudget()
+	logger := diagnosticOwner.Logger
+	defer workload.InstallDefaultLogger(logger)()
+	if diagnosticErr != nil {
+		return workload.LogStartupFailure(logger, gitproxy.ServiceName, diagnosticErr)
+	}
 	cfg, err := gitproxy.ConfigFromEnv(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, gitproxy.ServiceName, err)
 	}
-	openResult, err := openDatabase(ctx, gitproxy.EnvDatabaseURL, cfg.DatabaseURL)
+	workload.ConfigureProcessShutdown(ctx, cfg.DrainGrace, diagnosticOwner)
+	openResult, err := openDatabase(ctx, cfg.DatabaseURL, env.Getenv("TETRAL_DATABASE_TLS_CA_PATH"), env.Getenv("TETRAL_DATABASE_TLS_SERVER_NAME"))
 	if err != nil {
 		return workload.LogStartupFailure(logger, gitproxy.ServiceName, err)
 	}
-	defer func() { _ = openResult.Client.Close() }()
+	defer workload.ProcessCleanup(ctx, func() { _ = openResult.Client.Close() })
 	if err := verifySchema(ctx, openResult.Client); err != nil {
 		return workload.LogStartupFailure(logger, gitproxy.ServiceName, err)
 	}

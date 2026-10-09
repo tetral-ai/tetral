@@ -27,8 +27,8 @@ func TestHelmChartDefaultAndTogglesMatchCanonicalManifests(t *testing.T) {
 	chart := filepath.Join(engineRoot, "deploy", "helm", "tetral")
 
 	canonical := readManifestObjects(t, canonicalManifestPaths(t, engineRoot))
-	if len(canonical) != 61 {
-		t.Fatalf("canonical object count = %d; want 61", len(canonical))
+	if len(canonical) != 109 {
+		t.Fatalf("canonical object count = %d; want 109 including two preview-client egress policies", len(canonical))
 	}
 
 	rendered := renderChart(t, helm, chart)
@@ -57,16 +57,19 @@ func TestHelmChartDefaultAndTogglesMatchCanonicalManifests(t *testing.T) {
 		}
 	}
 
-	withoutCilium := renderChart(t, helm, chart, "cilium.enabled=false")
-	requireCiliumToggleShape(t, withoutCilium, rendered, []string{
+	withCilium := renderChart(t, helm, chart, "cilium.enabled=true")
+	requireCiliumToggleShape(t, rendered, withCilium, []string{
 		"cilium.io/v2|CiliumNetworkPolicy|tetral-agent-runtime|agent-runtime-apiserver-egress",
 		"cilium.io/v2|CiliumNetworkPolicy|tetral-system|bridge-apiserver-egress",
-		"cilium.io/v2|CiliumNetworkPolicy|tetral-system|gateway-apiserver-egress",
+		"cilium.io/v2|CiliumNetworkPolicy|tetral-system|provider-gateway-apiserver-egress",
+		"cilium.io/v2|CiliumNetworkPolicy|tetral-system|mcp-connector-apiserver-egress",
+		"cilium.io/v2|CiliumNetworkPolicy|tetral-system|web-connector-apiserver-egress",
+		"cilium.io/v2|CiliumNetworkPolicy|tetral-system|job-runner-apiserver-egress",
 	})
 
 	withEdge := renderChart(t, helm, chart, "edge.enabled=true")
 	edge := readManifestObjects(t, []string{
-		filepath.Join(engineRoot, "deploy", "kubernetes", "edge-gateway", "ingress-nginx.yaml"),
+		filepath.Join(engineRoot, "deploy", "kubernetes", "edge-gateway", "envoy-gateway.yaml"),
 	})
 	var edgeKeys []string
 	for _, object := range edge {
@@ -126,7 +129,7 @@ func TestHelmChartEnvironmentBuildTimingReachesContainer(t *testing.T) {
 func TestHelmChartCiliumAPIServerPoliciesAreExact(t *testing.T) {
 	helm := requireHelm(t)
 	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
-	rendered := uniqueObjects(t, renderChart(t, helm, chart))
+	rendered := uniqueObjects(t, renderChart(t, helm, chart, "cilium.enabled=true"))
 
 	for _, policy := range []struct {
 		name      string
@@ -134,7 +137,10 @@ func TestHelmChartCiliumAPIServerPoliciesAreExact(t *testing.T) {
 	}{
 		{name: "agent-runtime", namespace: "tetral-agent-runtime"},
 		{name: "bridge", namespace: "tetral-system"},
-		{name: "gateway", namespace: "tetral-system"},
+		{name: "provider-gateway", namespace: "tetral-system"},
+		{name: "mcp-connector", namespace: "tetral-system"},
+		{name: "web-connector", namespace: "tetral-system"},
+		{name: "job-runner", namespace: "tetral-system"},
 	} {
 		key := "cilium.io/v2|CiliumNetworkPolicy|" + policy.namespace + "|" + policy.name + "-apiserver-egress"
 		got, ok := rendered[key]
@@ -182,7 +188,7 @@ func TestHelmChartCiliumAPIServerPoliciesAreExact(t *testing.T) {
 func TestHelmChartGitProxyCiliumDNSBranchesAreL7(t *testing.T) {
 	helm := requireHelm(t)
 	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
-	rendered := uniqueObjects(t, renderChart(t, helm, chart, "cilium.gitProxyFQDNPolicy=true"))
+	rendered := uniqueObjects(t, renderChart(t, helm, chart, "cilium.gitProxyFQDNPolicy=true", "cilium.enabled=true"))
 	key := "cilium.io/v2|CiliumNetworkPolicy|tetral-system|git-proxy-github-egress"
 	policy, ok := rendered[key]
 	if !ok {
@@ -228,8 +234,8 @@ func TestHelmChartGitProxyCiliumDNSBranchesAreL7(t *testing.T) {
 func TestHelmChartGitProxyFQDNPolicyIsMutuallyExclusive(t *testing.T) {
 	helm := requireHelm(t)
 	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
-	defaults := uniqueObjects(t, renderChart(t, helm, chart))
-	withFQDNPolicy := uniqueObjects(t, renderChart(t, helm, chart, "cilium.gitProxyFQDNPolicy=true"))
+	defaults := uniqueObjects(t, renderChart(t, helm, chart, "cilium.enabled=true"))
+	withFQDNPolicy := uniqueObjects(t, renderChart(t, helm, chart, "cilium.gitProxyFQDNPolicy=true", "cilium.enabled=true"))
 
 	const networkPolicyKey = "networking.k8s.io/v1|NetworkPolicy|tetral-system|git-proxy"
 	const ciliumPolicyKey = "cilium.io/v2|CiliumNetworkPolicy|tetral-system|git-proxy-github-egress"
@@ -355,20 +361,20 @@ func TestHelmChartNetworkPeersAreOverridable(t *testing.T) {
 	for needle, count := range defaults {
 		want := 0
 		if needle == "port: 443" {
-			want = 3
+			want = 6
 		}
 		if count != want {
 			t.Fatalf("default peer %q survived the override in %d policies", needle, count)
 		}
 	}
 	want := map[string]int{
-		"172.20.0.1/32":         3,
-		"10.7.0.0/16":           9,
+		"172.20.0.1/32":         6,
+		"10.7.0.0/16":           11,
 		"edge-override-fixture": 4,
-		"dns-override-fixture":  10,
-		"203.0.113.0/24":        5,
-		"port: 25060":           9,
-		"port: 8443":            5,
+		"dns-override-fixture":  13,
+		"203.0.113.0/24":        8,
+		"port: 25060":           11,
+		"port: 8443":            8,
 	}
 	for needle, expected := range want {
 		if overrides[needle] != expected {
@@ -376,7 +382,7 @@ func TestHelmChartNetworkPeersAreOverridable(t *testing.T) {
 		}
 	}
 
-	ciliumValues := append(append([]string(nil), overrideValues...), "cilium.gitProxyFQDNPolicy=true")
+	ciliumValues := append(append([]string(nil), overrideValues...), "cilium.gitProxyFQDNPolicy=true", "cilium.enabled=true")
 	ciliumRendered := uniqueObjects(t, renderChart(t, helm, chart, ciliumValues...))
 	const ciliumPolicyKey = "cilium.io/v2|CiliumNetworkPolicy|tetral-system|git-proxy-github-egress"
 	ciliumPolicy, ok := ciliumRendered[ciliumPolicyKey]
@@ -455,9 +461,7 @@ func TestHelmChartStringValuesRemainStringsForBooleanShapedOverrides(t *testing.
 		"bootstrapWorkspaceID=true",
 		"secrets.apiSecrets=true",
 		"secrets.tetralBlob=custom-blob",
-		"edge.enabled=true",
 		"gitProxyHost=true",
-		"edge.tlsSecretName=true",
 		"image.registry=registry.example/tetral",
 		"image.tag=false",
 	))
@@ -523,10 +527,10 @@ func TestHelmChartStringValuesRemainStringsForBooleanShapedOverrides(t *testing.
 		"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF",
 	)
 
-	gitProxy := rendered["networking.k8s.io/v1|Ingress|tetral-system|git-proxy"]
-	requireManifestPathString(t, gitProxy, "true", "spec", "tls", 0, "hosts", 0)
-	requireManifestPathString(t, gitProxy, "true", "spec", "tls", 0, "secretName")
-	requireManifestPathString(t, gitProxy, "true", "spec", "rules", 0, "host")
+	edge := uniqueObjects(t, renderChart(t, helm, chart, "edge.enabled=true", "edge.gitTLSSecretName=true"))
+	gateway := edge["gateway.networking.k8s.io/v1|Gateway|tetral-system|tetral-public-edge"]
+	requireManifestPathString(t, gateway, "true", "spec", "listeners", 2, "tls", "certificateRefs", 0, "name")
+
 }
 
 func TestHelmReleaseRenderSeparatesWorkloadDigestsFromDaytonaSnapshotName(t *testing.T) {
@@ -597,14 +601,20 @@ func TestHelmChartRenderedManifestsPassInvariantSuites(t *testing.T) {
 		t.Fatalf("create rendered manifest root: %v", err)
 	}
 	for _, name := range []string{
+		"internal-routing.yaml",
+		"internal-security.yaml",
+		"database-budget.yaml",
 		"agent-runtime.yaml",
 		"api.yaml",
 		"auth.yaml",
-		"bridge-rbac.yaml",
+		"job-runner-rbac.yaml",
 		"bridge.yaml",
 		"cleanup.yaml",
 		"event-stream.yaml",
-		"gateway.yaml",
+		"provider-gateway.yaml",
+		"mcp-connector.yaml",
+		"web-connector.yaml",
+		"job-runner.yaml",
 		"git-proxy.yaml",
 		"internal-grpc-tokenreview-rbac.yaml",
 		"queue.yaml",
@@ -615,16 +625,18 @@ func TestHelmChartRenderedManifestsPassInvariantSuites(t *testing.T) {
 	// namespaces.create=true is intentionally covered only by the object-diff
 	// test: Namespace is outside the invariant suite's closed kind and file set.
 	skip := exactTestPattern([]string{
-		"TestKubernetesEdgeGatewayIngressNginxExternalAuthBoundary",
+		"TestKubernetesEdgeGatewayEnvoyExternalAuthBoundary",
 		"TestKubernetesManifestQueueIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestTetralAPIIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestTetralAuthIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestEventStreamIsComposedFromServiceLocalManifests",
-		"TestKubernetesManifestGatewayServiceIsComposedFromServiceLocalManifests",
+		"TestKubernetesManifestGatewayWorkloadsAreComposedFromServiceLocalManifests",
+		"TestKubernetesManifestJobRunnerIsComposedFromServiceLocalManifests",
+		"TestKubernetesManifestWebConnectorIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestGitProxyIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestAgentRuntimePodIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestBridgeServiceIsComposedFromServiceLocalManifests",
-		"TestKubernetesManifestBridgeRBACIsComposedFromServiceLocalManifests",
+		"TestKubernetesManifestJobRunnerRBACIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestSandboxIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestCleanupIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestInternalGRPCTokenReviewRBACIsComposedFromServiceLocalManifests",
@@ -639,10 +651,10 @@ func TestHelmChartRenderedManifestsPassInvariantSuites(t *testing.T) {
 	if err := os.MkdirAll(edgeDir, 0o755); err != nil {
 		t.Fatalf("create edge manifest root: %v", err)
 	}
-	copyTestFile(t, filepath.Join(edgeOutput, "edge.yaml"), filepath.Join(edgeDir, "ingress-nginx.yaml"))
+	copyTestFile(t, filepath.Join(edgeOutput, "edge.yaml"), filepath.Join(edgeDir, "envoy-gateway.yaml"))
 	runGoTest(t, root, []string{
 		"TETRAL_KUBERNETES_MANIFEST_ROOT=" + edgeRoot,
-	}, "./deploy/kubernetes", "-run", "^TestKubernetesEdgeGatewayIngressNginxExternalAuthBoundary$")
+	}, "./deploy/kubernetes", "-run", "^TestKubernetesEdgeGatewayEnvoyExternalAuthBoundary$")
 
 	runGoTest(t, root, []string{
 		"TETRAL_SCHEMA_OWNERSHIP_TOP_MANIFESTS_ROOT=" + renderedRoot,
@@ -1028,5 +1040,61 @@ func runGoTest(t *testing.T, root string, environment []string, arguments ...str
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("go %s: %v\n%s", strings.Join(args, " "), err, output)
+	}
+}
+
+func TestHelmSeparatedWorkloadReplicaOverrides(t *testing.T) {
+	helm := requireHelm(t)
+	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
+	names := map[string]string{"bridge": "bridge", "jobRunner": "job-runner", "providerGateway": "provider-gateway", "mcpConnector": "mcp-connector", "webConnector": "web-connector"}
+	check := func(t *testing.T, values []string, want map[string]int, hpa bool) {
+		t.Helper()
+		objects := uniqueObjects(t, renderChart(t, helm, chart, values...))
+		for key, name := range names {
+			d := objects["apps/v1|Deployment|tetral-system|"+name]
+			spec := d["spec"].(map[string]any)
+			expected := 1
+			if want[key] != 0 {
+				expected = want[key]
+			}
+			if spec["replicas"] != expected {
+				t.Fatalf("%s replicas=%v; want%d", name, spec["replicas"], expected)
+			}
+		}
+		object, ok := objects["autoscaling/v2|HorizontalPodAutoscaler|tetral-system|provider-gateway"]
+		if ok != hpa {
+			t.Fatalf("provider HPA exists=%v; want%v", ok, hpa)
+		}
+		if hpa {
+			spec := object["spec"].(map[string]any)
+			if spec["minReplicas"] != 2 || spec["maxReplicas"] != 10 || spec["scaleTargetRef"].(map[string]any)["name"] != "provider-gateway" {
+				t.Fatalf("provider autoscaling changed: %v", spec)
+			}
+		}
+		for _, n := range []string{"bridge", "job-runner", "mcp-connector", "web-connector", "gateway"} {
+			if _, ok := objects["autoscaling/v2|HorizontalPodAutoscaler|tetral-system|"+n]; ok {
+				t.Fatalf("unexpected autoscaling owner%s", n)
+			}
+		}
+	}
+	t.Run("defaults", func(t *testing.T) { check(t, nil, nil, true) })
+	for _, key := range []string{"bridge", "jobRunner", "providerGateway", "mcpConnector", "webConnector"} {
+		t.Run(key, func(t *testing.T) {
+			check(t, []string{"autoscaling.providerGateway.enabled=false", "replicas." + key + "=3"}, map[string]int{key: 3}, false)
+		})
+	}
+	t.Run("simultaneous independent", func(t *testing.T) {
+		check(t, []string{"autoscaling.providerGateway.enabled=false", "replicas.bridge=2", "replicas.jobRunner=3", "replicas.providerGateway=4", "replicas.mcpConnector=5", "replicas.webConnector=6"}, map[string]int{"bridge": 2, "jobRunner": 3, "providerGateway": 4, "mcpConnector": 5, "webConnector": 6}, false)
+	})
+	t.Run("autoscaled provider keeps floor", func(t *testing.T) {
+		check(t, []string{"replicas.providerGateway=4"}, map[string]int{"providerGateway": 4}, true)
+	})
+	for _, value := range []string{"replicas.bridge=0", "replicas.jobRunner=-1", "replicas.providerGateway=1.5", "replicas.mcpConnector=true", "replicas.webConnector=none", "autoscaling.providerGateway.enabled=none"} {
+		t.Run(value, func(t *testing.T) {
+			cmd := exec.Command(helm, "template", "tetral", chart, "--set", value)
+			if output, err := cmd.CombinedOutput(); err == nil {
+				t.Fatalf("invalid replica or HPA control rendered: %s", output)
+			}
+		})
 	}
 }

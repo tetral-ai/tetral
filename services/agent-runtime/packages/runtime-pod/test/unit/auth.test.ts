@@ -33,8 +33,9 @@ describe("Runtime Pod gRPC auth", () => {
     }
   });
 
-  test("inbound TokenReview admits the closed seven-method Bridge command set and denies an eighth", async () => {
+  test("inbound TokenReview admits the closed Job Runner command set and denies every other owner", async () => {
     const allowedMethods = [
+ "/tetral.agent_runtime.v1.AgentRuntimePodService/RecoverThread",
       "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptInput",
       "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptAgentMail",
       "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptTaskNotification",
@@ -43,7 +44,7 @@ describe("Runtime Pod gRPC auth", () => {
       "/tetral.agent_runtime.v1.AgentRuntimePodService/ApplyRuntimeConfig",
       "/tetral.agent_runtime.v1.AgentRuntimePodService/CleanupSession",
     ] as const;
-    expect(allowedMethods).toHaveLength(7);
+    expect(allowedMethods).toHaveLength(8);
     for (const method of allowedMethods) {
       const client = new RecordingTokenReviewClient(validReview());
       const metadata = metadataWithAuthorization("bearer caller-token");
@@ -51,7 +52,7 @@ describe("Runtime Pod gRPC auth", () => {
         metadata,
         method,
         tokenReviewClient: client,
-        allowedBridge: allowedBridge(),
+        allowedJobRunner: allowedJobRunner(),
       });
       expect(result.ok, method).toBe(true);
       expect(client.token).toBe("caller-token");
@@ -62,7 +63,7 @@ describe("Runtime Pod gRPC auth", () => {
       metadata: metadataWithAuthorization("bearer caller-token"),
       method: "/tetral.agent_runtime.v1.AgentRuntimePodService/UnlistedEighthCommand",
       tokenReviewClient: new RecordingTokenReviewClient(validReview()),
-      allowedBridge: allowedBridge(),
+      allowedJobRunner: allowedJobRunner(),
     });
     expect(denied).toEqual({ ok: false, code: "PermissionDenied", message: "permission denied" });
   });
@@ -82,14 +83,16 @@ describe("Runtime Pod gRPC auth", () => {
       { name: "wrong audience", metadata: metadataWithAuthorization("bearer token"), review: { ...validReview(), audiences: ["other"] }, code: "Unauthenticated" as const },
       { name: "unauthenticated", metadata: metadataWithAuthorization("bearer token"), review: { ...validReview(), authenticated: false }, code: "Unauthenticated" as const },
       { name: "malformed username", metadata: metadataWithAuthorization("bearer token"), review: { ...validReview(), username: "engine/bridge" }, code: "Unauthenticated" as const },
-      { name: "not allowlisted", metadata: metadataWithAuthorization("bearer token"), review: { ...validReview(), username: "system:serviceaccount:engine:api" }, code: "PermissionDenied" as const },
-      { name: "caller metadata spoof ignored", metadata: metadataWithAuthorization("bearer token", "system:serviceaccount:engine:bridge"), review: { ...validReview(), username: "system:serviceaccount:engine:api" }, code: "PermissionDenied" as const },
+      { name:"Bridge retired control caller", metadata:metadataWithAuthorization("bearer token"),review:{...validReview(),username:"system:serviceaccount:engine:bridge"},code:"PermissionDenied" as const},
+ {name:"wrong namespace",metadata:metadataWithAuthorization("bearer token"),review:{...validReview(),username:"system:serviceaccount:other:job-runner"},code:"PermissionDenied" as const},
+ { name: "not allowlisted", metadata: metadataWithAuthorization("bearer token"), review: { ...validReview(), username: "system:serviceaccount:engine:api" }, code: "PermissionDenied" as const },
+      { name: "caller metadata spoof ignored", metadata: metadataWithAuthorization("bearer token", "system:serviceaccount:engine:job-runner"), review: { ...validReview(), username: "system:serviceaccount:engine:api" }, code: "PermissionDenied" as const },
     ]) {
       const result = await authenticateRuntimeCaller({
         metadata: scenario.metadata,
         method: "/tetral.agent_runtime.v1.AgentRuntimePodService/CleanupSession",
         tokenReviewClient: new RecordingTokenReviewClient(scenario.review, scenario.reviewError),
-        allowedBridge: allowedBridge(),
+        allowedJobRunner: allowedJobRunner(),
       });
       expect(result.ok, scenario.name).toBe(false);
       if (!result.ok) {
@@ -104,7 +107,7 @@ describe("Runtime Pod gRPC auth", () => {
   test("inbound TokenReview rejects before request handling side effects", async () => {
     const sideEffects = new SideEffectRecorder();
     const response = await authenticateAndHandle({
-      metadata: metadataWithAuthorization("bearer request-token", "system:serviceaccount:engine:bridge"),
+      metadata: metadataWithAuthorization("bearer request-token", "system:serviceaccount:engine:job-runner"),
       method: "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptInput",
       tokenReviewClient: new RecordingTokenReviewClient({ ...validReview(), username: "system:serviceaccount:engine:api" }),
       handler: () => {
@@ -137,7 +140,7 @@ describe("Runtime Pod gRPC auth", () => {
         status: {
           authenticated: true,
           audiences: ["tetral-internal-grpc"],
-          user: { username: "system:serviceaccount:engine:bridge" },
+          user: { username: "system:serviceaccount:engine:job-runner" },
         },
       }), { status: 201 });
       },
@@ -169,15 +172,15 @@ function metadataWithAuthorizationValues(values: string[]): Metadata {
   return metadata;
 }
 
-function allowedBridge() {
-  return { namespace: "engine", name: "bridge" };
+function allowedJobRunner() {
+  return { namespace: "engine", name: "job-runner" };
 }
 
 function validReview() {
   return {
     authenticated: true,
     audiences: ["tetral-internal-grpc"],
-    username: "system:serviceaccount:engine:bridge",
+    username: "system:serviceaccount:engine:job-runner",
   };
 }
 
@@ -191,7 +194,7 @@ async function authenticateAndHandle(input: {
     metadata: input.metadata,
     method: input.method,
     tokenReviewClient: input.tokenReviewClient,
-    allowedBridge: allowedBridge(),
+    allowedJobRunner: allowedJobRunner(),
   });
   if (!auth.ok) {
     return auth;

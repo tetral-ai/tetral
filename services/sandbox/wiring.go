@@ -67,7 +67,8 @@ func NewDaytonaAdapter(ctx context.Context, cfg Config, client *dbconnect.Client
 }
 
 func NewDaytonaFileResourceMaterializerFromConfig(ctx context.Context, cfg Config, runner driver.DaytonaCommandRunner, logger *slog.Logger) (*DaytonaFileResourceMaterializer, error) {
-	blobStore, err := blob.NewS3BlobStore(ctx, &blob.Config{
+	blobStore, err := blob.NewProtectedS3BlobStore(ctx, &blob.Config{
+		TLSCAPath: cfg.BlobTLSCAPath, TLSServerName: cfg.BlobTLSServerName,
 		Endpoint:  cfg.BlobEndpoint,
 		Region:    cfg.BlobRegion,
 		Bucket:    cfg.BlobBucket,
@@ -84,9 +85,10 @@ func NewDaytonaFileResourceMaterializerFromConfig(ctx context.Context, cfg Confi
 		ParentAPIToken:    cfg.R2ParentAPIToken,
 	})
 	if err != nil {
+		_ = blobStore.Close()
 		return nil, err
 	}
-	return NewDaytonaFileResourceMaterializer(DaytonaFileResourceMaterializerConfig{
+	materializer, err := NewDaytonaFileResourceMaterializer(DaytonaFileResourceMaterializerConfig{
 		Blob:                    blobStore,
 		CredentialMinter:        minter,
 		CommandRunner:           runner,
@@ -99,6 +101,11 @@ func NewDaytonaFileResourceMaterializerFromConfig(ctx context.Context, cfg Confi
 		RcloneVFSMinFree:        cfg.RcloneVFSMinFree,
 		Logger:                  logger,
 	})
+	if err != nil {
+		_ = blobStore.Close()
+		return nil, err
+	}
+	return materializer, nil
 }
 
 type ConfigError struct {

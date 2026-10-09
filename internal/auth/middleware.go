@@ -10,13 +10,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-// Principal is the public-safe authentication identity derived from a
-// raw API key. APIKeyID is the api_keys.id value, never the raw key.
-type Principal struct {
-	Workspace workspace.Workspace
-	APIKeyID  string
-}
-
 type principalContextKey struct{}
 
 // WithPrincipal attaches the authenticated principal to ctx.
@@ -31,41 +24,23 @@ func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 	return principal, ok
 }
 
-// Authenticator resolves a raw API key string to the public-safe
-// principal it belongs to. The middleware uses this interface so
-// production wiring (an APIKeyStore-backed implementation) and test
-// fakes share one shape. Authenticate must not log or echo rawKey.
+// Authenticator resolves a raw API key string to the public-safe principal it
+// belongs to for the raw x-api-key Middleware. That middleware is an in-process
+// test harness; production public services admit only the Auth-signed
+// principal through InternalPrincipalMiddleware. Authenticate must not log or
+// echo rawKey.
 type Authenticator interface {
 	Authenticate(ctx context.Context, rawKey string) (Principal, error)
 }
 
-// AuthenticatorFunc adapts a plain function to the Authenticator
-// interface. Useful for tests and for the static wrapper used by
-// the legacy NewRouter signature.
+// AuthenticatorFunc adapts a plain function, such as
+// AuthorityResolver.AuthenticateKey or a test fake, to the Authenticator
+// interface.
 type AuthenticatorFunc func(ctx context.Context, rawKey string) (Principal, error)
 
 // Authenticate calls f.
 func (f AuthenticatorFunc) Authenticate(ctx context.Context, rawKey string) (Principal, error) {
 	return f(ctx, rawKey)
-}
-
-// StoreAuthenticator wraps an APIKeyStore so its AuthenticateRawKey
-// method satisfies the Authenticator interface.
-type StoreAuthenticator struct {
-	Store *APIKeyStore
-}
-
-// Authenticate implements Authenticator using the API key store's
-// narrow auth-lookup transaction.
-func (a *StoreAuthenticator) Authenticate(ctx context.Context, rawKey string) (Principal, error) {
-	if a == nil || a.Store == nil {
-		return Principal{}, &AuthenticationError{Message: "authentication unavailable"}
-	}
-	result, err := a.Store.AuthenticateRawKey(ctx, rawKey)
-	if err != nil {
-		return Principal{}, err
-	}
-	return Principal{Workspace: result.Workspace, APIKeyID: result.APIKeyID}, nil
 }
 
 // requestIDFromContext is the reflective accessor used by the audit
@@ -76,11 +51,18 @@ type requestIDExtractor func(ctx context.Context) string
 // AuditEvent is the public-safe authentication outcome emitted to the HTTP
 // boundary logger. It intentionally carries no raw key material.
 type AuditEvent struct {
-	RequestID string
-	Method    string
-	Path      string
-	Result    string
-	ErrorType string
+	RequestID        string
+	Method           string
+	Path             string
+	Result           string
+	ErrorType        string
+	Stage            string
+	Operation        Operation
+	Code             string
+	IdentityKind     string
+	RuleRevision     int64
+	IdentityRevision int64
+	GrantRevision    int64
 }
 
 // AuditRecorder receives public-safe auth events.
@@ -88,16 +70,17 @@ type AuditRecorder interface {
 	RecordAuthEvent(context.Context, AuditEvent)
 }
 
-// Middleware constructs the HTTP middleware that authenticates
-// `x-api-key` and attaches the resolved workspace.Workspace to the
-// request context. The errorWriter parameter is supplied by the
-// httpapi package so the middleware uses the same centralized error
-// envelope as every other Engine handler. requestID extracts the
-// chi request id from context for the audit log line; pass a noop
+// Middleware constructs the raw-key HTTP harness that authenticates
+// `x-api-key` and attaches the resolved workspace.Workspace to the request
+// context. It is an in-process test harness; production public
+// services receive the Auth-signed principal instead. The errorWriter
+// parameter is supplied by the httpapi package so the middleware uses the same
+// centralized error envelope as every other Engine handler. requestID extracts
+// the chi request id from context for the audit log line; pass a noop
 // returning "" if the caller does not propagate request ids.
 //
-// Audit semantics: one log line per request, "auth=success",
-// "auth=failure", or "auth=error", with no raw key material.
+// Successful admission stays quiet. Failure/error events carry no raw key
+// material; the owning HTTP recorder uses the process logger suppression policy.
 // Credential failures return authentication_error responses; unexpected
 // authenticator/store failures keep their server-error semantics while
 // logging only a safe error type marker.
@@ -123,6 +106,9 @@ func MiddlewareWithAudit(authenticator Authenticator, errorWriter ErrorWriter, r
 				return
 			}
 			principal, err := authenticator.Authenticate(ctx, provided)
+			if err == nil {
+				err = principal.Validate()
+			}
 			if err != nil {
 				var authErr *AuthenticationError
 				if errors.As(err, &authErr) {

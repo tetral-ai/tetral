@@ -17,17 +17,25 @@ type osEnv struct{}
 func (osEnv) Getenv(key string) string { return os.Getenv(key) }
 
 func main() {
-	if err := run(context.Background(), osEnv{}); err != nil {
+	if err := workload.RunProcess(func(ctx context.Context) error { return run(ctx, osEnv{}) }); err != nil {
 		os.Exit(1)
 	}
 }
 
 func run(ctx context.Context, env webconnector.Env) error {
-	logger := workload.NewLogger(os.Stderr, webconnector.ServiceName, env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"))
+	diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(env.Getenv)
+	diagnosticOwner := workload.NewProcessLogger(os.Stderr, webconnector.ServiceName, env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"), diagnostics)
+	defer diagnosticOwner.CloseWithBudget()
+	logger := diagnosticOwner.Logger
+	defer workload.InstallDefaultLogger(logger)()
+	if diagnosticErr != nil {
+		return workload.LogStartupFailure(logger, webconnector.ServiceName, diagnosticErr)
+	}
 	cfg, err := webconnector.LoadConfig(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, webconnector.ServiceName, err)
 	}
+	workload.ConfigureProcessShutdown(ctx, cfg.DrainTimeout+cfg.CancelJoinTimeout, diagnosticOwner)
 	blobCfg, err := blob.LoadConfig()
 	if err != nil {
 		return workload.LogStartupFailure(logger, webconnector.ServiceName, err)
@@ -35,10 +43,11 @@ func run(ctx context.Context, env webconnector.Env) error {
 	if err = blobCfg.AssertProductionReady(); err != nil {
 		return workload.LogStartupFailure(logger, webconnector.ServiceName, err)
 	}
-	blobStore, err := blob.NewS3BlobStore(ctx, blobCfg)
+	blobStore, err := blob.NewProtectedS3BlobStore(ctx, blobCfg)
 	if err != nil {
 		return workload.LogStartupFailure(logger, webconnector.ServiceName, err)
 	}
+	defer workload.ProcessCleanup(ctx, func() { _ = blobStore.Close() })
 	authCfg, err := grpcauth.LoadConfig(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, webconnector.ServiceName, err)
@@ -53,6 +62,8 @@ func run(ctx context.Context, env webconnector.Env) error {
 	client := &http.Client{Transport: transport, Timeout: webconnector.BackendRequestTimeout}
 	metrics := webconnector.NewMetrics()
 	backend := webconnector.NewJinaBackend(client, cfg.SearchEndpoint, cfg.ReaderEndpoint, cfg.APIKeys, time.Now).WithMetrics(metrics).WithLogger(logger)
+	defer workload.ProcessCleanup(ctx, backend.Close)
+	defer transport.CloseIdleConnections()
 	service := webconnector.NewService(blobStore, backend, webconnector.NewBindingVerifier(cfg.BindingHMACKey, time.Now), metrics, time.Now, nil).WithLogger(logger)
 	return webconnector.Run(ctx, cfg, service, metrics, webconnector.RuntimeConfig{Authenticator: authenticator, Logger: logger})
 }

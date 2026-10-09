@@ -27,6 +27,7 @@ interface FixtureInput {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly modelRequestId: string;
 	readonly modelToolCallId: string;
 	readonly toolUseEventId: string;
@@ -39,9 +40,11 @@ if (inputPath === undefined) {
 }
 const input = JSON.parse(await readFile(inputPath, "utf8")) as FixtureInput;
 const bridgeClient = {
+	close: () => undefined,
 	awaitSandboxExecution: (
 		_request: unknown,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	) => {
 		callback(null, {
@@ -83,6 +86,7 @@ function request(
 		bindingGeneration: input.bindingGeneration,
 		runtimeBindingToken: "fixture-binding-token",
 		targetPodUid: input.targetPodUid,
+		runtimeProcessId: input.runtimeProcessId,
 		modelRequestId: input.modelRequestId,
 		modelToolCallId: input.modelToolCallId,
 		modelOrder: 0,
@@ -106,6 +110,7 @@ if (commandResult.type !== "error" || fileResult.type !== "error") {
 const settlement = runtimeToolSettlement(commandResult);
 let captured: SettleToolResultRequest | undefined;
 const eventWriterClient = {
+	close: () => undefined,
 	settleToolResult: (
 		request: SettleToolResultRequest,
 		_metadata: Metadata,
@@ -130,6 +135,7 @@ const attempt = await writer.settleToolResult({
 	bindingId: input.bindingId,
 	bindingGeneration: input.bindingGeneration,
 	targetPodUid: input.targetPodUid,
+	runtimeProcessId: input.runtimeProcessId,
 	settlement: { toolUseEventId: input.toolUseEventId, outcome: settlement },
 });
 if (
@@ -148,4 +154,4 @@ console.log(
 		declaredError: JSON.parse(captured.settlement.error.errorJson) as unknown,
 	}),
 );
-process.exit(0);
+await Promise.all([runner.close(), writer.close()]);

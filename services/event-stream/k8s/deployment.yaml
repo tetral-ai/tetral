@@ -10,6 +10,11 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: event-stream
@@ -23,6 +28,9 @@ spec:
     spec:
       serviceAccountName: event-stream
       automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: event-stream
           image: ghcr.io/tetral-ai/tetral:0.0.0-dev
@@ -30,21 +38,75 @@ spec:
           command:
             - /usr/local/bin/event-stream
           env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              value: "local"
+            - name: TETRAL_SERVICE_VERSION
+              value: "dev"
+            - name: TETRAL_DATABASE_TLS_CA_PATH
+              value: /var/run/tetral/store-trust/database-ca.crt
+            - name: TETRAL_DATABASE_TLS_SERVER_NAME
+              value: "tetral-postgres.tetral-system.svc.cluster.local"
+            - name: TETRAL_DB_MAX_OPEN_CONNS
+              value: "20"
+            - name: TETRAL_HTTP_TRANSPORT
+              value: "plaintext"
+            - name: TETRAL_NATS_SERVERS
+              value: "nats://tetral-nats.tetral-system.svc.cluster.local:4222"
+            - name: TETRAL_NATS_USER_PATH
+              value: /var/run/tetral/nats-role/user
+            - name: TETRAL_NATS_PASSWORD_PATH
+              value: /var/run/tetral/nats-role/password
+            - name: TETRAL_EVENT_STREAM_ACTIVE_REQUESTS
+              value: "32"
+            - name: TETRAL_EVENT_STREAM_HEARTBEAT_INTERVAL_MS
+              value: "1000"
+            - name: TETRAL_EVENT_STREAM_HUB_MAX_BYTES
+              value: "8388608"
+            - name: TETRAL_EVENT_STREAM_HUB_MAX_FRAMES
+              value: "2048"
+            - name: TETRAL_EVENT_STREAM_POLL_INTERVAL_MS
+              value: "1000"
+            - name: TETRAL_EVENT_STREAM_PREVIEW_SETUP_TIMEOUT_MS
+              value: "1000"
+            - name: TETRAL_EVENT_STREAM_SUBSCRIPTION_MAX_BYTES
+              value: "8388608"
+            - name: TETRAL_EVENT_STREAM_SUBSCRIPTION_MAX_FRAMES
+              value: "2048"
+            - name: TETRAL_EVENT_STREAM_VIEWER_MAX_BYTES
+              value: "262144"
+            - name: TETRAL_EVENT_STREAM_VIEWER_MAX_FRAMES
+              value: "128"
+            - name: TETRAL_EVENT_STREAM_WRITE_TIMEOUT_MS
+              value: "10000"
+            - name: TETRAL_NATS_CONNECT_TIMEOUT_MS
+              value: "1000"
+            - name: TETRAL_NATS_RECONNECT_WAIT_MS
+              value: "1000"
+            - name: TETRAL_NATS_PING_INTERVAL_MS
+              value: "120000"
+            - name: TETRAL_NATS_MAX_PING_OUT
+              value: "2"
             - name: TETRAL_EVENT_STREAM_HTTP_ADDR
               value: ":8080"
             - name: TETRAL_EVENT_STREAM_METRICS_ADDR
               value: ":8081"
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
             - name: TETRAL_EVENT_STREAM_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: tetral-event-stream-database
+                  name: "tetral-event-stream-database"
                   key: url
             - name: TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64
               valueFrom:
                 secretKeyRef:
-                  name: auth-internal-principal
+                  name: "auth-internal-principal"
                   key: public_key_b64
           ports:
             - name: http
@@ -54,20 +116,29 @@ spec:
           livenessProbe:
             httpGet:
               path: /health
-              port: http
+              port: metrics
           readinessProbe:
             httpGet:
               path: /ready
-              port: http
+              port: metrics
+          volumeMounts:
+
+            - name: nats-role
+              mountPath: /var/run/tetral/nats-role
+              readOnly: true
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
           resources:
-            requests:
-              cpu: 50m
-              memory: 128Mi
-              ephemeral-storage: 64Mi
+
             limits:
               cpu: 500m
-              memory: 512Mi
               ephemeral-storage: 512Mi
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              ephemeral-storage: 64Mi
+              memory: 128Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -75,3 +146,17 @@ spec:
             capabilities:
               drop:
                 - ALL
+      volumes:
+
+        - name: nats-role
+          secret:
+            secretName: "tetral-nats-subscriber"
+            defaultMode: 0440
+            items:
+              - key: user
+                path: user
+              - key: password
+                path: password
+        - name: store-trust
+          configMap:
+            name: "tetral-store-trust"

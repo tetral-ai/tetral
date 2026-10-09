@@ -14,7 +14,9 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -23,7 +25,7 @@ func TestWriteEventRejectionWithoutOptionalDeltaEmitsBoundedPhaseReason(t *testi
 	store := &PostgreSQLBridgeAPIStore{Logger: slog.New(slog.NewJSONHandler(&output, nil))}
 	operationID := strings.Repeat("x", 129)
 	_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope:          bridgeAPIScope("sesn_write_event_diagnostic", "thr_write_event_diagnostic", "bind_write_event_diagnostic", 1, "pod_write_event_diagnostic"),
+		Scope:          sessionfixture.BridgeAPIScope("sesn_write_event_diagnostic", "thr_write_event_diagnostic", "bind_write_event_diagnostic", 1, "pod_write_event_diagnostic"),
 		RuntimeWriteId: operationID,
 	})
 	if status.Code(err) != codes.InvalidArgument {
@@ -48,8 +50,8 @@ func TestPostgreSQLReviewerOutcomeWritesCommitDuringUnrelatedThreadInterrupt(t *
 		bindingID  = "bind_reviewer_outcome_barrier"
 		podUID     = "pod_reviewer_outcome_barrier"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, reviewerID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, reviewerID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
 		workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
@@ -63,7 +65,7 @@ func TestPostgreSQLReviewerOutcomeWritesCommitDuringUnrelatedThreadInterrupt(t *
 	for _, eventType := range []string{"approval_review.decision", "approval_review.failure"} {
 		writeID := "rwrite_reviewer_outcome_barrier_" + strings.TrimPrefix(eventType, "approval_review.")
 		response, err := server.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-			Scope: bridgeAPIScope(sessionID, reviewerID, bindingID, 1, podUID), RuntimeWriteId: writeID,
+			Scope: sessionfixture.BridgeAPIScope(sessionID, reviewerID, bindingID, 1, podUID), RuntimeWriteId: writeID,
 			ModelRequestId: "mreq_reviewer_outcome_barrier", EventType: eventType, PayloadJson: `{"type":"` + eventType + `"}`,
 		})
 		if err != nil || response.GetCommitted() == nil {
@@ -90,21 +92,21 @@ func TestWriteEventReturnsOperationSpecificDurableFacts(t *testing.T) {
 		bindingID = "bind_write_event_facts"
 		podUID    = "pod_write_event_facts"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	store.AttachmentBlobStore = blob.NewFakeBlobStore()
 	seedBridgeAPIFileAttachment(t, admin, store.AttachmentBlobStore, "file_start_facts", "start.png", "image/png", "start")
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "sevt_start_facts", 1, "user.message",
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_start_facts"}}]}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_start_facts", "messages",
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_start_facts", "messages",
 		`["sevt_start_facts"]`, "committed", bindingID, podUID, 1, 1)
 
 	startRequest := &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_start", ModelRequestId: "mreq_facts",
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
-		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: requestKindAgentProviderRequest,
+		ContextThroughMessageSequence: sessionfixture.BridgeAPIInt64(0), RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
 		ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{{SourceEventId: "sevt_start_facts", FileId: "file_start_facts"}},
 	}
 	first, err := store.WriteEvent(context.Background(), startRequest)
@@ -136,7 +138,7 @@ func TestWriteEventReturnsOperationSpecificDurableFacts(t *testing.T) {
 
 	message, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_message", ModelRequestId: "mreq_facts",
-		EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"hello"}]}`,
+		PreallocatedEventId: bridgeString("evt_00000000000000000000000000000004"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"hello"}]}`,
 		AssistantContextDelta: &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_Text{Text: &bridgev1.RuntimeContextText{Text: "hello"}}}}},
 	})
 	if err != nil {
@@ -146,7 +148,7 @@ func TestWriteEventReturnsOperationSpecificDurableFacts(t *testing.T) {
 		t.Fatalf("message result = %#v", message)
 	}
 	var stored string
-	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id='mreq_facts'`, sessionID, threadID).Scan(&stored); err != nil {
+	if err := admin.QueryRowContext(context.Background(), `SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id='mreq_facts'`, sessionID, threadID).Scan(&stored); err != nil {
 		t.Fatalf("load stored context: %v", err)
 	}
 	var durable map[string]any
@@ -166,7 +168,7 @@ func TestWriteEventAcceptsRuntimeSelectedRequestContextBoundary(t *testing.T) {
 		bindingID = "bind_request_context_boundary"
 		podUID    = "pod_request_context_boundary"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_messages (
 		workspace_id, session_id, session_thread_id, message_id, sequence, kind,
@@ -177,12 +179,12 @@ func TestWriteEventAcceptsRuntimeSelectedRequestContextBoundary(t *testing.T) {
 		t.Fatalf("seed request context boundary messages: %v", err)
 	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	beyondHistory := int64(3)
 	rejected, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_request_context_boundary_future", ModelRequestId: "mreq_request_context_boundary_future",
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
-		ContextThroughMessageSequence: &beyondHistory, RequestKind: requestKindAgentProviderRequest,
+		ContextThroughMessageSequence: &beyondHistory, RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
 	})
 	if rejected != nil || status.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "exceeds durable history") {
 		t.Fatalf("future request context boundary = %#v/%v; want InvalidArgument", rejected, err)
@@ -192,7 +194,7 @@ func TestWriteEventAcceptsRuntimeSelectedRequestContextBoundary(t *testing.T) {
 	accepted, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_request_context_boundary_selected", ModelRequestId: "mreq_request_context_boundary_selected",
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
-		ContextThroughMessageSequence: &selectedBoundary, RequestKind: requestKindAgentProviderRequest,
+		ContextThroughMessageSequence: &selectedBoundary, RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
 	})
 	if err != nil || accepted.GetCommitted() == nil {
 		t.Fatalf("Runtime-selected request context boundary = %#v/%v; want committed", accepted, err)
@@ -209,11 +211,11 @@ func TestPostgreSQLWriteEventUsesOneOperationNamespaceWithoutChangingChildLoweri
 		podUID    = "pod_write_event_namespace"
 		writeID   = "rwrite_write_event_namespace"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
-	scope := bridgeAPIScope(sessionID, childID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, childID, bindingID, 1, podUID)
 	request := &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: writeID, EventType: "session.status_running",
 		PayloadJson: `{"type":"session.status_running"}`,
@@ -271,13 +273,13 @@ func TestWriteEventRequestStartRequiresUniqueCommittedMessageAuthorityAndSingleC
 	}{
 		{name: "missing"},
 		{name: "uncommitted", seedInbox: func(t *testing.T, admin *sql.DB, sessionID, threadID, bindingID, podUID string) {
-			seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_attachment_uncommitted", "messages",
+			sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_attachment_uncommitted", "messages",
 				`["sevt_attachment_authority"]`, "accepted", bindingID, podUID, 1, 1)
 		}},
 		{name: "ambiguous", seedInbox: func(t *testing.T, admin *sql.DB, sessionID, threadID, bindingID, podUID string) {
-			seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_attachment_committed", "messages",
+			sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_attachment_committed", "messages",
 				`["sevt_attachment_authority"]`, "committed", bindingID, podUID, 1, 1)
-			seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_attachment_conflict", "rejection",
+			sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_attachment_conflict", "rejection",
 				`["sevt_attachment_authority"]`, "committed", bindingID, podUID, 1, 1)
 		}},
 	} {
@@ -287,7 +289,7 @@ func TestWriteEventRequestStartRequiresUniqueCommittedMessageAuthorityAndSingleC
 			const threadID = "thr_attachment_authority"
 			const bindingID = "bind_attachment_authority"
 			const podUID = "pod_attachment_authority"
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 			store.AttachmentBlobStore = blob.NewFakeBlobStore()
@@ -298,10 +300,10 @@ func TestWriteEventRequestStartRequiresUniqueCommittedMessageAuthorityAndSingleC
 				testCase.seedInbox(t, admin, sessionID, threadID, bindingID, podUID)
 			}
 			response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-				Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeWriteId: "rwrite_attachment_authority",
+				Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeWriteId: "rwrite_attachment_authority",
 				ModelRequestId: "mreq_attachment_authority", EventType: "span.model_request_start",
-				PayloadJson: `{"type":"span.model_request_start"}`, ContextThroughMessageSequence: bridgeAPIInt64(0),
-				RequestKind: requestKindAgentProviderRequest, ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{{
+				PayloadJson: `{"type":"span.model_request_start"}`, ContextThroughMessageSequence: sessionfixture.BridgeAPIInt64(0),
+				RequestKind: runtimecontrol.RequestKindAgentProviderRequest, ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{{
 					SourceEventId: "sevt_attachment_authority", FileId: "file_attachment_authority",
 				}},
 			})
@@ -316,21 +318,21 @@ func TestWriteEventRequestStartRequiresUniqueCommittedMessageAuthorityAndSingleC
 	const threadID = "thr_attachment_single_consumption"
 	const bindingID = "bind_attachment_single_consumption"
 	const podUID = "pod_attachment_single_consumption"
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.AttachmentBlobStore = blob.NewFakeBlobStore()
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	seedBridgeAPIFileAttachment(t, admin, store.AttachmentBlobStore, "file_attachment_once", "once.png", "image/png", "once")
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "sevt_attachment_once", 1, "user.message",
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_attachment_once"}}]}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_attachment_once", "messages",
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_attachment_once", "messages",
 		`["sevt_attachment_once"]`, "committed", bindingID, podUID, 1, 1)
 	pair := &bridgev1.FileAttachmentPair{SourceEventId: "sevt_attachment_once", FileId: "file_attachment_once"}
 	first := &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_attachment_once_first", ModelRequestId: "mreq_attachment_once_first",
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
-		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: requestKindAgentProviderRequest,
+		ContextThroughMessageSequence: sessionfixture.BridgeAPIInt64(0), RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
 		ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{pair},
 	}
 	committed, err := store.WriteEvent(context.Background(), first)
@@ -351,7 +353,7 @@ func TestWriteEventRequestStartRequiresUniqueCommittedMessageAuthorityAndSingleC
 	second, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_attachment_once_second", ModelRequestId: "mreq_attachment_once_second",
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
-		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: requestKindAgentProviderRequest,
+		ContextThroughMessageSequence: sessionfixture.BridgeAPIInt64(0), RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
 		ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{pair},
 	})
 	if status.Code(err) != codes.AlreadyExists || second != nil {
@@ -376,14 +378,14 @@ func TestWriteEventRequestStartConsumptionRollsBackEventAndRelationTogether(t *t
 		bindingID = "bind_start_consumption_rollback"
 		podUID    = "pod_start_consumption_rollback"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.AttachmentBlobStore = blob.NewFakeBlobStore()
 	seedBridgeAPIFileAttachment(t, admin, store.AttachmentBlobStore, "file_start_rollback", "rollback.png", "image/png", "rollback")
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "sevt_start_rollback", 1, "user.message",
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_start_rollback"}}]}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_start_rollback", "messages",
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_start_rollback", "messages",
 		`["sevt_start_rollback"]`, "committed", bindingID, podUID, 1, 1)
 	if _, err := admin.ExecContext(context.Background(), `CREATE FUNCTION fail_start_consumption() RETURNS trigger
 		LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected consumption failure'; END $$;
@@ -392,10 +394,10 @@ func TestWriteEventRequestStartConsumptionRollsBackEventAndRelationTogether(t *t
 		t.Fatalf("install atomic rollback fault: %v", err)
 	}
 	response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeWriteId: "rwrite_start_rollback",
+		Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeWriteId: "rwrite_start_rollback",
 		ModelRequestId: "mreq_start_rollback", EventType: "span.model_request_start",
-		PayloadJson: `{"type":"span.model_request_start"}`, ContextThroughMessageSequence: bridgeAPIInt64(0),
-		RequestKind:             requestKindAgentProviderRequest,
+		PayloadJson: `{"type":"span.model_request_start"}`, ContextThroughMessageSequence: sessionfixture.BridgeAPIInt64(0),
+		RequestKind:             runtimecontrol.RequestKindAgentProviderRequest,
 		ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{{SourceEventId: "sevt_start_rollback", FileId: "file_start_rollback"}},
 	})
 	if err == nil || response != nil {
@@ -417,7 +419,7 @@ func TestWriteEventRequestStartConsumptionRollsBackEventAndRelationTogether(t *t
 func TestWriteEventRejectsContextOnNonMemberEvent(t *testing.T) {
 	store := NewPostgreSQLBridgeAPIStore(nil)
 	_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope: bridgeAPIScope("sesn", "sthr", "bind", 1, "pod"), RuntimeWriteId: "rwrite", EventType: "session.status_running", PayloadJson: `{}`,
+		Scope: sessionfixture.BridgeAPIScope("sesn", "sthr", "bind", 1, "pod"), RuntimeWriteId: "rwrite", EventType: "session.status_running", PayloadJson: `{}`,
 		AssistantContextDelta: &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_Text{Text: &bridgev1.RuntimeContextText{Text: "invalid"}}}}},
 	})
 	if status.Code(err) != codes.InvalidArgument {
@@ -433,16 +435,16 @@ func TestWriteEventRejectsSecondOpenRequest(t *testing.T) {
 		bindingID = "bind_second_open_request"
 		podUID    = "pod_second_open_request"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_open_request_one", "mreq_open_request_one", requestKindAgentProviderRequest, 0)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_open_request_one", "mreq_open_request_one", runtimecontrol.RequestKindAgentProviderRequest, 0)
 
 	_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_open_request_two", ModelRequestId: "mreq_open_request_two",
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
-		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: requestKindAgentProviderRequest,
+		ContextThroughMessageSequence: sessionfixture.BridgeAPIInt64(0), RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
 	})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("second open request error = %v; want FailedPrecondition", err)
@@ -465,14 +467,14 @@ func TestWriteEventRejectsHistoricalModelToolCallIDReuse(t *testing.T) {
 		podUID          = "pod_historical_tool_call_id"
 		modelToolCallID = "call_history_global"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_history_first_start", "mreq_history_first", requestKindAgentProviderRequest, 0)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_history_first_start", "mreq_history_first", runtimecontrol.RequestKindAgentProviderRequest, 0)
 	first, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_history_first_tool", ModelRequestId: "mreq_history_first",
-		ToolDeclaration: bridgeToolDeclarationForTest(modelToolCallID, "apply_patch", `{}`, "ask", "sandbox_execute"),
+		ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest(modelToolCallID, "apply_patch", `{}`, "ask", "sandbox_execute"),
 	})
 	if err != nil || first.GetCommitted() == nil {
 		t.Fatalf("first Tool Call = %#v/%v", first, err)
@@ -487,17 +489,17 @@ func TestWriteEventRejectsHistoricalModelToolCallIDReuse(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seal first request: %v", err)
 	}
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_history_second_start", "mreq_history_second", requestKindAgentProviderRequest, 1)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_history_second_start", "mreq_history_second", runtimecontrol.RequestKindAgentProviderRequest, 1)
 
 	_, err = store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_history_second_tool", ModelRequestId: "mreq_history_second",
-		ToolDeclaration: bridgeToolDeclarationForTest(modelToolCallID, "apply_patch", `{}`, "ask", "sandbox_execute"),
+		ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest(modelToolCallID, "apply_patch", `{}`, "ask", "sandbox_execute"),
 	})
 	if status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("historical Tool Call reuse error = %v; want AlreadyExists", err)
 	}
 	var declarations int
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_messages AS message CROSS JOIN LATERAL jsonb_array_elements(message.data_json::jsonb -> 'parts') AS part WHERE message.workspace_id='default' AND message.session_id=$1 AND message.session_thread_id=$2 AND part ->> 'type'='tool_call' AND part ->> 'modelToolCallId'=$3`, sessionID, threadID, modelToolCallID).Scan(&declarations); err != nil {
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_message_parts AS part WHERE part.workspace_id='default' AND part.session_id=$1 AND part.session_thread_id=$2 AND part.part_kind='tool_call' AND part.model_tool_call_id=$3`, sessionID, threadID, modelToolCallID).Scan(&declarations); err != nil {
 		t.Fatalf("count Tool Call declarations: %v", err)
 	}
 	if declarations != 1 {

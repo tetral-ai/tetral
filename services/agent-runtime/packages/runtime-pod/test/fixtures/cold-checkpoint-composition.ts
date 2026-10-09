@@ -41,6 +41,7 @@ if (inputPath === undefined)
 const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly contextJson: string;
 	readonly providerComposition?: boolean;
+	readonly ownershipValidation?: boolean;
 	readonly pendingToolUses?: readonly unknown[];
 	readonly pendingSandboxExecutions?: readonly unknown[];
 	readonly hotScenario?: {
@@ -58,6 +59,7 @@ const command = {
 	bindingId: "composition_binding",
 	bindingGeneration: 1,
 	targetPodUid: "composition_pod",
+	runtimeProcessId: "process-test",
 };
 
 const loadContext = async (contextJson: string) => {
@@ -69,6 +71,7 @@ const loadContext = async (contextJson: string) => {
 			loadContext: (
 				_request: unknown,
 				_metadata: Metadata,
+				_options: unknown,
 				callback: (error: Error | null, response: unknown) => void,
 			) => {
 				callback(null, {
@@ -81,6 +84,47 @@ const loadContext = async (contextJson: string) => {
 	});
 	return await loader.loadThreadContext(command);
 };
+
+// Exercise schema and ownership rejection through the same installation owner
+// used by delivery. The default positive composition below keeps its existing
+// output; this opt-in response exposes only typed status and actual call counts.
+if (input.ownershipValidation === true) {
+	const calls = { inputs: 0, tools: 0, provider: 0 };
+	const hosts = await buildRuntimeCoreHosts({
+		maxLocalSessions: 1,
+		now: () => "2026-08-27T00:00:00.000Z",
+		contextLoader: {
+			loadThreadContext: async () => await loadContext(input.contextJson),
+			commitAcceptedInput: async () => {
+				calls.inputs += 1;
+				throw new Error("ownership preload must not commit accepted input");
+			},
+		},
+		threadLoop: productionRuntimeOptions({
+			runTool: async () => {
+				calls.tools += 1;
+				throw new Error("ownership preload must not execute a Tool");
+			},
+			stream: () => {
+				calls.provider += 1;
+				return Stream.empty;
+			},
+		}),
+	});
+	try {
+		const preload = await hosts.subAgentRunHost.preloadThread(command);
+		const snapshot = await hosts.subAgentRunHost.inspectThread(command);
+		if (!snapshot.ok) throw new Error("ownership validation inspection unavailable");
+		process.stdout.write(JSON.stringify({
+			preload,
+			observed: snapshot.observed,
+			calls,
+		}));
+	} finally {
+		await hosts.close();
+	}
+	process.exit(0);
+}
 
 const cold = await loadContext(input.contextJson);
 const coldHosts = await buildRuntimeCoreHosts({
@@ -100,6 +144,7 @@ const coldHosts = await buildRuntimeCoreHosts({
 	}),
 });
 let coldProductionEntries: readonly RuntimeContextEntry[];
+let coldProductionSnapshot: Extract<Awaited<ReturnType<typeof coldHosts.subAgentRunHost.inspectThread>>, { readonly ok: true }> | undefined;
 let coldProductionPreloaded = false;
 try {
 	const preload = await coldHosts.subAgentRunHost.preloadThread(command);
@@ -111,6 +156,7 @@ try {
 		throw new Error("cold production preload did not publish the resident Thread");
 	}
 	coldProductionPreloaded = true;
+	coldProductionSnapshot = snapshot;
 	coldProductionEntries = snapshot.entries;
 } finally {
 	await coldHosts.close();
@@ -119,7 +165,7 @@ const coldActiveInputView = {
 	hasPendingAttachments: (cold.pendingAttachments?.length ?? 0) > 0,
 };
 const checkpoint = extractThreadTurnCheckpoint({
-	contextEntries: cold.contextEntries,
+	messages: cold.messages,
 	facts: cold.turnFacts,
 });
 const toolRouteView = extractColdThreadToolRouteView({
@@ -145,7 +191,7 @@ if (input.hotScenario !== undefined) {
 	const scenario = input.hotScenario;
 	const base = await loadContext(scenario.baseContextJson);
 	const baseCheckpoint = extractThreadTurnCheckpoint({
-		contextEntries: base.contextEntries,
+		messages: base.messages,
 		facts: base.turnFacts,
 	});
 	const baseRoutes = extractColdThreadToolRouteView({
@@ -161,9 +207,9 @@ if (input.hotScenario !== undefined) {
 		throw new Error("Tool settlement hot receipt is incomplete");
 	}
 	const runtime = new ThreadRuntime("composition_session");
-	runtime.state.contextManager.replaceEntries(base.contextEntries);
-	runtime.state.contextManager.installOpenRequestDraft(base.openRequestDraft);
-	runtime.state.installThreadTurn(baseCheckpoint, baseRoutes);
+	runtime.state.contextManager.replaceMessages(base.messages);
+	runtime.state.installThreadCheckpoint(baseCheckpoint);
+	runtime.state.installCurrentRequestMessage(base.currentRequestMessage??undefined);
 	const providerRequests: LLMRequest[] = [];
 	const layer = runtimeThreadLoopLayer(
 		new QueuedContextLoader([], []),
@@ -172,9 +218,9 @@ if (input.hotScenario !== undefined) {
 			stream: (request) => {
 				providerRequests.push(request);
 				return Stream.fromIterable([
-					{ type: "text-start" as const, id: "composition-text" },
-					{ type: "text-delta" as const, id: "composition-text", text_delta: "done" },
-					{ type: "text-end" as const, id: "composition-text" },
+
+
+					{type:"text-complete" as const,providerPartId:"composition-text",eventId:"evt_d3fe1c00a9116fea3e6865ae1f59aaf9",text:("done")},
 					{ type: "finish" as const, finishReason: "stop" as const },
 				]);
 			},
@@ -189,8 +235,7 @@ if (input.hotScenario !== undefined) {
 				const installed = yield* threadLoop.installLoadedPendingToolUses(
 					runtime,
 					base.pendingToolUses ?? [],
-					base.contextEntries,
-					base.openRequestDraft,
+					base.messages,
 				);
 				if (!installed.ok) throw new Error("hot pending Tool installation failed");
 			}
@@ -198,11 +243,11 @@ if (input.hotScenario !== undefined) {
 				const installed = yield* threadLoop.installLoadedSandboxExecutions(
 					runtime,
 					base.pendingSandboxExecutions ?? [],
-					base.contextEntries,
-					base.openRequestDraft,
+					base.messages,
 				);
 				if (!installed.ok) throw new Error("hot Sandbox installation failed");
 			}
+			runtime.state.installThreadTurn(baseCheckpoint,baseRoutes);
 			return yield* threadLoop.run(runtime, testRunCustody());
 		}).pipe(Effect.provide(layer)),
 	);
@@ -236,6 +281,9 @@ if (input.hotScenario !== undefined) {
 process.stdout.write(
 	JSON.stringify({
 		coldProductionPreloaded,
+		coldProductionEntries,
+		coldProductionCurrentRequestMessage: coldProductionSnapshot?.currentRequestMessage ?? null,
+		coldProductionActiveToolReferences: coldProductionSnapshot?.activeToolReferences ?? null,
 		checkpoint,
 		toolRouteView,
 		nextStep: deriveThreadTurnSnapshot(
@@ -372,6 +420,8 @@ function composeProviderContext(
 		const assembled = assembleProviderCallRequest({
 			identity: {
 				...command,
+				threadRole: cold.thread?.role,
+				threadVisibility: cold.thread?.visibility,
 				runtimeBindingToken: "composition-binding-token",
 			},
 			requestId: "req_provider_composition",
@@ -387,7 +437,13 @@ function composeProviderContext(
 			throw new Error(
 				`Runtime ProviderRequest assembly failed for ${rules.providerId}/${rules.modelId}`,
 			);
-		const validation = validateProviderRequest(assembled.request);
+		// This pure lowering control has a synthetic ModelRequest identity. Real
+		// dispatch fills this field from its committed RequestStart ACK.
+		const providerRequest = {
+			...assembled.request,
+			modelRequestStartEventId: "evt_1000000000000000",
+		};
+		const validation = validateProviderRequest(providerRequest);
 		return {
 			providerId: rules.providerId,
 			modelId: rules.modelId,
@@ -395,8 +451,8 @@ function composeProviderContext(
 			validation,
 			...(validation.ok
 				? {
-						providerRequest: assembled.request,
-						loweredMessages: lowerProviderRequest(assembled.request, rules, {
+						providerRequest,
+						loweredMessages: lowerProviderRequest(providerRequest, rules, {
 							modelOutputTokenLimit: 32_000,
 						}).messages,
 					}

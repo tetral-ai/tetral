@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -48,14 +51,14 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 	if err != nil {
 		return nil, err
 	}
-	requestHash := bridgeRequestHash(string(requestJSON))
+	requestHash := runtimecontrol.RequestHash(string(requestJSON))
 	toolUseEventID := settlement.GetToolUseEventId()
 	now := s.now()
 	var outcome string
 	var stagedMCPResult stagedMCPResultIdentity
 	var stagedMCPResultUsed bool
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.settle_tool_result", func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
 		evidence.Kind = "authorization"
@@ -63,7 +66,8 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 			return err
 		}
 		evidence.Kind = "transaction"
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		proof, err := lockRuntimeReceiptScopeTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
 		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOpSettleToolResult, toolUseEventID); err != nil {
@@ -75,11 +79,14 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 			outcome = "duplicate"
 			return nil
 		}
-		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
+		if err := proof.requireCurrent(tx); err != nil {
+			return err
+		}
+		threadScope, err := runtimecontrol.LockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {
 			return err
 		}
-		evidence.ThreadRole = threadScope.role
+		evidence.ThreadRole = threadScope.Role
 
 		toolEventType, tool, err := loadDurableToolSettlementTargetTx(ctx, tx, request.GetScope(), toolUseEventID)
 		if err != nil {
@@ -104,7 +111,7 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 			return status.Error(codes.InvalidArgument, "server tool usage requires a web tool result")
 		}
 
-		projection, err := settleRuntimeToolPartTx(ctx, tx, request.GetScope(), tool.ModelRequestID, settlement, now)
+		projection, err := runtimecontrol.SettleRuntimeToolPartTx(ctx, tx, request.GetScope(), tool.ModelRequestID, settlement, now)
 		if err != nil {
 			if status.Code(err) == codes.AlreadyExists {
 				outcome = "stale"
@@ -117,34 +124,28 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 			return err
 		}
 		eventID := id.New("evt_")
-		sequence, err := nextSessionEventSequenceTx(ctx, tx, request.GetScope())
+		sequence, err := runtimecontrol.NextSessionEventSequenceTx(ctx, tx, request.GetScope())
 		if err != nil {
 			return err
 		}
-		visibility, sessionVisible := threadScope.publicProjection(resultEventType)
-		projectionJSON, err := marshalBridgeJSON(projection)
+		visibility, sessionVisible := threadScope.PublicProjection(resultEventType)
+		projectionJSON, err := runtimecontrol.MarshalJSON(projection)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO session_events (
-				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-				visibility, session_visible, runtime_write_id, model_request_id,
-				projection_json, created_at, updated_at, processed_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10, $11, $12, $12, $12)`,
-			request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(),
-			eventID, sequence, resultEventType, payloadJSON, visibility, sessionVisible, tool.ModelRequestID, projectionJSON, now,
-		); err != nil {
-			return err
+		if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+			WorkspaceID: request.GetScope().GetWorkspaceId(), SessionID: request.GetScope().GetSessionId(),
+			SessionThreadID: request.GetScope().GetSessionThreadId(), EventID: eventID, Sequence: sequence, Type: resultEventType,
+			PayloadJSON: payloadJSON, ProjectionJSON: projectionJSON, Visibility: visibility, SessionVisible: sessionVisible,
+			ModelRequestID: tool.ModelRequestID, ToolUseEventID: toolUseEventID, CreatedAt: now, ProcessedAt: &now,
+		}); err != nil {
+			return runtimecontrol.ToolRelationInsertError(err)
 		}
-		if _, err := appendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
-			return err
-		}
-		if err := applyToolEventBookkeepingTx(ctx, tx, request.GetScope(), eventID, resultEventType, payloadJSON, projection, now); err != nil {
+		if err := applyToolResultBookkeepingTx(ctx, tx, request.GetScope(), eventID, resultEventType, toolUseEventID, projection, now); err != nil {
 			return err
 		}
 		if resultEventType == "agent.mcp_tool_result" && settlement.GetCompleted() != nil {
-			stagedMCPResult, err = consumeStagedMCPResultTx(ctx, tx, request.GetScope(), resultEventType, payloadJSON, now)
+			stagedMCPResult, err = consumeStagedMCPResultTx(ctx, tx, request.GetScope(), resultEventType, toolUseEventID, now)
 			if err != nil {
 				return err
 			}
@@ -155,9 +156,9 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 				return err
 			}
 		}
-		if err := insertBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOperationInsert{
+		if err := runtimecontrol.InsertOperationTx(ctx, tx, request.GetScope(), runtimecontrol.OperationInsert{
 			Operation: bridgeOpSettleToolResult, SourceKind: bridgeOpSettleToolResult,
-			IdempotencyKey: toolUseEventID, RequestHash: requestHash, AckStatus: bridgeAckCommitted,
+			IdempotencyKey: toolUseEventID, RequestHash: requestHash, AckStatus: runtimecontrol.AckCommitted,
 			RuntimeWriteID: sql.NullString{}, ResultJSON: "{}", Now: now,
 		}); err != nil {
 			return err
@@ -165,7 +166,7 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 		outcome = "committed"
 		return nil
 	}); err != nil {
-		if isConversationMutationStaleError(err) {
+		if runtimecontrol.IsConversationMutationStaleError(err) {
 			return toolSettlementStaleResponse(), nil
 		}
 		return nil, err
@@ -197,11 +198,7 @@ func durableToolResultExistsTx(
 			SELECT 1 FROM session_events
 			 WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
 			   AND type IN ('agent.tool_result','agent.mcp_tool_result')
-			   AND COALESCE(
-			         payload_json::jsonb ->> 'tool_use_event_id',
-			         payload_json::jsonb ->> 'tool_use_id',
-			         payload_json::jsonb ->> 'mcp_tool_use_id'
-			       ) = $4
+			   AND tool_use_event_id = $4
 		)`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
 	).Scan(&exists)
@@ -231,7 +228,7 @@ func loadDurableToolSettlementTargetTx(
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	toolUseEventID string,
-) (string, durableToolExecution, error) {
+) (string, runtimecontrol.DurableToolExecution, error) {
 	var eventType string
 	if err := tx.QueryRow(ctx,
 		`SELECT type FROM session_events
@@ -240,11 +237,11 @@ func loadDurableToolSettlementTargetTx(
 		  FOR UPDATE`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
 	).Scan(&eventType); dbconnect.IsNoRows(err) {
-		return "", durableToolExecution{}, status.Error(codes.FailedPrecondition, "durable Tool settlement target is missing")
+		return "", runtimecontrol.DurableToolExecution{}, status.Error(codes.FailedPrecondition, "durable Tool settlement target is missing")
 	} else if err != nil {
-		return "", durableToolExecution{}, err
+		return "", runtimecontrol.DurableToolExecution{}, err
 	}
-	tool, err := loadDurableToolExecutionTx(ctx, tx, scope, toolUseEventID, eventType, false)
+	tool, err := runtimecontrol.LoadDurableToolExecutionTx(ctx, tx, scope, toolUseEventID, eventType, false)
 	return eventType, tool, err
 }
 
@@ -257,15 +254,15 @@ func durableToolResultPayloadJSON(eventType string, toolUseEventID string, settl
 	}
 	switch outcome := settlement.GetOutcome().(type) {
 	case *bridgev1.RuntimeToolSettlement_Completed:
-		decoded, err := decodeRuntimeDeclarationValue(outcome.Completed.GetOutputJson())
+		decoded, err := runtimecontrol.DecodeRuntimeDeclarationValue(outcome.Completed.GetOutputJson())
 		output, ok := decoded.(map[string]any)
-		if err != nil || !ok || validateRuntimeBoundedText(output) != nil {
+		if err != nil || !ok || runtimecontrol.ValidateRuntimeBoundedText(output) != nil {
 			return "", status.Error(codes.InvalidArgument, "Tool completion output is invalid")
 		}
 		text, _ := output["text"].(string)
 		payload["content"] = []map[string]string{{"type": "text", "text": text}}
 	case *bridgev1.RuntimeToolSettlement_Error:
-		declaredError, err := decodeRuntimeToolErrorJSON(outcome.Error.GetErrorJson())
+		declaredError, err := runtimecontrol.DecodeRuntimeToolErrorJSON(outcome.Error.GetErrorJson())
 		if err != nil {
 			return "", status.Error(codes.InvalidArgument, "Tool error is invalid")
 		}

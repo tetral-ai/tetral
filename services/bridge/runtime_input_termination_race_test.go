@@ -2,28 +2,16 @@ package agentruntimebridge
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
-
-func TestPostgreSQLInputCommitAndRuntimeTerminationSerializeAtSessionBoundary(t *testing.T) {
-	for _, commitFirst := range []bool{true, false} {
-		name := "input_commit_first"
-		if !commitFirst {
-			name = "runtime_termination_first"
-		}
-		t.Run(name, func(t *testing.T) {
-			runInputCommitTerminationRace(t, commitFirst)
-		})
-	}
-}
 
 func TestPostgreSQLTaskNotificationCommitAndRuntimeTerminationSerializeAtSessionBoundary(t *testing.T) {
 	for _, notificationFirst := range []bool{true, false} {
@@ -50,12 +38,12 @@ func runTaskNotificationTerminationRace(t *testing.T, notificationFirst bool) {
 		turnID    = "rwrite_notification_termination_race"
 	)
 	now := time.Date(2026, 8, 12, 9, 0, 0, 0, time.UTC)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, taskID, "sevt_notification_termination_source")
 	storedResult := `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", storedResult)
-	seedBridgeAPITaskNotificationInbox(t, admin, "default", sessionID, threadID, inputID, bindingID, podUID)
+	sessionfixture.SeedBridgeAPITaskNotificationInbox(t, admin, "default", sessionID, threadID, inputID, bindingID, podUID)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	enqueue, err := queue.NewTaskNotificationRuntimeInputEnqueueRequest(workspace.DefaultID, sessionID, threadID, taskID, now)
 	if err != nil {
@@ -65,7 +53,7 @@ func runTaskNotificationTerminationRace(t *testing.T, notificationFirst bool) {
 	if err != nil {
 		t.Fatalf("enqueue task notification Queue custody: %v", err)
 	}
-	seedBridgeAPIOpenDurableTurn(t, admin, bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), turnID)
+	seedBridgeAPIOpenDurableTurn(t, admin, sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), turnID)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_status (
 		workspace_id,session_id,status,running_since,active_seconds_total,binding_id,binding_generation,created_at,updated_at
 	) VALUES ('default',$1,'running',$3,0,$2,1,$3,$3)`, sessionID, bindingID, now); err != nil {
@@ -73,8 +61,8 @@ func runTaskNotificationTerminationRace(t *testing.T, notificationFirst bool) {
 	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return now.Add(time.Second) }
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	notificationRequest := bridgeTaskNotificationRequestForTest(t, scope, inputID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	notificationRequest := sessionfixture.BridgeTaskNotificationRequestForTest(t, scope, inputID)
 	terminationRequest := &bridgev1.CommitRuntimeTerminationRequest{
 		Scope: scope, RuntimeWriteId: turnID,
 		FailureJson: `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`,
@@ -173,6 +161,18 @@ func runTaskNotificationTerminationRace(t *testing.T, notificationFirst bool) {
 	}
 }
 
+func TestPostgreSQLInputCommitAndRuntimeTerminationSerializeAtSessionBoundary(t *testing.T) {
+	for _, commitFirst := range []bool{true, false} {
+		name := "input_commit_first"
+		if !commitFirst {
+			name = "runtime_termination_first"
+		}
+		t.Run(name, func(t *testing.T) {
+			runInputCommitTerminationRace(t, commitFirst)
+		})
+	}
+}
+
 func runInputCommitTerminationRace(t *testing.T, commitFirst bool) {
 	t.Helper()
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -186,24 +186,18 @@ func runInputCommitTerminationRace(t *testing.T, commitFirst bool) {
 		turnID    = "rwrite_input_termination_race"
 	)
 	now := time.Date(2026, 8, 11, 11, 0, 0, 0, time.UTC)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message", `{"content":[{"type":"text","text":"race input"}]}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, inputID, "messages", `["evt_input_termination_race"]`, "accepted", bindingID, podUID, 1, 1)
-	seedBridgeAPIOpenDurableTurn(t, admin, bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), turnID)
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, inputID, "messages", `["evt_input_termination_race"]`, "accepted", bindingID, podUID, 1, 1)
+	seedBridgeAPIOpenDurableTurn(t, admin, sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), turnID)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_status (
 		workspace_id,session_id,status,running_since,active_seconds_total,binding_id,binding_generation,created_at,updated_at
 	) VALUES ('default',$1,'running',$3,0,$2,1,$3,$3)`, sessionID, bindingID, now); err != nil {
 		t.Fatalf("seed running Runtime status: %v", err)
 	}
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
-	request, err := lostRuntimeInputEnqueueRequest("default", sessionID, runtimePodLostAcceptedInput{
-		SessionThreadID: threadID, RuntimeInputID: inputID, InputKind: "messages", EventIDsJSON: `["` + eventID + `"]`,
-		SequenceFrom: sql.NullInt64{Int64: 1, Valid: true}, SequenceTo: sql.NullInt64{Int64: 1, Valid: true},
-	}, now)
-	if err != nil {
-		t.Fatalf("build accepted input Queue lineage: %v", err)
-	}
+	request := queue.EnqueueRequest{WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput, PartitionKey: queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID), DedupeKey: queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID), PayloadVersion: 1, PayloadJSON: []byte(`{"workspace_id":"default","session_id":"` + sessionID + `","session_thread_id":"` + threadID + `","runtime_input_id":"` + inputID + `","event_ids":["` + eventID + `"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`), Now: now}
 	queued, err := queueStore.Enqueue(context.Background(), request)
 	if err != nil {
 		t.Fatalf("enqueue accepted input Queue lineage: %v", err)
@@ -223,7 +217,7 @@ func runInputCommitTerminationRace(t *testing.T, commitFirst bool) {
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return now.Add(3 * time.Second) }
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	commitRequest := &bridgev1.CommitInputsRequest{
 		Scope: scope, RuntimeInputId: inputID,
 	}

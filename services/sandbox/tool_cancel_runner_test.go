@@ -248,9 +248,10 @@ func TestPostgreSQLConsumedCancellationRejectsEverySupersededWriter(t *testing.T
 				t.Fatalf("encode command reference: %v", err)
 			}
 			if _, err := adminDB.Exec(`INSERT INTO session_events (
-				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json, created_at, updated_at
+				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+				model_request_id, model_tool_call_id, created_at, updated_at
 			) VALUES ('ws_execution_store','sesn_execution_store','thr_execution_store',
-				'evt_consumed_cancel_result',1,'agent.tool_result','{}',$1,$1)`, now); err != nil {
+				'evt_consumed_cancel_result',1,'agent.tool_result','{}','mreq_consumed_cancel_result','call_consumed_cancel_result',$1,$1)`, now); err != nil {
 				t.Fatalf("seed consumed Tool Result: %v", err)
 			}
 			if _, err := adminDB.Exec(`UPDATE session_runtime_tool_results
@@ -427,8 +428,9 @@ func TestPostgreSQLToolCancellationClosesProviderCustodyAfterConversationConsump
 		t.Fatalf("encode command reference: %v", err)
 	}
 	if _, err := adminDB.Exec(`INSERT INTO session_events (
-		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json, created_at, updated_at
-	) VALUES ('ws_execution_store','sesn_execution_store','thr_execution_store','evt_cancel_terminal',1,'agent.tool_result','{}',$1,$1)`, now); err != nil {
+		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+		model_request_id, model_tool_call_id, created_at, updated_at
+	) VALUES ('ws_execution_store','sesn_execution_store','thr_execution_store','evt_cancel_terminal',1,'agent.tool_result','{}','mreq_cancel_terminal','call_cancel_terminal',$1,$1)`, now); err != nil {
 		t.Fatalf("seed conversation terminal event: %v", err)
 	}
 	if _, err := adminDB.Exec(`UPDATE session_runtime_tool_results

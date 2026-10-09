@@ -439,7 +439,7 @@ func TestSessionEventIngressUsesConfiguredBodyCapAndBatchLimit(t *testing.T) {
 		if rawKey != testAPIKey {
 			return auth.Principal{}, &auth.AuthenticationError{Message: "invalid api key"}
 		}
-		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}}, nil
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_session_event_fixture"), nil
 	})
 	handler := httpapi.NewSessionEventHandler(
 		service,
@@ -448,7 +448,7 @@ func TestSessionEventIngressUsesConfiguredBodyCapAndBatchLimit(t *testing.T) {
 			MaxEventsPerRequest: 1,
 		}),
 	)
-	router := httpapi.NewRouter(nil, "", httpapi.WithAuthenticator(authenticator), httpapi.WithSessionEventHandler(handler))
+	router := httpapi.NewRouter(httpapi.NewSessionHandler(&sessionEventHTTPFacts{}), "", httpapi.WithAuthenticator(authenticator), httpapi.WithSessionEventHandler(handler))
 
 	tooLarge := httptest.NewRequest(http.MethodPost, "/v1/sessions/sesn_http_configured/events?beta=true", strings.NewReader(`{"events":[{"type":"user.message","content":[{"type":"text","text":"`+strings.Repeat("x", 120)+`"}]}]}`))
 	tooLarge.Header.Set("x-api-key", testAPIKey)
@@ -476,12 +476,14 @@ func TestSessionEventIngressUsesConfiguredBodyCapAndBatchLimit(t *testing.T) {
 	}
 }
 
-func TestSessionEventIngressAllowsMissingIdempotencyKey(t *testing.T) {
+// An omitted header reaches admission as the explicit no-key value, never as a
+// minted key, so admission stores no receipt for it.
+func TestSessionEventIngressPassesMissingIdempotencyKeyAsNoKey(t *testing.T) {
 	service := &recordingSessionEventHTTPService{
-		result: testSessionEventHTTPResult("sevt_http_generated_idem", "sesn_generated_idem"),
+		result: testSessionEventHTTPResult("sevt_http_no_idem", "sesn_no_idem"),
 	}
 	router := newSessionEventHTTPRouter(service)
-	request := httptest.NewRequest(http.MethodPost, "/v1/sessions/sesn_generated_idem/events?beta=true", strings.NewReader(`{"events":[{"type":"user.interrupt"}]}`))
+	request := httptest.NewRequest(http.MethodPost, "/v1/sessions/sesn_no_idem/events?beta=true", strings.NewReader(`{"events":[{"type":"user.interrupt"}]}`))
 	request.Header.Set("x-api-key", testAPIKey)
 	recorder := httptest.NewRecorder()
 
@@ -493,8 +495,8 @@ func TestSessionEventIngressAllowsMissingIdempotencyKey(t *testing.T) {
 	if len(service.calls) != 1 {
 		t.Fatalf("service calls = %d; want 1", len(service.calls))
 	}
-	if !strings.HasPrefix(service.calls[0].idempotencyKey, "idem_") || service.calls[0].idempotencyKey == sessionEventHTTPIdempotencyKey {
-		t.Fatalf("generated idempotency key = %q; want internal idem_ key", service.calls[0].idempotencyKey)
+	if service.calls[0].idempotencyKey != sessionevent.NoIdempotencyKey {
+		t.Fatalf("idempotency key = %q; want the explicit no-key value", service.calls[0].idempotencyKey)
 	}
 }
 
@@ -632,12 +634,21 @@ func newSessionEventHTTPRouter(service *recordingSessionEventHTTPService) http.H
 		if rawKey != testAPIKey {
 			return auth.Principal{}, &auth.AuthenticationError{Message: "invalid api key"}
 		}
-		return auth.Principal{
-			Workspace: workspace.Workspace{ID: workspace.DefaultID, Type: "workspace", Name: "Default", CreatedAt: "2026-01-01T00:00:00Z"},
-			APIKeyID:  "ak_test",
-		}, nil
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID, Type: "workspace", Name: "Default", CreatedAt: "2026-01-01T00:00:00Z"}, "ak_test"), nil
 	})
-	return httpapi.NewRouter(nil, "", httpapi.WithAuthenticator(authenticator), httpapi.WithSessionEventHandler(httpapi.NewSessionEventHandler(service)))
+	return httpapi.NewRouter(httpapi.NewSessionHandler(&sessionEventHTTPFacts{}), "", httpapi.WithAuthenticator(authenticator), httpapi.WithSessionEventHandler(httpapi.NewSessionEventHandler(service)))
+}
+
+// The ingress fixture supplies an explicit trusted Session owner, just as the
+// production API wires its Session handler alongside event admission.
+type sessionEventHTTPFacts struct {
+	fakeSessionService
+	lookupCalls int
+}
+
+func (s *sessionEventHTTPFacts) LookupSession(_ context.Context, _ workspace.ID, sessionID string) (string, error) {
+	s.lookupCalls++
+	return sessionID, nil
 }
 
 type recordingSessionEventHTTPService struct {

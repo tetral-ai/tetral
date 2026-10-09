@@ -2,15 +2,11 @@ package tetralauth
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -23,11 +19,14 @@ import (
 const apiKeyBodyByteCap = 1 << 20
 
 type RouterConfig struct {
-	Store               *auth.APIKeyStore
-	Signer              *auth.InternalPrincipalSigner
-	PrincipalTTLSeconds int
-	Logger              *slog.Logger
-	RequestMetrics      httpapi.RequestMetricsRecorder
+	ExchangeLimits    ExchangeLimits
+	Resolver          *auth.AuthorityResolver
+	AssertionVerifier *auth.AssertionVerifier
+	exchangeLimiter   *exchangeLimiter
+	Store             *auth.APIKeyStore
+	Signer            *auth.InternalPrincipalSigner
+	Logger            *slog.Logger
+	RequestMetrics    httpapi.RequestMetricsRecorder
 }
 
 type apiKeyCreateRequest struct {
@@ -45,70 +44,31 @@ type apiKeyCursor struct {
 	Limit       int    `json:"limit"`
 }
 
-type authorizeResponse struct {
-	Allow bool `json:"allow"`
-}
-
 func NewRouter(cfg RouterConfig) http.Handler {
+	if cfg.ExchangeLimits == (ExchangeLimits{}) {
+		cfg.ExchangeLimits = DefaultExchangeLimits()
+	}
+	if err := cfg.ExchangeLimits.Validate(); err != nil {
+		panic(err)
+	}
+	cfg.exchangeLimiter = newExchangeLimiter(cfg.ExchangeLimits)
 	r := chi.NewRouter()
 	logger := cfg.Logger
 	if logger == nil {
-		logger = defaultRouterLogger(os.Stderr)
+		logger = workload.ComponentLogger("auth")
 	}
+	cfg.Logger = logger
 	r.Use(httpapi.RequestIDMiddleware)
 	r.Use(httpapi.RequestLogMiddleware(logger, httpapi.DefaultSlowRequestThreshold, httpapi.WithRequestLogMetrics(cfg.RequestMetrics)))
 	r.Use(httpapi.PublicRecoveryMiddleware(logger))
-	r.Post("/internal/auth/authorize", cfg.authorize)
+	r.Method(http.MethodPost, "/v1/oauth/token", &exchangeHandler{cfg: cfg})
 	r.Route("/v1", func(r chi.Router) {
-		r.Get("/api_keys", cfg.listAPIKeys)
-		r.Post("/api_keys", cfg.createAPIKey)
-		r.Delete("/api_keys/{api_key_id}", cfg.deleteAPIKey)
+		r.Use(cfg.signedPrincipalMiddleware)
+		r.Method(http.MethodGet, "/api_keys", httpapi.DeclarePublicOperation(http.MethodGet, "/v1/api_keys", cfg.listAPIKeys))
+		r.Method(http.MethodPost, "/api_keys", httpapi.DeclarePublicOperation(http.MethodPost, "/v1/api_keys", cfg.createAPIKey))
+		r.Method(http.MethodDelete, "/api_keys/{api_key_id}", httpapi.DeclarePublicOperation(http.MethodDelete, "/v1/api_keys/{api_key_id}", cfg.deleteAPIKey))
 	})
 	return r
-}
-
-func defaultRouterLogger(writer io.Writer) *slog.Logger {
-	return workload.NewLogger(writer, "auth", "", "")
-}
-
-func (cfg RouterConfig) authorize(w http.ResponseWriter, r *http.Request) {
-	if cfg.Store == nil || cfg.Signer == nil {
-		writeAuthError(w, r, &auth.AuthenticationError{Message: "authentication unavailable"})
-		return
-	}
-	rawKey := r.Header.Get("X-Api-Key")
-	originalMethod := r.Header.Get("X-Original-Method")
-	originalPath := r.Header.Get("X-Original-Path")
-	requestID := r.Header.Get("X-Request-Id")
-	forwardedFor := r.Header.Get("X-Forwarded-For")
-	if rawKey == "" {
-		writeAuthError(w, r, &auth.AuthenticationError{Message: "missing api key"})
-		return
-	}
-	if originalMethod == "" || originalPath == "" {
-		writeAuthError(w, r, &auth.ValidationError{Message: "original method and path are required"})
-		return
-	}
-	if requestID == "" || forwardedFor == "" {
-		writeAuthError(w, r, &auth.ValidationError{Message: "request id and forwarded-for are required"})
-		return
-	}
-	result, err := cfg.Store.AuthenticateRawKey(r.Context(), rawKey)
-	if err != nil {
-		writeAuthError(w, r, err)
-		return
-	}
-	if err := cfg.Store.TouchLastUsedForWorkspace(r.Context(), result.Workspace.ID, result.APIKeyID); err != nil {
-		writeAuthError(w, r, err)
-		return
-	}
-	token, err := cfg.Signer.MintWithRequestMetadata(auth.Principal{Workspace: result.Workspace, APIKeyID: result.APIKeyID}, originalMethod, originalPath, requestID, forwardedFor, principalTTL(cfg))
-	if err != nil {
-		writeAuthError(w, r, err)
-		return
-	}
-	w.Header().Set("X-Tetral-Internal-Principal", token)
-	writeAuthJSON(w, http.StatusOK, authorizeResponse{Allow: true})
 }
 
 func (cfg RouterConfig) createAPIKey(w http.ResponseWriter, r *http.Request) {
@@ -121,7 +81,11 @@ func (cfg RouterConfig) createAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, r, err)
 		return
 	}
-	result, err := cfg.Store.CreateForWorkspace(r.Context(), principal.Workspace.ID, req.Name)
+	if err := httpapi.AuthorizePublicRequest(r.Context(), auth.ResourceReference{WorkspaceID: principal.Workspace.ID, Type: "workspace"}); err != nil {
+		writeAuthError(w, r, err)
+		return
+	}
+	result, err := cfg.Store.CreateForPrincipal(r.Context(), principal, req.Name)
 	if err != nil {
 		writeAuthError(w, r, err)
 		return
@@ -147,6 +111,10 @@ func (cfg RouterConfig) listAPIKeys(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		afterID = cursor.AfterID
+	}
+	if err := httpapi.AuthorizePublicRequest(r.Context(), auth.ResourceReference{WorkspaceID: principal.Workspace.ID, Type: "workspace"}); err != nil {
+		writeAuthError(w, r, err)
+		return
 	}
 	keys, hasMore, err := cfg.Store.ListActiveForWorkspace(r.Context(), principal.Workspace.ID, limit, afterID, "")
 	if err != nil {
@@ -180,6 +148,15 @@ func (cfg RouterConfig) deleteAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, r, &auth.ValidationError{Message: "invalid api key id"})
 		return
 	}
+	metadata, err := cfg.Store.GetForWorkspace(r.Context(), principal.Workspace.ID, apiKeyID)
+	if err != nil {
+		writeAuthError(w, r, err)
+		return
+	}
+	if err := httpapi.AuthorizePublicRequest(r.Context(), auth.ResourceReference{WorkspaceID: principal.Workspace.ID, Type: "api_key", ID: metadata.ID}); err != nil {
+		writeAuthError(w, r, err)
+		return
+	}
 	if err := cfg.Store.RevokeForWorkspace(r.Context(), principal.Workspace.ID, apiKeyID); err != nil {
 		writeAuthError(w, r, err)
 		return
@@ -188,25 +165,32 @@ func (cfg RouterConfig) deleteAPIKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg RouterConfig) principalFromRequest(w http.ResponseWriter, r *http.Request) (auth.Principal, bool) {
+	if principal, ok := auth.PrincipalFromContext(r.Context()); ok {
+		return principal, true
+	}
+	principal, _, ok := cfg.verifyPrincipal(w, r)
+	return principal, ok
+}
+
+func (cfg RouterConfig) verifyPrincipal(w http.ResponseWriter, r *http.Request) (auth.Principal, auth.InternalPrincipalClaims, bool) {
 	if cfg.Store == nil || cfg.Signer == nil {
 		writeAuthError(w, r, &auth.AuthenticationError{Message: "authentication unavailable"})
-		return auth.Principal{}, false
+		return auth.Principal{}, auth.InternalPrincipalClaims{}, false
 	}
 	token := r.Header.Get("X-Tetral-Internal-Principal")
 	if token == "" {
-		writeAuthError(w, r, &auth.AuthenticationError{Message: "missing internal principal"})
-		return auth.Principal{}, false
-	}
-	principal, _, err := cfg.Signer.Verify(token, r.Method, r.URL.Path)
-	if err != nil {
+		err := &auth.AuthenticationError{Message: "missing internal principal"}
+		auth.RecordDecision(r.Context(), "signed_principal", err, auth.AuditEvent{})
 		writeAuthError(w, r, err)
-		return auth.Principal{}, false
+		return auth.Principal{}, auth.InternalPrincipalClaims{}, false
 	}
-	if principal.Workspace.ID == "" {
-		writeAuthError(w, r, workspace.ErrNoWorkspaceInContext)
-		return auth.Principal{}, false
+	principal, claims, err := cfg.Signer.Verify(token, r.Method, r.URL.Path)
+	if err != nil {
+		auth.RecordDecision(r.Context(), "signed_principal", err, auth.AuditEvent{})
+		writeAuthError(w, r, err)
+		return auth.Principal{}, auth.InternalPrincipalClaims{}, false
 	}
-	return principal, true
+	return principal, claims, true
 }
 
 func decodeStrictBody(w http.ResponseWriter, r *http.Request, target any) error {
@@ -220,14 +204,10 @@ func decodeStrictBody(w http.ResponseWriter, r *http.Request, target any) error 
 		}
 		return err
 	}
-	decoder := json.NewDecoder(bytes.NewReader(buffer.Bytes()))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return &auth.ValidationError{Message: "invalid request body: " + err.Error()}
+	if err := auth.DecodeStrictJSON(buffer.Bytes(), target); err != nil {
+		return &auth.ValidationError{Message: "invalid request body"}
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return &auth.ValidationError{Message: "request body must contain exactly one JSON value"}
-	}
+
 	return nil
 }
 
@@ -245,9 +225,20 @@ func parseLimit(raw string) int {
 	return limit
 }
 
-func principalTTL(cfg RouterConfig) time.Duration {
-	if cfg.PrincipalTTLSeconds <= 0 {
-		return 60 * time.Second
-	}
-	return time.Duration(cfg.PrincipalTTLSeconds) * time.Second
+func (cfg RouterConfig) signedPrincipalMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		principal, ok := auth.PrincipalFromContext(ctx)
+		if !ok {
+			var claims auth.InternalPrincipalClaims
+			principal, claims, ok = cfg.verifyPrincipal(w, r)
+			if !ok {
+				return
+			}
+			ctx = auth.WithVerifiedEdgeRequestID(ctx, claims)
+		}
+		ctx = auth.WithPrincipal(ctx, principal)
+		ctx = workspace.WithContext(ctx, principal.Workspace)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }

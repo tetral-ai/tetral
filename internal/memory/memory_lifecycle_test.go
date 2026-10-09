@@ -505,8 +505,8 @@ func seedMemoryStoreBySQL(t *testing.T, admin anySQL, storeID string) string {
 func seedMemoryAPIKey(t *testing.T, admin anySQL, apiKeyID string) {
 	t.Helper()
 	if _, err := admin.ExecContext(context.Background(),
-		`INSERT INTO api_keys (id, workspace_id, name, key_prefix, key_digest, key_kind, created_at)
-		 VALUES ($1, 'default', $1, $1, decode(md5($1), 'hex'), 'standard', '2026-01-01T00:00:00Z')
+		`INSERT INTO api_keys (id, workspace_id, name, key_prefix, key_digest, key_kind, authority_kind, created_at)
+		 VALUES ($1, 'default', $1, $1, decode(md5($1), 'hex'), 'standard', 'independent_key', '2026-01-01T00:00:00Z')
 		 ON CONFLICT (id) DO NOTHING`,
 		apiKeyID); err != nil {
 		t.Fatalf("seed api key %s: %v", apiKeyID, err)

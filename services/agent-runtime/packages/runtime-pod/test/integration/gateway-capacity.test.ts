@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   capacityProofHasRequiredHeadroom,
   runGatewayCapacityProof,
@@ -55,7 +56,7 @@ describe("Runtime-to-Gateway catalog capacity", () => {
   test("maps a large tool input after crossing the production Gateway transport", async () => {
     const events = await runLargeToolInputMappingProof();
     expect(events[0]).toMatchObject({
-      type: "tool-call",
+      type: "tool-call-complete",
       id: "call_large_memory_0",
       toolName: "memory",
       input: {
@@ -65,7 +66,7 @@ describe("Runtime-to-Gateway catalog capacity", () => {
       },
     });
     expect(events[1]).toMatchObject({
-      type: "tool-call",
+      type: "tool-call-complete",
       id: "call_large_memory_1",
       toolName: "memory",
       input: {
@@ -121,20 +122,31 @@ describe("Runtime-to-Gateway catalog capacity", () => {
   }, 30_000);
 
   test("replays recorded GLM reasoning text tool and terminal events through Gateway gRPC", async () => {
-    const events = await runRecordedGLMTransportProof();
+    const { events, normalizedCounts } = await runRecordedGLMTransportProof();
     const types = events.map((event) => event.type);
 
-    expect(types.filter((type) => type === "reasoning-start")).toHaveLength(1);
-    expect(types.filter((type) => type === "reasoning-delta")).toHaveLength(66);
-    expect(types.filter((type) => type === "reasoning-end")).toHaveLength(1);
-    expect(types.filter((type) => type === "text-start")).toHaveLength(1);
-    expect(types.filter((type) => type === "text-delta")).toHaveLength(1);
-    expect(types.filter((type) => type === "text-end")).toHaveLength(1);
-    expect(types.filter((type) => type === "tool-input-start")).toHaveLength(1);
-    expect(types.filter((type) => type === "tool-input-delta")).toHaveLength(1);
-    expect(types.filter((type) => type === "tool-input-end")).toHaveLength(1);
-    expect(events.find((event) => event.type === "tool-call")).toMatchObject({
-      type: "tool-call",
+    // Preserve the original SDK normalization counts at their Gateway-private owner.
+    expect(normalizedCounts["reasoning-start"]).toBe(1);
+    expect(normalizedCounts["reasoning-delta"]).toBe(66);
+    expect(normalizedCounts["reasoning-end"]).toBe(1);
+    expect(normalizedCounts["text-start"]).toBe(1);
+    expect(normalizedCounts["text-delta"]).toBe(1);
+    expect(normalizedCounts["text-end"]).toBe(1);
+    expect(normalizedCounts["tool-input-start"]).toBe(1);
+    expect(normalizedCounts["tool-input-delta"]).toBe(1);
+    expect(normalizedCounts["tool-input-end"]).toBe(1);
+    expect(types).toEqual(["thinking-started", "reasoning-complete", "tool-call-complete", "text-complete", "finish"]);
+    const reasoning = events.find(event => event.type === "reasoning-complete");
+    expect(reasoning?.type).toBe("reasoning-complete");
+    if (reasoning?.type !== "reasoning-complete") throw new Error("recorded reasoning missing");
+    // Independently derived from the literal66 reasoning_content SSE deltas using Python.
+    expect(Buffer.byteLength(reasoning.text, "utf8")).toBe(209);
+    expect(createHash("sha256").update(reasoning.text).digest("hex")).toBe("2433ebc0071a6fcfeb780ea1efd0b72b91bc5e1be63044b1fda3379bb9574a5a");
+    const started = events.find(event => event.type === "thinking-started");
+    expect(started?.type === "thinking-started" ? started.eventId : undefined).toBe(reasoning.thinkingEventId);
+    expect(events.find(event => event.type === "text-complete")).toMatchObject({ text: "ok" });
+    expect(events.find((event) => event.type === "tool-call-complete")).toMatchObject({
+      type: "tool-call-complete",
       toolName: "Search",
       input: { query: "tetral" },
     });

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -62,6 +63,11 @@ func TestTetralSandboxCommandStartsAllSandboxOwnedQueueRunners(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
 	}
+	assembly, err := os.ReadFile("worker_assembly.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source = append(source, assembly...)
 	required := []string{
 		"RunWorkspaceConsumerLoop",
 		"RunSandboxToolExecutionConsumerGroup",
@@ -107,6 +113,44 @@ func TestTetralSandboxCommandStartupFailureLogUsesSharedFields(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("startup log missing %s: %s", want, output)
 		}
+	}
+}
+
+// The Sandbox debug switch selects Debug regardless of TETRAL_LOG_LEVEL. The
+// process logger is installed as the default before the database opens, so the
+// stubbed open observes the level the whole process runs with.
+func TestTetralSandboxDebugSwitchSelectsDebugOverLogLevel(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		debug     string
+		wantDebug bool
+	}{
+		{name: "switch on", debug: "true", wantDebug: true},
+		{name: "switch off", debug: "false", wantDebug: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			previousOpen := openDatabase
+			t.Cleanup(func() { openDatabase = previousOpen })
+			opened := false
+			debugEnabled := false
+			openDatabase = func(ctx context.Context, _ string, _ string) (dbconnect.OpenResult, error) {
+				opened = true
+				debugEnabled = slog.Default().Enabled(ctx, slog.LevelDebug)
+				return dbconnect.OpenResult{}, errors.New("stop after process logger construction")
+			}
+			env := validSandboxSchemaEnv()
+			env["TETRAL_LOG_LEVEL"] = "error"
+			env[tetralsandbox.EnvSandboxDebugLogging] = test.debug
+			_, finish := captureStderr(t)
+			err := run(context.Background(), env)
+			finish()
+			if err == nil || !opened {
+				t.Fatalf("run error = %v, opened = %v; want the stubbed database failure", err, opened)
+			}
+			if debugEnabled != test.wantDebug {
+				t.Fatalf("process logger debug enabled = %v; want %v", debugEnabled, test.wantDebug)
+			}
+		})
 	}
 }
 

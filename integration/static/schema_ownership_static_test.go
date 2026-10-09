@@ -1,6 +1,9 @@
 package static_test
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,9 +20,23 @@ var yamlNamePattern = regexp.MustCompile(`^(\s*)- name: ([A-Za-z0-9_.-]+)\s*$`)
 
 func TestSchemaOwnershipManifestDiscoveryClassifiesEveryDatabaseContainer(t *testing.T) {
 	root := schemaOwnershipEngineRoot(t)
-	localFiles, err := filepath.Glob(filepath.Join(root, "services", "*", "k8s", "*.yaml"))
+	localDirectories, err := filepath.Glob(filepath.Join(root, "services", "*", "k8s"))
 	if err != nil {
-		t.Fatalf("glob service manifests: %v", err)
+		t.Fatalf("glob service manifest owners: %v", err)
+	}
+	var localFiles []string
+	for _, directory := range localDirectories {
+		if err := filepath.WalkDir(directory, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if !entry.IsDir() && strings.HasSuffix(path, ".yaml") {
+				localFiles = append(localFiles, path)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("walk service manifests under %s: %v", directory, err)
+		}
 	}
 	topRoot := filepath.Join(root, "deploy", "kubernetes")
 	if override := os.Getenv("TETRAL_SCHEMA_OWNERSHIP_TOP_MANIFESTS_ROOT"); override != "" {
@@ -30,20 +47,23 @@ func TestSchemaOwnershipManifestDiscoveryClassifiesEveryDatabaseContainer(t *tes
 		t.Fatalf("glob top-level manifests: %v", err)
 	}
 
+	// The census names every database-connected container; each one appears in
+	// TestSchemaOwnershipServingProcessesOnlyVerify, which proves from its
+	// startup source that it only verifies the schema and never migrates it.
 	local := discoverDatabaseContainers(t, localFiles)
 	top := discoverDatabaseContainers(t, topFiles)
 	want := []string{
-		"api=verify",
-		"auth=verify",
-		"bridge-api=verify",
-		"cleanup=verify",
-		"event-stream=verify",
-		"git-proxy=verify",
-		"job-runner=verify",
-		"mcp-connector=verify",
-		"provider-gateway=verify",
-		"queue=verify",
-		"sandbox=verify",
+		"api",
+		"auth",
+		"bridge-api",
+		"cleanup",
+		"event-stream",
+		"git-proxy",
+		"job-runner",
+		"mcp-connector",
+		"provider-gateway",
+		"queue",
+		"sandbox",
 	}
 	if strings.Join(local, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("service-local DB container census = %v, want %v", local, want)
@@ -65,7 +85,7 @@ func TestSchemaOwnershipServingProcessesOnlyVerify(t *testing.T) {
 		"queue":            {path: "services/queue/cmd/tetral-queue/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
 		"sandbox":          {path: "services/sandbox/cmd/tetral-sandbox/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
 		"bridge-api":       {path: "services/bridge/cmd/bridge-api/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
-		"job-runner":       {path: "services/bridge/cmd/job-runner/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
+		"job-runner":       {path: "services/job-runner/cmd/job-runner/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
 		"event-stream":     {path: "services/event-stream/cmd/event-stream/main.go", gate: ".VerifySchema(ctx)", roleGate: ".VerifyRuntimeRole(ctx)"},
 		"cleanup":          {path: "services/cleanup/cmd/tetral-cleanup/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
 		"git-proxy":        {path: "services/git-proxy/cmd/git-proxy/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
@@ -120,24 +140,62 @@ func TestSchemaOwnershipServingProcessesOnlyVerify(t *testing.T) {
 
 func TestSchemaOwnershipJobRunnerUsesProductionRuntimeDeliveryAssembly(t *testing.T) {
 	root := schemaOwnershipEngineRoot(t)
-	const path = "services/bridge/cmd/job-runner/main.go"
-	text := readSchemaOwnershipFile(t, filepath.Join(root, path))
-	for _, required := range []string{
-		"deliveryStore := agentruntimebridge.NewJobRunnerRuntimeDeliveryStore(",
-		"agentruntimebridge.JobRunner{",
-		"Deliverer: agentruntimebridge.RuntimePodDirectDeliverer{",
-		"Store: deliveryStore,",
-	} {
-		if !strings.Contains(text, required) {
-			t.Fatalf("job-runner startup missing production runtime-delivery wiring %q in %s", required, path)
-		}
+	const path = "services/job-runner/cmd/job-runner/main.go"
+	source := readSchemaOwnershipFile(t, filepath.Join(root, path))
+	file, err := parser.ParseFile(token.NewFileSet(), path, source, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The deliverer must be a field of the JobRunner literal, not a detached
-	// value: pin the ordering so the assignment itself is proven.
-	runnerAt := strings.Index(text, "agentruntimebridge.JobRunner{")
-	delivererAt := strings.Index(text, "Deliverer: agentruntimebridge.RuntimePodDirectDeliverer{")
-	if runnerAt >= delivererAt {
-		t.Fatalf("job-runner startup does not assign the deliverer inside the JobRunner literal in %s (JobRunner at %d, Deliverer at %d)", path, runnerAt, delivererAt)
+	selector := func(expr ast.Expr, name string) bool {
+		value, ok := expr.(*ast.SelectorExpr)
+		if !ok || value.Sel.Name != name {
+			return false
+		}
+		pkg, ok := value.X.(*ast.Ident)
+		return ok && pkg.Name == "jobrunner"
+	}
+	assembled, wired := false, false
+	ast.Inspect(file, func(node ast.Node) bool {
+		if assignment, ok := node.(*ast.AssignStmt); ok && len(assignment.Lhs) == 1 && len(assignment.Rhs) == 1 {
+			name, ok := assignment.Lhs[0].(*ast.Ident)
+			call, called := assignment.Rhs[0].(*ast.CallExpr)
+			if ok && called && name.Name == "deliveryStore" && selector(call.Fun, "NewJobRunnerRuntimeDeliveryStore") {
+				assembled = true
+			}
+		}
+		runner, ok := node.(*ast.CompositeLit)
+		if !ok || !selector(runner.Type, "JobRunner") {
+			return true
+		}
+		for _, element := range runner.Elts {
+			field, ok := element.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			key, ok := field.Key.(*ast.Ident)
+			if !ok || key.Name != "Deliverer" {
+				continue
+			}
+			deliverer, ok := field.Value.(*ast.CompositeLit)
+			if !ok || !selector(deliverer.Type, "RuntimePodDirectDeliverer") {
+				continue
+			}
+			for _, element := range deliverer.Elts {
+				field, ok := element.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				key, ok := field.Key.(*ast.Ident)
+				value, assigned := field.Value.(*ast.Ident)
+				if ok && assigned && key.Name == "Store" && value.Name == "deliveryStore" {
+					wired = true
+				}
+			}
+		}
+		return true
+	})
+	if !assembled || !wired {
+		t.Fatalf("job-runner must assemble deliveryStore with production constructor and assign it inside JobRunner.Deliverer.Store in %s (assembled=%t wired=%t)", path, assembled, wired)
 	}
 }
 
@@ -182,7 +240,7 @@ func TestSchemaOwnershipGatewayChecksumsMatchGoRegistry(t *testing.T) {
 
 func discoverDatabaseContainers(t *testing.T, files []string) []string {
 	t.Helper()
-	classified := map[string]string{}
+	discovered := map[string]bool{}
 	for _, path := range files {
 		text := readSchemaOwnershipFile(t, path)
 		lines := strings.Split(text, "\n")
@@ -205,39 +263,15 @@ func discoverDatabaseContainers(t *testing.T, files []string) []string {
 				(!databaseEnvironmentPattern.MatchString(block) && !databaseConfigurationSourcePattern.MatchString(block)) {
 				continue
 			}
-			mode := schemaModeFromContainerBlock(block)
-			if mode == "" {
-				t.Errorf("DB-connected container %s in %s has no literal TETRAL_SCHEMA_MODE", match[2], path)
-				mode = "<missing>"
-			}
-			if previous, duplicate := classified[match[2]]; duplicate && previous != mode {
-				t.Errorf("container %s mode drift: %s vs %s", match[2], previous, mode)
-			}
-			classified[match[2]] = mode
+			discovered[match[2]] = true
 		}
 	}
 	var result []string
-	for name, mode := range classified {
-		result = append(result, name+"="+mode)
+	for name := range discovered {
+		result = append(result, name)
 	}
 	sort.Strings(result)
 	return result
-}
-
-func schemaModeFromContainerBlock(block string) string {
-	lines := strings.Split(block, "\n")
-	for index, line := range lines {
-		if strings.TrimSpace(line) != "- name: TETRAL_SCHEMA_MODE" {
-			continue
-		}
-		for next := index + 1; next < len(lines) && next <= index+3; next++ {
-			trimmed := strings.TrimSpace(lines[next])
-			if strings.HasPrefix(trimmed, "value:") {
-				return strings.Trim(strings.TrimSpace(strings.TrimPrefix(trimmed, "value:")), `"'`)
-			}
-		}
-	}
-	return ""
 }
 
 func schemaOwnershipEngineRoot(t *testing.T) string {

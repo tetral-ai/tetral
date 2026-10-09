@@ -7,21 +7,21 @@ metadata:
     app.kubernetes.io/name: sandbox
     app.kubernetes.io/part-of: tetral
 data:
-  DAYTONA_API_URL: https://daytona.example.internal/api
-  DAYTONA_TARGET: us
+  DAYTONA_API_URL: "https://daytona.example.internal/api"
+  DAYTONA_TARGET: "us"
   # Environment artifact builds start FROM this image; it must be the same
   # sandbox image this release deploys, or every packages build fails at its
   # first Dockerfile line.
   TETRAL_SANDBOX_BASE_IMAGE: ghcr.io/tetral-ai/sandbox:0.0.0-dev
   TETRAL_QUEUE_GRPC_ADDR: queue.tetral-system.svc.cluster.local:9090
-  TETRAL_GIT_PROXY_HOST: git.tetral.example
+  TETRAL_GIT_PROXY_HOST: "git.tetral.example"
   TETRAL_SANDBOX_LEASE_HEARTBEAT_INTERVAL: 15s
   TETRAL_SANDBOX_JOB_LEASE_DURATION: 120s
   TETRAL_SANDBOX_PROVIDER_COMMAND_TIMEOUT: 45s
   TETRAL_SANDBOX_LATE_COMMAND_MARGIN: 30s
   TETRAL_SANDBOX_JOB_POLL_INTERVAL: 1s
-  TETRAL_SANDBOX_ENVIRONMENT_BUILD_WARN_AFTER: 10m
-  TETRAL_SANDBOX_ENVIRONMENT_BUILD_TIMEOUT: 30m
+  TETRAL_SANDBOX_ENVIRONMENT_BUILD_WARN_AFTER: "10m"
+  TETRAL_SANDBOX_ENVIRONMENT_BUILD_TIMEOUT: "30m"
   TETRAL_SANDBOX_DEBUG_LOGGING: "false"
   TETRAL_SANDBOX_ENVIRONMENT_BUILD_CONCURRENCY: "1"
   TETRAL_SANDBOX_ENVIRONMENT_READY_FANOUT_CONCURRENCY: "1"
@@ -30,10 +30,10 @@ data:
   TETRAL_SANDBOX_AUTO_STOP_INTERVAL: 30m
   TETRAL_SANDBOX_AUTO_ARCHIVE_INTERVAL: 24h
   TETRAL_SANDBOX_AUTO_DELETE_INTERVAL: 720h
-  TETRAL_BLOB_ENDPOINT: https://blob.example.internal
-  TETRAL_BLOB_REGION: local
-  TETRAL_BLOB_BUCKET: tetral-files
-  TETRAL_R2_ACCOUNT_ID: replace-me
+  TETRAL_BLOB_ENDPOINT: "https://blob.example.internal"
+  TETRAL_BLOB_REGION: "local"
+  TETRAL_BLOB_BUCKET: "tetral-files"
+  TETRAL_R2_ACCOUNT_ID: "replace-me"
   TETRAL_RESOURCE_CRED_TTL: 24h
   TETRAL_RESOURCE_CRED_REFRESH_MARGIN: 30m
   TETRAL_RCLONE_VFS_CACHE_MAX_SIZE: 2G
@@ -59,17 +59,29 @@ metadata:
     app.kubernetes.io/part-of: tetral
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: sandbox
   template:
     metadata:
+      annotations:
+        sidecar.istio.io/inject: "true"
+        sidecar.istio.io/nativeSidecar: "true"
+        sidecar.istio.io/proxyImage: "docker.io/istio/proxyv2:1.31.1@sha256:d86cba0dd1eb15c00b6901c69ce5ae3d2d5f8427a47751098cf8c3ab2a4a62e9"
+        proxy.istio.io/config: '{"holdApplicationUntilProxyStarts":true,"terminationDrainDuration":"5s"}'
       labels:
         app.kubernetes.io/name: sandbox
         app.kubernetes.io/part-of: tetral
+        istio.io/rev: "1-31-1"
     spec:
       serviceAccountName: sandbox
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
       containers:
         - name: sandbox
           image: ghcr.io/tetral-ai/tetral:0.0.0-dev
@@ -77,18 +89,40 @@ spec:
           command:
             - /usr/local/bin/tetral-sandbox
           env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
+            - name: TETRAL_DATABASE_TLS_CA_PATH
+              value: /var/run/tetral/store-trust/database-ca.crt
+            - name: TETRAL_DATABASE_TLS_SERVER_NAME
+              value: "tetral-postgres.tetral-system.svc.cluster.local"
+            - name: TETRAL_DB_MAX_OPEN_CONNS
+              value: "20"
+            - name: TETRAL_BLOB_TLS_CA_PATH
+              value: /var/run/tetral/store-trust/object-store-ca.crt
+            - name: TETRAL_BLOB_TLS_SERVER_NAME
+              value: "tetral-object-store.tetral-system.svc.cluster.local"
+            - name: TETRAL_DRAIN_TIMEOUT_MS
+              value: "30000"
+            - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
+              value: "5000"
+            - name: TETRAL_ROUTING_PROXY_REQUIRED
+              value: "true"
             - name: TETRAL_SANDBOX_HTTP_ADDR
               value: ":8080"
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT
-              value: local
+              value: "local"
             - name: TETRAL_SERVICE_VERSION
-              value: dev
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
+              value: "dev"
             - name: TETRAL_POSTGRES_DSN
               valueFrom:
                 secretKeyRef:
-                  name: tetral-database
+                  name: "tetral-database"
                   key: TETRAL_POSTGRES_DSN
             - name: DAYTONA_API_URL
               valueFrom:
@@ -109,7 +143,7 @@ spec:
             - name: DAYTONA_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: sandbox-daytona
+                  name: "sandbox-daytona"
                   key: DAYTONA_API_KEY
             - name: TETRAL_QUEUE_GRPC_ADDR
               valueFrom:
@@ -214,12 +248,12 @@ spec:
             - name: TETRAL_BLOB_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: sandbox-blob
+                  name: "sandbox-blob"
                   key: TETRAL_BLOB_ACCESS_KEY
             - name: TETRAL_BLOB_SECRET_KEY
               valueFrom:
                 secretKeyRef:
-                  name: sandbox-blob
+                  name: "sandbox-blob"
                   key: TETRAL_BLOB_SECRET_KEY
             - name: TETRAL_R2_ACCOUNT_ID
               valueFrom:
@@ -229,12 +263,12 @@ spec:
             - name: TETRAL_R2_PARENT_API_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: sandbox-r2-parent
+                  name: "sandbox-r2-parent"
                   key: TETRAL_R2_PARENT_API_TOKEN
             - name: TETRAL_R2_PARENT_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: sandbox-r2-parent
+                  name: "sandbox-r2-parent"
                   key: TETRAL_R2_PARENT_ACCESS_KEY
             - name: TETRAL_RESOURCE_CRED_TTL
               valueFrom:
@@ -267,15 +301,20 @@ spec:
             httpGet:
               path: /ready
               port: http
+          volumeMounts:
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
           resources:
-            requests:
-              cpu: 250m
-              memory: 512Mi
-              ephemeral-storage: 512Mi
+
             limits:
               cpu: "1"
-              memory: 1Gi
               ephemeral-storage: 2Gi
+              memory: 1Gi
+            requests:
+              cpu: 250m
+              ephemeral-storage: 512Mi
+              memory: 512Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -283,6 +322,10 @@ spec:
             capabilities:
               drop:
                 - ALL
+      volumes:
+        - name: store-trust
+          configMap:
+            name: "tetral-store-trust"
 ---
 apiVersion: v1
 kind: Service

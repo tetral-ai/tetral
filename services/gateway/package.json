@@ -43,25 +43,28 @@
     "@ai-sdk/anthropic": "3.0.82",
     "@ai-sdk/openai": "3.0.53",
     "@ai-sdk/openai-compatible": "2.0.41",
-    "@ai-sdk/provider": "3.0.8",
-    "@ai-sdk/provider-utils": "4.0.23",
+    "@ai-sdk/provider": "3.0.12",
+    "@ai-sdk/provider-utils": "4.0.33",
     "@bufbuild/protobuf": "2.12.0",
-    "@grpc/grpc-js": "1.14.4",
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@grpc/grpc-js": "1.14.5",
+    "@modelcontextprotocol/sdk": "1.31.0",
     "@tetral/gateway-lowering": "workspace:*",
     "@tetral/mcp-connector": "workspace:*",
     "@tetral/gateway-protocol": "workspace:*",
     "@tetral/provider-gateway": "workspace:*",
     "ai": "6.0.168",
-    "zod": "4.4.3"
+    "zod": "4.4.3",
+    "undici": "7.30.0"
   },
   "overrides": {
     "protobufjs": "7.6.5",
     "zod": "4.4.3",
-    "fast-uri": "3.1.7",
+    "fast-uri": "3.1.8",
     "qs": "6.16.0",
-    "ip-address": "10.4.0",
-    "hono": "4.12.34",
-    "@hono/node-server": "2.0.10"
+    "ip-address": "10.7.1",
+    "hono": "4.13.7",
+    "@hono/node-server": "2.0.10",
+    "@ai-sdk/provider": "3.0.12",
+    "@ai-sdk/provider-utils": "4.0.33"
   }
 }

@@ -36,43 +36,17 @@ const approvalReviewerOutputSchemaJson = await readFile(
 );
 
 describe("Gateway protocol bounds", () => {
-	test("keeps outbound reasoning deltas at the 64 KiB text and 16 KiB metadata boundaries", () => {
-		const request = validProviderRequest();
-		const base = {
-			sequence: 1,
-			type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA,
-		};
-		const metadataAtLimit = `{"x":"${"m".repeat(MaxMetadataBytes - 8)}"}`;
-		expect(
-			validateProviderStreamEvent({
-				...base,
-				reasoning: {
-					id: "reasoning_1",
-					text: "x".repeat(MaxTextBytes),
-					metadataJson: metadataAtLimit,
-				},
-			}),
-		).toEqual({ ok: true });
-		expect(
-			validateProviderStreamEvent({
-				...base,
-				reasoning: {
-					id: "reasoning_1",
-					text: "x".repeat(MaxTextBytes + 1),
-					metadataJson: "{}",
-				},
-			}),
-		).not.toEqual({ ok: true });
-		expect(
-			validateProviderStreamEvent({
-				...base,
-				reasoning: {
-					id: "reasoning_1",
-					text: "x",
-					metadataJson: `{"x":"${"m".repeat(MaxMetadataBytes - 7)}"}`,
-				},
-			}),
-		).not.toEqual({ ok: true });
+  test("preserves real Bridge Start ACK identity separately from new Gateway content IDs", () => {
+    expect(validateProviderRequest(validProviderRequest({modelRequestStartEventId:"evt_07105b47741e2ac3"}))).toEqual({ok:true});
+    for(const modelRequestStartEventId of ["", "x".repeat(MaxIdBytes+1), "evt_\ud800"])
+      expectInvalid(validateProviderRequest(validProviderRequest({modelRequestStartEventId})));
+    expectInvalid(validateProviderStreamEvent({frameSequence:1,type:ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED,thinkingStarted:{providerPartId:"reason",eventId:"evt_07105b47741e2ac3"}}));
+  });
+	test("accepts complete reasoning beyond retired fragment limits while retaining metadata bounds", () => {
+    const base = {frameSequence:1,type:ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE};
+    const reasoningComplete={providerPartId:"r",thinkingEventId:"evt_00000000000000000000000000000001",text:"x".repeat(65537),providerMetadataJson:`{"x":"${"m".repeat(16384-8)}"}`};
+    expect(validateProviderStreamEvent({...base,reasoningComplete})).toEqual({ok:true});
+    expectInvalid(validateProviderStreamEvent({...base,reasoningComplete:{...reasoningComplete,providerMetadataJson:`{"x":"${"m".repeat(16384-7)}"}`}}));
 	});
 
 	test("accepts a valid Runtime-to-Gateway ProviderRequest snapshot", () => {
@@ -252,23 +226,10 @@ describe("Gateway protocol bounds", () => {
 	});
 
 	test("uses the protocol identifier limit for provider stream ids", () => {
-		const base = validProviderRequest();
-		const eventBase = {
-			sequence: 1,
-			type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-		};
-		expect(
-			validateProviderStreamEvent({
-				...eventBase,
-				text: { id: "i".repeat(MaxIdBytes), text: "", metadataJson: "{}" },
-			}),
-		).toEqual({ ok: true });
-		expect(
-			validateProviderStreamEvent({
-				...eventBase,
-				text: { id: "i".repeat(MaxIdBytes + 1), text: "", metadataJson: "{}" },
-			}),
-		).not.toEqual({ ok: true });
+    const base={frameSequence:1,type:ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE};
+    const textComplete={providerPartId:"i".repeat(128),eventId:"evt_00000000000000000000000000000001",text:"body"};
+    expect(validateProviderStreamEvent({...base,textComplete})).toEqual({ok:true});
+    expectInvalid(validateProviderStreamEvent({...base,textComplete:{...textComplete,providerPartId:"i".repeat(129)}}));
 	});
 
 	test("accepts all contract-owned ProviderRequest request kinds", () => {
@@ -485,32 +446,35 @@ describe("Gateway protocol bounds", () => {
 		);
 
 		const eventBase = {
-			type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+			type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE,
 		};
 		expect(
 			validateProviderStreamEvent({
+        frameSequence:1,
 				...eventBase,
-				toolCall: {
-					id: "call_large",
+				toolCallComplete: {
+					modelToolCallId: "call_large",
 					name: "memory",
 					inputJson: jsonObjectAtBytes(MaxProviderToolCallInputJsonBytes),
-					metadataJson: "{}",
+					providerMetadataJson: "{}",
 				},
 			}),
 		).toEqual({ ok: true });
 		expectInvalid(
 			validateProviderStreamEvent({
+        frameSequence:1,
 				...eventBase,
-				toolCall: {
-					id: "call_large",
+				toolCallComplete: {
+					modelToolCallId: "call_large",
 					name: "memory",
 					inputJson: jsonObjectAtBytes(MaxProviderToolCallInputJsonBytes + 1),
-					metadataJson: "{}",
+					providerMetadataJson: "{}",
 				},
 			}),
 		);
 
 		const finish = (providerUsageJson: string): ProviderStreamEvent => ({
+			frameSequence: 1,
 			type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
 			finish: {
 				reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
@@ -536,32 +500,10 @@ describe("Gateway protocol bounds", () => {
 	});
 
 	test("rejects lone JSON surrogates at stream ingress while accepting a scalar pair", () => {
-		const base = {
-			sequence: 1,
-			type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
-		};
-		expectInvalid(
-			validateProviderStreamEvent({
-				...base,
-				toolCall: {
-					id: "call_1",
-					name: "Read",
-					inputJson: `{"value":"\\ud800"}`,
-					metadataJson: "{}",
-				},
-			}),
-		);
-		expect(
-			validateProviderStreamEvent({
-				...base,
-				toolCall: {
-					id: "call_1",
-					name: "Read",
-					inputJson: `{"value":"\\ud83d\\ude00"}`,
-					metadataJson: "{}",
-				},
-			}),
-		).toEqual({ ok: true });
+    const base={frameSequence:1,type:ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE};
+    const toolCallComplete={modelToolCallId:"call",name:"Read",inputJson:'{"x":"\\ud83d\\ude00"}',providerMetadataJson:"{}"};
+    expect(validateProviderStreamEvent({...base,toolCallComplete})).toEqual({ok:true});
+    for(const inputJson of ['{"x":"\\ud83d"}','{"x":"\\ude00"}'])expectInvalid(validateProviderStreamEvent({...base,toolCallComplete:{...toolCallComplete,inputJson}}));
 	});
 
 	test("truncates provider errors by UTF-8 bytes without splitting code points", () => {
@@ -948,6 +890,7 @@ describe("Gateway protocol bounds", () => {
 	test("validates ProviderStreamEvent payload shape", () => {
 		expect(
 			validateProviderStreamEvent({
+        frameSequence:1,
 				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
 				providerError: {
 					metadataJson: "{}",
@@ -966,6 +909,7 @@ describe("Gateway protocol bounds", () => {
 
 	test("accepts one bounded non-terminal attachment rejection envelope", () => {
 		const event = {
+            frameSequence:1,
 			type: 13,
 			attachmentRejections: {
 				rejections: [
@@ -1008,6 +952,7 @@ describe("Gateway protocol bounds", () => {
 		]) {
 			expectInvalid(
 				validateProviderStreamEvent({
+        frameSequence:1,
 					type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
 					providerError: { ...providerError, error },
 				}),
@@ -1015,187 +960,42 @@ describe("Gateway protocol bounds", () => {
 		}
 	});
 
+  test("preserves Finish usage validation and model-limit protobuf fields", () => {
+    const usage = {inputTotalTokens:1,inputUncachedTokens:1,outputTotalTokens:2,totalTokens:3,providerUsageJson:"{}"};
+    const finish = {reason:ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,usage,metadataJson:"{}",contextWindowTokens:500_000,inputLimitTokens:372_000,outputTokenLimit:128_000};
+    const frame = {frameSequence:1,type:ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,finish};
+    expect(validateProviderStreamEvent(frame)).toEqual({ok:true});
+    const decoded = ProviderStreamEventMessage.decode(ProviderStreamEventMessage.encode(frame).finish());
+    expect(decoded.finish).toMatchObject({usage,contextWindowTokens:500_000,inputLimitTokens:372_000,outputTokenLimit:128_000});
+    expect(validateProviderStreamEvent(decoded)).toEqual({ok:true});
+    for (const invalid of [
+      {...finish,usage:{...usage,inputTotalTokens:-1}},
+      {...finish,usage:{...usage,providerUsageJson:"not-json"}},
+      {...finish,contextWindowTokens:0},
+      {...finish,inputLimitTokens:1.5},
+    ]) expectInvalid(validateProviderStreamEvent({...frame,finish:invalid}));
+  });
+
 	test("rejects malformed ProviderStreamEvent payloads per event variant", () => {
-		const base = {};
-		const finishUsage = {
-			inputTotalTokens: 1,
-			inputUncachedTokens: 1,
-			outputTotalTokens: 2,
-			totalTokens: 3,
-			providerUsageJson: "{}",
-		};
-
-		expect(
-			validateProviderStreamEvent({
-				...base,
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
-				finish: {
-					reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
-					usage: finishUsage,
-					metadataJson: "{}",
-					contextWindowTokens: 500_000,
-					inputLimitTokens: 372_000,
-					outputTokenLimit: 128_000,
-				},
-			}),
-		).toEqual({ ok: true });
-		const finishRoundTrip = ProviderStreamEventMessage.decode(
-			ProviderStreamEventMessage.encode({
-				...base,
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
-				finish: {
-					reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
-					usage: finishUsage,
-					metadataJson: "{}",
-					contextWindowTokens: 500_000,
-					inputLimitTokens: 372_000,
-					outputTokenLimit: 128_000,
-				},
-			}).finish(),
-		);
-		expect(finishRoundTrip.finish).toMatchObject({
-			contextWindowTokens: 500_000,
-			inputLimitTokens: 372_000,
-			outputTokenLimit: 128_000,
-		});
-		for (const reason of [
-			ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
-			ProviderFinishReason.PROVIDER_FINISH_REASON_LENGTH,
-			ProviderFinishReason.PROVIDER_FINISH_REASON_TOOL_CALLS,
-			ProviderFinishReason.PROVIDER_FINISH_REASON_CONTENT_FILTER,
-			ProviderFinishReason.PROVIDER_FINISH_REASON_ERROR,
-			ProviderFinishReason.PROVIDER_FINISH_REASON_OTHER,
-			ProviderFinishReason.PROVIDER_FINISH_REASON_UNKNOWN,
-		]) {
-			expect(
-				validateProviderStreamEvent({
-					...base,
-					type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
-					finish: {
-						reason,
-						usage: finishUsage,
-						metadataJson: "{}",
-					},
-				}),
-			).toEqual({ ok: true });
-		}
-
-		for (const malformed of [
-			{
-				...base,
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_UNSPECIFIED,
-				text: { id: "text_1", text: "hello", metadataJson: "{}" },
-			},
-			{
-				...base,
-				type: ProviderStreamEventType.UNRECOGNIZED,
-				text: { id: "text_1", text: "hello", metadataJson: "{}" },
-			},
-			{
-				...base,
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
-			},
-			{
-				...base,
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
-				reasoning: { id: "rsn_1", text: "wrong-payload", metadataJson: "{}" },
-			},
-			{
-				...base,
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
-				text: { id: "text_1", text: "hello", metadataJson: "{}" },
-				reasoning: { id: "rsn_1", text: "extra-payload", metadataJson: "{}" },
-			},
-			{
-				...base,
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-				text: { id: "text_1", text: "not-a-delta", metadataJson: "{}" },
-			},
-			{
-				...base,
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END,
-				reasoning: { id: "rsn_1", text: "not-a-delta", metadataJson: "{}" },
-			},
-			{
-				...base,
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START,
-				toolInput: {
-					id: "tool_1",
-					name: "Read",
-					text: '{"path":"/tmp/a"}',
-					metadataJson: "{}",
-				},
-			},
-			{
-				...base,
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
-				text: { id: "text_1", text: "hello", metadataJson: "not-json" },
-			},
-			{
-				...base,
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
-				finish: {
-					reason: ProviderFinishReason.PROVIDER_FINISH_REASON_UNSPECIFIED,
-					usage: finishUsage,
-					metadataJson: "{}",
-				},
-			},
-			{
-				...base,
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
-				finish: {
-					reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
-					usage: { ...finishUsage, inputTotalTokens: -1 },
-					metadataJson: "{}",
-				},
-			},
-			{
-				...base,
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
-				finish: {
-					reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
-					usage: { ...finishUsage, providerUsageJson: "not-json" },
-					metadataJson: "{}",
-				},
-			},
-			{
-				...base,
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
-				finish: {
-					reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
-					usage: finishUsage,
-					metadataJson: "{}",
-					contextWindowTokens: 0,
-				},
-			},
-			{
-				...base,
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
-				finish: {
-					reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
-					usage: finishUsage,
-					metadataJson: "{}",
-					inputLimitTokens: 1.5,
-				},
-			},
-			{
-				...base,
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
-				finish: {
-					reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
-					usage: finishUsage,
-					metadataJson: "{}",
-					outputTokenLimit: -1,
-				},
-			},
-			{
-				...base,
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
-				providerError: { error: undefined, metadataJson: "{}" },
-			},
-		] satisfies readonly ProviderStreamEvent[]) {
-			expectInvalid(validateProviderStreamEvent(malformed));
-		}
+    const base={frameSequence:1};
+    const id="evt_00000000000000000000000000000001";
+    const valid:ProviderStreamEvent[]=[
+      {...base,type:14,thinkingStarted:{providerPartId:"r",eventId:id}},
+      {...base,type:15,textComplete:{providerPartId:"t",eventId:id,text:"body"}},
+      {...base,type:16,reasoningComplete:{providerPartId:"r",thinkingEventId:id,text:"",providerMetadataJson:'{"anthropic":{"signature":"signed"}}'}},
+      {...base,type:17,toolCallComplete:{modelToolCallId:"call",name:"Read",inputJson:"{}",providerMetadataJson:"{}"}},
+      {...base,type:11,finish:{reason:ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,metadataJson:"{}"}},
+      {...base,type:12,providerError:{metadataJson:"{}",error:{code:"provider_error",message:"safe",retryable:true,fatal:false,statusCode:503,retryAfterMs:0}}},
+      {...base,type:13,attachmentRejections:{rejections:[{transientAttachmentRef:"att",reason:1}]}}
+    ];
+    for(const frame of valid){expect(validateProviderStreamEvent(frame)).toEqual({ok:true});expect(validateProviderStreamEvent(ProviderStreamEventMessage.decode(ProviderStreamEventMessage.encode(frame).finish()))).toEqual({ok:true});for(const frameSequence of [0,-1,0xffffffff+1,1.5])expectInvalid(validateProviderStreamEvent({...frame,frameSequence}));}
+    for(const type of [0,1,2,3,4,5,6,7,8,9,10,-1,18])expectInvalid(validateProviderStreamEvent({...valid[1]!,type}));
+    expectInvalid(validateProviderStreamEvent({...valid[1]!,reasoningComplete:valid[2]!.reasoningComplete}));
+    expectInvalid(validateProviderStreamEvent({...valid[1]!,textComplete:{providerPartId:"t",eventId:id,text:""}}));
+    expectInvalid(validateProviderStreamEvent({...valid[1]!,textComplete:{providerPartId:"t",eventId:"sevt_legacy",text:"body"}}));
+    expectInvalid(validateProviderStreamEvent({...valid[1]!,textComplete:{providerPartId:"t",eventId:id,text:"\ud83d"}}));
+    for(const reason of [1,2,3,4,5,6,7])expect(validateProviderStreamEvent({...valid[4]!,finish:{reason,metadataJson:"{}"}})).toEqual({ok:true});
+    for(const bad of [{reason:0,metadataJson:"{}"},{reason:1,metadataJson:"broken"},{reason:1,metadataJson:"{}",outputTokenLimit:-1}])expectInvalid(validateProviderStreamEvent({...valid[4]!,finish:bad}));
 	});
 });
 

@@ -28,7 +28,9 @@ func verifyPostgreSQLRLSContract(ctx context.Context, queryer rlsCatalogQueryer)
 		return newSchemaMigrationError(SchemaErrorRLSDrift, 1, err)
 	}
 	expectedWorkspace := stringSet(contract.WorkspaceTables)
-	expectedWorkspace[contract.AppendOnlyWorkspaceTable] = true
+	for _, table := range contract.AppendOnlyWorkspaceTables {
+		expectedWorkspace[table] = true
+	}
 	expectedGlobal := stringSet(contract.GlobalTables)
 
 	tableRows, err := queryer.QueryContext(ctx, `
@@ -118,9 +120,10 @@ func expectedRLSPolicies(contract database.PostgreSQL) map[string]catalogPolicy 
 		policy := catalogPolicy{table: table, name: "workspace_isolation", command: "ALL", using: workspaceExpression, check: workspaceExpression, permissive: true, public: true}
 		policies[policyKey(table, policy.name)] = policy
 	}
-	appendOnly := contract.AppendOnlyWorkspaceTable
-	policies[policyKey(appendOnly, "workspace_select")] = catalogPolicy{table: appendOnly, name: "workspace_select", command: "SELECT", using: workspaceExpression, permissive: true, public: true}
-	policies[policyKey(appendOnly, "workspace_insert")] = catalogPolicy{table: appendOnly, name: "workspace_insert", command: "INSERT", check: workspaceExpression, permissive: true, public: true}
+	for _, appendOnly := range contract.AppendOnlyWorkspaceTables {
+		policies[policyKey(appendOnly, "workspace_select")] = catalogPolicy{table: appendOnly, name: "workspace_select", command: "SELECT", using: workspaceExpression, permissive: true, public: true}
+		policies[policyKey(appendOnly, "workspace_insert")] = catalogPolicy{table: appendOnly, name: "workspace_insert", command: "INSERT", check: workspaceExpression, permissive: true, public: true}
+	}
 	for _, declared := range contract.SpecialPolicies {
 		policy := catalogPolicy{table: declared.Table, name: declared.Name, command: declared.Command, using: declared.Using, check: declared.Check, permissive: true, public: true}
 		policies[policyKey(policy.table, policy.name)] = policy

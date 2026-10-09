@@ -6,9 +6,14 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"log/slog"
+
+	"github.com/tetral-ai/tetral/internal/mcpmanifest"
+
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+
+	"github.com/tetral-ai/tetral/internal/runtimeconfig"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -30,6 +35,9 @@ func (s *PostgreSQLBridgeAPIStore) LoadContext(ctx context.Context, request *bri
 	if request == nil {
 		return nil, status.Error(codes.InvalidArgument, "load context request is required")
 	}
+	if request.GetRecoveryLeaseRef() == nil && (request.GetSourceEventId() != "" || request.GetHandoffId() != "") {
+		return nil, status.Error(codes.InvalidArgument, "recovery source requires exact Queue lease")
+	}
 	phase = "scope_validation"
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.load_context", func(tx *dbconnect.Tx) error {
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
@@ -37,7 +45,7 @@ func (s *PostgreSQLBridgeAPIStore) LoadContext(ctx context.Context, request *bri
 		}
 		if request.GetRecoveryLeaseRef() != nil {
 			phase = "recovery_authority"
-			if err := verifyRuntimeRecoveryLoadAuthorityTx(ctx, tx, request.GetScope(), request.GetRecoveryLeaseRef()); err != nil {
+			if err := verifyRuntimeRecoveryLoadAuthorityTx(ctx, tx, request.GetScope(), request.GetRecoveryLeaseRef(), request.GetSourceEventId(), request.GetHandoffId()); err != nil {
 				return err
 			}
 		}
@@ -78,6 +86,7 @@ func verifyRuntimeRecoveryLoadAuthorityTx(
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	ref *bridgev1.RecoveryLeaseRef,
+	sourceEventID, handoffID string,
 ) error {
 	if ref.GetJobId() == "" || ref.GetLeaseToken() == "" || ref.GetPartitionKey() == "" || ref.GetDedupeKey() == "" ||
 		ref.GetPartitionKey() != queue.FormatSessionPartitionKey(workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId()) {
@@ -94,7 +103,7 @@ func verifyRuntimeRecoveryLoadAuthorityTx(
 		ref.GetPartitionKey(), ref.GetDedupeKey(),
 	).Scan(&jobKind, &payloadJSON); err != nil {
 		if dbconnect.IsNoRows(err) {
-			return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
+			return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
 		}
 		return err
 	}
@@ -110,18 +119,20 @@ func verifyRuntimeRecoveryLoadAuthorityTx(
 		return err
 	}
 	if !live {
-		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
+		return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
 	}
-	var payload struct {
-		SessionID       string `json:"session_id"`
-		SessionThreadID string `json:"session_thread_id"`
-		SourceEventID   string `json:"source_event_id"`
-	}
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || payload.SessionID != scope.GetSessionId() ||
-		payload.SessionThreadID != scope.GetSessionThreadId() || payload.SourceEventID == "" ||
-		ref.GetDedupeKey() != queue.FormatRuntimeRecoveryDedupeKey(workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId(), payload.SourceEventID) {
+	payload, err := queue.DecodeRuntimeRecoveryPayload([]byte(payloadJSON))
+	if err != nil || payload.SessionID != scope.GetSessionId() || payload.SessionThreadID != scope.GetSessionThreadId() || payload.SourceEventID != sourceEventID || payload.HandoffID != handoffID || ref.GetDedupeKey() != runtimecontrol.RecoveryDedupeKey(scope.GetWorkspaceId(), payload) {
 		return status.Error(codes.InvalidArgument, "runtime recovery authority is invalid")
 	}
+	found, err := runtimecontrol.VerifyRecoverySourceTx(ctx, tx, scope.GetWorkspaceId(), ref.GetJobId(), payload)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery source is stale"))
+	}
+
 	return nil
 }
 
@@ -169,8 +180,8 @@ func (s *PostgreSQLBridgeAPIStore) RefreshRuntimeBindingToken(ctx context.Contex
 }
 
 type bridgeLoadContextPayload struct {
-	ContextEntries           []bridgeRuntimeContextEntry          `json:"contextEntries"`
-	OpenRequestDraft         *bridgeRuntimeOpenRequestDraft       `json:"openRequestDraft"`
+	Messages                 []bridgeRuntimeContextEntry          `json:"messages"`
+	CurrentRequestMessage    *bridgeRuntimeCurrentRequestMessage  `json:"currentRequestMessage"`
 	TurnFacts                bridgeLoadContextTurnFacts           `json:"turnFacts"`
 	ThreadContextPrefix      *bridgeLoadContextThreadPrefix       `json:"threadContextPrefix"`
 	Thread                   bridgeLoadContextThread              `json:"thread"`
@@ -183,9 +194,10 @@ type bridgeLoadContextPayload struct {
 }
 
 type bridgeLoadContextMessageDescriptor struct {
-	Kind           string
-	SourceEventID  *string
-	ModelRequestID *string
+	MessageSequence int64
+	Kind            string
+	SourceEventID   *string
+	ModelRequestID  *string
 }
 
 type bridgeRuntimeContextEntry struct {
@@ -194,10 +206,9 @@ type bridgeRuntimeContextEntry struct {
 	Parts           []json.RawMessage `json:"parts"`
 }
 
-type bridgeRuntimeOpenRequestDraft struct {
-	ModelRequestID  string            `json:"modelRequestId"`
-	MessageSequence int64             `json:"messageSequence"`
-	Parts           []json.RawMessage `json:"parts"`
+type bridgeRuntimeCurrentRequestMessage struct {
+	ModelRequestID           string `json:"modelRequestId"`
+	AssistantMessageSequence int64  `json:"assistantMessageSequence"`
 }
 
 type bridgeLoadContextThreadPrefix struct {
@@ -261,18 +272,18 @@ type bridgeLoadContextMCPTool struct {
 }
 
 type bridgeLoadContextRuntimeConfig struct {
-	ConfigGeneration           int64                      `json:"configGeneration"`
-	ApprovalMode               string                     `json:"approvalMode"`
-	System                     *string                    `json:"system"`
-	MemoryStores               []bridgeRuntimeMemoryStore `json:"memoryStores"`
-	Agent                      bridgeLoadAgent            `json:"agent"`
-	Environment                bridgeLoadEnv              `json:"environment"`
-	ToolPolicy                 map[string]any             `json:"toolPolicy"`
-	Skills                     json.RawMessage            `json:"skills"`
-	SkillsIndex                json.RawMessage            `json:"skillsIndex"`
-	InstalledTools             json.RawMessage            `json:"installedTools"`
-	ProviderRescheduleBudget   int64                      `json:"providerRescheduleBudget"`
-	CompactionRescheduleBudget int64                      `json:"compactionRescheduleBudget"`
+	ConfigGeneration           int64                       `json:"configGeneration"`
+	ApprovalMode               string                      `json:"approvalMode"`
+	System                     *string                     `json:"system"`
+	MemoryStores               []runtimeconfig.MemoryStore `json:"memoryStores"`
+	Agent                      bridgeLoadAgent             `json:"agent"`
+	Environment                bridgeLoadEnv               `json:"environment"`
+	ToolPolicy                 map[string]any              `json:"toolPolicy"`
+	Skills                     json.RawMessage             `json:"skills"`
+	SkillsIndex                json.RawMessage             `json:"skillsIndex"`
+	InstalledTools             json.RawMessage             `json:"installedTools"`
+	ProviderRescheduleBudget   int64                       `json:"providerRescheduleBudget"`
+	CompactionRescheduleBudget int64                       `json:"compactionRescheduleBudget"`
 }
 
 type bridgeLoadAgent struct {
@@ -376,23 +387,12 @@ func loadThreadContextJSONTx(
 		)
 			SELECT m.kind,
 			       m.sequence,
-			       m.data_json,
+			       `+runtimecontrol.StoredMessageContentSQL+`,
 			       m.source_event_id,
-			       m.model_request_id,
-			       CASE
-			         WHEN m.kind <> 'assistant' OR m.model_request_id IS NULL THEN 'sealed'
-			         WHEN NOT EXISTS (
-			           SELECT 1 FROM session_events ended
-			            WHERE ended.workspace_id = m.workspace_id
-			              AND ended.session_id = m.session_id
-			              AND ended.session_thread_id = m.session_thread_id
-			              AND ended.model_request_id = m.model_request_id
-			              AND ended.type = 'span.model_request_end'
-			         ) THEN 'open'
-			         ELSE 'sealed'
-			       END AS context_state
+			       m.model_request_id
 		  FROM session_messages m
 		  CROSS JOIN latest_compaction c
+		  `+runtimecontrol.StoredMessagePartsJoinSQL+`
 		 WHERE m.workspace_id = $1
 		   AND m.session_id = $2
 		   AND m.session_thread_id = $3
@@ -425,6 +425,24 @@ func loadThreadContextJSONTx(
 		              AND ended.payload_json::jsonb #>> '{provider_context_retention,assistant_message_sequence}' = m.sequence::text
 		         )
 		         OR EXISTS (
+		           SELECT 1 FROM session_events ended
+		           JOIN session_bridge_operations receipt
+		             ON receipt.workspace_id = ended.workspace_id
+		            AND receipt.session_id = ended.session_id
+		            AND receipt.session_thread_id = ended.session_thread_id
+		            AND receipt.operation = 'write_request_end'
+		            AND receipt.source_kind = 'model_request'
+		            AND receipt.idempotency_key = ended.model_request_id
+		            AND receipt.receipt_json::jsonb ->> 'requestEndEventId' = ended.event_id
+		            WHERE ended.workspace_id = m.workspace_id
+		              AND ended.session_id = m.session_id
+		              AND ended.session_thread_id = m.session_thread_id
+		              AND ended.model_request_id = m.model_request_id
+		              AND ended.type = 'span.model_request_end'
+		              AND ended.payload_json::jsonb #>> '{provider_context_retention,disposition}' = 'completed'
+		              AND receipt.receipt_json::jsonb #>> '{ordinary,sealedMessageSequence}' = m.sequence::text
+		         )
+		         OR EXISTS (
 		           SELECT 1 FROM pending_requests pending
 		            WHERE pending.model_request_id = m.model_request_id
 		         )
@@ -441,53 +459,36 @@ func loadThreadContextJSONTx(
 		return "", err
 	}
 	defer func() { _ = rows.Close() }()
-	contextEntries := make([]bridgeRuntimeContextEntry, 0)
-	var openRequestDraft *bridgeRuntimeOpenRequestDraft
+	messages := make([]bridgeRuntimeContextEntry, 0)
 	messageDescriptors := make([]bridgeLoadContextMessageDescriptor, 0)
 	for rows.Next() {
 		var kind string
 		var sequence int64
-		var raw string
+		var content sql.NullString
 		var sourceEventID sql.NullString
 		var modelRequestID sql.NullString
-		var contextState string
 		if err := rows.Scan(
 			&kind,
 			&sequence,
-			&raw,
+			&content,
 			&sourceEventID,
 			&modelRequestID,
-			&contextState,
 		); err != nil {
+			return "", err
+		}
+		raw, err := runtimecontrol.StoredMessageContentJSON(content)
+		if err != nil {
 			return "", err
 		}
 		if !json.Valid([]byte(raw)) {
 			return "", status.Error(codes.FailedPrecondition, "session message projection is malformed")
 		}
-		parts, err := decodeStoredRuntimeContextParts(raw)
+		parts, err := runtimecontrol.DecodeStoredRuntimeContextParts(raw)
 		if err != nil {
 			return "", err
 		}
-		switch contextState {
-		case "sealed":
-			contextEntries = append(contextEntries, bridgeRuntimeContextEntry{
-				MessageSequence: sequence,
-				ContextKind:     kind,
-				Parts:           parts,
-			})
-		case "open":
-			if kind != "assistant" || !modelRequestID.Valid || openRequestDraft != nil {
-				return "", status.Error(codes.FailedPrecondition, "open request draft is ambiguous")
-			}
-			openRequestDraft = &bridgeRuntimeOpenRequestDraft{
-				ModelRequestID:  modelRequestID.String,
-				MessageSequence: sequence,
-				Parts:           parts,
-			}
-		default:
-			return "", status.Error(codes.FailedPrecondition, "durable context state is invalid")
-		}
-		descriptor := bridgeLoadContextMessageDescriptor{Kind: kind}
+		messages = append(messages, bridgeRuntimeContextEntry{MessageSequence: sequence, ContextKind: kind, Parts: parts})
+		descriptor := bridgeLoadContextMessageDescriptor{Kind: kind, MessageSequence: sequence}
 		if sourceEventID.Valid {
 			descriptor.SourceEventID = &sourceEventID.String
 		}
@@ -506,7 +507,7 @@ func loadThreadContextJSONTx(
 	if err != nil {
 		return "", err
 	}
-	durableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, scope)
+	durableTurnID, err := runtimecontrol.LoadOpenDurableTurnIDTx(ctx, tx, scope)
 	if err != nil {
 		return "", err
 	}
@@ -524,9 +525,13 @@ func loadThreadContextJSONTx(
 	if err != nil {
 		return "", err
 	}
-	return marshalBridgeJSON(bridgeLoadContextPayload{
-		ContextEntries:           contextEntries,
-		OpenRequestDraft:         openRequestDraft,
+	currentRequestMessage, err := selectCurrentRequestMessage(turnFacts, messageDescriptors)
+	if err != nil {
+		return "", err
+	}
+	return runtimecontrol.MarshalJSON(bridgeLoadContextPayload{
+		Messages:                 messages,
+		CurrentRequestMessage:    currentRequestMessage,
 		TurnFacts:                turnFacts,
 		ThreadContextPrefix:      threadContextPrefix,
 		Thread:                   thread,
@@ -645,56 +650,6 @@ func loadThreadMetadataForContextTx(
 	return thread, nil
 }
 
-const loadOpenDurableTurnIDSQL = `WITH latest_running AS MATERIALIZED (
-		SELECT event_id, sequence
-		  FROM session_events
-		 WHERE workspace_id=$1
-		   AND session_id=$2
-		   AND session_thread_id=$3
-		   AND type IN ('session.status_running', 'session.thread_status_running')
-		 ORDER BY sequence DESC
-		 LIMIT 1
-	)
-	SELECT running.event_id
-	  FROM latest_running running
-	 WHERE NOT EXISTS (
-	       SELECT 1
-	         FROM session_events closeout
-	        WHERE closeout.workspace_id=$1
-	          AND closeout.session_id=$2
-	          AND closeout.session_thread_id=$3
-	          AND closeout.type IN (
-	            'session.status_idle',
-	            'session.thread_status_idle',
-	            'session.status_terminated',
-	            'session.thread_status_terminated'
-	          )
-	          AND closeout.sequence > (SELECT sequence FROM latest_running)
-	        ORDER BY closeout.sequence ASC
-	        LIMIT 1
-	      )`
-
-func loadOpenDurableTurnIDTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-) (*string, error) {
-	var durableTurnID string
-	err := tx.QueryRow(ctx,
-		loadOpenDurableTurnIDSQL,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-	).Scan(&durableTurnID)
-	if dbconnect.IsNoRows(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &durableTurnID, nil
-}
-
 // loadThreadPendingAgentMailTx restores only mail already handed to Runtime.
 // Queued mail remains Queue-owned and must enter through its ordered delivery.
 func loadThreadPendingAgentMailTx(
@@ -762,11 +717,11 @@ func loadThreadPendingAgentMailTx(
 		if mail.DeliveryID == "" || storedMessageJSON == "" {
 			return nil, status.Error(codes.FailedPrecondition, "pending agent mail is malformed")
 		}
-		publicMessage, err := validatedPublicInterAgentMessageJSON(json.RawMessage(storedMessageJSON))
+		publicMessage, err := runtimecontrol.ValidatedPublicInterAgentMessageJSON(json.RawMessage(storedMessageJSON))
 		if err != nil {
 			return nil, err
 		}
-		mail.Content, err = agentMailContentFromPublicMessage(publicMessage)
+		mail.Content, err = runtimecontrol.AgentMailContentFromPublicMessage(publicMessage)
 		if err != nil {
 			return nil, err
 		}
@@ -881,7 +836,7 @@ func loadThreadPendingAttachmentsTx(
 			return nil, err
 		}
 		var metadata transientAttachmentMetadata
-		if err := json.Unmarshal([]byte(defaultString(metadataJSON, "{}")), &metadata); err != nil {
+		if err := json.Unmarshal([]byte(runtimecontrol.DefaultString(metadataJSON, "{}")), &metadata); err != nil {
 			_ = transientRows.Close()
 			return nil, status.Error(codes.FailedPrecondition, "transient attachment metadata is malformed")
 		}
@@ -958,11 +913,11 @@ func loadSessionMCPManifestsTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		if diagnostic.Valid {
 			manifest.Diagnostic = &diagnostic.String
 		}
-		if manifest.Readiness == mcpManifestReadinessUnready {
+		if manifest.Readiness == mcpmanifest.ReadinessUnready {
 			manifests = append(manifests, manifest)
 			continue
 		}
-		if manifest.Readiness != mcpManifestReadinessReady || !toolsJSON.Valid || !manifestETag.Valid {
+		if manifest.Readiness != mcpmanifest.ReadinessReady || !toolsJSON.Valid || !manifestETag.Valid {
 			return nil, status.Error(codes.FailedPrecondition, "stored mcp manifest readiness is malformed")
 		}
 		manifest.ManifestETag = manifestETag.String
@@ -1047,15 +1002,15 @@ func loadThreadRuntimeConfigTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		return bridgeLoadContextRuntimeConfig{}, status.Error(codes.Internal, "api_error")
 	}
 	agentConfigRaw := bridgeRawJSON(agentConfig, "{}")
-	memoryStores, err := bridgeRuntimeMemoryStoresTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId())
+	memoryStores, err := runtimeconfig.ReadMemoryStoresTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId())
 	if err != nil {
 		return bridgeLoadContextRuntimeConfig{}, err
 	}
-	settings, err := bridgeRuntimeSessionAgentSettings(approvalMode, agentConfig, installedTools, memoryStores)
+	settings, err := runtimeconfig.InterpretSessionSettings(approvalMode, agentConfig, installedTools, memoryStores)
 	if err != nil {
 		return bridgeLoadContextRuntimeConfig{}, status.Error(codes.Internal, "api_error")
 	}
-	if _, err := bridgeInstalledBuiltinFamily(settings.Config); err != nil {
+	if _, err := runtimeconfig.InstalledBuiltinFamily(settings.Config); err != nil {
 		return bridgeLoadContextRuntimeConfig{}, status.Error(codes.Internal, "api_error")
 	}
 	installedToolDeclarations, err := json.Marshal(settings.Config.Tools)
@@ -1186,7 +1141,7 @@ func loadThreadSandboxExecutionsTx(ctx context.Context, tx *dbconnect.Tx, scope 
 		           AND result.session_id = r.session_id
 		           AND result.session_thread_id = r.session_thread_id
 		           AND result.type IN ('agent.tool_result', 'agent.mcp_tool_result')
-		           AND result.payload_json::jsonb ->> 'tool_use_id' = r.tool_use_event_id
+		           AND result.tool_use_event_id = r.tool_use_event_id
 		    )
 		  ORDER BY e.sequence ASC, r.tool_use_event_id ASC`,
 		scope.GetWorkspaceId(),
@@ -1231,6 +1186,7 @@ type runtimeBindingTokenPayload struct {
 	BindingID         string `json:"binding_id"`
 	BindingGeneration int64  `json:"binding_generation"`
 	RuntimePodUID     string `json:"runtime_pod_uid"`
+	RuntimeProcessID  string `json:"runtime_process_id"`
 	ExpiresAtUnix     int64  `json:"exp"`
 }
 
@@ -1241,7 +1197,7 @@ func (s *PostgreSQLBridgeAPIStore) runtimeBindingToken(scope *bridgev1.RuntimeSc
 		scope.GetSessionThreadId() == "" ||
 		scope.GetBinding().GetBindingId() == "" ||
 		scope.GetBinding().GetBindingGeneration() <= 0 ||
-		scope.GetBinding().GetTargetPodUid() == "" {
+		scope.GetBinding().GetTargetPodUid() == "" || scope.GetBinding().GetRuntimeProcessId() == "" {
 		return "", status.Error(codes.FailedPrecondition, "runtime binding scope is incomplete")
 	}
 	if len(s.RuntimeBindingTokenHMACKey) == 0 {
@@ -1251,7 +1207,7 @@ func (s *PostgreSQLBridgeAPIStore) runtimeBindingToken(scope *bridgev1.RuntimeSc
 	if ttl <= 0 {
 		ttl = defaultRuntimeBindingTokenTTL
 	}
-	payload, err := marshalBridgeJSON(runtimeBindingTokenPayload{
+	payload, err := runtimecontrol.MarshalJSON(runtimeBindingTokenPayload{
 		Version:           1,
 		WorkspaceID:       scope.GetWorkspaceId(),
 		SessionID:         scope.GetSessionId(),
@@ -1259,6 +1215,7 @@ func (s *PostgreSQLBridgeAPIStore) runtimeBindingToken(scope *bridgev1.RuntimeSc
 		BindingID:         scope.GetBinding().GetBindingId(),
 		BindingGeneration: scope.GetBinding().GetBindingGeneration(),
 		RuntimePodUID:     scope.GetBinding().GetTargetPodUid(),
+		RuntimeProcessID:  scope.GetBinding().GetRuntimeProcessId(),
 		ExpiresAtUnix:     s.now().Add(ttl).Unix(),
 	})
 	if err != nil {
@@ -1269,9 +1226,4 @@ func (s *PostgreSQLBridgeAPIStore) runtimeBindingToken(scope *bridgev1.RuntimeSc
 	_, _ = mac.Write([]byte(payloadPart))
 	signaturePart := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	return "rtbt_v1." + payloadPart + "." + signaturePart, nil
-}
-
-func sha256Hex(value string) string {
-	digest := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(digest[:])
 }

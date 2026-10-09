@@ -1,3 +1,5 @@
+import { asSQLSource } from "@tetral/ts-dbconnect";
+import type { SQLSource } from "@tetral/ts-dbconnect";
 /**
  * @packageDocumentation
  * Rotates due OpenAI subscription OAuth credentials through a SQL-backed,
@@ -79,7 +81,7 @@ interface TokenEndpointResponse {
 
 /** Persistence, encryption, transport, and clock dependencies for OAuth rotation. */
 export interface SQLOpenAIOAuthCredentialRefreshWriterOptions {
-  readonly sql: GatewayCredentialSQL;
+  readonly sql: GatewayCredentialSQL | SQLSource<GatewayCredentialSQL>;
   readonly masterKeyHex: string;
   readonly fetch?: FetchFunction | undefined;
   readonly now?: () => number;
@@ -111,10 +113,12 @@ export interface SQLOpenAIOAuthCredentialRefreshWriterOptions {
  * and encrypted-byte compare-and-swap protection.
  */
 export class SQLOpenAIOAuthCredentialRefreshWriter implements OpenAIOAuthCredentialRefreshWriter {
+  private readonly sqlSource: SQLSource<GatewayCredentialSQL>;
   private readonly fetchImpl: FetchFunction;
   private readonly now: () => number;
 
   constructor(private readonly options: SQLOpenAIOAuthCredentialRefreshWriterOptions) {
+    this.sqlSource = asSQLSource(options.sql);
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.now = options.now ?? Date.now;
   }
@@ -125,48 +129,51 @@ export class SQLOpenAIOAuthCredentialRefreshWriter implements OpenAIOAuthCredent
     readonly credential: ResolvedSessionOAuthCredential;
     readonly abortSignal: AbortSignal;
   }): Promise<OpenAIOAuthCredentialRefreshResult> {
-    if (input.credential.refreshToken === undefined || input.credential.refreshToken.length === 0 || this.options.sql.begin === undefined) {
-      return { ok: false, error: "credential_required" };
-    }
-    try {
-      const result: OpenAIOAuthCredentialRefreshResult | { readonly ok: false; readonly error: "cas_miss" } = await this.options.sql.begin(async (tx) => {
-        await setWorkspaceRLS(tx, input.workspaceId);
-        const row = await this.loadCredentialForUpdate(tx, input.workspaceId, input.credential);
-        if (row === undefined || !providerOAuthRowUsable(row, input.credential)) {
-          return { ok: false, error: "credential_required" };
-        }
-        const encryptedAuth = databaseBytes(row.encrypted_auth);
-        const auth = await this.decryptAuth(encryptedAuth);
-        if (!storedAuthMatchesCredential(auth, input.credential)) {
-          return { ok: false, error: "credential_required" };
-        }
-        const current = credentialFromAuth(input.credential, auth);
-        if (!openAIOAuthCredentialRefreshDue(current.expiresAt, this.now())) {
-          return { ok: true, credential: current };
-        }
-        if (auth.refresh_token !== input.credential.refreshToken) {
-          return { ok: false, error: "credential_required" };
-        }
-        const rotated = await this.refreshWithIssuer(current, input.abortSignal);
-        if (rotated === undefined) {
-          return { ok: false, error: "credential_required" };
-        }
-        const updated = await this.writeCredential(tx, input.workspaceId, current, rotated, encryptedAuth);
-        if (!updated) {
-          return { ok: false as const, error: "cas_miss" as const };
-        }
-        return { ok: true as const, credential: rotated };
-      });
-      if (!result.ok && result.error === "cas_miss") {
-        return await this.readFreshCommittedCredential(input.workspaceId, input.credential);
+    return await this.sqlSource.withSQL(async (sql) => {
+      if (input.credential.refreshToken === undefined || input.credential.refreshToken.length === 0 || sql.begin === undefined) {
+        return { ok: false, error: "credential_required" };
       }
-      return result;
-    } catch {
-      return { ok: false, error: "credential_required" };
-    }
+      try {
+        const result: OpenAIOAuthCredentialRefreshResult | { readonly ok: false; readonly error: "cas_miss" } = await sql.begin(async (tx) => {
+          await setWorkspaceRLS(tx, input.workspaceId);
+          const row = await this.loadCredentialForUpdate(tx, input.workspaceId, input.credential);
+          if (row === undefined || !providerOAuthRowUsable(row, input.credential)) {
+            return { ok: false, error: "credential_required" };
+          }
+          const encryptedAuth = databaseBytes(row.encrypted_auth);
+          const auth = await this.decryptAuth(encryptedAuth);
+          if (!storedAuthMatchesCredential(auth, input.credential)) {
+            return { ok: false, error: "credential_required" };
+          }
+          const current = credentialFromAuth(input.credential, auth);
+          if (!openAIOAuthCredentialRefreshDue(current.expiresAt, this.now())) {
+            return { ok: true, credential: current };
+          }
+          if (auth.refresh_token !== input.credential.refreshToken) {
+            return { ok: false, error: "credential_required" };
+          }
+          const rotated = await this.refreshWithIssuer(current, input.abortSignal);
+          if (rotated === undefined) {
+            return { ok: false, error: "credential_required" };
+          }
+          const updated = await this.writeCredential(tx, input.workspaceId, current, rotated, encryptedAuth);
+          if (!updated) {
+            return { ok: false as const, error: "cas_miss" as const };
+          }
+          return { ok: true as const, credential: rotated };
+        });
+        if (!result.ok && result.error === "cas_miss") {
+          return await this.readFreshCommittedCredential(sql, input.workspaceId, input.credential);
+        }
+        return result;
+      } catch {
+        return { ok: false, error: "credential_required" };
+      }
+    });
   }
 
   private async readFreshCommittedCredential(
+    sql: GatewayCredentialSQL,
     workspaceId: string,
     credential: ResolvedSessionOAuthCredential,
   ): Promise<OpenAIOAuthCredentialRefreshResult> {
@@ -192,10 +199,10 @@ export class SQLOpenAIOAuthCredentialRefreshWriter implements OpenAIOAuthCredent
         ? { ok: false, error: "credential_required" }
         : { ok: true, credential: fresh };
     };
-    if (this.options.sql.begin !== undefined) {
-      return await this.options.sql.begin(read);
+    if (sql.begin !== undefined) {
+      return await sql.begin(read);
     }
-    return await read(this.options.sql);
+    return await read(sql);
   }
 
   private async loadCredentialForUpdate(
@@ -253,6 +260,7 @@ export class SQLOpenAIOAuthCredentialRefreshWriter implements OpenAIOAuthCredent
       return undefined;
     }
     if (!response.ok) {
+      try {await response.body?.cancel();} catch { /* Rejected issuer response remains authoritative. */ }
       return undefined;
     }
     let payload: TokenEndpointResponse;

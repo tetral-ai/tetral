@@ -32,6 +32,7 @@ export function validateRunMcpToolRequest(request: RunMcpToolRequest): Validatio
     invalidBytes(request.sessionThreadId, MaxIdBytes) ||
     invalidBytes(request.toolUseEventId, MaxIdBytes) ||
     invalidBytes(request.bindingId, MaxIdBytes) ||
+    invalidBytes(request.runtimeProcessId,MaxIdBytes) ||
     invalidBindingGeneration(request.bindingGeneration) ||
     invalidBytes(request.runtimeBindingToken, MaxTokenBytes)
   ) {
@@ -52,7 +53,7 @@ export function validateMcpExecutorPayload(payload: McpExecutorPayload): Validat
   return { ok: true };
 }
 
-/** Validates the tenant scope and catalog name carried by a tool-discovery request. */
+/** Validates the tenant scope and configured Server name carried by a tool-discovery request. */
 export function validateListMcpToolsRequest(request: ListMcpToolsRequest): ValidationResult {
   if (
     invalidBytes(request.workspaceId, MaxIdBytes) ||

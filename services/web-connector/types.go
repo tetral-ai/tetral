@@ -31,9 +31,8 @@ const (
 	// Stored page content may retain ASCII control bytes. JSON can encode each
 	// such byte as a six-byte \u00XX escape, so this is the largest aggregate
 	// raw result that always fits the canonical {"text":...} tool-output JSON.
-	// UPDATE-WITH: services/agent-runtime/packages/core/src/contracts/runtime.ts
-	// (RuntimeBoundedTextSchema); services/gateway/packages/protocol/src/bounds.ts
-	// (MaxProviderRequestToolOutputJsonBytes).
+	// Canonical policy: services/gateway/packages/protocol/src/content-limits.json
+	// (MaxProviderRequestToolOutputJsonBytes); checked by content_limits_test.go.
 	maxModelVisibleToolOutputJSONBytes = 512 * 1024
 	maxStoredJSONEscapeBytesPerByte    = 6
 	modelVisibleTextEnvelopeBytes      = len(`{"text":""}`)

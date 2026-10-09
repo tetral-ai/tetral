@@ -7,8 +7,8 @@
  *
  * Pure transformer between the provider carrier and SDK-free request/stream
  * plans. It lowers provider context entries to intermediate provider messages, raises
- * package-defined Gateway stream parts to ProviderStreamEvents, normalizes
- * provider usage, and classifies provider errors. It runs no I/O of its own;
+ * package-defined Gateway stream parts to Gateway-private normalized fragments,
+ * normalizes provider usage, and classifies provider errors. It runs no I/O of its own;
  * provider-gateway performs both concrete AI SDK adaptations.
  *
  * On the request side, the concrete output is an intermediate
@@ -22,9 +22,9 @@
  *   output-schema / provider-option assembly, and JSON-schema lowering.
  *   The concrete message records are this package's `LoweredProviderMessage`
  *   intermediate values; provider-gateway performs the final SDK conversion.
- * - GatewayStreamPart -> ProviderStreamEvent raising and the terminal latch
- *   (stream.ts: ProviderStreamRaiser). Provider-gateway first maps concrete AI
- *   SDK fullStream parts into this package-owned union.
+ * - GatewayStreamPart -> NormalizedProviderEvent raising and the terminal latch
+ *   (stream.ts: ProviderStreamRaiser; normalized-stream.ts). Provider-gateway
+ *   first maps concrete AI SDK stream parts into this package-owned union.
  * - Provider usage normalization across wire families (usage.ts:
  *   normalizeProviderUsage).
  * - Provider error classification and retryability (errors.ts).
@@ -49,11 +49,10 @@
  *   cache-control marking, then output-schema / provider-option assembly);
  *   reordering is outbound-wire visible (see request.ts: lowerProviderRequest).
  * - Producer-side stream-contract enforcement (single terminal, stable fragment
- *   ids, tool-call name agrees with streamed tool input) mirrors the consumer
- *   ProviderStreamValidator.
- *   This producer guarantee is deliberately partial: only synthesized ids for
- *   id-less fragments are stable here. Runtime owns full fragment lifecycle,
- *   duplicate, placement, and terminal validation.
+ *   ids, tool-call name agrees with streamed tool input) is deliberately
+ *   partial: only synthesized ids for id-less fragments are stable here.
+ *   Gateway's ProviderBlockAssembler owns fragment lifecycle validation and
+ *   complete-block assembly; Runtime validates the complete-frame protocol.
  * - SDK inputTokens is the cache-inclusive input total; uncached input is
  *   derived per wire family (see usage.ts).
  *
@@ -61,9 +60,10 @@
  * - services/gateway/packages/provider-gateway/src/providers/clients.ts
  *   (constructs requests and raisers, assigns each model its usage wire family,
  *   and routes each provider to a client).
- * - services/agent-runtime/packages/core/src/llm/llm-service.ts
- *   (ProviderStreamValidator, the consumer that re-checks the stream contract).
- * - services/gateway/packages/protocol/src (generated ProviderContextEntry /
- *   ProviderStreamEvent / RequestUsage shapes these transforms target).
+ * - services/gateway/packages/provider-gateway/src/providers/block-assembler.ts
+ *   (ProviderBlockAssembler, the consumer that validates fragment lifecycles
+ *   and assembles complete frames).
+ * - services/gateway/packages/protocol/src (generated ProviderContextEntry,
+ *   finish/error payload and RequestUsage shapes these transforms target).
  */
 export {};

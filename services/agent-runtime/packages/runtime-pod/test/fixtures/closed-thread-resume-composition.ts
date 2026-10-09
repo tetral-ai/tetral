@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { access, readFile, writeFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
+import type { LLMRequest } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
 import type { RuntimeToolExecutionRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
 import {
@@ -37,6 +39,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly sourceToolUseEventId: string;
 	readonly readyPath?: string;
 	readonly resumeResultPath?: string;
@@ -56,6 +59,19 @@ let providerRequests = 0;
 let runtimeEvents = 0;
 let resumeComplete = false;
 let nextRuntimeID = 0;
+// One serving fixture can execute multiple requests and sibling Threads. The
+// preallocated Event identity must belong to the actual request and part.
+function completedTextEventId(request: LLMRequest, providerPartId: string): string {
+	const frame = JSON.stringify([
+		"closed-thread-resume-composition.ts",
+		request.workspaceId,
+		request.sessionId,
+		request.sessionThreadId,
+		request.modelRequestId,
+		providerPartId,
+	]);
+	return `evt_${createHash("sha256").update(frame).digest("hex").slice(0, 32)}`;
+}
 const eventWriter = new BridgeAPIEventWriter({
 	address: input.address,
 	tokenPath: "/unused/service-account-token",
@@ -115,10 +131,7 @@ hosts = await buildRuntimeCoreHosts({
 		runtime: {
 			now: () => "2026-08-16T00:00:00.000Z",
 			monotonicMs: () => 0,
-			createId: (prefix) =>
-				input.providerScenario === "terminal-tool" && prefix === "event_write"
-					? `${prefix}_closed_resume_${++nextRuntimeID}`
-					: `${prefix}_closed_resume`,
+			createId: (prefix) => `${prefix}_closed_resume_${++nextRuntimeID}`,
 			sleep: async (durationMs, signal) => {
 				if (signal.aborted) return false;
 				await new Promise((resolve) => setTimeout(resolve, durationMs));
@@ -137,15 +150,16 @@ hosts = await buildRuntimeCoreHosts({
 				}
 				if (input.providerScenario === "terminal-tool" && providerRequests === 1) {
 					return Stream.fromIterable([
-						{ type: "text-start" as const, id: "terminal-tool-text" },
+
+
 						{
-							type: "text-delta" as const,
-							id: "terminal-tool-text",
-							text_delta: "checking the retained tool result",
+							type: "text-complete" as const,
+							providerPartId: "terminal-tool-text",
+							eventId: completedTextEventId(request, "terminal-tool-text"),
+							text: "checking the retained tool result",
 						},
-						{ type: "text-end" as const, id: "terminal-tool-text" },
 						{
-							type: "tool-call" as const,
+							type: "tool-call-complete" as const,
 							id: "call_closed_resume_terminal_tool",
 							toolName: "memory",
 							input: {
@@ -162,13 +176,14 @@ hosts = await buildRuntimeCoreHosts({
 					]);
 				}
 				return Stream.fromIterable([
-					{ type: "text-start" as const, id: "later-resume-text" },
+
+
 					{
-						type: "text-delta" as const,
-						id: "later-resume-text",
-						text_delta: "later input completed",
+						type: "text-complete" as const,
+						providerPartId: "later-resume-text",
+						eventId: completedTextEventId(request, "later-resume-text"),
+						text: "later input completed",
 					},
-					{ type: "text-end" as const, id: "later-resume-text" },
 					{ type: "finish" as const, finishReason: "stop" as const },
 				]);
 			},
@@ -203,9 +218,10 @@ try {
 		bindingId: input.bindingId,
 		bindingGeneration: input.bindingGeneration,
 		targetPodUid: input.targetPodUid,
+		runtimeProcessId: input.runtimeProcessId,
 	});
 	const checkpoint = extractThreadTurnCheckpoint({
-		contextEntries: loaded.contextEntries,
+		messages: loaded.messages,
 		facts: loaded.turnFacts,
 	});
 	const routeView = extractColdThreadToolRouteView({
@@ -229,6 +245,7 @@ try {
 		bindingGeneration: input.bindingGeneration,
 		runtimeBindingToken: loaded.runtimeBindingToken,
 		targetPodUid: input.targetPodUid,
+		runtimeProcessId: input.runtimeProcessId,
 		modelRequestId: "mreq_closed_resume_composition",
 		modelToolCallId: "call_closed_resume_composition",
 		modelOrder: 0,
@@ -248,13 +265,14 @@ try {
 		bindingId: input.bindingId,
 		bindingGeneration: input.bindingGeneration,
 		targetPodUid: input.targetPodUid,
+		runtimeProcessId: input.runtimeProcessId,
 	});
 	const resumeResult = {
 			result,
 			inspected,
 			checkpoint,
 			decision,
-			contextEntries: loaded.contextEntries,
+			currentRequestMessage:null,messages: loaded.messages,
 			turnFacts: loaded.turnFacts,
 			providerRequests,
 			runtimeEvents,
@@ -281,17 +299,18 @@ try {
 			},
 		} satisfies RuntimeCleanupController;
 		const service = new RuntimeControlService({
+	runtimeProcessId: input.runtimeProcessId,
 			ownPod: {
 				namespace: "tetral-agent-runtime",
 				name: "runtime-pod-closed-resume",
 				uid: input.targetPodUid,
 				ip: "127.0.0.1",
 			},
-			allowedBridge: { namespace: "tetral-system", name: "bridge" },
+			allowedJobRunner: { namespace: "tetral-system", name: "job-runner" },
 			authenticator: {
 				authenticate: async () => ({
 					ok: true as const,
-					serviceAccount: { namespace: "tetral-system", name: "bridge" },
+					serviceAccount: { namespace: "tetral-system", name: "job-runner" },
 				}),
 			},
 			runHost: {
@@ -312,6 +331,7 @@ try {
 								bindingId: input.bindingId,
 								bindingGeneration: input.bindingGeneration,
 								targetPodUid: input.targetPodUid,
+								runtimeProcessId: input.runtimeProcessId,
 							})
 							.then((afterAccept) =>
 								writeFile(

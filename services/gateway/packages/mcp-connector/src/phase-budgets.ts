@@ -1,8 +1,7 @@
 /**
  * Owns the wall-clock budget allocated between a durable MCP tool-result claim
  * and its commit. Client, credential, and Bridge adapters consume the
- * individual bounds defined here. These constants do not by themselves define
- * one end-to-end deadline across retries.
+ * individual bounds defined here. The shared execution budget clips each phase without renewing on retries.
  *
  * @packageDocumentation
  */
@@ -19,3 +18,10 @@ export const MCP_CONNECT_TIMEOUT_MS = 10_000;
 export const MCP_CLAIM_RPC_TIMEOUT_MS = 10_000;
 /** Bounds the durable Bridge commit after the external tool call returns. */
 export const MCP_COMMIT_RPC_TIMEOUT_MS = 10_000;
+
+/** Claim dispatch through prepared result, leaving the first commit reserve. */
+export const MCP_EXECUTION_TIMEOUT_MS = 170_000;
+export const MCP_FIRST_COMMIT_RESERVE_MS = 10_000;
+export const MCP_CALL_TIMEOUT_MS = 120_000;
+export const MCP_DISCOVERY_TIMEOUT_MS = 120_000;
+export const MCP_SESSION_IDLE_TIMEOUT_MS = 1_800_000;

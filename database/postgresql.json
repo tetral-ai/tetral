@@ -15,6 +15,7 @@
     "session_events",
     "session_event_stream_changes",
     "session_event_idempotency_keys",
+    "session_event_feed_retention",
     "session_messages",
     "session_mcp_manifests",
     "session_thread_context_prefixes",
@@ -46,22 +47,28 @@
     "files",
     "memory_stores",
     "memories",
-    "memory_versions"
+    "memory_versions",
+    "session_runtime_handoffs",
+    "session_runtime_handoff_threads",
+    "auth_workspace_grants",
+    "auth_access_tokens"
   ],
-  "append_only_workspace_table": "session_file_attachment_consumptions",
+  "append_only_workspace_tables": [
+    "session_file_attachment_consumptions",
+    "session_message_parts"
+  ],
   "global_tables": [
     "platform_provider_keys",
     "tetral_schema_migrations",
-    "workspaces"
+    "workspaces",
+    "runtime_process_pods",
+    "runtime_processes",
+    "runtime_process_liveness",
+    "auth_federation_rules",
+    "auth_identities",
+    "cleanup_schedule_cursor"
   ],
   "special_policies": [
-    {
-      "table": "api_keys",
-      "name": "auth_lookup",
-      "command": "SELECT",
-      "using": "(current_setting('tetral.auth_lookup'::text, true) = 'true'::text)",
-      "check": ""
-    },
     {
       "table": "session_git_tickets",
       "name": "git_ticket_lookup",
@@ -102,6 +109,160 @@
       "name": "transient_attachment_gc_select",
       "command": "SELECT",
       "using": "(current_setting('tetral.transient_attachment_gc'::text, true) = 'true'::text)",
+      "check": ""
+    },
+    {
+      "table": "session_runtime_status",
+      "name": "cleanup_discovery",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.cleanup_discovery'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_runtime_status'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "api_keys",
+      "name": "auth_lookup",
+      "command": "ALL",
+      "using": "((current_setting('tetral.auth_lookup'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('api_keys'::regclass)::oid))))",
+      "check": "((current_setting('tetral.auth_lookup'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('api_keys'::regclass)::oid))))"
+    },
+    {
+      "table": "auth_workspace_grants",
+      "name": "auth_lookup",
+      "command": "ALL",
+      "using": "((current_setting('tetral.auth_lookup'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('auth_workspace_grants'::regclass)::oid))))",
+      "check": "((current_setting('tetral.auth_lookup'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('auth_workspace_grants'::regclass)::oid))))"
+    },
+    {
+      "table": "auth_access_tokens",
+      "name": "auth_lookup",
+      "command": "ALL",
+      "using": "((current_setting('tetral.auth_lookup'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('auth_access_tokens'::regclass)::oid))))",
+      "check": "((current_setting('tetral.auth_lookup'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('auth_access_tokens'::regclass)::oid))))"
+    },
+    {
+      "table": "session_runtime_bindings",
+      "name": "runner_discovery",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.runner_discovery'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_runtime_bindings'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "session_runtime_status",
+      "name": "runner_discovery",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.runner_discovery'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_runtime_status'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "sessions",
+      "name": "runner_discovery",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.runner_discovery'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('sessions'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "session_runtime_inbox",
+      "name": "runner_discovery",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.runner_discovery'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_runtime_inbox'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "session_event_idempotency_keys",
+      "name": "retention_maintenance_select",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.retention_maintenance'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_event_idempotency_keys'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "session_event_idempotency_keys",
+      "name": "retention_maintenance_update",
+      "command": "UPDATE",
+      "using": "((current_setting('tetral.retention_maintenance'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_event_idempotency_keys'::regclass)::oid))))",
+      "check": "((current_setting('tetral.retention_maintenance'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_event_idempotency_keys'::regclass)::oid))))"
+    },
+    {
+      "table": "session_event_idempotency_keys",
+      "name": "retention_maintenance_delete",
+      "command": "DELETE",
+      "using": "((current_setting('tetral.retention_maintenance'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_event_idempotency_keys'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "session_event_stream_changes",
+      "name": "retention_maintenance_select",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.retention_maintenance'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_event_stream_changes'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "session_event_stream_changes",
+      "name": "retention_maintenance_update",
+      "command": "UPDATE",
+      "using": "((current_setting('tetral.retention_maintenance'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_event_stream_changes'::regclass)::oid))))",
+      "check": "((current_setting('tetral.retention_maintenance'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_event_stream_changes'::regclass)::oid))))"
+    },
+    {
+      "table": "session_event_stream_changes",
+      "name": "retention_maintenance_delete",
+      "command": "DELETE",
+      "using": "((current_setting('tetral.retention_maintenance'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_event_stream_changes'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "session_event_feed_retention",
+      "name": "retention_maintenance_select",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.retention_maintenance'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_event_feed_retention'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "session_event_feed_retention",
+      "name": "retention_maintenance_insert",
+      "command": "INSERT",
+      "using": "",
+      "check": "((current_setting('tetral.retention_maintenance'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_event_feed_retention'::regclass)::oid))))"
+    },
+    {
+      "table": "session_event_feed_retention",
+      "name": "retention_maintenance_update",
+      "command": "UPDATE",
+      "using": "((current_setting('tetral.retention_maintenance'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_event_feed_retention'::regclass)::oid))))",
+      "check": "((current_setting('tetral.retention_maintenance'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_event_feed_retention'::regclass)::oid))))"
+    },
+    {
+      "table": "session_events",
+      "name": "retention_maintenance_select",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.retention_maintenance'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_events'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "session_threads",
+      "name": "retention_maintenance_select",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.retention_maintenance'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_threads'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "queue_jobs",
+      "name": "retention_maintenance_select",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.retention_maintenance'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('queue_jobs'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "queue_jobs",
+      "name": "retention_maintenance_update",
+      "command": "UPDATE",
+      "using": "((current_setting('tetral.retention_maintenance'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('queue_jobs'::regclass)::oid))))",
+      "check": "((current_setting('tetral.retention_maintenance'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('queue_jobs'::regclass)::oid))))"
+    },
+    {
+      "table": "queue_jobs",
+      "name": "retention_maintenance_delete",
+      "command": "DELETE",
+      "using": "((current_setting('tetral.retention_maintenance'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('queue_jobs'::regclass)::oid))))",
       "check": ""
     }
   ]

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { credentials, Metadata } from "@grpc/grpc-js";
 import type {
@@ -40,6 +41,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly runtimeInputId: string;
 	readonly inputOrder: number;
 	readonly commitResponse?: CommitTaskNotificationResultResponse;
@@ -85,12 +87,13 @@ const bridgeLoader = new BridgeAPIContextLoader({
 			loadContext: (
 				_request: unknown,
 				_metadata: Metadata,
+				_options: unknown,
 				callback: (error: Error | null, value: unknown) => void,
 			) => {
 				callback(null, {
 					contextJson: JSON.stringify({
-						contextEntries: [],
-						openRequestDraft: null,
+						messages:[],currentRequestMessage:null,
+
 						turnFacts: { events: [], internalRepairs: [] },
 						thread: {
 							parentThreadId: null,
@@ -108,6 +111,7 @@ const bridgeLoader = new BridgeAPIContextLoader({
 			commitTaskNotificationResult: (
 				request: CommitTaskNotificationResultRequest,
 				_metadata: Metadata,
+				_options: unknown,
 				callback: (error: Error | null, value: unknown) => void,
 			) => {
 				declaration = request;
@@ -157,7 +161,7 @@ const contextLoader = {
 	loadThreadContext:
 		input.bridgeAddress === undefined
 			? async () => ({
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					turnFacts: { events: [], internalRepairs: [] },
 					thread: {
 						role: "main" as const,
@@ -214,16 +218,11 @@ const hosts = await buildRuntimeCoreHosts({
 				providerRequests.push(request);
 				const id = `task-notification-race-${providerInvocations}`;
 				return Stream.fromIterable([
-					{ type: "text-start" as const, id },
-					{
-						type: "text-delta" as const,
-						id,
-						text_delta:
-							providerInvocations === 1
+
+
+					{type:"text-complete" as const,providerPartId:id,eventId:`evt_${createHash("sha256").update(JSON.stringify(["task-notification-composition.ts", input.sessionId, id])).digest("hex").slice(0,32)}`,text:(providerInvocations === 1
 								? "current request completed"
-								: "task notification consumed",
-					},
-					{ type: "text-end" as const, id },
+								: "task notification consumed")},
 					{ type: "finish" as const, finishReason: "stop" as const },
 				]);
 			},
@@ -248,6 +247,7 @@ const preloadResult = await hosts.subAgentRunHost.preloadThread({
 	bindingId: input.bindingId,
 	bindingGeneration: input.bindingGeneration,
 	targetPodUid: input.targetPodUid,
+	runtimeProcessId: input.runtimeProcessId,
 });
 if (!preloadResult.ok || !preloadResult.applied) {
 	throw new Error(
@@ -255,17 +255,18 @@ if (!preloadResult.ok || !preloadResult.applied) {
 	);
 }
 const service = new RuntimeControlService({
+	runtimeProcessId: input.runtimeProcessId,
 	ownPod: {
 		namespace: "engine",
 		name: "runtime-pod-composition",
 		uid: input.targetPodUid,
 		ip: "127.0.0.1",
 	},
-	allowedBridge: { namespace: "engine", name: "bridge" },
+	allowedJobRunner: { namespace: "engine", name: "job-runner" },
 	authenticator: {
 		authenticate: async () => ({
 			ok: true as const,
-			serviceAccount: { namespace: "engine", name: "bridge" },
+			serviceAccount: { namespace: "engine", name: "job-runner" },
 		}),
 	},
 	runHost: {
@@ -308,6 +309,7 @@ try {
 					bindingId: input.bindingId,
 					bindingGeneration: input.bindingGeneration,
 					targetPodUid: input.targetPodUid,
+					runtimeProcessId: input.runtimeProcessId,
 					runtimeInputId: input.runtimeInputId,
 					inputOrder: input.inputOrder,
 					notificationJson: input.notificationJson,

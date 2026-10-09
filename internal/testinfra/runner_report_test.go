@@ -6,9 +6,67 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestGoCommandsApplyIntegrationPackageWatchdog(t *testing.T) {
+	// Force tool lookup to fail after the native worker constructs its command;
+	// this command-contract test must not execute the selected compositions.
+	t.Setenv("PATH", t.TempDir())
+	tests := []struct {
+		name    string
+		profile Profile
+		pkg     string
+		timeout string
+	}{
+		{name: "full integration", profile: ProfileFull, pkg: "github.com/tetral-ai/tetral/integration", timeout: "-timeout=25m"},
+		{name: "affected integration", profile: ProfileAffected, pkg: "github.com/tetral-ai/tetral/integration", timeout: "-timeout=25m"},
+		{name: "unrelated package", profile: ProfileFull, pkg: "github.com/tetral-ai/tetral/services/bridge", timeout: "-timeout=20m"},
+		{name: "integration subpackage", profile: ProfileFull, pkg: "github.com/tetral-ai/tetral/integration/static", timeout: "-timeout=20m"},
+		{name: "fast integration", profile: ProfileFast, pkg: "github.com/tetral-ai/tetral/integration"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			selection := Selection{Group: "go", Packages: []string{test.pkg}, Tests: []string{"TestSelected"}}
+			want := []string{"go", "test", "-json", "-count=1"}
+			if test.timeout != "" {
+				want = append(want, "-race", test.timeout)
+			}
+			serial, err := commandsForSelection(Plan{Profile: test.profile}, selection, t.TempDir(), t.TempDir(), DependencyAuditChanged)
+			if err != nil || len(serial) != 1 {
+				t.Fatalf("serial commands = %v/%v; want one command", serial, err)
+			}
+			if !slices.Equal(serial[0].Arguments, append(slices.Clone(want), test.pkg)) {
+				t.Fatalf("serial command = %v; want %v", serial[0].Arguments, append(slices.Clone(want), test.pkg))
+			}
+			worker, err := executeGoSelections(context.Background(), test.profile, []Selection{selection}, RunOptions{
+				Root: t.TempDir(), OutputDir: t.TempDir(), MaxWorkers: 1,
+			}, &dependencyManager{})
+			if err == nil || len(worker) != 1 || worker[0].Status != "apparatus-failed" {
+				t.Fatalf("worker result = %v/%v; want tool lookup failure", worker, err)
+			}
+			want = append(want, "-run", "^(?:TestSelected)$", test.pkg)
+			if !slices.Equal(worker[0].Command, want) {
+				t.Fatalf("worker command = %v; want %v", worker[0].Command, want)
+			}
+		})
+	}
+
+	t.Run("serial multiple packages", func(t *testing.T) {
+		packages := []string{"github.com/tetral-ai/tetral/services/bridge", "github.com/tetral-ai/tetral/integration"}
+		commands, err := commandsForSelection(Plan{Profile: ProfileFull}, Selection{Group: "go", Packages: packages}, t.TempDir(), t.TempDir(), DependencyAuditChanged)
+		if err != nil || len(commands) != 1 {
+			t.Fatalf("serial commands = %v/%v; want one command", commands, err)
+		}
+		want := append([]string{"go", "test", "-json", "-count=1", "-race", "-timeout=25m"}, packages...)
+		if !slices.Equal(commands[0].Arguments, want) {
+			t.Fatalf("serial multi-package command = %v; want %v", commands[0].Arguments, want)
+		}
+	})
+}
 
 func TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests(t *testing.T) {
 	commands, err := commandsForSelection(
@@ -33,6 +91,54 @@ func TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests(t *testing.T) {
 	}
 	if !slices.Equal(commands[2].Arguments[:2], []string{"go", "test"}) {
 		t.Fatalf("third coverage command = %v; want Go tests after dependency setup", commands[2].Arguments)
+	}
+
+	// Without an explicit budget go test stops every package binary after ten
+	// minutes. Coverage runs the integration package as one sequential binary,
+	// so its budget must leave twofold headroom over that package's calibrated
+	// top-level test durations, which sum to less than its measured total.
+	var budget time.Duration
+	for _, argument := range commands[2].Arguments {
+		value, ok := strings.CutPrefix(argument, "-timeout=")
+		if !ok {
+			continue
+		}
+		if budget != 0 {
+			t.Fatalf("coverage Go command %v names more than one timeout", commands[2].Arguments)
+		}
+		budget, err = time.ParseDuration(value)
+		if err != nil || budget <= 0 {
+			t.Fatalf("coverage Go timeout %q is malformed: %v", value, err)
+		}
+	}
+	if budget == 0 {
+		t.Fatalf("coverage Go command %v has no whole-package budget", commands[2].Arguments)
+	}
+	calibration, err := loadGoShardCalibration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var measured time.Duration
+	for _, weight := range calibration.Packages["github.com/tetral-ai/tetral/integration"].TestsMS {
+		measured += time.Duration(weight) * time.Millisecond
+	}
+	if measured == 0 || budget < 2*measured {
+		t.Fatalf("coverage Go budget %s does not leave twofold headroom over the calibrated sequential integration time %s", budget, measured)
+	}
+
+	// The job must outlast the Go budget so a stuck package reports through
+	// go test's watchdog, with time left for dependency setup, compilation and
+	// the Bun coverage commands that share the job.
+	workflow, err := parseYAMLFile(filepath.Join(testRepositoryRoot(t), ".github", "workflows", "main-branch-verification.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	minutes, err := strconv.Atoi(scalar(mappingValue(mappingValue(mappingValue(workflow.Content[0], "jobs"), "coverage"), "timeout-minutes")))
+	if err != nil {
+		t.Fatalf("main-branch coverage job has no numeric timeout-minutes: %v", err)
+	}
+	if jobLimit := time.Duration(minutes) * time.Minute; jobLimit < budget+15*time.Minute {
+		t.Fatalf("main-branch coverage job limit %s leaves less than 15 minutes around the Go budget %s", jobLimit, budget)
 	}
 }
 

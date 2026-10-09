@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,9 +32,11 @@ func TestWorkloadRunDrainsInFlightRequestBeforeReturning(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	metrics := workload.NewOperationMetrics("api")
 	runDone := make(chan error, 1)
 	go func() {
 		runDone <- workload.Run(ctx, workload.Config{
+			Metrics:         metrics,
 			ServiceName:     "api",
 			Listener:        listener,
 			Handler:         handler,
@@ -100,6 +104,11 @@ func TestWorkloadRunDrainsInFlightRequestBeforeReturning(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after drain completed")
 	}
+	response := httptest.NewRecorder()
+	workload.HealthRouter(workload.NewReadiness(), workload.WithMetricsCollector("operations", metrics.Collector())).ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
+	if !strings.Contains(response.Body.String(), `tetral_operation_duration_seconds_count{operation="shutdown_http_drain",outcome="success",service="api"} 1`) {
+		t.Fatalf("missing actual drain outcome: %s", response.Body.String())
+	}
 }
 
 // TestWorkloadRunSurfacesDrainTimeoutError proves that when an in-flight request
@@ -108,11 +117,13 @@ func TestWorkloadRunDrainsInFlightRequestBeforeReturning(t *testing.T) {
 func TestWorkloadRunSurfacesDrainTimeoutError(t *testing.T) {
 	handlerStarted := make(chan struct{})
 	releaseHandler := make(chan struct{})
+	handlerCancelled := make(chan struct{})
 
-	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(handlerStarted)
-		// Block past the shutdown timeout; released by the test after Run returns
-		// so no goroutine leaks.
+		// Forced close must cancel this actual request, then still join its cleanup.
+		<-r.Context().Done()
+		close(handlerCancelled)
 		<-releaseHandler
 		w.WriteHeader(http.StatusOK)
 	})
@@ -121,9 +132,11 @@ func TestWorkloadRunSurfacesDrainTimeoutError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	metrics := workload.NewOperationMetrics("api")
 	runDone := make(chan error, 1)
 	go func() {
 		runDone <- workload.Run(ctx, workload.Config{
+			Metrics:         metrics,
 			ServiceName:     "api",
 			Listener:        listener,
 			Handler:         handler,
@@ -147,15 +160,40 @@ func TestWorkloadRunSurfacesDrainTimeoutError(t *testing.T) {
 
 	// Trigger shutdown; the in-flight handler stays blocked past ShutdownTimeout.
 	cancel()
+	select {
+	case <-handlerCancelled:
+	case <-time.After(5 * time.Second):
+		close(releaseHandler)
+		t.Fatal("request context did not cancel at forced shutdown")
+	}
+	select {
+	case err := <-runDone:
+		close(releaseHandler)
+		t.Fatalf("Run returned before handler cleanup joined: %v", err)
+	default:
+	}
+	close(releaseHandler)
 
 	select {
 	case err := <-runDone:
 		if err == nil {
 			t.Fatal("Run returned nil despite a drain that outlived ShutdownTimeout")
 		}
-		close(releaseHandler)
 	case <-time.After(5 * time.Second):
-		close(releaseHandler)
 		t.Fatal("Run did not return after drain timeout")
+	}
+	response := httptest.NewRecorder()
+	workload.HealthRouter(workload.NewReadiness(), workload.WithMetricsCollector("operations", metrics.Collector())).ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
+	if !strings.Contains(response.Body.String(), `tetral_operation_duration_seconds_count{operation="shutdown_http_drain",outcome="timeout",service="api"} 1`) {
+		t.Fatalf("missing actual drain outcome: %s", response.Body.String())
+	}
+}
+
+func TestReadinessShutdownCannotBeOverwrittenByLateStartup(t *testing.T) {
+	ready := workload.NewReadiness()
+	ready.BeginShutdown()
+	ready.MarkReady()
+	if ready.Ready() {
+		t.Fatal("late listener startup reopened shutdown readiness")
 	}
 }

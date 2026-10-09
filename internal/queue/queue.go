@@ -42,7 +42,8 @@ const (
 	KindSandboxBackgroundCommand    = "sandbox_background_command"
 	KindSandboxBackgroundReconcile  = "sandbox_background_reconcile"
 
-	// MaxMcpManifestBytes is owned by Bridge manifest acceptance. Queue jobs
+	// MaxMcpManifestBytes is owned by shared mcpmanifest acceptance (Bridge
+	// connector-change and Job Runner initial discovery). Queue jobs
 	// carry only the manifest row identity; delivery rebuilds read the bounded
 	// content from that durable row.
 	MaxMcpManifestBytes = 256 * 1024
@@ -63,7 +64,7 @@ const (
 	// a successor with a new durable identity.
 	SandboxOutputCaptureMaxAttempts        = 5
 	SandboxOutputCaptureCleanupMaxAttempts = 5
-	// Bridge/Sandbox startup knobs own lease_owner; Lease admission rechecks
+	// Job Runner/Sandbox startup knobs own lease_owner; Lease admission rechecks
 	// it, and deployed service identifiers are below 32 bytes.
 	MaxQueueLeaseOwnerBytes = 256
 	// Queue-owned formatters compose bounded workspace/session/resource ids;
@@ -94,6 +95,43 @@ const (
 	// Fixed response headroom covers the response envelope and unknown fields;
 	// it is independent from the identically sized payload fuse.
 	QueueLeaseResponseFixedOverhead = 64 * 1024
+	// The direct Job Runner response also carries retry_after_ms: one tag byte
+	// plus a five-byte non-negative int32 varint.
+	jobRunnerLeaseRetryHintBytes = 6
+)
+
+// Direct Job Runner leasing limits. They are Queue-owned source constants,
+// not deployment knobs.
+const (
+	// MinJobRunnerLeaseDuration and MaxJobRunnerLeaseDuration bound
+	// LeaseJobRunnerJobs lease_duration_ms; workspace-scoped Lease keeps its
+	// positive-duration rule.
+	MinJobRunnerLeaseDuration = 5 * time.Second
+	MaxJobRunnerLeaseDuration = 300 * time.Second
+
+	// One call stops beginning database work after this budget, leaving the
+	// caller's 2-second RPC deadline for serialization and transport.
+	jobRunnerCallBudget = 1000 * time.Millisecond
+	// Per call: tenant turn attempts, fetched raw candidates and exact lease
+	// transactions. A turn fetches at most one tenant window and commits at
+	// most one job.
+	jobRunnerCallTurns             = 16
+	jobRunnerCallRawCandidates     = 128
+	jobRunnerCallLeaseTransactions = 16
+	jobRunnerTenantWindow          = 32
+	// Every discovery statement and exact lease transaction runs under these
+	// local limits, shortened by the remaining call budget.
+	jobRunnerStatementTimeout = 40 * time.Millisecond
+	jobRunnerLockTimeout      = 10 * time.Millisecond
+	// Retry hints: the active value after a budget or contention stop, and
+	// the clamp for the next future job otherwise.
+	jobRunnerActiveRetryAfter = 100 * time.Millisecond
+	jobRunnerIdleRetryAfter   = 1000 * time.Millisecond
+	// The scheduler's single cleanup worker probes at most this many pass
+	// entries per tick under its own child deadline.
+	jobRunnerCleanupInterval = time.Second
+	jobRunnerCleanupKeys     = 128
+	jobRunnerCleanupTimeout  = 200 * time.Millisecond
 )
 
 type QueueJobFieldBound struct {
@@ -178,8 +216,9 @@ func QueueJobEnvelopeAllowance() int {
 //	-------------  --------------------------------------------  ------------------------------------  ----------------------------
 //	pending        admitted, awaiting a lease; Retry/Defer       Enqueue (insert), Retry (not          -> leased, -> cancelled,
 //	               re-admit with backoff-delayed available_at,   exhausted), Defer, ReclaimExpired-
-//	               reclaim re-admits at available_at = now       Leases                                -> dead_lettered
-//	leased         one consumer holds the row under a             Lease                                 -> pending, -> acknowledged,
+//	               reclaim and release re-admit at               Leases, ReleaseUnstartedJob           -> dead_lettered
+//	               available_at = now
+//	leased         one consumer holds the row under a             Lease, LeaseJobRunnerJobs             -> pending, -> acknowledged,
 //	               lease_token for the lease window                                                     -> dead_lettered
 //	acknowledged   terminal; the leased work committed            Ack                                   (none)
 //	cancelled      terminal; pending work was fenced out          Cancel, CancelTx                       (none)
@@ -187,9 +226,9 @@ func QueueJobEnvelopeAllowance() int {
 //	               dead-letter
 //	                                                            DeadLetterExhaustedTx
 //
-// Readers of status: Lease candidate selection with its delivery-scope barrier,
-// the active-dedupe lookup in EnqueueTx, Metrics, the Sandbox over-budget
-// census, and terminal-retention maintenance.
+// Readers of status: Lease and direct Job Runner candidate selection with
+// their shared delivery-scope barrier, the active-dedupe lookup in EnqueueTx,
+// Metrics, the Sandbox over-budget census, and terminal-retention maintenance.
 //
 // INVARIANTS:
 //   - At most one active job per (workspace_id, dedupe_key) across pending and
@@ -213,6 +252,12 @@ func QueueJobEnvelopeAllowance() int {
 //   - Lease discovers candidates without Queue row locks, acquires the bounded
 //     Session arbitration set in canonical order, then locks and revalidates
 //     each exact candidate. It never waits Queue-row-first on a Session owner.
+//   - LeaseJobRunnerJobs leases one candidate per transaction: it try-locks the
+//     Session arbitration owner, skips a locked Queue row, and rechecks the
+//     same eligibility predicate as Lease against database time. Only it
+//     records lease_previous_attempt_count, and every transition off leased
+//     clears that private provenance, so ReleaseUnstartedJob can refund only a
+//     live direct lease.
 //
 // UPDATE-WITH: internal/queue/postgresql_store.go (every transition writer plus
 // the ON CONFLICT and NOT EXISTS guards that enforce the two invariants).
@@ -236,6 +281,20 @@ const (
 	SandboxMaintenanceBatchLimit = 100
 )
 
+// Job Runner terminal retention removes acknowledged and cancelled rows of the
+// five Job Runner kinds 24 hours after their terminal timestamp and
+// dead-lettered rows after 7 days, at most JobRunnerRetentionStateLimit rows
+// per terminal state per maintenance pass. tetral_prune_job_runner_jobs owns
+// the ages and caps every cutoff at its database clock minus the state's age.
+const (
+	JobRunnerTerminalRetentionAge   = 24 * time.Hour
+	JobRunnerDeadLetterRetentionAge = 7 * 24 * time.Hour
+	JobRunnerRetentionStateLimit    = 256
+)
+
+// JobRunnerTerminalStates are visited in this order by each retention pass.
+var JobRunnerTerminalStates = []string{StatusAcknowledged, StatusCancelled, StatusDeadLettered}
+
 type ValidationError struct {
 	Message string
 }
@@ -247,6 +306,19 @@ type IntegrityError struct {
 }
 
 func (e *IntegrityError) Error() string { return e.Message }
+
+// PreconditionError reports a well-formed request whose durable Queue state
+// does not permit the operation, such as releasing a live lease that carries
+// no direct-lease provenance.
+type PreconditionError struct {
+	Message string
+}
+
+func (e *PreconditionError) Error() string { return e.Message }
+
+// ErrJobRunnerSchedulerClosed rejects direct Job Runner leasing after the
+// owning Queue process began quiescing.
+var ErrJobRunnerSchedulerClosed = errors.New("queue: job runner scheduler is closed")
 
 type Job struct {
 	ID                     string
@@ -283,6 +355,7 @@ const (
 type MetricsSnapshot struct {
 	Kind             string
 	PendingJobs      int
+	ReadyJobs        int
 	LeasedJobs       int
 	RetryPendingJobs int
 	DeadLetteredJobs int
@@ -314,6 +387,36 @@ type LeaseRequest struct {
 	MaxJobs       int
 	LeaseDuration time.Duration
 	Now           time.Time
+}
+
+// LeaseJobRunnerJobsRequest carries only the caller's free capacity, label
+// and lease duration. Queue chooses workspaces and admits only the five Job
+// Runner kinds; there is no caller-supplied scope or continuation.
+type LeaseJobRunnerJobsRequest struct {
+	LeaseOwner    string
+	MaxJobs       int
+	LeaseDuration time.Duration
+}
+
+// LeaseJobRunnerJobsResult returns every committed lease and the Queue-owned
+// delay before the caller should ask again when it still has capacity.
+type LeaseJobRunnerJobsResult struct {
+	Jobs       []*Job
+	RetryAfter time.Duration
+	// Bounded diagnostics for the serving boundary: candidates skipped on a
+	// local lock or statement timeout, and the failure that stopped a call
+	// after Jobs had already committed.
+	LockTimeouts      int
+	StatementTimeouts int
+	StopFailure       error
+}
+
+// ReleaseUnstartedJobRequest names one direct Job Runner lease whose job the
+// caller observed but never dispatched.
+type ReleaseUnstartedJobRequest struct {
+	WorkspaceID workspace.ID
+	JobID       string
+	LeaseToken  string
 }
 
 type HeartbeatRequest struct {
@@ -485,6 +588,22 @@ type EmptyPartitionCounterSweepRequest struct {
 	Limit int
 }
 
+type JobRunnerTerminalRetentionRequest struct {
+	Now time.Time
+}
+
+// JobRunnerTerminalRetentionResult aggregates one retention pass. Malformed
+// counts Runner rows in a terminal status whose terminal timestamp is NULL;
+// they are retained, and each state's count is bounded at 256.
+// ExhaustedStates counts states whose 256-row page was full while the probe
+// after it still found an eligible row; the maintenance phase counts budget
+// exhaustion once when it is positive.
+type JobRunnerTerminalRetentionResult struct {
+	Deleted         int
+	Malformed       int
+	ExhaustedStates int
+}
+
 func NewJobID() string {
 	return id.New(JobIDPrefix)
 }
@@ -639,6 +758,58 @@ func MaxQueueLeaseJobs() int {
 		(MaxQueueJobPayloadBytes + QueueJobEnvelopeAllowance())
 }
 
+// MaxJobRunnerLeaseJobs is the largest LeaseJobRunnerJobs batch whose
+// maximal response fits the Queue Lease transport fuse, after the fixed
+// response headroom and the retry hint.
+func MaxJobRunnerLeaseJobs() int {
+	return (sessionrpc.MaxQueueLeaseGRPCMessageBytes - QueueLeaseResponseFixedOverhead - jobRunnerLeaseRetryHintBytes) /
+		(MaxQueueJobPayloadBytes + QueueJobEnvelopeAllowance())
+}
+
+// ValidateJobRunnerLeaseBatchSize rejects a non-positive or oversized direct
+// Job Runner batch; invalid requests are never clamped.
+func ValidateJobRunnerLeaseBatchSize(maxJobs int) error {
+	if maxJobs <= 0 {
+		return &ValidationError{Message: "max_jobs must be positive"}
+	}
+	if maximum := MaxJobRunnerLeaseJobs(); maxJobs > maximum {
+		return &ValidationError{Message: fmt.Sprintf("max_jobs must not exceed %d under the queue Lease message capacity", maximum)}
+	}
+	return nil
+}
+
+// ValidateJobRunnerLeaseDuration enforces the direct Job Runner lease range.
+func ValidateJobRunnerLeaseDuration(duration time.Duration) error {
+	if duration < MinJobRunnerLeaseDuration || duration > MaxJobRunnerLeaseDuration {
+		return jobRunnerLeaseDurationError()
+	}
+	return nil
+}
+
+// JobRunnerLeaseDurationFromMillis converts a wire lease_duration_ms only
+// after checking the direct Job Runner range, so no value can overflow.
+func JobRunnerLeaseDurationFromMillis(millis int64) (time.Duration, error) {
+	if millis < MinJobRunnerLeaseDuration.Milliseconds() || millis > MaxJobRunnerLeaseDuration.Milliseconds() {
+		return 0, jobRunnerLeaseDurationError()
+	}
+	return time.Duration(millis) * time.Millisecond, nil
+}
+
+func jobRunnerLeaseDurationError() error {
+	return &ValidationError{Message: fmt.Sprintf("lease_duration_ms must be between %d and %d",
+		MinJobRunnerLeaseDuration.Milliseconds(), MaxJobRunnerLeaseDuration.Milliseconds())}
+}
+
+func ValidateLeaseJobRunnerJobsRequest(request LeaseJobRunnerJobsRequest) error {
+	if err := ValidateLeaseOwner(request.LeaseOwner); err != nil {
+		return err
+	}
+	if err := ValidateJobRunnerLeaseBatchSize(request.MaxJobs); err != nil {
+		return err
+	}
+	return ValidateJobRunnerLeaseDuration(request.LeaseDuration)
+}
+
 func ValidateLeaseOwner(leaseOwner string) error {
 	if leaseOwner == "" {
 		return &ValidationError{Message: "lease_owner is required"}
@@ -737,6 +908,25 @@ func NewRuntimeRecoveryEnqueueRequest(workspaceID workspace.ID, sessionID string
 		DedupeKey:      FormatRuntimeRecoveryDedupeKey(workspaceID, sessionID, sourceEventID),
 		PayloadVersion: 1, PayloadJSON: payload, MaxAttempts: DefaultMaxAttempts, Now: now,
 	}, nil
+}
+
+// A handoff receipt is a control-plane source, distinct from public events.
+func FormatRuntimeHandoffDedupeKey(workspaceID workspace.ID, sessionID, sessionThreadID, handoffID string) string {
+	return formatQueueDedupeKey(KindRuntimeRecovery, workspaceID, sessionID, "handoff:"+sessionThreadID+":"+handoffID)
+}
+
+func NewRuntimeHandoffEnqueueRequest(workspaceID workspace.ID, sessionID, sessionThreadID, handoffID string, now time.Time) (EnqueueRequest, error) {
+	payload, err := json.Marshal(struct {
+		SessionID       string `json:"session_id"`
+		SessionThreadID string `json:"session_thread_id"`
+		HandoffID       string `json:"handoff_id"`
+	}{sessionID, sessionThreadID, handoffID})
+	if err != nil {
+		return EnqueueRequest{}, err
+	}
+	return EnqueueRequest{ID: NewJobID(), WorkspaceID: workspaceID, Kind: KindRuntimeRecovery,
+		PartitionKey: FormatSessionPartitionKey(workspaceID, sessionID), DedupeKey: FormatRuntimeHandoffDedupeKey(workspaceID, sessionID, sessionThreadID, handoffID),
+		PayloadVersion: 1, PayloadJSON: payload, MaxAttempts: DefaultMaxAttempts, Now: now}, nil
 }
 
 func FormatTaskNotificationRuntimeInputID(taskID string) string {
@@ -924,17 +1114,16 @@ func validateCanonicalQueueShape(request EnqueueRequest) error {
 	}
 	switch request.Kind {
 	case KindRuntimeRecovery:
-		if err := validatePayloadKeys(rawPayload, "session_id", "session_thread_id", "source_event_id"); err != nil {
-			return err
-		}
-		sessionID, sourceEventID, err := requiredPayloadTokens(payload, "session_id", "source_event_id")
+		recovery, err := DecodeRuntimeRecoveryPayload(request.PayloadJSON)
 		if err != nil {
 			return err
 		}
-		if _, err := requiredPayloadToken(payload, "session_thread_id"); err != nil {
-			return err
+		dedupe := FormatRuntimeRecoveryDedupeKey(request.WorkspaceID, recovery.SessionID, recovery.SourceEventID)
+		if recovery.HandoffID != "" {
+			dedupe = FormatRuntimeHandoffDedupeKey(request.WorkspaceID, recovery.SessionID, recovery.SessionThreadID, recovery.HandoffID)
 		}
-		return requireCanonicalKeys(request, FormatSessionPartitionKey(request.WorkspaceID, sessionID), FormatRuntimeRecoveryDedupeKey(request.WorkspaceID, sessionID, sourceEventID))
+		return requireCanonicalKeys(request, FormatSessionPartitionKey(request.WorkspaceID, recovery.SessionID), dedupe)
+
 	case KindRuntimeInput:
 		runtimeInputKeys := []string{"workspace_id", "session_id", "session_thread_id", "runtime_input_id", "event_ids", "sequence_from", "sequence_to", "input_kind"}
 		if err := validatePayloadKeys(rawPayload, runtimeInputKeys...); err != nil {
@@ -1394,6 +1583,17 @@ func isKnownKind(kind string) bool {
 	}
 }
 
+// IsJobRunnerKind reports the five kinds that direct Job Runner leasing
+// admits; every other kind is leased through workspace-scoped Lease.
+func IsJobRunnerKind(kind string) bool {
+	switch kind {
+	case KindRuntimeInput, KindRuntimeRecovery, KindRuntimeConfigUpdate, KindCleanupSession, KindSessionDeleteCleanup:
+		return true
+	default:
+		return false
+	}
+}
+
 func IsSandboxJobKind(kind string) bool {
 	switch kind {
 	case KindSandboxToolExecute, KindSandboxActivate, KindSandboxMaterialize, KindSandboxRelease, KindSandboxToolCancel,
@@ -1430,4 +1630,9 @@ func IsValidationError(err error) bool {
 func IsIntegrityError(err error) bool {
 	var integrity *IntegrityError
 	return errors.As(err, &integrity)
+}
+
+func IsPreconditionError(err error) bool {
+	var precondition *PreconditionError
+	return errors.As(err, &precondition)
 }

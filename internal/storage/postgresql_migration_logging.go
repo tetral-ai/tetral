@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/workload"
+
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -32,7 +34,7 @@ type migrationDiagnostics struct {
 func newMigrationDiagnostics(ctx context.Context) *migrationDiagnostics {
 	logger, _ := ctx.Value(migrationLoggerKey{}).(*slog.Logger)
 	if logger == nil {
-		logger = slog.Default()
+		logger = workload.ComponentLogger("database")
 	}
 	return &migrationDiagnostics{logger: logger, started: time.Now(), step: "validate_registry", outcome: "not_started"}
 }

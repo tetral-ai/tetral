@@ -31,7 +31,7 @@ import type {
 	LLMServiceError,
 	Interface as LLMServiceInterface,
 } from "../../../src/llm/llm-service.js";
-import { ProviderStreamAccumulator } from "../../../src/runtime/accumulator.js";
+import { RequestContentProcessor } from "../../../src/runtime/accumulator.js";
 import * as SessionManager from "../../../src/session/session-manager.js";
 import { appendIdleEvent } from "../../../src/thread-loop/closeout.js";
 import { assembleProviderCallRequest } from "../../../src/thread-loop/provider-request.js";
@@ -513,7 +513,8 @@ describe("ThreadLoop", () => {
 			type: "retry",
 			error: { code: "timeout" },
 		});
-		expect(timeoutSleeps).toBe(2);
+		expect(timeoutSleeps).toBe(1);
+		// Only the memo observation runs a timer; raw FinishIdle owns its deadline.
 		idleResult.resolve({
 			ok: true,
 			eventId: `bridge-${idleWriteId}`,
@@ -666,7 +667,7 @@ describe("ThreadLoop", () => {
 			),
 		);
 		expect(result).toEqual({ type: "interrupted", discardHotState: true });
-		expect(session.state.contextManager.entries()).toEqual([]);
+		expect(session.state.contextManager.historyMessages()).toEqual([]);
 		expect(session.state.acceptedInputCount()).toBe(0);
 		expect(terminalEvents).toEqual([]);
 	});
@@ -797,7 +798,7 @@ describe("ThreadLoop", () => {
 				manager.preloadThread({
 					...preloadAddress,
 					runtimeBindingToken: "runtime-binding-token",
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					turnCheckpoint: {
 						executionRunId: "evt_open_idle_retry",
 						pendingInputContextSequences: [],
@@ -975,13 +976,9 @@ describe("ThreadLoop", () => {
 					},
 				],
 				[
-					{ type: "text-start", id: "reschedule-successor" },
-					{
-						type: "text-delta",
-						id: "reschedule-successor",
-						text_delta: "accepted successor completed",
-					},
-					{ type: "text-end", id: "reschedule-successor" },
+
+
+					{type:"text-complete" as const,providerPartId:"reschedule-successor",eventId:"evt_a4f28bb0f70512216e56a8a90295a47f",text:("accepted successor completed")},
 					{ type: "finish", finishReason: "stop" },
 				],
 			],
@@ -1073,12 +1070,8 @@ describe("ThreadLoop", () => {
 				observedAbortSignal = options?.abortSignal;
 				return Stream.fromAsyncIterable(
 					(async function* () {
-						yield { type: "text-start" as const, id: "text-1" };
-						yield {
-							type: "text-delta" as const,
-							id: "text-1",
-							text_delta: "partial answer",
-						};
+
+
 						streamStarted.resolve();
 						if (options?.abortSignal === undefined) {
 							throw new Error("provider stream requires an abort signal");
@@ -1230,7 +1223,7 @@ describe("ThreadLoop", () => {
 						}),
 						createProcessor: () => {
 							const assistant = session.state.contextManager
-								.entries()
+								.historyMessages()
 								.find((message) => message.contextKind === "assistant");
 							expect(assistant).toBeUndefined();
 							throw new Error("processor construction failed");
@@ -1265,7 +1258,7 @@ describe("ThreadLoop", () => {
 				stop_reason: { type: "retries_exhausted" },
 			},
 		]);
-		expect(session.state.contextManager.entries()).toEqual([]);
+		expect(session.state.contextManager.historyMessages()).toEqual([]);
 	});
 	test("discards completed reasoning when an in-flight request is interrupted", async () => {
 		const session = new ThreadRuntime("sesn_1");
@@ -1292,16 +1285,9 @@ describe("ThreadLoop", () => {
 			stream(_request, options) {
 				return Stream.fromAsyncIterable(
 					(async function* () {
-						yield {
-							type: "reasoning-start" as const,
-							id: "interrupt-reasoning",
-						};
-						yield {
-							type: "reasoning-delta" as const,
-							id: "interrupt-reasoning",
-							text_delta: "discard on interrupt",
-						};
-						yield { type: "reasoning-end" as const, id: "interrupt-reasoning" };
+						yield {type:"thinking-started" as const,providerPartId:"interrupt-reasoning",eventId:"evt_8ce0cd94241751fef992223ff823a14d"};
+
+						yield {type:"reasoning-complete" as const,providerPartId:"interrupt-reasoning",thinkingEventId:"evt_8ce0cd94241751fef992223ff823a14d",text:("discard on interrupt")};
 						reasoningProcessed.resolve();
 						if (options?.abortSignal === undefined) {
 							throw new Error("provider stream requires an abort signal");
@@ -1366,7 +1352,7 @@ describe("ThreadLoop", () => {
 		});
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.flatMap((message) => message.parts)
 				.some((part) => part.type === "reasoning"),
 		).toBe(false);
@@ -1711,7 +1697,7 @@ describe("ThreadLoop", () => {
 				manager.preloadThread({
 					...input,
 					runtimeBindingToken: "runtime-binding-token",
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					thread: {
 						role: "main",
 						visibility: "public",
@@ -1776,7 +1762,7 @@ describe("ThreadLoop", () => {
 		const emptyPreload = () => ({
 			...threadAddress,
 			runtimeBindingToken: "runtime-binding-token",
-			contextEntries: [],
+			currentRequestMessage:null,messages: [],
 			turnCheckpoint: { pendingInputContextSequences: [] },
 			turnToolRouteView: { routes: [] },
 			thread: {
@@ -1814,7 +1800,7 @@ describe("ThreadLoop", () => {
 			await Effect.runPromise(
 				manager.preloadThread({
 					...emptyPreload(),
-					contextEntries: [
+					currentRequestMessage:null,messages: [
 						{
 							messageSequence: 1,
 							contextKind: "assistant",
@@ -1998,9 +1984,10 @@ describe("ThreadLoop", () => {
 		if (Exit.isFailure(runExit)) {
 			expect(
 				runExit.cause.reasons.find(Cause.isDieReason)?.defect,
-			).toMatchObject({ code: "schema_mismatch" });
+			).toMatchObject({ code: "runtime_invalid_sequence" });
 		}
 		expect(attemptResults).toEqual([]);
+		expect(session.state.persistentContextLoaded()).toBe(false);
 	});
 	test("cooperative child cancellation closes an ACKed request before run release", async () => {
 		const session = new ThreadRuntime("sesn_1");
@@ -2261,7 +2248,7 @@ describe("ThreadLoop", () => {
 								return Stream.fromAsyncIterable(
 									(async function* () {
 										yield {
-											type: "tool-call" as const,
+											type: "tool-call-complete" as const,
 											id: "tool-repair-failure",
 											toolName: "Write",
 											input: { file_path: "src/failure.ts", content: "one" },
@@ -2379,13 +2366,9 @@ describe("ThreadLoop", () => {
 						);
 					}
 					return Stream.fromIterable([
-						{ type: "text-start" as const, id: "follow-up" },
-						{
-							type: "text-delta" as const,
-							id: "follow-up",
-							text_delta: "after ACK",
-						},
-						{ type: "text-end" as const, id: "follow-up" },
+
+
+						{type:"text-complete" as const,providerPartId:"follow-up",eventId:"evt_c02dd21a1b0f1a89bf023bd8e0e05d48",text:("after ACK")},
 						{ type: "finish" as const, finishReason: "stop" as const },
 					]);
 				},
@@ -2419,7 +2402,7 @@ describe("ThreadLoop", () => {
 				manager.preloadThread({
 					...firstInput,
 					runtimeBindingToken: "runtime-binding-token",
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					thread: {
 						role: "main",
 						visibility: "public",
@@ -2490,9 +2473,11 @@ describe("ThreadLoop", () => {
 			sessionId: "sesn_1",
 			sessionThreadId: "thrd_1",
 			threadRole: "main",
+			threadVisibility: "public",
 			bindingId: "bind_1",
 			bindingGeneration: 1,
 			targetPodUid: "pod_1",
+			runtimeProcessId: "process-test",
 			runtimeBindingToken: "runtime-binding-token",
 		});
 		const releaseFinishIdle = deferred<void>();
@@ -2531,9 +2516,9 @@ describe("ThreadLoop", () => {
 			llmService: {
 				stream() {
 					return Stream.fromIterable([
-						{ type: "text-start" as const, id: "answer" },
-						{ type: "text-delta" as const, id: "answer", text_delta: "done" },
-						{ type: "text-end" as const, id: "answer" },
+
+
+						{type:"text-complete" as const,providerPartId:"answer",eventId:"evt_975867416d87134fbe4de5257464dc87",text:("done")},
 						{ type: "finish" as const, finishReason: "stop" as const },
 					]);
 				},
@@ -2584,7 +2569,7 @@ describe("ThreadLoop", () => {
 		const durableTurnId = "sevt_partial_requires_action_run";
 		const settledToolUseEventId = "sevt_partial_requires_action_settled";
 		const pendingToolUseEventId = "sevt_partial_requires_action_pending";
-		session.state.installThreadTurn(
+		session.state.installThreadCheckpoint(
 			{
 				executionRunId: durableTurnId,
 				pendingInputContextSequences: [],
@@ -2614,15 +2599,12 @@ describe("ThreadLoop", () => {
 					],
 				},
 			},
-			{
-				routes: [settledToolUseEventId, pendingToolUseEventId].map(
-					(toolUseEventId) => ({
-						toolUseEventId,
-						disposition: "requires_user_action" as const,
-					}),
-				),
-			},
 		);
+  session.state.contextManager.replaceMessages([{messageSequence:1,contextKind:"assistant",parts:[{type:"tool_call",modelToolCallId:"call_partial_requires_action_settled",toolName:"Write",canonicalInput:{file_path:"a",content:"a"}},{type:"tool_call",modelToolCallId:"call_partial_requires_action_pending",toolName:"Write",canonicalInput:{file_path:"b",content:"b"}}]}]);
+  session.state.installCurrentRequestMessage({modelRequestId:"mreq_partial_requires_action",assistantMessageSequence:1});
+  for(const [toolUseEventId,modelToolCallId] of [[settledToolUseEventId,"call_partial_requires_action_settled"],[pendingToolUseEventId,"call_partial_requires_action_pending"]] as const)session.state.registerActiveTool({toolUseEventId,modelToolCallId,modelRequestId:"mreq_partial_requires_action",assistantMessageSequence:1,disposition:"requires_user_action"});
+  session.state.installThreadTurn(session.state.threadTurnTransition().checkpoint,{routes:[settledToolUseEventId,pendingToolUseEventId].map(toolUseEventId=>({toolUseEventId,disposition:"requires_user_action" as const}))});
+
 		const finishIdleStarted = deferred<void>();
 		const releaseFinishIdle = deferred<void>();
 		const baseWriter = writerFrom(() => ({
@@ -2771,7 +2753,7 @@ describe("ThreadLoop", () => {
 				manager.preloadThread({
 					...preFenceInput,
 					runtimeBindingToken: "runtime-binding-token",
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					thread: {
 						role: "main",
 						visibility: "public",
@@ -2864,9 +2846,9 @@ describe("ThreadLoop", () => {
 						store,
 						writer,
 						events: [
-							{ type: "text-start", id: "text-1" },
-							{ type: "text-delta", id: "text-1", text_delta: "hello" },
-							{ type: "text-end", id: "text-1" },
+
+
+							{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_109c2f64aa7bd10c1dfad51d82bf708b",text:("hello")},
 						],
 					}),
 				),
@@ -2886,7 +2868,7 @@ describe("ThreadLoop", () => {
 		]);
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.some((message) => message.contextKind === "assistant"),
 		).toBe(false);
 	});
@@ -2959,7 +2941,7 @@ describe("ThreadLoop", () => {
 		expect(order).toEqual([]);
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.some((message) => message.contextKind === "assistant"),
 		).toBe(false);
 	});
@@ -3036,7 +3018,7 @@ describe("ThreadLoop", () => {
 		});
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.some((message) => message.contextKind === "assistant"),
 		).toBe(false);
 		expectNoProviderDiagnosticCanaries({
@@ -3129,7 +3111,7 @@ describe("ThreadLoop", () => {
 		});
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.some((message) => message.contextKind === "assistant"),
 		).toBe(false);
 		expect(order).toEqual([]);
@@ -3146,8 +3128,8 @@ describe("ThreadLoop", () => {
 		const service: LLMServiceInterface = {
 			stream() {
 				return Stream.fromIterable<LLMEvent>([
-					{ type: "text-start", id: "text-1" },
-					{ type: "text-delta", id: "text-1", text_delta: "visible" },
+
+
 				]);
 			},
 		};
@@ -3206,7 +3188,7 @@ describe("ThreadLoop", () => {
 		});
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.some((message) => message.contextKind === "assistant"),
 		).toBe(false);
 	});
@@ -3261,7 +3243,7 @@ describe("ThreadLoop", () => {
 		]);
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.some((message) => message.contextKind === "assistant"),
 		).toBe(false);
 	});
@@ -3318,13 +3300,9 @@ describe("ThreadLoop", () => {
 						recordRuntimeTerminalSettlement: (event) =>
 							observations.push(event),
 						events: [
-							{ type: "text-start", id: "terminal-text" },
-							{
-								type: "text-delta",
-								id: "terminal-text",
-								text_delta: "partial answer",
-							},
-							{ type: "text-end", id: "terminal-text" },
+
+
+							{type:"text-complete" as const,providerPartId:"terminal-text",eventId:"evt_4f998232f3c8b66c7c58cf65a91ad115",text:("partial answer")},
 							{ type: "provider-error", error: failure },
 						],
 					}),
@@ -3382,9 +3360,11 @@ describe("ThreadLoop", () => {
 			sessionThreadId: "thrd_reviewer",
 			parentThreadId: "thrd_main",
 			threadRole: "approval_reviewer",
+			threadVisibility: "internal",
 			bindingId: "bind_reviewer",
 			bindingGeneration: 1,
 			targetPodUid: "pod_reviewer",
+			runtimeProcessId: "process-test",
 			runtimeBindingToken: "binding-token-reviewer",
 		});
 		session.state.enqueueAcceptedInput(
@@ -3496,13 +3476,9 @@ describe("ThreadLoop", () => {
 			stream() {
 				return Stream.concat(
 					Stream.fromIterable<LLMEvent>([
-						{ type: "text-start", id: "stream-terminal-text" },
-						{
-							type: "text-delta",
-							id: "stream-terminal-text",
-							text_delta: "partial stream answer",
-						},
-						{ type: "text-end", id: "stream-terminal-text" },
+
+
+						{type:"text-complete" as const,providerPartId:"stream-terminal-text",eventId:"evt_1c18230a14958f034a41d03ae2045b72",text:("partial stream answer")},
 					]),
 					Stream.fail({
 						type: "llm-service",
@@ -3537,7 +3513,7 @@ describe("ThreadLoop", () => {
 				finishReason: "error",
 			}),
 		]);
-		expect(session.state.contextManager.entries()).toEqual([
+		expect(session.state.contextManager.historyMessages()).toEqual([
 			{
 				messageSequence: 1,
 				contextKind: "user",
@@ -3576,20 +3552,16 @@ describe("ThreadLoop", () => {
 						recordRuntimeTerminalSettlement: (event) =>
 							observations.push(event),
 						events: [
-							{ type: "text-start", id: "processor-failure-text" },
-							{
-								type: "text-delta",
-								id: "processor-failure-text",
-								text_delta: "durable before repair",
-							},
-							{ type: "text-end", id: "processor-failure-text" },
-							{ type: "step-start", stepIndex: 1 },
+
+
+							{type:"text-complete" as const,providerPartId:"processor-failure-text",eventId:"evt_8d3171254a2266576a7590fa739fe975",text:("durable before repair")},{type:"finish",finishReason:"stop"},
+
 						],
 						createProcessor: (options) => {
-							const processor = new ProviderStreamAccumulator(options);
+							const processor = new RequestContentProcessor(options);
 							const process = processor.process.bind(processor);
 							processor.process = async (source) => {
-								if (source.event.type === "step-start") {
+								if (source.event.type === "finish") {
 									return {
 										ok: false,
 										events: [],
@@ -3629,7 +3601,7 @@ describe("ThreadLoop", () => {
 				finishReason: "error",
 			}),
 		]);
-		expect(session.state.contextManager.entries()).toEqual([]);
+		expect(session.state.contextManager.historyMessages()).toEqual([]);
 	});
 	test("runtime layer discards active draft before terminal provider-error events", async () => {
 		const order: string[] = [];
@@ -3668,10 +3640,10 @@ describe("ThreadLoop", () => {
 						store,
 						writer,
 						events: [
-							{ type: "text-start", id: "text-1" },
-							{ type: "text-delta", id: "text-1", text_delta: "visible" },
+
+
 							{ type: "provider-error", error: providerError },
-							{ type: "text-start", id: "text-after-error" },
+
 						],
 					}),
 				),
@@ -3708,7 +3680,7 @@ describe("ThreadLoop", () => {
 		});
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.some((message) => message.contextKind === "assistant"),
 		).toBe(false);
 		expect(order).toEqual([]);
@@ -3745,13 +3717,9 @@ describe("ThreadLoop", () => {
 							};
 						}),
 						events: [
-							{ type: "text-start", id: "text-completed" },
-							{
-								type: "text-delta",
-								id: "text-completed",
-								text_delta: "durably completed",
-							},
-							{ type: "text-end", id: "text-completed" },
+
+
+							{type:"text-complete" as const,providerPartId:"text-completed",eventId:"evt_e818ecfb2aa17948b828e52a90d7fb48",text:("durably completed")},
 							{ type: "provider-error", error: providerError },
 						],
 					}),
@@ -3765,7 +3733,7 @@ describe("ThreadLoop", () => {
 				content: [{ type: "text", text: "durably completed" }],
 			},
 		]);
-		expect(session.state.contextManager.entries()).toEqual([
+		expect(session.state.contextManager.historyMessages()).toEqual([
 			{
 				messageSequence: 1,
 				contextKind: "user",
@@ -3806,8 +3774,8 @@ describe("ThreadLoop", () => {
 						store,
 						writer,
 						events: [
-							{ type: "text-start", id: "text-1" },
-							{ type: "text-delta", id: "text-1", text_delta: "visible" },
+
+
 							{ type: "provider-error", error: providerError },
 						],
 					}),
@@ -3827,8 +3795,130 @@ describe("ThreadLoop", () => {
 		]);
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.some((message) => message.contextKind === "assistant"),
 		).toBe(false);
 	});
 });
+
+
+for (const mode of [
+	"committed",
+	"duplicate",
+	"missing-sequence",
+	"missing-existing-sequence",
+	"changed-sequence",
+	"duplicate-changed-sequence",
+	"partial-local-application",
+] as const) {
+	test(`actual Request End reasoning application ${mode}`, async () => {
+		const session = new ThreadRuntime("sesn_end_application");
+		const loader = new RecordingContextLoader([], {
+			type: "context",
+			entries: [userMessage("user", 0, "answer")],
+		});
+		const events: LLMEvent[] = [];
+		if (mode === "changed-sequence" || mode === "duplicate-changed-sequence" || mode === "missing-existing-sequence") {
+			events.push({
+				type: "text-complete",
+				providerPartId: "t",
+				eventId: "evt_00000000000000000000000000000001",
+				text: "answer",
+			});
+		}
+		if (mode !== "missing-existing-sequence") {
+			events.push(
+				{
+					type: "thinking-started",
+					providerPartId: "r",
+					eventId: "evt_00000000000000000000000000000002",
+				},
+				{
+					type: "reasoning-complete",
+					providerPartId: "r",
+					thinkingEventId: "evt_00000000000000000000000000000002",
+					text: "signed",
+					providerMetadata: { anthropic: { signature: "sig" } },
+				},
+			);
+		}
+		events.push({ type: "finish", finishReason: "stop" });
+		let clock = 0;
+		const observations: Parameters<NonNullable<ThreadLoop.ThreadLoopRuntimeOptions["recordContentCommit"]>>[0][] = [];
+		let calls = 0;
+		let ends = 0;
+		let committedReference: ReturnType<typeof session.state.currentRequestMessage>;
+		let committedMessage: ReturnType<typeof session.state.contextManager.entry>;
+		const base = writerFrom((envelope) => ({
+			ok: true,
+			type: "committed",
+			eventId: envelope.preallocatedEventId ?? `bridge-${envelope.writeId}`,
+		}));
+		const writer: SessionEventWriter = {
+			...base,
+			finishIdle: async (envelope) => {
+				// Completed-run cleanup clears the active reference after this boundary.
+				committedReference = session.state.currentRequestMessage();
+				committedMessage = session.state.contextManager.entry(2);
+				return await base.finishIdle!(envelope);
+			},
+			writeRequestEnd: async (envelope) => {
+				ends += 1;
+				const result = await base.writeRequestEnd!(envelope);
+				clock += 25;
+				if (!result.ok || result.type === "stale") return result;
+				if (mode === "missing-sequence" || mode === "missing-existing-sequence") {
+					return { ...result, outcome: { type: "ordinary" } };
+				}
+				if (mode === "changed-sequence" || mode === "duplicate-changed-sequence") {
+					return { ...result, type: mode === "duplicate-changed-sequence" ? "duplicate" : "committed", outcome: { type: "ordinary", sealedMessageSequence: 99 } };
+				}
+				return { ...result, type: mode === "duplicate" ? "duplicate" : "committed" };
+			},
+		};
+		const install = session.state.contextManager.installAssistantMessage.bind(
+			session.state.contextManager,
+		);
+		session.state.contextManager.installAssistantMessage = (message) => {
+			install(message);
+			clock += 7;
+			if (mode === "partial-local-application") {
+				throw new Error("injected local application failure");
+			}
+		};
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+				const loop = yield* ThreadLoop.Service;
+				return yield* loop.run(session, testRunCustody());
+			}).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+				writer,
+				events,
+				runtime: { ...threadLoopRuntime(), monotonicMs: () => clock },
+				recordContentCommit: observation => { observations.push(observation); },
+				onStream: () => { calls += 1; },
+			}))),
+		);
+		expect(calls).toBe(1);
+		expect(ends).toBe(1);
+		const endObservations = observations.filter(observation => observation.kind === "request_end");
+		expect(endObservations.map(({ phase, durationMs, outcome, requestKind }) => ({ phase, durationMs, outcome, requestKind }))).toEqual([
+			{ phase: "request_end_commit", durationMs: 25, outcome: mode === "duplicate" || mode === "duplicate-changed-sequence" ? "duplicate" : "committed", requestKind: "agent_provider_request" },
+			{ phase: "request_end_apply", durationMs: mode === "committed" || mode === "duplicate" || mode === "partial-local-application" ? 7 : 0, outcome: mode === "committed" || mode === "duplicate" ? mode : "failed", requestKind: "agent_provider_request" },
+		]);
+		if (mode === "committed" || mode === "duplicate") {
+			expect(result).toMatchObject({ type: "completed" });
+			expect(committedReference?.assistantMessageSequence).toBe(2);
+			expect(committedMessage?.parts).toEqual([{
+				type: "reasoning",
+				text: "signed",
+				providerMetadata: { anthropic: { signature: "sig" } },
+			}]);
+		} else {
+			expect(result).toMatchObject({
+				type: "failed",
+				error: { code: "runtime_invalid_sequence" },
+			});
+			expect(session.state.persistentContextLoaded()).toBe(false);
+		}
+	});
+}

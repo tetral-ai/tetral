@@ -63,9 +63,9 @@ roleRef:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: gateway-tokenreview
+  name: provider-gateway-tokenreview
   labels:
-    app.kubernetes.io/name: gateway
+    app.kubernetes.io/name: provider-gateway
     app.kubernetes.io/part-of: tetral
 rules:
   - apiGroups:
@@ -78,15 +78,77 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: gateway-tokenreview
+  name: provider-gateway-tokenreview
   labels:
-    app.kubernetes.io/name: gateway
+    app.kubernetes.io/name: provider-gateway
     app.kubernetes.io/part-of: tetral
 subjects:
   - kind: ServiceAccount
-    name: gateway
+    name: provider-gateway
     namespace: tetral-system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: gateway-tokenreview
+  name: provider-gateway-tokenreview
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mcp-connector-tokenreview
+  labels:
+    app.kubernetes.io/name: mcp-connector
+    app.kubernetes.io/part-of: tetral
+rules:
+  - apiGroups:
+      - authentication.k8s.io
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mcp-connector-tokenreview
+  labels:
+    app.kubernetes.io/name: mcp-connector
+    app.kubernetes.io/part-of: tetral
+subjects:
+  - kind: ServiceAccount
+    name: mcp-connector
+    namespace: tetral-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mcp-connector-tokenreview
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: web-connector-tokenreview
+  labels:
+    app.kubernetes.io/name: web-connector
+    app.kubernetes.io/part-of: tetral
+rules:
+  - apiGroups:
+      - authentication.k8s.io
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: web-connector-tokenreview
+  labels:
+    app.kubernetes.io/name: web-connector
+    app.kubernetes.io/part-of: tetral
+subjects:
+  - kind: ServiceAccount
+    name: web-connector
+    namespace: tetral-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: web-connector-tokenreview

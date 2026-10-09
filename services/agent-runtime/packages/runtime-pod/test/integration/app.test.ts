@@ -1,3 +1,4 @@
+import { DefaultBridgeMethodPolicies } from "../../src/bridge-policy.js";
 import { describe, expect, test } from "bun:test";
 import { credentials, Metadata, status } from "@grpc/grpc-js";
 import {
@@ -10,6 +11,8 @@ import type {
   CleanupSessionRequest,
   CleanupSessionResponse,
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
+import { RuntimePodMetricsRegistry } from "../../src/metrics.js";
+import { createJsonLogger } from "../../src/logger.js";
 import { createRuntimePodApp } from "../../src/app.js";
 import type { RuntimeTokenReviewClient } from "../../src/auth.js";
 import type { RuntimePodConfig } from "../../src/config.js";
@@ -33,6 +36,14 @@ describe("RuntimePodApp production composition", () => {
       acceptGate.resolve();
       await expect(inFlight).resolves.toEqual({ accepted: {} });
       await shutdown;
+      expect(fixture.metrics.operations.render()).toContain('operation="shutdown_listeners",outcome="success"} 2');
+      expect(fixture.metrics.operations.render()).not.toContain('operation="shutdown_clients"');
+      const records = fixture.lines.map(line => JSON.parse(line)).filter(record => record.event === "workload.shutdown.phase_completed" && record.operation === "shutdown_listeners");
+      expect(records).toHaveLength(2);
+      expect(records.map(record => record["metric.observation.count"]).sort()).toEqual([1,2]);
+      expect(new Set(records.map(record => record["service.instance.id"])).size).toBe(1);
+      const seconds = records.reduce((sum,record) => sum + record["duration.seconds"],0);
+      expect(fixture.metrics.operations.render()).toContain(`tetral_operation_duration_seconds_sum{service="agent-runtime",operation="shutdown_listeners",outcome="success"} ${seconds}`);
     } finally {
       await fixture.stop();
     }
@@ -93,25 +104,41 @@ async function startAppFixture(options: {
   readonly cleanupRunHost?: RuntimeCoreCleanupHost;
   readonly tokenReviewClient?: RuntimeTokenReviewClient;
 } = {}) {
+  const metrics = new RuntimePodMetricsRegistry();
+  const lines: string[] = [];
+  const logger = createJsonLogger({ write: line => lines.push(line) });
   const app = createRuntimePodApp({
+    metrics,
+    runtimeProcess: {
+      runtimeProcessId: "process-test",
+      register: async () => undefined,
+      report: async () => undefined,
+      release: async () => {
+        throw new Error("app fixture owns no Session binding");
+      },
+      close: async () => undefined,
+    },
+    quiesce: async () => undefined,
     config: validConfig(),
-    logger: { info: () => undefined, error: () => undefined },
+    logger,
     tokenReviewClient: options.tokenReviewClient ?? new AllowingTokenReviewClient(),
     commandRunHost: options.runHost ?? new RecordingRunHost(Promise.resolve()),
     cleanupRunHost: options.cleanupRunHost ?? new RecordingCleanupHost(Promise.resolve({ ok: true, sessionId: "sesn_1", cleaned: true })),
-    drainTimeoutMs: 250,
   });
   const started = await app.start();
   const grpcAddress = `127.0.0.1:${started.grpcPort}`;
   const client = new AgentRuntimePodServiceClient(grpcAddress, credentials.createInsecure());
   await waitForReady(client);
   return {
+    metrics,
+    lines,
     app,
     client,
     httpUrl: started.httpUrl,
     stop: async () => {
       client.close();
       await app.shutdown().catch(() => undefined);
+      logger.close();
     },
   };
 }
@@ -125,10 +152,11 @@ function validConfig(): RuntimePodConfig {
       ip: "10.0.0.1",
     },
     deploymentEnvironment: "test",
+ diagnostics: {level:"info",maxRecordBytes:16384,summaryIntervalMs:30000,burst:1},
     serviceVersion: "test",
-    bridge: {
+    jobRunner: {
       namespace: "engine",
-      serviceAccount: "bridge",
+      serviceAccount: "job-runner",
     },
     grpcBindAddress: "127.0.0.1:0",
     httpBindAddress: "127.0.0.1:0",
@@ -141,6 +169,12 @@ function validConfig(): RuntimePodConfig {
     mcpConnectorGrpcAddress: "gateway.engine.svc:9091",
     webConnectorGrpcAddress: "gateway.engine.svc:9092",
     providerStreamTimeoutMs: 1_800_000,
+    bridgeMethodPolicies: DefaultBridgeMethodPolicies,
+    transportProfile: "standard-routed",
+    maxLocalSessions: 256,
+    maxConcurrentTools: 8,
+    // Short phase windows bound a stuck in-flight command without changing the admission contract.
+    lifecycle: { reportIntervalMs: 2000, processFreshnessMs: 10000, currentStepTimeoutMs: 250, settlementTimeoutMs: 250, settlementAttemptTimeoutMs: 5000, localJoinTimeoutMs: 250, proxyJoinTimeoutMs: 5000 },
     platformModels: {
       approvalReviewer: { providerId: "anthropic", modelId: "claude-opus-4-8" },
     },
@@ -158,6 +192,7 @@ function validCommand(runtimeInputId: string): AcceptInputRequest {
     bindingId: "bind_1",
     bindingGeneration: 42,
     targetPodUid: "uid-a",
+    runtimeProcessId: "process-test",
     runtimeInputId,
     inputOrder: 1,
     messagesJson: "{\"messages\":[]}",
@@ -171,6 +206,7 @@ function validCleanupCommand(cleanupOperationId: string): CleanupSessionRequest 
     bindingId: "bind_1",
     bindingGeneration: 42,
     targetPodUid: "uid-a",
+    runtimeProcessId: "process-test",
     cleanupOperationId,
     reason: CleanupSessionReason.CLEANUP_SESSION_REASON_EXPIRED,
   };
@@ -277,7 +313,7 @@ class AllowingTokenReviewClient implements RuntimeTokenReviewClient {
     return {
       authenticated: true,
       audiences: ["tetral-internal-grpc"],
-      username: "system:serviceaccount:engine:bridge",
+      username: "system:serviceaccount:engine:job-runner",
     };
   }
 }

@@ -160,6 +160,7 @@ func validAcceptInputRequest(runtimeInputID string) *agentruntimev1.AcceptInputR
 		BindingId:         "bind_go",
 		BindingGeneration: 42,
 		TargetPodUid:      "uid-a",
+		RuntimeProcessId:  "process-test",
 		RuntimeInputId:    runtimeInputID,
 		InputOrder:        1,
 		Content:           &agentruntimev1.AcceptInputRequest_MessagesJson{MessagesJson: "{}"},

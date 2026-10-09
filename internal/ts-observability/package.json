@@ -5,6 +5,7 @@
   "type": "module",
   "packageManager": "bun@1.3.14",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./test-support/executable-shutdown": "./test-support/executable-shutdown.ts"
   }
 }

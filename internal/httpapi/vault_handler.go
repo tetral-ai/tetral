@@ -90,6 +90,9 @@ func (h *VaultHandler) getVault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !authorizeReadResource(w, r, ws, "vault", result.ID) {
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -233,6 +236,9 @@ func (h *VaultHandler) getCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !authorizeReadResource(w, r, ws, "credential", result.ID) {
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -256,6 +262,9 @@ func (h *VaultHandler) listCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !authorizeReadResource(w, r, ws, "vault", vaultID) {
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 

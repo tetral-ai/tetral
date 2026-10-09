@@ -13,6 +13,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
+// watcherDiagnosticComponent names this shared visibility cache in its watch
+// records. The owning workload is identified by the logger's service.name.
+const watcherDiagnosticComponent = "kubernetes-visibility"
+
 type WatcherCache struct {
 	mutex                sync.Mutex
 	namespace            string
@@ -25,6 +29,7 @@ type WatcherCache struct {
 	endpointSlicesStale  bool
 	podsFailed           bool
 	endpointSlicesFailed bool
+	onPodDeleted         func()
 }
 
 type CacheOption func(*WatcherCache)
@@ -32,6 +37,14 @@ type CacheOption func(*WatcherCache)
 func WithLogger(logger *slog.Logger) CacheOption {
 	return func(cache *WatcherCache) {
 		cache.logger = logger
+	}
+}
+
+// WithPodDeleted calls notify after each observed Pod deletion, outside the
+// cache lock. The Job Runner uses it to request a Pod-loss repair run.
+func WithPodDeleted(notify func()) CacheOption {
+	return func(cache *WatcherCache) {
+		cache.onPodDeleted = notify
 	}
 }
 
@@ -49,7 +62,13 @@ func NewWatcherCache(namespace string, options ...CacheOption) *WatcherCache {
 
 func (c *WatcherCache) ReplacePods(pods []corev1.Pod) {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	recovered := c.podsFailed
+	defer func() {
+		c.mutex.Unlock()
+		if recovered {
+			c.logWatchRecovery("pods")
+		}
+	}()
 	c.pods = map[string]corev1.Pod{}
 	for _, pod := range pods {
 		c.pods[pod.Name] = pod
@@ -61,7 +80,13 @@ func (c *WatcherCache) ReplacePods(pods []corev1.Pod) {
 
 func (c *WatcherCache) ReplaceEndpointSlices(slices []discoveryv1.EndpointSlice) {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	recovered := c.endpointSlicesFailed
+	defer func() {
+		c.mutex.Unlock()
+		if recovered {
+			c.logWatchRecovery("endpointslices")
+		}
+	}()
 	c.endpointSlices = map[string]discoveryv1.EndpointSlice{}
 	for _, slice := range slices {
 		c.endpointSlices[slice.Name] = slice
@@ -73,7 +98,13 @@ func (c *WatcherCache) ReplaceEndpointSlices(slices []discoveryv1.EndpointSlice)
 
 func (c *WatcherCache) UpsertPod(pod corev1.Pod) {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	recovered := c.podsFailed
+	defer func() {
+		c.mutex.Unlock()
+		if recovered {
+			c.logWatchRecovery("pods")
+		}
+	}()
 	c.pods[pod.Name] = pod
 	c.podsSynced = true
 	c.podsFailed = false
@@ -82,7 +113,16 @@ func (c *WatcherCache) UpsertPod(pod corev1.Pod) {
 
 func (c *WatcherCache) DeletePod(name string) {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	recovered := c.podsFailed
+	defer func() {
+		c.mutex.Unlock()
+		if recovered {
+			c.logWatchRecovery("pods")
+		}
+		if c.onPodDeleted != nil {
+			c.onPodDeleted()
+		}
+	}()
 	delete(c.pods, name)
 	c.podsSynced = true
 	c.podsFailed = false
@@ -91,7 +131,13 @@ func (c *WatcherCache) DeletePod(name string) {
 
 func (c *WatcherCache) UpsertEndpointSlice(slice discoveryv1.EndpointSlice) {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	recovered := c.endpointSlicesFailed
+	defer func() {
+		c.mutex.Unlock()
+		if recovered {
+			c.logWatchRecovery("endpointslices")
+		}
+	}()
 	c.endpointSlices[slice.Name] = slice
 	c.endpointsSynced = true
 	c.endpointSlicesFailed = false
@@ -100,7 +146,13 @@ func (c *WatcherCache) UpsertEndpointSlice(slice discoveryv1.EndpointSlice) {
 
 func (c *WatcherCache) DeleteEndpointSlice(name string) {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	recovered := c.endpointSlicesFailed
+	defer func() {
+		c.mutex.Unlock()
+		if recovered {
+			c.logWatchRecovery("endpointslices")
+		}
+	}()
 	delete(c.endpointSlices, name)
 	c.endpointsSynced = true
 	c.endpointSlicesFailed = false
@@ -148,10 +200,11 @@ func (c *WatcherCache) MarkFailure(failure WatchFailure) {
 	}
 	c.mutex.Unlock()
 	if c.logger != nil {
+		defer func() { _ = recover() }()
 		c.logger.Warn("kubernetes.watch.failed",
 			slog.String("operation", "kubernetes_watch"),
 			slog.String("event.kind", "kubernetes.watch.failed"),
-			slog.String("component", "bridge"),
+			slog.String("component", watcherDiagnosticComponent),
 			slog.String("kubernetes.resource", failure.Resource),
 			slog.String("kubernetes.namespace", failure.Namespace),
 			slog.String("kubernetes.name", safeKubernetesIdentifier(failure.Name)),
@@ -162,6 +215,15 @@ func (c *WatcherCache) MarkFailure(failure WatchFailure) {
 			slog.String("error.message_safe", "kubernetes watch failed"),
 		)
 	}
+}
+
+// Existing cache success transitions clear failure flags before diagnostics run.
+func (c *WatcherCache) logWatchRecovery(resource string) {
+	if c.logger == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	c.logger.Info("kubernetes.watch.recovered", slog.String("operation", "kubernetes_watch"), slog.String("component", watcherDiagnosticComponent), slog.String("kubernetes.resource", resource), slog.String("outcome", "recovered"), slog.String("recovery.event", "kubernetes.watch.failed"), slog.String("recovery.resource", resource))
 }
 
 // Ready answers from the synced/stale/failed flags alone, without building the candidate
@@ -489,7 +551,7 @@ func (b *RestartBackoff) Reset() {
 
 func classifyKubernetesError(err error) string {
 	if err == nil {
-		return ""
+		return "kubernetes_watch_failure"
 	}
 	return "kubernetes_error"
 }

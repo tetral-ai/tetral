@@ -27,6 +27,7 @@ const (
 )
 
 const githubMCPCatalogURL = "https://api.githubcopilot.com/mcp/"
+const slackMCPCatalogURL = "https://mcp.slack.com/mcp"
 
 func supportedModelIDs() [7]string {
 	return [7]string{
@@ -920,6 +921,8 @@ func mcpCatalogCanonicalURL(canonicalURL string) (string, bool) {
 	switch strings.TrimSuffix(canonicalURL, "/") {
 	case strings.TrimSuffix(githubMCPCatalogURL, "/"):
 		return githubMCPCatalogURL, true
+	case slackMCPCatalogURL:
+		return slackMCPCatalogURL, true
 	default:
 		return "", false
 	}

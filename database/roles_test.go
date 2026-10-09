@@ -7,7 +7,7 @@ func TestRoleContractDeclaresEveryServingDatabaseWorkload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"api", "auth", "bridge", "cleanup", "event_stream", "gateway", "git_proxy", "queue", "sandbox"}
+	want := []string{"api", "auth", "bridge", "cleanup", "event_stream", "git_proxy", "job_runner", "mcp_connector", "provider_gateway", "queue", "sandbox"}
 	got := contract.WorkloadNames()
 	if len(got) != len(want) {
 		t.Fatalf("workload roles = %v; want %v", got, want)

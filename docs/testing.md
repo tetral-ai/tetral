@@ -14,6 +14,12 @@ passing test.
 - `make test-full` runs the complete local evidence set. It includes Race and
   can take materially longer.
 
+Non-Fast Go commands use a 20-minute package watchdog. The exact `integration`
+package has a 25-minute watchdog for its complete composition inventory; a
+serial command containing that package applies 25 minutes to every package in
+that invocation. These are package-wide runaway limits, separate from each
+test's unchanged request, fault, recovery and cleanup deadlines.
+
 The local SDK integration test is declared in `internal/testinfra/inventory.json`
 under `go_tests`, with its exact package, test name, and complete `sdk` and
 `postgresql` dependencies. These declarations replace source inference for the
@@ -37,11 +43,131 @@ installation can update ignored files such as `node_modules` even while Git
 reports a clean working tree. These installed files remain after verification;
 the runner removes only temporary checkouts it created itself.
 
+SDK pin changes also require the SDK's standalone source compatibility profile;
+the repository's protocol checks validate types and proof registration but do
+not execute that profile. From a clean SDK checkout at the runner's pinned
+commit, install frozen dependencies with lifecycle scripts disabled, run
+`bash ./scripts/build`, then run
+`TETRAL_ENGINE_ROOT=/absolute/path/to/engine bun run test:compatibility:static`.
+These source proofs complement the local SDK integration suites; they do not
+establish runtime or database interoperability by themselves.
+
+The registered SDK Session preview and typed OIDC Memory proofs run through
+`TestForkSDKIntegrationCompatibilityProofs` in the existing Go evidence owner. Its
+inventory declaration requires real HTTPS Keycloak, TLS PostgreSQL via Docker,
+MinIO, NATS, Bun workspaces and the pinned SDK. Full and Affected execute it
+while those dependencies are alive;
+the normal CI Go Race shards include it. Fast compiles it without execution.
+To reproduce with automatic setup, run from a clean Engine checkout:
+
+```sh
+go run ./internal/testinfra/cmd/tetral-test --profile full --groups go
+```
+
+The test runs the SDK's `test:compatibility:integration` command with the exact
+Engine root and revision. Frozen SDK installation disables lifecycle scripts;
+this launcher resolves source aliases directly and requires no SDK build or
+`dist` directory. The SDK selects the named public streaming Identity subtest
+and the complete `TestOIDCKeycloakSDK` root. The latter awaits typed SDK Memory
+retrieve/redact responses for human and service actors, then independently checks
+wire and stored attribution against the applied Engine identity IDs. Existing
+Session, token caching, revoked-bearer retry and durable-effect assertions also
+run. Both SDK and Engine validate executed Go JSONL, all five preview observations
+and four OIDC observations under their owning subtests. The wrapper requires
+exact source/scenario/test/assertion markers and four passing handlers; names,
+counts or exit zero alone cannot pass. Nested processes inherit the runner's
+process and
+database cleanup custody. Their original output remains in the Go artifact.
+Each fixed SDK child has an 11-minute process budget and the wrapper has a
+24-minute context; its owning native Go selection uses a 30-minute timeout.
+Other native Go selections use the package watchdog policy: 25 minutes for
+the exact integration package and 20 minutes for other packages.
+The runner tears down dependencies before a profile returns; a later standalone
+SDK command cannot reuse them. Standalone execution requires independently
+prepared dependencies and clean, matching Engine and SDK sources.
+
+Bridge, Job Runner and their shared Runtime configuration, MCP manifest and
+durable-control packages form one verification boundary. Affected selection
+includes both Go owners, cross-service integration tests and Runtime/Gateway
+consumers; Go imports alone cannot describe their RPC and Bun test dependencies.
+Content lifecycle changes include the Runtime context and client adapters,
+Gateway assembly and transport, Bridge declarations and context loading, and
+the `integration/content_*` tests and the content-lifecycle drivers under the
+Runtime pod and Provider Gateway `test/fixtures/` directories.
+Each selects the durable Go compositions and both TypeScript consumers, even
+when the changed fixture has no Go import edge.
+Service-owned `k8s/` changes select deployment evidence, including the raw
+manifest invariants, Helm rendering tests and Helm lint. Deployment evidence
+also runs the tests of the nested `integration/envoy-gateway-secret-helper`
+module with the Go toolchain that `deploy/dependencies.lock.json` selects; the
+root package listing excludes nested modules, so no Go profile reaches them,
+and a change confined to that module selects deployment evidence. Helm chart
+changes under `deploy/helm/tetral/` also select the integration package,
+because its direct Runtime TLS and Envoy Gateway compositions render that
+chart. Changes under `deploy/envoy-gateway/` likewise select the integration
+package, because the Envoy Gateway translation reads its GatewayClass. OIDC SDK
+driver changes under `integration/testdata/oidc-*` select the integration
+package too, because `TestOIDCKeycloakSDK` executes that Bun driver. Changes to
+`deploy/nats/values.yaml` or `values-hardened.yaml` select the integration and
+`internal/testinfra` packages, because the runner's broker and the integration
+TLS cluster project their client policy from those values. Unknown ownership
+continues to select Full. Service-owned `proto/` changes also select protocol
+generation and compatibility checks.
+
+Local transport fixtures use pinned Envoy and Bun images and own their Docker
+containers and networks. PID and process-start labels protect live owners from
+orphan cleanup. Concurrent collectors join an already-started removal for at
+most two seconds, clipped by the caller's deadline; a resource still present or
+an unavailable daemon remains a cleanup failure. Containers close before their
+networks, including after partial fixture startup.
+
+The runner's NATS broker is shared across concurrent package consumers; tests
+may publish and subscribe but must not stop, restart or reconfigure its lifetime.
+Destructive broker cases use `testinfra.NewNATSFixture` with the same pinned image
+and the role permissions projected from the NATS release values. Register its
+cleanup before clients so they join first; cleanup removes even a stopped broker
+and its private credential files, including after partial startup, without
+changing the shared descriptor or environment.
+
+OIDC integration uses the native `keycloak` dependency. Full and the normal
+Go Race CI shards execute `TestKeycloakHTTPSIdentityAndSigningKeyLifecycle`;
+Affected selects the dependency for its declared consumers, while Fast only
+compiles the real-issuer test. The runner starts the exact version and immutable
+image digest in `internal/testinfra/keycloak.lock.json`, verifies the running
+version, and records the digest and public realm-recipe checksum. The selected
+[Keycloak 26.7.5 release](https://www.keycloak.org/2026/09/keycloak-2675-released)
+is a test dependency, separate from Engine deployment.
+
+The fixture serves actual HTTPS with a generated CA and an IP SAN for its
+loopback endpoint. Its private descriptor, named by
+`TETRAL_TEST_KEYCLOAK_CONFIG`, supplies the CA and an explicit `127.0.0.1/32`
+destination allowance to the owning test. TLS verification stays enabled;
+fixture clients reject redirects and any other destination. Every HTTPS request
+has a five-second maximum, startup has a 120-second bound, and each independent
+realm provision has a separate 180-second bound, all clipped by cancellation.
+Realm consumers use the same fixed client, Engine audience, human username and
+service selector, with distinct immutable subjects for simultaneous realms.
+Credential files stay private and ephemeral. Actual realm signing-key controls
+support fresh-key issuance, old/new overlap, passive keys and disabled-key
+retirement; the fixture test independently verifies JWT signatures and claims
+against observed JWKS. Realm close deletes its IdP state and credential files;
+native dependency teardown removes the container, trust material and admin
+credentials. This fixture proof supports the Auth/SDK compositions without
+claiming their business behavior or later Kubernetes issuer routing.
+
 Each invocation prints its Selection Plan and writes structured evidence below
 `.test-results/`. Native package commands remain appropriate while developing
 one owning package; the repository profiles are the pre-submission contract.
 
 ## Continuous integration
+
+CI Go Race evidence jobs using the shared evidence action run at most two Go
+package processes at a time. Each Race package can also run concurrent Go
+goroutines, Bun children, and shared database work; the package limit is
+intended to leave capacity for those owners on the four-CPU hosted runner.
+It changes package scheduling only. Shards, test selection, per-scenario
+concurrency, deadlines, and assertions retain their own policies. Local runs
+keep their existing default and can set `--workers` explicitly.
 
 The readable CI topology is:
 
@@ -59,6 +185,23 @@ The readable CI topology is:
 - **Scheduled Verification**: bounded repetitions of named concurrency owners
   each week, plus daily compatibility, repository-health, and online dependency
   audits. A later pass is recorded but never erases the first failure.
+
+`internal/testinfra/go_shard_weights.json` balances the four Go Race shards.
+Each package listed there is split across shards by top-level test, weighted by
+the test's measured duration or the package's `default_ms`; other packages stay
+whole with relative weights. In the integration entry, every top-level test
+that ran longer than about ten seconds carries its `Elapsed` duration from the
+`go test -json` evidence of all four Go Race shards of Pull Request
+Verification run 37512221678, collected on the `calibrated_at` date. Recalibrate
+from the same per-test evidence of a current run, combining every shard of a
+sliced package.
+
+Report-only coverage runs `go test ./...` once without Race, so the integration
+package executes every top-level test sequentially in one binary. Its Go
+budget is 60 minutes: more than twice that package's measured Race total of
+about 26 minutes, and longer than the other tests plus the SDK wrapper's
+24-minute context. The coverage job's 80-minute limit leaves room for
+dependency setup, compilation, and the Bun coverage commands around it.
 
 Online Bun dependency audits are deliberately separated from deterministic
 security checks. Pull requests run them when a `package.json`, `bun.lock`, or

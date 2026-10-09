@@ -3,11 +3,13 @@ package workload
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"fmt"
 	"go/parser"
 	"go/token"
 	"io"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -22,33 +24,14 @@ import (
 	"time"
 )
 
-// NewLogger builds the production *slog.Logger every workload command shares.
-// Service identity is attached once here via logger.With so every line carries
-// service.name/deployment.environment/service.version without per-call repetition.
-// A nil writer falls back to os.Stderr; empty identity fields take the same
-// defaults the command config layer applies.
-func NewLogger(writer io.Writer, serviceName string, deploymentEnvironment string, serviceVersion string) *slog.Logger {
-	return NewLoggerWithLevel(writer, serviceName, deploymentEnvironment, serviceVersion, slog.LevelInfo)
-}
-
-func NewLoggerWithLevel(writer io.Writer, serviceName string, deploymentEnvironment string, serviceVersion string, level slog.Level) *slog.Logger {
+// NewLogger is a synchronous adapter for prompt-return writers and embedded tests.
+// Production process commands own NewProcessLogger and its bounded shutdown.
+func NewLogger(writer io.Writer, serviceName, deploymentEnvironment, serviceVersion string) *slog.Logger {
 	if writer == nil {
 		writer = os.Stderr
 	}
-	if serviceName == "" {
-		serviceName = "unknown"
-	}
-	if deploymentEnvironment == "" {
-		deploymentEnvironment = "local"
-	}
-	if serviceVersion == "" {
-		serviceVersion = "unknown"
-	}
-	return slog.New(slog.NewJSONHandler(writer, &slog.HandlerOptions{Level: level})).With(
-		slog.String("service.name", serviceName),
-		slog.String("deployment.environment", deploymentEnvironment),
-		slog.String("service.version", serviceVersion),
-	)
+	state := newDiagnosticState(DefaultDiagnosticConfig())
+	return newDiagnosticLogger(promptDiagnosticWriter{writer, &state.counts}, serviceName, deploymentEnvironment, serviceVersion, state)
 }
 
 // Readiness tracks whether a workload can receive traffic.
@@ -87,7 +70,7 @@ func (r *Readiness) WithReadinessDependency(dependency func() bool) *Readiness {
 // MarkReady marks dependencies ready.
 func (r *Readiness) MarkReady() {
 	if r != nil {
-		r.state.Store(readinessReady)
+		r.state.CompareAndSwap(readinessNotReady, readinessReady)
 	}
 }
 
@@ -127,7 +110,9 @@ func (r *Readiness) message() string {
 // metrics collector. Names, types, and labels are internal constants; values
 // must not contain request bodies, credentials, prompts, or other user data.
 type Metric struct {
-	Name   string
+	Name string
+	// Family is the header name for histogram bucket/count/sum samples.
+	Family string
 	Help   string
 	Type   string
 	Labels []MetricLabel
@@ -172,8 +157,9 @@ type DBStatsProvider interface {
 }
 
 type HTTPMetrics struct {
-	mu      sync.Mutex
-	records map[httpMetricsKey]durationMetricsRecord
+	Operations *OperationMetrics
+	mu         sync.Mutex
+	records    map[httpMetricsKey]durationMetricsRecord
 }
 
 type httpMetricsKey struct {
@@ -182,8 +168,9 @@ type httpMetricsKey struct {
 }
 
 type GRPCMetrics struct {
-	mu      sync.Mutex
-	records map[grpcMetricsKey]durationMetricsRecord
+	Operations *OperationMetrics
+	mu         sync.Mutex
+	records    map[grpcMetricsKey]durationMetricsRecord
 }
 
 type grpcMetricsKey struct {
@@ -196,14 +183,29 @@ type durationMetricsRecord struct {
 	sumSeconds float64
 }
 
-func NewHTTPMetrics() *HTTPMetrics {
-	return &HTTPMetrics{records: map[httpMetricsKey]durationMetricsRecord{}}
+// NewHTTPMetrics requires the owning service name from the closed workload
+// domain; see NewOperationMetrics.
+func NewHTTPMetrics(service string) *HTTPMetrics {
+	return &HTTPMetrics{records: map[httpMetricsKey]durationMetricsRecord{}, Operations: NewOperationMetrics(service, "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE", "http_unknown_method")}
 }
 
 func (m *HTTPMetrics) ObserveHTTPRequest(method string, statusCode int, duration time.Duration) {
 	if m == nil {
 		return
 	}
+	outcome := "success"
+	if statusCode >= 500 {
+		outcome = "error"
+	} else if statusCode >= 400 {
+		outcome = "rejected"
+	}
+	operation := method
+	switch method {
+	case "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE":
+	default:
+		operation = "http_unknown_method"
+	}
+	m.Operations.Observe(operation, outcome, duration)
 	key := httpMetricsKey{
 		method:     defaultString(method, "UNKNOWN"),
 		statusCode: fmt.Sprintf("%d", statusCode),
@@ -242,18 +244,22 @@ func (m *HTTPMetrics) Collector() MetricsCollector {
 				Metric{Name: "http_request_duration_seconds_sum", Help: "Observed HTTP request duration seconds.", Type: "counter", Labels: labels, Value: record.sumSeconds},
 			)
 		}
-		return metrics, nil
+		observations, _ := m.Operations.Collector()(context.Background())
+		return append(metrics, observations...), nil
 	}
 }
 
-func NewGRPCMetrics() *GRPCMetrics {
-	return &GRPCMetrics{records: map[grpcMetricsKey]durationMetricsRecord{}}
+// NewGRPCMetrics requires the owning service name from the closed workload
+// domain; see NewOperationMetrics.
+func NewGRPCMetrics(service string) *GRPCMetrics {
+	return &GRPCMetrics{records: map[grpcMetricsKey]durationMetricsRecord{}, Operations: NewOperationMetrics(service)}
 }
 
 func (m *GRPCMetrics) ObserveGRPCRequest(method string, code string, duration time.Duration) {
 	if m == nil {
 		return
 	}
+	m.Operations.Observe(method, grpcMetricOutcome(code), duration)
 	key := grpcMetricsKey{
 		method: defaultString(method, "unknown"),
 		code:   defaultString(code, "Unknown"),
@@ -292,7 +298,8 @@ func (m *GRPCMetrics) Collector() MetricsCollector {
 				Metric{Name: "grpc_request_duration_seconds_sum", Help: "Observed gRPC request duration seconds.", Type: "counter", Labels: labels, Value: record.sumSeconds},
 			)
 		}
-		return metrics, nil
+		observations, _ := m.Operations.Collector()(context.Background())
+		return append(metrics, observations...), nil
 	}
 }
 
@@ -401,10 +408,32 @@ func runtimeMetricsText(extra []Metric) string {
 	writeMetric(&builder, emittedHeaders, Metric{Name: "go_heap_free_bytes", Help: "Free bytes reserved for the Go heap.", Type: "gauge", Value: metricSampleValue(samples[3])})
 	writeMetric(&builder, emittedHeaders, Metric{Name: "go_gc_cycles_total", Help: "Completed Go GC cycles.", Type: "counter", Value: metricSampleValue(samples[4])})
 	writeMetric(&builder, emittedHeaders, Metric{Name: "go_gc_pause_seconds_total", Help: "Cumulative Go GC pause CPU seconds.", Type: "counter", Value: metricSampleValue(samples[5])})
-	for _, metric := range extra {
+	for _, metric := range groupMetricFamilies(extra) {
 		writeMetric(&builder, emittedHeaders, metric)
 	}
 	return builder.String()
+}
+
+// groupMetricFamilies stably reorders samples so each family is contiguous.
+// The text exposition format requires every sample of a family to follow its
+// single HELP/TYPE header, and several owning registries (HTTP, gRPC and
+// service-owned) contribute to the shared operation histogram. Families keep
+// their first-appearance order; samples keep collector order within a family.
+func groupMetricFamilies(metrics []Metric) []Metric {
+	var order []string
+	byFamily := map[string][]Metric{}
+	for _, metric := range metrics {
+		family := defaultString(metric.Family, metric.Name)
+		if _, seen := byFamily[family]; !seen {
+			order = append(order, family)
+		}
+		byFamily[family] = append(byFamily[family], metric)
+	}
+	grouped := make([]Metric, 0, len(metrics))
+	for _, family := range order {
+		grouped = append(grouped, byFamily[family]...)
+	}
+	return grouped
 }
 
 func metricsText(ctx context.Context, collectors []namedMetricsCollector) string {
@@ -442,9 +471,10 @@ func writeMetric(builder *strings.Builder, emittedHeaders map[string]bool, metri
 		return
 	}
 	metricType := defaultString(metric.Type, "gauge")
-	if !emittedHeaders[metric.Name] {
-		_, _ = fmt.Fprintf(builder, "# HELP %s %s\n# TYPE %s %s\n", metric.Name, defaultString(metric.Help, metric.Name), metric.Name, metricType)
-		emittedHeaders[metric.Name] = true
+	family := defaultString(metric.Family, metric.Name)
+	if !emittedHeaders[family] {
+		_, _ = fmt.Fprintf(builder, "# HELP %s %s\n# TYPE %s %s\n", family, defaultString(metric.Help, family), family, metricType)
+		emittedHeaders[family] = true
 	}
 	_, _ = fmt.Fprintf(builder, "%s%s %g\n", metric.Name, metricLabels(metric.Labels), metric.Value)
 }
@@ -493,11 +523,13 @@ type Config struct {
 	ListenConfigKey       string
 	Listen                func(network string, address string) (net.Listener, error)
 	Listener              net.Listener
+	TLSConfig             *tls.Config
 	Handler               http.Handler
 	Readiness             *Readiness
 	ReadHeaderTimeout     time.Duration
 	ShutdownTimeout       time.Duration
 	Logger                *slog.Logger
+	Metrics               *OperationMetrics
 }
 
 // Run validates config, serves HTTP, and gracefully drains on ctx cancellation.
@@ -515,10 +547,10 @@ func Run(ctx context.Context, cfg Config) error {
 		cfg.ReadHeaderTimeout = 10 * time.Second
 	}
 	if cfg.DeploymentEnvironment == "" {
-		cfg.DeploymentEnvironment = "local"
+		cfg.DeploymentEnvironment = DefaultDeploymentEnvironment
 	}
 	if cfg.ServiceVersion == "" {
-		cfg.ServiceVersion = "unknown"
+		cfg.ServiceVersion = DefaultServiceVersion
 	}
 	if cfg.ListenAddress == "" {
 		cfg.ListenAddress = ":8080"
@@ -527,7 +559,7 @@ func Run(ctx context.Context, cfg Config) error {
 		cfg.ListenConfigKey = "listen.address"
 	}
 	if cfg.Logger == nil {
-		cfg.Logger = NewLogger(os.Stderr, cfg.ServiceName, cfg.DeploymentEnvironment, cfg.ServiceVersion)
+		cfg.Logger = ComponentLogger(cfg.ServiceName)
 	}
 	if cfg.Readiness == nil {
 		cfg.Readiness = NewReadiness()
@@ -561,9 +593,15 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	signalCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	workCtx, cancelWork := context.WithCancel(context.WithoutCancel(signalCtx))
+	defer cancelWork()
+	users := &httpHandlerOwner{}
 	server := &http.Server{
-		Handler:           cfg.Handler,
+		Handler:           users.wrap(cfg.Handler),
+		BaseContext:       func(net.Listener) context.Context { return workCtx },
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+		TLSConfig:         cfg.TLSConfig,
+		ErrorLog:          log.New(&httpServerDiagnostics{logger: cfg.Logger}, "", 0),
 	}
 	cfg.Logger.Info("workload.started",
 		slog.String("operation", "workload.lifecycle"),
@@ -574,7 +612,13 @@ func Run(ctx context.Context, cfg Config) error {
 	)
 	serverErr := make(chan error, 1)
 	go func() {
-		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+		var err error
+		if cfg.TLSConfig != nil {
+			err = server.ServeTLS(listener, "", "")
+		} else {
+			err = server.Serve(listener)
+		}
+		if err != nil && err != http.ErrServerClosed {
 			serverErr <- err
 		}
 		close(serverErr)
@@ -600,9 +644,41 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	BeginProcessShutdown(ctx)
+	users.stopAdmission()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
+	drainStarted := time.Now()
 	shutdownErr := server.Shutdown(shutdownCtx)
+	outcome := "success"
+	if shutdownErr != nil {
+		outcome = "timeout"
+	}
+	cfg.Metrics.ObserveShutdown(cfg.Logger, "shutdown_http_drain", outcome, time.Since(drainStarted))
+	joinStarted := time.Now()
+	if shutdownErr != nil {
+		cancelWork()
+		_ = server.Close()
+	}
+	// Shutdown joins connections only on its successful path. The explicit handler
+	// join also covers forced close and hijacked handlers before resource owners exit.
+	handlersDone := make(chan struct{})
+	go func() { users.active.Wait(); close(handlersDone) }()
+	select {
+	case <-handlersDone:
+	case <-shutdownCtx.Done():
+		if shutdownErr == nil {
+			shutdownErr = shutdownCtx.Err()
+		}
+		cancelWork()
+		_ = server.Close()
+		<-handlersDone
+	}
+	<-serverErr
+	if shutdownErr != nil {
+		outcome = "timeout"
+	}
+	cfg.Metrics.ObserveShutdown(cfg.Logger, "shutdown_http_join", outcome, time.Since(joinStarted))
 	if serveErr != nil {
 		cfg.Logger.Error("workload.server.failed", StartupFailureAttrs(serveErr,
 			slog.String("component", "workload"),
@@ -617,6 +693,30 @@ func Run(ctx context.Context, cfg Config) error {
 		slog.String("readiness.state", cfg.Readiness.message()),
 	)
 	return shutdownErr
+}
+
+// Synchronize admission with WaitGroup.Add so no request can become a resource
+// user after shutdown has begun waiting for the final handlers.
+type httpHandlerOwner struct {
+	mu       sync.Mutex
+	stopping bool
+	active   sync.WaitGroup
+}
+
+func (o *httpHandlerOwner) stopAdmission() { o.mu.Lock(); o.stopping = true; o.mu.Unlock() }
+func (o *httpHandlerOwner) wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		o.mu.Lock()
+		if o.stopping {
+			o.mu.Unlock()
+			http.Error(w, "workload is draining", http.StatusServiceUnavailable)
+			return
+		}
+		o.active.Add(1)
+		o.mu.Unlock()
+		defer o.active.Done()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ForbiddenImportPrefixes returns packages the lifecycle package must not import.

@@ -39,8 +39,8 @@ func TestSDKCompatibilityRowsEqualRegistry(t *testing.T) {
 	sdkRoot := forkSDKRootForStaticTest(t, engineRoot)
 	registryPath := filepath.Join(sdkRoot, "tests", "compatibility", "compat-cases.json")
 	registryCases := readSDKCompatibilityRegistry(t, registryPath)
-	if len(registryCases) != 285 {
-		t.Fatalf("SDK compatibility registry cases = %d; want 285", len(registryCases))
+	if len(registryCases) != 287 {
+		t.Fatalf("SDK compatibility registry cases = %d; want 287", len(registryCases))
 	}
 
 	registryIDs := make(map[string]struct{}, len(registryCases))
@@ -102,7 +102,7 @@ func readSDKCompatibilityRegistry(t *testing.T, path string) []sdkCompatibilityR
 			t.Fatalf("SDK compatibility registry case %d must be a named, classified, non-empty proof case", index)
 		}
 		switch registryCase.Proof {
-		case "live", "static", "rejection", "not-produced":
+		case "live", "static", "integration", "rejection", "not-produced":
 		default:
 			t.Fatalf("SDK compatibility registry case %s has invalid proof category %q", registryCase.ID, registryCase.Proof)
 		}
@@ -116,8 +116,8 @@ func readSDKCompatibilityRegistry(t *testing.T, path string) []sdkCompatibilityR
 				t.Fatalf("SDK compatibility not-produced case %s must use not-produced proof, got %q", registryCase.ID, registryCase.Proof)
 			}
 		case "supported":
-			if registryCase.Proof != "live" && registryCase.Proof != "static" {
-				t.Fatalf("SDK compatibility supported case %s must use live or static proof, got %q", registryCase.ID, registryCase.Proof)
+			if registryCase.Proof != "live" && registryCase.Proof != "static" && registryCase.Proof != "integration" {
+				t.Fatalf("SDK compatibility supported case %s must use live, static or integration proof, got %q", registryCase.ID, registryCase.Proof)
 			}
 		default:
 			t.Fatalf("SDK compatibility registry case %s has invalid status %q", registryCase.ID, registryCase.Status)
@@ -157,8 +157,11 @@ func assertSDKCompatibilityExecutableLocators(t *testing.T, sdkRoot string, case
 	for _, compatibilityCase := range cases {
 		locator := compatibilityCase.Locator
 		wantSuite := "static"
-		if compatibilityCase.Proof == "live" || compatibilityCase.Proof == "rejection" {
+		switch compatibilityCase.Proof {
+		case "live", "rejection":
 			wantSuite = "live"
+		case "integration":
+			wantSuite = "integration"
 		}
 		if locator.Suite != wantSuite {
 			t.Fatalf("SDK compatibility case %s locator suite = %q; want %q for proof %q", compatibilityCase.ID, locator.Suite, wantSuite, compatibilityCase.Proof)

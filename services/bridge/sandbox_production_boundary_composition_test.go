@@ -15,23 +15,24 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tetral-ai/tetral/internal/dbconnect"
-	"github.com/tetral-ai/tetral/internal/internalgrpc"
-	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
-	"github.com/tetral-ai/tetral/internal/queue"
-	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
-	"github.com/tetral-ai/tetral/internal/storage/storagetest"
-	"github.com/tetral-ai/tetral/internal/workspace"
-	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
-	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
-
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/internalgrpc"
+	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
+	"github.com/tetral-ai/tetral/internal/queue"
+	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/workspace"
+	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
+	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
+	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
 
 func TestPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(t *testing.T) {
@@ -91,16 +92,16 @@ func testPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(
 		modelRequestID  = "mreq_sandbox_production_boundary"
 		modelToolCallID = "call_sandbox_production_boundary"
 	)
-	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, podUID)
-	seedReadySandboxForSharedToolExecution(t, admin, workspaceID, sessionID)
+	sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, workspaceID, sessionID)
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	startAwaitExecutionResultListener(t, store, nil)
 	store.RuntimeBindingTokenHMACKey = []byte("sandbox-production-boundary-key")
 	bridge := &sandboxProductionBoundaryBridgeServer{store: store}
 	client, bridgeAddress := startSandboxProductionBoundaryBridgeClient(t, bridge, podUID)
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	if _, err := client.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{Scope: scope}); status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("unauthenticated production Bridge request error = %v; want Unauthenticated", err)
 	}
@@ -108,7 +109,7 @@ func testPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(
 	if _, err := client.WriteEvent(wrongPodContext, &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_sandbox_wrong_pod", ModelRequestId: "mreq_sandbox_wrong_pod",
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_sandbox_wrong_pod"}`,
-		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
+		ContextThroughMessageSequence: sessionfixture.BridgeAPIInt64(0), RequestKind: "agent_provider_request",
 	}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("wrong-pod production Bridge request error = %v; want PermissionDenied", err)
 	}
@@ -117,7 +118,7 @@ func testPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(
 	start, err := client.WriteEvent(runtimeContext, &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_sandbox_production_start", ModelRequestId: modelRequestID,
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
-		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
+		ContextThroughMessageSequence: sessionfixture.BridgeAPIInt64(0), RequestKind: "agent_provider_request",
 	})
 	if err != nil || start.GetCommitted() == nil {
 		t.Fatalf("WriteEvent request start = %#v/%v; want committed", start, err)
@@ -142,7 +143,7 @@ func testPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(
 	fixtureInput, err := json.Marshal(map[string]any{
 		"address": bridgeAddress, "tokenPath": tokenPath, "workspaceId": workspaceID,
 		"sessionId": sessionID, "sessionThreadId": threadID, "bindingId": bindingID,
-		"bindingGeneration": 1, "targetPodUid": podUID,
+		"bindingGeneration": 1, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID,
 		"modelRequestId": modelRequestID, "modelToolCallId": modelToolCallID,
 		"toolName": toolName, "providerInput": json.RawMessage(providerInputJSON),
 	})
@@ -260,11 +261,11 @@ func testPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(
 		workspaceID, sessionID, toolUseEventID).Scan(&payloadJSON, &projectionJSON); err != nil {
 		t.Fatalf("read durable Tool declaration: %v", err)
 	}
-	if testJSONPathString(t, payloadJSON, "name") != toolName ||
-		!reflect.DeepEqual(testJSONPathValue(t, payloadJSON, "input"), executionInput) ||
-		testJSONPathString(t, projectionJSON, "tool_name") != toolName ||
-		!reflect.DeepEqual(testJSONPathValue(t, projectionJSON, "provider_input"), providerInput) ||
-		!reflect.DeepEqual(testJSONPathValue(t, projectionJSON, "canonical_execution_input"), executionInput) {
+	if sessionfixture.JSONPathString(t, payloadJSON, "name") != toolName ||
+		!reflect.DeepEqual(sessionfixture.JSONPathValue(t, payloadJSON, "input"), executionInput) ||
+		sessionfixture.JSONPathString(t, projectionJSON, "tool_name") != toolName ||
+		!reflect.DeepEqual(sessionfixture.JSONPathValue(t, projectionJSON, "provider_input"), providerInput) ||
+		!reflect.DeepEqual(sessionfixture.JSONPathValue(t, projectionJSON, "canonical_execution_input"), executionInput) {
 		t.Fatalf("durable Tool declaration payload/projection = %s / %s", payloadJSON, projectionJSON)
 	}
 	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
@@ -276,10 +277,7 @@ func testPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(
 		t.Fatalf("decode Sandbox composition context: %v", err)
 	}
 	providerInputFound := false
-	contextEntries := contextPayload.ContextEntries
-	if contextPayload.OpenRequestDraft != nil {
-		contextEntries = append(contextEntries, bridgeRuntimeContextEntry{Parts: contextPayload.OpenRequestDraft.Parts})
-	}
+	contextEntries := contextPayload.Messages
 	for _, entry := range contextEntries {
 		for _, rawPart := range entry.Parts {
 			var part map[string]any
@@ -323,6 +321,10 @@ type sandboxProductionBoundaryBridgeServer struct {
 	settlementACKDropped bool
 	toolDeclarations     []*bridgev1.WriteEventRequest
 	toolReceipts         []*bridgev1.WriteEventResponse
+}
+
+func (s *sandboxProductionBoundaryBridgeServer) LoadContext(ctx context.Context, request *bridgev1.LoadContextRequest) (*bridgev1.LoadContextResponse, error) {
+	return s.store.LoadContext(ctx, request)
 }
 
 func (s *sandboxProductionBoundaryBridgeServer) WriteEvent(ctx context.Context, request *bridgev1.WriteEventRequest) (*bridgev1.WriteEventResponse, error) {
@@ -463,5 +465,3 @@ func (p *sandboxProductionBoundaryProvider) ExecuteTool(_ context.Context, reque
 		ResultJSON: `{"status":"success","result":{"text":"production-boundary"}}`,
 	}}
 }
-
-var _ tetralsandbox.ProviderAdapter = (*sandboxProductionBoundaryProvider)(nil)

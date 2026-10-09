@@ -12,7 +12,6 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/tetral-ai/tetral/internal/eventwire"
-	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -80,17 +79,17 @@ func (h *SessionEventHandler) appendClientEvents(w http.ResponseWriter, r *http.
 		writeError(w, r, err)
 		return
 	}
-	workspaceID, err := requestWorkspace(r.Context())
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
 	idempotencyKey, err := sessionEventIdempotencyKey(r.Header.Values("Idempotency-Key"))
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
 	request, err := h.decodeStrictSessionEventBody(w, r)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	workspaceID, err := requestWorkspace(r.Context())
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -120,9 +119,12 @@ func (h *SessionEventHandler) decodeStrictSessionEventBody(w http.ResponseWriter
 	return sessionevent.DecodeAppendRequestWithLimits(body, h.limits)
 }
 
+// sessionEventIdempotencyKey validates the optional Idempotency-Key header.
+// An absent header is passed on as sessionevent.NoIdempotencyKey: admission
+// then reads and writes no idempotency receipt.
 func sessionEventIdempotencyKey(rawValues []string) (string, error) {
 	if len(rawValues) == 0 {
-		return id.New("idem_"), nil
+		return sessionevent.NoIdempotencyKey, nil
 	}
 	if len(rawValues) > 1 {
 		return "", &sessionevent.ValidationError{Message: "Idempotency-Key header must appear at most once"}

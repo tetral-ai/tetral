@@ -35,6 +35,12 @@ func Run(ctx context.Context, cfg Config, client *dbconnect.Client, encryptor va
 	if cfg.HTTPAddress == cfg.MetricsAddress {
 		return workload.NewConfigError(EnvMetricsAddress + " must not equal " + EnvHTTPAddress)
 	}
+	logger := runtime.Logger
+	if logger == nil {
+		owner := workload.NewProcessLogger(nil, ServiceName, cfg.DeploymentEnvironment, cfg.ServiceVersion, workload.DefaultDiagnosticConfig())
+		defer owner.CloseWithBudget()
+		logger = owner.Logger
+	}
 	readiness := workload.NewReadiness()
 	metrics := NewGitProxyMetrics()
 	proxyHandler := BuildHTTPHandler(readiness, NewHTTPHandler(
@@ -46,23 +52,18 @@ func Run(ctx context.Context, cfg Config, client *dbconnect.Client, encryptor va
 			NewPostgreSQLRepositoryTokenResolver(client, encryptor),
 		),
 		HandlerOptions{
-			PublicBaseURL:     cfg.PublicBaseURL,
-			LegacyPathCutover: cfg.LegacyPathCutover,
-			AccessLogger:      NewJSONAccessLogger(os.Stderr, WithAccessLogResource(cfg.DeploymentEnvironment, cfg.ServiceVersion)),
-			Metrics:           metrics,
+			PublicBaseURL: cfg.PublicBaseURL,
+			AccessLogger:  NewJSONAccessLogger(os.Stderr, WithAccessLogResource(cfg.DeploymentEnvironment, cfg.ServiceVersion), WithAccessLogLogger(logger)),
+			Metrics:       metrics,
 		},
 	))
-	metricsHandler := BuildMetricsHTTPHandler(readiness, metrics, runtime.DBStatsProvider)
+	metricsHandler := BuildMetricsHTTPHandler(readiness, metrics, runtime.DBStatsProvider, logger)
 	readiness.MarkReady()
 	runHTTP := runtime.RunHTTP
 	if runHTTP == nil {
 		runHTTP = workload.Run
 	}
-	logger := runtime.Logger
-	if logger == nil {
-		logger = workload.NewLogger(nil, ServiceName, cfg.DeploymentEnvironment, cfg.ServiceVersion)
-	}
-	return runHTTPPair(ctx, runHTTP, runtime.Listen, logger, readiness, cfg, proxyHandler, metricsHandler)
+	return runHTTPPair(ctx, runHTTP, runtime.Listen, logger, readiness, cfg, proxyHandler, metricsHandler, metrics.Operations)
 }
 
 func runHTTPPair(
@@ -74,21 +75,35 @@ func runHTTPPair(
 	cfg Config,
 	proxyHandler http.Handler,
 	metricsHandler http.Handler,
+	operations *workload.OperationMetrics,
 ) error {
+	if operations == nil {
+		return workload.NewConfigError("HTTP operation metrics are required")
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	tlsOwner, tlsConfig, err := cfg.HTTPTransport.Open(ctx)
+	if err != nil {
+		return workload.NewConfigError("native HTTP credential preparation failed")
+	}
+	if tlsOwner != nil {
+		defer func() { _ = tlsOwner.Close() }()
+	}
+
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := make(chan error, 2)
 	go func() {
 		results <- runHTTP(runCtx, workload.Config{
+			Metrics:               operations,
 			ServiceName:           ServiceName,
 			DeploymentEnvironment: cfg.DeploymentEnvironment,
 			ServiceVersion:        cfg.ServiceVersion,
 			ListenAddress:         cfg.HTTPAddress,
 			ListenConfigKey:       EnvHTTPAddress,
 			Listen:                listen,
+			TLSConfig:             tlsConfig,
 			Handler:               proxyHandler,
 			Readiness:             readiness,
 			ReadHeaderTimeout:     HeaderReadTimeout,
@@ -98,6 +113,7 @@ func runHTTPPair(
 	}()
 	go func() {
 		results <- runHTTP(runCtx, workload.Config{
+			Metrics:               operations,
 			ServiceName:           ServiceName,
 			DeploymentEnvironment: cfg.DeploymentEnvironment,
 			ServiceVersion:        cfg.ServiceVersion,
@@ -134,7 +150,7 @@ func BuildHTTPHandler(readiness *workload.Readiness, proxy http.Handler) http.Ha
 	return mux
 }
 
-func BuildMetricsHTTPHandler(readiness *workload.Readiness, metrics *GitProxyMetrics, dbStatsProvider workload.DBStatsProvider) http.Handler {
+func BuildMetricsHTTPHandler(readiness *workload.Readiness, metrics *GitProxyMetrics, dbStatsProvider workload.DBStatsProvider, logger *slog.Logger) http.Handler {
 	if metrics == nil {
 		metrics = NewGitProxyMetrics()
 	}
@@ -161,6 +177,7 @@ func BuildMetricsHTTPHandler(readiness *workload.Readiness, metrics *GitProxyMet
 		}
 		_, _ = w.Write([]byte(workload.RuntimeMetricsTextWith(extra)))
 		_, _ = w.Write([]byte(metrics.render()))
+		_, _ = w.Write([]byte(workload.DiagnosticMetricsText(logger)))
 	})
 	return mux
 }

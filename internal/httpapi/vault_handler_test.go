@@ -15,6 +15,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 
 	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/auth/authtest"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/vault"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -385,7 +386,7 @@ func newVaultHandlerRouterForListTests(t *testing.T, vaults *recordingVaultStore
 	t.Helper()
 	vaultHandler := httpapi.NewVaultHandler(vault.NewService(vaults, credentials))
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
-		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_test"}, nil
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_test"), nil
 	})
 	return httpapi.NewRouter(nil, "", httpapi.WithAuthenticator(authenticator), httpapi.WithVaultHandler(vaultHandler))
 }
@@ -1062,7 +1063,7 @@ func TestVaultAndCredentialHTTPArchivedFilteringAndWorkspaceIsolation(t *testing
 	requireIDs(t, listCredentialIDsViaHTTP(t, router, env.envKey, "/v1/vaults/"+credentialVaultID+"/credentials?include_archived=true"), activeCredentialID, archivedCredentialID)
 
 	env.seedWorkspace(t, "workspace_b", "B")
-	workspaceBKey, err := env.store.CreateForWorkspace(defaultWorkspaceContext(), "workspace_b", "b-key")
+	workspaceBKey, err := authtest.SeedIndependentKey(defaultWorkspaceContext(), env.runtime, "workspace_b", "b-key")
 	if err != nil {
 		t.Fatalf("create workspace_b key: %v", err)
 	}

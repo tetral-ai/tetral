@@ -5,7 +5,15 @@
  * normalized to finite non-negative numbers, snapshots copy mutable maps, and metrics remain a
  * read-only observability side channel that does not affect command or lifecycle decisions.
  */
+import { OperationMetricsRegistry } from "@tetral/ts-observability";
+import type { ShutdownPhaseLogger } from "@tetral/ts-observability";
+import { readFileSync } from "node:fs";
 import type {
+	RuntimeApprovalSource,
+	RuntimeContinuationOperation,
+	RuntimeContentKind,
+	RuntimeContentCommitPhase,
+	RuntimeContentCommitOutcome,
 	RuntimeCleanupCommandOutcome,
 	RuntimeContextLoadOperation,
 	RuntimeEventWriteOperation,
@@ -17,6 +25,42 @@ import type {
 import type { RuntimeCloseoutEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { RuntimePodLifecycle } from "./lifecycle.js";
 
+/** Container values share one cgroup scope; an unlimited/unknown limit cannot advertise headroom. */
+export interface ContainerMemoryObservation {
+	readonly usageBytes: number;
+	readonly limitBytes: number;
+}
+export function containerMemoryObservation(
+	read: (path: string) => string = (path) => readFileSync(path, "utf8"),
+): ContainerMemoryObservation | undefined {
+	for (const [usagePath, limitPath] of [
+		["/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.max"],
+		[
+			"/sys/fs/cgroup/memory/memory.usage_in_bytes",
+			"/sys/fs/cgroup/memory/memory.limit_in_bytes",
+		],
+	]) {
+		try {
+			const usage = read(usagePath!).trim(),
+				limit = read(limitPath!).trim();
+			if (!/^[0-9]+$/.test(usage) || !/^[1-9][0-9]*$/.test(limit))
+				return undefined;
+			const usageBytes = Number(usage),
+				limitBytes = Number(limit);
+			if (
+				!Number.isSafeInteger(usageBytes) ||
+				!Number.isSafeInteger(limitBytes) ||
+				limitBytes >= 2 ** 60
+			)
+				return undefined;
+			return { usageBytes, limitBytes };
+		} catch {
+			/* Try the other cgroup ABI only when its files are unavailable. */
+		}
+	}
+	return undefined;
+}
+
 interface Observation {
 	count: number;
 	sum: number;
@@ -26,6 +70,14 @@ interface Observation {
 export interface RuntimePodDomainMetricsSnapshot
 	extends RuntimeHotStateMetrics {
 	readonly activeToolFibers: number;
+ readonly operationDurationText?: string;
+ readonly pendingContentEntries?:number;
+ readonly pendingContentBytes?:number;
+ readonly contentCommitLatencyMs?:ReadonlyMap<string,Observation>;
+ readonly continuationLatencyMs?:ReadonlyMap<string,Observation>;
+	readonly approvalWaitStarted?: ReadonlyMap<string, number>;
+	readonly approvalWaitOutstanding?: ReadonlyMap<string, number>;
+	readonly approvalWaitUnavailable?: ReadonlyMap<string, number>;
 	readonly providerStreamDurationMs: ReadonlyMap<string, Observation>;
 	readonly eventWriteLatencyMs: ReadonlyMap<string, Observation>;
 	readonly contextLoadLatencyMs: ReadonlyMap<string, Observation>;
@@ -36,8 +88,11 @@ export interface RuntimePodDomainMetricsSnapshot
 	readonly closeoutEvents: ReadonlyMap<RuntimeCloseoutEvent["event"], number>;
 }
 
+export type RuntimeShutdownPhase = "shutdown_quiesce" | "shutdown_report" | "shutdown_release" | "shutdown_local_join" | "shutdown_clients" | "shutdown_listeners";
+
 /** Combines the Runtime Core metrics sink with snapshot access for HTTP exposition. */
 export interface RuntimePodMetricsSource extends RuntimeMetricsSink {
+ readonly observeShutdownPhase?: (phase: RuntimeShutdownPhase, durationMs: number, outcome: "success" | "error" | "timeout", logger?: ShutdownPhaseLogger) => void;
 	readonly recordCloseoutEvent: (event: RuntimeCloseoutEvent) => void;
 	readonly snapshot: () => RuntimePodDomainMetricsSnapshot;
 }
@@ -47,6 +102,15 @@ export interface RuntimePodMetricsSource extends RuntimeMetricsSink {
  * Callers inject one registry into runtime services and HTTP composition instead of using global state.
  */
 export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
+ readonly operations = new OperationMetricsRegistry("agent-runtime", [
+  "agent_provider_request", "compaction_summary", "approval_reviewer", "approval_reviewer_compaction",
+  "append", "finish_idle", "write_request_end", "commit_runtime_termination",
+  "build_context", "build_thread_context", "load_pending_input", "commit_accepted_input",
+  "content_commit", "content_apply", "request_end_commit", "request_end_apply",
+  "member_barrier_wait", "permit_wait", "binding_refresh", "approval_wait", "tool_accept", "tool_settle", "context_reconstruct", "cleanup_join",
+  "shutdown_quiesce", "shutdown_report", "shutdown_release", "shutdown_local_join", "shutdown_clients", "shutdown_listeners",
+ ]);
+ observeShutdownPhase(phase: RuntimeShutdownPhase, durationMs: number, outcome: "success" | "error" | "timeout", logger?: ShutdownPhaseLogger): void { this.operations.observeShutdown(phase,outcome,durationMs/1000,logger); }
 	private hotState: RuntimeHotStateMetrics = {
 		activeSessions: 0,
 		activeThreads: 0,
@@ -54,6 +118,13 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
 		pendingApprovals: 0,
 	};
 	private activeToolFibers = 0;
+ private pendingContentEntries=0;
+ private pendingContentBytes=0;
+ private readonly contentCommitLatencyMs=new Map<string,Observation>();
+ private readonly continuationLatencyMs=new Map<string,Observation>();
+	private readonly approvalWaitStarted = new Map<string, number>();
+	private readonly approvalWaitOutstanding = new Map<string, number>();
+	private readonly approvalWaitUnavailable = new Map<string, number>();
 	private readonly providerStreamDurationMs = new Map<string, Observation>();
 	private readonly eventWriteLatencyMs = new Map<string, Observation>();
 	private readonly contextLoadLatencyMs = new Map<string, Observation>();
@@ -65,6 +136,32 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
 		RuntimeCloseoutEvent["event"],
 		number
 	>();
+
+ recordContentSubmissionDelta(entries:number,bytes:number):void {
+  this.pendingContentEntries=nonNegative(this.pendingContentEntries+entries);
+  this.pendingContentBytes=nonNegative(this.pendingContentBytes+bytes);
+ }
+ observeContentCommitLatency(kind:RuntimeContentKind,phase:RuntimeContentCommitPhase,durationMs:number,outcome:RuntimeContentCommitOutcome,requestKind:RuntimeProviderStreamKind="agent_provider_request"):void {
+  this.operations.observe(phase,outcome,durationMs/1000);
+  addObservation(this.contentCommitLatencyMs,labelledKey({kind,phase,outcome,request_kind:requestKind}),durationMs);
+ }
+
+ observeContinuationLatency(operation:RuntimeContinuationOperation,durationMs:number,outcome:RuntimeMetricOutcome,requestKind:RuntimeProviderStreamKind,approvalSource?:RuntimeApprovalSource):void {
+  this.operations.observe(operation,outcome,durationMs/1000);
+  addObservation(this.continuationLatencyMs,labelledKey({operation,outcome,request_kind:requestKind,
+    ...(approvalSource === undefined ? {} : { approval_source: approvalSource })}),durationMs);
+ }
+
+	recordApprovalWaitDelta(delta: 1 | -1, requestKind: RuntimeProviderStreamKind, source: RuntimeApprovalSource): void {
+		const key = labelledKey({ request_kind: requestKind, approval_source: source });
+		if (delta === 1) this.approvalWaitStarted.set(key, (this.approvalWaitStarted.get(key) ?? 0) + 1);
+		this.approvalWaitOutstanding.set(key, nonNegative((this.approvalWaitOutstanding.get(key) ?? 0) + delta));
+	}
+
+	recordApprovalWaitUnavailable(requestKind: RuntimeProviderStreamKind, source: RuntimeApprovalSource): void {
+		const key = labelledKey({ request_kind: requestKind, approval_source: source });
+		this.approvalWaitUnavailable.set(key, (this.approvalWaitUnavailable.get(key) ?? 0) + 1);
+	}
 
 	/** Replaces the hot-state gauges after normalizing every value to a finite non-negative number. */
 	recordHotState(snapshot: RuntimeHotStateMetrics): void {
@@ -95,6 +192,7 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
 		durationMs: number,
 		outcome: RuntimeMetricOutcome,
 	): void {
+		this.operations.observe(kind,outcome,durationMs/1000);
 		addObservation(
 			this.providerStreamDurationMs,
 			labelledKey({ kind, outcome }),
@@ -108,6 +206,7 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
 		durationMs: number,
 		outcome: RuntimeMetricOutcome,
 	): void {
+		this.operations.observe(operation,outcome,durationMs/1000);
 		addObservation(
 			this.eventWriteLatencyMs,
 			labelledKey({ operation, outcome }),
@@ -121,6 +220,7 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
 		durationMs: number,
 		outcome: RuntimeMetricOutcome,
 	): void {
+		this.operations.observe(operation,outcome,durationMs/1000);
 		addObservation(
 			this.contextLoadLatencyMs,
 			labelledKey({ operation, outcome }),
@@ -151,6 +251,14 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
 		return {
 			...this.hotState,
 			activeToolFibers: this.activeToolFibers,
+   operationDurationText:this.operations.render(),
+   pendingContentEntries:this.pendingContentEntries,
+   pendingContentBytes:this.pendingContentBytes,
+   contentCommitLatencyMs:new Map(this.contentCommitLatencyMs),
+   continuationLatencyMs:new Map(this.continuationLatencyMs),
+			approvalWaitStarted: new Map(this.approvalWaitStarted),
+			approvalWaitOutstanding: new Map(this.approvalWaitOutstanding),
+			approvalWaitUnavailable: new Map(this.approvalWaitUnavailable),
 			providerStreamDurationMs: new Map(this.providerStreamDurationMs),
 			eventWriteLatencyMs: new Map(this.eventWriteLatencyMs),
 			contextLoadLatencyMs: new Map(this.contextLoadLatencyMs),
@@ -191,11 +299,54 @@ const EmptyRuntimePodMetrics: RuntimePodMetricsSource = {
 export function runtimePodMetricsText(
 	lifecycle: RuntimePodLifecycle,
 	runtimeMetrics: RuntimePodMetricsSource = EmptyRuntimePodMetrics,
+	readContainerMemory: () =>
+		| ContainerMemoryObservation
+		| undefined = containerMemoryObservation,
 ): string {
 	const snapshot = lifecycle.metricsSnapshot();
 	const runtimeSnapshot = runtimeMetrics.snapshot();
 	const memory = process.memoryUsage();
+	let container: ContainerMemoryObservation | undefined;
+	try {
+		container = readContainerMemory();
+	} catch {
+		/* unknown remains ineligible */
+	}
+	const validContainer =
+		container !== undefined &&
+		Number.isSafeInteger(container.usageBytes) &&
+		container.usageBytes >= 0 &&
+		Number.isSafeInteger(container.limitBytes) &&
+		container.limitBytes > 0;
+	const capacity = lifecycle.sessionCapacity();
 	return [
+    runtimeSnapshot.operationDurationText ?? "",
+		...(capacity === undefined
+			? []
+			: [
+					metric(
+						"runtimepod_session_capacity",
+						"Configured local Session capacity.",
+						"gauge",
+						capacity,
+					),
+				]),
+		...(validContainer
+			? [
+					metric(
+						"runtimepod_container_memory_usage_bytes",
+						"Current container cgroup memory usage.",
+						"gauge",
+						container!.usageBytes,
+					),
+					metric(
+						"runtimepod_container_memory_limit_bytes",
+						"Finite container cgroup memory limit.",
+						"gauge",
+						container!.limitBytes,
+					),
+				]
+			: ["# runtimepod_container_memory_state unknown_or_unlimited\n"]),
 		metric(
 			"runtimepod_ready",
 			"Runtime Pod readiness state.",
@@ -238,6 +389,13 @@ export function runtimePodMetricsText(
 			"gauge",
 			runtimeSnapshot.activeToolFibers,
 		),
+  metric("runtimepod_pending_content_entries","Runtime semantic member submissions awaiting ACK/application.","gauge",runtimeSnapshot.pendingContentEntries??0),
+  metric("runtimepod_pending_content_bytes","Encoded Runtime semantic member submissions awaiting ACK/application.","gauge",runtimeSnapshot.pendingContentBytes??0),
+  observationMetric("runtimepod_continuation_latency_ms","Runtime owning continuation stages in milliseconds.",runtimeSnapshot.continuationLatencyMs??new Map()),
+		labelledMetric("runtimepod_approval_wait_started_total", "Hot residency approval observations started.", "counter", runtimeSnapshot.approvalWaitStarted ?? new Map()),
+		labelledMetric("runtimepod_approval_wait_outstanding", "Hot residency approval observations awaiting a local outcome.", "gauge", runtimeSnapshot.approvalWaitOutstanding ?? new Map()),
+		labelledMetric("runtimepod_approval_wait_unavailable_total", "Cold approvals with no local start timestamp; excluded from latency summaries.", "counter", runtimeSnapshot.approvalWaitUnavailable ?? new Map()),
+  observationMetric("runtimepod_content_commit_latency_ms","Completed content bridge ACK and local application latency in milliseconds.",runtimeSnapshot.contentCommitLatencyMs??new Map()),
 		metric(
 			"runtimepod_pending_approvals",
 			"Runtime Pod pending approval tool jobs.",
@@ -295,6 +453,12 @@ function observationMetric(
 		text += `${name}_count${labels} ${formatMetricValue(observation.count)}\n`;
 		text += `${name}_sum${labels} ${formatMetricValue(observation.sum)}\n`;
 	}
+	return text;
+}
+
+function labelledMetric(name: string, help: string, type: "counter" | "gauge", values: ReadonlyMap<string, number>): string {
+	let text = `# HELP ${name} ${help}\n# TYPE ${name} ${type}\n`;
+	for (const [labels, value] of values) text += `${name}${labels} ${formatMetricValue(value)}\n`;
 	return text;
 }
 

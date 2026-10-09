@@ -7,31 +7,47 @@
 //	Read RPCs over the ledger:
 //	  ListSessionEvents / ListThreadEvents                 paged list APIs over session_events
 //	  ListSessionEventChanges / ListThreadEventChanges     SSE change feed
-//	  CurrentStreamPosition / CurrentThreadStreamPosition  SSE cursor head
-//	Bounds: defaultStreamBatchSize (100) caps rows per change-feed fetch;
-//	  defaultListLimit (20) and maxListLimit (100) bound the list page size.
+//	  CurrentStreamPosition / CurrentThreadStreamPosition  exact SSE feed head (retained or pruned)
+//	  ReadPreviewRequest                                   exact scoped Start/thread admission descriptor for a private preview frame
+//	  ListRequestFinalMessages                             database-proven End expansion, one complete agent.message per page
+//	  ReadSessionSignals                                   coarse per-Session idle signal for Event Stream's shared idle checks
+//	Bounds: MaxStreamBatchSize (100) caps rows per change-feed fetch;
+//	  MaxSessionSignalBatch (128) caps Sessions per signal statement;
+//	  defaultListLimit (20) and maxListLimit (100) bound the list page size;
+//	  a request-final page holds exactly one message (limit 1).
 //	Signed session_events page token (resource "session_events", version 3), in pagination.go.
-//	Reads, never writes, four tables:
+//	Reads, never writes, five tables:
 //	  session_event_stream_changes  SSE cursor movement (stream_position)
+//	  session_event_feed_retention  per-feed pruned_through watermark (head, gap check and Session signal)
 //	  session_events                event body (type, payload_json, processed_at) and list paging keys
 //	  session_threads               thread visibility/role gate joined into every public read
-//	  sessions                      lifecycle_state readability guard (a deleted session reads as not-found)
+//	  sessions                      lifecycle_state readability guard (deletion rules under INVARIANTS)
 //
 // STATE MACHINE (durable ledger keys this reader pages on; every writer named
-// here lives OUTSIDE this package — the event append path in internal/sessionevent,
-// internal/session, and services/bridge):
+// here lives OUTSIDE this package — internal/sessioneventwrite, called by the
+// event append paths in internal/sessionevent, internal/session,
+// internal/runtimecontrol, services/bridge and services/job-runner):
 //
-//	key                                          | states                  | writer (external) | reader (this pkg)                            | transitions
-//	session_event_stream_changes.stream_position | absent -> N (IDENTITY)  | append path       | change feed + Current*StreamPosition (MAX)   | append-only, strictly increasing per (workspace,session); rows are never rewritten
-//	session_events.insert_stream_position        | 0 (unset) -> N          | append path       | ListSessionEvents ordering + session cursor  | set once to the first stream_position the event appears at, immutable thereafter
+//	key                                          | states                     | writer (external) | reader (this pkg)                            | transitions
+//	session_event_stream_changes.stream_position | absent -> N (IDENTITY)     | append path       | change feed + Current*StreamPosition (head)  | append-only, strictly increasing per (workspace,session) in commit order under the Session fence; rows are never rewritten; Cleanup deletes rows older than 24 h
+//	session_event_feed_retention.pruned_through  | absent -> N, increasing    | Cleanup retention | feed head + change-feed gap check            | highest deleted eligible position of one feed ('session' or 'thread:<id>'); never decreases
+//	session_events.insert_stream_position        | N at the event INSERT      | append path       | ListSessionEvents ordering + session cursor  | the revision-1 change position, written with the event and immutable thereafter
 //	session_events.sequence                      | assigned (thread-local) | append path       | ListThreadEvents ordering + thread cursor    | unique and stable per (workspace,session,thread); the thread-scoped paging key
 //
 // INVARIANTS:
 //
-//   - SSE cursor movement and the SSE head are read from
-//     session_event_stream_changes (stream_position); the event body on each change
-//     is JOINed in from session_events. The list APIs read session_events only and
-//     never page over the change log.
+//   - SSE cursor movement is read from session_event_stream_changes
+//     (stream_position); the event body on each change is JOINed in from
+//     session_events. The SSE head is GREATEST(newest retained eligible change,
+//     the feed's pruned_through) in one statement, so a fully pruned feed keeps
+//     its head. The list APIs read session_events only and never page over the
+//     change log.
+//   - A change-feed batch, its lifecycle gate and its retention watermark share
+//     one short repeatable-read snapshot. When pruned_through exceeds the actual
+//     cursor, eligible history the viewer never read is gone: the read returns
+//     ErrRetainedHistoryGap and the stream closes through its reader-failure
+//     path. Equality is not a gap; sequence gaps, the oldest retained row and
+//     connection age are never evidence of loss.
 //   - The session list orders and pages by the immutable insert_stream_position
 //     (event_id tie-break), giving a stable session-global order across threads; the
 //     thread list orders and pages by the thread-local sequence.
@@ -50,22 +66,38 @@
 //     reads drop such events per row through the session_threads join, while the
 //     thread reads gate the whole read once — a missing, non-public, or
 //     approval_reviewer thread reads as not-found (ensureReadableThreadTx).
+//   - A deleted session reads as not-found for opening reads (Current*StreamPosition),
+//     lists, preview admission and every thread-scoped read. An already-open
+//     Session feed is the exception: ensureReadableSessionFeedTx keeps it
+//     readable until the insert position of its permanent session.deleted event
+//     is behind the cursor, and the Session End-group expansion uses the same
+//     gate keyed by the End's own position, so an End ordered before the
+//     deletion still publishes. The gate never reads the expiring change row.
+//   - Change-feed agent.message rows linked to a model request select no payload
+//     (NULL payload_json, DeferredMessage). Their bodies are read only through
+//     ListRequestFinalMessages after the exact scoped End/Start lookup.
 //
 // UPDATE-WITH:
 //
 //   - internal/eventstream/postgresql_reader.go — the read queries themselves.
+//   - internal/eventstream/request_final_messages.go — preview admission and
+//     End-group reads.
+//   - services/event-stream/preview_writer.go — the SSE writer that consumes the
+//     deferred-message and End-group contract.
+//   - services/event-stream/idle_checks.go — the shared idle checks that read
+//     ReadSessionSignals and wake viewers on a changed signal.
 //   - internal/eventstream/pagination.go — page-token position/sequence keys.
 //   - internal/eventstream/list.go — list limit bounds and query options.
 //   - internal/storage/postgresql_schema.go — stream_position IDENTITY,
 //     insert_stream_position default, and thread sequence uniqueness.
-//   - internal/sessionevent/postgresql_store.go, internal/session/postgresql_store.go,
-//     services/bridge/bridge_api_events.go — the append paths that
-//     assign stream_position and freeze insert_stream_position.
+//   - internal/sessioneventwrite/sessioneventwrite.go — the one writer that
+//     reserves stream_position and writes insert_stream_position with the event.
 package eventstream
 
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -74,7 +106,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-const defaultStreamBatchSize = 100
+const MaxStreamBatchSize = 100
 
 type PostgreSQLReader struct {
 	client          *dbconnect.Client
@@ -323,27 +355,7 @@ func (r *PostgreSQLReader) CurrentStreamPosition(ctx context.Context, ws workspa
 		if err := ensureReadableSessionTx(ctx, tx, ws, sessionID); err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx,
-			`SELECT COALESCE(MAX(c.stream_position), 0)
-			   FROM session_event_stream_changes c
-			   JOIN session_events e
-			     ON e.workspace_id = c.workspace_id
-			    AND e.session_id = c.session_id
-			    AND e.session_thread_id IS NOT DISTINCT FROM c.session_thread_id
-			    AND e.event_id = c.event_id
-			    AND e.visibility = 'public'
-			   LEFT JOIN session_threads t
-			     ON t.workspace_id = c.workspace_id
-			    AND t.session_id = c.session_id
-			    AND t.id = c.session_thread_id
-			  WHERE c.workspace_id = $1
-			    AND c.session_id = $2
-			    AND c.visibility = 'public'
-			    AND c.session_visible = TRUE
-			    AND (c.session_thread_id IS NULL OR (t.visibility = 'public' AND t.role <> 'approval_reviewer'))`,
-			string(ws),
-			sessionID,
-		).Scan(&position)
+		return tx.QueryRow(ctx, sessionFeedHeadQuery, string(ws), sessionID).Scan(&position)
 	})
 	if err != nil {
 		return 0, err
@@ -363,23 +375,7 @@ func (r *PostgreSQLReader) CurrentThreadStreamPosition(ctx context.Context, ws w
 		if err := ensureReadableThreadTx(ctx, tx, ws, sessionID, threadID); err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx,
-			`SELECT COALESCE(MAX(c.stream_position), 0)
-			   FROM session_event_stream_changes c
-			   JOIN session_events e
-			     ON e.workspace_id = c.workspace_id
-			    AND e.session_id = c.session_id
-			    AND e.session_thread_id = c.session_thread_id
-			    AND e.event_id = c.event_id
-			    AND e.visibility = 'public'
-			  WHERE c.workspace_id = $1
-			    AND c.session_id = $2
-			    AND c.session_thread_id = $3
-			    AND c.visibility = 'public'`,
-			string(ws),
-			sessionID,
-			threadID,
-		).Scan(&position)
+		return tx.QueryRow(ctx, threadFeedHeadQuery, string(ws), sessionID, threadID).Scan(&position)
 	})
 	if err != nil {
 		return 0, err
@@ -387,74 +383,141 @@ func (r *PostgreSQLReader) CurrentThreadStreamPosition(ctx context.Context, ws w
 	return position, nil
 }
 
+// sessionFeedHeadQuery is the exact Session feed head in one statement:
+// GREATEST(newest retained eligible change, the feed's pruned_through, 0). The
+// retained seek walks the Session head index newest first and joins the
+// permanent event and Thread headers for exact eligibility.
+const sessionFeedHeadQuery = `SELECT GREATEST(
+  COALESCE((SELECT c.stream_position
+     FROM session_event_stream_changes c
+     JOIN session_events e
+       ON e.workspace_id = c.workspace_id
+      AND e.session_id = c.session_id
+      AND e.session_thread_id IS NOT DISTINCT FROM c.session_thread_id
+      AND e.event_id = c.event_id
+      AND e.visibility = 'public'
+     LEFT JOIN session_threads t
+       ON t.workspace_id = c.workspace_id
+      AND t.session_id = c.session_id
+      AND t.id = c.session_thread_id
+    WHERE c.workspace_id = $1
+      AND c.session_id = $2
+      AND c.visibility = 'public'
+      AND c.session_visible = TRUE
+      AND (c.session_thread_id IS NULL OR (t.visibility = 'public' AND t.role <> 'approval_reviewer'))
+    ORDER BY c.stream_position DESC
+    LIMIT 1), 0),
+  COALESCE((SELECT r.pruned_through FROM session_event_feed_retention r
+    WHERE r.workspace_id = $1 AND r.session_id = $2 AND r.feed_key = 'session'), 0))`
+
+// threadFeedHeadQuery is the exact Thread feed head in one statement, over the
+// Thread head index. The caller has already gated the Thread itself.
+const threadFeedHeadQuery = `SELECT GREATEST(
+  COALESCE((SELECT c.stream_position
+     FROM session_event_stream_changes c
+     JOIN session_events e
+       ON e.workspace_id = c.workspace_id
+      AND e.session_id = c.session_id
+      AND e.session_thread_id = c.session_thread_id
+      AND e.event_id = c.event_id
+      AND e.visibility = 'public'
+    WHERE c.workspace_id = $1
+      AND c.session_id = $2
+      AND c.session_thread_id = $3
+      AND c.visibility = 'public'
+    ORDER BY c.stream_position DESC
+    LIMIT 1), 0),
+  COALESCE((SELECT r.pruned_through FROM session_event_feed_retention r
+    WHERE r.workspace_id = $1 AND r.session_id = $2 AND r.feed_key = 'thread:' || $3), 0))`
+
+// ErrRetainedHistoryGap reports that change retention has pruned an eligible
+// position after the caller's cursor, so the feed can no longer be delivered
+// completely from that cursor. It is an internal read failure: the stream
+// closes through its ordinary reader-failure path.
+var ErrRetainedHistoryGap = errors.New("eventstream: retained history gap")
+
 func (r *PostgreSQLReader) ListSessionEventChanges(ctx context.Context, ws workspace.ID, sessionID string, after int64, limit int) ([]StreamChange, error) {
-	if err := validateReaderScope(ws, sessionID); err != nil {
+	return r.listEventChanges(ctx, ReadScope{WorkspaceID: ws, SessionID: sessionID}, after, limit)
+}
+
+func (r *PostgreSQLReader) ListThreadEventChanges(ctx context.Context, ws workspace.ID, sessionID, threadID string, after int64, limit int) ([]StreamChange, error) {
+	if err := validateThreadReaderScope(ws, sessionID, threadID); err != nil {
+		return nil, err
+	}
+	return r.listEventChanges(ctx, ReadScope{WorkspaceID: ws, SessionID: sessionID, ThreadID: threadID}, after, limit)
+}
+
+func (r *PostgreSQLReader) listEventChanges(ctx context.Context, scope ReadScope, after int64, limit int) ([]StreamChange, error) {
+	if err := validateReaderScope(scope.WorkspaceID, scope.SessionID); err != nil {
 		return nil, err
 	}
 	if r == nil || r.client == nil {
 		return nil, &httpapi.ValidationError{Message: "event stream reader is required"}
 	}
-	if limit <= 0 || limit > defaultStreamBatchSize {
-		limit = defaultStreamBatchSize
+	if limit <= 0 || limit > MaxStreamBatchSize {
+		limit = MaxStreamBatchSize
 	}
 	var changes []StreamChange
-	err := r.client.WithWorkspaceReadOnlyTx(ctx, string(ws), "eventstream.list_session_event_changes", func(tx *dbconnect.Tx) error {
-		rows, err := tx.Query(ctx,
-			`SELECT c.stream_position,
-			        e.event_id,
-			        COALESCE(e.session_thread_id, ''),
-			        e.sequence,
-			        e.type,
-			        e.payload_json,
-			        e.processed_at
-			   FROM session_event_stream_changes c
-			   JOIN session_events e
-			     ON e.workspace_id = c.workspace_id
-			    AND e.session_id = c.session_id
-			    AND e.session_thread_id IS NOT DISTINCT FROM c.session_thread_id
-			    AND e.event_id = c.event_id
-			    AND e.visibility = 'public'
-			   LEFT JOIN session_threads t
-			     ON t.workspace_id = c.workspace_id
-			    AND t.session_id = c.session_id
-			    AND t.id = c.session_thread_id
-			  WHERE c.workspace_id = $1
-			    AND c.session_id = $2
-			    AND c.visibility = 'public'
-			    AND c.session_visible = TRUE
-			    AND (c.session_thread_id IS NULL OR (t.visibility = 'public' AND t.role <> 'approval_reviewer'))
-			    AND c.stream_position > $3
-			  ORDER BY c.stream_position ASC
-			  LIMIT $4`,
-			string(ws),
-			sessionID,
-			after,
-			limit,
-		)
+	// One short repeatable-read snapshot covers the lifecycle gate, the
+	// retention watermark and the batch, so a prune committing after the
+	// snapshot cannot hide rows of this batch or fake a gap. The transaction ends
+	// before the caller writes to its socket.
+	err := r.client.WithWorkspaceReadOnlyRepeatableReadTx(ctx, string(scope.WorkspaceID), "eventstream.list_event_changes", func(tx *dbconnect.Tx) error {
+		// Session deletion remains observable on the session feed. Once its deletion
+		// event is behind the cursor (or absent), the lifecycle gate closes the reader.
+		feedKey := "session"
+		if scope.ThreadID != "" {
+			feedKey = "thread:" + scope.ThreadID
+			if err := ensureReadableThreadTx(ctx, tx, scope.WorkspaceID, scope.SessionID, scope.ThreadID); err != nil {
+				return err
+			}
+		} else {
+			if err := ensureReadableSessionFeedTx(ctx, tx, scope.WorkspaceID, scope.SessionID, after); err != nil {
+				return err
+			}
+		}
+		// Retention has lost an unread eligible position only when its watermark
+		// passed the actual cursor. Equality is safe, and sequence gaps or the
+		// oldest retained row prove nothing.
+		var prunedThrough int64
+		if err := tx.QueryRow(ctx, `SELECT pruned_through FROM session_event_feed_retention
+   WHERE workspace_id = $1 AND session_id = $2 AND feed_key = $3`, string(scope.WorkspaceID), scope.SessionID, feedKey).Scan(&prunedThrough); err != nil && !dbconnect.IsNoRows(err) {
+			return err
+		}
+		if prunedThrough > after {
+			return ErrRetainedHistoryGap
+		}
+		rows, err := tx.Query(ctx, `SELECT c.stream_position, e.event_id, COALESCE(e.session_thread_id,''), e.sequence,e.type,
+    CASE WHEN e.type = 'agent.message' AND e.model_request_id IS NOT NULL THEN NULL ELSE e.payload_json END,
+    e.processed_at, COALESCE(e.model_request_id,''),
+    COALESCE(started.event_id,''),COALESCE(started.insert_stream_position,0),COALESCE(started.projection_json::jsonb ->> 'request_kind',''),COALESCE(t.role,''),
+    e.type = 'agent.message' AND e.model_request_id IS NOT NULL
+   FROM session_event_stream_changes c
+   JOIN session_events e ON e.workspace_id = c.workspace_id AND e.session_id = c.session_id
+    AND e.session_thread_id IS NOT DISTINCT FROM c.session_thread_id AND e.event_id = c.event_id AND e.visibility = 'public'
+   LEFT JOIN session_threads t ON t.workspace_id = c.workspace_id AND t.session_id = c.session_id AND t.id = c.session_thread_id
+   LEFT JOIN session_events started ON started.workspace_id = e.workspace_id AND started.session_id = e.session_id
+    AND started.session_thread_id = e.session_thread_id AND started.model_request_id = e.model_request_id AND started.type = 'span.model_request_start'
+   WHERE c.workspace_id = $1 AND c.session_id = $2 AND c.visibility = 'public'
+    AND (c.session_thread_id IS NULL OR (t.visibility = 'public' AND t.role <> 'approval_reviewer'))
+    AND (($3 = '' AND c.session_visible = TRUE) OR c.session_thread_id = NULLIF($3,''))
+    AND c.stream_position > $4 ORDER BY c.stream_position ASC LIMIT $5`, string(scope.WorkspaceID), scope.SessionID, scope.ThreadID, after, limit)
 		if err != nil {
 			return err
 		}
 		defer func() { _ = rows.Close() }()
-
 		changes = []StreamChange{}
 		for rows.Next() {
 			var change StreamChange
-			var sequence int64
-			var payload string
+			var payload sql.NullString
 			var processedAt sql.NullTime
-			if err := rows.Scan(
-				&change.StreamPosition,
-				&change.Event.ID,
-				&change.Event.ThreadID,
-				&sequence,
-				&change.Event.Type,
-				&payload,
-				&processedAt,
-			); err != nil {
+			if err := rows.Scan(&change.StreamPosition, &change.Event.ID, &change.Event.ThreadID, &change.Sequence, &change.Event.Type, &payload, &processedAt, &change.ModelRequestID, &change.RequestStartEventID, &change.RequestStartStreamPosition, &change.RequestKind, &change.ThreadRole, &change.DeferredMessage); err != nil {
 				return err
 			}
-			change.Event.SessionID = sessionID
-			change.Event.Payload = []byte(payload)
+			change.Event.SessionID = scope.SessionID
+			if payload.Valid {
+				change.Event.Payload = []byte(payload.String)
+			}
 			if processedAt.Valid {
 				formatted := processedAt.Time.UTC().Format(time.RFC3339Nano)
 				change.Event.ProcessedAt = &formatted
@@ -469,85 +532,22 @@ func (r *PostgreSQLReader) ListSessionEventChanges(ctx context.Context, ws works
 	return changes, nil
 }
 
-func (r *PostgreSQLReader) ListThreadEventChanges(ctx context.Context, ws workspace.ID, sessionID string, threadID string, after int64, limit int) ([]StreamChange, error) {
-	if err := validateThreadReaderScope(ws, sessionID, threadID); err != nil {
-		return nil, err
+// ensureReadableSessionFeedTx keeps an established Session feed, or an End
+// group selected at position after, readable while the Session's permanent
+// public session.deleted event lies beyond that position. It keys on the
+// event's immutable insert position, never on its expiring change row; a
+// deleted Session without that event is unreadable.
+func ensureReadableSessionFeedTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string, after int64) error {
+	var readable bool
+	err := tx.QueryRow(ctx, `SELECT lifecycle_state <> 'deleted' OR EXISTS (
+  SELECT 1 FROM session_events e
+   WHERE e.workspace_id=s.workspace_id AND e.session_id=s.id AND e.type='session.deleted'
+     AND e.visibility='public' AND e.session_visible=TRUE AND e.insert_stream_position > $3
+  ) FROM sessions s WHERE workspace_id=$1 AND id=$2`, string(ws), sessionID, after).Scan(&readable)
+	if dbconnect.IsNoRows(err) || (err == nil && !readable) {
+		return &httpapi.NotFoundError{Message: "session not found"}
 	}
-	if r == nil || r.client == nil {
-		return nil, &httpapi.ValidationError{Message: "event stream reader is required"}
-	}
-	if limit <= 0 || limit > defaultStreamBatchSize {
-		limit = defaultStreamBatchSize
-	}
-	var changes []StreamChange
-	err := r.client.WithWorkspaceReadOnlyTx(ctx, string(ws), "eventstream.list_thread_event_changes", func(tx *dbconnect.Tx) error {
-		if err := ensureReadableThreadTx(ctx, tx, ws, sessionID, threadID); err != nil {
-			return err
-		}
-		rows, err := tx.Query(ctx,
-			`SELECT c.stream_position,
-			        e.event_id,
-			        COALESCE(e.session_thread_id, ''),
-			        e.sequence,
-			        e.type,
-			        e.payload_json,
-			        e.processed_at
-			   FROM session_event_stream_changes c
-			   JOIN session_events e
-			     ON e.workspace_id = c.workspace_id
-			    AND e.session_id = c.session_id
-			    AND e.session_thread_id = c.session_thread_id
-			    AND e.event_id = c.event_id
-			    AND e.visibility = 'public'
-			  WHERE c.workspace_id = $1
-			    AND c.session_id = $2
-			    AND c.session_thread_id = $3
-			    AND c.visibility = 'public'
-			    AND c.stream_position > $4
-			  ORDER BY c.stream_position ASC
-			  LIMIT $5`,
-			string(ws),
-			sessionID,
-			threadID,
-			after,
-			limit,
-		)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = rows.Close() }()
-
-		changes = []StreamChange{}
-		for rows.Next() {
-			var change StreamChange
-			var sequence int64
-			var payload string
-			var processedAt sql.NullTime
-			if err := rows.Scan(
-				&change.StreamPosition,
-				&change.Event.ID,
-				&change.Event.ThreadID,
-				&sequence,
-				&change.Event.Type,
-				&payload,
-				&processedAt,
-			); err != nil {
-				return err
-			}
-			change.Event.SessionID = sessionID
-			change.Event.Payload = []byte(payload)
-			if processedAt.Valid {
-				formatted := processedAt.Time.UTC().Format(time.RFC3339Nano)
-				change.Event.ProcessedAt = &formatted
-			}
-			changes = append(changes, change)
-		}
-		return rows.Err()
-	})
-	if err != nil {
-		return nil, err
-	}
-	return changes, nil
+	return err
 }
 
 func ensureReadableSessionTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string) error {

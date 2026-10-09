@@ -1,3 +1,5 @@
+import type { ExecutableProcessBoundary } from "@tetral/ts-observability";
+import { createDiagnosticStreamSink, processFailureLogRecord, processShutdownFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
 /**
  * @packageDocumentation
  * Boots the Runtime Pod process and composes its Runtime Core, Bridge, Gateway, tool, authentication,
@@ -32,11 +34,14 @@ import type {
 	ToolPermissionPolicy,
 } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import {
+	canonicalBuiltinToolName,
 	createApprovalReviewerToolCatalog,
 	createToolCatalog,
 } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { ToolApprovalMode } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
-import type { RuntimePodApp } from "./app.js";
+import type { RuntimePodApp, RuntimePodAppOptions } from "./app.js";
+import { BridgeRuntimeProcess } from "./runtime-process.js";
+import { waitForRoutingProxy } from "./routing-proxy.js";
 import { createRuntimePodApp } from "./app.js";
 import {
 	createRuntimeApprovalReviewer,
@@ -67,7 +72,8 @@ import {
 	RuntimePodGatewayClient,
 	runtimeProviderStreamObserver,
 } from "./gateway-client.js";
-import type { RuntimePodLogger } from "./logger.js";
+import type { ProcessFailurePhase } from "@tetral/ts-observability";
+import type { RuntimePodLogRecord, RuntimePodLogger } from "./logger.js";
 import {
 	acceptedInputCommitLogRecord,
 	createJsonLogger,
@@ -77,6 +83,8 @@ import {
 	runtimeCloseoutLogRecord,
 	runtimeMCPManifestUpdateLogRecord,
 	runtimeTerminalSettlementLogRecord,
+	runtimeContentCommitLogRecord,
+	runtimeOperationLogRecord,
 	startupFailureLogRecord,
 } from "./logger.js";
 import type { RuntimePodMetricsSource } from "./metrics.js";
@@ -97,6 +105,7 @@ export interface RuntimePodCommandDependencies {
  * and the terminal wait used by the executable and its tests.
  */
 export interface RuntimePodCommandOptions {
+	readonly processBoundary?: ExecutableProcessBoundary;
 	readonly logger?: RuntimePodLogger;
 	readonly dependencyBuilder?: (input: {
 		readonly config: RuntimePodConfig;
@@ -111,6 +120,12 @@ export interface RuntimePodCommandOptions {
  * the complete production object graph.
  */
 export interface RuntimePodDependencyBuilderOptions {
+	readonly readContainerMemory?: RuntimePodAppOptions["readContainerMemory"];
+	readonly runtimeProcessFactory?: (
+		id: string,
+		config: RuntimePodConfig,
+	) => import("./runtime-process.js").RuntimeProcessPort;
+	readonly routingProxyReady?: typeof waitForRoutingProxy;
 	readonly coreHostsFactory?: typeof buildRuntimeCoreHosts;
 	readonly tokenReviewClientFactory?: (
 		config: RuntimePodConfig,
@@ -143,51 +158,100 @@ function providerStreamTimeoutOptions(
  * app, and then waits for process termination. Startup failures are logged with bounded records and
  * rethrown without dependency details.
  */
-export async function runRuntimePodCommand(
-	options: RuntimePodCommandOptions = {},
-): Promise<void> {
-	const startupLogger =
-		options.logger ??
-		createJsonLogger({ write: (line) => process.stderr.write(line) });
-	const config = loadRuntimePodConfigFromProcessEnv();
-	if (!config.ok) {
-		startupLogger.error(startupFailureLogRecord(config.error));
-		throw new Error("runtime pod config error");
-	}
-	const logger =
-		options.logger ??
-		createJsonLogger({
-			write: (line) => process.stderr.write(line),
-			deploymentEnvironment: config.config.deploymentEnvironment,
-			serviceVersion: config.config.serviceVersion,
-		});
-	let dependencies: RuntimePodCommandDependencies;
-	try {
-		dependencies = await (
-			options.dependencyBuilder ?? buildRuntimePodCommandDependencies
-		)({
-			config: config.config,
-			logger,
-		});
-	} catch (error) {
-		logger.error(
-			startupFailureLogRecord({
-				kind: "startup_error",
-				message: "runtime pod startup failed",
-				cause: error,
-				causeCategory: "dependency_readiness",
-			}),
-		);
-		throw new Error("runtime pod startup error");
-	}
-	const shutdown = async (): Promise<void> => {
-		await dependencies.app.shutdown();
-		await dependencies.coreHosts.close();
+export async function runRuntimePodCommand(options: RuntimePodCommandOptions = {}): Promise<void> {
+	const diagnosticSink = options.logger === undefined ? createDiagnosticStreamSink(process.stderr) : undefined;
+	const diagnosticOwners: object[] = [];
+	const diagnosticReleases: (() => void)[] = [];
+	const registerDiagnosticCleanup = (owner: object): void => {
+		if (diagnosticOwners.includes(owner)) return;
+		diagnosticOwners.push(owner);
+		try { if ("flush" in owner && typeof owner.flush === "function") diagnosticReleases.push(owner.flush.bind(owner)); } catch { /* best effort */ }
 	};
-	(options.registerSignalHandlers ?? registerProcessSignalHandlers)(shutdown);
-	await dependencies.app.start();
-	logWorkloadStarted(logger);
-	await (options.waitForever ?? waitForever)();
+	let logger: RuntimePodLogger | undefined;
+	const report = (record: RuntimePodLogRecord): void => { try { logger?.error(record); } catch { /* observability does not own lifecycle */ } };
+	const closes: { phase: ProcessFailurePhase; close: () => void | Promise<void> }[] = [];
+	let applicationShutdownBudgetMs: number | undefined;
+	let stopping: Promise<void> | undefined;
+	const shutdown = (): Promise<void> => {
+		if (stopping !== undefined) return stopping;
+		const disarmExit = applicationShutdownBudgetMs === undefined ? undefined : options.processBoundary?.beginShutdown(
+			Date.now() + applicationShutdownBudgetMs,
+			() => report(processShutdownFailureLogRecord()),
+		);
+		let resolveShutdown!: () => void, rejectShutdown!: (error: unknown) => void;
+		stopping = new Promise<void>((resolve, reject) => { resolveShutdown = resolve; rejectShutdown = reject; });
+		void (async () => {
+			let failed = false;
+			let firstFailure: unknown;
+			try {
+				for (const step of closes.slice().reverse()) {
+					try {
+						await step.close();
+					} catch (error) {
+						if (!failed) firstFailure = error;
+						failed = true;
+						report(processFailureLogRecord(step.phase, true));
+					}
+				}
+			} finally {
+				disarmExit?.();
+				for (const release of diagnosticReleases) { try { release(); } catch { /* best effort */ } }
+				diagnosticSink?.close();
+			}
+			if (failed) throw firstFailure;
+		})().then(resolveShutdown, rejectShutdown);
+		return stopping;
+	};
+	let phase: ProcessFailurePhase = "configuration", failureReported = false, failed = false;
+	let releaseSignals: (() => void) | void = undefined;
+	try {
+		logger = options.logger ?? createJsonLogger({ write: (line) => diagnosticSink?.write(line), sinkFailures: () => diagnosticSink?.stats().failures ?? 0 });
+		registerDiagnosticCleanup(logger);
+		const config = loadRuntimePodConfigFromProcessEnv();
+		if (!config.ok) {
+			failureReported = true; report(startupFailureLogRecord(config.error));
+			throw new Error("runtime pod config error");
+		}
+		logger = options.logger ?? createJsonLogger({ write: (line) => diagnosticSink?.write(line), sinkFailures: () => diagnosticSink?.stats().failures ?? 0, deploymentEnvironment: config.config.deploymentEnvironment, diagnostics: config.config.diagnostics, serviceVersion: config.config.serviceVersion });
+		registerDiagnosticCleanup(logger);
+		applicationShutdownBudgetMs =
+			config.config.lifecycle.currentStepTimeoutMs +
+			config.config.lifecycle.settlementTimeoutMs +
+			config.config.lifecycle.localJoinTimeoutMs;
+		phase = "dependency";
+		let dependencies: RuntimePodCommandDependencies;
+		try { dependencies = await (options.dependencyBuilder ?? buildRuntimePodCommandDependencies)({ config: config.config, logger }); }
+		catch (error) {
+			failureReported = true;
+			report(startupFailureLogRecord({ kind: "startup_error", message: "runtime pod startup failed", cause: error, causeCategory: "dependency_readiness" }));
+			throw new Error("runtime pod startup error");
+		}
+		closes.push({ phase: "runtime_core", close: () => dependencies.coreHosts.close() });
+		closes.push({ phase: "app", close: () => dependencies.app.shutdown() });
+		releaseSignals = options.registerSignalHandlers === undefined ? registerProcessSignalHandlers(shutdown) : options.registerSignalHandlers(shutdown);
+		phase = "listener";
+		await dependencies.app.start();
+		logWorkloadStarted(logger);
+		phase = "wait";
+		const terminalWait = (options.waitForever ?? waitForever)();
+		await (dependencies.app.processFailure === undefined
+			? terminalWait
+			: Promise.race([
+				terminalWait,
+				dependencies.app.processFailure.then((error) => { throw error; }),
+			]));
+	} catch (error) {
+		failed = true;
+		if (!failureReported) report(processFailureLogRecord(phase));
+		throw error;
+	} finally {
+		releaseSignals?.();
+		try {
+			await shutdown();
+		} catch (error) {
+			if (!failed) throw error;
+		}
+	}
 }
 
 /**
@@ -206,6 +270,7 @@ export async function buildRuntimePodCommandDependencies(input: {
 	const metrics = new RuntimePodMetricsRegistry();
 	const bridgeContextLoader = new BridgeAPIContextLoader({
 		address: input.config.bridgeApiGrpcAddress,
+		methodPolicies: input.config.bridgeMethodPolicies,
 		tokenPath: input.config.outboundInternalGrpcTokenPath,
 		metadataFactory: outboundMetadataFactory,
 		logger: input.logger,
@@ -222,17 +287,20 @@ export async function buildRuntimePodCommandDependencies(input: {
 	const approvalReviewerThreadCreator =
 		new BridgeAPIApprovalReviewerThreadCreator({
 			address: input.config.bridgeApiGrpcAddress,
+			methodPolicies: input.config.bridgeMethodPolicies,
 			tokenPath: input.config.outboundInternalGrpcTokenPath,
 			metadataFactory: outboundMetadataFactory,
 		});
 	const internalToolRepairCommitter = new BridgeAPIInternalToolRepairCommitter({
 		address: input.config.bridgeApiGrpcAddress,
+		methodPolicies: input.config.bridgeMethodPolicies,
 		tokenPath: input.config.outboundInternalGrpcTokenPath,
 		metadataFactory: outboundMetadataFactory,
 	});
 	let subAgentRunHost: RuntimeCoreHosts["subAgentRunHost"] | undefined;
 	const toolRunner = new RuntimePodToolRunner({
 		bridgeAddress: input.config.bridgeApiGrpcAddress,
+		methodPolicies: input.config.bridgeMethodPolicies,
 		webAddress: input.config.webConnectorGrpcAddress,
 		mcpConnectorAddress: input.config.mcpConnectorGrpcAddress,
 		tokenPath: input.config.outboundInternalGrpcTokenPath,
@@ -242,11 +310,18 @@ export async function buildRuntimePodCommandDependencies(input: {
 	const streamTimeoutOptions = providerStreamTimeoutOptions(input.config);
 	const createRuntimeId = (prefix: string): string =>
 		`${prefix}_${crypto.randomUUID()}`;
+	const eventWriter = new BridgeAPIEventWriter({
+		address: input.config.bridgeApiGrpcAddress,
+		methodPolicies: input.config.bridgeMethodPolicies,
+		tokenPath: input.config.outboundInternalGrpcTokenPath,
+		metadataFactory: outboundMetadataFactory,
+	});
+	let phaseDeadline: number | undefined;
 	const coreHosts = await (
 		input.builderOptions?.coreHostsFactory ?? buildRuntimeCoreHosts
 	)({
-		maxLocalSessions: 256,
-		maxConcurrentTools: 8,
+		maxLocalSessions: input.config.maxLocalSessions,
+		maxConcurrentTools: input.config.maxConcurrentTools,
 		now: () => new Date().toISOString(),
 		contextLoader: bridgeContextLoader,
 		logger: input.logger,
@@ -280,11 +355,7 @@ export async function buildRuntimePodCommandDependencies(input: {
 			internalToolRepairStore: new BridgeInternalToolRepairStore(
 				internalToolRepairCommitter,
 			),
-			sessionEventWriter: new BridgeAPIEventWriter({
-				address: input.config.bridgeApiGrpcAddress,
-				tokenPath: input.config.outboundInternalGrpcTokenPath,
-				metadataFactory: outboundMetadataFactory,
-			}),
+			sessionEventWriter: eventWriter,
 			runtime: {
 				now: () => new Date().toISOString(),
 				monotonicMs: () => Date.now(),
@@ -310,7 +381,12 @@ export async function buildRuntimePodCommandDependencies(input: {
 				gatewayClient,
 				runtimeProviderStreamObserver(input.logger),
 			),
-			storeOperationTimeoutMs: 5_000,
+			storeOperationTimeoutMs: Math.max(
+				...Object.values(input.config.bridgeMethodPolicies).map((policy) =>
+					policy.kind === "fixed" ? policy.timeoutMs : 0,
+				),
+			),
+			phaseDeadline: () => phaseDeadline,
 			recordProviderReschedule: (event) => {
 				input.logger.info(providerRescheduleSelectedLogRecord(event));
 			},
@@ -320,6 +396,8 @@ export async function buildRuntimePodCommandDependencies(input: {
 			recordAcceptedInputCommit: (event) => {
 				input.logger.info(acceptedInputCommitLogRecord(event));
 			},
+			recordOperation: event => { input.logger.debug?.(runtimeOperationLogRecord(event)); },
+			recordContentCommit:event=>{input.logger.debug?.(runtimeContentCommitLogRecord(event));},
 			recordRuntimeTerminalSettlement: (event) => {
 				try {
 					input.logger.error(runtimeTerminalSettlementLogRecord(event));
@@ -378,22 +456,68 @@ export async function buildRuntimePodCommandDependencies(input: {
 		}) ??
 		new BridgeAPIControlInputCommitter({
 			address: input.config.bridgeApiGrpcAddress,
+			methodPolicies: input.config.bridgeMethodPolicies,
 			tokenPath: input.config.outboundInternalGrpcTokenPath,
 			metadataFactory: outboundMetadataFactory,
 		});
+	const processId = crypto.randomUUID();
+	const runtimeProcess =
+		input.builderOptions?.runtimeProcessFactory?.(processId, input.config) ??
+		new BridgeRuntimeProcess(processId, {
+			address: input.config.bridgeApiGrpcAddress,
+			tokenPath: input.config.outboundInternalGrpcTokenPath,
+			policies: input.config.bridgeMethodPolicies,
+			metadataFactory: outboundMetadataFactory,
+		});
 	const app = createRuntimePodApp({
+		runtimeProcess,
+		...(input.builderOptions?.readContainerMemory === undefined ? {} : {
+			readContainerMemory: input.builderOptions.readContainerMemory,
+		}),
+		quiesce: async (options) => {
+			phaseDeadline = options.settlementDeadline;
+			const bridgePhase = {
+				currentStepDeadline: options.currentStepDeadline,
+				settlementDeadline: options.settlementDeadline,
+				settlementAttemptTimeoutMs: input.config.lifecycle.settlementAttemptTimeoutMs,
+			};
+			for (const adapter of [
+				eventWriter,
+				bridgeContextLoader,
+				approvalReviewerThreadCreator,
+				internalToolRepairCommitter,
+			])
+				adapter.beginDrain(bridgePhase);
+			toolRunner.beginDrain(bridgePhase);
+			if (controlInputCommitter instanceof BridgeAPIControlInputCommitter)
+				controlInputCommitter.beginDrain(bridgePhase);
+			await coreHosts.quiesce(options);
+		},
+		closeClients: async () => {
+			await Promise.all([
+				gatewayClient.close(),
+				toolRunner.close(),
+				bridgeContextLoader.close(),
+				eventWriter.close(),
+				approvalReviewerThreadCreator.close(),
+				internalToolRepairCommitter.close(),
+				...(controlInputCommitter instanceof BridgeAPIControlInputCommitter
+					? [controlInputCommitter.close()]
+					: []),
+			]);
+		},
 		config: input.config,
 		logger: input.logger,
 		tokenReviewClient,
 		commandRunHost: coreHosts.commandRunHost,
 		controlInputCommitter,
 		cleanupRunHost: coreHosts.cleanupRunHost,
-		shutdownActiveRuns: coreHosts.shutdownActiveRuns,
 		metrics,
 		bootstrap: {
-			runtime: async () => {
-				return;
-			},
+			runtime: () =>
+				(input.builderOptions?.routingProxyReady ?? waitForRoutingProxy)(
+					input.config.transportProfile,
+				),
 			core: async () => undefined,
 			authClient: async () => {
 				await validateKubernetesTokenReviewReviewerMaterial({
@@ -411,15 +535,6 @@ export async function buildRuntimePodCommandDependencies(input: {
 
 async function waitForever(): Promise<never> {
 	return await new Promise<never>(() => undefined);
-}
-
-function registerProcessSignalHandlers(shutdown: () => Promise<void>): void {
-	process.once("SIGTERM", () => {
-		void shutdown().then(() => process.exit(0));
-	});
-	process.once("SIGINT", () => {
-		void shutdown().then(() => process.exit(0));
-	});
 }
 
 /**
@@ -524,6 +639,13 @@ function runtimeToolPolicyFromPatchPayloadsWithFamily(
 		if (deriveInstalledBuiltinFamily && patchIndex === 0) {
 			family = unambiguousColdInstalledBuiltinFamily(runtimeConfig);
 		}
+		const installedTools = recordField(runtimeConfig, "installedTools") ??
+			recordField(runtimeConfig, "installed_tools");
+		if (installedTools !== undefined) {
+			const installedFamily = unambiguousColdInstalledBuiltinFamily(runtimeConfig);
+			if (family !== installedFamily) throw new Error("runtime installed builtin family changed");
+			configs = installedBuiltinToolConfigs(installedTools, installedFamily);
+		}
 		const systemPatch = runtimeAgentSystemPatch(parsed, runtimeConfig);
 		if (systemPatch.present) {
 			system = systemPatch.value;
@@ -563,9 +685,11 @@ function runtimeToolPolicyFromPatchPayloadsWithFamily(
 			recordArrayField(parsed.tool_policy, "configs") ??
 			recordArrayField(recordField(parsed.toolPolicy, "tools"), "configs") ??
 			recordArrayField(recordField(parsed.tool_policy, "tools"), "configs");
-		if (nextApprovalMode !== undefined || configValues !== undefined) {
-			approvalMode = nextApprovalMode ?? approvalMode;
-			configs = parseToolConfigs(configValues ?? []);
+		approvalMode = nextApprovalMode ?? approvalMode;
+		// Installed snapshots own declaration defaults and overrides. Ordered
+		// config-only patches retain their existing explicit replacement semantics.
+		if (installedTools === undefined && configValues !== undefined) {
+			configs = parseToolConfigs(configValues);
 		}
 		const nextMcpToolsets = parseMcpToolsets(
 			recordArrayField(parsed.tool_policy, "mcpToolsets") ??
@@ -643,6 +767,53 @@ function requiredColdInstalledBuiltinFamily(
 		throw new Error("runtime installed builtin family is malformed");
 	}
 	return family;
+}
+
+/** Projects the installed declaration into the same catalog used by provider and gate. */
+function installedBuiltinToolConfigs(
+	installedTools: unknown,
+	family: InstalledBuiltinFamily,
+): readonly ToolConfig[] {
+	if (!Array.isArray(installedTools)) throw new Error("runtime installed builtin policy is malformed");
+	const declaration = installedTools.find((tool: unknown) => isRecord(tool) && tool.type === "tetral_agent_toolset");
+	if (!isRecord(declaration)) throw new Error("runtime installed builtin policy is malformed");
+	const defaults = declaration.default_config ?? declaration.defaultConfig;
+	if (defaults !== undefined && defaults !== null && !isRecord(defaults)) {
+		throw new Error("runtime installed builtin policy is malformed");
+	}
+	const enabled = installedToolEnabled(defaults, true);
+	const permissionPolicy = installedToolPermission(defaults);
+	const overrides = declaration.configs ?? [];
+	if (!Array.isArray(overrides)) throw new Error("runtime installed builtin policy is malformed");
+	const byName = new Map<string, ToolConfig>();
+	for (const override of overrides) {
+		if (!isRecord(override) || typeof override.name !== "string") {
+			throw new Error("runtime installed builtin policy is malformed");
+		}
+		const name = canonicalBuiltinToolName(family, override.name);
+		if (name === undefined || byName.has(name)) throw new Error("runtime installed builtin policy is malformed");
+		const policy = installedToolPermission(override) ?? permissionPolicy;
+		byName.set(name, { name, enabled: installedToolEnabled(override, enabled),
+			...(policy === undefined ? {} : { permissionPolicy: policy }) });
+	}
+	return createToolCatalog({ family, includeSubAgentTools: true }).entries.map((entry) =>
+		byName.get(entry.name) ?? { name: entry.name, enabled,
+			...(permissionPolicy === undefined ? {} : { permissionPolicy }) });
+}
+
+function installedToolEnabled(value: unknown, fallback: boolean): boolean {
+	const enabled = recordField(value, "enabled");
+	if (enabled === undefined || enabled === null) return fallback;
+	if (typeof enabled !== "boolean") throw new Error("runtime installed builtin policy is malformed");
+	return enabled;
+}
+
+function installedToolPermission(value: unknown): ToolPermissionPolicy | undefined {
+	const raw = recordField(value, "permission_policy") ?? recordField(value, "permissionPolicy");
+	if (raw === undefined || raw === null) return undefined;
+	const policy = parsePermissionPolicy(raw);
+	if (policy === undefined) throw new Error("runtime installed builtin policy is malformed");
+	return policy;
 }
 
 function unambiguousColdInstalledBuiltinFamily(
@@ -1133,5 +1304,5 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 if (import.meta.main) {
-	await runRuntimePodCommand();
+	await runProcessEntry((processBoundary) => runRuntimePodCommand({ processBoundary }));
 }

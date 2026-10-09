@@ -1,0 +1,1799 @@
+{
+  "schema": "tetral.managed-resource-inventory/v1",
+  "dependencyLock": "deploy/dependencies.lock.json",
+  "resourceSets": {
+    "standard-routed": [
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-agent-runtime",
+        "name": "agent-runtime"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "api"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "auth"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "bridge"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "event-stream"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "git-proxy"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "job-runner"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "mcp-connector"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "provider-gateway"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "queue"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "sandbox"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "web-connector"
+      },
+      {
+        "apiVersion": "autoscaling/v2",
+        "kind": "HorizontalPodAutoscaler",
+        "namespace": "tetral-system",
+        "name": "git-proxy"
+      },
+      {
+        "apiVersion": "autoscaling/v2",
+        "kind": "HorizontalPodAutoscaler",
+        "namespace": "tetral-system",
+        "name": "provider-gateway"
+      },
+      {
+        "apiVersion": "batch/v1",
+        "kind": "CronJob",
+        "namespace": "tetral-system",
+        "name": "cleanup"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-bridge"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-mcp"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-provider"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-web"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-system",
+        "name": "tetral-bridge-mcp"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-system",
+        "name": "tetral-mcp-bridge"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-system",
+        "name": "tetral-provider-bridge"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-system",
+        "name": "tetral-runner-mcp"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-system",
+        "name": "tetral-runner-queue"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-system",
+        "name": "tetral-sandbox-queue"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-bridge"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-mcp"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-provider"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-web"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-system",
+        "name": "tetral-bridge-mcp"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-system",
+        "name": "tetral-mcp-bridge"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-system",
+        "name": "tetral-provider-bridge"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-system",
+        "name": "tetral-runner-mcp"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-system",
+        "name": "tetral-runner-queue"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-system",
+        "name": "tetral-sandbox-queue"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-agent-runtime",
+        "name": "agent-runtime"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-agent-runtime-istiod"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "api"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "auth"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "bridge"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "cleanup"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "event-stream"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "event-stream-nats"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "git-proxy"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "job-runner"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "mcp-connector"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "provider-gateway"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "provider-gateway-nats"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "queue"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "sandbox"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-bridge-istiod"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-job-runner-istiod"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-mcp-connector-istiod"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-provider-gateway-istiod"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-sandbox-istiod"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "web-connector"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRole",
+        "namespace": "",
+        "name": "agent-runtime-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRole",
+        "namespace": "",
+        "name": "bridge-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRole",
+        "namespace": "",
+        "name": "mcp-connector-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRole",
+        "namespace": "",
+        "name": "provider-gateway-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRole",
+        "namespace": "",
+        "name": "web-connector-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRoleBinding",
+        "namespace": "",
+        "name": "agent-runtime-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRoleBinding",
+        "namespace": "",
+        "name": "bridge-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRoleBinding",
+        "namespace": "",
+        "name": "mcp-connector-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRoleBinding",
+        "namespace": "",
+        "name": "provider-gateway-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRoleBinding",
+        "namespace": "",
+        "name": "web-connector-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "Role",
+        "namespace": "tetral-agent-runtime",
+        "name": "job-runner-visibility"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "RoleBinding",
+        "namespace": "tetral-agent-runtime",
+        "name": "job-runner-visibility"
+      },
+      {
+        "apiVersion": "security.istio.io/v1",
+        "kind": "AuthorizationPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-bridge-protected"
+      },
+      {
+        "apiVersion": "security.istio.io/v1",
+        "kind": "AuthorizationPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-mcp-connector-protected"
+      },
+      {
+        "apiVersion": "security.istio.io/v1",
+        "kind": "AuthorizationPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-provider-gateway-protected"
+      },
+      {
+        "apiVersion": "security.istio.io/v1",
+        "kind": "PeerAuthentication",
+        "namespace": "tetral-system",
+        "name": "tetral-bridge-protected"
+      },
+      {
+        "apiVersion": "security.istio.io/v1",
+        "kind": "PeerAuthentication",
+        "namespace": "tetral-system",
+        "name": "tetral-mcp-connector-protected"
+      },
+      {
+        "apiVersion": "security.istio.io/v1",
+        "kind": "PeerAuthentication",
+        "namespace": "tetral-system",
+        "name": "tetral-provider-gateway-protected"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "namespace": "tetral-system",
+        "name": "api-config"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "namespace": "tetral-system",
+        "name": "auth-config"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "namespace": "tetral-system",
+        "name": "bridge-config"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "namespace": "tetral-system",
+        "name": "queue-config"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "namespace": "tetral-system",
+        "name": "sandbox-config"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "namespace": "tetral-system",
+        "name": "tetral-database-connection-budget"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "namespace": "tetral-system",
+        "name": "web-connector-config"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-agent-runtime",
+        "name": "agent-runtime"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "api"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "api-metrics"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "auth"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "auth-metrics"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "bridge"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "event-stream"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "event-stream-metrics"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "git-proxy"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "job-runner"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "mcp-connector"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "provider-gateway"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "queue"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "sandbox"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "web-connector"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-agent-runtime",
+        "name": "agent-runtime"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "api"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "auth"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "bridge"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "cleanup"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "event-stream"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "git-proxy"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "job-runner"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "mcp-connector"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "provider-gateway"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "queue"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "sandbox"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "web-connector"
+      }
+    ],
+    "hardened": [
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-agent-runtime",
+        "name": "agent-runtime"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "api"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "auth"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "bridge"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "event-stream"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "git-proxy"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "job-runner"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "mcp-connector"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "provider-gateway"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "queue"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "sandbox"
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "tetral-system",
+        "name": "web-connector"
+      },
+      {
+        "apiVersion": "autoscaling/v2",
+        "kind": "HorizontalPodAutoscaler",
+        "namespace": "tetral-system",
+        "name": "git-proxy"
+      },
+      {
+        "apiVersion": "autoscaling/v2",
+        "kind": "HorizontalPodAutoscaler",
+        "namespace": "tetral-system",
+        "name": "provider-gateway"
+      },
+      {
+        "apiVersion": "batch/v1",
+        "kind": "CronJob",
+        "namespace": "tetral-system",
+        "name": "cleanup"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-bridge"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-mcp"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-provider"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-web"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-system",
+        "name": "tetral-bridge-mcp"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-system",
+        "name": "tetral-mcp-bridge"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-system",
+        "name": "tetral-provider-bridge"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-system",
+        "name": "tetral-runner-mcp"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-system",
+        "name": "tetral-runner-queue"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "DestinationRule",
+        "namespace": "tetral-system",
+        "name": "tetral-sandbox-queue"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-bridge"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-mcp"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-provider"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-web"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-system",
+        "name": "tetral-bridge-mcp"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-system",
+        "name": "tetral-mcp-bridge"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-system",
+        "name": "tetral-provider-bridge"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-system",
+        "name": "tetral-runner-mcp"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-system",
+        "name": "tetral-runner-queue"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "namespace": "tetral-system",
+        "name": "tetral-sandbox-queue"
+      },
+      {
+        "apiVersion": "networking.istio.io/v1alpha3",
+        "kind": "EnvoyFilter",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-direct-tls"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-agent-runtime",
+        "name": "agent-runtime"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-agent-runtime-istiod"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "api"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "auth"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "bridge"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "cleanup"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "event-stream"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "event-stream-nats"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "git-proxy"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "job-runner"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "mcp-connector"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "provider-gateway"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "provider-gateway-nats"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "queue"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "sandbox"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-bridge-istiod"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-job-runner-istiod"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-mcp-connector-istiod"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-provider-gateway-istiod"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-queue-istiod"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-sandbox-istiod"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-web-connector-istiod"
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "web-connector"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRole",
+        "namespace": "",
+        "name": "agent-runtime-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRole",
+        "namespace": "",
+        "name": "bridge-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRole",
+        "namespace": "",
+        "name": "mcp-connector-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRole",
+        "namespace": "",
+        "name": "provider-gateway-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRole",
+        "namespace": "",
+        "name": "web-connector-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRoleBinding",
+        "namespace": "",
+        "name": "agent-runtime-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRoleBinding",
+        "namespace": "",
+        "name": "bridge-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRoleBinding",
+        "namespace": "",
+        "name": "mcp-connector-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRoleBinding",
+        "namespace": "",
+        "name": "provider-gateway-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRoleBinding",
+        "namespace": "",
+        "name": "web-connector-tokenreview"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "Role",
+        "namespace": "tetral-agent-runtime",
+        "name": "job-runner-visibility"
+      },
+      {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "RoleBinding",
+        "namespace": "tetral-agent-runtime",
+        "name": "job-runner-visibility"
+      },
+      {
+        "apiVersion": "security.istio.io/v1",
+        "kind": "AuthorizationPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-bridge-protected"
+      },
+      {
+        "apiVersion": "security.istio.io/v1",
+        "kind": "AuthorizationPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-mcp-connector-protected"
+      },
+      {
+        "apiVersion": "security.istio.io/v1",
+        "kind": "AuthorizationPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-provider-gateway-protected"
+      },
+      {
+        "apiVersion": "security.istio.io/v1",
+        "kind": "AuthorizationPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-queue-protected"
+      },
+      {
+        "apiVersion": "security.istio.io/v1",
+        "kind": "AuthorizationPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-web-connector-protected"
+      },
+      {
+        "apiVersion": "security.istio.io/v1",
+        "kind": "PeerAuthentication",
+        "namespace": "tetral-system",
+        "name": "tetral-bridge-protected"
+      },
+      {
+        "apiVersion": "security.istio.io/v1",
+        "kind": "PeerAuthentication",
+        "namespace": "tetral-system",
+        "name": "tetral-mcp-connector-protected"
+      },
+      {
+        "apiVersion": "security.istio.io/v1",
+        "kind": "PeerAuthentication",
+        "namespace": "tetral-system",
+        "name": "tetral-provider-gateway-protected"
+      },
+      {
+        "apiVersion": "security.istio.io/v1",
+        "kind": "PeerAuthentication",
+        "namespace": "tetral-system",
+        "name": "tetral-queue-protected"
+      },
+      {
+        "apiVersion": "security.istio.io/v1",
+        "kind": "PeerAuthentication",
+        "namespace": "tetral-system",
+        "name": "tetral-web-connector-protected"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-direct-sds"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "namespace": "tetral-system",
+        "name": "api-config"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "namespace": "tetral-system",
+        "name": "auth-config"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "namespace": "tetral-system",
+        "name": "bridge-config"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "namespace": "tetral-system",
+        "name": "queue-config"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "namespace": "tetral-system",
+        "name": "sandbox-config"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "namespace": "tetral-system",
+        "name": "tetral-database-connection-budget"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "namespace": "tetral-system",
+        "name": "web-connector-config"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-agent-runtime",
+        "name": "agent-runtime"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "api"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "api-metrics"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "auth"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "auth-metrics"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "bridge"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "event-stream"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "event-stream-metrics"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "git-proxy"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "job-runner"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "mcp-connector"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "provider-gateway"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "queue"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "sandbox"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "namespace": "tetral-system",
+        "name": "web-connector"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-agent-runtime",
+        "name": "agent-runtime"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "api"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "auth"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "bridge"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "cleanup"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "event-stream"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "git-proxy"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "job-runner"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "mcp-connector"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "provider-gateway"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "queue"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "sandbox"
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "namespace": "tetral-system",
+        "name": "web-connector"
+      }
+    ],
+    "public-edge-standard": [
+      {
+        "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+        "kind": "BackendTrafficPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-public-edge"
+      },
+      {
+        "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+        "kind": "ClientTrafficPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-public-api-https"
+      },
+      {
+        "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+        "kind": "ClientTrafficPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-public-git-https"
+      },
+      {
+        "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+        "kind": "ClientTrafficPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-public-http"
+      },
+      {
+        "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+        "kind": "EnvoyPatchPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-auth-raw-headers"
+      },
+      {
+        "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+        "kind": "EnvoyProxy",
+        "namespace": "tetral-system",
+        "name": "tetral-public-edge"
+      },
+      {
+        "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+        "kind": "SecurityPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-public-api"
+      },
+      {
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "Gateway",
+        "namespace": "tetral-system",
+        "name": "tetral-public-edge"
+      },
+      {
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "HTTPRoute",
+        "namespace": "tetral-system",
+        "name": "tetral-public-api"
+      },
+      {
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "HTTPRoute",
+        "namespace": "tetral-system",
+        "name": "tetral-public-git"
+      },
+      {
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "HTTPRoute",
+        "namespace": "tetral-system",
+        "name": "tetral-public-redirect"
+      },
+      {
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "HTTPRoute",
+        "namespace": "tetral-system",
+        "name": "tetral-token-exchange"
+      }
+    ],
+    "public-edge-hardened": [
+      {
+        "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+        "kind": "BackendTrafficPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-public-edge"
+      },
+      {
+        "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+        "kind": "ClientTrafficPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-public-api-https"
+      },
+      {
+        "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+        "kind": "ClientTrafficPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-public-git-https"
+      },
+      {
+        "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+        "kind": "ClientTrafficPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-public-http"
+      },
+      {
+        "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+        "kind": "EnvoyPatchPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-auth-raw-headers"
+      },
+      {
+        "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+        "kind": "EnvoyProxy",
+        "namespace": "tetral-system",
+        "name": "tetral-public-edge"
+      },
+      {
+        "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+        "kind": "SecurityPolicy",
+        "namespace": "tetral-system",
+        "name": "tetral-public-api"
+      },
+      {
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "BackendTLSPolicy",
+        "namespace": "tetral-system",
+        "name": "api-edge"
+      },
+      {
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "BackendTLSPolicy",
+        "namespace": "tetral-system",
+        "name": "auth-edge"
+      },
+      {
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "BackendTLSPolicy",
+        "namespace": "tetral-system",
+        "name": "event-stream-edge"
+      },
+      {
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "BackendTLSPolicy",
+        "namespace": "tetral-system",
+        "name": "git-proxy-edge"
+      },
+      {
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "Gateway",
+        "namespace": "tetral-system",
+        "name": "tetral-public-edge"
+      },
+      {
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "HTTPRoute",
+        "namespace": "tetral-system",
+        "name": "tetral-public-api"
+      },
+      {
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "HTTPRoute",
+        "namespace": "tetral-system",
+        "name": "tetral-public-git"
+      },
+      {
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "HTTPRoute",
+        "namespace": "tetral-system",
+        "name": "tetral-public-redirect"
+      },
+      {
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "HTTPRoute",
+        "namespace": "tetral-system",
+        "name": "tetral-token-exchange"
+      }
+    ],
+    "cilium-optional": [
+      {
+        "apiVersion": "cilium.io/v2",
+        "kind": "CiliumNetworkPolicy",
+        "namespace": "tetral-agent-runtime",
+        "name": "agent-runtime-apiserver-egress"
+      },
+      {
+        "apiVersion": "cilium.io/v2",
+        "kind": "CiliumNetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "bridge-apiserver-egress"
+      },
+      {
+        "apiVersion": "cilium.io/v2",
+        "kind": "CiliumNetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "job-runner-apiserver-egress"
+      },
+      {
+        "apiVersion": "cilium.io/v2",
+        "kind": "CiliumNetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "mcp-connector-apiserver-egress"
+      },
+      {
+        "apiVersion": "cilium.io/v2",
+        "kind": "CiliumNetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "provider-gateway-apiserver-egress"
+      },
+      {
+        "apiVersion": "cilium.io/v2",
+        "kind": "CiliumNetworkPolicy",
+        "namespace": "tetral-system",
+        "name": "web-connector-apiserver-egress"
+      }
+    ],
+    "native-certificates-optional": [
+      {
+        "apiVersion": "cert-manager.io/v1",
+        "kind": "Certificate",
+        "namespace": "tetral-agent-runtime",
+        "name": "tetral-runtime-direct-tls"
+      },
+      {
+        "apiVersion": "cert-manager.io/v1",
+        "kind": "Certificate",
+        "namespace": "tetral-system",
+        "name": "tetral-api-edge-tls"
+      },
+      {
+        "apiVersion": "cert-manager.io/v1",
+        "kind": "Certificate",
+        "namespace": "tetral-system",
+        "name": "tetral-auth-edge-tls"
+      },
+      {
+        "apiVersion": "cert-manager.io/v1",
+        "kind": "Certificate",
+        "namespace": "tetral-system",
+        "name": "tetral-edge-client-tls"
+      },
+      {
+        "apiVersion": "cert-manager.io/v1",
+        "kind": "Certificate",
+        "namespace": "tetral-system",
+        "name": "tetral-event-stream-edge-tls"
+      },
+      {
+        "apiVersion": "cert-manager.io/v1",
+        "kind": "Certificate",
+        "namespace": "tetral-system",
+        "name": "tetral-git-proxy-edge-tls"
+      },
+      {
+        "apiVersion": "cert-manager.io/v1",
+        "kind": "Certificate",
+        "namespace": "tetral-system",
+        "name": "tetral-runner-direct-tls"
+      }
+    ]
+  },
+  "independentPrerequisites": [
+    {
+      "owner": "istio",
+      "renderer": "deploy/istio/render.py"
+    },
+    {
+      "owner": "envoy-gateway",
+      "renderer": "deploy/envoy-gateway/render.py"
+    },
+    {
+      "owner": "cert-manager",
+      "renderer": "deploy/cert-manager/render.py",
+      "requiredWhen": "nativeCertificates.enabled"
+    }
+  ],
+  "previousResourceDispositions": "deploy/managed/previous-resource-dispositions.json",
+  "removals": [
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "namespace": "tetral-system",
+      "name": "gateway",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "gateway",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "independent-provider-gateway-mcp-web-workloads"
+    },
+    {
+      "apiVersion": "autoscaling/v2",
+      "kind": "HorizontalPodAutoscaler",
+      "namespace": "tetral-system",
+      "name": "gateway",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "gateway",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "independent-provider-gateway-mcp-web-workloads"
+    },
+    {
+      "apiVersion": "cilium.io/v2",
+      "kind": "CiliumNetworkPolicy",
+      "namespace": "tetral-system",
+      "name": "gateway-apiserver-egress",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "gateway",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "independent-provider-gateway-mcp-web-workloads"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "Ingress",
+      "namespace": "tetral-system",
+      "name": "git-proxy",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "git-proxy",
+        "app.kubernetes.io/part-of": "tetral",
+        "tetral.ai/edge-adapter": "ingress-nginx"
+      },
+      "replacementOwner": "public-envoy-gateway"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "Ingress",
+      "namespace": "tetral-system",
+      "name": "tetral-event-stream",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "tetral-public-edge",
+        "app.kubernetes.io/part-of": "tetral",
+        "tetral.ai/edge-adapter": "ingress-nginx"
+      },
+      "replacementOwner": "public-envoy-gateway"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "Ingress",
+      "namespace": "tetral-system",
+      "name": "tetral-public-api",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "tetral-public-edge",
+        "app.kubernetes.io/part-of": "tetral",
+        "tetral.ai/edge-adapter": "ingress-nginx"
+      },
+      "replacementOwner": "public-envoy-gateway"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "namespace": "tetral-system",
+      "name": "gateway",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "gateway",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "independent-provider-gateway-mcp-web-workloads"
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "namespace": "",
+      "name": "gateway-tokenreview",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "gateway",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "independent-provider-gateway-mcp-web-workloads"
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "namespace": "",
+      "name": "gateway-tokenreview",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "gateway",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "independent-provider-gateway-mcp-web-workloads"
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "namespace": "tetral-agent-runtime",
+      "name": "bridge-visibility",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "bridge",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "job-runner-runtime-visibility"
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "namespace": "tetral-agent-runtime",
+      "name": "bridge-visibility",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "bridge",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "job-runner-runtime-visibility"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "namespace": "tetral-system",
+      "name": "gateway-config",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "gateway",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "independent-provider-gateway-mcp-web-workloads"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "namespace": "tetral-system",
+      "name": "gateway",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "gateway",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "independent-provider-gateway-mcp-web-workloads"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "namespace": "tetral-system",
+      "name": "gateway",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "gateway",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "independent-provider-gateway-mcp-web-workloads"
+    }
+  ],
+  "preserve": [
+    "unrelated controllers and Gateway API CRD ownership",
+    "stores, databases, object namespaces and unrelated applications"
+  ]
+}

@@ -18,18 +18,26 @@ metadata:
     app.kubernetes.io/part-of: tetral
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: {{ .Values.rollout.maxSurge }}
   selector:
     matchLabels:
       app.kubernetes.io/name: agent-runtime
   template:
     metadata:
+      annotations:
+{{ include "tetral.routingAnnotations" (dict "root" . "role" "agent-runtime") | indent 8 }}
       labels:
         app.kubernetes.io/name: agent-runtime
         app.kubernetes.io/part-of: tetral
+        istio.io/rev: {{ .Values.routing.revision | quote }}
     spec:
       serviceAccountName: agent-runtime
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 15
+      terminationGracePeriodSeconds: {{ .Values.lifecycle.runtimeGraceSeconds }}
       containers:
         - name: agent-runtime
           image: {{ include "tetral.image" (dict "root" . "name" "agent-runtime") }}
@@ -38,10 +46,25 @@ spec:
             - bun
             - /app/dist/command.js
           env:
+{{ include "tetral.diagnosticEnv" . | trim | indent 12 }}
+            - name: TETRAL_RUNTIME_DRAIN_TIMEOUT_MS
+              value: {{ .Values.lifecycle.runtimeDrainMs | quote }}
+            - name: TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS
+              value: {{ .Values.lifecycle.runtimeSettlementMs | quote }}
+            - name: TETRAL_RUNTIME_SETTLEMENT_ATTEMPT_TIMEOUT_MS
+              value: {{ .Values.lifecycle.settlementAttemptTimeoutMs | quote }}
+            - name: TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS
+              value: {{ .Values.lifecycle.runtimeLocalJoinMs | quote }}
+            - name: TETRAL_RUNTIME_PROXY_JOIN_TIMEOUT_MS
+              value: {{ .Values.lifecycle.runtimeProxyJoinMs | quote }}
+            - name: TETRAL_TRANSPORT_PROFILE
+              value: {{ .Values.transport.profile | quote }}
+            - name: TETRAL_ROUTING_PROXY_REQUIRED
+              value: "true"
             - name: TETRAL_RUNTIME_POD_HTTP_ADDR
               value: 0.0.0.0:8080
             - name: TETRAL_RUNTIME_POD_GRPC_PORT
-              value: "9090"
+              value: {{ if eq .Values.transport.profile "hardened" }}"9090"{{ else }}"19090"{{ end }}
             - name: TETRAL_RUNTIME_POD_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -65,17 +88,17 @@ spec:
             - name: TETRAL_RUNTIME_POD_GRPC_AUDIENCE
               value: tetral-internal-grpc
             - name: TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS
-              value: tetral-system/bridge
+              value: tetral-system/job-runner
             - name: TETRAL_RUNTIME_POD_OUTBOUND_GRPC_TOKEN_PATH
               value: /var/run/secrets/tetral-internal-grpc/runtime-pod/token
             - name: TETRAL_BRIDGE_API_GRPC_ADDR
               value: bridge.tetral-system.svc.cluster.local:9090
             - name: TETRAL_GATEWAY_GRPC_ADDR
-              value: dns:///gateway.tetral-system.svc.cluster.local:9090
+              value: dns:///provider-gateway.tetral-system.svc.cluster.local:9090
             - name: TETRAL_MCP_CONNECTOR_GRPC_ADDR
-              value: dns:///gateway.tetral-system.svc.cluster.local:9091
+              value: dns:///mcp-connector.tetral-system.svc.cluster.local:9091
             - name: TETRAL_WEB_CONNECTOR_GRPC_ADDR
-              value: dns:///gateway.tetral-system.svc.cluster.local:9092
+              value: dns:///web-connector.tetral-system.svc.cluster.local:9092
             - name: TETRAL_RUNTIME_APPROVAL_REVIEWER_MODEL
               value: deepseek/deepseek-v4-pro
             - name: TETRAL_RUNTIME_SKILL_GUIDANCE_DESCRIPTION_BUDGET_BYTES
@@ -92,7 +115,7 @@ spec:
             - name: http
               containerPort: 8080
             - name: grpc
-              containerPort: 9090
+              containerPort: {{ if eq .Values.transport.profile "hardened" }}9090{{ else }}19090{{ end }}
           livenessProbe:
             httpGet:
               path: /health
@@ -155,6 +178,9 @@ spec:
     - name: http
       port: 8080
       targetPort: http
+    - name: grpc-direct
+      port: {{ if eq .Values.transport.profile "hardened" }}19443{{ else }}19090{{ end }}
+      targetPort: {{ if eq .Values.transport.profile "hardened" }}19443{{ else }}19090{{ end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -188,10 +214,10 @@ spec:
               kubernetes.io/metadata.name: tetral-system
           podSelector:
             matchLabels:
-              app.kubernetes.io/name: bridge
+              app.kubernetes.io/name: job-runner
       ports:
         - protocol: TCP
-          port: 9090
+          port: {{ if eq .Values.transport.profile "hardened" }}19443{{ else }}19090{{ end }}
   egress:
     - to:
         - namespaceSelector:
@@ -209,19 +235,35 @@ spec:
               kubernetes.io/metadata.name: tetral-system
           podSelector:
             matchLabels:
-              app.kubernetes.io/name: gateway
+              app.kubernetes.io/name: provider-gateway
       ports:
         - protocol: TCP
           port: 9090
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp-connector
+      ports:
         - protocol: TCP
           port: 9091
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: web-connector
+      ports:
         - protocol: TCP
           port: 9092
     - to:
 {{- toYaml .Values.network.apiServerPeers | nindent 8 }}
       ports:
         - protocol: TCP
-          port: 443
+          port: {{ .Values.network.apiServerPort }}
     - to:
 {{- toYaml .Values.network.dnsPeers | nindent 8 }}
       ports:
@@ -248,8 +290,8 @@ spec:
         - kube-apiserver
       toPorts:
         - ports:
-            - port: "443"
+            - port: '443'
               protocol: TCP
-            - port: "6443"
+            - port: '6443'
               protocol: TCP
 {{- end }}

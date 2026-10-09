@@ -1,0 +1,245 @@
+package jobrunner
+
+import (
+	"context"
+	"database/sql"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/workspace"
+)
+
+func assertActiveCompletionWake(t *testing.T, db *sql.DB, sessionID string, deliveryID string, want bool) {
+	t.Helper()
+	var count int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*)
+		   FROM queue_jobs
+		  WHERE workspace_id = 'default'
+		    AND dedupe_key = $1
+		    AND status IN ('pending', 'leased')`,
+		queue.FormatRuntimeInputDedupeKey(
+			workspace.ID("default"),
+			sessionID,
+			runtimecontrol.CompletionRuntimeInputID(deliveryID),
+		),
+	).Scan(&count); err != nil {
+		t.Fatalf("count active completion wake: %v", err)
+	}
+	wantCount := 0
+	if want {
+		wantCount = 1
+	}
+	if count != wantCount {
+		t.Fatalf("active wake for %s = %d; want %d", deliveryID, count, wantCount)
+	}
+}
+
+func TestPostgreSQLCompletionMailWakeAcceptsEveryStaleRecipientArm(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *sql.DB, string, string)
+		absent bool
+	}{
+		{name: "absent session", absent: true},
+		{
+			name: "deleted session",
+			mutate: func(t *testing.T, admin *sql.DB, sessionID string, _ string) {
+				t.Helper()
+				if _, err := admin.ExecContext(context.Background(),
+					`UPDATE sessions SET lifecycle_state='deleted' WHERE workspace_id='default' AND id=$1`,
+					sessionID,
+				); err != nil {
+					t.Fatalf("delete session fixture: %v", err)
+				}
+			},
+		},
+		{
+			name: "terminated session",
+			mutate: func(t *testing.T, admin *sql.DB, sessionID string, _ string) {
+				t.Helper()
+				if _, err := admin.ExecContext(context.Background(),
+					`UPDATE sessions SET status='terminated' WHERE workspace_id='default' AND id=$1`,
+					sessionID,
+				); err != nil {
+					t.Fatalf("terminate session fixture: %v", err)
+				}
+			},
+		},
+		{
+			name: "closed recipient",
+			mutate: func(t *testing.T, admin *sql.DB, sessionID string, threadID string) {
+				t.Helper()
+				if _, err := admin.ExecContext(context.Background(),
+					`UPDATE session_threads SET status='closed_for_runtime'
+					  WHERE workspace_id='default' AND session_id=$1 AND id=$2`,
+					sessionID,
+					threadID,
+				); err != nil {
+					t.Fatalf("close recipient fixture: %v", err)
+				}
+			},
+		},
+		{
+			name: "terminated recipient",
+			mutate: func(t *testing.T, admin *sql.DB, sessionID string, threadID string) {
+				t.Helper()
+				if _, err := admin.ExecContext(context.Background(),
+					`UPDATE session_threads SET status='terminated'
+					  WHERE workspace_id='default' AND session_id=$1 AND id=$2`,
+					sessionID,
+					threadID,
+				); err != nil {
+					t.Fatalf("terminate recipient fixture: %v", err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			suffix := strings.ReplaceAll(test.name, " ", "_")
+			sessionID := "sesn_completion_mail_stale_" + suffix
+			threadID := "thrd_completion_mail_stale_" + suffix
+			if test.absent {
+				if _, err := admin.ExecContext(context.Background(),
+					`INSERT INTO workspaces (id, type, name, created_at)
+					 VALUES ('default', 'workspace', 'default', '2026-01-01T00:00:00Z')
+					 ON CONFLICT (id) DO NOTHING`,
+				); err != nil {
+					t.Fatalf("seed absent-session workspace: %v", err)
+				}
+			} else {
+				sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
+				test.mutate(t, admin, sessionID, threadID)
+			}
+			store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
+			plan, err := store.PrepareRuntimeCommand(context.Background(),
+				completionMailRuntimeJob(sessionID, threadID, "agent_mail:delivery_stale_"+suffix))
+			if err != nil {
+				t.Fatalf("prepare stale completion-mail wake: %v", err)
+			}
+			if !plan.StaleAccepted || plan.hasCommand() {
+				t.Fatalf("stale completion-mail plan = %#v; want accepted no-op", plan)
+			}
+		})
+	}
+}
+
+func TestPostgreSQLCompletionMailFinalizationRechecksTerminalRecipientFences(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *sql.DB, string, string)
+	}{
+		{
+			name: "session terminates after prepare",
+			mutate: func(t *testing.T, admin *sql.DB, sessionID string, _ string) {
+				t.Helper()
+				if _, err := admin.ExecContext(context.Background(),
+					`UPDATE sessions SET status='terminated' WHERE workspace_id='default' AND id=$1`,
+					sessionID,
+				); err != nil {
+					t.Fatalf("terminate session after prepare: %v", err)
+				}
+			},
+		},
+		{
+			name: "recipient closes after prepare",
+			mutate: func(t *testing.T, admin *sql.DB, sessionID string, threadID string) {
+				t.Helper()
+				if _, err := admin.ExecContext(context.Background(),
+					`UPDATE session_threads SET status='closed_for_runtime'
+					  WHERE workspace_id='default' AND session_id=$1 AND id=$2`,
+					sessionID,
+					threadID,
+				); err != nil {
+					t.Fatalf("close recipient after prepare: %v", err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			suffix := strings.ReplaceAll(test.name, " ", "_")
+			sessionID := "sesn_completion_mail_finalize_stale_" + suffix
+			threadID := "thrd_completion_mail_finalize_stale_" + suffix
+			childID := "thrd_completion_mail_finalize_stale_child_" + suffix
+			deliveryID := "delivery_completion_mail_finalize_stale_" + suffix
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, childID)
+			messageJSON := sessionfixture.BridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "task_"+childID, "completion"))
+			seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_completion_mail_finalize_stale_sent_"+suffix, 1,
+				"agent.thread_message_sent",
+				sessionfixture.BridgeInterAgentSentEventJSON(t, deliveryID, childID, threadID, "", "sevt_completion_mail_finalize_stale_"+suffix, messageJSON))
+			sessionfixture.SeedAgentMailCustody(t, admin, sessionID, threadID, deliveryID, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_"+suffix, 1, "pod_"+suffix)
+			store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
+			store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
+			job := leaseCompletionMailRuntimeJob(t, runtime)
+
+			plan, err := store.PrepareRuntimeCommand(context.Background(), job)
+			if err != nil || plan.AcceptAgentMail == nil || plan.StaleAccepted {
+				t.Fatalf("prepare completion-mail race fixture = %#v/%v; want live request", plan, err)
+			}
+			test.mutate(t, admin, sessionID, threadID)
+			exhaustion := runtimeDeliveryResultWithAttemptedBinding(retryableExhaustionResult(), plan.AttemptedBinding)
+
+			for attempt := 0; attempt < 2; attempt++ {
+				finalized, err := store.FinalizeRuntimeDelivery(context.Background(), job, exhaustion)
+				if err != nil || finalized.Status != RuntimeDeliveryAccepted {
+					t.Fatalf("finalize stale completion mail attempt %d = %#v/%v; want accepted no-op", attempt, finalized, err)
+				}
+			}
+			var errorEvents int
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT count(*) FROM session_events
+				  WHERE workspace_id='default' AND session_id=$1 AND type='session.error'`,
+				sessionID,
+			).Scan(&errorEvents); err != nil {
+				t.Fatalf("count stale finalization errors: %v", err)
+			}
+			if errorEvents != 0 {
+				t.Fatalf("stale completion-mail finalization errors = %d; want 0", errorEvents)
+			}
+			assertActiveCompletionWake(t, admin, sessionID, deliveryID, true)
+		})
+	}
+}
+
+func completionMailRuntimeJob(sessionID string, threadID string, runtimeInputID string) RuntimeJob {
+	return RuntimeJob{
+		JobID:           "qjob_" + runtimeInputID,
+		LeaseToken:      "lease_" + runtimeInputID,
+		Kind:            queue.KindRuntimeInput,
+		WorkspaceID:     "default",
+		SessionID:       sessionID,
+		SessionThreadID: threadID,
+		RuntimeInputID:  runtimeInputID,
+		InputKind:       "agent_mail",
+		PayloadJSON:     "{}",
+	}
+}
+
+func leaseCompletionMailRuntimeJob(t *testing.T, runtime *sql.DB) RuntimeJob {
+	t.Helper()
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "completion-mail-production-test",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	if err != nil || len(leased) != 1 {
+		t.Fatalf("lease completion-mail Queue custody = %#v/%v", leased, err)
+	}
+	job, err := DecodeRuntimeJob(queueJobProto(leased[0]))
+	if err != nil {
+		t.Fatalf("decode completion-mail Queue custody: %v", err)
+	}
+	return job
+}

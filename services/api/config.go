@@ -1,6 +1,9 @@
 package tetralapi
 
-import "github.com/tetral-ai/tetral/internal/workload"
+import (
+	"github.com/tetral-ai/tetral/internal/transportsecurity"
+	"github.com/tetral-ai/tetral/internal/workload"
+)
 
 const (
 	EnvHTTPAddress           = "TETRAL_API_HTTP_ADDR"
@@ -8,8 +11,8 @@ const (
 	EnvLegacyPort            = "ENGINE_PORT"
 	EnvVaultKey              = "ENGINE_VAULT_KEY"
 	EnvDataDir               = "ENGINE_DATA_DIR"
-	EnvDeploymentEnvironment = "TETRAL_DEPLOYMENT_ENVIRONMENT"
-	EnvServiceVersion        = "TETRAL_SERVICE_VERSION"
+	EnvDeploymentEnvironment = workload.EnvDeploymentEnvironment
+	EnvServiceVersion        = workload.EnvServiceVersion
 
 	defaultDataDir     = "/var/tetral"
 	defaultPort        = "8080"
@@ -23,6 +26,7 @@ type Env interface {
 
 // Config is the service-local api workload configuration.
 type Config struct {
+	HTTPTransport         transportsecurity.HTTPConfig
 	ListenAddress         string
 	MetricsAddress        string
 	VaultKey              string
@@ -53,20 +57,18 @@ func ConfigFromEnv(env Env) (Config, error) {
 	if dataDir == "" {
 		dataDir = defaultDataDir
 	}
-	deploymentEnvironment := env.Getenv(EnvDeploymentEnvironment)
-	if deploymentEnvironment == "" {
-		deploymentEnvironment = "local"
-	}
-	serviceVersion := env.Getenv(EnvServiceVersion)
-	if serviceVersion == "" {
-		serviceVersion = "unknown"
+	resource := workload.ResourceConfigFromEnv(env.Getenv)
+	httpTransport, err := transportsecurity.HTTPConfigFromEnv(env.Getenv)
+	if err != nil {
+		return Config{}, workload.NewConfigError(err.Error())
 	}
 	return Config{
+		HTTPTransport:         httpTransport,
 		ListenAddress:         listenAddress,
 		MetricsAddress:        metricsAddress,
 		VaultKey:              env.Getenv(EnvVaultKey),
 		DataDir:               dataDir,
-		DeploymentEnvironment: deploymentEnvironment,
-		ServiceVersion:        serviceVersion,
+		DeploymentEnvironment: resource.DeploymentEnvironment,
+		ServiceVersion:        resource.ServiceVersion,
 	}, nil
 }

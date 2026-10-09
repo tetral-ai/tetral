@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -160,6 +161,33 @@ func executeSelection(ctx context.Context, plan Plan, selection Selection, optio
 	return results, nil
 }
 
+// The registered SDK wrapper runs two fixed child scenarios (11 minutes each)
+// inside a 24-minute context. Only its inventory-owned selection needs a larger
+// enclosing Go budget; ordinary commands use the package watchdog policy.
+func goTestSelectionTimeout(selection Selection) string {
+	if slices.Contains(selection.Tests, "TestForkSDKIntegrationCompatibilityProofs") {
+		return "-timeout=30m"
+	}
+	return goPackageTimeout(selection.Packages)
+}
+
+func goTestExecutionArguments(profile Profile, selection Selection) []string {
+	arguments := []string{"go", "test", "-json", "-count=1"}
+	if profile != ProfileFast {
+		arguments = append(arguments, "-race", goTestSelectionTimeout(selection))
+	}
+	if len(selection.Tests) > 0 {
+		tests := make([]string, len(selection.Tests))
+		for index, name := range selection.Tests {
+			tests[index] = regexp.QuoteMeta(name)
+		}
+		arguments = append(arguments, "-run", "^(?:"+strings.Join(tests, "|")+")$")
+	} else if profile == ProfileFast {
+		arguments = append(arguments, "-run", "a^")
+	}
+	return append(arguments, selection.Packages[0])
+}
+
 func executeGoSelections(ctx context.Context, profile Profile, selections []Selection, options RunOptions, dependencies *dependencyManager) ([]StepResult, error) {
 	type outcome struct {
 		index int
@@ -176,20 +204,7 @@ func executeGoSelections(ctx context.Context, profile Profile, selections []Sele
 			defer wait.Done()
 			for index := range jobs {
 				selection := selections[index]
-				arguments := []string{"go", "test", "-json", "-count=1"}
-				if profile != ProfileFast {
-					arguments = append(arguments, "-race", "-timeout=20m")
-				}
-				if len(selection.Tests) > 0 {
-					tests := make([]string, len(selection.Tests))
-					for index, name := range selection.Tests {
-						tests[index] = regexp.QuoteMeta(name)
-					}
-					arguments = append(arguments, "-run", "^(?:"+strings.Join(tests, "|")+")$")
-				} else if profile == ProfileFast {
-					arguments = append(arguments, "-run", "a^")
-				}
-				arguments = append(arguments, selection.Packages[0])
+				arguments := goTestExecutionArguments(profile, selection)
 				command := commandSpec{
 					Arguments:         arguments,
 					Artifact:          "go-" + string(profile) + "-" + sanitizeArtifact(selection.Packages[0]) + ".jsonl",
@@ -221,8 +236,11 @@ func executeGoSelections(ctx context.Context, profile Profile, selections []Sele
 }
 
 type commandSpec struct {
-	Arguments         []string
-	WorkingDir        string
+	Arguments  []string
+	WorkingDir string
+	// Environment entries replace same-named variables of the isolated
+	// process environment for this command only.
+	Environment       []string
 	Artifact          string
 	Kind              string
 	RejectSkip        bool
@@ -232,6 +250,25 @@ type commandSpec struct {
 }
 
 const descendantRegistryEnv = "TETRAL_TEST_DESCENDANT_REGISTRY"
+
+func goPackageTimeout(packages []string) string {
+	for _, name := range packages {
+		if name == "github.com/tetral-ai/tetral/integration" {
+			return "-timeout=25m"
+		}
+	}
+	return "-timeout=20m"
+}
+
+// Report-only coverage runs every Go package once without Race, so the
+// integration package executes all of its top-level tests sequentially in one
+// binary instead of in duration-balanced Race slices. Those slices measured
+// about 26 minutes in total (docs/testing.md names the source run). The budget
+// is more than twice that total, and it exceeds the remaining tests plus the
+// SDK wrapper's 24-minute context, so the wrapper reports its own deadline
+// before the package watchdog fires. The main-branch coverage job limit holds
+// this budget plus dependency setup, compilation and the Bun coverage commands.
+const coverageGoTestTimeout = "-timeout=60m"
 
 func commandsForSelection(plan Plan, selection Selection, root, outputDir string, dependencyAuditMode DependencyAuditMode) ([]commandSpec, error) {
 	switch selection.Group {
@@ -250,7 +287,7 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 		}
 		arguments := []string{"go", "test", "-json", "-count=1"}
 		if plan.Profile != ProfileFast {
-			arguments = append(arguments, "-race", "-timeout=20m")
+			arguments = append(arguments, "-race", goTestSelectionTimeout(selection))
 		}
 		arguments = append(arguments, packages...)
 		return []commandSpec{{Arguments: arguments, Artifact: "go.jsonl", Kind: "go-json"}}, nil
@@ -316,9 +353,20 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 			{Arguments: []string{"./scripts/check-sdk-compatibility-traceability.sh"}},
 		}, nil
 	case "deployment":
+		lock, err := loadEdgeDependencyLock(root)
+		if err != nil {
+			return nil, err
+		}
+		toolchain := lock.Gateway.SecretHelper.Toolchain
+		if toolchain == "" {
+			return nil, errors.New("edge dependency lock names no SecretType helper toolchain")
+		}
 		return []commandSpec{
-			{Arguments: []string{"go", "test", "-count=1", "./deploy/kubernetes"}},
+			{Arguments: []string{"go", "test", "-count=1", "./deploy/kubernetes", "./deploy/helm", "./deploy/istio", "./deploy/nats"}},
 			{Arguments: []string{"helm", "lint", "deploy/helm/tetral"}},
+			// The nested SecretType helper module is outside the root package
+			// listing; its tests run with the toolchain the lock selects.
+			{Arguments: []string{"go", "test", "-mod=readonly", "-count=1", "./..."}, WorkingDir: "integration/envoy-gateway-secret-helper", Environment: []string{"GOTOOLCHAIN=" + toolchain}},
 		}, nil
 	case "security":
 		commands := []commandSpec{
@@ -331,6 +379,9 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 				commandSpec{Arguments: []string{"./scripts/run-bun-audit.sh", "services/gateway"}},
 			)
 		}
+		if helperVulnerabilityAuditNeeded(plan, dependencyAuditMode) {
+			commands = append(commands, commandSpec{Arguments: []string{"python3", "scripts/check-envoy-secret-helper.py"}})
+		}
 		return append(commands, commandSpec{Arguments: []string{"go", "test", "./integration/static", "-run", "Test.*Secret|Test.*Redact|Test.*Import|Test.*Boundary|Test.*Log", "-count=1"}}), nil
 	case "sandbox-image":
 		return []commandSpec{
@@ -341,13 +392,28 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 		return []commandSpec{
 			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/agent-runtime"},
 			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/gateway"},
-			{Arguments: []string{"go", "test", "-count=1", "-covermode=atomic", "-coverprofile=" + filepath.Join(outputDir, "go-coverage.out"), "./..."}},
+			{Arguments: []string{"go", "test", "-count=1", coverageGoTestTimeout, "-covermode=atomic", "-coverprofile=" + filepath.Join(outputDir, "go-coverage.out"), "./..."}},
 			{Arguments: []string{"bun", "test", "--coverage", "--coverage-reporter=lcov", "--coverage-dir=" + filepath.Join(outputDir, "runtime-coverage"), "packages/core/test/unit/", "packages/protocol/test/unit/", "packages/runtime-pod/test/unit/"}, WorkingDir: "services/agent-runtime"},
 			{Arguments: []string{"bun", "test", "--coverage", "--coverage-reporter=lcov", "--coverage-dir=" + filepath.Join(outputDir, "gateway-coverage"), "packages/protocol/test/unit/", "packages/lowering/test/", "packages/provider-gateway/test/unit/", "packages/provider-gateway/test/golden/", "packages/mcp-connector/test/unit/"}, WorkingDir: "services/gateway"},
 		}, nil
 	default:
 		return nil, fmt.Errorf("unknown evidence group %q", selection.Group)
 	}
+}
+
+func helperVulnerabilityAuditNeeded(plan Plan, mode DependencyAuditMode) bool {
+	if mode == DependencyAuditAlways {
+		return true
+	}
+	if mode == DependencyAuditNever {
+		return false
+	}
+	for _, path := range plan.Revision.ChangedPaths {
+		if strings.HasPrefix(path, "integration/envoy-gateway-secret-helper/") || path == "scripts/check-envoy-secret-helper.py" || path == "deploy/dependencies.lock.json" || path == "go.mod" || path == "go.sum" || path == ".github/workflows/engine-vulncheck.yml" || path == "internal/testinfra/runner.go" {
+			return true
+		}
+	}
+	return false
 }
 
 func runDependencyAudit(plan Plan, mode DependencyAuditMode) bool {
@@ -392,6 +458,10 @@ func runStep(ctx context.Context, root, group string, spec commandSpec, dependen
 	}
 	descendantRegistry := filepath.Join(outputDir, "descendants-"+sanitizeArtifact(group)+"-"+fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(spec.Arguments, "\x00"))))[:12]+".txt")
 	environment = append(withoutEnvironmentVariable(environment, descendantRegistryEnv), descendantRegistryEnv+"="+descendantRegistry)
+	for _, entry := range spec.Environment {
+		name, _, _ := strings.Cut(entry, "=")
+		environment = append(withoutEnvironmentVariable(environment, name), entry)
+	}
 	artifactPath := ""
 	if spec.Artifact != "" {
 		artifactPath = filepath.Join(outputDir, spec.Artifact)

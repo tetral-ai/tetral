@@ -1,0 +1,37 @@
+{{- if .Values.nativeCertificates.enabled }}
+{{- $root := . }}
+{{- $roles := list }}
+{{- range $role := list "auth" "api" "event-stream" "git-proxy" }}
+{{- $roles = append $roles (dict "role" $role "namespace" "tetral-system" "secret" (index $root.Values.edge.serverLeafSecrets $role) "usage" "server auth") }}
+{{- end }}
+{{- $roles = append $roles (dict "role" "tetral-public-edge" "namespace" "tetral-system" "uriNamespace" "envoy-gateway-system" "secret" .Values.edge.clientLeafSecret "usage" "client auth") }}
+{{- $roles = append $roles (dict "role" "agent-runtime" "namespace" "tetral-agent-runtime" "dnsName" .Values.transport.runtimeServerName "secret" .Values.transport.runtimeDirectLeafSecret "usage" "server auth") }}
+{{- $roles = append $roles (dict "role" "job-runner" "namespace" "tetral-system" "secret" .Values.transport.runnerDirectLeafSecret "usage" "client auth") }}
+{{- range $entry := $roles }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $entry.secret | quote }}
+  namespace: {{ $entry.namespace }}
+spec:
+  secretName: {{ $entry.secret | quote }}
+  issuerRef:
+    name: {{ $root.Values.nativeCertificates.issuerName | quote }}
+    kind: ClusterIssuer
+    group: cert-manager.io
+  duration: 24h
+  renewBefore: 8h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  dnsNames:
+    - {{ default (printf "%s.%s.svc.cluster.local" $entry.role $entry.namespace) $entry.dnsName | quote }}
+  uris:
+    - {{ printf "spiffe://%s/ns/%s/sa/%s" $root.Values.routing.trustDomain (default $entry.namespace $entry.uriNamespace) $entry.role | quote }}
+  usages:
+    - digital signature
+    - {{ $entry.usage }}
+{{- end }}
+{{- end }}

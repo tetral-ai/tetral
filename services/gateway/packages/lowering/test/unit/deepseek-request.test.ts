@@ -283,6 +283,10 @@ function lowerDeepSeekRequest(
 
 function deepSeekRequest(overrides: Partial<ProviderRequest> = {}): ProviderRequest {
   return {
+    outputContractVersion: 2,
+    modelRequestStartEventId: "evt_1000000000000001",
+    threadRole: 1,
+    threadVisibility: 1,
     requestId: "req_1",
     modelRequestId: "mreq_1",
     requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST,
@@ -291,6 +295,7 @@ function deepSeekRequest(overrides: Partial<ProviderRequest> = {}): ProviderRequ
     sessionThreadId: "thrd_1",
     bindingId: "bind_1",
     bindingGeneration: 1,
+    runtimeProcessId: "process-test",
     runtimeBindingToken: "rtbt_v1.test",
     model: { providerId: "deepseek", modelId: "deepseek-v4-pro", variant: "" },
     system: [],

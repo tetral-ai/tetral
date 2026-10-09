@@ -15,6 +15,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -1303,7 +1304,7 @@ func cancelSessionRuntimeCustodyForDelete(ctx context.Context, tx *dbconnect.Tx,
 		`UPDATE queue_jobs
 		    SET status='cancelled', cancelled_at=$3,
 		        lease_token=NULL, leased_by=NULL, leased_at=NULL, leased_until=NULL,
-		        updated_at=$3
+		        lease_previous_attempt_count=NULL, updated_at=$3
 		  WHERE workspace_id=$1
 		    AND causal_session_id=$2
 		    AND kind IN ($4, $5, $6, $7)
@@ -1366,24 +1367,17 @@ func (t *postgresqlTransaction) appendPublicProcessedSessionEvent(ctx context.Co
 	}
 	sessionVisible := controlPlaneEventSessionVisible(eventType, sessionThreadID)
 	eventTimestamp := timestamp
-	if _, err := t.tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, 'public', $8, $7, $9, $9, $9)`,
-		string(t.workspaceID),
-		sessionID,
-		nullableEmptyString(sessionThreadID),
-		eventID,
-		sequence,
-		eventType,
-		string(payload),
-		sessionVisible,
-		eventTimestamp,
-	); err != nil {
+	rawTx, err := t.rawDBTx()
+	if err != nil {
 		return err
 	}
-	return t.appendSessionEventStreamChange(ctx, sessionID, sessionThreadID, eventID, sessionVisible, eventTimestamp)
+	_, err = sessioneventwrite.InsertInitialTx(ctx, rawTx, sessioneventwrite.InitialEvent{
+		WorkspaceID: string(t.workspaceID), SessionID: sessionID, SessionThreadID: sessionThreadID,
+		EventID: eventID, Sequence: sequence, Type: eventType,
+		PayloadJSON: string(payload), ProjectionJSON: string(payload), Visibility: "public", SessionVisible: sessionVisible,
+		CreatedAt: eventTimestamp, ProcessedAt: &eventTimestamp,
+	})
+	return err
 }
 
 func (t *postgresqlTransaction) nextSessionEventSequence(ctx context.Context, sessionID string, sessionThreadID string) (int64, error) {
@@ -1399,40 +1393,6 @@ func (t *postgresqlTransaction) nextSessionEventSequence(ctx context.Context, se
 		nullableEmptyString(sessionThreadID),
 	).Scan(&sequence)
 	return sequence, err
-}
-
-func (t *postgresqlTransaction) appendSessionEventStreamChange(ctx context.Context, sessionID string, sessionThreadID string, eventID string, sessionVisible bool, timestamp time.Time) error {
-	var streamPosition int64
-	if err := t.tx.QueryRowScanner(ctx,
-		`INSERT INTO session_event_stream_changes (
-			workspace_id, session_id, event_id, session_thread_id, revision, visibility, session_visible, changed_at
-		) VALUES ($1, $2, $3, $4, 1, 'public', $5, $6)
-		RETURNING stream_position`,
-		string(t.workspaceID),
-		sessionID,
-		eventID,
-		nullableEmptyString(sessionThreadID),
-		sessionVisible,
-		timestamp,
-	).Scan(&streamPosition); err != nil {
-		return err
-	}
-	_, err := t.tx.Exec(ctx,
-		`UPDATE session_events
-		    SET latest_stream_position = $4,
-		        insert_stream_position = CASE
-		            WHEN insert_stream_position = 0 THEN $4
-		            ELSE insert_stream_position
-		        END
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND event_id = $3`,
-		string(t.workspaceID),
-		sessionID,
-		eventID,
-		streamPosition,
-	)
-	return err
 }
 
 func controlPlaneEventSessionVisible(eventType string, sessionThreadID string) bool {
@@ -2830,4 +2790,127 @@ func mapPostgreSQLSessionError(err error) error {
 		return &ConflictError{Message: "session unique constraint violated"}
 	}
 	return err
+}
+
+// LookupSession, LookupThread and LookupResource each run one SELECT of the
+// canonical ID in a read-only workspace transaction. They state the workspace
+// predicate explicitly in addition to row-level security.
+func (s *PostgreSQLSessionStore) LookupSession(ctx context.Context, ws workspace.ID, sessionID string) (string, error) {
+	var resolved string
+	err := s.client.WithWorkspaceReadOnlyTx(ctx, string(ws), "session.lookup", func(tx *dbconnect.Tx) error {
+		err := tx.QueryRow(ctx,
+			`SELECT id
+			   FROM sessions
+			  WHERE workspace_id = $1
+			    AND id = $2
+			    AND lifecycle_state <> 'deleted'`,
+			string(ws), sessionID,
+		).Scan(&resolved)
+		if dbconnect.IsNoRows(err) {
+			return &NotFoundError{Message: "session not found"}
+		}
+		return err
+	})
+	return resolved, err
+}
+
+// LookupThread does not filter archived_at: an archived public Thread remains
+// the target of a repeated archive.
+func (s *PostgreSQLSessionStore) LookupThread(ctx context.Context, ws workspace.ID, sessionID, threadID string) (string, error) {
+	var resolved string
+	err := s.client.WithWorkspaceReadOnlyTx(ctx, string(ws), "session.lookup_thread", func(tx *dbconnect.Tx) error {
+		err := tx.QueryRow(ctx,
+			`SELECT t.id
+			   FROM session_threads t
+			   JOIN sessions s
+			     ON s.workspace_id = t.workspace_id AND s.id = t.session_id
+			  WHERE t.workspace_id = $1
+			    AND t.session_id = $2
+			    AND t.id = $3
+			    AND s.lifecycle_state <> 'deleted'
+			    AND t.visibility = 'public'
+			    AND t.role <> 'approval_reviewer'`,
+			string(ws), sessionID, threadID,
+		).Scan(&resolved)
+		if dbconnect.IsNoRows(err) {
+			return &NotFoundError{Message: "session thread not found"}
+		}
+		return err
+	})
+	return resolved, err
+}
+
+// LookupResource applies GetResource's visibility relation without assembling
+// the resource. Unlike LookupResourceDeletion it rejects a pending delete and a
+// tombstoned file.
+func (s *PostgreSQLSessionStore) LookupResource(ctx context.Context, ws workspace.ID, sessionID, resourceID string) (string, error) {
+	var resolved string
+	err := s.client.WithWorkspaceReadOnlyTx(ctx, string(ws), "session.lookup_resource", func(tx *dbconnect.Tx) error {
+		err := tx.QueryRow(ctx,
+			`SELECT sr.resource_id
+			   FROM session_resources sr
+			   LEFT JOIN session_file_resources sfr
+			     ON sfr.workspace_id = sr.workspace_id AND sfr.session_id = sr.session_id AND sfr.resource_id = sr.resource_id
+			  WHERE sr.workspace_id = $1
+			    AND sr.session_id = $2
+			    AND sr.resource_id = $3
+			    AND sr.detached_at IS NULL
+			    AND sr.delete_requested_at IS NULL
+			    AND EXISTS (
+			      SELECT 1
+			        FROM sessions s
+			       WHERE s.workspace_id = sr.workspace_id
+			         AND s.id = sr.session_id
+			         AND s.lifecycle_state <> 'deleted'
+			    )
+			    AND (
+			      sr.type <> 'file'
+			      OR EXISTS (
+			        SELECT 1
+			          FROM files f
+			         WHERE f.workspace_id = sr.workspace_id
+			           AND f.file_id = sfr.file_id
+			           AND f.scope_type = 'session'
+			           AND f.scope_id = sr.session_id
+			           AND f.deleted_at IS NULL
+			      )
+			    )`,
+			string(ws), sessionID, resourceID,
+		).Scan(&resolved)
+		if dbconnect.IsNoRows(err) {
+			return &NotFoundError{Message: "session resource not found"}
+		}
+		return err
+	})
+	return resolved, err
+}
+
+func (s *PostgreSQLSessionStore) LookupSessionDeletion(ctx context.Context, ws workspace.ID, sessionID string) (string, error) {
+	var resolved string
+	err := s.client.WithWorkspaceReadOnlyTx(ctx, string(ws), "session.lookup_deletion", func(tx *dbconnect.Tx) error {
+		err := tx.QueryRow(ctx, `SELECT id FROM sessions WHERE workspace_id=$1 AND id=$2`, string(ws), sessionID).Scan(&resolved)
+		if err == sql.ErrNoRows {
+			return &NotFoundError{Message: "session not found"}
+		}
+		return err
+	})
+	return resolved, err
+}
+
+func (s *PostgreSQLSessionStore) LookupResourceDeletion(ctx context.Context, ws workspace.ID, sessionID, resourceID string) (string, error) {
+	var resolved string
+	err := s.client.WithWorkspaceReadOnlyTx(ctx, string(ws), "session.lookup_resource_deletion", func(tx *dbconnect.Tx) error {
+		// Match RequestResourceDelete's retained row relation, including a pending
+		// delete and its tombstoned file; detached resources remain unavailable.
+		err := tx.QueryRow(ctx, `SELECT sr.resource_id FROM session_resources sr
+   LEFT JOIN session_file_resources sfr ON sfr.workspace_id=sr.workspace_id AND sfr.session_id=sr.session_id AND sfr.resource_id=sr.resource_id
+   WHERE sr.workspace_id=$1 AND sr.session_id=$2 AND sr.resource_id=$3 AND sr.detached_at IS NULL
+   AND EXISTS (SELECT 1 FROM sessions s WHERE s.workspace_id=sr.workspace_id AND s.id=sr.session_id AND s.lifecycle_state<>'deleted')
+   AND (sr.type<>'file' OR EXISTS (SELECT 1 FROM files f WHERE f.workspace_id=sr.workspace_id AND f.file_id=sfr.file_id AND f.scope_type='session' AND f.scope_id=sr.session_id))`, string(ws), sessionID, resourceID).Scan(&resolved)
+		if err == sql.ErrNoRows {
+			return &NotFoundError{Message: "session resource not found"}
+		}
+		return err
+	})
+	return resolved, err
 }

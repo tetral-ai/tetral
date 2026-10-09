@@ -8,7 +8,7 @@
  * while the scoped provider Fiber lifecycle is owned here and supplied an already-built Effect.
  */
 
-import { MaxTextBytes } from "@tetral/gateway-protocol/src/bounds.js";
+import { ProviderOutputContractVersion,MaxTextBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import type {
 	ProviderContextEntry as GatewayProviderContextEntry,
 	ProviderRequestAttachment as GatewayProviderRequestAttachment,
@@ -18,24 +18,22 @@ import type {
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import {
 	ProviderRequestKind,
+ ProviderThreadRole,ProviderThreadVisibility,
 	SystemCacheHint,
 	SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { Scope } from "effect";
 import { Cause, Effect, Exit, Fiber } from "effect";
 import type {
-	RuntimeAssistantContextAppend,
 	RuntimeFailure,
 	RuntimeJsonValue,
 	RuntimeProviderAttachment,
 	RuntimeRequestErrorKind,
 	SessionEventEnvelope,
 	SessionEventWriterRequestEndEnvelope,
-	SessionEventWriterRequestEndResult,
 } from "../contracts/runtime.js";
 import {
 	normalizeRuntimeFailure,
-	normalizeSessionEventWriterError,
 } from "../contracts/runtime.js";
 import type {
 	RuntimeFailure as LLMRuntimeFailure,
@@ -151,13 +149,6 @@ export type ProviderCallAssembler = (
 export interface RejectedProviderAttachment {
 	readonly attachment: RuntimeProviderAttachment;
 	readonly reason: RuntimeAttachmentRejection["reason"];
-}
-
-interface RequestEndProjection {
-	applyRequestEndAppend(
-		append: RuntimeAssistantContextAppend | undefined,
-		result: { readonly sealedMessageSequence?: number | undefined },
-	): boolean;
 }
 
 export type EffectRestore = <A, E, R>(
@@ -434,53 +425,6 @@ export function requestErrorKindFromFailure(
 		return "runtime_semantic_error";
 	}
 	return "runtime_persistence_error";
-}
-
-export type RequestEndSealApplication =
-	| { readonly type: "applied" }
-	| { readonly type: "stale_custody" }
-	| { readonly type: "failed"; readonly error: RuntimeFailure };
-
-export function applyRequestEndSeal(
-	processor: RequestEndProjection,
-	append: RuntimeAssistantContextAppend | undefined,
-	result:
-		| { readonly type: "stale" }
-		| Extract<
-				SessionEventWriterRequestEndResult,
-				{ readonly ok: true; readonly type: "committed" | "duplicate" }
-		  >["outcome"],
-): RequestEndSealApplication {
-	if (result.type === "stale") {
-		return { type: "stale_custody" };
-	}
-	try {
-		if (
-			processor.applyRequestEndAppend(
-				append,
-				result.type === "ordinary" ? result : {},
-			)
-		) {
-			return { type: "applied" };
-		}
-	} catch {
-		// The normalized failure below owns malformed acknowledgement details.
-	}
-	const error = normalizeSessionEventWriterError({ code: "schema_mismatch" });
-	const runtimeCode =
-		error.code === "superseded" || error.code === "unrepairable"
-			? "runtime_invalid_sequence"
-			: error.code;
-	return {
-		type: "failed",
-		error: normalizeRuntimeFailure({
-			type: "session-event-writer",
-			code: runtimeCode,
-			retryable: error.retryable,
-			fatal: error.fatal,
-			sessionId: error.sessionId,
-		}),
-	};
 }
 
 export function providerRequestWithoutRejectedAttachments(
@@ -845,7 +789,12 @@ export function assembleProviderCallRequest(
 		);
 	}
 	const tools = projectedTools.tools;
-	const request: ProviderRequest = {
+ if(input.identity.threadRole===undefined||input.identity.threadVisibility===undefined)throw new Error("Provider request requires loaded Thread role and visibility");
+ const request: ProviderRequest = {
+  outputContractVersion:ProviderOutputContractVersion,
+  modelRequestStartEventId:"",
+  threadRole:input.identity.threadRole==="main"?ProviderThreadRole.PROVIDER_THREAD_ROLE_MAIN:input.identity.threadRole==="subagent"?ProviderThreadRole.PROVIDER_THREAD_ROLE_SUBAGENT:ProviderThreadRole.PROVIDER_THREAD_ROLE_APPROVAL_REVIEWER,
+  threadVisibility:input.identity.threadVisibility==="public"?ProviderThreadVisibility.PROVIDER_THREAD_VISIBILITY_PUBLIC:ProviderThreadVisibility.PROVIDER_THREAD_VISIBILITY_INTERNAL,
 		requestId: input.requestId,
 		modelRequestId: input.modelRequestId,
 		requestKind,
@@ -854,6 +803,7 @@ export function assembleProviderCallRequest(
 		sessionThreadId: input.identity.sessionThreadId,
 		bindingId: input.identity.bindingId,
 		bindingGeneration: input.identity.bindingGeneration,
+		runtimeProcessId: input.identity.runtimeProcessId,
 		runtimeBindingToken: input.identity.runtimeBindingToken,
 		model: {
 			providerId: input.currentModel.providerId,

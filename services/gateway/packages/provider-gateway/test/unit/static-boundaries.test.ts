@@ -8,8 +8,8 @@ const serviceRoot = new URL("../../", providerRoot);
 
 const aiSdkDirectDependencyPins: Record<string, string> = {
   ai: "6.0.168",
-  "@ai-sdk/provider": "3.0.8",
-  "@ai-sdk/provider-utils": "4.0.23",
+  "@ai-sdk/provider": "3.0.12",
+  "@ai-sdk/provider-utils": "4.0.33",
   "@ai-sdk/anthropic": "3.0.82",
   "@ai-sdk/openai": "3.0.53",
   "@ai-sdk/openai-compatible": "2.0.41",
@@ -212,11 +212,28 @@ describe("Gateway static boundaries", () => {
     expect(clients).not.toContain("reasoning_content");
   });
 
-  test("Gateway manifests expose headless service discovery and bounded egress intent", async () => {
-    const service = await readFile(new URL("k8s/service.yaml", serviceRoot), "utf8");
-    const networkPolicy = await readFile(new URL("k8s/networkpolicy.yaml", serviceRoot), "utf8");
+  test("Gateway manifests expose scoped proxy routing and bounded egress intent", async () => {
+    const service = await readFile(new URL("k8s/provider-gateway/service.yaml", serviceRoot), "utf8");
+    const networkPolicy = await readFile(new URL("k8s/provider-gateway/networkpolicy.yaml", serviceRoot), "utf8");
 
-    expect(service).toContain("clusterIP: None");
+    expect(service).toContain("name: provider-gateway");
+    expect(service).toContain("selector:\n    app.kubernetes.io/name: provider-gateway");
+    expect(networkPolicy).toContain("app.kubernetes.io/name: provider-gateway");
+    expect(service).toContain("type: ClusterIP");
+    expect(service).toContain("sessionAffinity: None");
+    expect(service).not.toContain("clusterIP: None");
+    const routing = await readFile(new URL("../../deploy/kubernetes/internal-routing.yaml", serviceRoot), "utf8");
+    const providerRules = routing.split(/^---\s*$/m).filter((document) => document.includes("  name: tetral-runtime-provider\n"));
+    expect(providerRules).toHaveLength(2);
+    const destination = providerRules.find((document) => document.includes("kind: DestinationRule"));
+    const virtualService = providerRules.find((document) => document.includes("kind: VirtualService"));
+    expect(destination).toContain("host: provider-gateway.tetral-system.svc.cluster.local");
+    expect(destination).toContain("workloadSelector:");
+    expect(destination).toContain("app.kubernetes.io/name: agent-runtime");
+    expect(destination).toContain("simple: LEAST_REQUEST");
+    expect(virtualService).toContain("sourceNamespace: tetral-agent-runtime");
+    expect(virtualService).toContain("app.kubernetes.io/name: agent-runtime");
+    expect(virtualService).toContain("attempts: 0");
     expect(service).toContain("name: provider-grpc");
     expect(service).toContain("port: 9090");
     const egressIntent = networkPolicy.match(/tetral\.ai\/egress-intent:\s*"([^"]+)"/)?.[1]?.split(",").map((host) => host.trim()).sort();

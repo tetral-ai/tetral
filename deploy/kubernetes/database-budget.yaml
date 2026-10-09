@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tetral-database-connection-budget
+  namespace: tetral-system
+data:
+  status: "unresolved"
+  maximumOwnedPoolSlots: "780"
+  operatorReserveSlots: "8"
+  availableServerConnections: "unknown"
+  externalConsumerSlots: "unknown"

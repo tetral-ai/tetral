@@ -21,9 +21,11 @@ export interface RuntimeThreadIdentity {
   readonly parentTaskName?: string | undefined;
   readonly taskName?: string | undefined;
   readonly threadRole?: "main" | "subagent" | "approval_reviewer" | undefined;
+  readonly threadVisibility?:"public"|"internal"|undefined;
   readonly bindingId: string;
   readonly bindingGeneration: number;
   readonly targetPodUid: string;
+  readonly runtimeProcessId: string;
   readonly runtimeBindingToken: string;
 }
 
@@ -55,7 +57,7 @@ export class ThreadRuntime {
   }
 
   updateIdentity(identity: RuntimeThreadIdentity): void {
-    this.#identity = identity;
+    this.#identity = {...this.#identity,...identity,threadRole:identity.threadRole??this.#identity.threadRole,threadVisibility:identity.threadVisibility??this.#identity.threadVisibility};
   }
 }
 
@@ -64,9 +66,12 @@ function defaultRuntimeThreadIdentity(sessionId: string): RuntimeThreadIdentity 
     workspaceId: "workspace-test",
     sessionId,
     sessionThreadId: "thread-test",
+    threadRole:"main",
+    threadVisibility:"public",
     bindingId: "binding-test",
     bindingGeneration: 1,
     targetPodUid: "pod-test",
+    runtimeProcessId: "process-test",
     runtimeBindingToken: "runtime-binding-token-test",
   };
 }

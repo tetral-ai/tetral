@@ -66,6 +66,7 @@ function controlInputScope(sessionId: string, runtimeInputId: string) {
 		bindingId: `bind_${sessionId}`,
 		bindingGeneration: 1,
 		targetPodUid: `pod_${sessionId}`,
+		runtimeProcessId: `process_${sessionId}`,
 		runtimeInputId,
 	};
 }
@@ -120,6 +121,7 @@ function runtimeConfigCommand(
 		bindingId: `bind_${sessionId}`,
 		bindingGeneration: 1,
 		targetPodUid: `pod_${sessionId}`,
+		runtimeProcessId: `process_${sessionId}`,
 		configIdentity: `session:${generation}`,
 		generation,
 		contentJson: JSON.stringify({ config_generation: generation }),
@@ -135,6 +137,7 @@ function cleanupCommand(
 		bindingId: `bind_${sessionId}`,
 		bindingGeneration: 1,
 		targetPodUid: `pod_${sessionId}`,
+		runtimeProcessId: `process_${sessionId}`,
 		cleanupOperationId: `cleanup_${sessionId}`,
 	};
 }
@@ -450,6 +453,7 @@ function fakeManagerLayer(
 						entries: [],
 					};
 				}),
+			quiesce: () => Effect.void,
 			shutdownActiveRuns: () =>
 				Effect.sync(() => {
 					calls.push({ method: "shutdownActiveRuns", args: [] });
@@ -493,7 +497,7 @@ class HostRuntimeStore extends RuntimeInternalToolRepairStore {
 class RecordingWriter implements SessionEventWriter {
 	readonly events: SessionEvent[] = [];
 	private eventSequence = 0;
-	private messageSequence = 0;
+	private messageSequence = 1;
 	private readonly requestMessageSequences = new Map<string, number>();
 
 	async append(
@@ -508,7 +512,7 @@ class RecordingWriter implements SessionEventWriter {
 			return {
 				ok: true,
 				type: "committed",
-				eventId: `bridge-${envelope.writeId}`,
+				eventId: envelope.preallocatedEventId??`bridge-${envelope.writeId}`,
 			};
 		}
 		let assignedMessageSequence = this.requestMessageSequences.get(
@@ -525,7 +529,7 @@ class RecordingWriter implements SessionEventWriter {
 		return {
 			ok: true,
 			type: "committed",
-			eventId: `bridge-${envelope.writeId}`,
+			eventId: envelope.preallocatedEventId??`bridge-${envelope.writeId}`,
 			assistant: {
 				messageSequence: assignedMessageSequence,
 				createdToolUseEventIds: envelope.assistantContextAppend.parts
@@ -602,9 +606,9 @@ class ControlledLLMService implements LLMServiceInterface {
 		const service = this;
 		return Stream.fromAsyncIterable(
 			(async function* (): AsyncIterable<LLMEvent> {
-				yield { type: "text-start", id: "text-1" };
-				yield { type: "text-delta", id: "text-1", text_delta: "ok" };
-				yield { type: "text-end", id: "text-1" };
+
+
+				yield {type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_c6587d97dcec88c046113390dc442054",text:("ok")};
 				await new Promise<void>((resolve) => {
 					if (service.releasePending) {
 						service.releasePending = false;
@@ -673,7 +677,8 @@ function fullHostLayer(options: {
 		now: () => createdAt,
 		loadThreadContext: async (command) => ({
 			...command,
-			contextEntries: [],
+			currentRequestMessage:null,messages: [],
+			thread: {role:"main",visibility:"public",agentType:"general",status:"idle"},
 			runtimeBindingToken: `rtbt_${command.sessionId}`,
 		}),
 	}).pipe(Layer.provide(threadLoopLayer));
@@ -909,6 +914,7 @@ describe("SessionRunHost", () => {
 			"handleToolConfirmation",
 			"handleWaitReviewerExecution",
 			"handleWaitThread",
+			"quiesce",
 			"shutdownActiveRuns",
 		]);
 	});

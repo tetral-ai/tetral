@@ -11,6 +11,7 @@ const inputPath = process.argv[2];
 if (inputPath === undefined) throw new Error("cleanup composition input is required");
 const input = JSON.parse(await readFile(inputPath, "utf8")) as {
   readonly targetPodUid: string;
+  readonly runtimeProcessId: string;
   readonly sessionId: string;
   readonly mode: "delayed_busy" | "success" | "failure";
   readonly readyPath: string;
@@ -52,8 +53,9 @@ if (input.mode === "success") {
     bindingId: `bind_${input.sessionId}`,
     bindingGeneration: 7,
     targetPodUid: input.targetPodUid,
+    runtimeProcessId: input.runtimeProcessId,
     runtimeBindingToken: `rtbt_${input.sessionId}`,
-    contextEntries: [],
+    currentRequestMessage:null,messages: [],
     thread: { role: "main", visibility: "public", status: "idle" },
   }));
   if (!preloaded.ok || !preloaded.applied) {
@@ -81,17 +83,18 @@ const cleanupController = new SessionRunHostCleanupController({
   },
 });
 const service = new RuntimeControlService({
+	runtimeProcessId: input.runtimeProcessId,
   ownPod: {
     namespace: "tetral-agent-runtime",
     name: "runtime-cleanup-composition",
     uid: input.targetPodUid,
     ip: "127.0.0.1",
   },
-  allowedBridge: { namespace: "tetral-system", name: "bridge" },
+  allowedJobRunner: { namespace: "tetral-system", name: "job-runner" },
   authenticator: {
     authenticate: async () => ({
       ok: true as const,
-      serviceAccount: { namespace: "tetral-system", name: "bridge" },
+      serviceAccount: { namespace: "tetral-system", name: "job-runner" },
     }),
   },
   runHost: {} as RuntimeSessionRunHost,

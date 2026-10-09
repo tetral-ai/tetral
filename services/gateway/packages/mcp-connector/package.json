@@ -9,10 +9,11 @@
     "build": "bun build src/command.ts src/server.ts --outdir dist --target bun"
   },
   "dependencies": {
-    "@grpc/grpc-js": "1.14.4",
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@grpc/grpc-js": "1.14.5",
+    "@modelcontextprotocol/sdk": "1.31.0",
     "@tetral/gateway-protocol": "workspace:*",
     "@tetral/ts-observability": "file:../../../../internal/ts-observability",
-    "zod": "4.4.3"
+    "zod": "4.4.3",
+    "@tetral/ts-dbconnect": "file:../../../../internal/ts-dbconnect"
   }
 }

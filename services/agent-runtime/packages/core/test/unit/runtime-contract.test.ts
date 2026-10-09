@@ -59,6 +59,7 @@ function writerBinding() {
 		bindingId: "binding-1",
 		bindingGeneration: 1,
 		targetPodUid: "pod-1",
+		runtimeProcessId: "process-test",
 	} as const;
 }
 
@@ -70,6 +71,30 @@ test("attachment_unavailable defaults to a non-fatal provider failure", () => {
 		message: "Attachment bytes are no longer available.",
 		retryable: false,
 		fatal: false,
+	});
+});
+
+test("Gateway stream resource failures preserve their identity and terminal policy", () => {
+	const failure = normalizeProviderError({
+		code: "provider_stream_limit_exceeded",
+		message: "Provider output exceeded Gateway resource limits.",
+		statusCode: 413,
+		retryable: false,
+		fatal: true,
+	});
+	expect(failure).toEqual({
+		code: "provider_stream_limit_exceeded",
+		message: "Provider output exceeded Gateway resource limits.",
+		statusCode: 413,
+		retryable: false,
+		fatal: true,
+	});
+	expect(
+		normalizeProviderError({ code: "provider_stream_limit_exceeded" }),
+	).toMatchObject({
+		code: "provider_stream_limit_exceeded",
+		retryable: false,
+		fatal: true,
 	});
 });
 
@@ -400,6 +425,7 @@ describe("runtime boundary contracts", () => {
 			modelRequestId: "mreq_projection",
 		};
 		const messageEnvelope = {
+			preallocatedEventId: "evt_00000000000000000000000000000001",
 			...projectionBase,
 			event: {
 				type: "agent.message" as const,
@@ -442,6 +468,7 @@ describe("runtime boundary contracts", () => {
 			bindingId: "binding-1",
 			bindingGeneration: 1,
 			targetPodUid: "pod-1",
+			runtimeProcessId: "process-test",
 		};
 		expect(
 			SessionEventWriterToolSettlementEnvelopeSchema.safeParse({
@@ -594,32 +621,13 @@ describe("runtime boundary contracts", () => {
 		).toBe(false);
 	});
 
-	test("matches reasoning stream admission to the shared 64 KiB text and 16 KiB metadata bounds", () => {
-		const metadataAtLimit = { x: "m".repeat(16 * 1024 - 8) };
-		expect(
-			LLMEventSchema.safeParse({
-				type: "reasoning-delta",
-				id: "reasoning_1",
-				text_delta: "x".repeat(64 * 1024),
-				providerMetadata: metadataAtLimit,
-			}).success,
-		).toBe(true);
-		expect(
-			LLMEventSchema.safeParse({
-				type: "reasoning-delta",
-				id: "reasoning_1",
-				text_delta: "x".repeat(64 * 1024 + 1),
-			}).success,
-		).toBe(false);
-		expect(
-			LLMEventSchema.safeParse({
-				type: "reasoning-delta",
-				id: "reasoning_1",
-				text_delta: "x",
-				providerMetadata: { x: "m".repeat(16 * 1024 - 7) },
-			}).success,
-		).toBe(false);
-	});
+	test("complete reasoning admits scalar content and enforces the canonical metadata bound", () => {
+  const base={type:"reasoning-complete",providerPartId:"reasoning_1",thinkingEventId:"evt_00000000000000000000000000000001"};
+  expect(LLMEventSchema.safeParse({...base,text:"x".repeat(64*1024+1),providerMetadata:{x:"m".repeat(16*1024-8)}}).success).toBe(true);
+  expect(LLMEventSchema.safeParse({...base,text:"x",providerMetadata:{x:"m".repeat(16*1024-7)}}).success).toBe(false);
+  expect(LLMEventSchema.safeParse({...base,text:"\uD800"}).success).toBe(false);
+  expect(LLMEventSchema.safeParse({type:"reasoning-delta",id:"reasoning_1",text_delta:"x"}).success).toBe(false);
+ });
 	test("maps internal RuntimeFailure session errors to fork-SDK durable payloads", () => {
 		const failures = [
 			normalizeRuntimeFailure({
@@ -991,11 +999,12 @@ describe("runtime boundary contracts", () => {
 		).toBe("Context loader operation failed.");
 		expect(
 			LLMEventSchema.parse({
-				type: "text-delta",
-				id: "text-1",
-				text_delta: "hello",
+				type: "text-complete",
+				providerPartId: "text-1",
+				eventId: "evt_11111111111111111111111111111111",
+				text: "hello",
 			}).type,
-		).toBe("text-delta");
+		).toBe("text-complete");
 		expect(
 			LLMEventSchema.safeParse({ type: "raw-provider-event", raw: canary })
 				.success,
@@ -1139,7 +1148,7 @@ describe("runtime boundary contracts", () => {
 			parts: [{ type: "text", text: executableText }],
 		});
 		const toolCall = LLMEventSchema.parse({
-			type: "tool-call",
+			type: "tool-call-complete",
 			id: canary,
 			toolName: "search",
 			input: boundedJson.value,

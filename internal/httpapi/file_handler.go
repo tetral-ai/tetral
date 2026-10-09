@@ -292,6 +292,9 @@ func (h *FileHandler) getFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	if !authorizeReadResource(w, r, ws, "file", got.ID) {
+		return
+	}
 	writeJSON(w, http.StatusOK, got)
 }
 
@@ -301,12 +304,12 @@ func (h *FileHandler) deleteFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	ws, err := requestWorkspace(r.Context())
+	fileID, err := validatedFileIDFromRequest(r)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	fileID, err := validatedFileIDFromRequest(r)
+	ws, err := requestWorkspace(r.Context())
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -341,8 +344,15 @@ func (h *FileHandler) getFileContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = stream.Reader.Close() }()
+	if stream.Metadata == nil {
+		writeError(w, r, errors.New("content lookup returned no metadata"))
+		return
+	}
+	if !authorizeReadResource(w, r, ws, "file", stream.Metadata.ID) {
+		return
+	}
 	mimeType := "application/octet-stream"
-	if stream.Metadata != nil && stream.Metadata.MIMEType != "" {
+	if stream.Metadata.MIMEType != "" {
 		mimeType = stream.Metadata.MIMEType
 	}
 	w.Header().Set("Content-Type", mimeType)

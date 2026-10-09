@@ -26,9 +26,12 @@ func TestBridgeAPICommandStartsAndStopsExecutionResultListener(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	client := dbconnect.NewClientForTesting(runtimeDB)
 	previousOpen, previousWorkload := openDatabase, runWorkload
+	previousBlob := newBlobStore
+	newBlobStore = blob.NewS3BlobStore
 	previousGRPC, previousTokenReview := runInternalGRPC, newTokenReviewClient
 	t.Cleanup(func() {
 		openDatabase, runWorkload = previousOpen, previousWorkload
+		newBlobStore = previousBlob
 		runInternalGRPC, newTokenReviewClient = previousGRPC, previousTokenReview
 	})
 	openDatabase = func(context.Context, string, string) (dbconnect.OpenResult, error) {
@@ -138,7 +141,11 @@ func TestBridgeAPISchemaBehindStopsBeforeStoreAndListeners(t *testing.T) {
 	}
 	t.Cleanup(func() { openDatabase, verifySchema = previousOpen, previousVerify })
 
-	err := run(context.Background(), bridgeEnvMap{agentruntimebridge.EnvDatabaseURL: "postgres://runtime@postgres/tetral"})
+	err := run(context.Background(), bridgeEnvMap{
+		agentruntimebridge.EnvDatabaseURL:                "postgres://runtime@postgres/tetral",
+		agentruntimebridge.EnvBridgeMCPConnectorGRPCAddr: "127.0.0.1:1",
+		agentruntimebridge.EnvBridgeGatewayTokenPath:     "/unused/test-token",
+	})
 	var schemaErr *storage.SchemaMigrationError
 	if !errors.As(err, &schemaErr) || schemaErr.Kind != storage.SchemaErrorBehind {
 		t.Fatalf("run error = %v, want schema-behind", err)
@@ -154,7 +161,9 @@ func TestBridgeAPICommandStartupFailureLogRedactsDependencyError(t *testing.T) {
 
 	stderr, finish := captureStderr(t)
 	err := run(context.Background(), bridgeEnvMap{
-		agentruntimebridge.EnvDatabaseURL: "postgres://runtime@postgres/tetral",
+		agentruntimebridge.EnvDatabaseURL:                "postgres://runtime@postgres/tetral",
+		agentruntimebridge.EnvBridgeMCPConnectorGRPCAddr: "127.0.0.1:1",
+		agentruntimebridge.EnvBridgeGatewayTokenPath:     "/unused-token",
 	})
 	if err == nil {
 		t.Fatal("run returned nil for dependency failure")

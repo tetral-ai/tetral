@@ -16,26 +16,25 @@ import (
 	"testing"
 	"time"
 
-	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
-
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/memory"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	sandboxmodel "github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
-
-// This file owns the Bridge tools protocol-family boundary.
 
 type bridgeMemoryProjectionProvider struct {
 	requests []sandboxdriver.MemoryProjectionRefresh
@@ -92,7 +91,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentW
 		modelCallID  = "call_bridge_durable_tool"
 		modelRequest = "mreq_bridge_durable_tool"
 	)
-	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, "bind_bridge_durable_tool", 1, "pod_uid_bridge_durable_tool")
 	const reasoningEventID = "evt_bridge_durable_reasoning"
 	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, reasoningEventID, 1, "agent.thinking", `{}`)
@@ -103,8 +102,8 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentW
 	); err != nil {
 		t.Fatalf("stamp durable tool-use model request: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, modelRequest, toolUseID, modelCallID, "exec_command")
-	seedBridgeAPIAllowedToolRoute(t, admin, workspaceID, sessionID, threadID, toolUseID)
+	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, modelRequest, toolUseID, modelCallID, "exec_command")
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, workspaceID, sessionID, threadID, toolUseID)
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_messages SET source_event_id = $5
 		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND model_request_id = $4`,
@@ -117,7 +116,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentW
 	startAwaitExecutionResultListener(t, store, nil)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
 	request := &bridgev1.AcceptSandboxExecutionRequest{
-		Scope: bridgeAPIScope(sessionID, threadID, "bind_bridge_durable_tool", 1, "pod_uid_bridge_durable_tool"), ToolUseEventId: toolUseID,
+		Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_bridge_durable_tool", 1, "pod_uid_bridge_durable_tool"), ToolUseEventId: toolUseID,
 	}
 	accepted, err := store.AcceptSandboxExecution(context.Background(), request)
 	if err != nil {
@@ -241,11 +240,11 @@ func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
 		modelToolCallID = "call_bridge_patch_split"
 		rawPatch        = "*** Begin Patch\n*** Add File: note.txt\n+hello\n*** End Patch\n"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("bridge-patch-split-key-32-bytes!")
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_patch_split_start", modelRequestID, "agent_provider_request", 0)
 
 	providerInputJSON, err := json.Marshal(rawPatch)
@@ -259,7 +258,7 @@ func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_patch_split_tool", ModelRequestId: modelRequestID,
 		ToolDeclaration: func() *bridgev1.RuntimeToolDeclaration {
-			declaration := bridgeToolDeclarationForTest(modelToolCallID, "apply_patch", string(executionInputJSON), "allow", "sandbox_execute")
+			declaration := sessionfixture.BridgeToolDeclarationForTest(modelToolCallID, "apply_patch", string(executionInputJSON), "allow", "sandbox_execute")
 			declaration.DistinctProviderInputJson = bridgeString(string(providerInputJSON))
 			return declaration
 		}(),
@@ -272,8 +271,8 @@ func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
 	if err := admin.QueryRowContext(context.Background(), `SELECT payload_json FROM session_events WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, toolUseEventID).Scan(&durableEventPayload); err != nil {
 		t.Fatalf("load authoritative Tool Use event: %v", err)
 	}
-	if testJSONPathString(t, durableEventPayload, "name") != "apply_patch" ||
-		!reflect.DeepEqual(testJSONPathValue(t, durableEventPayload, "input"), map[string]any{"patch": rawPatch}) ||
+	if sessionfixture.JSONPathString(t, durableEventPayload, "name") != "apply_patch" ||
+		!reflect.DeepEqual(sessionfixture.JSONPathValue(t, durableEventPayload, "input"), map[string]any{"patch": rawPatch}) ||
 		strings.Contains(durableEventPayload, "runtime_only") {
 		t.Fatalf("authoritative Tool Use payload = %s", durableEventPayload)
 	}
@@ -292,10 +291,7 @@ func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
 	}
 	assertRuntimeScalar := func(payload bridgeLoadContextPayload) {
 		t.Helper()
-		entries := payload.ContextEntries
-		if payload.OpenRequestDraft != nil {
-			entries = append(entries, bridgeRuntimeContextEntry{Parts: payload.OpenRequestDraft.Parts})
-		}
+		entries := payload.Messages
 		for _, entry := range entries {
 			for _, rawPart := range entry.Parts {
 				var part map[string]any
@@ -328,7 +324,7 @@ func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
 		t.Fatalf("admitted apply_patch route = %#v; want durable allow execution identity", beforeAcceptance.PendingToolUses)
 	}
 
-	canonicalInput, _, err := canonicalRunToolInput(string(executionInputJSON))
+	canonicalInput, _, err := runtimecontrol.CanonicalRunToolInput(string(executionInputJSON))
 	if err != nil {
 		t.Fatalf("canonical patch input: %v", err)
 	}
@@ -371,24 +367,24 @@ func TestSandboxSettlementAndBridgeConsumptionConvergeUnderSessionLockRace(t *te
 		modelRequestID  = "mreq_sandbox_settle_consume_race"
 		modelToolCallID = "call_sandbox_settle_consume_race"
 	)
-	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`)
 	if _, err := admin.Exec(`UPDATE session_events SET model_request_id=$2, projection_json=$4 WHERE workspace_id=$1 AND event_id=$3`,
 		workspaceID, modelRequestID, toolUseEventID, `{"model_tool_call_id":"`+modelToolCallID+`"}`); err != nil {
 		t.Fatalf("stamp Tool Use model request: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, modelRequestID, toolUseEventID, modelToolCallID, "Read")
-	seedBridgeAPIAllowedToolRoute(t, admin, workspaceID, sessionID, threadID, toolUseEventID)
+	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, modelRequestID, toolUseEventID, modelToolCallID, "Read")
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, workspaceID, sessionID, threadID, toolUseEventID)
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	if _, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
 		Scope: scope, ToolUseEventId: toolUseEventID,
 	}); err != nil {
 		t.Fatalf("AcceptSandboxExecution: %v", err)
 	}
-	seedReadySandboxForSharedToolExecution(t, admin, workspaceID, sessionID)
+	sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, workspaceID, sessionID)
 
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	queueConnection := startBackgroundNotificationQueueServer(t, queueStore)
@@ -427,7 +423,7 @@ func TestSandboxSettlementAndBridgeConsumptionConvergeUnderSessionLockRace(t *te
 	locker, lockerPID := lockPostgreSQLFinalizationFence(t, admin,
 		`SELECT id FROM sessions WHERE workspace_id=$1 AND id=$2 FOR UPDATE`, workspaceID, sessionID)
 	defer func() { _ = locker.Rollback() }()
-	writeRequest := bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest(toolUseEventID, "done"))
+	writeRequest := sessionfixture.BridgeToolSettlementRequestForTest(scope, sessionfixture.BridgeCompletedToolSettlementForTest(toolUseEventID, "done"))
 	type writeResult struct {
 		response *bridgev1.SettleToolResultResponse
 		err      error
@@ -456,7 +452,7 @@ func TestSandboxSettlementAndBridgeConsumptionConvergeUnderSessionLockRace(t *te
 	if written.err != nil {
 		t.Fatalf("SettleToolResult after Sandbox settlement: %v", written.err)
 	}
-	bridgeRequireToolSettlementOutcomeForTest(t, written.response, "committed")
+	sessionfixture.BridgeRequireToolSettlementOutcomeForTest(t, written.response, "committed")
 
 	var executionState string
 	var retainedResult sql.NullString
@@ -521,8 +517,6 @@ func (p *gatedBridgeToolProvider) ExecuteTool(ctx context.Context, _ tetralsandb
 	}
 }
 
-var _ tetralsandbox.ProviderAdapter = (*gatedBridgeToolProvider)(nil)
-
 func TestPostgreSQLBridgeAPIStoreMemoryInputsRoundTripThroughWriteAndLoadContext(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -532,12 +526,12 @@ func TestPostgreSQLBridgeAPIStoreMemoryInputsRoundTripThroughWriteAndLoadContext
 		podUID         = "pod_bridge_memory_input_roundtrip"
 		modelRequestID = "mreq_bridge_memory_input_roundtrip"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("memory-roundtrip-test-signing-key")
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_memory_input_roundtrip_start", modelRequestID, requestKindAgentProviderRequest, 0)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_memory_input_roundtrip_start", modelRequestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 	inputs := []map[string]any{
 		{"action": "create", "path": "notes/large.md", "content": "CREATE_HEAD" + strings.Repeat("\x01", 9_000) + "CREATE_TAIL"},
 		{"action": "replace", "path": "notes/large.md", "old_text": "old", "new_text": "new"},
@@ -547,13 +541,13 @@ func TestPostgreSQLBridgeAPIStoreMemoryInputsRoundTripThroughWriteAndLoadContext
 		if err != nil {
 			t.Fatalf("marshal input: %v", err)
 		}
-		canonicalInput, _, err := canonicalRunToolInput(string(encoded))
+		canonicalInput, _, err := runtimecontrol.CanonicalRunToolInput(string(encoded))
 		if err != nil {
 			t.Fatalf("canonical input: %v", err)
 		}
 		response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 			Scope: scope, RuntimeWriteId: fmt.Sprintf("rwrite_memory_%d", index), ModelRequestId: modelRequestID,
-			ToolDeclaration: bridgeToolDeclarationForTest(
+			ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest(
 				fmt.Sprintf("call_memory_%d", index), "memory", canonicalInput, "allow", "memory_execute",
 			),
 		})
@@ -569,10 +563,10 @@ func TestPostgreSQLBridgeAPIStoreMemoryInputsRoundTripThroughWriteAndLoadContext
 	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode context: %v", err)
 	}
-	if payload.OpenRequestDraft == nil || len(payload.OpenRequestDraft.Parts) != len(inputs) {
-		t.Fatalf("open draft = %#v; want %d Tool Calls", payload.OpenRequestDraft, len(inputs))
+	if payload.CurrentRequestMessage == nil || len(payload.Messages) != 1 || len(payload.Messages[0].Parts) != len(inputs) {
+		t.Fatalf("current Assistant = %#v/%#v; want %d Tool Calls", payload.CurrentRequestMessage, payload.Messages, len(inputs))
 	}
-	for index, rawPart := range payload.OpenRequestDraft.Parts {
+	for index, rawPart := range payload.Messages[0].Parts {
 		var part map[string]any
 		if err := json.Unmarshal(rawPart, &part); err != nil {
 			t.Fatalf("decode part: %v", err)
@@ -582,6 +576,7 @@ func TestPostgreSQLBridgeAPIStoreMemoryInputsRoundTripThroughWriteAndLoadContext
 		}
 	}
 }
+
 func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionEnforcesDurablePermission(t *testing.T) {
 	for _, testCase := range []struct {
 		name                string
@@ -608,7 +603,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionEnforcesDurablePermission
 			toolUseID := "evt_permission_" + suffix
 			modelRequestID := "mreq_permission_" + suffix
 			modelToolCallID := "call_permission_" + suffix
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_permission_"+suffix, 1, "pod_permission_"+suffix)
 			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, toolUseID, 1, "agent.tool_use",
 				`{"name":"exec_command","input":{"cmd":"printf ok"},"evaluated_permission":"`+testCase.evaluatedPermission+`"}`)
@@ -618,9 +613,9 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionEnforcesDurablePermission
 			); err != nil {
 				t.Fatalf("stamp permission model request: %v", err)
 			}
-			seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseID, modelToolCallID, "exec_command")
+			sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseID, modelToolCallID, "exec_command")
 			if testCase.evaluatedPermission == "allow" {
-				seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, threadID, toolUseID)
+				sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, threadID, toolUseID)
 			}
 			if testCase.approvalStatus != "" {
 				approvalInput := testCase.approvalInput
@@ -641,7 +636,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionEnforcesDurablePermission
 
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			_, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
-				Scope: bridgeAPIScope(sessionID, threadID, "bind_permission_"+suffix, 1, "pod_permission_"+suffix), ToolUseEventId: toolUseID,
+				Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_permission_"+suffix, 1, "pod_permission_"+suffix), ToolUseEventId: toolUseID,
 			})
 			if status.Code(err) != testCase.wantCode {
 				t.Fatalf("AcceptSandboxExecution error = %v; want %s", err, testCase.wantCode)
@@ -685,7 +680,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionRejectsNewWorkAfterReleas
 		toolUseID   = "evt_bridge_released_tool"
 		modelCallID = "call_bridge_released_tool"
 	)
-	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, "bind_bridge_released_tool", 1, "pod_uid_bridge_released_tool")
 	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseID, 1, "agent.tool_use", `{"name":"exec_command","input":{"cmd":"true"},"evaluated_permission":"allow"}`)
 	if _, err := admin.ExecContext(context.Background(),
@@ -694,7 +689,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionRejectsNewWorkAfterReleas
 	); err != nil {
 		t.Fatalf("stamp durable tool-use model request: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, "mreq_bridge_released_tool", toolUseID, modelCallID, "exec_command")
+	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, "mreq_bridge_released_tool", toolUseID, modelCallID, "exec_command")
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_sandbox_bindings (
 		workspace_id, session_id, logical_sandbox_id, environment_id,
 		environment_generation, provider, provider_resource_id, binding_revision,
@@ -707,7 +702,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionRejectsNewWorkAfterReleas
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	_, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
-		Scope: bridgeAPIScope(sessionID, threadID, "bind_bridge_released_tool", 1, "pod_uid_bridge_released_tool"), ToolUseEventId: toolUseID,
+		Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_bridge_released_tool", 1, "pod_uid_bridge_released_tool"), ToolUseEventId: toolUseID,
 	})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("AcceptSandboxExecution after release fence error = %v; want FailedPrecondition", err)
@@ -737,7 +732,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionRejectsSettledToolUse(t *
 		threadID    = "thr_bridge_settled_tool"
 		toolUseID   = "evt_bridge_settled_tool"
 	)
-	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, "bind_bridge_settled_tool", 1, "pod_uid_bridge_settled_tool")
 	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseID, 1, "agent.tool_use", `{"name":"exec_command","input":{"cmd":"true"},"evaluated_permission":"allow"}`)
 	if _, err := admin.ExecContext(context.Background(),
@@ -746,12 +741,12 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionRejectsSettledToolUse(t *
 	); err != nil {
 		t.Fatalf("stamp durable tool-use model request: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, "mreq_bridge_settled_tool", toolUseID, "call_bridge_settled_tool", "exec_command")
-	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, "evt_bridge_settled_result", 2, "agent.tool_result", `{"tool_use_event_id":"evt_bridge_settled_tool","content":[{"type":"text","text":"cancelled"}]}`)
+	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, "mreq_bridge_settled_tool", toolUseID, "call_bridge_settled_tool", "exec_command")
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, "evt_bridge_settled_result", 2, "agent.tool_result", `{"tool_use_id":"evt_bridge_settled_tool","content":[{"type":"text","text":"cancelled"}]}`)
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	_, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
-		Scope: bridgeAPIScope(sessionID, threadID, "bind_bridge_settled_tool", 1, "pod_uid_bridge_settled_tool"), ToolUseEventId: toolUseID,
+		Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_bridge_settled_tool", 1, "pod_uid_bridge_settled_tool"), ToolUseEventId: toolUseID,
 	})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("AcceptSandboxExecution settled Tool Use error = %v; want FailedPrecondition", err)
@@ -789,11 +784,11 @@ func TestInternalToolRepairKeyIsBoundedTupleSafeAndCrossLanguageStable(t *testin
 
 func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_repair", "thr_bridge_repair")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_repair", "thr_bridge_repair")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_repair", "bind_bridge_repair", 1, "pod_uid_repair")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("internal-repair-test-signing-key")
-	scope := bridgeAPIScope("sesn_bridge_repair", "thr_bridge_repair", "bind_bridge_repair", 1, "pod_uid_repair")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_repair", "thr_bridge_repair", "bind_bridge_repair", 1, "pod_uid_repair")
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_repair_start", "mreq_repair", "agent_provider_request", 0)
 	repairKey := internalToolRepairKey("mreq_repair", "call_repair", "unknown_tool")
 	request := &bridgev1.CommitInternalToolRepairRequest{
@@ -818,13 +813,13 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	}
 	var dataJSON string
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT data_json FROM session_messages
+		`SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m
 		  WHERE workspace_id='default' AND session_id='sesn_bridge_repair'
 		    AND session_thread_id='thr_bridge_repair' AND model_request_id='mreq_repair'`,
 	).Scan(&dataJSON); err != nil {
 		t.Fatalf("read repair context: %v", err)
 	}
-	parts, err := decodeStoredRuntimeContextParts(dataJSON)
+	parts, err := runtimecontrol.DecodeStoredRuntimeContextParts(dataJSON)
 	if err != nil || len(parts) != 2 {
 		t.Fatalf("repair context parts = %s err=%v", dataJSON, err)
 	}
@@ -872,16 +867,17 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 		t.Fatalf("stale-scope internal repair effects = operations:%d events:%d; want 1/1", repairOperations, repairEvents)
 	}
 }
+
 func TestPostgreSQLBridgeAPIStoreRejectsPublicAndRepairToolCallIdentityCollision(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_collision", "sthr_collision")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_collision", "sthr_collision")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_collision", "bind_collision", 1, "pod_collision")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope("sesn_collision", "sthr_collision", "bind_collision", 1, "pod_collision")
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_collision_start", "mreq_collision", requestKindAgentProviderRequest, 0)
+	scope := sessionfixture.BridgeAPIScope("sesn_collision", "sthr_collision", "bind_collision", 1, "pod_collision")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_collision_start", "mreq_collision", runtimecontrol.RequestKindAgentProviderRequest, 0)
 	public, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_collision_tool", ModelRequestId: "mreq_collision",
-		ToolDeclaration: bridgeToolDeclarationForTest("call_collision", "unknown_tool", `{}`, "allow", "sandbox_execute"),
+		ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest("call_collision", "unknown_tool", `{}`, "allow", "sandbox_execute"),
 	})
 	if err != nil || public.GetCommitted() == nil {
 		t.Fatalf("seed public Tool Call: response=%#v err=%v", public, err)
@@ -896,19 +892,20 @@ func TestPostgreSQLBridgeAPIStoreRejectsPublicAndRepairToolCallIdentityCollision
 		t.Fatalf("repair collision error = %v; want AlreadyExists", err)
 	}
 }
+
 func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneDraft(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_mixed_draft", "sthr_mixed_draft")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_mixed_draft", "sthr_mixed_draft")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_mixed_draft", "bind_mixed_draft", 1, "pod_mixed_draft")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("mixed-draft-test-signing-key")
-	scope := bridgeAPIScope("sesn_mixed_draft", "sthr_mixed_draft", "bind_mixed_draft", 1, "pod_mixed_draft")
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_mixed_start", "mreq_mixed", requestKindAgentProviderRequest, 0)
+	scope := sessionfixture.BridgeAPIScope("sesn_mixed_draft", "sthr_mixed_draft", "bind_mixed_draft", 1, "pod_mixed_draft")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_mixed_start", "mreq_mixed", runtimecontrol.RequestKindAgentProviderRequest, 0)
 
 	written, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_mixed_text", ModelRequestId: "mreq_mixed",
-		EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":"continuing"}`,
-		AssistantContextDelta: bridgeTextContextDeltaForTest("continuing"),
+		PreallocatedEventId: bridgeString("evt_00000000000000000000000000000001"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":"continuing"}`,
+		AssistantContextDelta: sessionfixture.BridgeTextContextDeltaForTest("continuing"),
 	})
 	if err != nil || written.GetCommitted() == nil {
 		t.Fatalf("write ordinary Assistant member: response=%#v err=%v", written, err)
@@ -927,14 +924,14 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneDraf
 	var rowCount int
 	var dataJSON string
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*), max(data_json)
-		   FROM session_messages
+		`SELECT count(*), max(`+sessionfixture.MessageContentSQL+`)
+		   FROM session_messages m
 		  WHERE workspace_id='default' AND session_id='sesn_mixed_draft'
 		    AND session_thread_id='sthr_mixed_draft' AND model_request_id='mreq_mixed'`,
 	).Scan(&rowCount, &dataJSON); err != nil {
 		t.Fatalf("read mixed Assistant draft: %v", err)
 	}
-	parts, err := decodeStoredRuntimeContextParts(dataJSON)
+	parts, err := runtimecontrol.DecodeStoredRuntimeContextParts(dataJSON)
 	if err != nil || rowCount != 1 || len(parts) != 3 {
 		t.Fatalf("mixed Assistant draft rows/parts = %d/%d data=%s err=%v; want 1/3", rowCount, len(parts), dataJSON, err)
 	}
@@ -958,14 +955,15 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneDraf
 	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode mixed Assistant draft: %v", err)
 	}
-	if payload.OpenRequestDraft == nil || payload.OpenRequestDraft.ModelRequestID != "mreq_mixed" ||
-		len(payload.OpenRequestDraft.Parts) != 3 || len(payload.TurnFacts.InternalRepairs) != 1 {
-		t.Fatalf("mixed Assistant recovery = draft=%#v repairs=%#v", payload.OpenRequestDraft, payload.TurnFacts.InternalRepairs)
+	if payload.CurrentRequestMessage == nil || payload.CurrentRequestMessage.ModelRequestID != "mreq_mixed" ||
+		len(payload.Messages) != 1 || len(payload.Messages[0].Parts) != 3 || len(payload.TurnFacts.InternalRepairs) != 1 {
+		t.Fatalf("mixed Assistant recovery = draft=%#v repairs=%#v", payload.CurrentRequestMessage, payload.TurnFacts.InternalRepairs)
 	}
 	if payload.TurnFacts.InternalRepairs[0].RepairKey != repairKey {
 		t.Fatalf("mixed Assistant repair fact = %#v", payload.TurnFacts.InternalRepairs[0])
 	}
 }
+
 func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairRejectsRequestEndSeal(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -973,11 +971,11 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairRejectsRequestEndSeal(t
 		threadID       = "thr_repair_after_end"
 		modelRequestID = "mreq_repair_after_end"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_repair_after_end", 1, "pod_repair_after_end")
-	scope := bridgeAPIScope(sessionID, threadID, "bind_repair_after_end", 1, "pod_repair_after_end")
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_repair_after_end", 1, "pod_repair_after_end")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_repair_after_end_start", modelRequestID, requestKindAgentProviderRequest, 0)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_repair_after_end_start", modelRequestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_repair_after_end_close", ModelRequestId: modelRequestID,
 		FinishReason: "tool_calls", UsageJson: `{}`,
@@ -997,12 +995,12 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairRejectsRequestEndSeal(t
 
 func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairRejectsStaleBinding(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_repair_stale", "thr_bridge_repair_stale")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_repair_stale", "thr_bridge_repair_stale")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_repair_stale", "bind_bridge_repair_stale", 1, "pod_uid_repair_stale")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	response, err := store.CommitInternalToolRepair(context.Background(), &bridgev1.CommitInternalToolRepairRequest{
-		Scope:              bridgeAPIScope("sesn_bridge_repair_stale", "thr_bridge_repair_stale", "bind_bridge_repair_stale", 2, "pod_uid_repair_stale"),
+		Scope:              sessionfixture.BridgeAPIScope("sesn_bridge_repair_stale", "thr_bridge_repair_stale", "bind_bridge_repair_stale", 2, "pod_uid_repair_stale"),
 		ModelRequestId:     "mreq_repair_stale",
 		ModelToolCallId:    "call_repair_stale",
 		ToolName:           "unknown_tool",
@@ -1027,12 +1025,12 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryMutatesDurableMemoryAndReplays(t *test
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	workload := storagetest.OpenWorkloadDB(t, admin, "bridge")
 	runtime := workload.DB
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory", "thr_bridge_memory")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_memory", "thr_bridge_memory")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory", "bind_bridge_memory", 1, "pod_uid_memory")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory", "memstore_bridge_memory")
+	sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory", "memstore_bridge_memory")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope("sesn_bridge_memory", "thr_bridge_memory", "bind_bridge_memory", 1, "pod_uid_memory")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_memory", "thr_bridge_memory", "bind_bridge_memory", 1, "pod_uid_memory")
 	create := durableMemoryRequestForTest(
 		t, admin, scope, "evt_tool_memory_create",
 		`{"action":"create","path":"notes/todo.md","content":"one"}`,
@@ -1110,12 +1108,12 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryMutatesDurableMemoryAndReplays(t *test
 
 func TestPostgreSQLBridgeAPIStoreRunMemoryUsesDeclaredRouteWithoutToolNameAllowlist(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_declared_route", "thr_bridge_memory_declared_route")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_declared_route", "thr_bridge_memory_declared_route")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_declared_route", "bind_bridge_memory_declared_route", 1, "pod_uid_memory_declared_route")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_declared_route", "memstore_bridge_memory_declared_route")
+	sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_declared_route", "memstore_bridge_memory_declared_route")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope("sesn_bridge_memory_declared_route", "thr_bridge_memory_declared_route", "bind_bridge_memory_declared_route", 1, "pod_uid_memory_declared_route")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_memory_declared_route", "thr_bridge_memory_declared_route", "bind_bridge_memory_declared_route", 1, "pod_uid_memory_declared_route")
 	request := durableMemoryRequestForTest(t, admin, scope, "evt_tool_memory_declared_route",
 		`{"action":"create","path":"notes/declared.md","content":"declared"}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
@@ -1140,9 +1138,9 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryWaitsForDurableSandboxProjection(t *te
 		memoryWrite = "evt_tool_memory_projection_queue"
 		providerID  = "provider_memory_projection_queue"
 	)
-	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_memory_projection_queue")
-	seedBridgeAPIWritableMemoryStore(t, admin, workspaceID, sessionID, memoryStore)
+	sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, workspaceID, sessionID, memoryStore)
 	if _, err := admin.Exec(`INSERT INTO session_sandbox_bindings (
 		workspace_id, session_id, logical_sandbox_id, environment_id,
 		environment_generation, provider, provider_resource_id, binding_revision,
@@ -1155,7 +1153,7 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryWaitsForDurableSandboxProjection(t *te
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	request := durableMemoryRequestForTest(
-		t, admin, bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_memory_projection_queue"), memoryWrite,
+		t, admin, sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_memory_projection_queue"), memoryWrite,
 		`{"action":"create","path":"notes/queue.md","content":"durable"}`,
 	)
 	type callResult struct {
@@ -1244,14 +1242,14 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryWaitsForDurableSandboxProjection(t *te
 func TestPostgreSQLBridgeAPIStoreRunMemoryEnforcesDurableMemoryQuotas(t *testing.T) {
 	t.Run("memory identities", func(t *testing.T) {
 		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-		seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_identity_quota", "thr_bridge_memory_identity_quota")
+		sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_identity_quota", "thr_bridge_memory_identity_quota")
 		seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_identity_quota", "bind_bridge_memory_identity_quota", 1, "pod_uid_memory_identity_quota")
-		seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_identity_quota", "memstore_bridge_memory_identity_quota")
+		sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_identity_quota", "memstore_bridge_memory_identity_quota")
 		seedBridgeAPIMemoryIdentities(t, admin, "memstore_bridge_memory_identity_quota", memory.MaxMemoriesPerStore)
 
 		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 		request := durableMemoryRequestForTest(t, admin,
-			bridgeAPIScope("sesn_bridge_memory_identity_quota", "thr_bridge_memory_identity_quota", "bind_bridge_memory_identity_quota", 1, "pod_uid_memory_identity_quota"),
+			sessionfixture.BridgeAPIScope("sesn_bridge_memory_identity_quota", "thr_bridge_memory_identity_quota", "bind_bridge_memory_identity_quota", 1, "pod_uid_memory_identity_quota"),
 			"evt_tool_memory_identity_quota", `{"action":"create","path":"over-limit.md","content":"x"}`)
 		_, err := store.RunMemory(context.Background(), request)
 		var quota *memory.QuotaError
@@ -1266,9 +1264,9 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryEnforcesDurableMemoryQuotas(t *testing
 
 	t.Run("versions", func(t *testing.T) {
 		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-		seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_version_quota", "thr_bridge_memory_version_quota")
+		sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_version_quota", "thr_bridge_memory_version_quota")
 		seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_version_quota", "bind_bridge_memory_version_quota", 1, "pod_uid_memory_version_quota")
-		seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_version_quota", "memstore_bridge_memory_version_quota")
+		sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_version_quota", "memstore_bridge_memory_version_quota")
 		seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_version_quota", "mem_bridge_memory_version_quota", "/quota.md", "x")
 		seedBridgeAPIAdditionalMemoryVersions(t, admin, "memstore_bridge_memory_version_quota", "mem_bridge_memory_version_quota", memory.MaxMemoryVersionsPerStore-1)
 
@@ -1284,7 +1282,7 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryEnforcesDurableMemoryQuotas(t *testing
 		for _, test := range requests {
 			t.Run(test.name, func(t *testing.T) {
 				request := durableMemoryRequestForTest(t, admin,
-					bridgeAPIScope("sesn_bridge_memory_version_quota", "thr_bridge_memory_version_quota", "bind_bridge_memory_version_quota", 1, "pod_uid_memory_version_quota"),
+					sessionfixture.BridgeAPIScope("sesn_bridge_memory_version_quota", "thr_bridge_memory_version_quota", "bind_bridge_memory_version_quota", 1, "pod_uid_memory_version_quota"),
 					"evt_tool_memory_version_quota_"+test.name, test.inputJSON)
 				_, err := store.RunMemory(context.Background(), request)
 				var quota *memory.QuotaError
@@ -1302,9 +1300,9 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryEnforcesDurableMemoryQuotas(t *testing
 
 	t.Run("retained payload bytes", func(t *testing.T) {
 		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-		seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_retained_quota", "thr_bridge_memory_retained_quota")
+		sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_retained_quota", "thr_bridge_memory_retained_quota")
 		seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_retained_quota", "bind_bridge_memory_retained_quota", 1, "pod_uid_memory_retained_quota")
-		seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_retained_quota", "memstore_bridge_memory_retained_quota")
+		sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_retained_quota", "memstore_bridge_memory_retained_quota")
 		seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_retained_quota", "mem_bridge_memory_retained_quota", "/quota.md", "x")
 		seedBridgeAPIRetainedMemoryPayload(t, admin, "memstore_bridge_memory_retained_quota", "mem_bridge_memory_retained_quota", memory.MaxRetainedMemoryPayloadBytesPerStore-1)
 
@@ -1320,7 +1318,7 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryEnforcesDurableMemoryQuotas(t *testing
 		for _, test := range requests {
 			t.Run(test.name, func(t *testing.T) {
 				request := durableMemoryRequestForTest(t, admin,
-					bridgeAPIScope("sesn_bridge_memory_retained_quota", "thr_bridge_memory_retained_quota", "bind_bridge_memory_retained_quota", 1, "pod_uid_memory_retained_quota"),
+					sessionfixture.BridgeAPIScope("sesn_bridge_memory_retained_quota", "thr_bridge_memory_retained_quota", "bind_bridge_memory_retained_quota", 1, "pod_uid_memory_retained_quota"),
 					"evt_tool_memory_retained_quota_"+test.name, test.inputJSON)
 				_, err := store.RunMemory(context.Background(), request)
 				var quota *memory.RequestTooLargeError
@@ -1339,11 +1337,11 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryEnforcesDurableMemoryQuotas(t *testing
 
 func TestPostgreSQLBridgeAPIStoreRunMemoryRequiresWritableSessionBinding(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_missing", "thr_bridge_memory_missing")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_missing", "thr_bridge_memory_missing")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_missing", "bind_bridge_memory_missing", 1, "pod_uid_memory_missing")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	missing := durableMemoryRequestForTest(t, admin,
-		bridgeAPIScope("sesn_bridge_memory_missing", "thr_bridge_memory_missing", "bind_bridge_memory_missing", 1, "pod_uid_memory_missing"),
+		sessionfixture.BridgeAPIScope("sesn_bridge_memory_missing", "thr_bridge_memory_missing", "bind_bridge_memory_missing", 1, "pod_uid_memory_missing"),
 		"evt_tool_memory_missing", `{"action":"create","path":"notes/missing.md","content":"one"}`)
 	missingResponse, err := store.RunMemory(context.Background(), missing)
 	if err != nil {
@@ -1352,11 +1350,11 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRequiresWritableSessionBinding(t *test
 	assertMemoryToolErrorCode(t, committedMemoryResultJSON(t, missingResponse), "memory_store_not_configured")
 	assertMemoryProjectionStateNull(t, admin, "sesn_bridge_memory_missing", "evt_tool_memory_missing")
 
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_detached", "thr_bridge_memory_detached")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_detached", "thr_bridge_memory_detached")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_detached", "bind_bridge_memory_detached", 1, "pod_uid_memory_detached")
 	seedBridgeAPIDetachedMemoryStoreBinding(t, admin, "default", "sesn_bridge_memory_detached", "memstore_bridge_memory_detached", "read_write", "/mnt/memory/detached")
 	detached := durableMemoryRequestForTest(t, admin,
-		bridgeAPIScope("sesn_bridge_memory_detached", "thr_bridge_memory_detached", "bind_bridge_memory_detached", 1, "pod_uid_memory_detached"),
+		sessionfixture.BridgeAPIScope("sesn_bridge_memory_detached", "thr_bridge_memory_detached", "bind_bridge_memory_detached", 1, "pod_uid_memory_detached"),
 		"evt_tool_memory_detached", `{"action":"create","path":"notes/detached.md","content":"one"}`)
 	detachedResponse, err := store.RunMemory(context.Background(), detached)
 	if err != nil {
@@ -1365,12 +1363,12 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRequiresWritableSessionBinding(t *test
 	assertMemoryToolErrorCode(t, committedMemoryResultJSON(t, detachedResponse), "memory_store_not_configured")
 	assertMemoryProjectionStateNull(t, admin, "sesn_bridge_memory_detached", "evt_tool_memory_detached")
 
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_ambiguous", "thr_bridge_memory_ambiguous")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_ambiguous", "thr_bridge_memory_ambiguous")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_ambiguous", "bind_bridge_memory_ambiguous", 1, "pod_uid_memory_ambiguous")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_ambiguous", "memstore_bridge_memory_a")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_ambiguous", "memstore_bridge_memory_b")
+	sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_ambiguous", "memstore_bridge_memory_a")
+	sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_ambiguous", "memstore_bridge_memory_b")
 	ambiguous := durableMemoryRequestForTest(t, admin,
-		bridgeAPIScope("sesn_bridge_memory_ambiguous", "thr_bridge_memory_ambiguous", "bind_bridge_memory_ambiguous", 1, "pod_uid_memory_ambiguous"),
+		sessionfixture.BridgeAPIScope("sesn_bridge_memory_ambiguous", "thr_bridge_memory_ambiguous", "bind_bridge_memory_ambiguous", 1, "pod_uid_memory_ambiguous"),
 		"evt_tool_memory_ambiguous", `{"action":"create","path":"notes/ambiguous.md","content":"one"}`)
 	ambiguousResponse, err := store.RunMemory(context.Background(), ambiguous)
 	if err != nil {
@@ -1407,15 +1405,15 @@ func TestPostgreSQLBridgeAPIStoreRunMemorySkipsRefreshForValidationErrors(t *tes
 			bindingID := "bind_bridge_memory_validation_" + strconv.Itoa(index)
 			storeID := "memstore_bridge_memory_validation_" + strconv.Itoa(index)
 			toolUseID := "evt_tool_memory_validation_" + strconv.Itoa(index)
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_uid_memory_validation")
-			seedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
+			sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
 			if tc.seed != nil {
 				tc.seed(t, admin, storeID)
 			}
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			request := durableMemoryRequestForTest(t, admin,
-				bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_memory_validation"), toolUseID, tc.inputJSON)
+				sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_memory_validation"), toolUseID, tc.inputJSON)
 			response, err := store.RunMemory(context.Background(), request)
 			if err != nil {
 				t.Fatalf("RunMemory validation error: %v", err)
@@ -1453,14 +1451,14 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsInvalidInputs(t *testing.T) {
 			threadID := "thr_bridge_memory_invalid_" + strconv.Itoa(index)
 			bindingID := "bind_bridge_memory_invalid_" + strconv.Itoa(index)
 			storeID := "memstore_bridge_memory_invalid_" + strconv.Itoa(index)
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_uid_memory_invalid")
-			seedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
+			sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
 			seedBridgeAPIMemory(t, admin, "default", storeID, "mem_bridge_memory_invalid_"+strconv.Itoa(index), "/notes/todo.md", "one")
 
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			request := durableMemoryRequestForTest(t, admin,
-				bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_memory_invalid"),
+				sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_memory_invalid"),
 				"evt_tool_memory_invalid_"+strconv.Itoa(index), tc.inputJSON)
 			response, err := store.RunMemory(context.Background(), request)
 			if err != nil {
@@ -1496,13 +1494,13 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsOversizedReplaceBeforeDurableWr
 			bindingID := "bind_bridge_memory_replace_cap_" + strconv.Itoa(index)
 			storeID := "memstore_bridge_memory_replace_cap_" + strconv.Itoa(index)
 			toolUseID := "evt_tool_memory_replace_cap_" + strconv.Itoa(index)
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_uid_memory_replace_cap")
-			seedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
+			sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
 			seedBridgeAPIMemory(t, admin, "default", storeID, "mem_bridge_memory_replace_cap_"+strconv.Itoa(index), "/notes/todo.md", tc.content)
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			request := durableMemoryRequestForTest(t, admin,
-				bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_memory_replace_cap"), toolUseID, tc.inputJSON)
+				sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_memory_replace_cap"), toolUseID, tc.inputJSON)
 			response, err := store.RunMemory(context.Background(), request)
 			if err != nil {
 				t.Fatalf("RunMemory oversized replace: %v", err)
@@ -1518,14 +1516,14 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsOversizedReplaceBeforeDurableWr
 
 func TestPostgreSQLBridgeAPIStoreRunMemoryDeletesWithExpectedText(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_delete", "thr_bridge_memory_delete")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_delete", "thr_bridge_memory_delete")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_delete", "bind_bridge_memory_delete", 1, "pod_uid_memory_delete")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_delete", "memstore_bridge_memory_delete")
+	sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_delete", "memstore_bridge_memory_delete")
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_delete", "mem_bridge_memory_delete", "/notes/delete.md", "delete me")
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_delete", "mem_bridge_memory_delete_other", "/notes/other.md", "keep me")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope("sesn_bridge_memory_delete", "thr_bridge_memory_delete", "bind_bridge_memory_delete", 1, "pod_uid_memory_delete")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_memory_delete", "thr_bridge_memory_delete", "bind_bridge_memory_delete", 1, "pod_uid_memory_delete")
 	deleteRequest := durableMemoryRequestForTest(t, admin, scope, "evt_tool_memory_delete",
 		`{"action":"delete","path":"notes/delete.md","expected_text":"delete me"}`)
 	deleted, err := store.RunMemory(context.Background(), deleteRequest)
@@ -1546,14 +1544,14 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryDeletesWithExpectedText(t *testing.T) 
 
 func TestPostgreSQLBridgeAPIStoreRunMemoryRenamesWithExpectedText(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_rename", "thr_bridge_memory_rename")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_rename", "thr_bridge_memory_rename")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_rename", "bind_bridge_memory_rename", 1, "pod_uid_memory_rename")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_rename", "memstore_bridge_memory_rename")
+	sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_rename", "memstore_bridge_memory_rename")
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_rename", "mem_bridge_memory_rename", "/notes/old.md", "rename me")
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_rename", "mem_bridge_memory_rename_collision", "/notes/existing.md", "existing")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope("sesn_bridge_memory_rename", "thr_bridge_memory_rename", "bind_bridge_memory_rename", 1, "pod_uid_memory_rename")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_memory_rename", "thr_bridge_memory_rename", "bind_bridge_memory_rename", 1, "pod_uid_memory_rename")
 
 	wrongRenameRequest := durableMemoryRequestForTest(t, admin, scope, "evt_tool_memory_rename_wrong",
 		`{"action":"rename","path":"notes/old.md","new_path":"notes/wrong.md","expected_text":"wrong"}`)
@@ -1579,10 +1577,10 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRenamesWithExpectedText(t *testing.T) 
 	}
 	renameResult := committedMemoryResultJSON(t, renamed)
 	assertMemoryResultStatus(t, renameResult, "completed")
-	if testJSONPathString(t, renameResult, "path") != "notes/old.md" {
+	if sessionfixture.JSONPathString(t, renameResult, "path") != "notes/old.md" {
 		t.Fatalf("rename result = %s; want path notes/old.md", renameResult)
 	}
-	if testJSONPathString(t, renameResult, "new_path") != "notes/new.md" {
+	if sessionfixture.JSONPathString(t, renameResult, "new_path") != "notes/new.md" {
 		t.Fatalf("rename result = %s; want new_path notes/new.md", renameResult)
 	}
 	assertMemoryCurrentPathContentAndOperation(t, admin, "memstore_bridge_memory_rename", "mem_bridge_memory_rename", "/notes/new.md", "rename me", "modified")
@@ -1590,13 +1588,13 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRenamesWithExpectedText(t *testing.T) 
 
 func TestPostgreSQLBridgeAPIStoreRunMemoryReportsStaleReplace(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_replace_stale", "thr_bridge_memory_replace_stale")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_replace_stale", "thr_bridge_memory_replace_stale")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_replace_stale", "bind_bridge_memory_replace_stale", 1, "pod_uid_memory_replace_stale")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_replace_stale", "memstore_bridge_memory_replace_stale")
+	sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_replace_stale", "memstore_bridge_memory_replace_stale")
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_replace_stale", "mem_bridge_memory_replace_stale", "/notes/repeat.md", "one one")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope("sesn_bridge_memory_replace_stale", "thr_bridge_memory_replace_stale", "bind_bridge_memory_replace_stale", 1, "pod_uid_memory_replace_stale")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_memory_replace_stale", "thr_bridge_memory_replace_stale", "bind_bridge_memory_replace_stale", 1, "pod_uid_memory_replace_stale")
 	run := func(eventID, inputJSON string) string {
 		t.Helper()
 		request := durableMemoryRequestForTest(t, admin, scope, eventID, inputJSON)
@@ -1622,9 +1620,9 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryReportsStaleReplace(t *testing.T) {
 
 func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsPrefixConflictingPaths(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_prefix", "thr_bridge_memory_prefix")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_prefix", "thr_bridge_memory_prefix")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_prefix", "bind_bridge_memory_prefix", 1, "pod_uid_memory_prefix")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_prefix", "memstore_bridge_memory_prefix")
+	sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_prefix", "memstore_bridge_memory_prefix")
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_prefix", "mem_bridge_memory_prefix_a", "/a", "a")
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_prefix", "mem_bridge_memory_prefix_parent_child", "/parent/child", "child")
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_prefix", "mem_bridge_memory_prefix_parent_other", "/parent/other", "other")
@@ -1632,7 +1630,7 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsPrefixConflictingPaths(t *testi
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	scope := bridgeAPIScope("sesn_bridge_memory_prefix", "thr_bridge_memory_prefix", "bind_bridge_memory_prefix", 1, "pod_uid_memory_prefix")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_memory_prefix", "thr_bridge_memory_prefix", "bind_bridge_memory_prefix", 1, "pod_uid_memory_prefix")
 	run := func(eventID, inputJSON string) string {
 		t.Helper()
 		request := durableMemoryRequestForTest(t, admin, scope, eventID, inputJSON)
@@ -1645,14 +1643,14 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsPrefixConflictingPaths(t *testi
 
 	descendant := run("evt_tool_memory_prefix_descendant", `{"action":"create","path":"a/b","content":"child"}`)
 	assertMemoryToolError(t, descendant, "path_exists", true)
-	if got := testJSONPathString(t, descendant, "message"); got != "memory path is inside an existing memory" {
+	if got := sessionfixture.JSONPathString(t, descendant, "message"); got != "memory path is inside an existing memory" {
 		t.Fatalf("descendant conflict message = %q; want distinguishing descendant message", got)
 	}
 	assertMemoryPathConflictResult(t, descendant, []memoryPathConflictWireHead{{MemoryID: "mem_bridge_memory_prefix_a", Path: "/a"}}, 1, false)
 
 	ancestorCreate := run("evt_tool_memory_prefix_create_ancestor", `{"action":"create","path":"parent","content":"root"}`)
 	assertMemoryToolError(t, ancestorCreate, "path_exists", true)
-	if got := testJSONPathString(t, ancestorCreate, "message"); got != "memory path would contain an existing memory" {
+	if got := sessionfixture.JSONPathString(t, ancestorCreate, "message"); got != "memory path would contain an existing memory" {
 		t.Fatalf("ancestor create conflict message = %q; want distinguishing ancestor message", got)
 	}
 	assertMemoryPathConflictResult(t, ancestorCreate, []memoryPathConflictWireHead{
@@ -1663,7 +1661,7 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsPrefixConflictingPaths(t *testi
 	exactRename := run("evt_tool_memory_prefix_rename_exact",
 		`{"action":"rename","path":"literal_%","new_path":"a","expected_text":"percent"}`)
 	assertMemoryToolError(t, exactRename, "path_exists", true)
-	if got := testJSONPathString(t, exactRename, "message"); got != "memory target path already exists" {
+	if got := sessionfixture.JSONPathString(t, exactRename, "message"); got != "memory target path already exists" {
 		t.Fatalf("exact rename conflict message = %q; want exact collision message", got)
 	}
 	assertMemoryPathConflictResult(t, exactRename, []memoryPathConflictWireHead{{MemoryID: "mem_bridge_memory_prefix_a", Path: "/a"}}, 1, false)
@@ -1671,7 +1669,7 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsPrefixConflictingPaths(t *testi
 	descendantRename := run("evt_tool_memory_prefix_rename_descendant",
 		`{"action":"rename","path":"literal_%","new_path":"a/b","expected_text":"percent"}`)
 	assertMemoryToolError(t, descendantRename, "path_exists", true)
-	if got := testJSONPathString(t, descendantRename, "message"); got != "memory target path is inside an existing memory" {
+	if got := sessionfixture.JSONPathString(t, descendantRename, "message"); got != "memory target path is inside an existing memory" {
 		t.Fatalf("descendant rename conflict message = %q; want distinguishing descendant message", got)
 	}
 	assertMemoryPathConflictResult(t, descendantRename, []memoryPathConflictWireHead{{MemoryID: "mem_bridge_memory_prefix_a", Path: "/a"}}, 1, false)
@@ -1679,7 +1677,7 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsPrefixConflictingPaths(t *testi
 	ancestorRename := run("evt_tool_memory_prefix_rename_ancestor",
 		`{"action":"rename","path":"literal_%","new_path":"parent","expected_text":"percent"}`)
 	assertMemoryToolError(t, ancestorRename, "path_exists", true)
-	if got := testJSONPathString(t, ancestorRename, "message"); got != "memory target path would contain an existing memory" {
+	if got := sessionfixture.JSONPathString(t, ancestorRename, "message"); got != "memory target path would contain an existing memory" {
 		t.Fatalf("ancestor rename conflict message = %q; want distinguishing ancestor message", got)
 	}
 	assertMemoryPathConflictResult(t, ancestorRename, []memoryPathConflictWireHead{
@@ -1700,9 +1698,9 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryBoundsPathConflictWire(t *testing.T) {
 			sessionID := "sesn_bridge_memory_conflict_bound_" + suffix
 			threadID := "thr_bridge_memory_conflict_bound_" + suffix
 			storeID := "memstore_bridge_memory_conflict_bound_" + suffix
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_memory_conflict_bound", 1, "pod_uid_memory_conflict_bound")
-			seedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
+			sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
 
 			targetPath := "/root/target"
 			seedBridgeAPIMemory(t, admin, "default", storeID, "mem_00_exact", targetPath, "exact")
@@ -1716,7 +1714,7 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryBoundsPathConflictWire(t *testing.T) {
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
 			request := durableMemoryRequestForTest(t, admin,
-				bridgeAPIScope(sessionID, threadID, "bind_bridge_memory_conflict_bound", 1, "pod_uid_memory_conflict_bound"),
+				sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_bridge_memory_conflict_bound", 1, "pod_uid_memory_conflict_bound"),
 				"evt_tool_memory_conflict_bound_"+suffix, `{"action":"create","path":"root/target","content":"rejected"}`)
 			response, err := store.RunMemory(context.Background(), request)
 			if err != nil {
@@ -1770,21 +1768,21 @@ func TestCanonicalRunToolInputMatchesJavaScriptStringifyEscaping(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			canonical, hash, err := canonicalRunToolInput(test.raw)
+			canonical, hash, err := runtimecontrol.CanonicalRunToolInput(test.raw)
 			if err != nil {
 				t.Fatalf("canonicalRunToolInput: %v", err)
 			}
-			if canonical != test.want || hash != sha256Hex(test.want) {
-				t.Fatalf("canonical/hash = %q/%q; want JavaScript bytes %q/%q", canonical, hash, test.want, sha256Hex(test.want))
+			if canonical != test.want || hash != runtimecontrol.Sha256Hex(test.want) {
+				t.Fatalf("canonical/hash = %q/%q; want JavaScript bytes %q/%q", canonical, hash, test.want, runtimecontrol.Sha256Hex(test.want))
 			}
 		})
 	}
 
-	first, firstHash, err := canonicalRunToolInput(`{"workdir":"/workspace","cmd":"printf <ok>"}`)
+	first, firstHash, err := runtimecontrol.CanonicalRunToolInput(`{"workdir":"/workspace","cmd":"printf <ok>"}`)
 	if err != nil {
 		t.Fatalf("canonical first: %v", err)
 	}
-	second, secondHash, err := canonicalRunToolInput("{ \"cmd\" : \"printf <ok>\", \"workdir\" : \"/workspace\" }")
+	second, secondHash, err := runtimecontrol.CanonicalRunToolInput("{ \"cmd\" : \"printf <ok>\", \"workdir\" : \"/workspace\" }")
 	if err != nil {
 		t.Fatalf("canonical reordered: %v", err)
 	}
@@ -1809,31 +1807,31 @@ func TestCanonicalRunToolInputSharedCrossLanguageVectors(t *testing.T) {
 	for _, vector := range vectors {
 		t.Run(vector.Name, func(t *testing.T) {
 			for _, input := range vector.Inputs {
-				canonical, hash, err := canonicalRunToolInput(input)
+				canonical, hash, err := runtimecontrol.CanonicalRunToolInput(input)
 				if err != nil {
 					t.Fatalf("canonicalRunToolInput(%q): %v", input, err)
 				}
-				if canonical != vector.Canonical || hash != sha256Hex(vector.Canonical) {
-					t.Fatalf("canonical/hash = %q/%q; want shared vector %q/%q", canonical, hash, vector.Canonical, sha256Hex(vector.Canonical))
+				if canonical != vector.Canonical || hash != runtimecontrol.Sha256Hex(vector.Canonical) {
+					t.Fatalf("canonical/hash = %q/%q; want shared vector %q/%q", canonical, hash, vector.Canonical, runtimecontrol.Sha256Hex(vector.Canonical))
 				}
 			}
 		})
 	}
-	if _, _, err := canonicalRunToolInput(strings.Repeat("[", 257) + "0" + strings.Repeat("]", 257)); err == nil || !strings.Contains(err.Error(), "nesting exceeds") {
+	if _, _, err := runtimecontrol.CanonicalRunToolInput(strings.Repeat("[", 257) + "0" + strings.Repeat("]", 257)); err == nil || !strings.Contains(err.Error(), "nesting exceeds") {
 		t.Fatalf("over-depth canonical error = %v; want shared closed nesting bound", err)
 	}
-	if _, _, err := canonicalRunToolInput(`{"unterminated":`); err == nil {
+	if _, _, err := runtimecontrol.CanonicalRunToolInput(`{"unterminated":`); err == nil {
 		t.Fatal("malformed canonical input accepted")
 	}
 }
 
 func TestVerifyRuntimeScopeRejectsRuntimePodUIDMismatchFromIdentity(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_scope_identity", "thr_bridge_scope_identity")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_scope_identity", "thr_bridge_scope_identity")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_scope_identity", "bind_bridge_scope_identity", 1, "pod_uid_scope_identity")
 
 	client := dbconnect.NewClientForTesting(runtime)
-	scope := bridgeAPIScope("sesn_bridge_scope_identity", "thr_bridge_scope_identity", "bind_bridge_scope_identity", 1, "pod_uid_scope_identity")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_scope_identity", "thr_bridge_scope_identity", "bind_bridge_scope_identity", 1, "pod_uid_scope_identity")
 	for _, test := range []struct {
 		name     string
 		ctx      context.Context
@@ -1894,7 +1892,7 @@ func TestVerifyRuntimeScopeRejectsRuntimePodUIDMismatchFromIdentity(t *testing.T
 
 func TestVerifyRuntimeScopeRejectsDeletedSessionWithLiveBinding(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_deleted_scope", "thr_bridge_deleted_scope")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_deleted_scope", "thr_bridge_deleted_scope")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_deleted_scope", "bind_bridge_deleted_scope", 1, "pod_uid_deleted_scope")
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE sessions SET lifecycle_state = 'deleted' WHERE workspace_id = 'default' AND id = 'sesn_bridge_deleted_scope'`); err != nil {
@@ -1902,7 +1900,7 @@ func TestVerifyRuntimeScopeRejectsDeletedSessionWithLiveBinding(t *testing.T) {
 	}
 
 	client := dbconnect.NewClientForTesting(runtime)
-	scope := bridgeAPIScope("sesn_bridge_deleted_scope", "thr_bridge_deleted_scope", "bind_bridge_deleted_scope", 1, "pod_uid_deleted_scope")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_deleted_scope", "thr_bridge_deleted_scope", "bind_bridge_deleted_scope", 1, "pod_uid_deleted_scope")
 	err := client.WithWorkspaceTx(context.Background(), "default", "bridge_api.verify_deleted_runtime_scope", func(tx *dbconnect.Tx) error {
 		return verifyRuntimeScopeTx(context.Background(), tx, scope)
 	})
@@ -1927,10 +1925,10 @@ func TestPostgreSQLBridgeAPIStoreDurableToolOperationsReturnTypedStaleCustody(t 
 		bindingID = "bind_tool_typed_stale"
 		podUID    = "pod_tool_typed_stale"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	stale := bridgeAPIScope(sessionID, threadID, bindingID, 2, podUID)
+	stale := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 2, podUID)
 
 	accepted, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{Scope: stale, ToolUseEventId: "evt_tool"})
 	if err != nil || accepted.GetStale() == nil {
@@ -1967,12 +1965,12 @@ func TestPostgreSQLBridgeAPIStoreAcceptAndAwaitSandboxExecutionByDurableTarget(t
 		bindingID   = "bind_sandbox_durable_target"
 		podUID      = "pod_sandbox_durable_target"
 	)
-	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	startAwaitExecutionResultListener(t, store, nil)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	toolUseEventID := writeDurableOrdinaryToolUseForTest(
 		t, store, scope, "mreq_sandbox_durable_target", "call_sandbox_durable_target",
 		"exec_command", `{"cmd":"printf ok"}`,
@@ -2058,11 +2056,11 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryUsesDurableInputAndReplays(t *testing.
 		podUID    = "pod_memory_durable_target"
 		storeID   = "memstore_memory_durable_target"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
+	sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	toolUseEventID := writeDurableOrdinaryToolUseForTest(
 		t, store, scope, "mreq_memory_durable_target", "call_memory_durable_target",
 		"memory", `{"action":"create","path":"notes/todo.md","content":"one"}`,
@@ -2116,11 +2114,11 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryUsesDurableInputAndReplays(t *testing.
 
 func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsMissingDurableTarget(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_memory_missing_target", "thr_memory_missing_target")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_memory_missing_target", "thr_memory_missing_target")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_memory_missing_target", "bind_memory_missing_target", 1, "pod_memory_missing_target")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	_, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
-		Scope:          bridgeAPIScope("sesn_memory_missing_target", "thr_memory_missing_target", "bind_memory_missing_target", 1, "pod_memory_missing_target"),
+		Scope:          sessionfixture.BridgeAPIScope("sesn_memory_missing_target", "thr_memory_missing_target", "bind_memory_missing_target", 1, "pod_memory_missing_target"),
 		ToolUseEventId: "evt_memory_missing_target",
 	})
 	if status.Code(err) != codes.FailedPrecondition {
@@ -2141,7 +2139,7 @@ func writeDurableOrdinaryToolUseForTest(
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_"+modelRequestID+"_start", modelRequestID, "agent_provider_request", 0)
 	response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_" + modelRequestID + "_tool", ModelRequestId: modelRequestID,
-		ToolDeclaration: bridgeToolDeclarationWithRouteForTest(modelToolCallID, toolName, inputJSON, "allow"),
+		ToolDeclaration: sessionfixture.BridgeToolDeclarationWithRouteForTest(modelToolCallID, toolName, inputJSON, "allow"),
 	})
 	if err != nil || response.GetCommitted() == nil {
 		t.Fatalf("write durable ordinary Tool use: response=%#v err=%v", response, err)
@@ -2160,7 +2158,7 @@ func durableMemoryRequestForTest(
 	if !json.Valid([]byte(inputJSON)) {
 		t.Fatalf("durable memory Tool input is invalid JSON: %s", inputJSON)
 	}
-	sequence := nextBridgeAPIEventSequenceForTest(t, db, scope.GetSessionId(), scope.GetSessionThreadId())
+	sequence := sessionfixture.NextBridgeAPIEventSequenceForTest(t, db, scope.GetSessionId(), scope.GetSessionThreadId())
 	seedBridgeAPIEvent(
 		t,
 		db,
@@ -2195,7 +2193,7 @@ func durableMemoryRequestForTest(
 	); err != nil {
 		t.Fatalf("stamp durable memory Tool facts: %v", err)
 	}
-	seedBridgeAPIAllowedToolRoute(t, db, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, db, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID)
 	return &bridgev1.RunMemoryRequest{Scope: scope, ToolUseEventId: toolUseEventID}
 }
 

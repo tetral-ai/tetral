@@ -73,6 +73,14 @@ func NewService(store Store, options ...Option) *Service {
 	return service
 }
 
+// NoIdempotencyKey is the idempotencyKey argument of AppendClientEvents for a
+// request that carried no Idempotency-Key header. Such an admission reads and
+// writes no idempotency receipt, so a retry is a new admission.
+const NoIdempotencyKey = ""
+
+// AppendClientEvents admits one public event batch. idempotencyKey is the
+// client's Idempotency-Key header value, or NoIdempotencyKey when the request
+// carried none.
 func (s *Service) AppendClientEvents(ctx context.Context, workspaceID workspace.ID, sessionID string, idempotencyKey string, request AppendRequest) (*AppendResult, error) {
 	if workspaceID == "" {
 		return nil, &ValidationError{Message: "workspace_id is required"}
@@ -127,7 +135,10 @@ type appendSettings struct {
 	now time.Time
 }
 
+// appendIdempotency is the admission's idempotency input. supplied is false
+// when the client sent no Idempotency-Key header; keyDigest is then nil.
 type appendIdempotency struct {
+	supplied  bool
 	keyDigest []byte
 }
 
@@ -255,15 +266,19 @@ func validateContentBlock(block ContentBlock) error {
 }
 
 func prepareAppendIdempotency(rawKey string, request AppendRequest) (appendIdempotency, error) {
+	if rawKey == NoIdempotencyKey {
+		return appendIdempotency{supplied: false}, nil
+	}
 	key := strings.TrimSpace(rawKey)
 	if key == "" {
-		return appendIdempotency{}, &ValidationError{Message: "Idempotency-Key header is required"}
+		return appendIdempotency{}, &ValidationError{Message: "Idempotency-Key header must not be blank"}
 	}
 	if len([]byte(key)) > 255 {
 		return appendIdempotency{}, &ValidationError{Message: "Idempotency-Key header is too long"}
 	}
 	keyDigest := sha256.Sum256([]byte(key))
 	return appendIdempotency{
+		supplied:  true,
 		keyDigest: keyDigest[:],
 	}, nil
 }

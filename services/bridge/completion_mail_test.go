@@ -9,22 +9,12 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
 func completionMailEnvelope(taskName string, sender string, payload string) string {
 	return "Message Type: FINAL_ANSWER\nTask name: " + taskName + "\nSender: " + sender + "\nPayload:\n" + payload
-}
-
-func TestCompletionDeliveryIdentityIsScopedToTheSettlingChild(t *testing.T) {
-	first := completionDeliveryID("thr_child_a", "rwrite_shared")
-	second := completionDeliveryID("thr_child_b", "rwrite_shared")
-	if first == second {
-		t.Fatalf("sender-scoped completion delivery ids collided: %q", first)
-	}
-	if first != completionDeliveryID("thr_child_a", "rwrite_shared") {
-		t.Fatal("completion delivery identity is not deterministic")
-	}
 }
 
 func TestPostgreSQLCompletionMailPersistsDeclaredEnvelopeVerbatim(t *testing.T) {
@@ -144,8 +134,8 @@ func TestPostgreSQLCompletionMailNeverLeavesApprovalReviewerThreads(t *testing.T
 			mainID     = "thrd_completion_reviewer_idle_main"
 			reviewerID = "thrd_completion_reviewer_idle"
 		)
-		seedBridgeAPISession(t, admin, "default", sessionID, mainID)
-		seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, reviewerID)
+		sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainID)
+		sessionfixture.SeedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, reviewerID)
 		seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_completion_reviewer_idle", 1, "pod_completion_reviewer_idle")
 		if _, err := admin.ExecContext(context.Background(),
 			`UPDATE sessions SET status='running' WHERE workspace_id='default' AND id=$1`,
@@ -161,7 +151,7 @@ func TestPostgreSQLCompletionMailNeverLeavesApprovalReviewerThreads(t *testing.T
 			t.Fatalf("mark reviewer thread running: %v", err)
 		}
 		store := completionMailTestStore(t, runtime)
-		scope := bridgeAPIScope(sessionID, reviewerID, "bind_completion_reviewer_idle", 1, "pod_completion_reviewer_idle")
+		scope := sessionfixture.BridgeAPIScope(sessionID, reviewerID, "bind_completion_reviewer_idle", 1, "pod_completion_reviewer_idle")
 		request := &bridgev1.FinishIdleRequest{
 			Scope:          scope,
 			DurableTurnId:  "evt_completion_reviewer_running",
@@ -184,24 +174,24 @@ func TestPostgreSQLCompletionMailNeverLeavesApprovalReviewerThreads(t *testing.T
 			mainID     = "thrd_completion_reviewer_terminate_main"
 			reviewerID = "thrd_completion_reviewer_terminate"
 		)
-		seedBridgeAPISession(t, admin, "default", sessionID, mainID)
-		seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, reviewerID)
+		sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainID)
+		sessionfixture.SeedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, reviewerID)
 		seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_completion_reviewer_terminate", 1, "pod_completion_reviewer_terminate")
 		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-		scope := bridgeAPIScope(sessionID, reviewerID, "bind_completion_reviewer_terminate", 1, "pod_completion_reviewer_terminate")
+		scope := sessionfixture.BridgeAPIScope(sessionID, reviewerID, "bind_completion_reviewer_terminate", 1, "pod_completion_reviewer_terminate")
 		seedBridgeAPIOpenDurableTurn(t, admin, scope, "rwrite_completion_reviewer_terminate")
 		const privateToolUseID = "evt_completion_reviewer_private_tool"
 		seedBridgeAPIEvent(t, admin, "default", sessionID, reviewerID, privateToolUseID,
-			nextBridgeAPIEventSequenceForTest(t, admin, sessionID, reviewerID), "agent.tool_use",
+			sessionfixture.NextBridgeAPIEventSequenceForTest(t, admin, sessionID, reviewerID), "agent.tool_use",
 			`{"type":"agent.tool_use","name":"Read","input":{"path":"review.txt"},"evaluated_permission":"allow"}`)
 		if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
 			SET visibility='internal',session_visible=false
 			WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, privateToolUseID); err != nil {
 			t.Fatalf("make reviewer Tool route private: %v", err)
 		}
-		seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, reviewerID,
+		sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, reviewerID,
 			"mreq_completion_reviewer_private_tool", privateToolUseID, "call_completion_reviewer_private_tool", "Read")
-		seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, reviewerID, privateToolUseID)
+		sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, reviewerID, privateToolUseID)
 		if _, err := store.CommitRuntimeTermination(context.Background(), &bridgev1.CommitRuntimeTerminationRequest{
 			Scope:          scope,
 			RuntimeWriteId: "rwrite_completion_reviewer_terminate",
@@ -217,7 +207,7 @@ func TestPostgreSQLCompletionMailNeverLeavesApprovalReviewerThreads(t *testing.T
 		var routeStatus string
 		if err := admin.QueryRowContext(context.Background(), `SELECT
 			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
-			 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_event_id'=$3 AND visibility='internal'),
+			 AND type='agent.tool_result' AND tool_use_event_id=$3 AND visibility='internal'),
 			(SELECT status FROM session_pending_tool_uses WHERE workspace_id='default' AND session_id=$1
 			 AND session_thread_id=$2 AND tool_use_event_id=$3)`, sessionID, reviewerID, privateToolUseID).
 			Scan(&privateResults, &routeStatus); err != nil {

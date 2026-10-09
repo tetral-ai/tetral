@@ -1,0 +1,51 @@
+{
+  "realm": "tetral-fixture",
+  "enabled": true,
+  "sslRequired": "all",
+  "registrationAllowed": false,
+  "accessTokenLifespan": 900,
+  "defaultSignatureAlgorithm": "RS256",
+  "clients": [
+    {
+      "id": "fixture-client-id",
+      "clientId": "tetral-fixture",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "GENERATED_CLIENT_SECRET",
+      "serviceAccountsEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "engine-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "tetral-engine",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "id": "fixture-human",
+      "username": "fixture-human",
+      "enabled": true,
+      "email": "fixture-human@example.invalid",
+      "emailVerified": true,
+      "firstName": "Fixture",
+      "lastName": "Human",
+      "credentials": [{"type": "password", "value": "GENERATED_HUMAN_PASSWORD", "temporary": false}]
+    },
+    {
+      "id": "fixture-service",
+      "username": "service-account-tetral-fixture",
+      "enabled": true,
+      "serviceAccountClientId": "tetral-fixture"
+    }
+  ]
+}

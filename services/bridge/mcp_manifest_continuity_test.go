@@ -11,14 +11,17 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/mcpmanifest"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
 func TestPostgreSQLBridgeAPIStoreManifestAcceptanceUsesMonotonicGenerationAcrossETagFlap(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedMCPFamilySession(t, admin, "sesn_mcp_generation_flap", "thr_mcp_generation_flap", "claude")
-	lister := &recordingMCPManifestLister{results: []MCPManifestListResult{
+	lister := &recordingMCPManifestLister{results: []mcpmanifest.ListResult{
 		mcpManifestResult("etag_a", "github_a"),
 		mcpManifestResult("etag_b", "github_b"),
 		mcpManifestResult("etag_a", "github_a_again"),
@@ -123,10 +126,10 @@ func TestPostgreSQLBridgeAPIStoreManifestByteBoundAcceptsExactAndPreservesAccept
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedMCPFamilySession(t, admin, "sesn_mcp_bytes", "thr_mcp_bytes", "claude")
 	exactTool := exactBoundMCPManifestTool(t)
-	lister := &recordingMCPManifestLister{results: []MCPManifestListResult{
-		{ManifestETag: "etag_exact", Tools: []MCPManifestTool{exactTool}},
-		{ManifestETag: "etag_over", Tools: []MCPManifestTool{{Name: exactTool.Name, Description: exactTool.Description + "x", InputSchemaJSON: exactTool.InputSchemaJSON}}},
-		{ManifestETag: "etag_over", Tools: []MCPManifestTool{{Name: exactTool.Name, Description: exactTool.Description + "x", InputSchemaJSON: exactTool.InputSchemaJSON}}},
+	lister := &recordingMCPManifestLister{results: []mcpmanifest.ListResult{
+		{ManifestETag: "etag_exact", Tools: []mcpmanifest.Tool{exactTool}},
+		{ManifestETag: "etag_over", Tools: []mcpmanifest.Tool{{Name: exactTool.Name, Description: exactTool.Description + "x", InputSchemaJSON: exactTool.InputSchemaJSON}}},
+		{ManifestETag: "etag_over", Tools: []mcpmanifest.Tool{{Name: exactTool.Name, Description: exactTool.Description + "x", InputSchemaJSON: exactTool.InputSchemaJSON}}},
 	}}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.MCPManifestLister = lister
@@ -144,8 +147,8 @@ func TestPostgreSQLBridgeAPIStoreManifestByteBoundAcceptsExactAndPreservesAccept
 	); err != nil {
 		t.Fatalf("read exact-bound manifest: %v", err)
 	}
-	if len([]byte(beforeTools)) != MaxMcpManifestBytes {
-		t.Fatalf("exact accepted tools bytes = %d; want %d", len([]byte(beforeTools)), MaxMcpManifestBytes)
+	if len([]byte(beforeTools)) != mcpmanifest.MaxBytes {
+		t.Fatalf("exact accepted tools bytes = %d; want %d", len([]byte(beforeTools)), mcpmanifest.MaxBytes)
 	}
 	firstOver, err := store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
 		WorkspaceId: "default", SessionId: "sesn_mcp_bytes", McpServerName: "github", ManifestEtag: "etag_over",
@@ -255,7 +258,7 @@ func TestPostgreSQLBridgeAPIStoreFirstOverCapManifestCommitsReadinessOnlyAndCold
 	exactTool := exactBoundMCPManifestTool(t)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("mcp-first-over-binding-token-key")
-	lister := &constantMCPManifestLister{result: MCPManifestListResult{ManifestETag: "etag_over", Tools: []MCPManifestTool{{
+	lister := &constantMCPManifestLister{result: mcpmanifest.ListResult{ManifestETag: "etag_over", Tools: []mcpmanifest.Tool{{
 		Name: exactTool.Name, Description: exactTool.Description + "x", InputSchemaJSON: exactTool.InputSchemaJSON,
 	}}}}
 	store.MCPManifestLister = lister
@@ -289,7 +292,7 @@ func TestPostgreSQLBridgeAPIStoreFirstOverCapManifestCommitsReadinessOnlyAndCold
 		t.Fatalf("readiness-only row = tools=%v etag=%v generation=%d readiness=%q diagnostic=%q", toolsJSON, etag, generation, readiness, diagnostic.String)
 	}
 	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope("sesn_mcp_first_over", "thr_mcp_first_over", "bind_mcp_first_over", 1, "pod_mcp_first_over"),
+		Scope: sessionfixture.BridgeAPIScope("sesn_mcp_first_over", "thr_mcp_first_over", "bind_mcp_first_over", 1, "pod_mcp_first_over"),
 	})
 	if err != nil {
 		t.Fatalf("LoadContext readiness-only row: %v", err)
@@ -337,10 +340,10 @@ func TestPostgreSQLBridgeAPIStoreStoredETagDuplicatePathsRestoreReadyAndEnqueue(
 		WHERE workspace_id = 'default' AND session_id = 'sesn_mcp_restore' AND mcp_server_name = 'github'`); err != nil {
 		t.Fatalf("mark acceptance-path etag unready: %v", err)
 	}
-	var acceptance mcpManifestAcceptance
+	var acceptance mcpmanifest.Acceptance
 	if err := dbconnect.NewClientForTesting(runtime).WithWorkspaceTx(context.Background(), "default", "test.mcp_restore_acceptance", func(tx *dbconnect.Tx) error {
 		var err error
-		acceptance, err = captureMCPManifestAcceptanceTx(context.Background(), tx, "default", "sesn_mcp_restore", "github", "etag_restore", mcpManifestResult("etag_restore", "github_restore").Tools, time.Now().UTC())
+		acceptance, err = mcpmanifest.CaptureAcceptanceTx(context.Background(), tx, "default", "sesn_mcp_restore", "github", "etag_restore", mcpManifestResult("etag_restore", "github_restore").Tools, time.Now().UTC())
 		return err
 	}); err != nil {
 		t.Fatalf("acceptance-path restore: %v", err)
@@ -361,69 +364,6 @@ func TestPostgreSQLBridgeAPIStoreStoredETagDuplicatePathsRestoreReadyAndEnqueue(
 	assertQueuedMCPManifestGenerations(t, admin, "sesn_mcp_restore", []int64{1, 3, 5})
 }
 
-func TestPostgreSQLRuntimeDeliveryStoreFinalManifestAttemptTransitionsUnreadyWithoutReplacementJob(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedMCPFamilySession(t, admin, "sesn_mcp_exhaust", "thr_mcp_exhaust", "claude")
-	bridge := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	bridge.MCPManifestLister = &constantMCPManifestLister{result: mcpManifestResult("etag_exhaust", "github_exhaust")}
-	mustAcceptMCPManifestChange(t, bridge, "sesn_mcp_exhaust", "etag_exhaust")
-	delivery := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 0)
-	logs := &lockedBuffer{}
-	delivery.Logger = slog.New(slog.NewJSONHandler(logs, nil))
-	job := RuntimeJob{
-		Kind: "runtime_config_update", WorkspaceID: "default", SessionID: "sesn_mcp_exhaust",
-		RuntimeInputID: runtimeMCPManifestInputID("sesn_mcp_exhaust", "github", 1), MCPServerName: "github",
-		MCPManifestGeneration: "1", AttemptCount: 5, MaxAttempts: 5,
-	}
-	result, err := delivery.FinalizeRuntimeDelivery(context.Background(), RuntimeJob{
-		Kind: job.Kind, WorkspaceID: job.WorkspaceID, SessionID: job.SessionID,
-		RuntimeInputID: job.RuntimeInputID, MCPServerName: job.MCPServerName,
-		MCPManifestGeneration: job.MCPManifestGeneration, AttemptCount: job.AttemptCount, MaxAttempts: job.MaxAttempts,
-	}, RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true})
-	if err != nil {
-		t.Fatalf("FinalizeRuntimeDelivery final MCP attempt: %v", err)
-	}
-	if result.Status != RuntimeDeliveryRejected || result.Retryable || result.ErrorKind != "runtime_delivery_exhausted" {
-		t.Fatalf("finalized result = %#v; want typed same-job defer disposition", result)
-	}
-	var generation int64
-	var readiness, diagnostic string
-	if err := admin.QueryRow(`SELECT manifest_generation, readiness, diagnostic FROM session_mcp_manifests
-		WHERE workspace_id = 'default' AND session_id = 'sesn_mcp_exhaust' AND mcp_server_name = 'github'`).Scan(&generation, &readiness, &diagnostic); err != nil {
-		t.Fatalf("read exhausted manifest: %v", err)
-	}
-	if generation != 2 || readiness != "unready" || diagnostic != "delivery_exhausted" {
-		t.Fatalf("exhausted manifest = generation %d readiness %q diagnostic %q", generation, readiness, diagnostic)
-	}
-	assertQueuedMCPManifestGenerations(t, admin, "sesn_mcp_exhaust", []int64{1})
-	var maxAttempts []int
-	rows, err := admin.Query(`SELECT max_attempts FROM queue_jobs WHERE workspace_id = 'default' AND payload_json::jsonb ->> 'session_id' = 'sesn_mcp_exhaust' ORDER BY created_at`)
-	if err != nil {
-		t.Fatalf("query MCP max attempts: %v", err)
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var attempts int
-		if err := rows.Scan(&attempts); err != nil {
-			t.Fatal(err)
-		}
-		maxAttempts = append(maxAttempts, attempts)
-	}
-	if stringSliceJSON(maxAttempts) != stringSliceJSON([]int{5}) {
-		t.Fatalf("MCP max attempts = %v; want the original queue job only", maxAttempts)
-	}
-	if _, err := delivery.FinalizeRuntimeDelivery(context.Background(), job, RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true}); err != nil {
-		t.Fatalf("replay final MCP attempt: %v", err)
-	}
-	if strings.Count(logs.String(), `"event.kind":"mcp_manifest_transition_committed"`) != 1 ||
-		!strings.Contains(logs.String(), `"mcp.manifest.previous_generation":1`) ||
-		!strings.Contains(logs.String(), `"mcp.manifest.generation":2`) ||
-		!strings.Contains(logs.String(), `"mcp.manifest.diagnostic":"delivery_exhausted"`) ||
-		!strings.Contains(logs.String(), `"queue.custody":"retained"`) {
-		t.Fatalf("delivery-exhausted transition log = %s; want one retained-custody commit", logs.String())
-	}
-}
-
 func TestPostgreSQLBridgeAPIStoreLoadContextReplaysLatestManifestForReplacementBinding(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedMCPFamilySession(t, admin, "sesn_mcp_cold", "thr_mcp_cold", "claude")
@@ -435,7 +375,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReplaysLatestManifestForReplacementB
 	store.MCPManifestLister = lister
 
 	first, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope("sesn_mcp_cold", "thr_mcp_cold", "bind_mcp_cold_1", 1, "pod_mcp_cold_1"),
+		Scope: sessionfixture.BridgeAPIScope("sesn_mcp_cold", "thr_mcp_cold", "bind_mcp_cold_1", 1, "pod_mcp_cold_1"),
 	})
 	if err != nil {
 		t.Fatalf("LoadContext first binding: %v", err)
@@ -448,14 +388,22 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReplaysLatestManifestForReplacementB
 		`[{"name":"github_issue","description":"github_issue","input_schema":{"type":"object"}}]`); err != nil {
 		t.Fatalf("advance accepted manifest: %v", err)
 	}
+	identity := runtimecontrol.ProcessIdentity{Namespace: "tetral-agent-runtime", PodUID: "pod_mcp_cold_2", ID: "process_pod_mcp_cold_2"}
+	registered, err := runtimecontrol.RegisterProcess(context.Background(), dbconnect.NewClientForTesting(admin), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runtimecontrol.ReportProcess(context.Background(), dbconnect.NewClientForTesting(admin), identity, registered.RegistrationReceipt, runtimecontrol.ProcessAccepting); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_runtime_bindings
-		    SET binding_id = 'bind_mcp_cold_2', binding_generation = 2, agent_runtime_pod_uid = 'pod_mcp_cold_2', updated_at = '2026-01-01T00:00:02Z'
+		    SET binding_id = 'bind_mcp_cold_2', binding_generation = 2, agent_runtime_pod_uid = 'pod_mcp_cold_2', runtime_process_id='process_pod_mcp_cold_2', updated_at = '2026-01-01T00:00:02Z'
 		  WHERE workspace_id = 'default' AND session_id = 'sesn_mcp_cold'`); err != nil {
 		t.Fatalf("replace runtime binding: %v", err)
 	}
 	second, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope("sesn_mcp_cold", "thr_mcp_cold", "bind_mcp_cold_2", 2, "pod_mcp_cold_2"),
+		Scope: sessionfixture.BridgeAPIScope("sesn_mcp_cold", "thr_mcp_cold", "bind_mcp_cold_2", 2, "pod_mcp_cold_2"),
 	})
 	if err != nil {
 		t.Fatalf("LoadContext replacement binding: %v", err)
@@ -468,19 +416,19 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReplaysLatestManifestForReplacementB
 
 type constantMCPManifestLister struct {
 	mu     sync.Mutex
-	result MCPManifestListResult
+	result mcpmanifest.ListResult
 	calls  int
 }
 
 type stagedMCPManifestLister struct {
 	mu      sync.Mutex
-	result  MCPManifestListResult
+	result  mcpmanifest.ListResult
 	calls   int
 	staged  chan struct{}
 	release chan struct{}
 }
 
-func newStagedMCPManifestLister(result MCPManifestListResult) *stagedMCPManifestLister {
+func newStagedMCPManifestLister(result mcpmanifest.ListResult) *stagedMCPManifestLister {
 	return &stagedMCPManifestLister{
 		result:  result,
 		staged:  make(chan struct{}),
@@ -488,7 +436,7 @@ func newStagedMCPManifestLister(result MCPManifestListResult) *stagedMCPManifest
 	}
 }
 
-func (l *stagedMCPManifestLister) ListMCPTools(ctx context.Context, _ MCPManifestListRequest) (MCPManifestListResult, error) {
+func (l *stagedMCPManifestLister) ListMCPTools(ctx context.Context, _ mcpmanifest.ListRequest) (mcpmanifest.ListResult, error) {
 	l.mu.Lock()
 	l.calls++
 	if l.calls == 2 {
@@ -497,7 +445,7 @@ func (l *stagedMCPManifestLister) ListMCPTools(ctx context.Context, _ MCPManifes
 	l.mu.Unlock()
 	select {
 	case <-ctx.Done():
-		return MCPManifestListResult{}, ctx.Err()
+		return mcpmanifest.ListResult{}, ctx.Err()
 	case <-l.release:
 		return l.result, nil
 	}
@@ -509,15 +457,15 @@ func (l *stagedMCPManifestLister) callCount() int {
 	return l.calls
 }
 
-func (l *constantMCPManifestLister) ListMCPTools(_ context.Context, _ MCPManifestListRequest) (MCPManifestListResult, error) {
+func (l *constantMCPManifestLister) ListMCPTools(_ context.Context, _ mcpmanifest.ListRequest) (mcpmanifest.ListResult, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.calls++
 	return l.result, nil
 }
 
-func mcpManifestResult(etag string, toolName string) MCPManifestListResult {
-	return MCPManifestListResult{ManifestETag: etag, Tools: []MCPManifestTool{{
+func mcpManifestResult(etag string, toolName string) mcpmanifest.ListResult {
+	return mcpmanifest.ListResult{ManifestETag: etag, Tools: []mcpmanifest.Tool{{
 		Name: toolName, Description: toolName, InputSchemaJSON: `{"type":"object"}`,
 	}}}
 }
@@ -539,7 +487,7 @@ func TestPostgreSQLMCPManifestChangeRejectsTerminatedSessionWithoutCustody(t *te
 		sessionID = "sesn_mcp_manifest_terminated"
 		threadID  = "thr_mcp_manifest_terminated"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET status='terminated'
 		WHERE workspace_id='default' AND id=$1`, sessionID); err != nil {
 		t.Fatalf("terminate MCP Session: %v", err)
@@ -549,7 +497,7 @@ func TestPostgreSQLMCPManifestChangeRejectsTerminatedSessionWithoutCustody(t *te
 	response, err := store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
 		WorkspaceId: "default", SessionId: sessionID, McpServerName: "github", ManifestEtag: "etag-terminal",
 	})
-	if response != nil || !isConversationMutationStaleError(err) {
+	if response != nil || !runtimecontrol.IsConversationMutationStaleError(err) {
 		t.Fatalf("terminated Session MCP change = %#v/%v; want typed stale", response, err)
 	}
 	var manifests, jobs int
@@ -564,20 +512,20 @@ func TestPostgreSQLMCPManifestChangeRejectsTerminatedSessionWithoutCustody(t *te
 	}
 }
 
-func exactBoundMCPManifestTool(t *testing.T) MCPManifestTool {
+func exactBoundMCPManifestTool(t *testing.T) mcpmanifest.Tool {
 	t.Helper()
-	tool := MCPManifestTool{Name: "github_exact", InputSchemaJSON: `{"type":"object"}`}
-	base, err := canonicalMCPManifestToolsJSON([]MCPManifestTool{tool})
+	tool := mcpmanifest.Tool{Name: "github_exact", InputSchemaJSON: `{"type":"object"}`}
+	base, err := mcpmanifest.CanonicalToolsJSON([]mcpmanifest.Tool{tool})
 	if err != nil {
 		t.Fatalf("marshal base manifest: %v", err)
 	}
-	tool.Description = strings.Repeat("x", MaxMcpManifestBytes-len(base))
-	exact, err := canonicalMCPManifestToolsJSON([]MCPManifestTool{tool})
+	tool.Description = strings.Repeat("x", mcpmanifest.MaxBytes-len(base))
+	exact, err := mcpmanifest.CanonicalToolsJSON([]mcpmanifest.Tool{tool})
 	if err != nil {
 		t.Fatalf("marshal exact manifest: %v", err)
 	}
-	if len(exact) != MaxMcpManifestBytes {
-		t.Fatalf("exact manifest construction bytes = %d; want %d", len(exact), MaxMcpManifestBytes)
+	if len(exact) != mcpmanifest.MaxBytes {
+		t.Fatalf("exact manifest construction bytes = %d; want %d", len(exact), mcpmanifest.MaxBytes)
 	}
 	return tool
 }
@@ -658,6 +606,3 @@ func stringSliceJSON(value any) string {
 	raw, _ := json.Marshal(value)
 	return string(raw)
 }
-
-var _ MCPManifestLister = (*constantMCPManifestLister)(nil)
-var _ MCPManifestLister = (*stagedMCPManifestLister)(nil)

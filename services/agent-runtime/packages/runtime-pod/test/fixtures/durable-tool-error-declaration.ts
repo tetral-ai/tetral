@@ -23,6 +23,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly modelRequestId: string;
 	readonly modelToolCallId: string;
 	readonly toolUseEventId: string;
@@ -30,6 +31,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 
 let captured: SettleToolResultRequest | undefined;
 const client = {
+close:()=>undefined,
 	acceptSandboxExecution: (
 		_request: AcceptSandboxExecutionRequest,
 		_metadata: Metadata,
@@ -42,6 +44,7 @@ const client = {
 	awaitSandboxExecution: (
 		_request: AwaitSandboxExecutionRequest,
 		_metadata: Metadata,
+		_options:CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	) => {
 		callback(null, {
@@ -77,6 +80,7 @@ const request: RuntimeToolExecutionRequest = {
 	bindingGeneration: input.bindingGeneration,
 	runtimeBindingToken: "fixture-binding-token",
 	targetPodUid: input.targetPodUid,
+	runtimeProcessId: input.runtimeProcessId,
 	modelRequestId: input.modelRequestId,
 	modelToolCallId: input.modelToolCallId,
 	modelOrder: 0,
@@ -114,6 +118,7 @@ const attempt = await writer.settleToolResult({
 	bindingId: input.bindingId,
 	bindingGeneration: input.bindingGeneration,
 	targetPodUid: input.targetPodUid,
+	runtimeProcessId: input.runtimeProcessId,
 	settlement: { toolUseEventId: input.toolUseEventId, outcome },
 });
 if (!attempt.ok || attempt.result.type !== "committed" || captured?.settlement?.error === undefined) {
@@ -127,3 +132,5 @@ process.stdout.write(JSON.stringify({
 	runtimeSettlement: outcome,
 	expectedDurableError: runtimeToolErrorFromFailure(result.error),
 }));
+
+await Promise.all([runner.close(),writer.close()]);

@@ -1,14 +1,17 @@
 # gateway
 
-The Gateway Pod: the only place in the platform where provider SDKs, provider
-credentials, and provider wire formats exist. It runs three containers behind
-one cluster-internal headless `Service` — one gRPC port per container plus HTTP
-health/metrics listeners. This folder owns two of them, both TypeScript/Bun
-under `packages/`: `provider-gateway` (this document's subject) and
-`mcp-connector` (the MCP tool relay, detailed in its own section below). The
-third container, `web-connector`, lives in its own service folder with its own
-README. The shared support packages — `protocol`, `lowering`, and `schema` —
-sit beside the container packages.
+This workspace owns the Provider Gateway and MCP Connector Bun processes in
+`packages/provider-gateway` and `packages/mcp-connector`. Each runs in its own
+Deployment with its own ServiceAccount, credentials, probes, metrics Service and
+replica setting. Package-owned manifests live under `k8s/provider-gateway/` and
+`k8s/mcp-connector/`. The Go Web Connector runs independently under
+`services/web-connector`; its implementation and manifests belong there.
+Shared protocol, lowering and schema packages remain in this workspace.
+
+Provider Gateway, MCP, and Web each use an ordinary ClusterIP Service. Routed
+mesh upstreams select replicas for each new request while preserving an admitted
+stream on its original upstream. Provider autoscaling targets only `provider-gateway`, with
+its existing minimum of two, maximum of ten and CPU target of 70 percent.
 
 ## Responsibilities
 
@@ -42,23 +45,129 @@ runs only after the prior succeeds.
 
 | Stage | Action | Failure |
 | --- | --- | --- |
-| Authenticate | Verify the runtime workload token and the per-thread `runtime_binding_token` (scope triple, binding id/generation, pod UID, expiry) | gRPC `UNAUTHENTICATED`/`PERMISSION_DENIED` before any credential is resolved |
+| Authenticate | Verify the runtime workload token and the per-thread `runtime_binding_token` (scope triple, binding id/generation, pod UID, Runtime process ID, expiry) | gRPC `UNAUTHENTICATED`/`PERMISSION_DENIED` before any credential is resolved |
 | Readiness | Reject if the process is not ready | gRPC `UNAVAILABLE` ("gateway service not ready") — transient, runtime retries |
 | Admission | Bounded concurrent in-flight turns (`TurnAdmissionGate`, default 8, `TETRAL_GATEWAY_MAX_CONCURRENT_TURNS`) | fast retryable `provider-error` rather than event-loop queueing |
 | Validate | `validateProviderRequest` (pure, in `packages/protocol`) | deterministic `INVALID_ARGUMENT` — **non-retryable** for that turn |
 | Catalog lookup | Model → rules + client | unknown model → `provider_unavailable` (non-retryable) |
 | Lower | `lowerProviderRequest` (hop ①, pure, once per turn) | lowering failure closes the turn |
 | Credential + call | Resolve credential, attempt the provider stream inside the pool failover loop | see credential and pool tables |
-| Raise + write | `ProviderStreamRaiser.map` each SDK stream part → `ProviderStreamEvent`, written with gRPC drain backpressure | terminal event only |
+| Raise + assemble + write | Private normalized SDK records → `ProviderBlockAssembler` → complete protobuf frames; one frame held through its write callback and any required drain | partial blocks discarded; complete prefix retained |
 
-The stream event set is closed: `text-*`, `reasoning-*`, `tool-input-*`,
-`tool-call`, `finish`, `provider-error`, and the pre-stream
-`attachment-rejections` report. Ordering and terminal rules the gateway must
-never violate: `finish` and `provider-error` are terminal and mutually
-exclusive; `usage` rides `finish` only; every fragment id starts before its
-delta/end and never restarts after end; `tool-call` arrives once per id and its
-name matches the streamed tool-input; `attachment-rejections` is non-terminal,
-emitted at most once, before provider streaming begins.
+The v2 wire carries `ThinkingStarted`, `TextComplete`, `ReasoningComplete`,
+`ToolCallComplete`, Finish, ProviderError, and the pre-stream attachment-rejection
+report. Every frame has a consecutive `frame_sequence` beginning at one. Requests
+must explicitly set `output_contract_version = 2`; absent, older, or unknown
+versions fail before attachment, credential, or provider work. There is no fragment
+wire fallback. Runtime supplies the acknowledged `model_request_start_event_id`,
+thread role, and visibility from its loaded identity.
+
+Fragment starts, deltas, ends, and streamed tool arguments stay inside Gateway's
+private normalized union. The assembler checks their lifecycle, immutable tool
+names, completion uniqueness, Unicode scalars, final metadata, and successful EOF.
+Streamed tool argument bytes count against the live retained-content budget until
+their complete call arrives; Gateway keeps no argument copy, and the SDK's
+complete call JSON is the authoritative input. Finish cannot hide an open
+text/reasoning block or tool input awaiting its complete call. A provider attempt closes the credential failover fence at its first private
+normalized event, even when the assembler has emitted no complete frame yet.
+
+Text IDs are allocated on first nonempty content; empty text blocks produce no
+frame. Thinking IDs are allocated at reasoning start; `ThinkingStarted` contains
+only the provider part ID and event ID. Signed empty reasoning remains complete
+content. The injected best-effort preview offer admits only main/public ordinary
+requests, never includes reasoning bodies or signatures, and cannot change formal
+delivery when disabled or throwing. The admitted request's producer publishes
+best-effort public progress through the process-owned Core NATS client.
+
+### Public previews
+
+Gateway admits previews only for an ordinary model request whose loaded thread
+role is `main` and visibility is `public`. Runtime supplies those facts and the
+durably acknowledged model-request Start identity; viewer presence never changes
+model admission. Child, reviewer, compaction and unknown identities use the same
+complete-content path and produce no previews. Text/thinking IDs allocated by the
+assembler remain the IDs of their eventual committed events.
+
+`providers/preview-publisher.ts` owns one client, a fresh-connection supervisor
+and a nonblocking request producer. `request_open` precedes provider output;
+text starts at sequence zero and subsequent deltas are consecutive. Thinking is
+start-only: reasoning bodies/signatures and Tool arguments never enter the broker.
+The strict versioned JSON and encoded workspace/Session subject belong to
+`providers/preview-protocol.ts`. Shared contract ceilings (256 KiB/frame and 4096
+event identities/request) are defined by the protocol's `preview-limits.json`.
+Split UTF-16 scalars are held per event until complete; invalid/oversized preview
+content stops that event while authoritative complete content keeps its own limits.
+
+The queue is initially 4 MiB/1024 frames. Admission computes exact JSON UTF-8 size
+without a serialized allocation and reserves each encoded payload
+plus a bounded client copy and its PUB framing, so queued and in-flight/client
+buffers share the byte budget. A direct encoder fills one reserved buffer;
+rejected count/byte admission never invokes it. A worker hands at most 256 KiB/64 frames to the
+official client and holds their charge through one flush with a one-second
+deadline. Flush confirms processing by the connected server, not subscriber
+delivery. Encoding or queue overflow removes that event's unsent frames and stops
+its later deltas. Disconnect or uncertain flush discards the queue and disables
+active producers. Retired in-flight batches and client reservations stay charged
+until their worker and old-client cleanup settle; replacement requests share the
+remaining original budget and the single worker. The client has `reconnect:false`; a supervisor uses a one-second
+connect budget and a jittered retry delay capped at five seconds, and a fresh
+connection admits only new requests. Gateway's default native heartbeat
+interval is 1000 ms with one outstanding ping allowed. Its stale-connection signal explicitly
+closes the native client; that status worker joins connection cleanup, so an idle
+publisher does not depend only on a socket close callback. Old previews are never replayed. Broker
+availability does not change Gateway's core readiness, provider invocation,
+complete frames, or durable Tool/context custody.
+
+`providers/preview-transport.ts` owns one complete connection-attempt deadline
+across seeds and sockets, including pre-INFO and pre-TLS failures. It uses the
+pinned official transport's extension boundary for socket custody and delegates
+TLS verification and NATS parsing to that client. Host resolution occurs in the
+owned socket (`resolve:false`); cancellation destroys and joins those sockets
+without claiming to cancel an underlying operating-system resolver thread. A
+stable transport factory obtains the current attempt from async-local context,
+so concurrent credential replacement and recovery retain separate ownership.
+Shutdown cancels pending attempts as well as the active publisher client.
+
+Preview wiring is optional. With all preview settings unset no client is created.
+Configure `TETRAL_NATS_SERVERS` as comma-separated `nats://` addresses for the
+standard profile or verified-DNS `tls://` addresses for native TLS; URLs must not
+contain credentials. `TETRAL_NATS_USER_PATH` and `TETRAL_NATS_PASSWORD_PATH` name
+the mounted publish-role credential files. Native TLS additionally requires the
+complete `TETRAL_NATS_TLS_CA_PATH`, `TETRAL_NATS_TLS_CERT_PATH`, and
+`TETRAL_NATS_TLS_KEY_PATH` set. The official Node transport performs TLS before
+INFO, verifies each broker/advertised DNS name, and presents the client role
+certificate; there is no plaintext fallback. Malformed/partial startup settings
+or absent/invalid initial material fail startup. Configured but unavailable
+brokers stop previews while complete model delivery remains available.
+
+The validated file loader observes mounted generations on a 250-ms timer. It
+verifies a complete current CA/leaf/key pair before constructing a replacement
+connection and confirming its flush, then retires the old client and active
+previews. Malformed updates retain only still-valid last-known-good material and
+emit a bounded failure; expired material retires the client. A valid new
+generation that cannot connect or flush also retires the old client, so trust
+removal cannot keep a connection established under the removed trust. Shutdown
+starts observer/supervisor/publication cleanup alongside provider drain and
+joins both inside the existing workload budget before SQL closure.
+
+Operational settings are restart-only, parsed once in `preview-config.ts`:
+`TETRAL_GATEWAY_PREVIEW_{QUEUE_BYTES,QUEUE_FRAMES,BATCH_BYTES,BATCH_FRAMES,
+FLUSH_TIMEOUT_MS}` and `TETRAL_NATS_{CONNECT_TIMEOUT_MS,RETRY_MAX_MS,
+CREDENTIAL_POLL_MS,PING_INTERVAL_MS,MAX_PING_OUT}`. Heartbeat interval uses
+milliseconds (1–60000); maximum outstanding pings is a count (1–16), independently
+selected from connect/retry timing. Positive integer/range checks preserve frame, batch and
+combined queue compatibility. Metrics distinguish attempted, locally accepted,
+flushed, deliberately dropped and disabled previews, plus pending/client bytes
+and frames. They establish local accounting only. First disconnect, classified
+stop and recovery use bounded diagnostics with request scope and safe reasons;
+healthy fragments produce no default log. IDs, content and credentials never
+become metric labels. Event Stream owns authorized Session opt-in, contiguous
+prefix delivery and full text publication before the durable request End.
+
+Finish and ProviderError are mutually exclusive terminal frames. Usage rides
+Finish only. Attachment rejections are nonterminal and appear at most once before
+provider streaming. Incomplete content is discarded on failure; delivered complete
+frames retain their normal Runtime settlement semantics.
 
 ### Credential resolution by `request_kind`
 
@@ -128,10 +237,51 @@ enters the platform pool. The gateway does not own Runtime turn retries.
 ### Process lifecycle
 
 Ops plane is bare `Bun.serve` on a separate port (`/healthz`, `/readyz`,
-`/metrics`; `packages/provider-gateway/src/http-server.ts`). Graceful shutdown on
-SIGTERM: flip readiness false → graceful `server.stop()` drain → grpc
-`tryShutdown()` → exit. New turns are refused (`UNAVAILABLE`) the moment
-readiness flips, while in-flight streams finish under the drain.
+`/metrics`; `packages/provider-gateway/src/http-server.ts`). SIGTERM withdraws
+readiness and admission immediately. Provider and MCP allow a configured 30-second business drain
+(`TETRAL_DRAIN_TIMEOUT_MS`), followed by a configured five-second
+cancellation and join phase (`TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS`).
+Both phases and the five-second proxy cleanup allocation must fit the
+60-second Pod grace. Admitted requests may finish during drain; cancellation
+then aborts provider and attachment work and joins remaining stream, SDK, and
+unary workers, so an aborted provider request can still write its terminal
+error. When that cancellation and join window expires, Provider Gateway
+force-closes its remaining streams, including writes held by HTTP/2 flow
+control, so their workers can join; Runtime treats the closed stream as an
+interruption under its recovery contract. A missed join deadline
+is reported after the owned workers join, so dependency closure cannot
+overtake work. Listener and client close reuse the same remaining budget. SQL closes last, after producers join,
+with a five-second allocation clipped to the remaining application deadline.
+A cleanup failure does not skip other owned resources. Reusable service owners
+retain an unjoined worker and its dependencies; they do not terminate the host
+process. Executable commands arm one absolute deadline from the configured drain
+and join phases (35 seconds by default), covering signal and command-finally
+cleanup. If work cannot join, the command reports incomplete shutdown and exits
+nonzero at that deadline. SQL and other required dependencies remain owned until
+process termination, with no fabricated successful cleanup. Silent or throwing
+diagnostic sinks cannot extend the deadline.
+
+Provider request timeout starts at ingress and covers authentication,
+credential preparation, every attachment metadata/chunk RPC, provider headers,
+and response consumption. Each downstream call receives the remaining absolute
+budget and real cancellation. Shutdown joins actual unary callbacks before
+closing their channel. MCP similarly retains pending credential transactions,
+SDK connects, notifications, and calls after their public timeout or cache
+eviction until they actually join; each SDK client closes once. A reusable MCP
+client close that exceeds its deadline reports the original timeout only after
+those joins, so command cleanup cannot advance to SQL closure early. The
+executable enforces its shared absolute deadline if work cannot join.
+
+MCP's typed Bridge policies mirror the Runtime descriptor: manifest notification
+five seconds and claim/commit/relinquish ten seconds. SDK defaults remain
+credential 15 seconds, connect ten seconds, call and discovery 120 seconds, and
+idle eviction 1,800 seconds. `TETRAL_BRIDGE_<METHOD>_TIMEOUT_MS` and
+`TETRAL_MCP_{CREDENTIAL,CONNECT,CALL,DISCOVERY,EXECUTION}_TIMEOUT_MS` configure these actual
+operations. Phase ceilings clip to the shared execution allowance. The execution
+allowance is at most 170 seconds and first Commit is at most ten seconds within
+the 180-second claim lease. A lost immutable result-commit response can
+rejoin its named receipt; an unknown execution outcome cannot be replayed or
+converted into a fabricated result.
 
 ## Seams
 
@@ -152,7 +302,14 @@ it preserves the stated invariants and passes the named suites.
   request channel is pinned at 64 MiB at both ends and is exercised with the
   1,050,000-token catalog-capacity vectors, including escape-dense tool-result
   history. Provider stream events have an
-  independent 8 MiB carrier for bounded tool-call input. Provider deltas and raw
+  independent 32 MiB encoded protobuf carrier, prechecked before send. The response
+  server explicitly sets the native HTTP2 session accounting budget to 256 MiB;
+  grpc-js's MAX_SAFE_INTEGER default resets multiplexed large responses on declared
+  Bun 1.3.14 in the bounded primitive control. This budget is not a JavaScript heap/RSS cap. Complete text
+  retains the 16 MiB canonical JSON limit, tool input 4 MiB, metadata 16 KiB, and
+  reasoning 16 parts / 2 MiB per request. These shared contracts are defined once in
+  `packages/protocol/src/content-limits.json`, imported by TS and checked against
+  the Go Bridge projection. Provider deltas and raw
   provider chunks are hot-only and never forwarded; the gateway never writes
   events, messages, or usage; credentials never reach Runtime or Bridge; a
   deterministic request-shape rejection is `INVALID_ARGUMENT` and non-retryable.
@@ -269,7 +426,70 @@ it preserves the stated invariants and passes the named suites.
   cross-origin credential stripping). The one divergent transport is
   `providers/openai-oauth.ts` (authorization swap, subscription-URL rewrite,
   system text carried as the call's `instructions`).
-- **Lifecycle.** One SDK stream per turn; SDK client retries are disabled.
+- **Lifecycle.** One SDK stream per attempt; SDK client retries are disabled.
+  The native iterator consumes terminal EOF and awaits closure on exit. Provider
+  body cancellation is joined and releases its reader lock; no unread response
+  body remains owned after cleanup.
+- **Input scheduling.** The response wrapper reads on demand and forwards each
+  source chunk in ordered segments of at most 16 KiB. At pull boundaries it yields
+  to the event loop after 256 KiB, 128 segments, or 8 ms, so already-buffered SDK
+  input still gives cancellation and timers an opportunity to run. These are
+  scheduling checkpoints, not a latency guarantee or an admission limit. Only a
+  new source read resets network inactivity; segmenting an existing chunk does
+  not. Cancellation clears the pending chunk and joins reader cancellation.
+- **Write custody.** Cancellation, transport error, and the absolute deadline stop
+  further frames promptly. A submitted frame stays charged until its callback
+  settles or the actual Writable closes; successful delivery also requires any
+  needed drain. Handler and server shutdown join these custody promises. A close
+  witness releases application ownership; it does not claim peer consumption.
+- **Provider conversion and retention.** `providers/model-stream.ts` calls the pinned
+  official `LanguageModelV3.doStream` adapters directly. It converts resolved
+  prompts, declarations, schemas and provider options, safely parses Tool inputs,
+  and translates usage and signed reasoning events one at a time. Unused SDK
+  recorded content, step results and stream tees are absent. Completed content
+  and record counts are diagnostics, not request-lifetime rejection rules.
+  Adapter stream-start warnings become one content-free `provider.model_warnings`
+  record per request at WARN: catalog `provider.id` and `model.id`, the warning
+  types as `reason`, `warning.count`, and at most eight bounded SDK option
+  identifiers in `warning.features`; adapter message and details text is never
+  recorded, and the SDK console warning printer is not used. The shared limiter
+  keys these records by event and warning types, so warnings that repeat on
+  every request to one model are summarized with suppressed counts.
+  `providers/block-assembler.ts` coalesces text/reasoning segments and bounds live
+  content, open blocks, identities, segments and request-wide reasoning. Live
+  content includes streamed Tool arguments until their complete call arrives;
+  compatible adapters may retain their copy until stream release, so this charge
+  bounds in-flight arguments rather than measuring SDK retention. Existing
+  canonical per-block, Tool and metadata bounds still apply. Required metadata
+  overflow fails explicitly rather than silently dropping a signature.
+- **HTTP ownership.** `providers/transport.ts` uses pinned official Undici's public
+  dispatcher request API and its pinned experimental decompression interceptor.
+  Response reads follow downstream demand, including gzip/error bodies; they do
+  not pump unread response history into Bun's native fetch buffer. Egress,
+  credentials, OAuth rewrites, deadlines and manual redirects remain owned by
+  the client wrappers. Discarded redirect bodies are cancelled and joined.
+  The process command creates the single transport and injects its fetch into
+  the provider client registry, which requires that fetch and never creates or
+  closes a transport of its own. Shutdown closes the process-owned dispatcher
+  after request operations join, before SQL closes. This changes neither
+  deployment settings nor admission.
+- **Operating policy.** `DefaultProviderAssemblyBounds` in
+  `providers/resource-policy.ts` holds the production active assembly bounds:
+  32 MiB logical retained content, 64 open blocks, 4096 block/call identities,
+  and 8192 retained segments coalesced at 8192 UTF-16 code units. They are
+  operating bounds, separate from the legal content limits and not capacity
+  measurements; tests may inject smaller bounds through the constructor. Resource
+  exhaustion produces a fatal, nonretryable request error, never a truncated
+  successful block. No raw-record, completed-content history or
+  attachment-envelope limit is introduced here.
+- **Observations.** The service emits content-free `provider.stage_completed`
+  samples for dispatch → first private content fragment, first fragment → first
+  complete semantic frame, and complete frame → local write callback. Each sample
+  carries a closed outcome/content kind, duration, canonical bytes, and encoded
+  frame bytes. Missing-content failure/cancellation samples retain the denominator.
+  Live assembly gauges and pending complete-frame bytes distinguish ownership
+  release from allocator RSS. Frame ownership lasts through callback and any
+  required drain. Logging and metric sink failures cannot affect delivery.
 - **Liveness.** First-event and inter-event watchdogs bound transport stalls.
   Independently, a 60-second semantic-progress watchdog is measured from the
   last non-empty text/reasoning delta or Tool Call/input delta. Metadata,
@@ -279,14 +499,23 @@ it preserves the stated invariants and passes the named suites.
   points — a raw-wire mutation elsewhere is a boundary violation. Provider
   fetches may target only catalog base URLs plus the OAuth issuer/subscription
   endpoints (the app-layer allowlist, fully separate from the web tool's
-  SSRF classification, which lives in the `web-connector` service). AI SDK versions are pinned. Abort must deterministically error
-  the stream so `streamText` cannot hang.
+  SSRF classification, which lives in the `web-connector` service). AI SDK
+  versions are pinned; workspace overrides keep the patched provider utilities
+  and their matching provider types consistent across the pinned adapters. Abort
+  must deterministically error the stream so the official adapter stream cannot hang.
 - **Conformance.** `packages/provider-gateway/test/unit/clients.test.ts`,
+  `packages/provider-gateway/test/unit/provider-response-bounds.test.ts`
+  (buffered SDK responses reject an advertised size above the upstream cap and
+  cancel the body; adapter error paths preserve safe retryable failures),
   the golden wire suite
   (`packages/provider-gateway/test/golden/*` — captured outbound request bytes
   and headers, plus recorded SSE replay per provider including cache-hit usage
-  numbers), and the cancellation/timeout cases in `service.test.ts` /
-  `grpc-server.test.ts`.
+  numbers), the cancellation/timeout cases in `service.test.ts` /
+  `grpc-server.test.ts`, and `assembly-retention.test.ts`, which drives the
+  8 MiB one-character text and three near-16 MiB blocks through the pinned SDK
+  adapter, assembler and writer over real gRPC, compares exact bytes with
+  independently generated digests, and requires released assembler, SDK and
+  writer owners, including cancellation with a held block and a delayed reader.
 
 ### Attachment resolution
 
@@ -313,8 +542,9 @@ it preserves the stated invariants and passes the named suites.
   checks the migration stamp, exact live Workspace-RLS catalog, and effective
   serving role after SQL-client construction and before any SQL-backed store or
   resolver is built.
-- **Invariants.** The separate migration owner constructs schema. Gateway and
-  MCP serving roles are NOSUPERUSER and NOBYPASSRLS; both fail closed through a
+- **Invariants.** The separate migration owner constructs schema. The
+  `provider_gateway` and `mcp_connector` serving roles are distinct,
+  NOSUPERUSER and NOBYPASSRLS; both fail closed through a
   stable error that retains no role name, DSN, credential, or driver text when
   the stamp, live policies, or role posture differs from the repository-owned
   contract.
@@ -326,7 +556,7 @@ it preserves the stated invariants and passes the named suites.
 | Suite | Proves |
 | --- | --- |
 | `packages/lowering/test/unit/*-request.test.ts` | Each provider's request-lowering rule cells (table-driven, one case set per rule id) |
-| `packages/lowering/test/unit/stream.test.ts` | SDK stream part → `ProviderStreamEvent` mapping, dropped parts, ordering/terminal negatives |
+| `packages/lowering/test/unit/stream.test.ts` | SDK stream part → private normalized record mapping, dropped parts, ordering/terminal negatives |
 | `packages/lowering/test/unit/usage.test.ts` | Usage normalization including the anthropic-wire vs openai-wire family split and cache-hit numbers |
 | `packages/lowering/test/unit/errors.test.ts` | Error classification and the retryable overrides (5xx, in-stream 5xx, context overflow, entitlement) |
 | `packages/lowering/test/rules-coverage.test.ts` | Every enumerated rule id has at least one test — the matrix-to-test mapping, enforced by CI |
@@ -334,12 +564,13 @@ it preserves the stated invariants and passes the named suites.
 | `credentials*.test.ts`, `openai-oauth-refresh.test.ts` | Fail-closed enumeration, positive resolution to the provider-native credential header, Go↔TS decryption round-trip, OAuth single-flight refresh and rotation CAS |
 | `platform-pool.test.ts`, `platform-key-cli.test.ts` | Body-level classification, cool/quarantine transitions, pre-first-byte failover and switch cap, cooldown clamp, weighted selection, cache-scope startup refusal, operator-CLI round-trip |
 | `leak-guards.test.ts` | No key/token sentinel appears in any captured log, event, or error payload |
-| `service.test.ts`, `grpc-server.test.ts` | End-to-end streaming turn, drain backpressure, cancellation, header/inter-chunk and semantic-progress timeouts, admission cap, and the Bun/grpc-js tripwire (high event count + trailers + clean status) |
+| `service.test.ts`, `grpc-server.test.ts` | End-to-end streaming turn, drain backpressure, cancellation, header/inter-chunk and semantic-progress timeouts, admission cap, and the Bun/grpc-js tripwire (many private records → complete frames + trailers + clean status) |
 | `http-server.test.ts` | Ops-route responses and readiness-first graceful shutdown |
 | `attachments.test.ts` | Transient and file-backed resolution, per-ref rejection reporting, and the integrity-mismatch fatal path |
 | `schema-startup.test.ts`, `static-boundaries.test.ts` | Migration-registry verification and cross-package boundary guards |
+| `preview-protocol.test.ts`, `preview-publisher.test.ts`, `preview-metrics.test.ts` | Strict cross-language preview fixture, UTF-8/scalar boundaries, charged bounded batches/queues, uncertain flush/reconnect/shutdown, request eligibility and safe local instruments |
 
-Run from `services/gateway`. The whole workspace suite (both containers
+Run from `services/gateway`. The whole workspace suite (both workload packages
 plus the shared packages) is `bun run test` — the `test` script in
 `package.json`, the same set the `gateway-ts` CI job runs. For a single suite,
 `bun test` filters by path substring per package (e.g. `bun test
@@ -351,11 +582,11 @@ explicit reviewed action, never a side effect of a failing run.
 
 ### Responsibilities
 
-`mcp-connector` is the second TypeScript/Bun container of the Gateway Pod. It
+`mcp-connector` is an independent TypeScript/Bun workload in this workspace. It
 terminates tool calls of `kind = mcp` on its own gRPC port (`McpConnectorService`,
 defined beside the provider service in
 `proto/tetral/provider_gateway/v1/provider_gateway.proto`), holds the MCP client
-sessions to a **closed catalog of curated servers**, discovers each server's
+sessions to registered GitHub and Slack server adapters, discovers each server's
 tools, resolves the per-call MCP credential from the session's vault, executes
 the tool, maps the result through a closed content formatter, and classifies
 failures into a bounded taxonomy. It contains no provider-lowering code and never
@@ -368,16 +599,20 @@ package depends only on `packages/protocol` and is statically forbidden from
 importing `packages/lowering` or `packages/provider-gateway`
 (`static-boundaries.test.ts`).
 
-The catalog is one entry — GitHub — in `MCP_CATALOG`
-(`packages/mcp-connector/src/catalog.ts`). `assertCatalogURL` refuses any
-connection whose URL, after single-trailing-slash normalization
-(`normalizeCatalogURL`), is not in the constant; catalog-only admission is
-enforced upstream and this is defense in depth. Adding a server is a code change.
+The immutable adapter registry (`packages/mcp-connector/src/adapters/registry.ts`)
+admits GitHub at `https://api.githubcopilot.com/mcp/` and Slack at
+`https://mcp.slack.com/mcp`. Endpoint matching removes at most one trailing slash;
+it preserves case, authority, query, fragment and path spelling. Adding a server
+requires a registered adapter. Adapters own endpoints and service headers; the
+generic client owns bearer Authorization; the pinned SDK owns MCP protocol and session headers.
 
-The entry also pins the Engine-owned toolset selection `default,actions`, sent
-verbatim as the `X-MCP-Toolsets` header on every newly created transport —
-including connection recreation after credential replacement — alongside the
-Vault-based `Authorization: Bearer` header (`streamableHTTPTransportOptions`).
+`SQLMcpServerResolver` reads Workspace-scoped
+`sessions.installed_tools_json.mcp_servers`. Configured names such as `work-slack`
+are independent of adapter IDs and tool names. One attempt binds that resolved
+endpoint to credential selection, refresh and transport construction. GitHub's
+adapter pins `X-MCP-Toolsets: default,actions`; Slack sends no GitHub header.
+Every new transport combines adapter headers with Vault bearer authorization.
+
 `default` is GitHub's supported alias for its baseline issue/PR toolsets, so
 those tools stay available without enumerating constituents; `actions` adds
 exactly the four Actions tools: `actions_list` (list workflows, runs, jobs, and
@@ -394,7 +629,8 @@ the same `RunMcpTool` pipeline as any other MCP tool.
 
 `McpConnectorServiceShell` drives one tool call as an ordered pipeline, with a
 Bridge-backed durable reservation bracketing the external side effect. The
-`RunMcpTool` caller is the Runtime pod; `ListMcpTools` is called by Bridge. Both
+`RunMcpTool` caller is the Runtime pod; `ListMcpTools` is called by Bridge
+(connector-change discovery) and Job Runner (initial discovery). All caller
 identities are TokenReview-authenticated (`KubernetesTokenReviewClient`,
 `packages/mcp-connector/src/auth.ts`); `RunMcpTool` additionally verifies the
 per-thread runtime binding token.
@@ -404,8 +640,8 @@ per-thread runtime binding token.
 | Authenticate | TokenReview the Runtime workload token, then verify the binding token | gRPC `Unauthenticated` / `PermissionDenied` before any side effect |
 | Validate | `validateRunMcpToolRequest` (`bounds.ts`) | gRPC `INVALID_ARGUMENT` |
 | Claim | Create one execution-attempt `claimId`, then call `ClaimMcpToolResult` with `(scope, tool_use_event_id, claimId)`; Bridge loads the durable server, tool, and canonical input and compares its normalized hash internally | same-claim replay renews the lease; an unexpired different claim remains in flight; an expired lease admits a new claim; a terminal result replays directly |
-| Resolve credential | Match one session-vault credential (table below) | fail closed, no MCP call is made |
-| Establish + execute | Lazy-connect the MCP client, call the tool within `MCP_CALL_TIMEOUT_SECONDS` (120) | reconnect/auth policy below; timeout → `mcp_timeout` |
+| Resolve Server + credential | Match one session-vault credential (table below) | fail closed, no MCP call is made |
+| Establish + execute | Complete SDK connect and every discovery page before caching or calling; call within `MCP_CALL_TIMEOUT_SECONDS` (120) | reconnect/auth policy below; timeout → `mcp_timeout` |
 | Format | `formatMcpToolResult` → `result_text` + at most one attachment, decoded bytes held in memory only | bounds rejection before commit |
 | Commit | `CommitMcpToolResult` with the same `claimId` plus result/media; Bridge fences the current claimant, creates transient-attachment rows, and persists the refs-only result in one transaction | stale claimant → custody lost; post-effect commit failure → retryable `runtime_error` |
 | Relinquish | `RelinquishMcpToolResult` with the same `claimId`, only after a deterministic post-acquisition failure has proved no result commit is uncertain | exact active claim is deleted and may be immediately reacquired; stored/different claims return stale; lost ACK replays duplicate |
@@ -422,8 +658,8 @@ reconnect policy map to `status = runtime_error`.
 
 #### Credential resolution by vault match (`packages/mcp-connector/src/credential.ts`)
 
-`SQLGitHubMcpCredentialResolver` searches the session's immutable vault set for a
-credential whose `auth_public_json.mcp_server_url` equals the catalog URL
+`SQLMcpCredentialResolver` searches the session's immutable vault set for a
+credential whose `auth_public_json.mcp_server_url` equals the resolved registered endpoint
 (single-trailing-slash normalized). Eligible auth types are `mcp_oauth` and
 `static_bearer`; archived credentials are treated as absent. A "usable"
 credential decrypts and is either unexpired or refreshable. Resolved material is
@@ -439,7 +675,7 @@ delivered as `Authorization: Bearer <token>`.
 | `mcp_oauth` expired, refresh block present | single-flight refresh, then use |
 | `mcp_oauth` expired, refresh fails | fail closed `refresh_failed` — the row is not mutated |
 
-The bounded error set is `GitHubMcpCredentialError` (`credential_required |
+The bounded error set is `McpCredentialError` (`credential_required |
 ambiguous | undecryptable | expired | refresh_failed`); an uncaught
 selection-query failure is outside it. Decrypted plaintext exists only in process
 memory and inside TLS to the server — never logged, never returned to Runtime,
@@ -447,46 +683,63 @@ never persisted here.
 
 #### Single-flight OAuth refresh (`packages/mcp-connector/src/credential-update-path.ts`)
 
-GitHub OAuth refresh tokens rotate on use, so two consumers must never burn one
-rotating token concurrently. `SQLVaultGitHubMcpCredentialUpdatePath` serializes
+OAuth refresh tokens can rotate on use, so two consumers must never burn one
+rotating token concurrently. `SQLVaultMcpCredentialUpdatePath` serializes
 refresh on a `SELECT … FOR UPDATE` (or advisory lock) keyed by `(workspace_id,
 vault_id, credential_id)` for the refresh HTTP call plus write-back. Losers block,
 re-read the row, and use the newer material without refreshing once `expires_at`
 has moved forward. Proactive refresh at resolution triggers only when `expires_at
 <= now + REFRESH_SKEW_SECONDS` (60 s, `credential-constants.ts`); a reactive path
-(upstream 401/403) invokes one single-flight refresh regardless of expiry. A
+(typed HTTP 401/403) invokes one single-flight refresh regardless of expiry. A
 refresh failure marks the resolution `refresh_failed` and leaves the row
-unmutated. One `RunMcpTool` operation traverses at most one proactive, one
-establishment-reactive, and one operation-reactive refresh — no path loops a
-refresh on a repeated same-phase failure.
+unmutated. Each cold operation permits one handshake refresh and one operation refresh.
+Cold execution shares its operation allowance between readiness listing and the
+call; spending it during listing forbids another call refresh. Rebuild after an
+operation refresh permits no further refresh, including during connect/list.
+Pending initialization shares spent allowances with every waiter, including
+late joiners; a new independent operation on a ready entry gets a fresh operation
+allowance. OAuth uses the configured token endpoint and confidential-client
+policy. An HTTP-200 `{ok:false}` token response fails without row mutation.
 
 #### MCP client connection (`packages/mcp-connector/src/client.ts`)
 
-`McpSDKClient` wraps the SDK's `StreamableHTTPClientTransport` (Bearer header
-plus the catalog's `X-MCP-Toolsets` selection via
-`streamableHTTPTransportOptions`). Clients are cached by `(workspace_id,
-session_id, mcp_server_name, sha256(token))`; a per-call resolution that yields
-different material creates a new client and closes the old, so credential
-switches need no coordination.
+`McpSDKClient` uses the pinned SDK's `StreamableHTTPClientTransport` and SDK
+output validators. Connect plus a successful all-page listing is the readiness
+barrier. Cache identity is `(workspace_id, session_id, configured_server_name,
+vault_id, credential_id, sha256(token))` with unambiguous framing. An installed
+endpoint change retires a mismatched ready/pending entry even under the same key.
+New credential material also retires superseded pending initialization in that
+scope; its waiters fail with `mcp_connection_failed` without replay, while aliases
+of the same refreshed opening keep their shared ownership and spent allowances.
+Concurrent openings coalesce. Each waiter owns its cancellation/deadline; one
+leaving preserves initialization for others, while all leaving aborts it. Failed
+initialization never publishes a ready client. Idle expiry closes and evicts.
+Only the SDK retains output schema metadata; full definitions remain local to
+initialization, explicit discovery or manifest reporting. Warm calls do not list.
+A native SDK request timeout retires the transport when that execution is its
+sole owner, even if the total execution timer has not fired. Warm discovery and
+other concurrent operations retain ownership of their shared ready client.
 
 | State | Trigger | Transition |
 | --- | --- | --- |
-| Establish | first use (discovery or first call) | lazy `initialize` handshake, `MCP_CONNECT_TIMEOUT_MS` (10 s) |
+| Establish | first use (discovery or first call) | `initialize` handshake within 10 s plus complete listing before readiness |
 | Idle close | `MCP_SESSION_IDLE_SECONDS` (1800) without a call | close the client |
 | Reconnect | connection loss | 3 attempts, backoff 1 s / 4 s / 16 s (`MCP_RECONNECT_DELAYS_MS`, `MCP_RECONNECT_MAX_RETRIES`); in-flight call reports `retry_status: retrying` then `exhausted` |
-| Auth retry | server 401/403 | one single-flight refresh + one retry; a second auth failure is `terminal` → `mcp_authentication_failed` |
+| Auth retry | typed HTTP 401/403 or pinned SDK auth error | bounded handshake/operation allowances above; repeated auth failure is terminal |
 | Exhaustion settlement | terminal reconnect exhaustion | the connector's own `Client.onerror` synthesizes `mcp_connection_failed` / `retry_status = exhausted`, settles every in-flight call on that client exactly once, evicts the cached entry, and clears the idle timer; late responses are ignored |
 
-Exhaustion settlement (~21 s after loss) pre-empts the 120 s `mcp_timeout`, which
-remains for non-connection stalls — one failure yields exactly one
-classification. The SDK fires `onerror` but never `onclose`, so a client→entry
+With default ceilings and sufficient shared/caller time, exhaustion settlement
+(~21 s after loss) precedes the 120 s call ceiling. A shorter shared budget or
+caller deadline can expire sooner with `mcp_timeout`. The first terminal
+outcome determines the classification. The SDK fires `onerror` but never `onclose`, so a client→entry
 index performs the eviction; without it the dead client would stay cached.
 
 #### Durable idempotency and reservation lease
 
 The connector owns no replay store; records live in the Bridge-owned
 `session_runtime_tool_results` table (`tool_kind = mcp`) reached through three
-TokenReview-authenticated Bridge RPCs the gateway ServiceAccount may call
+TokenReview-authenticated Bridge RPCs the `tetral-system/mcp-connector`
+ServiceAccount may call
 (`BridgeAPIMcpToolResultIdempotencyStore`, `packages/mcp-connector/src/bridge-client.ts`).
 `CommitMcpToolResult` persists the refs-only result and, in the same Bridge
 transaction, creates the transient-attachment rows from a bounded inline-media
@@ -505,30 +758,39 @@ cannot strand the call. Two properties keep the fence honest: the Claim RPC
 carries `MCP_CLAIM_RPC_TIMEOUT_MS` (below the lease) so a delayed acknowledgement
 becomes `DEADLINE_EXCEEDED` rather than acting on a superseded reservation; and
 Commit fences on the reservation owner, so at most one result is ever persisted.
-RESIDUAL, stated not hidden: an operation whose full authorized path — a 120 s
-call, an operation-reactive refresh, and a second 120 s call — outruns the lease
-can let two replicas *execute* the external side effect. Double-persist is already
-excluded by the owner-fenced Commit; the short-lease-with-heartbeat fix is
-deferred to a dedicated cycle. On replay a media attachment whose transient ref is
+A monotonic 170-second preparation/execution budget starts before Claim dispatch
+and covers credentials, connect, discovery, synchronous manifest preparation,
+call and formatting. Every phase/retry is clipped by its phase ceiling and the
+remaining shared budget; shorter caller deadlines are preserved. Expiry stops
+new external dispatch and cancels owned work. The first Commit attempt retains a
+10-second reserve within the 180-second lease. A lost Commit ACK continues the
+same immutable result/claim receipt recovery beyond that reserve; it never grants
+another external invocation or extends the lease. On replay a media attachment whose transient ref is
 no longer resolvable renders an omission line `[MCP attachment unavailable:
 <mime> (<size>)]` rather than serving stale bytes.
+
+A finite-bound `RunMcpTool` caller cancellation settles `mcp_timeout`, including
+early abandonment while the reconstructed server deadline still has time.
+Transport cancellation carries no client reason; settlement retains the original
+claim and does not authorize another external invocation.
 
 #### Discovery and manifest delivery
 
 The connector alone can reach the server, so it **produces** the manifest; Bridge
-**delivers** it (Bridge can reach the Gateway Pod; the connector cannot reach
-Runtime). `ListMcpTools` returns each tool's `{name, description, input_schema}`
+**accepts and enqueues** it, and Job Runner **delivers** it (Bridge and Job Runner
+can reach the MCP Connector; the connector cannot reach Runtime). `ListMcpTools` returns each tool's `{name, description, input_schema}`
 verbatim, plus a `manifest_etag` (content hash via `manifestEtag`) and
 `omitted_tools` (platform-tool name collisions the connector filtered via
 `filterManifestTools`, `reason = builtin_name_collision`). Bridge captures the
-manifest to a durable `session_mcp_manifests` row before delivering, assigns a
+manifest to a durable `session_mcp_manifests` row before enqueuing delivery, assigns a
 monotonic `manifest_generation`, and enforces the 256 KiB per-server manifest
 bound at acceptance. Supersession keys on generation monotonicity, never on etag
 inequality — a flapping A→B→A etag must not clobber newer state — and the etag is
 identity-only, so the family-filtered delivered subset need not re-hash. At
-runtime every `tools/list_changed` notification triggers a re-list, and each
+execution-created readiness, the Connector client reports its complete
+operation-local list after publication; every `tools/list_changed` notification triggers a re-list, and each
 successful re-list is reported to Bridge even when its etag matches an earlier
-notification. The initial upstream list precedes notification retry and is
+notification. Bridge verification can re-list the published client without initializer recursion. The initial upstream list precedes notification retry and is
 non-mutating on failure. The connector retries a within-cap notification with 4
 total attempts (`MCP_MANIFEST_NOTIFY_RETRY_DELAYS_MS`, 1 s / 4 s / 16 s). Notify
 exhaustion is a structured connector log only, never a readiness flip; the next
@@ -558,15 +820,15 @@ UTF-8 JSON bytes are counted while accumulating tools, including SDK-only
 metadata. This limits retained definitions; it is not a hard limit on the HTTP
 body being parsed. Bridge separately limits its canonical projection to 256 KiB.
 The shared 120-second discovery deadline includes credential resolution,
-connection, all pages and bounded authentication refresh. A Bridge gRPC deadline
-can shorten it; cancellation stops further page requests without closing the
+connection, all pages and bounded authentication refresh. A caller's (Bridge or
+Job Runner) gRPC deadline can shorten it; cancellation stops further page requests without closing the
 shared client or canceling unrelated calls. Authentication restart begins again
 without a cursor, within the same deadline.
 
 Protocol/bound failures use a discovery-specific error and the existing typed
 `manifest_invalid` trailer, with safe reason/page/tool counts in operator logs.
-JSON-RPC invalid-parameter errors retain their original classification; an
-off-catalog rejection or rejected request is not logged as a pagination-bound
+SDK output-schema rejection settles non-success without refresh or re-execution. JSON-RPC 401/403 and SDK validation errors containing those numbers are not authentication provenance; HTTP 500 bodies mentioning 401 are not authentication. JSON-RPC invalid-parameter errors retain their original classification; an
+unregistered-endpoint rejection or rejected request is not logged as a pagination-bound
 violation. Discovery timeouts name tool discovery, including SDK timeout paths;
 tool-call timeouts continue to name the tool call. During discovery, terminal or
 exhausted connection failures map to the `server_unavailable` trailer, including
@@ -588,13 +850,18 @@ time, and that denial returns as a model-visible `tool_error` result, never a
 success. The connector performs no Actions permission preflight and infers no
 missing scope from an absent tool.
 
+The explicit GitHub/Slack live runner and environment adapter contract are
+[documented separately](packages/mcp-connector/test/live/README.md). Its offline
+validation is part of local checks; actual deployment binding and external
+execution supply separate live evidence.
+
 #### Tool-system mapping
 
 | Concern | Rule |
 | --- | --- |
 | Definition | MCP `{name, description, inputSchema}` verbatim |
 | Route | `gateway`, `kind = mcp` |
-| Scheduler | `parallel_safe`, no conflict key (server-side effects are GitHub's own concurrency domain) |
+| Scheduler | `parallel_safe`, no conflict key (server-side effects remain the external service's concurrency domain) |
 | Name collision | the connector filters platform-tool collisions into `omitted_tools` and logs a warning; family-builtin collisions are Bridge's to filter, so the connector stays family-blind |
 | Schema | the same per-provider schema transform every tool gets in lowering; no MCP-specific branch |
 
@@ -621,7 +888,7 @@ compatibility, so appending unconditionally would duplicate it).
 
 #### Error taxonomy (`packages/mcp-connector/src/errors.ts`, closed)
 
-`McpConnectorErrorCode` is a ten-member union mapped to the protocol enum by
+`McpConnectorErrorCode` is a closed union mapped to the protocol enum by
 `mcpErrorKind`. Every `RunMcpTool` produces exactly one terminal record;
 `mcp_in_flight` is its own kind and is never logged as `mcp_connection_failed`.
 
@@ -632,10 +899,11 @@ compatibility, so appending unconditionally would duplicate it).
 | `mcp_connection_failed` | reconnect exhausted / terminal | `session.error` wrapping `mcp_connection_failed_error`; call settles `runtime_error` |
 | `mcp_authentication_failed` | auth retry failed (an existing credential was rejected) | `session.error` wrapping `mcp_authentication_failed_error`; call settles `runtime_error` |
 | `mcp_credential_required` | zero matching credential to try | `session.error` wrapping `mcp_authentication_failed_error` with `retry_status = terminal`; call settles `runtime_error` |
-| `mcp_timeout` | call exceeded `MCP_CALL_TIMEOUT_SECONDS` (120) | `tool_error` result naming the timeout |
+| `mcp_timeout` | shared preparation/execution allowance or an owning phase ceiling exhausted, or a finite-bound execution caller expired or abandoned its request (including before external dispatch) | `tool_error` result naming the timeout |
 | `mcp_claim_conflict` | Claim stored-result hash mismatch | `session.error` wrapping `unknown_error` with `retry_status = terminal`; call settles `runtime_error` |
 | `mcp_in_flight` | live unexpired reservation on claim | retryable `runtime_error`, no `session.error` |
 | `mcp_commit_failed` | post-effect Commit/store failure after the side effect ran | retryable `runtime_error`, no `session.error` |
+| `mcp_custody_lost` | Claim or Commit finds that the requesting Runtime binding or process no longer holds custody (stale custody) | `runtime_error` with no `retry_status` and no `session.error`; Runtime treats the response as stale custody and does not settle the call |
 | `mcp_internal_error` | an unclassified connector-side exception during execution | retryable `runtime_error`, no `session.error`, no `retry_status` |
 
 #### Event mapping
@@ -667,45 +935,68 @@ it preserves the stated invariants and passes the named suites.
   cross-call protocol state. Ops plane is a bare Bun HTTP server on a separate
   port (`http-server.ts`).
 - **Invariants.** `RunMcpTool` is caller-authenticated as the Runtime pod plus a
-  binding-token check; `ListMcpTools` is caller-authenticated as Bridge; identity
+  binding-token check; `ListMcpTools` is caller-authenticated as Bridge or Job Runner for discovery only; identity
   failures are gRPC status errors, never tool results. Exactly one terminal
-  `run_mcp_tool` record per call. `RunMcpToolResponse.attachments[]` carry refs
+  `run_mcp_tool` record per call, carrying the configured `mcp.server.name`,
+  `mcp.tool.name`, `status`, `mcp.credential.refresh_triggered`,
+  `mcp.result.content_count` and `mcp.result.attachment_count`; a failed call
+  also carries the shared `error.class`/`error.code`/`error.message_safe`
+  tuple. Omitted platform-name collisions are WARN records subject to the
+  shared repeated-warning limiter. `RunMcpToolResponse.attachments[]` carry refs
   only — raw/base64 media bytes never appear.
 - **Conformance.** `service.test.ts`, `bounds.test.ts`, `auth.test.ts`,
   `http-server.test.ts`.
 
-#### MCP catalog and client transport
+The shared logger emits fixed owner phase records for server/credential resolution,
+refresh, connect, complete readiness, manifest preparation, call, Claim and first
+Commit. Execution records carry the original claim and Tool Use, phase attempt,
+monotonic elapsed and remaining shared budget. A shared opening reports each
+participating execution. Lost ACK convergence emits a separate `receipt_recovery`
+record for the original claim. Scope-only repeated diagnostics use the shared
+limiter; logs never include credentials, SDK error bodies, schemas or tool results.
 
-- **Contract.** `MCP_CATALOG` / `assertCatalogURL` (`catalog.ts`) and
-  `McpSDKClient` over `StreamableHTTPClientTransport` (`client.ts`).
-- **Lifecycle.** Lazy establish on first use, idle close at 1800 s, bounded
-  reconnect, terminal-exhaustion settlement with cache eviction.
-- **Invariants.** The connector opens a connection only to a catalog URL (defense
-  in depth on top of upstream admission). Every newly created transport carries
-  the catalog's `X-MCP-Toolsets: default,actions` selection alongside bearer
-  authorization. Discovery follows opaque `nextCursor` values within one listing
-  until absent and composes a single manifest; repeated cursors and the
-  page/tool/byte bounds and the shared deadline fail
-  the listing terminally and a partial page sequence is never published as a
-  successful manifest. Reconnect exhaustion is synthesized in
-  the handler, never mapped from SDK wording, and settles every in-flight call on
-  the client exactly once. The connection cache key includes `sha256(token)`, so a
-  credential switch is a new client.
-- **Conformance.** `catalog.test.ts`, `client.test.ts`, `discovery.test.ts` (real SDK and gRPC).
+#### MCP adapters and client transport
+
+- **Contract.** The immutable `MCP_ADAPTERS` registry (`adapters/registry.ts`),
+  Workspace-scoped `SQLMcpServerResolver` (`server-resolver.ts`) and `McpSDKClient`
+  over the pinned SDK's `StreamableHTTPClientTransport` (`client.ts`). Installed
+  Session configuration owns names; one resolved endpoint binds credential
+  selection and transport construction throughout an attempt.
+- **Lifecycle.** Lazy establish on first use, complete SDK connect and every
+  discovery page before cache publication or calling, idle close at 1800 s,
+  bounded reconnect, terminal-exhaustion settlement with cache eviction.
+- **Invariants.** Only registered endpoints are allowed. GitHub transports carry
+  `X-MCP-Toolsets: default,actions`; Slack transports do not. The SDK owns protocol
+  and session headers; the common connector owns bearer authorization. Discovery
+  follows opaque cursors into one complete list; repeated cursors, page/tool/byte
+  bounds and the shared deadline fail without publishing partial definitions.
+  There is no second retained tool-definition cache. The composite cache key is
+  Workspace, Session, configured name, Vault, credential ID and `sha256(token)`;
+  an endpoint mismatch retires an entry even if that key remains equal. Pending
+  waiters share readiness and inherit spent refresh allowances. Each caller keeps
+  its own deadline; shared SDK phases use the finite opening allowance and phase
+  ceiling, and the initializer aborts when its last waiter leaves. Reconnect
+  exhaustion is synthesized by the connector and settles every in-flight call
+  exactly once; SDK message wording never establishes authentication provenance.
+- **Conformance.** `catalog.test.ts`, `adapter-routing.test.ts`, `client.test.ts`,
+  `client-readiness.test.ts`, `discovery.test.ts`, `execution-budget.test.ts` and
+  `rpc-readiness.test.ts` exercise the owning boundaries, including real SDK HTTP.
 
 #### Credential resolution and single-flight refresh
 
-- **Contract.** `SQLGitHubMcpCredentialResolver` (`credential.ts`) and
-  `SQLVaultGitHubMcpCredentialUpdatePath` (`credential-update-path.ts`); scope key
+- **Contract.** `SQLMcpCredentialResolver` (`credential.ts`) and
+  `SQLVaultMcpCredentialUpdatePath` (`credential-update-path.ts`); scope key
   `(workspace_id, vault_id, credential_id)`.
 - **Lifecycle.** One read per call; the single sanctioned durable write is the
   OAuth refresh write-back under a row-level single-flight lock.
 - **Invariants.** Match is by normalized `mcp_server_url`; the bounded
-  `GitHubMcpCredentialError` set each fails closed and leaks no internal step; a
+  `McpCredentialError` set each fails closed and leaks no internal step; a
   rotating refresh token is never burned twice concurrently; per-operation refresh
-  ceiling of one per phase; `refreshTriggered` means a successful rotation
-  contributed to the returned call, while issuer attempts are counted at the
-  locked refresh owner; plaintext never logged or persisted.
+  ceiling of one per phase; on a returned call, `refreshTriggered` records refresh
+  path participation or inherited refreshed material, including reuse of another
+  refresher's winner. It does not prove a new issuer rotation or credential write;
+  issuer attempts are counted at the locked refresh owner. Plaintext is never
+  logged or persisted.
 - **Conformance.** `credential.test.ts`, `credential-postgresql.test.ts`, and the
   `test/testdata/mcp-credential-vectors.json` vector set (each vector exercised by
   the credential suite).
@@ -744,10 +1035,10 @@ it preserves the stated invariants and passes the named suites.
 
 | Suite | Proves |
 | --- | --- |
-| `service.test.ts` | End-to-end `RunMcpTool`/`ListMcpTools`: caller auth and binding rejected before side effects, claim/commit reservation flow, terminal-record uniqueness, manifest production and notify retries |
-| `auth.test.ts` | TokenReview admission of the Runtime pod and Bridge identities; every other caller rejected |
+| `service.test.ts` | End-to-end `RunMcpTool`/`ListMcpTools`: caller auth and binding rejected before side effects, post-drain admission rejected with one `rejected` operation sample and no client work, claim/commit reservation flow, terminal-record uniqueness, manifest production and notify retries |
+| `auth.test.ts` | TokenReview admission of the Runtime tool execution and Bridge/Job Runner discovery identities; wrong methods and every other caller rejected |
 | `bounds.test.ts` | Request/response envelope validation |
-| `catalog.test.ts` | Closed catalog, URL normalization, connection refusal to any non-catalog URL |
+| `catalog.test.ts` | Registered adapters, exact endpoint normalization and rejection of unregistered endpoints |
 | `client.test.ts` | Connection cache keying, idle close, reconnect backoff, auth-retry, terminal-exhaustion settlement and cache eviction |
 | `credential.test.ts`, `credential-postgresql.test.ts` | The full match/fail-closed enumeration, single-flight refresh, rotation write-back, and the `mcp-credential-vectors.json` set |
 | `bridge-client.test.ts` | Claim/Commit idempotency, owner fence, commit message-size admission, and `McpManifestChanged` retry classification |
@@ -756,20 +1047,20 @@ it preserves the stated invariants and passes the named suites.
 | `schema-startup.test.ts`, `static-boundaries.test.ts` | Migration-registry verification and the no-`lowering`/no-`provider-gateway` import guard |
 | `config.test.ts`, `logger.test.ts` | Env config parsing (including allowed service accounts) and the leak-free structured log envelope |
 
-If a PR changes the catalog, the credential match or refresh path, the connection
+If a PR changes the adapter registry, the installed Server resolver, the credential match or refresh path, the connection
 policy, the idempotency or manifest RPCs, the formatter table, or the error
 taxonomy in this package, it updates the matching section here and the named
 conformance suites.
 
 ## Boundaries
 
-No Gateway Pod container writes `session_events`, `session_messages`, or
+Neither Gateway process writes `session_events`, `session_messages`, or
 `sessions.usage`; usage rides the `finish` event and Bridge commits it. The
 gateway never chooses or replaces a model. `provider-gateway` contains no MCP
 branch; `mcp-connector` contains no lowering; neither touches sandboxes. The
 `provider-gateway` gRPC service also carries the shared
 `ProviderGatewayService.RunWeb` method but rejects it with `UNIMPLEMENTED`,
-because web execution is served on the `web-connector` container's own port and
+because web execution is served by the independent `web-connector` Service and
 the Runtime Pod dials that port directly. A call arriving on the provider port
 is a misrouted client, not a deferred feature.
 
@@ -789,6 +1080,38 @@ cd services/gateway
 export TETRAL_DATABASE_URL='postgres://...'
 export ENGINE_VAULT_KEY='<64 hex chars>'
 ```
+
+Each CLI database command owns one SQL connection for its serial command and awaits
+native close before exiting. The single connection avoids unused pool handshakes
+that can leave Bun 1.3.14 close waiting after the write has committed. This is an
+operator CLI setting; Gateway serving pools retain their own configuration.
+The entrypoint flushes its buffered stdout and stderr writers before exit so
+operator confirmations, help and redacted errors reach the caller.
+`TestPostgreSQLPlatformKeyCLINativeClose` runs the actual entrypoint against TLS
+PostgreSQL with spare handshakes held, checks the committed credential, and
+requires native close and process cleanup within the existing 35-second budget.
+
+### CLI phase diagnostics
+
+The CLI normally emits no phase observations. An operator or test caller can
+explicitly set `TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD` to an inherited descriptor
+number (3–1024) for a private regular file with mode `0600`. The caller owns the
+file, descriptor and cleanup; stdout, stderr, stdin and SQL execution are unchanged.
+The native-close integration test opts in and asserts the close phase chain.
+
+At most nine records (4096 bytes) contain only a closed `phase` name and monotonic
+`elapsed_ms`: CLI entry, stdin begin/complete, insert query begin/complete, body
+error, close begin/complete and exit begin. No credentials, SQL, error text or
+payloads enter this file. Invalid descriptors and observation/write failures
+disable diagnostics without changing the operation or native close outcome.
+Missing or invalid observations cannot establish which native phase ran. A partial
+chain proves only recorded checkpoints; a missing next record can also reflect
+an observation failure. The Go fixture disables the diagnostic on Windows, where
+`os/exec` cannot pass `ExtraFiles`, and still runs the original CLI and assertions.
+
+These checkpoints bracket existing awaits; they do not explain an intermittent
+native failure. An inherited descriptor and synchronous writes can affect timing,
+so a successful observed run is not proof that the failure has been repaired.
 
 ### Initialize
 
@@ -886,3 +1209,110 @@ bun scripts/platform-key.ts disable \
 If a PR changes the credential resolution table, a lowering rule family, the
 stream event set, the error taxonomy, the key pool, the model catalog, or the
 attachment resolution in this folder, it updates the matching section here.
+
+## Workload identity configuration
+
+`TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS` retains its existing name
+and accepts an explicit comma-separated list of `namespace/serviceaccount`
+identities, bounded to 16 entries and 4096 bytes. The deployed discovery callers are `tetral-system/bridge` and
+`tetral-system/job-runner`. Empty, duplicate, malformed and wildcard entries
+fail startup; namespace overrides remain supported. Discovery admission never
+grants `RunMcpTool`: that method admits only the configured Runtime identity
+and verifies its signed Session binding and reviewed Pod UID. Provider model
+execution likewise admits only Runtime. Provider Gateway has only the Bridge
+attachment methods; MCP has only the Bridge manifest and result methods.
+Configuration changes require a process restart.
+
+Provider Gateway and MCP Connector always run beside the mandatory routing
+sidecar, injected as a Kubernetes native sidecar. Kubernetes starts the
+application container only after that proxy has started, which supplies the
+start-after-proxy ordering; neither command has its own proxy wait or reads a
+transport-profile setting.
+
+## Process diagnostics and database pools
+
+Provider Gateway and MCP Connector use the shared
+[TypeScript diagnostic contract](../../internal/ts-observability/README.md).
+`TETRAL_LOG_LEVEL`, `TETRAL_LOG_MAX_RECORD_BYTES`,
+`TETRAL_LOG_SUMMARY_INTERVAL_MS`, and `TETRAL_LOG_BURST` are restart-only controls.
+The default level is Info. Safe builders retain fixed classifications and bounded
+identities; repeated degradation emits bounded summaries. Existing metrics expose
+drops and asynchronous stderr failures. Startup and shutdown finally blocks
+release diagnostic timers/listeners without waiting for stream flush.
+
+Each command attempts every acquired resource once after startup, listener,
+wait or shutdown failure. Provider and MCP stop admission, join producers and listeners, close owned
+clients, and close SQL last under their shared absolute deadline. A rejected earlier close does not skip
+later resources. Programmatic callers retain the original run failure, or the
+first cleanup failure after a successful run. Executable and signal boundaries
+emit fixed safe phase/class records and exit nonzero on failure, without raw
+exception messages or stacks. Diagnostic faults add no stderr-flush wait;
+business shutdown retains the same durable outcome when diagnostics fail.
+
+Provider request validation, caller denial and cancellation summaries use Info
+while retaining the safe failure tuple. Provider transport, configuration and
+final failure summaries use Error. Existing stream/timeout/discovery/review
+classifications remain admitted by the shared scalar vocabulary.
+
+The [Bun PostgreSQL pool owner](../../internal/ts-dbconnect/README.md) supplies
+`max` 10 connections, `idleTimeout` 30 seconds, `maxLifetime` 1800 seconds, a
+30-second `connectionTimeout` and `statementTimeoutMs` 30000 milliseconds. All
+five controls accept canonical positive
+safe integers. Missing values use defaults; Provider Gateway also treats explicit
+empty values as defaults, while MCP Connector rejects explicit empties.
+`TETRAL_DRAIN_TIMEOUT_MS` and `TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS`
+follow the same per-process rule: Provider Gateway treats an empty value as
+omitted, and MCP Connector rejects it. The pool values configure each owned SQL
+generation. Explicit database TLS requires both
+`TETRAL_DATABASE_TLS_CA_PATH` and `TETRAL_DATABASE_TLS_SERVER_NAME`, hostname
+verification, and a complete verified initial generation before readiness.
+Every actual awaited store operation, including transaction commit, stays inside
+the generation owner's `withSQL` callback. CA rotation follows the owner's
+[trust replacement policy](../../internal/ts-dbconnect/README.md#pool-generation-owner):
+a candidate verifies before it receives work, and an update that removes a
+still-valid CA first stops admission on the old generation. Old-generation
+borrowers are joined under the 20-second drain bound. Shutdown interrupts
+candidate validation and uses the remaining application deadline; it does not
+start a fresh rotation budget.
+Go's independently owned pool policy remains distinct.
+
+## Operation measurement
+
+Both metrics listeners export the additive seconds histogram
+`tetral_operation_duration_seconds{service,operation,outcome}` with the
+[shared fixed bounds](../../internal/workload/README.md#operation-durations).
+Provider Gateway operations are `StreamProviderRequest`,
+`provider_first_fragment`, `provider_first_complete`, `complete_frame_write`,
+`shutdown_drain` and `shutdown_cancel_join`. Request duration covers the actual
+service entry through owned cleanup, including authentication, validation and
+capacity rejection. Stage durations retain their existing dispatch/fragment/
+complete/write-callback boundaries and success/error/cancelled populations;
+no-content failure observations remain included. A successful local write is
+not evidence of client delivery or a valid Agent turn.
+
+`providergateway_provider_streams_active` and
+`providergateway_provider_stream_capacity` expose current admitted work and its
+configured admission bound. `providergateway_admission_rejections_total` counts
+only concurrent-turn admission refusal. Provider stream counters, assembly
+gauges and pending-frame bytes keep their meaning. Stage durations are exported
+only through `tetral_operation_duration_seconds` and the raw
+`provider.stage_completed` samples.
+
+MCP operations are `RunMcpTool`, `ListMcpTools`, `shutdown_drain` and
+`shutdown_cancel_join`. Execution records one owning duration across claim,
+credential/SDK work and settlement, with success/error/rejected/timeout/cancelled
+outcomes. Tool names remain only in the existing legacy MCP series; the new
+histogram aggregates them under the fixed RPC operation. Discovery records its
+actual complete-list duration, including non-success. Shutdown records actual
+drain and forced worker joins, with deadline exhaustion retained as timeout.
+An unjoined worker contributes no fabricated completion sample.
+
+For all replica histograms, sum buckets by `le,service,operation` before
+`histogram_quantile`; add an `outcome` selector for a conditional distribution.
+Retain all-outcome counts alongside conditional latency. The existing
+`mcpconnector_sessions_active` counts SDK sessions, not active tool execution.
+Bun SQL's exposed pool interface has no physical acquisition-wait observation;
+query/transaction duration must not be relabeled as pool wait. Go owners expose
+actual SQL wait counters separately. Scheduled-arrival-to-validated-SDK-final
+latency and valid completed-turn counts remain the independent load ledger's
+boundary, not any one RPC or stage histogram.

@@ -10,6 +10,7 @@ const RuntimeUsername = "system:serviceaccount:tetral-agent-runtime:agent-runtim
 const BridgeUsername = "system:serviceaccount:tetral-system:bridge";
 const RuntimePodUid = "pod_uid_mcp_connector";
 const AllowedRuntimePod = { namespace: "tetral-agent-runtime", name: "agent-runtime" };
+const AllowedJobRunner = { namespace: "tetral-system", name: "job-runner" };
 const AllowedBridge = { namespace: "tetral-system", name: "bridge" };
 
 describe("MCP connector TokenReview caller authentication", () => {
@@ -21,7 +22,7 @@ describe("MCP connector TokenReview caller authentication", () => {
       method: RunMcpToolMethod,
       tokenReviewClient,
       allowedRuntimePod: AllowedRuntimePod,
-      allowedBridge: AllowedBridge,
+      allowedDiscoveryCallers: [AllowedBridge, AllowedJobRunner],
     });
 
     expect(result).toEqual({ ok: true, serviceAccount: { ...AllowedRuntimePod, podUid: RuntimePodUid } });
@@ -39,12 +40,27 @@ describe("MCP connector TokenReview caller authentication", () => {
         podUid: RuntimePodUid,
       }),
       allowedRuntimePod: AllowedRuntimePod,
-      allowedBridge: AllowedBridge,
+      allowedDiscoveryCallers: [AllowedBridge, AllowedJobRunner],
     });
 
     expect(result).toEqual({ ok: true, serviceAccount: { ...AllowedBridge, podUid: RuntimePodUid } });
   });
 
+  test("Job Runner discovery does not grant tool execution",async()=>{
+    for(const method of [ListMcpToolsMethod,RunMcpToolMethod]){
+      const result=await authenticateMcpCaller({metadata:metadata("Bearer projected-token"),method,tokenReviewClient:new RecordingTokenReviewClient({authenticated:true,audiences:[Audience],username:"system:serviceaccount:tetral-system:job-runner",podUid:RuntimePodUid}),allowedRuntimePod:AllowedRuntimePod,allowedDiscoveryCallers:[AllowedBridge,AllowedJobRunner]});
+      expect(result).toEqual(method===ListMcpToolsMethod?{ok:true,serviceAccount:{...AllowedJobRunner,podUid:RuntimePodUid}}:{ok:false,code:"PermissionDenied",message:"permission denied"});
+    }
+  });
+  test("TokenReview expiration, audience and pod binding fail closed",async()=>{
+    for(const review of [
+      {authenticated:false,audiences:[Audience],username:RuntimeUsername,podUid:RuntimePodUid},
+      {authenticated:true,audiences:["api"],username:RuntimeUsername,podUid:RuntimePodUid},
+      {authenticated:true,audiences:[Audience],username:RuntimeUsername,podUid:""},
+    ]){
+      expect(await authenticateMcpCaller({metadata:metadata("Bearer projected-token"),method:RunMcpToolMethod,tokenReviewClient:new RecordingTokenReviewClient(review),allowedRuntimePod:AllowedRuntimePod,allowedDiscoveryCallers:[AllowedBridge,AllowedJobRunner]})).toEqual({ok:false,code:"Unauthenticated",message:"unauthenticated"});
+    }
+  });
   test("rejects malformed bearer metadata before authorization", async () => {
     for (const value of [undefined, "Basic abc", "Bearer", "Bearer "]) {
       const result = await authenticateMcpCaller({
@@ -52,7 +68,7 @@ describe("MCP connector TokenReview caller authentication", () => {
         method: RunMcpToolMethod,
         tokenReviewClient: new RecordingTokenReviewClient(),
         allowedRuntimePod: AllowedRuntimePod,
-        allowedBridge: AllowedBridge,
+        allowedDiscoveryCallers: [AllowedBridge, AllowedJobRunner],
       });
       expect(result).toEqual({ ok: false, code: "Unauthenticated", message: "unauthenticated" });
     }
@@ -64,6 +80,9 @@ describe("MCP connector TokenReview caller authentication", () => {
       { method: RunMcpToolMethod, username: BridgeUsername },
       { method: ListMcpToolsMethod, username: RuntimeUsername },
       { method: ListMcpToolsMethod, username: "system:serviceaccount:tetral-system:api" },
+ {method:ListMcpToolsMethod,username:"system:serviceaccount:wrong-system:job-runner"},
+ {method:RunMcpToolMethod,username:"system:serviceaccount:tetral-system:provider-gateway"},
+ {method:ListMcpToolsMethod,username:"system:serviceaccount:tetral-system:gateway"},
     ]) {
       const result = await authenticateMcpCaller({
         metadata: metadata("Bearer projected-token"),
@@ -75,7 +94,7 @@ describe("MCP connector TokenReview caller authentication", () => {
           podUid: RuntimePodUid,
         }),
         allowedRuntimePod: AllowedRuntimePod,
-        allowedBridge: AllowedBridge,
+        allowedDiscoveryCallers: [AllowedBridge, AllowedJobRunner],
       });
       expect(result).toEqual({ ok: false, code: "PermissionDenied", message: "permission denied" });
     }

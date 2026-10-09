@@ -19,7 +19,6 @@ const (
 var gitSegmentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 type gitRequest struct {
-	LegacyTicket string
 	Owner        string
 	Repo         string
 	RepoWithGit  string
@@ -28,7 +27,10 @@ type gitRequest struct {
 	UpstreamPath string
 }
 
-func parseGitRequest(request *http.Request, legacyPathCutover bool) (gitRequest, bool) {
+// parseGitRequest accepts only the four smart-HTTP shapes under a leading
+// github.com segment. The ticket travels only in X-Tetral-Git-Ticket, so any
+// other leading segment, including a ticket placed in the URL, does not parse.
+func parseGitRequest(request *http.Request) (gitRequest, bool) {
 	if request == nil || request.URL == nil {
 		return gitRequest{}, false
 	}
@@ -37,14 +39,6 @@ func parseGitRequest(request *http.Request, legacyPathCutover bool) (gitRequest,
 		return gitRequest{}, false
 	}
 	segments := strings.Split(strings.TrimPrefix(rawPath, "/"), "/")
-	legacyTicket := ""
-	if len(segments) > 0 && segments[0] != "github.com" {
-		if !legacyPathCutover {
-			return gitRequest{}, false
-		}
-		legacyTicket = segments[0]
-		segments = segments[1:]
-	}
 	if len(segments) < 4 || segments[0] != "github.com" {
 		return gitRequest{}, false
 	}
@@ -55,10 +49,9 @@ func parseGitRequest(request *http.Request, legacyPathCutover bool) (gitRequest,
 		return gitRequest{}, false
 	}
 	base := gitRequest{
-		LegacyTicket: legacyTicket,
-		Owner:        owner,
-		Repo:         repo,
-		RepoWithGit:  repoWithGit,
+		Owner:       owner,
+		Repo:        repo,
+		RepoWithGit: repoWithGit,
 	}
 	switch request.Method {
 	case http.MethodGet:

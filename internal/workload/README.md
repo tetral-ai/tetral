@@ -1,0 +1,190 @@
+# Workload process boundaries
+
+This package owns common Go listener lifecycle, readiness, metrics, safe startup
+failure records and process diagnostics. Service configuration remains in the
+owning service. `ResourceConfigFromEnv` reads deployment environment/version with
+Go defaults `local`/`unknown`; `ResourceConfigFromEnvWithTrimPolicy` explicitly preserves Git Proxy's
+existing trimming of all metadata values; ordinary callers preserve nonblank
+spaces and default only exact empty values.
+
+## Listener and request lifetime
+
+`Run` closes request admission when shutdown begins and marks readiness as
+shutting down. A late startup callback cannot restore readiness. Already
+admitted HTTP handlers retain their request contexts during the configured
+shutdown grace period; cancellation of the process context alone does not
+abort them. At the deadline the owner cancels those contexts, closes remaining
+connections and joins all admitted handlers and the serving loop before it
+returns. Command-owned database, object-store and transport clients can then
+close without racing an active handler. Hijacked handlers are included in the
+join even though `http.Server.Shutdown` does not wait for them.
+
+The internal gRPC owner uses the same order: withdraw health/admission, attempt
+graceful completion, force cancellation at its deadline, then join handlers
+and the serving loop. `internalgrpc.RunGRPCWorkload` joins every started gRPC
+server, including cancellation before the serving callback. Its outer HTTP
+orchestration does not impose a second timeout that could return while gRPC
+still uses the command's dependencies. A configured cancellation/join budget
+reports an overrun immediately, retains handler ownership until the join, and
+then returns an error. A zero budget uses the shared five-second default.
+Service-specific consumers separately
+own their acquisition, heartbeat, settlement and drain policies.
+
+Executable entrypoints explicitly call `RunProcess`. Their validated service
+configuration supplies one absolute application shutdown allocation (drain plus
+cancellation/join). The first signal, listener failure or dependency cleanup
+starts that deadline; other listeners and later cleanup cannot reset it. If a
+producer refuses cancellation, the executable exits with status 1 when that
+allocation expires. It does not close dependencies beneath live producers or
+claim a completed handoff. A final diagnostic is best effort through the bounded
+process logger; silent, blocked and panicking sinks cannot delay exit. Reusable
+runners retain join-before-close ownership and cannot exit their caller. Normal
+completion disarms the executable guard only after command cleanup returns.
+
+## Diagnostics
+
+The process reads diagnostic controls once at startup. Empty values keep the
+following defaults; malformed, noncanonical integers and values outside the
+listed ranges fail startup without echoing their supplied value.
+
+| Environment | Default | Accepted values |
+| --- | --- | --- |
+| `TETRAL_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `TETRAL_LOG_MAX_RECORD_BYTES` | `16384` | `1024`–`65536` bytes, including newline |
+| `TETRAL_LOG_SUMMARY_INTERVAL_MS` | `30000` | `100`–`3600000` milliseconds |
+| `TETRAL_LOG_BURST` | `1` | `1`–`1000` initial records per repeated event/reason window |
+
+Severity describes operational significance; a semantic failure retains
+`error.class`, `error.code`, and `error.message_safe` independently of severity.
+Healthy high-frequency polling and authenticated gRPC completions use Debug.
+First degradation and final failures remain visible at their owning severity.
+Repeated warnings, errors, and marked failures aggregate by stable event/reason,
+never by workspace, Session, Thread, request or operation identity. Kubernetes
+watch diagnostics additionally distinguish the two fixed resource classes
+`pods` and `endpointslices`; a recovery for one resource clears only its windows. At most 256
+windows retain one bounded correlation sample each. Summaries contain suppressed
+count and first/last timestamps, the complete safe failure tuple when present,
+and approved distinguishing phase/component context. Partial failure tuples are
+completed per missing member without replacing supplied safe fields or treating
+an ordinary Info/Warn record as a failure. Severity escalation emits a new first record;
+a recovery marked with `recovery.event` flushes that event's summary before the
+recovery record and resets its window.
+
+The shared boundary normalizes event names and protects resource metadata. It
+admits the scalar field vocabulary in
+[`fields.json`](../ts-observability/src/fields.json), bounds strings to 1024 Go bytes or TypeScript UTF-16 code units
+and inspects at most 64 caller fields per record, removes controls, redacts credentials,
+content fields and full URLs, and drops records exceeding the byte ceiling.
+Resource values are sanitized once and bounded to 253 Go bytes or TypeScript UTF-16 code units for diagnostics;
+this does not change their owning configuration validation. Existing safe builders
+remain responsible for turning arbitrary errors and content into fixed public
+messages or approved bounded classifications. Adding a field requires reviewing
+its producer and updating the checked Go vocabulary alongside this file.
+
+JSON records carry `service.name`, `deployment.environment`, `service.version`,
+`service.instance.id`, and `process.pid`. Existing health/metrics servers expose,
+through `DiagnosticMetrics`, fixed `tetral_diagnostic_*` counters for emissions,
+filtering, suppression, dropped records and sink failures, plus limiter-entry and
+queued-record gauges. The queued-record gauge reports the process logger's queue
+and is zero for synchronous writers. The series carry no request or tenant
+labels, and never report diagnostic loss through the log sink.
+Diagnostics are best effort: observer, encoding and sink faults cannot become
+business operation failures. Durable receipts and external effects remain owned
+by their business boundary.
+
+`NewProcessLogger` owns one worker and a nonblocking queue of 64 bounded records.
+Production commands install that logger as the process default for library
+records and close it after business listeners and resources. `Close(ctx)` flushes
+bounded suppression summaries and waits only within the caller's budget;
+`CloseWithBudget` supplies a one-second diagnostic budget. Excess records drop
+under backpressure. A generic injected `io.Writer` cannot be canceled: if its
+write never returns, the single worker may remain blocked after Close returns.
+There are no per-record goroutines or additional unbounded buffers. Tests that
+inject a blocked writer must release it during cleanup. Production stderr has
+the same explicit write/backpressure boundary.
+
+`Stats` counts successfully completed writes as emitted and rejected, discarded,
+partial or failed writes as loss. `NewLogger` is a synchronous adapter at the
+default Info level for writers known to return promptly, such as test buffers;
+production commands use the process owner. Embedded components without an
+installed process logger remain quiet until the caller injects one. The shared
+runners `workload.Run`, `internalgrpc.Run` and `internalgrpc.RunGRPCWorkload`
+follow the same rule: without an injected `Logger` they use the installed
+process logger and are otherwise quiet. `InstallDefaultLogger` returns a
+restoration function so construction and tests do not leak global ownership.
+
+The package tests check literal controls, bounded retained samples, field
+projection, severity/recovery transitions and an actual paused OS pipe. Selected
+service tests cover real Queue poll/heartbeat and authenticated gRPC caller noise.
+
+## Operation durations
+
+HTTP and internal gRPC metrics retain their existing count/sum series and add
+`tetral_operation_duration_seconds{service,operation,outcome}` as a histogram.
+HTTP operations are the nine standard verbs, with `http_unknown_method` for
+other input. gRPC operations are exact full methods from the registered service
+and health descriptors; other methods share `unknown_method`. Service names are
+the closed workload domain: `NewHTTPMetrics`, `NewGRPCMetrics` and
+`NewOperationMetrics` require the owner's service constant, and constructing a
+registry for any other name is a startup programming error that panics rather
+than relabeling samples. Service-specific operations, including Queue's drain
+phases, are registered by their owner with `SetOperations` or the constructor's
+operation list. Request paths, tools, tenant and request IDs never become labels
+in this family. Existing legacy labels retain their prior contract. HTTP, gRPC
+and service-owned registries can all contribute to this family in one process;
+the shared `/metrics` renderer emits each family once, as one contiguous group
+after its single header.
+
+Upper bucket bounds in seconds are `0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 900, 1800, +Inf`. Exact bounds are inclusive;
+`_count` equals the `+Inf` population and `_sum` contains real elapsed seconds.
+The checked TypeScript projection uses the same bounds. Aggregate bucket counts
+across eligible replicas before computing a percentile; histogram interpolation
+cannot supply an exact raw-sample maximum or whole-turn end-to-end percentile.
+For example:
+
+```promql
+histogram_quantile(0.95, sum by (le, service, operation) (
+  rate(tetral_operation_duration_seconds_bucket{namespace="$namespace",outcome="success"}[5m])
+))
+```
+
+HTTP statuses below 400 record `success`, 4xx `rejected`, and 5xx `error`.
+gRPC OK records `success`, Canceled `cancelled`, DeadlineExceeded `timeout`, and
+InvalidArgument/Unauthenticated/PermissionDenied/ResourceExhausted/Unimplemented
+`rejected`; other codes record `error`. These are transport/handler outcomes,
+not proof of a valid Agent turn. Existing owning admission/completion ledgers
+retain unfinished operations independently.
+
+Shutdown samples bracket actual `shutdown_http_drain`, `shutdown_http_join`,
+`shutdown_grpc_drain` and `shutdown_grpc_cancel_join` operations, which every
+registry recognizes. Owners register their own phases, such as Queue's
+`shutdown_queue_drain` and `shutdown_queue_cancel_join`. A drain sample measures the actual
+graceful wait and records `timeout` when its cutoff expires. A join sample is
+recorded only after the actual owner joins, including a join that outlives its
+budget. HTTP drain and join share the same absolute `ShutdownTimeout` deadline;
+a join's `timeout` can inherit the exhausted drain budget even when the final
+join is brief. Instrumentation changes no admission, deadline or dependency
+closure order. `ObserveShutdown` also sends the same completed observation to
+the existing process logger as `workload.shutdown.phase_completed`, with closed
+`operation`/`outcome`, exact `duration.seconds` and `metric.observation.count`
+for that registry's operation/outcome. This can retain a phase sample after the
+metrics listener closes; it does not assert a final scrape or complete process
+cleanup. Logger-owned `service.instance.id`/`process.pid` plus the central pod,
+container incarnation and log stream identify the producing process. Count
+continuity helps detect omitted records; the last observed count alone cannot
+prove that no later phase occurred.
+
+Phase logging uses the existing bounded, nonblocking `ProcessLogger` producer
+before command diagnostics close. No network exporter or shutdown budget is
+added. Info filtering, backpressure, sink failure, missing central records or
+process termination before a join leave phase evidence unavailable or partial;
+they never manufacture zero duration. A blocked arbitrary synchronous logger
+is outside `ProcessLogger`'s producer contract. The owning held-gRPC test closes
+its actual metrics listener before completion and tests both a throwing and
+blocked production diagnostic writer without transferring join ownership.
+
+Pool waits retain `db_pool_wait_count_total` and
+`db_pool_wait_duration_seconds_total`; `db_pool_open_connections`,
+`db_pool_in_use_connections` and `db_pool_idle_connections` describe actual Go
+SQL pools. They do not measure query execution time.

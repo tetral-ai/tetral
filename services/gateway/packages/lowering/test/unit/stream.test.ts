@@ -1,7 +1,9 @@
+import { NormalizedProviderEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import type { NormalizedProviderEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { describe, expect, test } from "bun:test";
 import {
   ProviderFinishReason,
-  ProviderStreamEventType,
+
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { ProviderStreamRaiser } from "../../src/stream.js";
 
@@ -40,17 +42,17 @@ describe("Gateway stream raising", () => {
     ];
 
     expect(events.map((event) => event.type)).toEqual([
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+      NormalizedProviderEventType.TextStart,
+      NormalizedProviderEventType.TextDelta,
+      NormalizedProviderEventType.TextEnd,
+      NormalizedProviderEventType.ReasoningStart,
+      NormalizedProviderEventType.ReasoningDelta,
+      NormalizedProviderEventType.ReasoningEnd,
+      NormalizedProviderEventType.ToolInputStart,
+      NormalizedProviderEventType.ToolInputDelta,
+      NormalizedProviderEventType.ToolInputEnd,
+      NormalizedProviderEventType.ToolCall,
+      NormalizedProviderEventType.Finish,
     ]);
     expect(events[1]?.text?.text).toBe("hello");
     expect(events[3]?.reasoning?.metadataJson).toContain("signature");
@@ -159,13 +161,19 @@ describe("Gateway stream raising", () => {
     expect(event?.reasoning?.metadataJson).not.toContain("https://storage.example");
   });
 
-  test("bounds provider metadata JSON", () => {
+  test("preserves opaque resubmission metadata verbatim even when it resembles telemetry", () => {
+    const raiser = new ProviderStreamRaiser({ usageWireFamily: "openai-wire", modelLimits: TestModelLimits });
+    const signature = "https://fixture.invalid/sk-signature-fixture";
+    const encrypted = "bearer opaque-encrypted-fixture";
+    const event = raiser.map({type:"reasoning-start",metadata:{anthropic:{signature},openai:{reasoningEncryptedContent:encrypted},headers:{authorization:"bearer credential-fixture"}}})[0]!;
+    expect(JSON.parse(event.reasoning!.metadataJson)).toEqual({anthropic:{signature},openai:{reasoningEncryptedContent:encrypted},headers:"[redacted]"});
+  });
+
+  test("fails closed rather than dropping oversized provider metadata", () => {
     const raiser = new ProviderStreamRaiser(
       { usageWireFamily: "openai-wire", modelLimits: TestModelLimits },
     );
 
-    const [event] = raiser.map({ type: "text-start", metadata: { payload: "x".repeat(17 * 1024) } });
-
-    expect(event?.text?.metadataJson).toBe("{}");
+    expect(() => raiser.map({ type: "reasoning-start", metadata: { anthropic: { signature: "x".repeat(17 * 1024) } } })).toThrow("Provider metadata exceeded its content bound.");
   });
 });

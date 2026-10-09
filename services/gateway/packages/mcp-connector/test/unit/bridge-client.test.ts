@@ -578,6 +578,7 @@ function mcpContext(): McpIdempotencyContext {
     sessionThreadId: "thrd_1",
     bindingId: "bind_1",
     bindingGeneration: 1,
+    runtimeProcessId: "process-test",
     runtimePodUid: "pod_1",
   };
 }
@@ -592,6 +593,7 @@ function relinquishRequest(): RelinquishMcpToolResultRequest {
       binding: {
         bindingId: context.bindingId,
         bindingGeneration: context.bindingGeneration,
+        runtimeProcessId: context.runtimeProcessId,
         targetPodUid: context.runtimePodUid,
       },
     },
@@ -610,6 +612,7 @@ function claimRequest(): ClaimMcpToolResultRequest {
       binding: {
         bindingId: context.bindingId,
         bindingGeneration: context.bindingGeneration,
+        runtimeProcessId: context.runtimeProcessId,
         targetPodUid: context.runtimePodUid,
       },
     },

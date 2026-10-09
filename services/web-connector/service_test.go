@@ -30,17 +30,8 @@ func TestRunWebRejectsMissingAuthenticatedIdentityBeforeDependencies(t *testing.
 	if status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("code = %s", status.Code(err))
 	}
-	var record map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &record); err != nil {
-		t.Fatalf("decode failure log: %v", err)
-	}
-	delete(record, "time")
-	if len(record) != 4 ||
-		record["level"] != "ERROR" ||
-		record["msg"] != "web.request.failed" ||
-		record["operation"] != "search" ||
-		record["grpc.code"] != "Unauthenticated" {
-		t.Fatalf("failure log fields = %#v", record)
+	if logs.Len() != 0 {
+		t.Fatalf("direct service duplicated the RPC boundary diagnostic: %s", logs.String())
 	}
 }
 
@@ -243,12 +234,12 @@ func (f *fakeBackend) Fetch(context.Context, string) (Page, BackendOutcome) {
 
 func validRequest(t *testing.T) *providergatewayv1.RunWebRequest {
 	t.Helper()
-	r := &providergatewayv1.RunWebRequest{WorkspaceId: "ws", SessionId: "ses", SessionThreadId: "thr", ToolUseEventId: "evt", BindingId: "bind", BindingGeneration: 1, Input: &providergatewayv1.WebToolInput{SearchQuery: []*providergatewayv1.WebSearchQuery{{Q: "example"}}}}
+	r := &providergatewayv1.RunWebRequest{WorkspaceId: "ws", SessionId: "ses", SessionThreadId: "thr", ToolUseEventId: "evt", BindingId: "bind", BindingGeneration: 1, RuntimeProcessId: "process_web_fixture", Input: &providergatewayv1.WebToolInput{SearchQuery: []*providergatewayv1.WebSearchQuery{{Q: "example"}}}}
 	r.RuntimeBindingToken = signRequest(r, "runtime-pod", time.Now().Add(time.Hour), []byte("binding-verifier-key-with-at-least-32-bytes"))
 	return r
 }
 func signRequest(r *providergatewayv1.RunWebRequest, pod string, exp time.Time, key []byte) string {
-	payload, _ := json.Marshal(map[string]any{"v": 1, "workspace_id": r.GetWorkspaceId(), "session_id": r.GetSessionId(), "session_thread_id": r.GetSessionThreadId(), "binding_id": r.GetBindingId(), "binding_generation": r.GetBindingGeneration(), "runtime_pod_uid": pod, "exp": exp.Unix()})
+	payload, _ := json.Marshal(map[string]any{"v": 1, "workspace_id": r.GetWorkspaceId(), "session_id": r.GetSessionId(), "session_thread_id": r.GetSessionThreadId(), "binding_id": r.GetBindingId(), "binding_generation": r.GetBindingGeneration(), "runtime_pod_uid": pod, "runtime_process_id": r.GetRuntimeProcessId(), "exp": exp.Unix()})
 	part := base64.RawURLEncoding.EncodeToString(payload)
 	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write([]byte(part))

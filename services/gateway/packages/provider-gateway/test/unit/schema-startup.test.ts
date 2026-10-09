@@ -16,15 +16,8 @@ describe("provider-gateway schema verification", () => {
 				{
 					version: 1,
 					checksum:
-						"d42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6",
+						"f600e78f7be8b4262b8317603fc4a3eb4b0fba3ab3602bf0d6575115514c54e0",
 				},
-				{
-					version: 2,
-					checksum:
-						"36b50e4c53b62e8a7b38b8d91b3128400ff06394bf71dcd3e1d992df32b55458",
-				},
-				{ version: 3, checksum: "be73f97aa7ebc41ec39ad270aed25a2b9d5228eb8ab49e814032283cb9dbd90f" },
-				{ version: 4, checksum: "ce7bda672824e406b569caaea79723ca0932150bd54f5d153b9f781ee426bb19" },
 			],
 		]);
 
@@ -43,14 +36,7 @@ describe("provider-gateway schema verification", () => {
 		},
 		{
 			name: "behind",
-			responses: [
-				[{ exists: true }],
-				[{
-					version: 1,
-					checksum:
-						"d42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6",
-				}],
-			],
+			responses: [[{ exists: true }], []],
 			kind: "schema_behind",
 		},
 		{
@@ -69,12 +55,12 @@ describe("provider-gateway schema verification", () => {
 					{
 						version: 1,
 						checksum:
-							"d42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6",
+							"f600e78f7be8b4262b8317603fc4a3eb4b0fba3ab3602bf0d6575115514c54e0",
 					},
 					{
 						version: 1,
 						checksum:
-							"d42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6",
+							"f600e78f7be8b4262b8317603fc4a3eb4b0fba3ab3602bf0d6575115514c54e0",
 					},
 				],
 			],
@@ -96,7 +82,7 @@ describe("provider-gateway schema verification", () => {
 					{
 						version: 1,
 						checksum:
-							"d42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6",
+							"f600e78f7be8b4262b8317603fc4a3eb4b0fba3ab3602bf0d6575115514c54e0",
 					},
 					{
 						version: 2,
@@ -264,12 +250,14 @@ function schemaSQL(
 function providerConfig(): ProviderGatewayConfig {
 	return {
 		deploymentEnvironment: "test",
+    diagnostics: { level: "info", maxRecordBytes: 16384, summaryIntervalMs: 30000, burst: 1 },
 		serviceVersion: "unit",
 		grpcBindAddress: "127.0.0.1:9090",
 		httpBindAddress: "127.0.0.1:8080",
 		allowedRuntimePod: { namespace: "tetral", serviceAccount: "runtime" },
 		runtimeBindingTokenHMACKey: "x".repeat(32),
 		databaseUrl: "postgres://gateway",
+		drainTimeoutMs: 30000,cancelJoinTimeoutMs:5000,
 		databasePool: {
 			max: 10,
 			idleTimeout: 30,

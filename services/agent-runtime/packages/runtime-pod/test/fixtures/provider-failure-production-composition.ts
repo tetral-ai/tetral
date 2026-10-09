@@ -1,3 +1,5 @@
+import type { NormalizedProviderEvent } from "../../../../../gateway/packages/lowering/src/normalized-stream.js";
+import { NormalizedProviderEventType } from "../../../../../gateway/packages/lowering/src/normalized-stream.js";
 import { access, readFile, writeFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
 import { createLLMService } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
@@ -6,13 +8,12 @@ import { createToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-cat
 import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
 import {
 	ProviderFinishReason,
-	ProviderStreamEventType,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { createGatewayGrpcServer } from "../../../../../gateway/packages/provider-gateway/src/grpc-server.js";
 import { ProviderClientRegistry } from "../../../../../gateway/packages/provider-gateway/src/providers/clients.js";
 import type {
-	GatewayStreamTextInput,
-	GatewayStreamTextResult,
+	GatewayModelStreamInput,
+	GatewayModelStreamResult,
 } from "../../../../../gateway/packages/provider-gateway/src/providers/clients.js";
 import {
 	ProviderCredentialResolver,
@@ -45,6 +46,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly readyPath: string;
 	readonly statePath: string;
 	readonly closePath: string;
@@ -163,12 +165,12 @@ const credentialResolver = new ProviderCredentialResolver({
 });
 const streamTextResult = (
 	parts: readonly GatewaySDKStreamPart[],
-): GatewayStreamTextResult => ({
+): GatewayModelStreamResult => ({
 	fullStream: (async function* () {
 		for (const part of parts) yield part;
 	})(),
 });
-type GatewaySDKStreamPart = GatewayStreamTextResult["fullStream"] extends AsyncIterable<
+type GatewaySDKStreamPart = GatewayModelStreamResult["fullStream"] extends AsyncIterable<
 	infer Part
 >
 	? Part
@@ -243,7 +245,7 @@ const providerClientRegistry = new ProviderClientRegistry({
 			fetch: settings.fetch,
 		}),
 	}),
-	streamText: (request: GatewayStreamTextInput) => {
+	streamModel: (request: GatewayModelStreamInput) => {
 		providerInvocations += 1;
 		providerRequestContexts.push(JSON.stringify(request.messages));
 		void writeRuntimeState();
@@ -345,7 +347,7 @@ const providerClientRegistry = new ProviderClientRegistry({
 	},
 });
 const semanticTimeoutStreamer = {
-	stream: async function* (request: ProviderRequestStreamInput) {
+	stream: async function* (request: ProviderRequestStreamInput): AsyncGenerator<NormalizedProviderEvent> {
 		providerInvocations += 1;
 		if (
 			scenario === "semantic_tool_route" &&
@@ -359,10 +361,13 @@ const semanticTimeoutStreamer = {
 			}
 		}
 		providerRequestContexts.push(JSON.stringify(request.request.context));
-		await writeRuntimeState();
+		const failedPartialRequest =
+			(scenario === "semantic_tool_route" && providerInvocations === 2) ||
+			(scenario !== "semantic_tool_route" && providerInvocations <= 2);
+		if (!failedPartialRequest) await writeRuntimeState();
 		if (scenario === "semantic_tool_route" && providerInvocations === 1) {
 			yield {
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+				type: NormalizedProviderEventType.ToolCall,
 				toolCall: {
 					id: "call_semantic_tool_route",
 					name: "Read",
@@ -371,7 +376,7 @@ const semanticTimeoutStreamer = {
 				},
 			};
 			yield {
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+				type: NormalizedProviderEventType.Finish,
 				finish: {
 					reason: ProviderFinishReason.PROVIDER_FINISH_REASON_TOOL_CALLS,
 					contextWindowTokens: 200_000,
@@ -388,16 +393,13 @@ const semanticTimeoutStreamer = {
 			};
 			return;
 		}
-		if (
-			(scenario === "semantic_tool_route" && providerInvocations === 2) ||
-			(scenario !== "semantic_tool_route" && providerInvocations <= 2)
-		) {
+		if (failedPartialRequest) {
 			yield {
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+				type: NormalizedProviderEventType.TextStart,
 				text: { id: `failed-partial-${providerInvocations}`, text: "", metadataJson: "{}" },
 			};
 			yield {
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
+				type: NormalizedProviderEventType.TextDelta,
 				text: {
 					id: `failed-partial-${providerInvocations}`,
 					text: `failed partial ${providerInvocations}`,
@@ -405,9 +407,12 @@ const semanticTimeoutStreamer = {
 				},
 			};
 			yield {
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
+				type: NormalizedProviderEventType.TextEnd,
 				text: { id: `failed-partial-${providerInvocations}`, text: "", metadataJson: "{}" },
 			};
+			// This case requires a completed partial before the semantic stall.
+			// Observation-file I/O must not consume its pre-progress watchdog.
+			await writeRuntimeState();
 			for (let index = 0; index < 40; index += 1) {
 				request.onTransportActivity?.();
 				await new Promise((resolve) => setTimeout(resolve, 5));
@@ -415,19 +420,19 @@ const semanticTimeoutStreamer = {
 			return;
 		}
 		yield {
-			type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+			type: NormalizedProviderEventType.TextStart,
 			text: { id: "recovered", text: "", metadataJson: "{}" },
 		};
 		yield {
-			type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
+			type: NormalizedProviderEventType.TextDelta,
 			text: { id: "recovered", text: "recovered input", metadataJson: "{}" },
 		};
 		yield {
-			type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
+			type: NormalizedProviderEventType.TextEnd,
 			text: { id: "recovered", text: "", metadataJson: "{}" },
 		};
 		yield {
-			type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+			type: NormalizedProviderEventType.Finish,
 			finish: {
 				reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
 				contextWindowTokens: 200_000,
@@ -572,17 +577,18 @@ const cleanupController = {
 } satisfies RuntimeCleanupController;
 const controlInputCommitter = new BridgeAPIControlInputCommitter(bridgeOptions);
 const runtimeService = new RuntimeControlService({
+	runtimeProcessId: input.runtimeProcessId,
 	ownPod: {
 		namespace: "tetral-agent-runtime",
 		name: "runtime-pod-provider-timeout",
 		uid: input.targetPodUid,
 		ip: "127.0.0.1",
 	},
-	allowedBridge: { namespace: "tetral-system", name: "bridge" },
+	allowedJobRunner: { namespace: "tetral-system", name: "job-runner" },
 	authenticator: {
 		authenticate: async () => ({
 			ok: true as const,
-			serviceAccount: { namespace: "tetral-system", name: "bridge" },
+			serviceAccount: { namespace: "tetral-system", name: "job-runner" },
 		}),
 	},
 	runHost: hosts.commandRunHost,

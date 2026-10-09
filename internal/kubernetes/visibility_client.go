@@ -3,10 +3,12 @@ package kubernetes
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
@@ -41,6 +43,26 @@ func (c *ClientsetVisibilityClient) ListPods(ctx context.Context, namespace stri
 	return c.client.CoreV1().Pods(namespace).List(ctx, options)
 }
 
+// PodObservation contains only the fresh facts required by Runtime arbitration.
+// SDK objects and Kubernetes status decoding remain inside this boundary.
+type PodObservation struct {
+	Namespace, Name, UID, IP         string
+	Absent, Running, Ready, Deleting bool
+}
+
+// GetPod is a fresh, bounded-by-caller observation used outside Session
+// transactions to confirm loss. Watch cache absence is not a GET substitute.
+func (c *ClientsetVisibilityClient) GetPod(ctx context.Context, namespace, name string) (*PodObservation, error) {
+	pod, err := c.client.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return &PodObservation{Absent: true}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &PodObservation{Namespace: pod.Namespace, Name: pod.Name, UID: string(pod.UID), IP: pod.Status.PodIP, Running: pod.Status.Phase == corev1.PodRunning, Ready: podReady(*pod), Deleting: pod.DeletionTimestamp != nil}, nil
+}
+
 func (c *ClientsetVisibilityClient) WatchPods(ctx context.Context, namespace string, options metav1.ListOptions) (watch.Interface, error) {
 	return c.client.CoreV1().Pods(namespace).Watch(ctx, options)
 }
@@ -57,18 +79,34 @@ type WatchHandles struct {
 	Pods           watch.Interface
 	EndpointSlices watch.Interface
 	cancel         context.CancelFunc
+	completion     *watchCompletion
+}
+
+// Shared completion survives copies of WatchHandles. Stop cancels and joins
+// both owners, including replacement watches and in-flight context-bound lists.
+type watchCompletion struct {
+	stop    sync.Once
+	workers sync.WaitGroup
 }
 
 func (h WatchHandles) Stop() {
-	if h.cancel != nil {
-		h.cancel()
+	stop := func() {
+		if h.cancel != nil {
+			h.cancel()
+		}
+		if h.Pods != nil {
+			h.Pods.Stop()
+		}
+		if h.EndpointSlices != nil {
+			h.EndpointSlices.Stop()
+		}
 	}
-	if h.Pods != nil {
-		h.Pods.Stop()
+	if h.completion == nil {
+		stop()
+		return
 	}
-	if h.EndpointSlices != nil {
-		h.EndpointSlices.Stop()
-	}
+	h.completion.stop.Do(stop)
+	h.completion.workers.Wait()
 }
 
 type SyncOptions struct {
@@ -124,9 +162,17 @@ func SyncAndWatchWithOptions(ctx context.Context, client VisibilityClient, cfg C
 	}
 	cache.ReplacePods(pods.Items)
 	cache.ReplaceEndpointSlices(endpointSlices.Items)
-	go runPodWatch(watchCtx, client, cfg, podOptions, cache, podWatch, syncOptions)
-	go runEndpointSliceWatch(watchCtx, client, cfg, endpointOptions, cache, endpointWatch, syncOptions)
-	return WatchHandles{Pods: podWatch, EndpointSlices: endpointWatch, cancel: cancel}, nil
+	completion := &watchCompletion{}
+	completion.workers.Add(2)
+	go func() {
+		defer completion.workers.Done()
+		runPodWatch(watchCtx, client, cfg, podOptions, cache, podWatch, syncOptions)
+	}()
+	go func() {
+		defer completion.workers.Done()
+		runEndpointSliceWatch(watchCtx, client, cfg, endpointOptions, cache, endpointWatch, syncOptions)
+	}()
+	return WatchHandles{Pods: podWatch, EndpointSlices: endpointWatch, cancel: cancel, completion: completion}, nil
 }
 
 func runPodWatch(ctx context.Context, client VisibilityClient, cfg Config, options metav1.ListOptions, cache *WatcherCache, current watch.Interface, syncOptions SyncOptions) {

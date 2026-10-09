@@ -39,7 +39,12 @@ metadata:
     app.kubernetes.io/part-of: tetral
     app.kubernetes.io/managed-by: kustomize
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicas.auth }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: {{ .Values.rollout.maxSurge }}
   selector:
     matchLabels:
       app.kubernetes.io/name: auth
@@ -60,6 +65,9 @@ spec:
           command:
             - /usr/local/bin/tetral-auth
           env:
+{{ include "tetral.diagnosticEnv" . | trim | indent 12 }}
+{{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" false "bun" false) | trim | indent 12 }}
+{{ include "tetral.edgeHTTPEnv" (dict "root" .) | trim | indent 12 }}
             - name: TETRAL_AUTH_HTTP_ADDR
               valueFrom:
                 configMapKeyRef:
@@ -100,14 +108,28 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secrets.authInternalPrincipal | quote }}
                   key: private_key_b64
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
             - name: TETRAL_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secrets.authDatabase | quote }}
                   key: url
+            - name: TETRAL_AUTH_GRPC_ADDR
+              value: ":9095"
+            - name: TETRAL_AUTH_GRPC_TRANSPORT
+              value: {{ ternary "native-mtls" "plaintext" (eq .Values.transport.profile "hardened") | quote }}
+{{- if eq .Values.transport.profile "hardened" }}
+            - name: TETRAL_AUTH_GRPC_TLS_CA_PATH
+              value: /var/run/tetral/edge-trust/ca.crt
+            - name: TETRAL_AUTH_GRPC_TLS_CERT_PATH
+              value: /var/run/tetral/edge-leaf/tls.crt
+            - name: TETRAL_AUTH_GRPC_TLS_KEY_PATH
+              value: /var/run/tetral/edge-leaf/tls.key
+            - name: TETRAL_AUTH_GRPC_TLS_EDGE_CLIENT_URI
+              value: {{ printf "spiffe://%s/ns/envoy-gateway-system/sa/tetral-public-edge" .Values.routing.trustDomain | quote }}
+{{- end }}
           ports:
+            - name: grpc-check
+              containerPort: 9095
             - name: http
               containerPort: 8080
             - name: metrics
@@ -115,11 +137,16 @@ spec:
           livenessProbe:
             httpGet:
               path: /health
-              port: http
+              port: metrics
           readinessProbe:
             httpGet:
               path: /ready
-              port: http
+              port: metrics
+          volumeMounts:
+{{ include "tetral.edgeHTTPMounts" . | trim | indent 12 }}
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
           resources:
 {{ toYaml .Values.resources.auth | nindent 12 }}
           securityContext:
@@ -129,6 +156,11 @@ spec:
             capabilities:
               drop:
                 - ALL
+      volumes:
+{{ include "tetral.edgeHTTPVolumes" (dict "root" . "name" "auth") | trim | indent 8 }}
+        - name: store-trust
+          configMap:
+            name: {{ .Values.transport.storeTrustConfigMap | quote }}
 ---
 apiVersion: v1
 kind: Service
@@ -142,10 +174,15 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
     tetral.ai/exposure: public
 spec:
+  sessionAffinity: None
   type: ClusterIP
   selector:
     app.kubernetes.io/name: auth
   ports:
+    - name: grpc-check
+      port: 9095
+      targetPort: grpc-check
+      appProtocol: kubernetes.io/h2c
     - name: http
       port: 8080
       targetPort: http
@@ -192,6 +229,8 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+        - protocol: TCP
+          port: 9095
     - from:
         - namespaceSelector:
             matchLabels:

@@ -3,10 +3,13 @@ namespaces:
 
 # Where Tetral's dependencies live is a property of the cluster, not of
 # Tetral, so every such location is a value here rather than a literal in
-# a template: the API server, the database, the ingress controller, the
-# DNS service, and the outbound-HTTPS allowance. The defaults reproduce
-# the canonical manifests, so a cluster shaped like the kubeadm default
-# needs none of them. Each peer list is a plain NetworkPolicy peer list
+# a template: the API server, the database, the public edge data plane
+# (publicIngressPeers), the DNS service, and the outbound-HTTPS allowance.
+# The defaults reproduce the canonical manifests and are illustrative. With
+# Cilium disabled, apiServerPeers and apiServerPort must name the API server
+# endpoint that NetworkPolicy evaluates after Service translation - typically
+# the control-plane endpoint addresses and their port, not the kubernetes
+# ClusterIP 10.96.0.1:443. Each peer list is a plain NetworkPolicy peer list
 # and accepts every peer shape that API allows - except
 # ciliumDNSEndpointSelectors, which is a Cilium endpoint selector and
 # uses Cilium's own label syntax.
@@ -18,6 +21,7 @@ network:
   apiServerPeers:
     - ipBlock:
         cidr: 10.96.0.1/32
+  apiServerPort: 443
   databasePeers:
     - podSelector:
         matchLabels:
@@ -48,9 +52,11 @@ network:
     - matchLabels:
         k8s:io.kubernetes.pod.namespace: kube-system
         k8s:k8s-app: kube-dns
-  # Outbound HTTPS for the five workloads that call third-party APIs (model
-  # providers, the sandbox provider, blob storage, the web reader, and
-  # git-proxy). The default is unrestricted because those endpoints are
+  # Outbound HTTPS for the workloads that call operator-selected endpoints:
+  # API, Bridge, Job Runner and Web Connector blob storage; the Sandbox
+  # provider and blob storage; Provider Gateway model providers; MCP
+  # Connector remote MCP servers; Web Connector search and reader; and the
+  # git-proxy upstream. The default is unrestricted because those endpoints are
   # operator-chosen and resolve dynamically. NetworkPolicy is a union of
   # allows, so this cannot be narrowed by adding another policy - a deployment
   # that requires an egress gateway or a fixed provider range narrows it here.
@@ -63,7 +69,7 @@ network:
     - 443
 
 cilium:
-  enabled: true
+  enabled: false
   # Opt-in network-layer GitHub restriction for git-proxy. This requires a CNI
   # whose L7 DNS interception works. It is measured broken on Cilium 1.19.6
   # with k3s, VXLAN, and legacy host routing (cilium/cilium#46284); enabling it
@@ -80,7 +86,17 @@ sandbox:
 
 edge:
   enabled: false
-  tlsSecretName: git-proxy-tls
+  gatewayClassName: tetral-envoy-gateway
+  apiHost: api.tetral.example
+  apiTLSSecretName: tetral-api-public-tls
+  gitTLSSecretName: tetral-git-public-tls
+  trustConfigMap: tetral-edge-native-trust
+  clientLeafSecret: tetral-edge-client-tls
+  serverLeafSecrets:
+    auth: tetral-auth-edge-tls
+    api: tetral-api-edge-tls
+    event-stream: tetral-event-stream-edge-tls
+    git-proxy: tetral-git-proxy-edge-tls
 
 image:
   registry: ghcr.io/tetral-ai
@@ -134,6 +150,23 @@ bootstrapWorkspaceID: existing-workspace-id
 observability:
   deploymentEnvironment: local
   serviceVersion: dev
+  # Restart-required controls shared by every application process.
+  logLevel: info
+  logMaxRecordBytes: 16384
+  logSummaryIntervalMs: 30000
+  logBurst: 1
+
+queue:
+  leaseReclaimIntervalSeconds: 30
+  leaseReclaimLimit: 100
+  retryBaseMs: 1000
+  retryCapMs: 60000
+  retryMaxAttempts: 10
+
+jobRunner:
+  leaseDurationMs: 30000
+  heartbeatIntervalMs: 10000
+  maxJobs: 8
 
 resources:
   agentRuntime:
@@ -172,7 +205,7 @@ resources:
       cpu: "1"
       memory: 1Gi
       ephemeral-storage: 1Gi
-  bridgeJobRunner:
+  jobRunner:
     requests:
       cpu: 100m
       memory: 256Mi
@@ -253,3 +286,127 @@ resources:
       cpu: "1"
       memory: 1Gi
       ephemeral-storage: 2Gi
+
+# Each Deployment starts independently; enabled provider autoscaling retains its floor of two.
+replicas:
+  # Event Stream distributes new SSE connections; active streams stay on their Pod.
+  eventStream: 1
+  api: 1
+  auth: 1
+  bridge: 1
+  jobRunner: 1
+  sandbox: 1
+  providerGateway: 1
+  mcpConnector: 1
+  webConnector: 1
+autoscaling:
+  providerGateway:
+    enabled: true
+    maxReplicas: 10
+
+# Istiod is installed separately; these workload routes are mandatory in both
+# profiles and are not a chart option. The revision must equal the locked Istio
+# revision 1-31-1; any other value is rejected.
+routing:
+  revision: 1-31-1
+  trustDomain: cluster.local
+transport:
+  profile: standard-routed
+  # Operator-provided public trust; no workload receives an issuer signing key.
+  storeTrustConfigMap: tetral-store-trust
+  databaseServerName: tetral-postgres.tetral-system.svc.cluster.local
+  blobServerName: tetral-object-store.tetral-system.svc.cluster.local
+  runtimeDirectTrustConfigMap: tetral-runtime-direct-trust
+  runtimeDirectLeafSecret: tetral-runtime-direct-tls
+  runnerDirectLeafSecret: tetral-runner-direct-tls
+  runtimeServerName: agent-runtime.tetral-agent-runtime.svc.cluster.local
+  # Aggregate server capacity includes rollout surge, both Bun generations and reserve.
+  databaseCapacity: null
+  databaseReserve: 8
+  goPoolMax: 20
+  bunPoolMax: 10
+  externalDatabaseConnections: null
+
+# Core NATS is an independently installed, pinned official-chart release.
+# Disable only previews; PostgreSQL formal SSE always remains active.
+preview:
+  enabled: true
+  brokerAddress: tetral-nats.tetral-system.svc.cluster.local:4222
+  publisherSecret: tetral-nats-publisher
+  subscriberSecret: tetral-nats-subscriber
+  trustConfigMap: tetral-nats-client-trust
+  publisherLeafSecret: tetral-nats-publisher-tls
+  subscriberLeafSecret: tetral-nats-subscriber-tls
+  gateway:
+    queueBytes: 4194304
+    queueFrames: 1024
+    batchBytes: 262144
+    batchFrames: 64
+    connectTimeoutMs: 1000
+    flushTimeoutMs: 1000
+    retryMaxMs: 5000
+    credentialPollMs: 250
+    pingIntervalMs: 1000
+    maxPingOut: 1
+  subscriber:
+    connectTimeoutMs: 1000
+    reconnectWaitMs: 1000
+    pingIntervalMs: 120000
+    maxPingOut: 2
+
+# Projections of Event Stream's typed defaults. pollIntervalMs is the round
+# interval of the shared idle checks, not a per-viewer timer.
+eventStream:
+  pollIntervalMs: 1000
+  heartbeatIntervalMs: 1000
+  writeTimeoutMs: 10000
+  previewSetupTimeoutMs: 1000
+  hubMaxBytes: 8388608
+  hubMaxFrames: 2048
+  viewerMaxBytes: 262144
+  viewerMaxFrames: 128
+  subscriptionMaxBytes: 8388608
+  subscriptionMaxFrames: 2048
+  activeRequests: 32
+
+# Resolved against each workload replica/HPA bound in the connection ledger.
+rollout:
+  maxSurge: 1
+
+# Application drains and cancellation joins are bounded inside each Pod grace.
+lifecycle:
+  # Checked projections of the Runtime typed phase defaults; Pod grace adds a fixed 5s signal margin.
+  runtimeDrainMs: 60000
+  runtimeSettlementMs: 15000
+  # Per-attempt final settlement cap, clipped to method/caller/remaining phase; not another phase allocation.
+  settlementAttemptTimeoutMs: 5000
+  runtimeLocalJoinMs: 5000
+  runtimeProxyJoinMs: 5000
+  runtimeGraceSeconds: 90
+  bridgeDrainMs: 40000
+  runnerDrainMs: 30000
+  sandboxDrainMs: 30000
+  cancelJoinMs: 5000
+  providerDrainMs: 30000
+  providerJoinMs: 5000
+  mcpDrainMs: 30000
+  mcpJoinMs: 5000
+  webDrainMs: 10000
+  queueDrainMs: 10000
+
+# Optional native leaf automation. The issuer is an operator-installed,
+# separately scoped intermediate; signing material never enters this chart.
+# Leaf lifetimes are fixed by the chart at 24h with an 8h renewal lead and
+# per-renewal key rotation; they are a security contract, not a value.
+nativeCertificates:
+  enabled: false
+  issuerName: tetral-native
+
+# Federation URLs, CA trust and private CIDRs are imported by tetral-auth-policy
+# into Auth's durable registry. Only Auth may make the corresponding native
+# HTTPS requests. Supply exact public CIDRs or private namespace/Pod peers.
+authIssuerNetwork:
+  enabled: false
+  peers: []
+  ports:
+    - 443

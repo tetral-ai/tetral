@@ -185,6 +185,7 @@ function collectLifecycleBoundaryViolations(
 					importSpecifier === "../runtime/accumulator.js" ||
 					importSpecifier === "../runtime/conversation-turns.js" ||
 					importSpecifier === "../runtime/runtime-declaration.js" ||
+					importSpecifier === "../runtime/runtime-identity.js" ||
 					importSpecifier === "../runtime/metrics.js" ||
 					importSpecifier === "../runtime/turn-retry-budget.js")) ||
 			(relativePath === "src/thread-loop/provider-request.ts" &&
@@ -311,7 +312,7 @@ describe("session run static boundaries", () => {
 		);
 	});
 
-	test("string-keyed maps are limited to residency, reviewer memo, and pure checkpoint extraction", async () => {
+	test("string-keyed maps are limited to residency, reviewer memo, admitted reviewer dependencies, and pure checkpoint extraction", async () => {
 		const managerSource = await readFile(
 			sourceUrl("src/session/session-manager.ts"),
 			"utf8",
@@ -347,6 +348,7 @@ describe("session run static boundaries", () => {
 		expect(mapOwners).toEqual([
 			"src/session/approval-reviewer-manager.ts",
 			"src/session/session-manager.ts",
+            "src/thread-loop/thread-state.ts",
 			"src/thread-loop/turn/load.ts",
 		]);
 		expect(normalizedManager).toContain("interfaceThreadRunSlot{");
@@ -537,10 +539,10 @@ describe("session run static boundaries", () => {
 
 		expect(installIndex).toBeGreaterThanOrEqual(0);
 		expect(normalizedThreadLoop).toContain(
-			"installLoadedPendingToolUses:(session,pendingToolUses,entries,openRequestDraft,)=>Effect.sync(()=>installLoadedPendingToolUses(",
+			"installLoadedPendingToolUses:(session,pendingToolUses,entries,)=>Effect.sync(()=>installLoadedPendingToolUses(",
 		);
 		expect(normalizedThreadLoop).toContain(
-			"()=>toolCatalogForSession(session,options),pendingToolUses,entries,openRequestDraft,",
+			"()=>toolCatalogForSession(session,options),pendingToolUses,entries,",
 		);
 		expect(pendingAssignmentIndex).toBeGreaterThanOrEqual(0);
 		expect(residencyIndex).toBeGreaterThanOrEqual(0);
@@ -567,7 +569,7 @@ describe("session run static boundaries", () => {
 		expect(stateEnd).toBeGreaterThan(stateStart);
 		expect(normalizedPendingState).toContain("assistantMessageSequence:number");
 		expect(normalizedPendingState).toContain(
-			'toolPart:Extract<RuntimeAssistantDraftPart,{readonlytype:"tool"}>',
+			'toolPart:Extract<RuntimeAssistantDraftPart,{readonlytype:"tool";}>',
 		);
 	});
 });

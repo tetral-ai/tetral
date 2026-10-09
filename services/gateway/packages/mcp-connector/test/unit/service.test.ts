@@ -7,6 +7,7 @@ import type { RunMcpToolRequest } from "@tetral/gateway-protocol/src/gen/tetral/
 import { createRuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
 import { BridgeAPIMcpToolResultIdempotencyStore } from "../../src/bridge-client.js";
 import { McpConnectorError } from "../../src/errors.js";
+import { createJsonLogger } from "../../src/logger.js";
 import { McpConnectorMetricsRegistry } from "../../src/metrics.js";
 import { MCP_FAILURE_KIND_METADATA_KEY, MCP_MANIFEST_NOTIFY_RETRY_DELAYS_MS, McpConnectorServiceShell, GrpcStatusError } from "../../src/service.js";
 import type { ClaimMcpToolResultRequest, ClaimMcpToolResultResponse, CommitMcpToolResultRequest, CommitMcpToolResultResponse, RelinquishMcpToolResultRequest, RelinquishMcpToolResultResponse } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
@@ -20,17 +21,65 @@ const RuntimePodUid = "pod_uid_mcp_connector";
 const BindingTokenKey = "gateway-runtime-binding-token-test-key-32";
 
 describe("McpConnectorServiceShell", () => {
-  test("refuses non-catalog server names before client I/O", async () => {
+  test("shutdown rejects an unjoined list worker and keeps its completion owned", async () => {
+    const lines: string[] = [];
+    const logger = createJsonLogger({ write: line => lines.push(line) });
+    let release!: () => void;
+    const held=new Promise<void>(resolve=>{release=resolve;});
+    const client=new RecordingMcpClient();
+    const original=client.listTools.bind(client);
+    client.listTools=async (...args)=>{await held;return original(...args);};
+    const service=createService(client,undefined,logger);
+    const worker=service.listMcpTools(validListRequest(),new Metadata());
+    await new Promise(resolve=>setTimeout(resolve,1));
+    let completed=false;
+    const shutdown=service.shutdown(new Date(Date.now()+30));
+    const observed=shutdown.then(()=>{completed=true;},error=>{completed=true;return error;});
+    await new Promise(resolve=>setTimeout(resolve,45));expect(completed).toBe(false);
+    release();
+    // Metrics must not claim a worker joined before the held SDK operation returns.
+expect(await observed).toBeInstanceOf(Error);
+    expect(service.metricsText()).toContain('operation="shutdown_drain",outcome="timeout"} 1');
+    expect(service.metricsText()).toContain('operation="shutdown_cancel_join",outcome="timeout"} 1');await worker;
+    const phases = lines.map(line => JSON.parse(line)).filter(record => record.event === "workload.shutdown.phase_completed");
+    expect(phases.map(record => record.operation)).toEqual(["shutdown_drain", "shutdown_cancel_join"]);
+    for (const record of phases) {
+      expect(record["service.instance.id"]).toBeString();
+      expect(record["metric.observation.count"]).toBe(1);
+      expect(record["duration.seconds"]).toBeGreaterThan(0);
+      expect(service.metricsText()).toContain(`tetral_operation_duration_seconds_sum{service="mcp-connector",operation="${record.operation}",outcome="timeout"} ${record["duration.seconds"]}`);
+    }
+    logger.close();
+    await service.shutdown(new Date(Date.now()+30));
+    // Post-drain admission records exactly one rejected sample per RPC and no
+    // other change, so relabeling as error or double counting is visible.
+    const operationCounts=(text:string)=>Object.fromEntries(text.split("\n")
+      .filter(line=>line.startsWith("tetral_operation_duration_seconds_count{")&&/operation="(ListMcpTools|RunMcpTool)"/.test(line))
+      .map(line=>[line.slice(0,line.lastIndexOf(" ")),Number(line.slice(line.lastIndexOf(" ")+1))]));
+    const countsBefore=operationCounts(service.metricsText());
+    expect(Object.keys(countsBefore).filter(series=>series.includes('outcome="rejected"'))).toEqual([]);
+    const callsBefore=client.calls.length;
+    await expect(service.listMcpTools(validListRequest(),new Metadata())).rejects.toMatchObject({code:status.UNAVAILABLE});
+    await expect(service.runMcpTool(validRunRequest(),new Metadata())).rejects.toMatchObject({code:status.UNAVAILABLE});
+    expect(client.calls).toHaveLength(callsBefore);
+    expect(operationCounts(service.metricsText())).toEqual({
+      ...countsBefore,
+      'tetral_operation_duration_seconds_count{service="mcp-connector",operation="ListMcpTools",outcome="rejected"}':1,
+      'tetral_operation_duration_seconds_count{service="mcp-connector",operation="RunMcpTool",outcome="rejected"}':1,
+    });
+  });
+  test("surfaces configured-server resolution rejection from the client owner", async () => {
     const client = new RecordingMcpClient();
+    client.listToolsError = new McpConnectorError("mcp_invalid_input", "Configured MCP server is unsupported.");
     const service = createService(client);
 
     await expect(service.listMcpTools({
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
       mcpServerName: "not-github",
-    }, new Metadata())).rejects.toMatchObject({ code: status.INVALID_ARGUMENT });
+    }, new Metadata())).rejects.toMatchObject({ code: "mcp_invalid_input" });
 
-    expect(client.calls).toEqual([]);
+    expect(client.calls).toEqual(["listTools"]);
   });
 
   test("omits platform collisions while leaving family collisions to Bridge", async () => {
@@ -69,19 +118,24 @@ describe("McpConnectorServiceShell", () => {
       input_schema: JSON.parse(tool.inputSchemaJson) as unknown,
     }));
     expect(response.manifestEtag).toBe(createHash("sha256").update(canonicalJson(canonicalManifest)).digest("hex"));
-    const warningRecords = (logger.records as Array<Record<string, unknown>>).filter((record) => record["event.kind"] === "mcp_manifest_tool_omitted");
+    const omittedIndexes = (logger.records as Array<Record<string, unknown>>)
+      .map((record, index) => (record["event.kind"] === "mcp_manifest_tool_omitted" ? index : -1))
+      .filter((index) => index >= 0);
+    const warningRecords = omittedIndexes.map((index) => logger.records[index] as Record<string, unknown>);
     expect(warningRecords).toHaveLength(platformNames.length);
+    expect(omittedIndexes.map((index) => logger.levels[index])).toEqual(platformNames.map(() => "warn"));
     expect(warningRecords.map((record) => record["mcp.tool.name"])).toEqual(platformNames);
     for (const record of warningRecords) {
       expect(record).toMatchObject({
-        severity: "warning",
         operation: "mcp_manifest_list",
         component: "mcp-connector",
         "workspace.id": "wksp_1",
         "session.id": "sesn_1",
         "mcp.server.name": "github",
+        reason: "builtin_name_collision",
         "mcp.omission.reason": "builtin_name_collision",
       });
+      expect(record).not.toHaveProperty("severity");
     }
     expect(logger.records).toContainEqual(expect.objectContaining({
       event: "mcp_manifest_listed",
@@ -320,11 +374,13 @@ describe("McpConnectorServiceShell", () => {
       sessionThreadId: "thrd_1",
       bindingId: "bind_2",
       bindingGeneration: 43,
+      runtimeProcessId: "process-test",
     };
 
     const response = await service.runMcpTool(validRunRequest({
       bindingId: replacementIdentity.bindingId,
       bindingGeneration: replacementIdentity.bindingGeneration,
+      runtimeProcessId: replacementIdentity.runtimeProcessId,
       runtimeBindingToken: signedRuntimeBindingToken(replacementIdentity, RuntimePodUid),
     }), new Metadata());
 
@@ -500,13 +556,16 @@ describe("McpConnectorServiceShell", () => {
     expect(client.calls).toEqual([]);
   });
 
-  test("terminally settles post-acquisition executor and catalog rejection on the exact claim", async () => {
+  test("terminally settles post-acquisition executor and configured-server resolution rejection on the exact claim", async () => {
     for (const executor of [
       { ...durableExecutor(), inputJson: "[]" },
-      { ...durableExecutor(), mcpServerName: "not-catalogued" },
+      { ...durableExecutor(), toolName: "" },
+      { ...durableExecutor(), mcpServerName: "unsupported-installed" },
     ]) {
       const store = new RecordingExecutorRejectionStore(executor);
       const client = new RecordingMcpClient();
+      const resolutionRejected=executor.mcpServerName==="unsupported-installed";
+      if(resolutionRejected)client.callToolError=new McpConnectorError("mcp_invalid_input","Configured MCP server is unavailable or unsupported.");
       const response = await createService(
         client,
         new RecordingManifestChangeNotifier(),
@@ -515,15 +574,16 @@ describe("McpConnectorServiceShell", () => {
         store,
       ).runMcpTool(validRunRequest(), authorizationMetadata());
 
-      expect(response).toMatchObject({
-        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
-        resultText: "MCP tool execution metadata was rejected.",
-        errorKind: McpErrorKind.MCP_ERROR_KIND_INTERNAL,
-      });
-      expect(client.calls).toEqual([]);
+      expect(response).toMatchObject(resolutionRejected?{
+        status:RunMcpToolStatus.RUN_MCP_TOOL_STATUS_TOOL_ERROR,resultText:"Configured MCP server is unavailable or unsupported.",errorKind:McpErrorKind.MCP_ERROR_KIND_INVALID_INPUT,
+      }:{status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,resultText:"MCP tool execution metadata was rejected.",errorKind:McpErrorKind.MCP_ERROR_KIND_INTERNAL});
+      expect(client.calls).toEqual(resolutionRejected?["callTool"]:[]);
       expect(store.stores).toHaveLength(1);
       expect(store.failures).toEqual([]);
       expect(store.claimContext?.claimId).toBe(store.storeContext?.claimId);
+      expect(store.claimKey).toEqual(store.storeKey);
+      expect(store.claimKey).toEqual({toolUseEventId:validRunRequest().toolUseEventId});
+      expect(store.stores[0]!.response).toMatchObject({status:response.status,errorKind:response.errorKind,resultText:response.resultText});
     }
   });
 
@@ -568,9 +628,10 @@ describe("McpConnectorServiceShell", () => {
       errorKind: McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED,
       retryStatus: McpRetryStatus.MCP_RETRY_STATUS_RETRYING,
     });
-    expect(logger.records).toHaveLength(1);
-    expect(logger.records[0]).toMatchObject({ status: "runtime_error", error_kind: "mcp_commit_failed" });
+    expect(logger.terminalRecords).toHaveLength(1);
+    expect(logger.terminalRecords[0]).toMatchObject({ status: "runtime_error", "error.code": "mcp_commit_failed" });
     expect(metrics.render()).toContain('mcpconnector_calls_total{tool="create_issue",status="runtime_error",error_kind="mcp_commit_failed"} 1');
+    expect(metrics.render()).toContain('tetral_operation_duration_seconds_count{service="mcp-connector",operation="RunMcpTool",outcome="error"} 1');
   });
 
   test("records exactly one terminal RunMcpTool outcome for every early exit", async () => {
@@ -610,12 +671,12 @@ describe("McpConnectorServiceShell", () => {
       });
 
       await expect(service.runMcpTool(testCase.request ?? validRunRequest(), authorizationMetadata()), testCase.name).rejects.toBeDefined();
-      expect(logger.records, testCase.name).toHaveLength(1);
-      expect(logger.records[0], testCase.name).toMatchObject({
+      expect(logger.terminalRecords, testCase.name).toHaveLength(1);
+      expect(logger.terminalRecords[0], testCase.name).toMatchObject({
         operation: "run_mcp_tool",
         "event.kind": "mcpconnector.call",
         status: "runtime_error",
-        error_kind: testCase.errorKind,
+        "error.code": testCase.errorKind,
       });
     }
   });
@@ -692,7 +753,8 @@ describe("McpConnectorServiceShell", () => {
         { type: "image", data: Buffer.from("image-bytes").toString("base64"), mimeType: "image/png" },
       ],
     };
-    const logger = new MemoryLogger();
+    const lines: string[] = [];
+    const logger = createJsonLogger({ write: (line) => lines.push(line) });
     const service = createService(
       client,
       new RecordingManifestChangeNotifier(),
@@ -708,27 +770,14 @@ describe("McpConnectorServiceShell", () => {
     await service.runMcpTool(request, authorizationMetadata());
 
     expect(response.status).toBe(RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED);
-    expect(logger.records).toHaveLength(2);
-    for (const [index, record] of (logger.records as Array<Record<string, unknown>>).entries()) {
-      expect(Object.keys(record).sort()).toEqual([
-        "attachment_count",
-        "component",
-        "content_items",
-        "duration.ms",
-        "error_kind",
-        "event.kind",
-        "mcp_server_name",
-        "operation",
-        "refresh_triggered",
-        "request.id",
-        "session.id",
-        "status",
-        "thread.id",
-        "tool.use.event.id",
-        "tool_name",
-        "workspace.id",
-      ].sort());
+    const records = lines
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((record) => record["event.kind"] === "mcpconnector.call");
+    expect(records).toHaveLength(2);
+    for (const [index, record] of records.entries()) {
       expect(record).toMatchObject({
+        level: "info",
+        "service.name": "mcp-connector",
         "request.id": expect.stringMatching(/^mcpclaim_/),
         "workspace.id": "wksp_1",
         "session.id": "sesn_1",
@@ -737,20 +786,23 @@ describe("McpConnectorServiceShell", () => {
         operation: "run_mcp_tool",
         "event.kind": "mcpconnector.call",
         component: "mcp-connector",
-        mcp_server_name: index === 0 ? "github" : "",
-        tool_name: index === 0 ? "create_issue" : "",
+        "mcp.server.name": index === 0 ? "github" : "",
+        "mcp.tool.name": index === 0 ? "create_issue" : "",
         status: "completed",
-        error_kind: "",
-        refresh_triggered: true,
-        content_items: 2,
-        attachment_count: 1,
+        "mcp.credential.refresh_triggered": true,
+        "mcp.result.content_count": 2,
+        "mcp.result.attachment_count": 1,
       });
       expect(typeof record["duration.ms"]).toBe("number");
-      const serialized = JSON.stringify(record);
-      expect(serialized).not.toContain("Authorization");
-      expect(serialized).not.toContain("Bearer");
-      expect(serialized).not.toContain("rtbt_v1");
+      for (const removed of ["mcp_server_name", "tool_name", "error_kind", "refresh_triggered", "content_items", "attachment_count", "severity", "error.code"]) {
+        expect(record).not.toHaveProperty(removed);
+      }
+      expect(Object.values(record)).not.toContain("[REDACTED]");
     }
+    const serialized = lines.join("");
+    expect(serialized).not.toContain("Authorization");
+    expect(serialized).not.toContain("Bearer");
+    expect(serialized).not.toContain("rtbt_v1");
   });
 
   test("maps invalid MCP arguments to model-visible tool errors", async () => {
@@ -766,8 +818,8 @@ describe("McpConnectorServiceShell", () => {
       resultText: "MCP server rejected the arguments.",
       errorKind: McpErrorKind.MCP_ERROR_KIND_INVALID_INPUT,
     });
-    expect(logger.records).toHaveLength(1);
-    expect(logger.records[0]).toMatchObject({
+    expect(logger.terminalRecords).toHaveLength(1);
+    expect(logger.terminalRecords[0]).toMatchObject({
       "request.id": expect.stringMatching(/^mcpclaim_/),
       "workspace.id": "wksp_1",
       "session.id": "sesn_1",
@@ -775,36 +827,34 @@ describe("McpConnectorServiceShell", () => {
       operation: "run_mcp_tool",
       "event.kind": "mcpconnector.call",
       component: "mcp-connector",
-      mcp_server_name: "github",
-      tool_name: "create_issue",
+      "mcp.server.name": "github",
+      "mcp.tool.name": "create_issue",
       status: "tool_error",
-      error_kind: "mcp_invalid_input",
       "error.class": "mcp_invalid_input",
       "error.code": "mcp_invalid_input",
       "error.message_safe": "MCP connector call failed.",
     });
-    expect(Object.keys(logger.records[0] as Record<string, unknown>).sort()).toEqual([
-      "attachment_count",
+    expect(Object.keys(logger.terminalRecords[0] as Record<string, unknown>).sort()).toEqual([
       "component",
-      "content_items",
       "duration.ms",
       "error.class",
       "error.code",
-      "error_kind",
       "error.message_safe",
       "event.kind",
-      "mcp_server_name",
+      "mcp.credential.refresh_triggered",
+      "mcp.result.attachment_count",
+      "mcp.result.content_count",
+      "mcp.server.name",
+      "mcp.tool.name",
       "operation",
-      "refresh_triggered",
       "request.id",
       "session.id",
       "status",
       "thread.id",
       "tool.use.event.id",
-      "tool_name",
       "workspace.id",
     ].sort());
-    expect(JSON.stringify(logger.records[0])).not.toContain("MCP server rejected the arguments.");
+    expect(JSON.stringify(logger.terminalRecords[0])).not.toContain("MCP server rejected the arguments.");
   });
 
   test("maps terminal MCP authentication failure into the event envelope fields", async () => {
@@ -873,7 +923,7 @@ describe("McpConnectorServiceShell", () => {
     expect(bridge.commitCalls).toHaveLength(1);
     expect(logger.records).toContainEqual(expect.objectContaining({
       status: "runtime_error",
-      error_kind: "mcp_internal_error",
+      "error.code": "mcp_internal_error",
       "error.class": "mcp_internal_error",
     }));
     expect(metrics.render()).toContain('mcpconnector_calls_total{tool="create_issue",status="runtime_error",error_kind="mcp_internal_error"} 1');
@@ -985,36 +1035,34 @@ describe("McpConnectorServiceShell", () => {
         operation: "run_mcp_tool",
         "event.kind": "mcpconnector.call",
         component: "mcp-connector",
-        mcp_server_name: "",
-        tool_name: "",
+        "mcp.server.name": "",
+        "mcp.tool.name": "",
         status: "runtime_error",
-        error_kind: "runtime_binding_token_rejected",
-        refresh_triggered: false,
-        content_items: 0,
-        attachment_count: 0,
+        "mcp.credential.refresh_triggered": false,
+        "mcp.result.content_count": 0,
+        "mcp.result.attachment_count": 0,
         "error.class": "runtime_binding_token_rejected",
         "error.code": "runtime_binding_token_rejected",
         "error.message_safe": "MCP connector call failed.",
       });
       expect(Object.keys(logger.records[0] as Record<string, unknown>).sort()).toEqual([
-        "attachment_count",
         "component",
-        "content_items",
         "duration.ms",
         "error.class",
         "error.code",
-        "error_kind",
         "error.message_safe",
         "event.kind",
-        "mcp_server_name",
+        "mcp.credential.refresh_triggered",
+        "mcp.result.attachment_count",
+        "mcp.result.content_count",
+        "mcp.server.name",
+        "mcp.tool.name",
         "operation",
-        "refresh_triggered",
         "request.id",
         "session.id",
         "status",
-      "thread.id",
-      "tool.use.event.id",
-      "tool_name",
+        "thread.id",
+        "tool.use.event.id",
         "workspace.id",
       ].sort());
       expect(JSON.stringify(logger.records[0])).not.toContain("rtbt_v1");
@@ -1078,6 +1126,7 @@ function validRunRequest(overrides: Partial<RunMcpToolRequest> = {}): RunMcpTool
     toolUseEventId: "sevt_tool_1",
     bindingId: "bind_1",
     bindingGeneration: 42,
+    runtimeProcessId: "process-test",
     runtimeBindingToken: signedRuntimeBindingToken(validRunIdentity(), RuntimePodUid),
     ...overrides,
   };
@@ -1096,6 +1145,7 @@ function validRunIdentity(): RuntimeBindingRequestIdentity {
     sessionThreadId: "thrd_1",
     bindingId: "bind_1",
     bindingGeneration: 42,
+    runtimeProcessId: "process-test",
   };
 }
 
@@ -1108,6 +1158,7 @@ function signedRuntimeBindingToken(request: RuntimeBindingRequestIdentity, runti
     binding_id: request.bindingId,
     binding_generation: request.bindingGeneration,
     runtime_pod_uid: runtimePodUid,
+    runtime_process_id: "process-test",
     exp: Math.floor(new Date(expiresAt).getTime() / 1000),
   };
   const payloadPart = Buffer.from(JSON.stringify(payload)).toString("base64url");
@@ -1230,6 +1281,7 @@ class StaleCustodyIdempotencyStore implements McpIdempotencyStore {
 }
 
 class RecordingExecutorRejectionStore implements McpIdempotencyStore {
+  claimKey:unknown;storeKey:unknown;
   claimContext: McpIdempotencyContext | undefined;
   storeContext: McpIdempotencyContext | undefined;
   readonly stores: PendingStoredRunMcpToolResponse[] = [];
@@ -1239,6 +1291,7 @@ class RecordingExecutorRejectionStore implements McpIdempotencyStore {
 
   claim(_key: unknown, context?: McpIdempotencyContext): ReturnType<McpIdempotencyStore["claim"]> {
     this.claimContext = context;
+    this.claimKey=_key;
     return { status: "new", executor: this.executor };
   }
 
@@ -1248,6 +1301,7 @@ class RecordingExecutorRejectionStore implements McpIdempotencyStore {
     context?: McpIdempotencyContext,
   ): ReturnType<McpIdempotencyStore["store"]> {
     this.stores.push(stored);
+    this.storeKey=_key;
     this.storeContext = context;
     return {
       status: stored.response.status,
@@ -1424,13 +1478,22 @@ class AllowingAuthenticator implements McpAuthenticator {
 
 class MemoryLogger implements McpConnectorLogger {
   readonly records: unknown[] = [];
+  readonly levels: Array<"info" | "warn" | "error"> = [];
+  get terminalRecords(): unknown[] { return this.records.filter(record => (record as {"event.kind"?:unknown})["event.kind"] === "mcpconnector.call"); }
 
   info(record: unknown): void {
     this.records.push(record);
+    this.levels.push("info");
+  }
+
+  warn(record: unknown): void {
+    this.records.push(record);
+    this.levels.push("warn");
   }
 
   error(record: unknown): void {
     this.records.push(record);
+    this.levels.push("error");
   }
 }
 

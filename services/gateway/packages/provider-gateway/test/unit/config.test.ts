@@ -2,6 +2,17 @@ import { describe, expect, test } from "bun:test";
 import { loadProviderGatewayConfigFromEnv } from "../../src/config.js";
 
 describe("Gateway config", () => {
+  test("preserves configured business drain and separate join within Pod grace",()=>{
+    const result=loadProviderGatewayConfigFromEnv({...validEnv(),TETRAL_DRAIN_TIMEOUT_MS:"200",TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS:"1000"});
+    expect(result.ok).toBe(true);if(result.ok){expect(result.config.drainTimeoutMs).toBe(200);expect(result.config.cancelJoinTimeoutMs).toBe(1000);}
+    for(const join of ["0","-1","55000","bad"])expect(loadProviderGatewayConfigFromEnv({...validEnv(),TETRAL_DRAIN_TIMEOUT_MS:"200",TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS:join}).ok).toBe(false);
+  });
+
+  test("reads the application drain only from the shared drain key",()=>{
+    const result=loadProviderGatewayConfigFromEnv({...validEnv(),TETRAL_SERVICE_DRAIN_TIMEOUT_MS:"200"});
+    expect(result.ok).toBe(true);if(result.ok)expect(result.config.drainTimeoutMs).toBe(30000);
+  });
+
   test("projects only Gateway-owned environment", () => {
     const config = loadProviderGatewayConfigFromEnv({
       ...validEnv(),
@@ -59,13 +70,23 @@ describe("Gateway config", () => {
       "TETRAL_DATABASE_POOL_CONNECTION_TIMEOUT_SECONDS",
       "TETRAL_DATABASE_STATEMENT_TIMEOUT_MS",
     ] as const) {
-      for (const value of ["0", "-1"]) {
+      for (const value of ["0", "-1", "1.5", " 1", "01", "9007199254740992"]) {
         expect(loadProviderGatewayConfigFromEnv({
           ...validEnv(),
           [key]: value,
         }).ok).toBe(false);
       }
     }
+  });
+
+  test("explicit empty pool values retain Gateway defaults", () => {
+    const result = loadProviderGatewayConfigFromEnv({ ...validEnv(),
+      TETRAL_DATABASE_POOL_MAX: "", TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS: "",
+      TETRAL_DATABASE_POOL_MAX_LIFETIME_SECONDS: "", TETRAL_DATABASE_POOL_CONNECTION_TIMEOUT_SECONDS: "",
+      TETRAL_DATABASE_STATEMENT_TIMEOUT_MS: "",
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.config.databasePool).toEqual({ max: 10, idleTimeout: 30, maxLifetime: 1800, connectionTimeout: 30, statementTimeoutMs: 30000 });
   });
 
   test("accepts bounded concurrent-turn admission cap and rejects invalid values", () => {

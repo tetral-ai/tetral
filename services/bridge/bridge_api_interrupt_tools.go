@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -50,7 +53,7 @@ func settleInterruptedThreadToolsTx(
 	if err != nil {
 		return nil, err
 	}
-	threadScope, err := lockThreadMutationTx(ctx, tx, scope)
+	threadScope, err := runtimecontrol.LockThreadMutationTx(ctx, tx, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +78,7 @@ func settleInterruptedThreadToolsTx(
 			resultEventType = "agent.mcp_tool_result"
 			identityField = "mcp_tool_use_id"
 		}
-		payloadJSON, err := marshalBridgeJSON(map[string]any{
+		payloadJSON, err := runtimecontrol.MarshalJSON(map[string]any{
 			"type": resultEventType, identityField: tool.eventID,
 			"content":  []map[string]string{{"type": "text", "text": safeMessage}},
 			"is_error": true, "reason": "runtime_interrupted",
@@ -83,34 +86,28 @@ func settleInterruptedThreadToolsTx(
 		if err != nil {
 			return nil, err
 		}
-		visibility, sessionVisible := threadScope.publicProjection(resultEventType)
+		visibility, sessionVisible := threadScope.PublicProjection(resultEventType)
 		resultEventID := id.New("evt_")
-		resultSequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
+		resultSequence, err := runtimecontrol.NextSessionEventSequenceTx(ctx, tx, scope)
 		if err != nil {
 			return nil, err
 		}
-		durableProjection, err := settleRuntimeToolPartTx(ctx, tx, scope, tool.modelRequestID, settlement, now)
+		durableProjection, err := runtimecontrol.SettleRuntimeToolPartTx(ctx, tx, scope, tool.modelRequestID, settlement, now)
 		if err != nil {
 			return nil, err
 		}
-		projectionJSON, err := marshalBridgeJSON(durableProjection)
+		projectionJSON, err := runtimecontrol.MarshalJSON(durableProjection)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO session_events (
-				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-				visibility, session_visible, runtime_write_id, model_request_id, projection_json,
-				created_at, updated_at, processed_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $13)`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), resultEventID,
-			resultSequence, resultEventType, payloadJSON, visibility, sessionVisible,
-			stableRuntimeID("interrupt_tool_result", interruptEventID, tool.eventID), tool.modelRequestID, projectionJSON, now,
-		); err != nil {
-			return nil, err
-		}
-		if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, resultEventID, visibility, sessionVisible, now); err != nil {
-			return nil, err
+		if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+			WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
+			EventID: resultEventID, Sequence: resultSequence, Type: resultEventType,
+			PayloadJSON: payloadJSON, ProjectionJSON: projectionJSON, Visibility: visibility, SessionVisible: sessionVisible,
+			RuntimeWriteID: runtimecontrol.StableRuntimeID("interrupt_tool_result", interruptEventID, tool.eventID),
+			ModelRequestID: tool.modelRequestID, ToolUseEventID: tool.eventID, CreatedAt: now, ProcessedAt: &now,
+		}); err != nil {
+			return nil, runtimecontrol.ToolRelationInsertError(err)
 		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE session_pending_tool_uses
@@ -122,7 +119,7 @@ func settleInterruptedThreadToolsTx(
 			return nil, err
 		}
 		if execution != nil {
-			if err := consumeSandboxExecutionForTerminalWriterTx(
+			if err := runtimecontrol.ConsumeSandboxExecutionForTerminalWriterTx(
 				ctx, tx, scope, tool.eventID, resultEventID, "conversation_tool_result", now,
 			); err != nil {
 				return nil, err
@@ -170,8 +167,8 @@ func lockUnfinishedRuntimeToolsTx(
 		      SELECT 1 FROM session_events result
 		       WHERE result.workspace_id=e.workspace_id AND result.session_id=e.session_id
 		         AND result.session_thread_id=e.session_thread_id
-		         AND ((result.type='agent.tool_result' AND COALESCE(result.payload_json::jsonb->>'tool_use_event_id', result.payload_json::jsonb->>'tool_use_id')=e.event_id)
-		           OR (result.type='agent.mcp_tool_result' AND result.payload_json::jsonb->>'mcp_tool_use_id'=e.event_id))
+		         AND result.type IN ('agent.tool_result','agent.mcp_tool_result')
+		         AND result.tool_use_event_id=e.event_id
 		    )
 		  ORDER BY e.sequence, e.event_id
 		  FOR UPDATE OF e`,
@@ -257,7 +254,7 @@ func interruptedToolOutcomeTx(
 		message = "Tool execution may have completed, but its result did not commit before interruption."
 		code = "runtime_interrupted_result_not_committed"
 	}
-	errorJSON, err := marshalBridgeJSON(map[string]any{
+	errorJSON, err := runtimecontrol.MarshalJSON(map[string]any{
 		"type": code, "message": message, "retryable": false,
 	})
 	if err != nil {
@@ -284,10 +281,10 @@ func requestSandboxExecutionCancellationTx(ctx context.Context, tx *dbconnect.Tx
 	if err != nil {
 		return queue.EnqueueRequest{}, err
 	}
-	if !rowsAffected(result) {
+	if !runtimecontrol.RowsAffected(result) {
 		return queue.EnqueueRequest{}, status.Error(codes.Aborted, "sandbox execution changed during interrupt settlement")
 	}
-	payload, err := marshalBridgeJSON(map[string]string{
+	payload, err := runtimecontrol.MarshalJSON(map[string]string{
 		"workspace_id": scope.GetWorkspaceId(), "session_id": scope.GetSessionId(),
 		"session_thread_id": scope.GetSessionThreadId(), "tool_use_event_id": execution.toolUseEventID,
 	})

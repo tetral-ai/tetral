@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { access, readFile, writeFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
 import type { LLMRequest } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
@@ -38,6 +39,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId?: string;
 	readonly bindingGeneration?: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly now: string;
 	readonly preloadOnly?: boolean;
 	readonly terminationWriteId?: string;
@@ -47,6 +49,10 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly recoveryResultPath?: string;
 	readonly closePath?: string;
 	readonly waitForSandboxObservation?: boolean;
+	// This scenario must account for the already-created child independently
+	// from the parent's one bounded recovery attempt.
+	readonly heldChildThreadId?: string;
+	readonly providerStatePath?: string;
 };
 const command = {
 	workspaceId: input.workspaceId,
@@ -55,6 +61,7 @@ const command = {
 	bindingId: input.bindingId ?? "",
 	bindingGeneration: input.bindingGeneration ?? 0,
 	targetPodUid: input.targetPodUid,
+	runtimeProcessId: input.runtimeProcessId,
 };
 const bridgeOptions = {
 	address: input.bridgeAddress,
@@ -73,21 +80,60 @@ let acceptedInputCommitCalls = 0;
 let acceptedInputCommitCallsInFlight = 0;
 let acceptedInputCommitBarrierEntered = false;
 let acceptedInputCommitBarrierReleased = false;
-let acceptedInputCommitTimeoutTriggered = false;
-let markFirstAcceptedInputCommitDurable: (() => void) | undefined;
-const firstAcceptedInputCommitDurable = new Promise<void>((resolve) => {
-	markFirstAcceptedInputCommitDurable = resolve;
-});
-let releaseFirstAcceptedInputCommit: (() => void) | undefined;
-const firstAcceptedInputCommitRelease = new Promise<void>((resolve) => {
-	releaseFirstAcceptedInputCommit = resolve;
-});
+let acceptedInputCommitMaxInFlight = 0;
 let markSandboxObservationStarted: (() => void) | undefined;
 const sandboxObservationStarted = new Promise<void>((resolve) => {
 	markSandboxObservationStarted = resolve;
 });
+type RecoveryProviderEntry = {
+	readonly sessionId: string;
+	readonly sessionThreadId: string;
+	readonly modelRequestId: string;
+	readonly requestId: string;
+	stage: "requested" | "failed" | "held" | "cancelled";
+	joined: boolean;
+};
+const providerEntries: RecoveryProviderEntry[] = [];
+let parentErrorEnd: {
+	readonly modelRequestId: string;
+	readonly eventId: string;
+	readonly type: "committed" | "duplicate";
+} | undefined;
+let providerStateWrites = Promise.resolve();
+function publishProviderState(): Promise<void> {
+	if (input.providerStatePath === undefined) return Promise.resolve();
+	const state = JSON.stringify({ providerEntries, parentErrorEnd });
+	providerStateWrites = providerStateWrites.then(() =>
+		writeFile(input.providerStatePath!, state, { mode: 0o600 }),
+	);
+	return providerStateWrites;
+}
+class RecoveryEventWriter extends BridgeAPIEventWriter {
+	override async writeRequestEnd(
+		envelope: Parameters<BridgeAPIEventWriter["writeRequestEnd"]>[0],
+	) {
+		const result = await super.writeRequestEnd(envelope);
+		if (
+			input.heldChildThreadId !== undefined &&
+			envelope.sessionId === input.sessionId &&
+			envelope.sessionThreadId === input.sessionThreadId &&
+			envelope.isError && result.ok &&
+			(result.type === "committed" || result.type === "duplicate") &&
+			result.outcome.type === "ordinary" &&
+			providerEntries.some((entry) => entry.modelRequestId === envelope.modelRequestId)
+		) {
+			parentErrorEnd = {
+				modelRequestId: envelope.modelRequestId,
+				eventId: result.requestEndEventId,
+				type: result.type,
+			};
+			await publishProviderState();
+		}
+		return result;
+	}
+}
 let nextID = 0;
-const writer = new BridgeAPIEventWriter(bridgeOptions);
+const writer = new RecoveryEventWriter(bridgeOptions);
 const toolRunner = new RuntimePodToolRunner({
 	bridgeAddress: input.bridgeAddress,
 	webAddress: "127.0.0.1:1",
@@ -107,18 +153,17 @@ const hosts = await buildRuntimeCoreHosts({
 		commitAcceptedInput: async (acceptedInput, options) => {
 			const commitCall = ++acceptedInputCommitCalls;
 			acceptedInputCommitCallsInFlight += 1;
+			acceptedInputCommitMaxInFlight = Math.max(
+				acceptedInputCommitMaxInFlight,
+				acceptedInputCommitCallsInFlight,
+			);
 			try {
 				if (commitCall === 1) {
 					acceptedInputCommitBarrierEntered = true;
 				}
 				const result = await loader.commitAcceptedInput(acceptedInput, options);
-				if (commitCall === 1) {
-					markFirstAcceptedInputCommitDurable?.();
-					await firstAcceptedInputCommitRelease;
-				}
 				if (commitCall === 2) {
 					acceptedInputCommitBarrierReleased = true;
-					releaseFirstAcceptedInputCommit?.();
 				}
 				return result;
 			} finally {
@@ -137,28 +182,6 @@ const hosts = await buildRuntimeCoreHosts({
 			sleep: async (delayMs, signal) => {
 				if (signal.aborted) return false;
 				waitedMs.push(delayMs);
-				if (
-					acceptedInputCommitBarrierEntered &&
-					!acceptedInputCommitTimeoutTriggered &&
-					acceptedInputCommitCalls === 1 &&
-					acceptedInputCommitCallsInFlight === 1
-				) {
-					await firstAcceptedInputCommitDurable;
-					if (signal.aborted) return false;
-					acceptedInputCommitTimeoutTriggered = true;
-					return true;
-				}
-				if (
-					acceptedInputCommitTimeoutTriggered &&
-					acceptedInputCommitCalls >= 2 &&
-					acceptedInputCommitCallsInFlight > 0
-				) {
-					return await new Promise<boolean>((resolve) => {
-						signal.addEventListener("abort", () => resolve(false), {
-							once: true,
-						});
-					});
-				}
 				return true;
 			},
 		},
@@ -166,7 +189,41 @@ const hosts = await buildRuntimeCoreHosts({
 			stream: (request) => {
 				providerInvocations += 1;
 				providerRequests.push(request);
-				if (providerInvocations === 1) {
+				let entry: RecoveryProviderEntry | undefined;
+				if (input.heldChildThreadId !== undefined) {
+					entry = {
+						sessionId: request.sessionId,
+						sessionThreadId: request.sessionThreadId,
+						modelRequestId: request.modelRequestId,
+						requestId: request.requestId,
+						stage: "requested", joined: false,
+					};
+					providerEntries.push(entry);
+					if (request.sessionThreadId === input.heldChildThreadId) {
+						const heldEntry = entry;
+						// Consuming the stream is the child-entry boundary. Keep it
+						// interruptible and emit no finish/completion mail before close.
+						return Stream.fromEffect(Effect.gen(function* () {
+							heldEntry.stage = "held";
+							yield* Effect.promise(publishProviderState);
+							return yield* Effect.never;
+						}).pipe(
+							Effect.onInterrupt(() => Effect.sync(() => {
+								heldEntry.stage = "cancelled";
+							})),
+							Effect.ensuring(Effect.promise(async () => {
+								heldEntry.joined = true;
+								await publishProviderState();
+							})),
+						));
+					}
+				}
+				const parentAttempt = providerRequests.filter((call) =>
+					call.sessionThreadId === input.sessionThreadId,
+				).length;
+				if (input.heldChildThreadId === undefined ? providerInvocations === 1 :
+					request.sessionThreadId === input.sessionThreadId && parentAttempt === 1) {
+					if (entry !== undefined) entry.stage = "failed";
 					return Stream.fail({
 						type: "llm-service" as const,
 						error: {
@@ -178,16 +235,14 @@ const hosts = await buildRuntimeCoreHosts({
 							fatal: false,
 							reason: "gateway_transport_completion_deadline" as const,
 						},
-					});
+					}).pipe(Stream.ensuring(Effect.sync(() => {
+						if (entry !== undefined) entry.joined = true;
+					})));
 				}
 				return Stream.fromIterable([
-					{ type: "text-start" as const, id: "recovered-text" },
-					{
-						type: "text-delta" as const,
-						id: "recovered-text",
-						text_delta: "recovered",
-					},
-					{ type: "text-end" as const, id: "recovered-text" },
+
+
+					{type:"text-complete" as const,providerPartId:"recovered-text",eventId:`evt_${createHash("sha256").update(JSON.stringify(["provider-reschedule-recovery-composition.ts", request.sessionId, request.modelRequestId, "recovered-text"])).digest("hex").slice(0,32)}`,text:("recovered")},
 					{ type: "finish" as const, finishReason: "stop" as const },
 				]);
 			},
@@ -244,17 +299,18 @@ if (input.serveRecovery === true) {
 		},
 	} satisfies RuntimeCleanupController;
 	const service = new RuntimeControlService({
+	runtimeProcessId: input.runtimeProcessId,
 		ownPod: {
 			namespace: "tetral-agent-runtime",
 			name: "runtime-provider-reschedule-recovery",
 			uid: input.targetPodUid,
 			ip: "127.0.0.1",
 		},
-		allowedBridge: { namespace: "tetral-system", name: "bridge" },
+		allowedJobRunner: { namespace: "tetral-system", name: "job-runner" },
 		authenticator: {
 			authenticate: async () => ({
 				ok: true as const,
-				serviceAccount: { namespace: "tetral-system", name: "bridge" },
+				serviceAccount: { namespace: "tetral-system", name: "job-runner" },
 			}),
 		},
 		runHost: {
@@ -300,16 +356,22 @@ if (input.serveRecovery === true) {
 		await server.shutdown();
 		await hosts.close();
 	}
+	await providerStateWrites;
 	process.stdout.write(JSON.stringify({
 		resultType: "completed",
 		providerInvocations,
+		providerEntries,
+		parentErrorEnd,
 		executorInvocations,
 		sandboxAcceptanceInvocations,
 		sandboxObservationInvocations,
 		waitedMs,
 		acceptedInputCommitBarrierEntered,
 		acceptedInputCommitBarrierReleased,
-		providerContext: providerRequests[0]?.context ?? [],
+		acceptedInputCommitCalls,
+		acceptedInputCommitMaxInFlight,
+		providerContext: (input.heldChildThreadId === undefined ? providerRequests[0] :
+			providerRequests.find((request) => request.sessionThreadId === input.sessionThreadId))?.context ?? [],
 		recoveredTurnEventIds,
 	}));
 	process.exit(0);
@@ -356,6 +418,8 @@ if (input.preloadOnly === true) {
 		waitedMs,
 		acceptedInputCommitBarrierEntered,
 		acceptedInputCommitBarrierReleased,
+		acceptedInputCommitCalls,
+		acceptedInputCommitMaxInFlight,
 		providerContext: [],
 		recoveredTurnEventIds,
 		preloadResult,
@@ -366,7 +430,7 @@ if (input.preloadOnly === true) {
 }
 const loaded = await loader.loadThreadContext(command);
 const checkpoint = extractThreadTurnCheckpoint({
-	contextEntries: loaded.contextEntries,
+	messages: loaded.messages,
 	facts: loaded.turnFacts,
 });
 const routes = extractColdThreadToolRouteView({
@@ -376,9 +440,11 @@ const routes = extractColdThreadToolRouteView({
 });
 const session = new ThreadRuntime({
 	...command,
+	threadRole: loaded.thread?.role,
+	threadVisibility: loaded.thread?.visibility,
 	runtimeBindingToken: loaded.runtimeBindingToken,
 });
-session.state.contextManager.replaceEntries(productionEntries as never);
+session.state.contextManager.replaceMessages(productionEntries as never);
 session.state.markPersistentContextLoaded();
 session.state.installThreadTurn(checkpoint, routes);
 const result = await Effect.runPromise(
@@ -404,9 +470,9 @@ const result = await Effect.runPromise(
 						providerInvocations += 1;
 						providerRequests.push(request);
 						return Stream.fromIterable([
-							{ type: "text-start" as const, id: "recovered-text" },
-							{ type: "text-delta" as const, id: "recovered-text", text_delta: "recovered" },
-							{ type: "text-end" as const, id: "recovered-text" },
+
+
+							{type:"text-complete" as const,providerPartId:"recovered-text",eventId:`evt_${createHash("sha256").update(JSON.stringify(["provider-reschedule-recovery-composition.ts", request.sessionId, request.modelRequestId, "recovered-after-cold"])).digest("hex").slice(0,32)}`,text:("recovered")},
 							{ type: "finish" as const, finishReason: "stop" as const },
 						]);
 					},
@@ -433,6 +499,8 @@ process.stdout.write(
 		waitedMs,
 		acceptedInputCommitBarrierEntered,
 		acceptedInputCommitBarrierReleased,
+		acceptedInputCommitCalls,
+		acceptedInputCommitMaxInFlight,
 		providerContext: providerRequests[0]?.context,
 		recoveredTurnEventIds,
 		preloadResult,

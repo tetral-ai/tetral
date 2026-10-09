@@ -3,8 +3,10 @@ name: engine-vulncheck
 # Go dependency vulnerabilities track upstream advisories, not pull requests: a
 # change to this repository cannot introduce one unless it changes the module
 # graph, and an advisory published tomorrow applies to code that merged last
-# week. Pull requests therefore run this gate only when go.mod/go.sum (or this
-# workflow) change, and the daily schedule reports new advisories when they
+# week. Pull requests therefore run this gate only when the Go module graph
+# (go.mod/go.sum), the test-only Envoy Gateway secret-helper module,
+# scripts/check-envoy-secret-helper.py, deploy/dependencies.lock.json or this
+# workflow change, and the daily schedule reports new advisories when they
 # actually appear.
 #
 # Why the scan is split: symbol-level analysis of the whole repository peaks
@@ -24,6 +26,9 @@ on:
     paths:
       - 'go.mod'
       - 'go.sum'
+      - 'integration/envoy-gateway-secret-helper/**'
+      - 'scripts/check-envoy-secret-helper.py'
+      - 'deploy/dependencies.lock.json'
       - '.github/workflows/engine-vulncheck.yml'
   schedule:
     - cron: '23 6 * * *'
@@ -53,13 +58,13 @@ jobs:
         # actions/setup-go@v6
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
-          go-version: '1.25.13'
+          go-version: '1.26.9'
           cache-dependency-path: go.sum
 
       - name: Slice coverage guard
         run: |
           set -euo pipefail
-          uncovered=$(go list ./... | grep -vE '^github.com/tetral-ai/tetral/(database|deploy|integration|internal|services/(agent-runtime|api|auth|bridge|cleanup|event-stream|gateway|git-proxy|queue|web-connector|sandbox))(/|$)' || true)
+          uncovered=$(go list ./... | grep -vE '^github.com/tetral-ai/tetral/(cmd|database|deploy|integration|internal|services/(agent-runtime|api|auth|bridge|cleanup|event-stream|gateway|git-proxy|job-runner|queue|web-connector|sandbox))(/|$)' || true)
           if [ -n "${uncovered}" ]; then
             echo "package trees missing from the vulncheck slice list:"
             echo "${uncovered}"
@@ -70,6 +75,7 @@ jobs:
         run: |
           set -euo pipefail
           slices=(
+            ./cmd/...
             ./database/...
             ./deploy/...
             ./integration/...
@@ -82,6 +88,7 @@ jobs:
             ./services/event-stream/...
             ./services/gateway/...
             ./services/git-proxy/...
+            ./services/job-runner/...
             ./services/queue/...
             ./services/web-connector/...
           )
@@ -93,3 +100,6 @@ jobs:
       - name: Module-level scan (covers the sandbox closure)
         working-directory: services/sandbox
         run: go tool govulncheck -scan module
+
+      - name: Separate upstream translator module and symbol scans
+        run: python3 scripts/check-envoy-secret-helper.py

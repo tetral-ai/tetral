@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { access, readFile, writeFile } from "node:fs/promises";
 import { credentials, Metadata } from "@grpc/grpc-js";
 import { normalizeSessionEventWriterError } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
@@ -24,6 +25,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly readyPath: string;
 	readonly acceptResultPath: string;
 	readonly toolStartedPath: string;
@@ -116,38 +118,22 @@ const hosts = await buildRuntimeCoreHosts({
 						JSON.stringify(request.context).includes(input.fastThreadText))
 				) {
 					return Stream.fromIterable([
-						{ type: "text-start" as const, id: "thread-isolation-fast" },
-						{
-							type: "text-delta" as const,
-							id: "thread-isolation-fast",
-							text_delta: "sibling complete",
-						},
-						{ type: "text-end" as const, id: "thread-isolation-fast" },
+
+
+						{type:"text-complete" as const,providerPartId:"thread-isolation-fast",eventId:`evt_${createHash("sha256").update(JSON.stringify(["interrupt-closeout-composition.ts", request.sessionId, request.modelRequestId, "thread-isolation-fast"])).digest("hex").slice(0,32)}`,text:("sibling complete")},
 						{ type: "finish" as const, finishReason: "stop" as const },
 					]);
 				}
 				return Stream.concat(
 					Stream.fromIterable([
-						{ type: "text-start" as const, id: "interrupt-partial" },
+
+
+						{type:"text-complete" as const,providerPartId:"interrupt-partial",eventId:`evt_${createHash("sha256").update(JSON.stringify(["interrupt-closeout-composition.ts", request.sessionId, request.modelRequestId, "interrupt-partial"])).digest("hex").slice(0,32)}`,text:("failed interrupt partial text")},
+						{type:"thinking-started" as const,providerPartId:"interrupt-reasoning",eventId:`evt_${createHash("sha256").update(JSON.stringify(["interrupt-closeout-composition.ts", request.sessionId, request.modelRequestId, "interrupt-reasoning"])).digest("hex").slice(0,32)}`},
+
+						{type:"reasoning-complete" as const,providerPartId:"interrupt-reasoning",thinkingEventId:`evt_${createHash("sha256").update(JSON.stringify(["interrupt-closeout-composition.ts", request.sessionId, request.modelRequestId, "interrupt-reasoning"])).digest("hex").slice(0,32)}`,text:("interrupt Tool reasoning"),providerMetadata:Object.assign({},{ anthropic: { signature: "sig_interrupt_composition" } })},
 						{
-							type: "text-delta" as const,
-							id: "interrupt-partial",
-							text_delta: "failed interrupt partial text",
-						},
-						{ type: "text-end" as const, id: "interrupt-partial" },
-						{ type: "reasoning-start" as const, id: "interrupt-reasoning" },
-						{
-							type: "reasoning-delta" as const,
-							id: "interrupt-reasoning",
-							text_delta: "interrupt Tool reasoning",
-						},
-						{
-							type: "reasoning-end" as const,
-							id: "interrupt-reasoning",
-							providerMetadata: { anthropic: { signature: "sig_interrupt_composition" } },
-						},
-						{
-							type: "tool-call" as const,
+							type: "tool-call-complete" as const,
 							id: "call_interrupt_composition",
 							toolName: "Bash",
 							input: { command: "durable-operation" },
@@ -189,17 +175,18 @@ const cleanupController = {
 	startCleanup: hosts.cleanupRunHost.handleCleanupSession,
 } satisfies RuntimeCleanupController;
 const service = new RuntimeControlService({
+	runtimeProcessId: input.runtimeProcessId,
 	ownPod: {
 		namespace: "tetral-agent-runtime",
 		name: "runtime-pod-interrupt-composition",
 		uid: input.targetPodUid,
 		ip: "127.0.0.1",
 	},
-	allowedBridge: { namespace: "tetral-system", name: "bridge" },
+	allowedJobRunner: { namespace: "tetral-system", name: "job-runner" },
 	authenticator: {
 		authenticate: async () => ({
 			ok: true as const,
-			serviceAccount: { namespace: "tetral-system", name: "bridge" },
+			serviceAccount: { namespace: "tetral-system", name: "job-runner" },
 		}),
 	},
 	runHost: {

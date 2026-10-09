@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestTetralSandboxManifestUsesQueueWorkersWithoutKubernetesAPIToken(t *testing.T) {
@@ -46,18 +48,26 @@ func TestTetralSandboxManifestUsesQueueWorkersWithoutKubernetesAPIToken(t *testi
 
 func TestTetralSandboxConfigMapCarriesResourceProjectionKnobs(t *testing.T) {
 	configMap := readServiceLocalManifest(t, "configmap.yaml")
-	for _, required := range []string{
-		"TETRAL_BLOB_BUCKET: tetral-files",
-		"TETRAL_R2_ACCOUNT_ID:",
-		"TETRAL_RESOURCE_CRED_TTL: 24h",
-		"TETRAL_RESOURCE_CRED_REFRESH_MARGIN: 30m",
-		"TETRAL_RCLONE_VFS_CACHE_MAX_SIZE: 2G",
-		"TETRAL_RCLONE_VFS_MIN_FREE: 1G",
-		"TETRAL_GIT_PROXY_HOST: git.tetral.example",
+	var decoded struct {
+		Data map[string]string `yaml:"data"`
+	}
+	if err := yaml.Unmarshal([]byte(configMap), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	for key, expected := range map[string]string{
+		"TETRAL_BLOB_BUCKET":                  "tetral-files",
+		"TETRAL_RESOURCE_CRED_TTL":            "24h",
+		"TETRAL_RESOURCE_CRED_REFRESH_MARGIN": "30m",
+		"TETRAL_RCLONE_VFS_CACHE_MAX_SIZE":    "2G",
+		"TETRAL_RCLONE_VFS_MIN_FREE":          "1G",
+		"TETRAL_GIT_PROXY_HOST":               "git.tetral.example",
 	} {
-		if !strings.Contains(configMap, required) {
-			t.Fatalf("sandbox configmap missing %q", required)
+		if decoded.Data[key] != expected {
+			t.Fatalf("sandbox configmap %s=%q want%q", key, decoded.Data[key], expected)
 		}
+	}
+	if _, ok := decoded.Data["TETRAL_R2_ACCOUNT_ID"]; !ok {
+		t.Fatal("Sandbox resource projection account is absent")
 	}
 	if strings.Contains(configMap, "TETRAL_WORKSPACE_ID") {
 		t.Fatal("sandbox configmap must not pin a serving workspace")

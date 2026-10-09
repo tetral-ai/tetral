@@ -1,0 +1,19 @@
+tlsCA:
+  enabled: true
+  configMapName: tetral-nats-broker-trust
+config:
+  nats:
+    tls:
+      enabled: true
+      secretName: tetral-nats-server-tls
+      merge:
+        verify: true
+        handshake_first: true
+        min_version: "1.2"
+  cluster:
+    tls:
+      enabled: true
+      secretName: tetral-nats-route-tls
+      merge:
+        verify: true
+        min_version: "1.2"

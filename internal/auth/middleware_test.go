@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -54,7 +55,7 @@ func (r *recordingAudit) RecordAuthEvent(_ context.Context, event auth.AuditEven
 func TestMiddlewareRejectsMissingHeader(t *testing.T) {
 	rec := &errorWriterRecorder{}
 	audit := &recordingAudit{}
-	authFn := staticAuthenticator{expected: "secret", resolved: auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_test"}}
+	authFn := staticAuthenticator{expected: "secret", resolved: auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_test")}
 	handler := auth.MiddlewareWithAudit(authFn, rec.writeError, nil, audit)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Error("downstream handler must not run when header is missing")
 	}))
@@ -77,7 +78,7 @@ func TestMiddlewareRejectsMissingHeader(t *testing.T) {
 func TestMiddlewareRejectsInvalidKey(t *testing.T) {
 	rec := &errorWriterRecorder{}
 	audit := &recordingAudit{}
-	authFn := staticAuthenticator{expected: "secret", resolved: auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_test"}}
+	authFn := staticAuthenticator{expected: "secret", resolved: auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_test")}
 	handler := auth.MiddlewareWithAudit(authFn, rec.writeError, nil, audit)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Error("downstream handler must not run for invalid key")
 	}))
@@ -102,7 +103,7 @@ func TestMiddlewareRejectsInvalidKey(t *testing.T) {
 
 func TestMiddlewareIgnoresQueryStringAPIKey(t *testing.T) {
 	rec := &errorWriterRecorder{}
-	authFn := staticAuthenticator{expected: "secret", resolved: auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_test"}}
+	authFn := staticAuthenticator{expected: "secret", resolved: auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_test")}
 	handler := auth.Middleware(authFn, rec.writeError, nil)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Error("downstream handler must not run when key is in query string only")
 	}))
@@ -120,7 +121,7 @@ func TestMiddlewareAttachesWorkspaceAndPrincipalOnSuccess(t *testing.T) {
 	expectedWorkspace := workspace.Workspace{
 		ID: workspace.DefaultID, Type: "workspace", Name: "Default",
 	}
-	expectedPrincipal := auth.Principal{Workspace: expectedWorkspace, APIKeyID: "ak_context"}
+	expectedPrincipal := auth.IndependentKeyPrincipal(expectedWorkspace, "ak_context")
 	authFn := staticAuthenticator{expected: "secret", resolved: expectedPrincipal}
 	called := false
 	handler := auth.MiddlewareWithAudit(authFn, rec.writeError, nil, audit)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
@@ -138,7 +139,7 @@ func TestMiddlewareAttachesWorkspaceAndPrincipalOnSuccess(t *testing.T) {
 			t.Error("downstream handler did not see auth principal in context")
 			return
 		}
-		if principal != expectedPrincipal {
+		if !reflect.DeepEqual(principal, expectedPrincipal) {
 			t.Errorf("principal in context = %+v; want %+v", principal, expectedPrincipal)
 		}
 	}))
@@ -160,7 +161,7 @@ func TestMiddlewareAttachesWorkspaceAndPrincipalOnSuccess(t *testing.T) {
 func TestMiddlewareDoesNotLogProvidedKeyOnSuccess(t *testing.T) {
 	rec := &errorWriterRecorder{}
 	audit := &recordingAudit{}
-	authFn := staticAuthenticator{expected: "supersecret_key_material", resolved: auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_secret"}}
+	authFn := staticAuthenticator{expected: "supersecret_key_material", resolved: auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_secret")}
 	handler := auth.MiddlewareWithAudit(authFn, rec.writeError, nil, audit)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -207,5 +208,23 @@ func TestMiddlewarePassesThroughNonAuthErrors(t *testing.T) {
 	}
 	if strings.Contains(audit.events[0].ErrorType, "leaked-key-material") {
 		t.Fatalf("audit event leaked arbitrary error text: %#v", audit.events[0])
+	}
+}
+
+func TestMiddlewareRejectsIncompleteAuthenticatorSnapshot(t *testing.T) {
+	rec := &errorWriterRecorder{}
+	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
+		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_partial"}, nil
+	})
+	called := false
+	handler := auth.Middleware(authenticator, rec.writeError, nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	request := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+	request.Header.Set("X-Api-Key", "selected")
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+	if called {
+		t.Fatal("incomplete authority exposed to downstream handler")
+	}
+	if len(rec.calls) != 1 {
+		t.Fatal("incomplete authenticator snapshot was silently upgraded")
 	}
 }

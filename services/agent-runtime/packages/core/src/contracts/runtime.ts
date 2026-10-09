@@ -11,6 +11,10 @@
 
 import {
 	MaxIdBytes,
+ MaxMetadataBytes,
+	validProviderEventId,
+	MaxStableReasoningPartsPerRequest,
+	MaxStableReasoningBytesPerRequest,
 	MaxProviderContextTextJsonBytes,
 	MaxProviderRequestToolOutputJsonBytes,
 	MaxProviderToolCallInputJsonBytes,
@@ -89,7 +93,7 @@ const IdentifierSchema = z.string().min(1);
 const TimestampSchema = z.string().datetime({ offset: true });
 const NonNegativeIntegerSchema = z.number().int().nonnegative();
 const PositiveIntegerSchema = z.number().int().positive();
-const RuntimeProviderMetadataMaxBytes = 16 * 1024;
+const RuntimeProviderMetadataMaxBytes = MaxMetadataBytes;
 // Stable-reasoning durable bounds for one model request, enforced as a SINGLE
 // budget across BOTH durability vectors: the per-tool anchored-prefix attach
 // (WriteEvent) and the request-end settlement set (WriteRequestEnd).
@@ -101,8 +105,7 @@ const RuntimeProviderMetadataMaxBytes = 16 * 1024;
 // refuses, and a smaller one would drop parts Bridge would have accepted.
 // UPDATE-WITH: services/bridge/bridge_api_store.go,
 //              services/bridge/bridge_api_settlement.go
-export const MaxStableReasoningPartsPerRequest = 16;
-export const MaxStableReasoningBytesPerRequest = 2 * 1024 * 1024;
+export { MaxStableReasoningPartsPerRequest, MaxStableReasoningBytesPerRequest };
 
 /** Encodes the exact reasoning metadata bytes sent to and counted by Bridge. */
 // UPDATE-WITH: services/bridge/bridge_api_settlement.go
@@ -224,11 +227,11 @@ export type RuntimeFinishReason = z.infer<typeof RuntimeFinishReasonSchema>;
 //                             invalid/empty compaction summary); the failure site
 //                             carries its own discriminator so it is never conflated
 //                             with a stream-event rejection.
-// The Bridge runtime-repair path stamps one further value the pod never stamps —
+// The Job Runner runtime-repair path stamps one further value the pod never stamps —
 // runtime_pod_lost — when it closes a request left open by a dead pod, reusing the
 // original model_request_id; that value is intentionally absent from this pod enum.
 // UPDATE-WITH: services/agent-runtime/packages/core/src/runtime/session-event-writer.ts,
-//              services/bridge/runtime_pod_lost.go
+//              services/job-runner/runtime_pod_lost.go
 export const RuntimeRequestErrorKindSchema = z.enum([
 	"provider_error",
 	"gateway_stream_error",
@@ -483,7 +486,7 @@ export const RuntimeContextKindSchema = z.enum([
 ]);
 export type RuntimeContextKind = z.infer<typeof RuntimeContextKindSchema>;
 
-/** Ordered sealed provider history. Database identities and audit time do not enter this model. */
+/** Ordered committed content. Request ownership and lifecycle live in ThreadState. */
 export const RuntimeContextEntrySchema = z.strictObject({
 	messageSequence: PositiveIntegerSchema,
 	contextKind: RuntimeContextKindSchema,
@@ -491,15 +494,9 @@ export const RuntimeContextEntrySchema = z.strictObject({
 });
 export type RuntimeContextEntry = z.infer<typeof RuntimeContextEntrySchema>;
 
-/** Assistant content persisted for an open Request but excluded from provider history. */
-export const RuntimeOpenRequestDraftSchema = z.strictObject({
-	modelRequestId: RuntimeContextIdentifierSchema,
-	messageSequence: PositiveIntegerSchema,
-	parts: z.array(RuntimeContextPartSchema),
-});
-export type RuntimeOpenRequestDraft = z.infer<
-	typeof RuntimeOpenRequestDraftSchema
->;
+/** Reference to the current durable request's committed Assistant content. */
+export const RuntimeCurrentRequestMessageSchema = z.strictObject({modelRequestId:RuntimeContextIdentifierSchema,assistantMessageSequence:PositiveIntegerSchema});
+export type RuntimeCurrentRequestMessage = z.infer<typeof RuntimeCurrentRequestMessageSchema>;
 
 /** Request-local Assistant member before its durable operation settles. */
 export const RuntimeAssistantDraftPartSchema = z.discriminatedUnion("type", [
@@ -567,11 +564,16 @@ export const RuntimeInternalToolRepairCommitSchema = z.strictObject({
 	bindingId: SanitizedIdentifierSchema,
 	bindingGeneration: NonNegativeIntegerSchema,
 	targetPodUid: SanitizedIdentifierSchema,
+	runtimeProcessId: SanitizedIdentifierSchema,
 	modelRequestId: SanitizedIdentifierSchema,
 	modelToolCallId: SanitizedIdentifierSchema,
 	toolName: SanitizedIdentifierSchema,
 	repairKey: SanitizedIdentifierSchema,
 	canonicalInput: RuntimeJsonValueSchema,
+	reasoningPrefixContextDelta: RuntimeAssistantContextAppendSchema.refine(
+		append => append.parts.every(part => part.type === "reasoning"),
+		"internal repair prefix must contain reasoning only",
+	).optional(),
 	error: RuntimeToolErrorSchema,
 });
 export type RuntimeInternalToolRepairCommit = z.infer<
@@ -982,7 +984,9 @@ export const SessionEventEnvelopeSchema = z
 		bindingId: SanitizedIdentifierSchema,
 		bindingGeneration: NonNegativeIntegerSchema,
 		targetPodUid: SanitizedIdentifierSchema,
+		runtimeProcessId: SanitizedIdentifierSchema,
 		writeId: SanitizedIdentifierSchema,
+		preallocatedEventId:z.string().refine(validProviderEventId).optional(),
 		event: SessionEventWriterAppendEventSchema,
 		assistantContextAppend: RuntimeAssistantContextAppendSchema.optional(),
 		modelRequestId: SanitizedIdentifierSchema.optional(),
@@ -1007,6 +1011,8 @@ export const SessionEventEnvelopeSchema = z
 		toolRouteCapability: RuntimeToolRouteCapabilitySchema.optional(),
 	})
 	.superRefine((envelope, context) => {
+  const suppliedIdentityEvent=envelope.event.type==="agent.message"||envelope.event.type==="agent.thinking";
+  if(suppliedIdentityEvent ? envelope.preallocatedEventId===undefined||envelope.modelRequestId===undefined : envelope.preallocatedEventId!==undefined)context.addIssue({code:"custom",message:"supplied Gateway event identity is required only for model message/thinking"});
 		const memberEvent =
 			envelope.event.type === "agent.message" ||
 			envelope.event.type === "agent.tool_use" ||
@@ -1091,6 +1097,7 @@ export const SessionEventWriterToolSettlementEnvelopeSchema = z.strictObject({
 	bindingId: SanitizedIdentifierSchema,
 	bindingGeneration: NonNegativeIntegerSchema,
 	targetPodUid: SanitizedIdentifierSchema,
+	runtimeProcessId: SanitizedIdentifierSchema,
 	settlement: RuntimeToolSettlementDeclarationSchema,
 });
 export type SessionEventWriterToolSettlementEnvelope = z.infer<
@@ -1106,6 +1113,7 @@ export const SessionEventWriterRequestEndEnvelopeSchema = z
 		bindingId: SanitizedIdentifierSchema,
 		bindingGeneration: NonNegativeIntegerSchema,
 		targetPodUid: SanitizedIdentifierSchema,
+		runtimeProcessId: SanitizedIdentifierSchema,
 		writeId: SanitizedIdentifierSchema,
 		modelRequestId: SanitizedIdentifierSchema,
 		providerContextRetention: z
@@ -1278,6 +1286,7 @@ export const SessionEventWriterFinishIdleEnvelopeSchema = z.strictObject({
 	bindingId: SanitizedIdentifierSchema,
 	bindingGeneration: NonNegativeIntegerSchema,
 	targetPodUid: SanitizedIdentifierSchema,
+	runtimeProcessId: SanitizedIdentifierSchema,
 	durableTurnId: SanitizedIdentifierSchema,
 	stopReason: SessionIdleStopReasonSchema,
 	completionMailText: RuntimeTextSchema.optional(),
@@ -1294,6 +1303,7 @@ export const SessionEventWriterRuntimeTerminationEnvelopeSchema =
 		bindingId: SanitizedIdentifierSchema,
 		bindingGeneration: NonNegativeIntegerSchema,
 		targetPodUid: SanitizedIdentifierSchema,
+		runtimeProcessId: SanitizedIdentifierSchema,
 		writeId: SanitizedIdentifierSchema,
 		failure: RuntimeFailureSchema,
 	});
@@ -1301,8 +1311,9 @@ export type SessionEventWriterRuntimeTerminationEnvelope = z.infer<
 	typeof SessionEventWriterRuntimeTerminationEnvelopeSchema
 >;
 
-// This timeout bounds both each ordinary transport attempt and each failed-run
-// closeout observation window; the latter never cancels its in-flight transport.
+// Canonical initial short-write deadline and retry schedule. Actual transports
+// project their parsed method policy to consumers. Failed-run memo observers
+// retain this separate initial observation window without cancelling transport.
 export const SessionEventWriterRetryPolicy = {
 	attempts: 3,
 	timeoutPerAttemptMs: 3000,
@@ -1407,7 +1418,21 @@ export type SessionEventWriterToolSettlementAttempt =
 	  }
 	| { readonly ok: false; readonly error: SessionEventWriterError };
 
-/** Durable event port whose closed operation results gate the corresponding hot projection. */
+/**
+ * Bounds the owned FinishIdle operation by the shared settlement phase. A failed-run closeout
+ * observer never supplies these controls: its observation window may expire while the operation
+ * stays owned.
+ */
+export interface FinishIdleOperationControls {
+	/** Absolute settlement boundary; an RPC attempt cannot reset it. */
+	readonly deadlineEpochMs?: number;
+}
+
+/**
+ * Durable event port whose closed results gate hot projection. Adapters own
+ * bounded transport deadlines, actual cancellation and raw joins. Promise-only
+ * consumers cannot cancel an uncooperative adapter by observing a timeout.
+ */
 export interface SessionEventWriter {
 	/**
 	 * Appends one Bridge-bound event before its matching event projection mutates hot
@@ -1426,6 +1451,7 @@ export interface SessionEventWriter {
 	) => Promise<SessionEventWriterRequestEndResult>;
 	readonly finishIdle?: (
 		envelope: SessionEventWriterFinishIdleEnvelope,
+		controls?: FinishIdleOperationControls,
 	) => Promise<SessionEventWriterFinishIdleResult>;
 	readonly commitRuntimeTermination?: (
 		envelope: SessionEventWriterRuntimeTerminationEnvelope,

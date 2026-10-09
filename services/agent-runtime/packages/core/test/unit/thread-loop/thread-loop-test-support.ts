@@ -229,6 +229,7 @@ function acceptedInput(
 		bindingId: "bind_1",
 		bindingGeneration: 1,
 		targetPodUid: "pod_1",
+		runtimeProcessId: "process-test",
 		runtimeInputId,
 		inputOrder: 1,
 		kind: "messages",
@@ -310,7 +311,7 @@ function installRecoveredToolTurn(
 			| "resume_sandbox_execution";
 	}>,
 ): void {
-	session.state.installThreadTurn(
+	session.state.installThreadCheckpoint(
 		{
 			pendingInputContextSequences: [],
 			request: {
@@ -331,13 +332,12 @@ function installRecoveredToolTurn(
 				},
 			},
 		},
-		{
-			routes: members.map((member) => ({
-				toolUseEventId: member.toolUseEventId,
-				disposition: member.disposition ?? "requires_user_action",
-			})),
-		},
 	);
+ const owner=session.state.contextManager.messages().find(message=>message.contextKind==="assistant"&&members.every(member=>message.parts.some(part=>part.type==="tool_call"&&part.modelToolCallId===member.modelToolCallId)));
+ if(owner===undefined)throw new Error("recovered Tool fixture has no committed Assistant owner");
+ session.state.installCurrentRequestMessage({modelRequestId,assistantMessageSequence:owner.messageSequence});
+ for(const member of members)session.state.registerActiveTool({...member,modelRequestId,assistantMessageSequence:owner.messageSequence,disposition:member.disposition??"requires_user_action"});
+
 }
 
 function testControlCommit(
@@ -385,6 +385,7 @@ function approvalReviewAcceptedInput(
 		bindingId: "bind_reviewer",
 		bindingGeneration: 1,
 		targetPodUid: "pod_reviewer",
+		runtimeProcessId: "process-test",
 		runtimeInputId,
 		inputOrder: 1,
 		kind: "approval_review",
@@ -580,7 +581,7 @@ async function installLoaderStateForTest(
 	session: ThreadRuntime,
 ): Promise<void> {
 	if (!session.state.persistentContextLoaded()) {
-		session.state.contextManager.replaceEntries(
+		session.state.contextManager.replaceMessages(
 			await loader.buildContext(session.sessionId),
 		);
 		session.state.markPersistentContextLoaded();
@@ -695,13 +696,7 @@ function firstRequestThenFinalResponse(
 				requestCount === 1
 					? events
 					: [
-							{ type: "text-start" as const, id: "continuation-final" },
-							{
-								type: "text-delta" as const,
-								id: "continuation-final",
-								text_delta: "done",
-							},
-							{ type: "text-end" as const, id: "continuation-final" },
+							{type:"text-complete" as const,providerPartId:"continuation-final",eventId:"evt_11111111111111111111111111111111",text:"done"},
 							{ type: "finish" as const, finishReason: "stop" as const },
 						],
 			);
@@ -819,7 +814,8 @@ function requestEndResultFromAppend(
 			interruptToolResults: [],
 		};
 	}
-	let sealedMessageSequence: number | undefined;
+	let sealedMessageSequence = sequence.assistantSequenceByRequest?.get(envelope.modelRequestId)
+		?? envelope.providerContextRetention.assistantMessageSequence;
 	if (envelope.trailingContextAppend !== undefined) {
 		sealedMessageSequence = assistantMessageSequence(
 			sequence,
@@ -844,6 +840,7 @@ function requestEndResultForTest(
 		SessionEventWriterRequestEndResult,
 		{ readonly ok: true; readonly type: "committed" | "duplicate" }
 	>["outcome"],
+	sequence: TestDurableSequence = { eventSequence: 1, messageSequence: 0 },
 ): SessionEventWriterRequestEndResult {
 	if (outcome !== undefined) {
 		return {
@@ -861,7 +858,7 @@ function requestEndResultForTest(
 			type: "committed",
 			eventId: `bridge-${envelope.writeId}`,
 		},
-		{ eventSequence: 1, messageSequence: 0 },
+		sequence,
 	);
 }
 
@@ -884,7 +881,7 @@ function writerFrom(
 		const supplied = await append(envelope);
 		if (!supplied.ok || supplied.type === "stale") return supplied;
 		durableSequence.eventSequence += 1;
-		let result = supplied;
+		let result:SessionEventWriterAppendResult = envelope.preallocatedEventId===undefined?supplied:{...supplied,eventId:envelope.preallocatedEventId};
 		if (
 			envelope.assistantContextAppend !== undefined &&
 			!("assistant" in supplied)
@@ -895,7 +892,7 @@ function writerFrom(
 				requestKey,
 			);
 			result = {
-				...supplied,
+				...result,
 				assistant: {
 					messageSequence: assignedMessageSequence,
 					createdToolUseEventIds: envelope.assistantContextAppend.parts
@@ -943,6 +940,7 @@ function writerFrom(
 				bindingId: envelope.bindingId,
 				bindingGeneration: envelope.bindingGeneration,
 				targetPodUid: envelope.targetPodUid,
+				runtimeProcessId: envelope.runtimeProcessId,
 				writeId: envelope.writeId,
 				event: {
 					type: "span.model_request_end",
@@ -1003,6 +1001,7 @@ function writerFrom(
 					bindingId: envelope.bindingId,
 					bindingGeneration: envelope.bindingGeneration,
 					targetPodUid: envelope.targetPodUid,
+					runtimeProcessId: envelope.runtimeProcessId,
 					writeId: envelope.durableTurnId,
 					event: {
 						type: "session.status_idle",
@@ -1339,6 +1338,8 @@ function runtimeThreadLoopLayer(
 		>[0]["runtimePolicy"];
 		readonly runtime?: RuntimeDependencies;
 		readonly metrics?: RuntimeMetricsSink;
+		readonly recordContentCommit?: Parameters<typeof ThreadLoop.layer>[0]["recordContentCommit"];
+		readonly recordOperation?: Parameters<typeof ThreadLoop.layer>[0]["recordOperation"];
 		readonly recordProviderReschedule?: Parameters<
 			typeof ThreadLoop.layer
 		>[0]["recordProviderReschedule"];
@@ -1381,18 +1382,45 @@ function runtimeThreadLoopLayer(
 	if (store instanceof ThreadLoopRuntimeStore) {
 		store.bindDurableSequence(writerSequence);
 	}
+	let activeSession: ThreadRuntime | undefined;
+	const observeCommittedSequences = () => {
+		if (activeSession === undefined) return;
+		writerSequence.messageSequence = Math.max(
+			writerSequence.messageSequence,
+			...activeSession.state.contextManager.messages().map((message) => message.messageSequence),
+		);
+	};
+	// Preserve class-owned transport methods and intentionally absent methods.
+	// Only allocation boundaries need the shared fixture sequence observation.
+	const sequencedWriter = new Proxy(writer, {
+		get(target, property) {
+			const value = Reflect.get(target, property, target);
+			if (typeof value !== "function") return value;
+			if (property === "append") {
+				return (envelope: SessionEventEnvelope) => {
+					observeCommittedSequences();
+					return target.append(envelope);
+				};
+			}
+			if (property === "writeRequestEnd") {
+				return (envelope: SessionEventWriterRequestEndEnvelope) => {
+					observeCommittedSequences();
+					return target.writeRequestEnd(envelope);
+				};
+			}
+			return value.bind(target);
+		},
+	});
 	const productionLayer = ThreadLoop.layer({
 		internalToolRepairStore: store,
-		sessionEventWriter: writer,
+		sessionEventWriter: sequencedWriter,
 		runtime: options.runtime ?? threadLoopRuntime(),
 		llmService:
 			options.llmService ??
 			(options.events === undefined
 				? llmService(
 						[
-							{ type: "text-start", id: "text-1" },
-							{ type: "text-delta", id: "text-1", text_delta: "ok" },
-							{ type: "text-end", id: "text-1" },
+							{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_22222222222222222222222222222222",text:"ok"},
 							{ type: "finish", finishReason: "stop" },
 						],
 						options.onStream,
@@ -1441,6 +1469,8 @@ function runtimeThreadLoopLayer(
 					createToolCatalog({ family: "claude" }),
 			})),
 		...(options.metrics !== undefined ? { metrics: options.metrics } : {}),
+		...(options.recordContentCommit === undefined ? {} : { recordContentCommit: options.recordContentCommit }),
+		...(options.recordOperation === undefined ? {} : { recordOperation: options.recordOperation }),
 		...(options.recordProviderReschedule !== undefined
 			? { recordProviderReschedule: options.recordProviderReschedule }
 			: {}),
@@ -1463,9 +1493,6 @@ function runtimeThreadLoopLayer(
 			? { refreshRuntimeBindingToken: options.refreshRuntimeBindingToken }
 			: {}),
 	}).pipe(Layer.provide(ThreadLoop.contextLoaderLayer(loader)));
-	if (options.installLoaderState === false) {
-		return productionLayer;
-	}
 	return Layer.effect(
 		ThreadLoop.Service,
 		Effect.gen(function* () {
@@ -1473,9 +1500,13 @@ function runtimeThreadLoopLayer(
 			return ThreadLoop.Service.of({
 				...production,
 				run: (session, custody) =>
-					Effect.promise(() => installLoaderStateForTest(loader, session)).pipe(
-						Effect.flatMap(() => production.run(session, custody)),
-					),
+					Effect.promise(async () => {
+						activeSession = session;
+						if (options.installLoaderState !== false) {
+							await installLoaderStateForTest(loader, session);
+						}
+						observeCommittedSequences();
+					}).pipe(Effect.flatMap(() => production.run(session, custody))),
 			});
 		}).pipe(Effect.provide(productionLayer)),
 	);

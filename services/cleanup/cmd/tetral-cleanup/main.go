@@ -2,17 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/workload"
-	"github.com/tetral-ai/tetral/internal/workspace"
 	tetralcleanup "github.com/tetral-ai/tetral/services/cleanup"
 )
 
-var openDatabase = dbconnect.OpenPlainDSNFromEnv
+var openDatabase = dbconnect.OpenProtectedDSNFromEnv
 var verifySchema = func(ctx context.Context, client *dbconnect.Client) error { return client.VerifySchema(ctx) }
 
 var newMetricsExporter = func(endpoint string) tetralcleanup.MetricsExporter {
@@ -33,7 +33,14 @@ func main() {
 }
 
 func run(ctx context.Context, env tetralcleanup.Env) error {
-	logger := workload.NewLogger(os.Stderr, "cleanup", env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"))
+	diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(env.Getenv)
+	diagnosticOwner := workload.NewProcessLogger(os.Stderr, "cleanup", env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"), diagnostics)
+	defer diagnosticOwner.CloseWithBudget()
+	logger := diagnosticOwner.Logger
+	defer workload.InstallDefaultLogger(logger)()
+	if diagnosticErr != nil {
+		return workload.LogStartupFailure(logger, "cleanup", diagnosticErr)
+	}
 	cfg, err := tetralcleanup.ConfigFromEnv(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, "cleanup", err)
@@ -49,16 +56,56 @@ func run(ctx context.Context, env tetralcleanup.Env) error {
 	if err := openResult.Client.VerifyRuntimeRole(ctx); err != nil {
 		return workload.LogStartupFailure(logger, "cleanup", err)
 	}
-	scheduler := tetralcleanup.NewScheduler(openResult.Client)
 	metrics := tetralcleanup.NewSchedulerMetrics()
-	defer exportCleanupMetrics(ctx, logger, newMetricsExporter(cfg.MetricsExportURL), metrics, cfg.MetricsExportTimeout)
-	if err := tetralcleanup.ClaimDueAcrossWorkspaces(ctx, workspace.NewStore(openResult.RawDatabaseForExcludedStores), scheduler, cfg.ClaimLimit, func(workspaceID workspace.ID, claimed int, duration time.Duration) {
-		metrics.ObserveClaimDue(claimed, duration)
-		logCleanupClaimDue(logger, workspaceID, claimed, cfg.ClaimLimit, duration)
-	}); err != nil {
+	err = runPhases(ctx, logger, openResult.Client, cfg, metrics)
+	// Every phase has run or been cancelled; their joined errors are returned
+	// only after this invocation's metrics are exported.
+	exportCleanupMetrics(ctx, logger, newMetricsExporter(cfg.MetricsExportURL), metrics, cfg.MetricsExportTimeout)
+	if err != nil {
 		return workload.LogStartupFailure(logger, "cleanup", err)
 	}
 	return nil
+}
+
+// runPhases runs the three independent phases once each, in order: Session
+// scheduling, idempotency-receipt retention, then change retention. A phase
+// failure, or scheduling exhausting its own 45 s budget, is recorded and the
+// next phase still runs; only cancellation of the process context stops the
+// remaining phases. Both retention phases share one 24-hour cutoff read from
+// the database clock at invocation, and each derives its own batch deadlines
+// from the process context.
+func runPhases(ctx context.Context, logger *slog.Logger, client *dbconnect.Client, cfg tetralcleanup.Config, metrics *tetralcleanup.SchedulerMetrics) error {
+	retention := tetralcleanup.NewRetention(client)
+	cutoff, cutoffErr := retention.Cutoff(ctx)
+	var errs []error
+
+	// The scheduling phase derives its own 45 s budget from the process context
+	// and releases its election before returning.
+	scheduler := tetralcleanup.NewScheduler(client, cfg.ClaimLimit)
+	started := time.Now()
+	result, err := scheduler.RunSchedulingPhase(ctx)
+	duration := time.Since(started)
+	metrics.ObserveClaimDue(result.Claimed, duration, err)
+	logCleanupClaimDue(logger, result, err, cfg.ClaimLimit, duration)
+	errs = append(errs, err)
+
+	if cutoffErr != nil {
+		return errors.Join(append(errs, cutoffErr)...)
+	}
+	for _, phase := range []func(context.Context, time.Time) (tetralcleanup.RetentionResult, error){
+		retention.PruneIdempotencyReceipts,
+		retention.PruneStreamChanges,
+	} {
+		if ctx.Err() != nil {
+			return errors.Join(append(errs, ctx.Err())...)
+		}
+		started := time.Now()
+		result, err := phase(ctx, cutoff)
+		metrics.ObserveRetention(result)
+		logCleanupRetention(logger, result, err, time.Since(started))
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 func exportCleanupMetrics(
@@ -76,6 +123,8 @@ func exportCleanupMetrics(
 	defer cancel()
 	samples, err := metrics.Collector()(exportCtx)
 	if err == nil {
+		diagnostics, _ := workload.DiagnosticMetrics(logger)(exportCtx)
+		samples = append(samples, diagnostics...)
 		err = exporter.Export(exportCtx, samples)
 	}
 	if err == nil || logger == nil {
@@ -94,17 +143,54 @@ func exportCleanupMetrics(
 	)
 }
 
-func logCleanupClaimDue(logger *slog.Logger, workspaceID workspace.ID, claimed int, limit int, duration time.Duration) {
+// logCleanupRetention records one retention phase with aggregate counts only;
+// a failed phase's error is reported separately without its raw text.
+func logCleanupRetention(logger *slog.Logger, result tetralcleanup.RetentionResult, err error, duration time.Duration) {
 	if logger == nil {
 		return
+	}
+	outcome := "completed"
+	switch {
+	case err != nil:
+		outcome = "failed"
+	case result.BudgetExhausted:
+		outcome = "budget_exhausted"
+	}
+	logger.Info("cleanup.retention.completed",
+		slog.String("operation", "cleanup.retention"),
+		slog.String("event.kind", "cleanup.retention.completed"),
+		slog.String("component", tetralcleanup.ServiceName),
+		slog.String("phase", result.Phase),
+		slog.String("outcome", outcome),
+		slog.Int64("duration.ms", duration.Milliseconds()),
+		slog.Int("page.count", result.Batches),
+		slog.Int("candidate.count", result.Examined),
+		slog.Int("deleted.count", result.Deleted),
+	)
+}
+
+// logCleanupClaimDue records one scheduling phase with aggregate counts only;
+// a failed phase's error is reported separately without its raw text.
+func logCleanupClaimDue(logger *slog.Logger, result tetralcleanup.SchedulingResult, err error, limit int, duration time.Duration) {
+	if logger == nil {
+		return
+	}
+	outcome := "completed"
+	switch {
+	case err != nil:
+		outcome = "failed"
+	case !result.Elected:
+		outcome = "not_elected"
 	}
 	logger.Info("cleanup.claim_due.completed",
 		slog.String("operation", "cleanup.claim_due"),
 		slog.String("event.kind", "cleanup.claim_due.completed"),
 		slog.String("component", tetralcleanup.ServiceName),
-		slog.String("workspace.id", string(workspaceID)),
+		slog.String("outcome", outcome),
 		slog.Int64("duration.ms", duration.Milliseconds()),
-		slog.Int("cleanup.jobs.claimed", claimed),
+		slog.Int("candidate.count", result.Attempted),
+		slog.Int("cleanup.jobs.claimed", result.Claimed),
+		slog.Int("failed.count", result.Failed),
 		slog.Int("cleanup.claim.limit", limit),
 	)
 }

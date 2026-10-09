@@ -7,6 +7,7 @@
  */
 
 import type {
+	FinishIdleOperationControls,
 	RuntimeContextEntry,
 	RuntimeFailure,
 	SessionEventWriterAppendResult,
@@ -105,17 +106,17 @@ export async function closeFailedThreadRun(
 	) {
 		return result;
 	}
-	const durableTurnId = custody.activeTurnId(session);
-	if (durableTurnId === undefined) {
-		return result;
-	}
+	let durableTurnId:string|undefined;let reviewerRequest:boolean;
+ try {durableTurnId=custody.activeTurnId(session);reviewerRequest=session.state.threadTurnTransition().checkpoint.request?.requestKind==="approval_reviewer";}catch {
+  session.state.invalidateResidentState();
+  return {...result,releaseSession:{reason:"event_write_failed"}};
+ }
+ if(durableTurnId===undefined)return result;
 	const failure =
 		"type" in result.error
 			? result.error
 			: runtimeFailureFromProviderError(result.error);
-	const reviewerRequest =
-		session.state.threadTurnTransition().checkpoint.request?.requestKind ===
-		"approval_reviewer";
+
 	if (reviewerRequest || !isRuntimeTerminationFailure(failure)) {
 		if (!reviewerRequest) {
 			// A failed provider Turn closes before any concurrently admitted input
@@ -165,6 +166,7 @@ export async function closeFailedThreadRun(
 		bindingId: session.identity.bindingId,
 		bindingGeneration: session.identity.bindingGeneration,
 		targetPodUid: session.identity.targetPodUid,
+		runtimeProcessId: session.identity.runtimeProcessId,
 		writeId: durableTurnId,
 		failure,
 	});
@@ -277,6 +279,7 @@ export async function appendIdleEvent(
 						bindingId: session.identity.bindingId,
 						bindingGeneration: session.identity.bindingGeneration,
 						targetPodUid: session.identity.targetPodUid,
+						runtimeProcessId: session.identity.runtimeProcessId,
 						durableTurnId,
 						stopReason,
 						...(declaredCompletionMail === undefined
@@ -406,6 +409,7 @@ export async function closeFailedRunDurably(
 				bindingId: session.identity.bindingId,
 				bindingGeneration: session.identity.bindingGeneration,
 				targetPodUid: session.identity.targetPodUid,
+				runtimeProcessId: session.identity.runtimeProcessId,
 				writeId: durableTurnId,
 				failure,
 			});
@@ -490,6 +494,7 @@ export async function closeFailedRunDurably(
 					bindingId: session.identity.bindingId,
 					bindingGeneration: session.identity.bindingGeneration,
 					targetPodUid: session.identity.targetPodUid,
+					runtimeProcessId: session.identity.runtimeProcessId,
 					durableTurnId,
 					stopReason: { type: "end_turn" },
 				}),
@@ -634,33 +639,67 @@ async function observeFailedRunCloseoutStep<
 	return observed.result;
 }
 
-export async function finishIdleWithRetry(
-	options: ThreadLoopRuntimeOptions,
-	envelope: SessionEventWriterFinishIdleEnvelope,
-): Promise<SessionEventWriterFinishIdleResult> {
-	if (options.sessionEventWriter.finishIdle === undefined) {
-		return writerUnavailable(envelope.sessionId, envelope.durableTurnId);
-	}
-	let lastFailure: SessionEventWriterFinishIdleResult | undefined;
-	for (
-		let attempt = 1;
-		attempt <= SessionEventWriterRetryPolicy.attempts;
-		attempt += 1
-	) {
-		const result = await finishIdleWithTimeout(options, envelope);
-		if (result.ok) return result;
-		lastFailure = result;
-		if (
-			!result.error.retryable ||
-			attempt === SessionEventWriterRetryPolicy.attempts
-		) {
-			return result;
-		}
-		await retryBackoff(options, attempt);
-	}
-	return (
-		lastFailure ?? writerUnknown(envelope.sessionId, envelope.durableTurnId)
-	);
+/**
+ * Rejoins one FinishIdle capture/closeout operation until it succeeds, is stale or
+ * deterministically rejected, exhausts the ordinary failure budget, or the shared settlement
+ * phase deadline passes. Wait expiries rejoin the same operation without spending ordinary
+ * failures; outside drain no phase deadline exists. The phase deadline is also each attempt's
+ * transport deadline, so expiry cancels and joins the actual call.
+ */
+export async function finishIdleWithRetry(options: ThreadLoopRuntimeOptions, envelope: SessionEventWriterFinishIdleEnvelope): Promise<SessionEventWriterFinishIdleResult> {
+    if (options.sessionEventWriter.finishIdle === undefined) {
+        return writerUnavailable(envelope.sessionId, envelope.durableTurnId);
+    }
+    let ordinaryFailures = 0;
+    let waitExpiries = 0;
+    const operationControls = (): FinishIdleOperationControls => {
+        const deadlineEpochMs = options.phaseDeadline?.() ?? Infinity;
+        return Number.isFinite(deadlineEpochMs) ? { deadlineEpochMs } : {};
+    };
+    const stopped = (): boolean =>
+        Date.now() >= (operationControls().deadlineEpochMs ?? Infinity);
+    const terminal = (): SessionEventWriterFinishIdleResult => ({
+        ok: false,
+        error: {
+            ...normalizeSessionEventWriterError({
+                code: "timeout", sessionId: envelope.sessionId, writeId: envelope.durableTurnId
+            }),
+            retryable: false,
+        },
+    });
+    for (;;) {
+        if (stopped())
+            return terminal();
+        // Each returned attempt has joined its actual transport before rejoining this operation.
+        const result = await finishIdleOnce(options, envelope, operationControls());
+        if (result.ok)
+            return result;
+        if (!result.error.retryable)
+            return result;
+        if (stopped())
+            return terminal();
+        if (result.error.code === "timeout")
+            waitExpiries += 1;
+        else
+            ordinaryFailures += 1;
+        if (ordinaryFailures >= SessionEventWriterRetryPolicy.attempts)
+            return result;
+        const backoffs = SessionEventWriterRetryPolicy.backoffMs;
+        const failureCount = result.error.code === "timeout" ? waitExpiries : ordinaryFailures;
+        const backoffMs = backoffs[Math.min(failureCount - 1, backoffs.length - 1)] ?? 0;
+        const backoffControls = operationControls();
+        const controller = new AbortController();
+        const cancel = (): void => controller.abort();
+        const remaining = (backoffControls.deadlineEpochMs ?? Infinity) - Date.now();
+        const timer = Number.isFinite(remaining) ? setTimeout(cancel, Math.max(0, remaining)) : undefined;
+        try {
+            await options.runtime.sleep(Math.min(backoffMs, Math.max(0, remaining)), controller.signal);
+        }
+        finally {
+            if (timer !== undefined)
+                clearTimeout(timer);
+        }
+    }
 }
 
 export async function commitRuntimeTerminationWithRetry(
@@ -683,24 +722,8 @@ export async function commitRuntimeTerminationWithRetry(
 		attempt <= SessionEventWriterRetryPolicy.attempts;
 		attempt += 1
 	) {
-		const result = await Promise.race([
-			commitRuntimeTerminationOnce(options, envelope),
-			options.runtime
-				.sleep(
-					SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
-					new AbortController().signal,
-				)
-				.then(
-					(): SessionEventWriterRuntimeTerminationResult => ({
-						ok: false,
-						error: normalizeSessionEventWriterError({
-							code: "timeout",
-							sessionId: envelope.sessionId,
-							writeId: envelope.writeId,
-						}),
-					}),
-				),
-		]);
+		// Await the transport-owned deadline and joined result before any retry.
+		const result = await commitRuntimeTerminationOnce(options, envelope);
 		if (result.ok) {
 			return result;
 		}
@@ -759,36 +782,14 @@ async function commitRuntimeTerminationOnce(
 	}
 }
 
-async function finishIdleWithTimeout(
-	options: ThreadLoopRuntimeOptions,
-	envelope: SessionEventWriterFinishIdleEnvelope,
-): Promise<SessionEventWriterFinishIdleResult> {
-	const rawOperation = finishIdleOnce(options, envelope);
-	const timeoutController = new AbortController();
-	const first = await Promise.race([
-		rawOperation.then((result) => ({ type: "raw" as const, result })),
-		options.runtime
-			.sleep(
-				SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
-				timeoutController.signal,
-			)
-			.then(() => ({ type: "local_timeout" as const })),
-	]);
-	if (first.type === "raw") {
-		timeoutController.abort();
-		return first.result;
-	}
-	// The transport has no cancellation contract, so ownership stays with the raw write.
-	return await rawOperation;
-}
-
 async function finishIdleOnce(
 	options: ThreadLoopRuntimeOptions,
 	envelope: SessionEventWriterFinishIdleEnvelope,
+	controls: FinishIdleOperationControls,
 ): Promise<SessionEventWriterFinishIdleResult> {
 	const startedAt = options.runtime.monotonicMs();
 	try {
-		const result = await options.sessionEventWriter.finishIdle!(envelope);
+		const result = await options.sessionEventWriter.finishIdle!(envelope, controls);
 		observeEventWrite(
 			options,
 			"finish_idle",
@@ -847,20 +848,6 @@ function writerUnavailable(
 	};
 }
 
-function writerUnknown(
-	sessionId: string,
-	writeId: string,
-): SessionEventWriterFinishIdleResult {
-	return {
-		ok: false,
-		error: normalizeSessionEventWriterError({
-			code: "unknown",
-			sessionId,
-			writeId,
-		}),
-	};
-}
-
 export function finishIdleCompletionCreate(
 	runtimeThread: ThreadRuntime,
 	stopReason: SessionEventWriterFinishIdleEnvelope["stopReason"],
@@ -878,7 +865,7 @@ export function finishIdleCompletionCreate(
 	}
 	const payload =
 		failure === undefined
-			? finalAssistantText(runtimeThread.state.contextManager.entries())
+			? finalAssistantText(runtimeThread.state.contextManager.historyMessages())
 			: completionMailErrorPayload(failure.message);
 	return completionMailText(
 		[

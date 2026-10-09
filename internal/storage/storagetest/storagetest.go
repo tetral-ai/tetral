@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/tetral-ai/tetral/database"
@@ -539,11 +541,11 @@ func heartbeatRun(db *sql.DB, runID string, stop <-chan struct{}) {
 func refreshRunLease(ctx context.Context, db *sql.DB, runID string) error {
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return &DatabaseSetupError{Stage: "connect_run_heartbeat"}
+		return &DatabaseSetupError{Stage: "connect_run_heartbeat", diagnostic: classifyDatabaseFailure(ctx, "run_heartbeat.connect", err)}
 	}
 	defer func() { _ = conn.Close() }()
 	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", registryAdvisoryLockKey); err != nil {
-		return &DatabaseSetupError{Stage: "lock_run_heartbeat"}
+		return &DatabaseSetupError{Stage: "lock_run_heartbeat", diagnostic: classifyDatabaseFailure(ctx, "run_heartbeat.lock", err)}
 	}
 	defer func() {
 		_, _ = conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", registryAdvisoryLockKey)
@@ -553,10 +555,13 @@ func refreshRunLease(ctx context.Context, db *sql.DB, runID string) error {
 		runID, postgresInterval(registryLease),
 	)
 	if err != nil {
-		return &DatabaseSetupError{Stage: "refresh_run_heartbeat"}
+		return &DatabaseSetupError{Stage: "refresh_run_heartbeat", diagnostic: classifyDatabaseFailure(ctx, "run_heartbeat.update", err)}
 	}
 	affected, err := result.RowsAffected()
-	if err != nil || affected != 1 {
+	if err != nil {
+		return &DatabaseSetupError{Stage: "lost_run_heartbeat_lease", diagnostic: classifyDatabaseFailure(ctx, "run_heartbeat.affected_rows", err)}
+	}
+	if affected != 1 {
 		return &DatabaseSetupError{Stage: "lost_run_heartbeat_lease"}
 	}
 	return nil
@@ -653,7 +658,7 @@ func testBaselineDigest(ctx context.Context, db *sql.DB) (string, error) {
 	}
 	return digestBaselineInputs(baselineInputs{
 		helperFormat:       helperFormat,
-		schemaChecksum:     storage.PostgreSQLSchemaVersionOneChecksum + ":" + storage.PostgreSQLSchemaVersionTwoChecksum,
+		schemaChecksum:     storage.PostgreSQLSchemaVersionOneChecksum,
 		postgresqlContract: database.PostgreSQLContractDigest(),
 		roleContract:       database.RoleContractDigest(),
 		seed:               strings.Join([]string{testSeedStatement, string(workspace.DefaultID), testSeedName, testSeedCreatedAt}, "\x00"),
@@ -935,6 +940,19 @@ func cloneSchemaGrantStatements(roleName string) []string {
 		"GRANT USAGE ON SCHEMA public TO " + roleName,
 		"GRANT ALL ON ALL TABLES IN SCHEMA public TO " + roleName,
 		"GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO " + roleName,
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_lock_runtime_process(text,text,text)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_lock_runtime_process(text,text,text) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_lock_runtime_process_liveness(text,text,text)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_lock_runtime_process_liveness(text,text,text) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_job_runner_binding_upper()') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_job_runner_binding_upper() TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_job_runner_binding_page(text,text,text,text,integer)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_job_runner_binding_page(text,text,text,text,integer) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_auth_lookup_key(bytea)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_auth_lookup_key(bytea) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_auth_lookup_token(bytea)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_auth_lookup_token(bytea) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_auth_lookup_grants(text,text)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_auth_lookup_grants(text,text) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_auth_lock_authority(text,text,text,text)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_auth_lock_authority(text,text,text,text) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_auth_prune_tokens(integer)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_auth_prune_tokens(integer) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_cleanup_due_sessions(timestamptz,timestamptz,text,integer)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_cleanup_due_sessions(timestamptz,timestamptz,text,integer) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_prune_event_idempotency(timestamptz,timestamptz,text,text,bytea,integer)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_prune_event_idempotency(timestamptz,timestamptz,text,text,bytea,integer) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_prune_event_changes(timestamptz,timestamptz,text,text,bigint,integer)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_prune_event_changes(timestamptz,timestamptz,text,text,bigint,integer) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_prune_job_runner_jobs(text,timestamptz,integer)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_prune_job_runner_jobs(text,timestamptz,integer) TO "+roleName) + "; END IF; END $fixture_grant$",
 	}
 }
 
@@ -1017,7 +1035,7 @@ func cleanupRegisteredClone(ctx context.Context, db cleanupExecutor, registratio
 	var cleanupErr error
 	for _, item := range statements {
 		if _, err := db.ExecContext(ctx, item.sql); err != nil {
-			cleanupErr = errors.Join(cleanupErr, &DatabaseCleanupError{Database: databaseName, Stage: item.stage})
+			cleanupErr = errors.Join(cleanupErr, &DatabaseCleanupError{Database: databaseName, Stage: item.stage, diagnostic: classifyDatabaseFailure(ctx, cleanupFailureOperation(item.stage), err)})
 		}
 	}
 	if cleanupErr == nil {
@@ -1230,23 +1248,131 @@ func (e *MalformedTestDSNError) Error() string {
 	return fmt.Sprintf("storagetest: %s is malformed; raw error suppressed", e.EnvVarName)
 }
 
+// Stage identifies the failed owning operation; diagnostic scalars describe
+// the observed caller context and native failure independently. Native errors,
+// SQL text and connection details are never retained. Classification does not
+// change the fail-closed heartbeat or cleanup policy and its existing budgets.
 type DatabaseSetupError struct {
-	Stage    string
-	Database string
+	Stage      string
+	Database   string
+	diagnostic databaseFailure
 }
 
 func (e *DatabaseSetupError) Error() string {
 	if e.Database == "" {
-		return fmt.Sprintf("storagetest: database setup failed at stage %q", e.Stage)
+		return fmt.Sprintf("storagetest: database setup failed at stage %q", e.Stage) + e.diagnostic.suffix()
 	}
-	return fmt.Sprintf("storagetest: database setup failed at stage %q for database %q", e.Stage, e.Database)
+	return fmt.Sprintf("storagetest: database setup failed at stage %q for database %q", e.Stage, e.Database) + e.diagnostic.suffix()
 }
 
 type DatabaseCleanupError struct {
-	Database string
-	Stage    string
+	Database   string
+	Stage      string
+	diagnostic databaseFailure
 }
 
 func (e *DatabaseCleanupError) Error() string {
-	return fmt.Sprintf("storagetest: database cleanup failed at stage %q for database %q", e.Stage, e.Database)
+	return fmt.Sprintf("storagetest: database cleanup failed at stage %q for database %q", e.Stage, e.Database) + e.diagnostic.suffix()
+}
+
+type databaseFailure struct {
+	operation, context, native, sqlstate string
+}
+
+func classifyDatabaseFailure(ctx context.Context, operation string, err error) databaseFailure {
+	if err == nil || !databaseFailureOperationAllowed(operation) {
+		return databaseFailure{}
+	}
+	result := databaseFailure{operation: operation, context: "none", native: "other"}
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		result.context = "deadline"
+	case errors.Is(ctx.Err(), context.Canceled):
+		result.context = "canceled"
+	}
+	var postgres *pgconn.PgError
+	var network net.Error
+	switch {
+	case errors.As(err, &postgres):
+		result.native = "postgresql"
+		if validDatabaseSQLState(postgres.Code) {
+			result.sqlstate = postgres.Code
+		}
+	case errors.Is(err, context.DeadlineExceeded):
+		result.native = "deadline"
+	case errors.Is(err, context.Canceled):
+		result.native = "canceled"
+	case errors.As(err, &network):
+		result.native = "network"
+	}
+	return result
+}
+
+func databaseFailureOperationAllowed(value string) bool {
+	switch value {
+	case "run_heartbeat.connect", "run_heartbeat.lock", "run_heartbeat.update", "run_heartbeat.affected_rows",
+		"cleanup.workload_no_login", "cleanup.role_no_login", "cleanup.role_connect_revoke", "cleanup.public_connect_revoke",
+		"cleanup.sessions_terminate", "cleanup.database_drop", "cleanup.role_drop", "cleanup.workload_role_drop":
+		return true
+	default:
+		return false
+	}
+}
+
+func cleanupFailureOperation(stage string) string {
+	switch stage {
+	case "revoke_workload_login":
+		return "cleanup.workload_no_login"
+	case "revoke_login":
+		return "cleanup.role_no_login"
+	case "revoke_connect":
+		return "cleanup.role_connect_revoke"
+	case "revoke_public_connect":
+		return "cleanup.public_connect_revoke"
+	case "terminate_sessions":
+		return "cleanup.sessions_terminate"
+	case "drop_database":
+		return "cleanup.database_drop"
+	case "drop_role":
+		return "cleanup.role_drop"
+	case "drop_workload_role":
+		return "cleanup.workload_role_drop"
+	default:
+		return ""
+	}
+}
+
+func validDatabaseSQLState(value string) bool {
+	if len(value) != 5 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch < 'A' || ch > 'Z') && (ch < '0' || ch > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func (d databaseFailure) suffix() string {
+	// A literal error with no diagnostic retains its existing public formatting.
+	// Recheck every projected scalar so a future caller cannot emit arbitrary data.
+	if !databaseFailureOperationAllowed(d.operation) {
+		return ""
+	}
+	switch d.context {
+	case "none", "canceled", "deadline":
+	default:
+		return ""
+	}
+	switch d.native {
+	case "postgresql", "deadline", "canceled", "network", "other":
+	default:
+		return ""
+	}
+	result := fmt.Sprintf(" (operation=%s context=%s native=%s", d.operation, d.context, d.native)
+	if d.native == "postgresql" && validDatabaseSQLState(d.sqlstate) {
+		result += " sqlstate=" + d.sqlstate
+	}
+	return result + ")"
 }

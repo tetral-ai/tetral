@@ -21,45 +21,81 @@ import type { RuntimeControlService } from "./runtime-service.js";
 
 /** Owns the underlying gRPC server together with asynchronous bind and graceful shutdown controls. */
 export interface RuntimeGrpcServer {
-  readonly server: Server;
-  readonly bind: (address: string) => Promise<number>;
-  readonly shutdown: () => Promise<void>;
+	readonly server: Server;
+	readonly bind: (address: string) => Promise<number>;
+	readonly shutdown: (deadline?: Date) => Promise<void>;
 }
 
 /**
  * Creates the internal Runtime Pod command server without binding it to an address.
- * The returned server registers every supported Bridge command and uses insecure transport because
+ * The returned server registers every supported Job Runner command and uses insecure transport because
  * caller authentication is enforced from service-account metadata by the control service.
  */
-export function createRuntimeGrpcServer(service: RuntimeControlService): RuntimeGrpcServer {
-  const server = new Server(grpcServerOptions());
-  server.addService(AgentRuntimePodServiceService, {
-		recoverThread: commandHandler((request, metadata) => service.recoverThread(request, metadata)),
-    acceptInput: commandHandler((request, metadata) => service.acceptInput(request, metadata)),
-    acceptAgentMail: commandHandler((request, metadata) => service.acceptAgentMail(request, metadata)),
-    acceptTaskNotification: commandHandler((request, metadata) => service.acceptTaskNotification(request, metadata)),
-    interrupt: commandHandler((request, metadata) => service.interrupt(request, metadata)),
-    resolveToolConfirmation: commandHandler((request, metadata) => service.resolveToolConfirmation(request, metadata)),
-    applyRuntimeConfig: commandHandler((request, metadata) => service.applyRuntimeConfig(request, metadata)),
-    cleanupSession: commandHandler((request, metadata) => service.cleanupSession(request, metadata)),
-  });
-  return {
-    server,
-    bind: async (address) =>
-      await new Promise<number>((resolve, reject) => {
-        server.bindAsync(address, ServerCredentials.createInsecure(), (error, port) => {
-          if (error !== null) {
-            reject(new Error("grpc listener unavailable"));
-            return;
-          }
-          resolve(port);
-        });
-      }),
-    shutdown: async () =>
-      await new Promise<void>((resolve) => {
-        server.tryShutdown(() => resolve());
-      }),
-  };
+export function createRuntimeGrpcServer(
+	service: RuntimeControlService,
+): RuntimeGrpcServer {
+	const server = new Server(grpcServerOptions());
+	server.addService(AgentRuntimePodServiceService, {
+		recoverThread: commandHandler((request, metadata) =>
+			service.recoverThread(request, metadata),
+		),
+		acceptInput: commandHandler((request, metadata) =>
+			service.acceptInput(request, metadata),
+		),
+		acceptAgentMail: commandHandler((request, metadata) =>
+			service.acceptAgentMail(request, metadata),
+		),
+		acceptTaskNotification: commandHandler((request, metadata) =>
+			service.acceptTaskNotification(request, metadata),
+		),
+		interrupt: commandHandler((request, metadata) =>
+			service.interrupt(request, metadata),
+		),
+		resolveToolConfirmation: commandHandler((request, metadata) =>
+			service.resolveToolConfirmation(request, metadata),
+		),
+		applyRuntimeConfig: commandHandler((request, metadata) =>
+			service.applyRuntimeConfig(request, metadata),
+		),
+		cleanupSession: commandHandler((request, metadata) =>
+			service.cleanupSession(request, metadata),
+		),
+	});
+	let closing: Promise<void> | undefined;
+	return {
+		server,
+		bind: async (address) =>
+			await new Promise<number>((resolve, reject) => {
+				server.bindAsync(
+					address,
+					ServerCredentials.createInsecure(),
+					(error, port) => {
+						if (error !== null) {
+							reject(new Error("grpc listener unavailable"));
+							return;
+						}
+						resolve(port);
+					},
+				);
+			}),
+		shutdown: (deadline = new Date(Date.now() + 5000)) => {
+			if (closing !== undefined) return closing;
+			closing = new Promise<void>((resolve) => {
+				const timer = setTimeout(
+					() => {
+						server.forceShutdown();
+						resolve();
+					},
+					Math.max(0, deadline.getTime() - Date.now()),
+				);
+				server.tryShutdown(() => {
+					clearTimeout(timer);
+					resolve();
+				});
+			});
+			return closing;
+		},
+	};
 }
 
 function commandHandler<Request, Response>(

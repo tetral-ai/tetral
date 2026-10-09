@@ -1,0 +1,10 @@
+{
+  "MaxProviderContextTextJsonBytes": 16777216,
+  "MaxProviderToolCallInputJsonBytes": 4194304,
+  "MaxMetadataBytes": 16384,
+  "MaxStableReasoningPartsPerRequest": 16,
+  "MaxStableReasoningBytesPerRequest": 2097152,
+  "MaxProviderResponseFrameBytes": 33554432,
+  "MaxProviderRequestToolOutputJsonBytes": 524288,
+  "MaxProviderRequestAttachments": 32
+}

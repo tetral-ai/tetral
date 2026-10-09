@@ -3,9 +3,9 @@
 ## Responsibilities
 
 `web-connector` is the execution service behind the platform `web` tool —
-search the web, open a page, find within an opened page. It is the third
-container of the Gateway Pod, alongside `provider-gateway` and
-`mcp-connector`, and terminates exactly one method, `ProviderGatewayService.RunWeb`,
+search the web, open a page, find within an opened page. Its independent
+Deployment has one business container, `web-connector`, and its Service
+terminates exactly one method, `ProviderGatewayService.RunWeb`,
 on its own gRPC port; every other method on that service returns
 `UNIMPLEMENTED` here. It contains no provider-lowering code and no MCP code,
 never talks to a model provider or an MCP server, and owns no tables and no
@@ -29,6 +29,8 @@ module, following the `bridge` precedent); the binary is at
 | `TETRAL_WEB_API_KEYS` | Ordered JSON array of platform backend keys (pool order) |
 | `TETRAL_WEB_CONNECTOR_GRPC_ADDR` | gRPC listen address (default `0.0.0.0:9092`) |
 | `TETRAL_WEB_CONNECTOR_METRICS_ADDR` | Prometheus / health listen address (default `0.0.0.0:9464`) |
+| `TETRAL_DRAIN_TIMEOUT_MS` | gRPC drain, default10000ms, range1..20000ms; leaves10s for joins and proxy shutdown inside the30s Pod grace |
+| `TETRAL_BLOB_TLS_CA_PATH` / `TETRAL_BLOB_TLS_SERVER_NAME` | Required object-store trust bundle and exact DNS identity; production uses native verified HTTPS |
 | `TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY` | HMAC key for runtime binding-token verification |
 
 Constants that govern behavior are fixed source values, not free knobs, and are
@@ -45,6 +47,30 @@ timeout 30 s, fetch token budget 262144, and key cooldowns 60 s (rate-limited)
 and 3600 s (quota-exhausted) live in `backend.go`. The 7-day cache TTL is the
 bucket lifecycle rule, provisioned outside this repository.
 
+## Process ownership
+
+SIGTERM/SIGINT withdraw readiness and gRPC health, then close new request
+admission. Accepted work retains its request context for the configured drain.
+At expiry the process cancels backend/object calls, force-stops gRPC and joins
+all handlers and listeners before returning to the command. The command then
+closes its backend HTTP transport and protected blob owner. It does not write
+a user cancellation or repeat an uncertain backend operation during shutdown.
+
+Three instances can share the same scoped snapshot bucket. Search may first
+create a stub; materializing it is a backend operation. Once a complete page is
+stored, another instance can open/find that reference without another fetch.
+The stored job receipt, scope triple and canonical input preserve replay and
+conflict behavior across replicas.
+
+The owning metrics surface is `/metrics`: `web_requests_active`, `web_draining`,
+`web_requests_total`, `web_backend_calls_total` and
+`web_request_duration_seconds` distinguish active/draining work, persisted
+reads and external calls. Dashboard queries group bounded operation/status/API
+labels; replica identity comes from scrape labels. `web.drain.started` and
+`web.drain.joined` logs expose phase and active count. Local compositions check
+these fields and zero active work after join; remote scrape/Grafana wiring and
+alert thresholds are deployment preparation work.
+
 ## States & lifecycle
 
 ### Request pipeline (`RunWeb`)
@@ -60,10 +86,10 @@ returns and stops.
 | Caller identity | gRPC peer authenticates as the `agent-runtime` service account in namespace `tetral-agent-runtime` with a pod UID; no other caller, no public bearer tokens (`MethodAuthorizer`) | gRPC `Unauthenticated` / `PermissionDenied` (out of band, not a tool result) | none |
 | Semantic envelope | scope triple + `tool_use_event_id` present; input not all-empty; ≤ 8 items | in-band `tool_error` | none |
 | Structural envelope | fields within size bounds; each `open` item sets exactly one of `url` / `ref_id` | gRPC `InvalidArgument` (malformed internal request) | none |
-| Binding token | `rtbt_v1` HMAC token verifies against this scope triple, `binding_id`, `binding_generation`, caller pod UID; not expired (`BindingVerifier.Verify`) | gRPC status error | none |
+| Binding token | `rtbt_v1` HMAC token verifies against this scope triple, `binding_id`, `binding_generation`, caller pod UID and exact `runtime_process_id`; not expired (`BindingVerifier.Verify`) | gRPC status error | none |
 | Idempotency | key = `tool_use_event_id` + canonical-input hash; read job record first | matching hash replays stored response verbatim; mismatched hash is `runtime_error` "tool delivery conflict", never re-executed | none |
 | Execution | run `search_query`, then `open`, then `find` in field order | per-operation `tool_error` / `runtime_error` in the composed result | stub / snapshot writes as each operation dictates |
-| Settlement | write the create-only job record | — | see result-class table below |
+| Settlement | conditionally settle the matching in-flight claim with the immutable result receipt | — | see result-class table below |
 
 An in-flight identity remains owned for the maximum legal call: eight input
 items, four domain requests per search item, every configured provider-key
@@ -81,13 +107,15 @@ parent context, the stored claim expiry, and the 30-second commit margin.
 
 | Result status | Persisted as job record? | Same-key retry | Notes |
 | --- | --- | --- | --- |
-| `completed` | yes (create-only) | replays the stored response byte-identical | settled outcome |
-| `tool_error` | yes (create-only) | replays the stored response byte-identical | a settled, model-visible outcome |
-| `runtime_error` | never | re-executes | the retryable class; a transient backend failure must not stick |
+| `completed` | yes (conditional claim settlement) | replays the stored response byte-identical | settled outcome |
+| `tool_error` | yes (conditional claim settlement) | replays the stored response byte-identical | a settled, model-visible outcome |
+| `runtime_error` | yes, when produced after acquiring the job claim | replays the stored response byte-identical | preserves the settled delivery outcome; same-key delivery does not invoke the backend again |
 
 Pre-execution rejections (envelope failures, idempotency conflict) are never
-persisted. A concurrent duplicate that loses the create-only job race reads
-and returns the winner's stored response. A non-completed result additionally
+persisted. A failure to read, acquire or settle a claim may return an unpersisted
+runtime error; this does not grant authority to re-execute a still-owned identity.
+A concurrent duplicate that loses the create-only claim race waits for and
+returns the winner's conditionally settled response. A non-completed result additionally
 deletes its own cache objects best-effort, and its usage block still rides the
 error response.
 
@@ -106,7 +134,7 @@ Objects are keyed under the scope triple taken from the authenticated envelope
 | --- | --- | --- | --- |
 | `.meta` stub | a rendered search hit (`SnapshotStore.StoreStub`) | write-once; a lazy upgrade adds a sibling `.doc`, never rewrites the stub | bucket lifecycle (7 days) |
 | `.doc` snapshot | `open(url)`, or lazy upgrade of a stub (`StorePage` / `StorePageForRef`) | immutable; normalized once at write time and never again | bucket lifecycle (7 days) |
-| `.job` record | settlement of a `completed` / `tool_error` result (`PutJob`) | create-only | bucket lifecycle (7 days) — a replay after TTL simply re-executes |
+| `.job` record | create-only in-flight claim (`PutJob`), followed by conditional outcome settlement (`CompareAndSwapJob`) | immutable identity/input hash and claim expiry; one conditional settlement to a replayable response, including runtime errors | bucket lifecycle (7 days); deduplication does not extend beyond record retention |
 
 A `ref_id` is `r_` followed by 26 lowercase base32 characters over 128 random
 bits, minted by the connector. Model input contributes only the final
@@ -200,8 +228,8 @@ backend lands without touching operation semantics, storage, or formatters; a
 replacement implements `Backend` and nothing above it changes in this service.
 Two things outside the interface do move for a differently-hosted vendor: the
 backend endpoint hosts (`s.jina.ai` / `r.jina.ai`) are also listed in the
-Gateway Pod NetworkPolicy egress-intent host list
-(`services/gateway/k8s/networkpolicy.yaml`), so a swap to a new host
+Web Connector Deployment NetworkPolicy egress-intent host list
+(`services/web-connector/k8s/networkpolicy.yaml`), so a swap to a new host
 needs that manifest edit; and the vendor's fixtures must be recorded before the
 suite can stay fixture-only (see the testing guide).
 
@@ -345,7 +373,7 @@ fixtures before the tests can pin it.
 | --- | --- |
 | `service_test.go` | `RunWeb` end-to-end: identity and binding rejected before dependencies; search+open usage summed; failed search does not count backend requests; validation errors have usage and no side effects |
 | `admission_test.go` | binding admission rejects every tampered claim before any blob/backend access; matching claims proceed; the web port leaves the sibling provider stream `UNIMPLEMENTED` |
-| `operations_test.go` | operation semantics: envelope validation performs no I/O; lazy upgrade from stub then stays local; scope isolation; idempotent replay and conflict; maximum-call claim ownership, immutable expiry, bounded winner CAS, parent-context authority, bounded duplicate polling, boundary settlement, exact replay, and abandoned-claim convergence; runtime failures re-execute; multi-item composition and singular-field reduction; window/lineno bounds; denied-URL and target-HTTP taxonomy; loser-cleanup on concurrent delivery |
+| `operations_test.go` | operation semantics: envelope validation performs no I/O; lazy upgrade from stub then stays local; scope isolation; idempotent replay and conflict; maximum-call claim ownership, immutable expiry, bounded winner CAS, parent-context authority, bounded duplicate polling, boundary settlement, exact replay, and abandoned-claim convergence; claimed runtime failures persist and replay without another backend execution; multi-item composition and singular-field reduction; window/lineno bounds; denied-URL and target-HTTP taxonomy; loser-cleanup on concurrent delivery |
 | `storage_test.go` | snapshot normalization order (truncate → CRLF split → wrap → count); create-only writes never replace bytes; UTF-8-safe truncation; every stored line addressable; window continuation to the final window; canonical input-hash stability and array-order sensitivity |
 | `backend_test.go` | Jina backend: closed header tables; fixture-driven search/fetch mapping; usage from the data block; target-redirect status treated as readable; full failure taxonomy; construction-fixed attempt bound; key-pool rotation, cooldown boundaries, dead-key persistence, exhaustion; domain fan-out dedup and too-many-domains rejection |
 | `classifier_test.go` | URL classifier accepts public `http`/`https` and rejects every non-public target class |
@@ -385,3 +413,60 @@ If a PR changes the `RunWeb` pipeline, the search/open/find semantics, the
 cache-bucket keys or snapshot normalization, the backend taxonomy or key pool,
 the URL classifier, or the usage and metrics surface in this folder, it
 updates the matching section here and the conformance tests named above.
+
+## Deployment ownership
+
+`k8s/` owns this service's Deployment, ordinary ClusterIP Service, ServiceAccount,
+TokenReview RBAC and NetworkPolicies. The only business container is
+`web-connector`, exposing gRPC 9092 and health/readiness/metrics on 9464. It
+admits the Runtime workload identity and then verifies the signed Session
+binding and reviewed Runtime Pod UID before backend or object-store effects.
+Its Web-only key pool and cache Secret grants remain independent of Provider
+Gateway and MCP. It receives neither a database DSN nor provider vault keys,
+and has no provider HPA. Helm's `replicas.webConnector` controls it independently
+of the other workloads. The external cache bucket still requires its enabled
+seven-day expiry lifecycle rule. The deployment contract and denied-access
+controls live in `deploy/kubernetes/separated_workloads_test.go`.
+
+Web Connector has a routing sidecar only in the hardened transport profile,
+where its receiver proxy is injected as a Kubernetes native sidecar and
+therefore starts before the application. The command has no proxy wait of its
+own and reads no transport-profile setting.
+
+## Process diagnostics
+
+The command follows the shared [Go process diagnostic contract](../../internal/workload/README.md#diagnostics)
+for the restart-only `TETRAL_LOG_*` controls, the default Info level, bounded
+suppression summaries, diagnostic drop and sink-failure metrics, and the
+diagnostic close after listeners and business resources.
+Listener-open failures name the fixed gRPC or metrics listener and omit the raw
+bind error and address.
+
+The internal gRPC boundary owns request rejection summaries: ordinary
+unauthenticated, invalid and denied requests emit Info, cancellation emits Debug,
+and terminal internal failures emit Error. `RunWeb` retains request metrics and
+specific idempotency warnings without duplicating that boundary record. Unknown
+backend client-error taxonomy is recorded as `unknown_client_error` with the
+actual HTTP status; arbitrary dependency response names never enter diagnostics.
+
+The command validates `TETRAL_CANCEL_JOIN_TIMEOUT_MS` (default 5000) together
+with `TETRAL_DRAIN_TIMEOUT_MS`: their sum must fit within 25000 ms,
+leaving the web-connector Pod's proxy allocation. One executable deadline covers
+service drain, cancellation, all joins and dependency cleanup. An uncooperative
+producer causes exit status 1 without closing dependencies under live work.
+Reusable `Run` callers retain join-before-close ownership.
+
+## Operation measurement
+
+The metrics port also exports `tetral_operation_duration_seconds` with
+`service="web-connector"`, a registered full RPC method (including `RunWeb`),
+and the shared gRPC outcome classification. This measures the authenticated
+RPC boundary; a gRPC success can contain a model-visible Tool error. Existing
+`web_request_duration_seconds{operation}` retains its execution boundary.
+The same family records actual `shutdown_grpc_drain`, forced
+`shutdown_grpc_cancel_join` and `shutdown_http_drain` phases. Samples appear
+only when those owning boundaries complete; completed shutdown observations
+require a remaining metrics listener or process-local evidence to collect.
+
+Fixed seconds buckets and replica percentile queries follow the
+[shared operation duration contract](../../internal/workload/README.md#operation-durations).

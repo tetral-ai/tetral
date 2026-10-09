@@ -715,6 +715,8 @@ type RecoverThreadRequest struct {
 	TargetPodUid      string                 `protobuf:"bytes,6,opt,name=target_pod_uid,json=targetPodUid,proto3" json:"target_pod_uid,omitempty"`
 	SourceEventId     string                 `protobuf:"bytes,7,opt,name=source_event_id,json=sourceEventId,proto3" json:"source_event_id,omitempty"`
 	RecoveryLeaseRef  *RecoveryLeaseRef      `protobuf:"bytes,9,opt,name=recovery_lease_ref,json=recoveryLeaseRef,proto3" json:"recovery_lease_ref,omitempty"`
+	RuntimeProcessId  string                 `protobuf:"bytes,11,opt,name=runtime_process_id,json=runtimeProcessId,proto3" json:"runtime_process_id,omitempty"`
+	HandoffId         string                 `protobuf:"bytes,10,opt,name=handoff_id,json=handoffId,proto3" json:"handoff_id,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -803,6 +805,20 @@ func (x *RecoverThreadRequest) GetRecoveryLeaseRef() *RecoveryLeaseRef {
 		return x.RecoveryLeaseRef
 	}
 	return nil
+}
+
+func (x *RecoverThreadRequest) GetRuntimeProcessId() string {
+	if x != nil {
+		return x.RuntimeProcessId
+	}
+	return ""
+}
+
+func (x *RecoverThreadRequest) GetHandoffId() string {
+	if x != nil {
+		return x.HandoffId
+	}
+	return ""
 }
 
 type RecoveryLeaseRef struct {
@@ -1109,9 +1125,10 @@ type AcceptInputRequest struct {
 	//
 	//	*AcceptInputRequest_MessagesJson
 	//	*AcceptInputRequest_Rejection
-	Content       isAcceptInputRequest_Content `protobuf_oneof:"content"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Content          isAcceptInputRequest_Content `protobuf_oneof:"content"`
+	RuntimeProcessId string                       `protobuf:"bytes,11,opt,name=runtime_process_id,json=runtimeProcessId,proto3" json:"runtime_process_id,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *AcceptInputRequest) Reset() {
@@ -1223,6 +1240,13 @@ func (x *AcceptInputRequest) GetRejection() *AcceptInputRejection {
 		}
 	}
 	return nil
+}
+
+func (x *AcceptInputRequest) GetRuntimeProcessId() string {
+	if x != nil {
+		return x.RuntimeProcessId
+	}
+	return ""
 }
 
 type isAcceptInputRequest_Content interface {
@@ -1518,6 +1542,7 @@ type AcceptAgentMailRequest struct {
 	RuntimeInputId    string                 `protobuf:"bytes,7,opt,name=runtime_input_id,json=runtimeInputId,proto3" json:"runtime_input_id,omitempty"`
 	DeliveryId        string                 `protobuf:"bytes,8,opt,name=delivery_id,json=deliveryId,proto3" json:"delivery_id,omitempty"`
 	Content           string                 `protobuf:"bytes,9,opt,name=content,proto3" json:"content,omitempty"`
+	RuntimeProcessId  string                 `protobuf:"bytes,10,opt,name=runtime_process_id,json=runtimeProcessId,proto3" json:"runtime_process_id,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -1611,6 +1636,13 @@ func (x *AcceptAgentMailRequest) GetDeliveryId() string {
 func (x *AcceptAgentMailRequest) GetContent() string {
 	if x != nil {
 		return x.Content
+	}
+	return ""
+}
+
+func (x *AcceptAgentMailRequest) GetRuntimeProcessId() string {
+	if x != nil {
+		return x.RuntimeProcessId
 	}
 	return ""
 }
@@ -1848,6 +1880,7 @@ type AcceptTaskNotificationRequest struct {
 	RuntimeInputId    string                 `protobuf:"bytes,7,opt,name=runtime_input_id,json=runtimeInputId,proto3" json:"runtime_input_id,omitempty"`
 	InputOrder        int64                  `protobuf:"varint,8,opt,name=input_order,json=inputOrder,proto3" json:"input_order,omitempty"`
 	NotificationJson  string                 `protobuf:"bytes,9,opt,name=notification_json,json=notificationJson,proto3" json:"notification_json,omitempty"`
+	RuntimeProcessId  string                 `protobuf:"bytes,10,opt,name=runtime_process_id,json=runtimeProcessId,proto3" json:"runtime_process_id,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -1941,6 +1974,13 @@ func (x *AcceptTaskNotificationRequest) GetInputOrder() int64 {
 func (x *AcceptTaskNotificationRequest) GetNotificationJson() string {
 	if x != nil {
 		return x.NotificationJson
+	}
+	return ""
+}
+
+func (x *AcceptTaskNotificationRequest) GetRuntimeProcessId() string {
+	if x != nil {
+		return x.RuntimeProcessId
 	}
 	return ""
 }
@@ -2178,6 +2218,7 @@ type InterruptRequest struct {
 	RuntimeInputId    string                 `protobuf:"bytes,7,opt,name=runtime_input_id,json=runtimeInputId,proto3" json:"runtime_input_id,omitempty"`
 	Origin            InterruptOrigin        `protobuf:"varint,9,opt,name=origin,proto3,enum=tetral.agent_runtime.v1.InterruptOrigin" json:"origin,omitempty"`
 	InterruptLeaseRef *InterruptLeaseRef     `protobuf:"bytes,10,opt,name=interrupt_lease_ref,json=interruptLeaseRef,proto3" json:"interrupt_lease_ref,omitempty"`
+	RuntimeProcessId  string                 `protobuf:"bytes,11,opt,name=runtime_process_id,json=runtimeProcessId,proto3" json:"runtime_process_id,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -2273,6 +2314,13 @@ func (x *InterruptRequest) GetInterruptLeaseRef() *InterruptLeaseRef {
 		return x.InterruptLeaseRef
 	}
 	return nil
+}
+
+func (x *InterruptRequest) GetRuntimeProcessId() string {
+	if x != nil {
+		return x.RuntimeProcessId
+	}
+	return ""
 }
 
 type InterruptLeaseRef struct {
@@ -2577,6 +2625,7 @@ type ResolveToolConfirmationRequest struct {
 	ToolUseEventId    string                   `protobuf:"bytes,8,opt,name=tool_use_event_id,json=toolUseEventId,proto3" json:"tool_use_event_id,omitempty"`
 	Decision          ToolConfirmationDecision `protobuf:"varint,9,opt,name=decision,proto3,enum=tetral.agent_runtime.v1.ToolConfirmationDecision" json:"decision,omitempty"`
 	DenyMessage       *string                  `protobuf:"bytes,10,opt,name=deny_message,json=denyMessage,proto3,oneof" json:"deny_message,omitempty"`
+	RuntimeProcessId  string                   `protobuf:"bytes,11,opt,name=runtime_process_id,json=runtimeProcessId,proto3" json:"runtime_process_id,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -2677,6 +2726,13 @@ func (x *ResolveToolConfirmationRequest) GetDecision() ToolConfirmationDecision 
 func (x *ResolveToolConfirmationRequest) GetDenyMessage() string {
 	if x != nil && x.DenyMessage != nil {
 		return *x.DenyMessage
+	}
+	return ""
+}
+
+func (x *ResolveToolConfirmationRequest) GetRuntimeProcessId() string {
+	if x != nil {
+		return x.RuntimeProcessId
 	}
 	return ""
 }
@@ -2966,9 +3022,10 @@ type ApplyRuntimeConfigRequest struct {
 	//
 	//	*ApplyRuntimeConfigRequest_SessionConfig
 	//	*ApplyRuntimeConfigRequest_McpManifest
-	Config        isApplyRuntimeConfigRequest_Config `protobuf_oneof:"config"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Config           isApplyRuntimeConfigRequest_Config `protobuf_oneof:"config"`
+	RuntimeProcessId string                             `protobuf:"bytes,8,opt,name=runtime_process_id,json=runtimeProcessId,proto3" json:"runtime_process_id,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *ApplyRuntimeConfigRequest) Reset() {
@@ -3059,6 +3116,13 @@ func (x *ApplyRuntimeConfigRequest) GetMcpManifest() *RuntimeMcpManifestConfig {
 		}
 	}
 	return nil
+}
+
+func (x *ApplyRuntimeConfigRequest) GetRuntimeProcessId() string {
+	if x != nil {
+		return x.RuntimeProcessId
+	}
+	return ""
 }
 
 type isApplyRuntimeConfigRequest_Config interface {
@@ -3472,6 +3536,7 @@ type CleanupSessionRequest struct {
 	TargetPodUid       string                 `protobuf:"bytes,5,opt,name=target_pod_uid,json=targetPodUid,proto3" json:"target_pod_uid,omitempty"`
 	CleanupOperationId string                 `protobuf:"bytes,6,opt,name=cleanup_operation_id,json=cleanupOperationId,proto3" json:"cleanup_operation_id,omitempty"`
 	Reason             CleanupSessionReason   `protobuf:"varint,7,opt,name=reason,proto3,enum=tetral.agent_runtime.v1.CleanupSessionReason" json:"reason,omitempty"`
+	RuntimeProcessId   string                 `protobuf:"bytes,8,opt,name=runtime_process_id,json=runtimeProcessId,proto3" json:"runtime_process_id,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -3553,6 +3618,13 @@ func (x *CleanupSessionRequest) GetReason() CleanupSessionReason {
 		return x.Reason
 	}
 	return CleanupSessionReason_CLEANUP_SESSION_REASON_UNSPECIFIED
+}
+
+func (x *CleanupSessionRequest) GetRuntimeProcessId() string {
+	if x != nil {
+		return x.RuntimeProcessId
+	}
+	return ""
 }
 
 type CleanupSessionResponse struct {
@@ -3781,7 +3853,7 @@ var File_tetral_agent_runtime_v1_agent_runtime_proto protoreflect.FileDescriptor
 
 const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"\n" +
-	"+tetral/agent_runtime/v1/agent_runtime.proto\x12\x17tetral.agent_runtime.v1\"\x8e\x03\n" +
+	"+tetral/agent_runtime/v1/agent_runtime.proto\x12\x17tetral.agent_runtime.v1\"\xdb\x03\n" +
 	"\x14RecoverThreadRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1d\n" +
 	"\n" +
@@ -3792,7 +3864,11 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"\x12binding_generation\x18\x05 \x01(\x03R\x11bindingGeneration\x12$\n" +
 	"\x0etarget_pod_uid\x18\x06 \x01(\tR\ftargetPodUid\x12&\n" +
 	"\x0fsource_event_id\x18\a \x01(\tR\rsourceEventId\x12W\n" +
-	"\x12recovery_lease_ref\x18\t \x01(\v2).tetral.agent_runtime.v1.RecoveryLeaseRefR\x10recoveryLeaseRefJ\x04\b\b\x10\tR\rrecovery_kind\"\x8e\x01\n" +
+	"\x12recovery_lease_ref\x18\t \x01(\v2).tetral.agent_runtime.v1.RecoveryLeaseRefR\x10recoveryLeaseRef\x12,\n" +
+	"\x12runtime_process_id\x18\v \x01(\tR\x10runtimeProcessId\x12\x1d\n" +
+	"\n" +
+	"handoff_id\x18\n" +
+	" \x01(\tR\thandoffIdJ\x04\b\b\x10\tR\rrecovery_kind\"\x8e\x01\n" +
 	"\x10RecoveryLeaseRef\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x1f\n" +
 	"\vlease_token\x18\x02 \x01(\tR\n" +
@@ -3809,7 +3885,7 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"\x16RecoverThreadDuplicate\"|\n" +
 	"\x15RecoverThreadRejected\x12E\n" +
 	"\x06reason\x18\x01 \x01(\x0e2-.tetral.agent_runtime.v1.RecoverThreadFailureR\x06reason\x12\x1c\n" +
-	"\tretryable\x18\x02 \x01(\bR\tretryable\"\xc2\x03\n" +
+	"\tretryable\x18\x02 \x01(\bR\tretryable\"\xf0\x03\n" +
 	"\x12AcceptInputRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1d\n" +
 	"\n" +
@@ -3824,7 +3900,8 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"inputOrder\x12%\n" +
 	"\rmessages_json\x18\t \x01(\tH\x00R\fmessagesJson\x12M\n" +
 	"\trejection\x18\n" +
-	" \x01(\v2-.tetral.agent_runtime.v1.AcceptInputRejectionH\x00R\trejectionB\t\n" +
+	" \x01(\v2-.tetral.agent_runtime.v1.AcceptInputRejectionH\x00R\trejection\x12,\n" +
+	"\x12runtime_process_id\x18\v \x01(\tR\x10runtimeProcessIdB\t\n" +
 	"\acontent\"c\n" +
 	"\x14AcceptInputRejection\x12K\n" +
 	"\x06reason\x18\x01 \x01(\x0e23.tetral.agent_runtime.v1.AcceptInputRejectionReasonR\x06reason\"\x87\x02\n" +
@@ -3837,7 +3914,7 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"\x14AcceptInputDuplicate\"x\n" +
 	"\x13AcceptInputRejected\x12C\n" +
 	"\x06reason\x18\x01 \x01(\x0e2+.tetral.agent_runtime.v1.AcceptInputFailureR\x06reason\x12\x1c\n" +
-	"\tretryable\x18\x02 \x01(\bR\tretryable\"\xdf\x02\n" +
+	"\tretryable\x18\x02 \x01(\bR\tretryable\"\x8d\x03\n" +
 	"\x16AcceptAgentMailRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1d\n" +
 	"\n" +
@@ -3850,7 +3927,9 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"\x10runtime_input_id\x18\a \x01(\tR\x0eruntimeInputId\x12\x1f\n" +
 	"\vdelivery_id\x18\b \x01(\tR\n" +
 	"deliveryId\x12\x18\n" +
-	"\acontent\x18\t \x01(\tR\acontent\"\x97\x02\n" +
+	"\acontent\x18\t \x01(\tR\acontent\x12,\n" +
+	"\x12runtime_process_id\x18\n" +
+	" \x01(\tR\x10runtimeProcessId\"\x97\x02\n" +
 	"\x17AcceptAgentMailResponse\x12N\n" +
 	"\baccepted\x18\x01 \x01(\v20.tetral.agent_runtime.v1.AcceptAgentMailAcceptedH\x00R\baccepted\x12Q\n" +
 	"\tduplicate\x18\x02 \x01(\v21.tetral.agent_runtime.v1.AcceptAgentMailDuplicateH\x00R\tduplicate\x12N\n" +
@@ -3860,7 +3939,7 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"\x18AcceptAgentMailDuplicate\"\x80\x01\n" +
 	"\x17AcceptAgentMailRejected\x12G\n" +
 	"\x06reason\x18\x01 \x01(\x0e2/.tetral.agent_runtime.v1.AcceptAgentMailFailureR\x06reason\x12\x1c\n" +
-	"\tretryable\x18\x02 \x01(\bR\tretryable\"\xf9\x02\n" +
+	"\tretryable\x18\x02 \x01(\bR\tretryable\"\xa7\x03\n" +
 	"\x1dAcceptTaskNotificationRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1d\n" +
 	"\n" +
@@ -3873,7 +3952,9 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"\x10runtime_input_id\x18\a \x01(\tR\x0eruntimeInputId\x12\x1f\n" +
 	"\vinput_order\x18\b \x01(\x03R\n" +
 	"inputOrder\x12+\n" +
-	"\x11notification_json\x18\t \x01(\tR\x10notificationJson\"\xb3\x02\n" +
+	"\x11notification_json\x18\t \x01(\tR\x10notificationJson\x12,\n" +
+	"\x12runtime_process_id\x18\n" +
+	" \x01(\tR\x10runtimeProcessId\"\xb3\x02\n" +
 	"\x1eAcceptTaskNotificationResponse\x12U\n" +
 	"\baccepted\x18\x01 \x01(\v27.tetral.agent_runtime.v1.AcceptTaskNotificationAcceptedH\x00R\baccepted\x12X\n" +
 	"\tduplicate\x18\x02 \x01(\v28.tetral.agent_runtime.v1.AcceptTaskNotificationDuplicateH\x00R\tduplicate\x12U\n" +
@@ -3883,7 +3964,7 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"\x1fAcceptTaskNotificationDuplicate\"\x8e\x01\n" +
 	"\x1eAcceptTaskNotificationRejected\x12N\n" +
 	"\x06reason\x18\x01 \x01(\x0e26.tetral.agent_runtime.v1.AcceptTaskNotificationFailureR\x06reason\x12\x1c\n" +
-	"\tretryable\x18\x02 \x01(\bR\tretryable\"\xcf\x03\n" +
+	"\tretryable\x18\x02 \x01(\bR\tretryable\"\xfd\x03\n" +
 	"\x10InterruptRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1d\n" +
 	"\n" +
@@ -3896,7 +3977,8 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"\x10runtime_input_id\x18\a \x01(\tR\x0eruntimeInputId\x12@\n" +
 	"\x06origin\x18\t \x01(\x0e2(.tetral.agent_runtime.v1.InterruptOriginR\x06origin\x12Z\n" +
 	"\x13interrupt_lease_ref\x18\n" +
-	" \x01(\v2*.tetral.agent_runtime.v1.InterruptLeaseRefR\x11interruptLeaseRefJ\x04\b\b\x10\tR\vinput_order\"\x8f\x01\n" +
+	" \x01(\v2*.tetral.agent_runtime.v1.InterruptLeaseRefR\x11interruptLeaseRef\x12,\n" +
+	"\x12runtime_process_id\x18\v \x01(\tR\x10runtimeProcessIdJ\x04\b\b\x10\tR\vinput_order\"\x8f\x01\n" +
 	"\x11InterruptLeaseRef\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x1f\n" +
 	"\vlease_token\x18\x02 \x01(\tR\n" +
@@ -3913,7 +3995,7 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"\x12InterruptDuplicate\"t\n" +
 	"\x11InterruptRejected\x12A\n" +
 	"\x06reason\x18\x01 \x01(\x0e2).tetral.agent_runtime.v1.InterruptFailureR\x06reason\x12\x1c\n" +
-	"\tretryable\x18\x02 \x01(\bR\tretryable\"\xdf\x03\n" +
+	"\tretryable\x18\x02 \x01(\bR\tretryable\"\x8d\x04\n" +
 	"\x1eResolveToolConfirmationRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1d\n" +
 	"\n" +
@@ -3927,7 +4009,8 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"\x11tool_use_event_id\x18\b \x01(\tR\x0etoolUseEventId\x12M\n" +
 	"\bdecision\x18\t \x01(\x0e21.tetral.agent_runtime.v1.ToolConfirmationDecisionR\bdecision\x12&\n" +
 	"\fdeny_message\x18\n" +
-	" \x01(\tH\x00R\vdenyMessage\x88\x01\x01B\x0f\n" +
+	" \x01(\tH\x00R\vdenyMessage\x88\x01\x01\x12,\n" +
+	"\x12runtime_process_id\x18\v \x01(\tR\x10runtimeProcessIdB\x0f\n" +
 	"\r_deny_message\"\x86\x03\n" +
 	"\x1fResolveToolConfirmationResponse\x12V\n" +
 	"\baccepted\x18\x01 \x01(\v28.tetral.agent_runtime.v1.ResolveToolConfirmationAcceptedH\x00R\baccepted\x12Y\n" +
@@ -3940,7 +4023,7 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"\x1cResolveToolConfirmationStale\"\x90\x01\n" +
 	"\x1fResolveToolConfirmationRejected\x12O\n" +
 	"\x06reason\x18\x01 \x01(\x0e27.tetral.agent_runtime.v1.ResolveToolConfirmationFailureR\x06reason\x12\x1c\n" +
-	"\tretryable\x18\x02 \x01(\bR\tretryable\"\x8b\x03\n" +
+	"\tretryable\x18\x02 \x01(\bR\tretryable\"\xb9\x03\n" +
 	"\x19ApplyRuntimeConfigRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1d\n" +
 	"\n" +
@@ -3950,7 +4033,8 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"\x12binding_generation\x18\x04 \x01(\x03R\x11bindingGeneration\x12$\n" +
 	"\x0etarget_pod_uid\x18\x05 \x01(\tR\ftargetPodUid\x12V\n" +
 	"\x0esession_config\x18\x06 \x01(\v2-.tetral.agent_runtime.v1.RuntimeSessionConfigH\x00R\rsessionConfig\x12V\n" +
-	"\fmcp_manifest\x18\a \x01(\v21.tetral.agent_runtime.v1.RuntimeMcpManifestConfigH\x00R\vmcpManifestB\b\n" +
+	"\fmcp_manifest\x18\a \x01(\v21.tetral.agent_runtime.v1.RuntimeMcpManifestConfigH\x00R\vmcpManifest\x12,\n" +
+	"\x12runtime_process_id\x18\b \x01(\tR\x10runtimeProcessIdB\b\n" +
 	"\x06config\"Y\n" +
 	"\x14RuntimeSessionConfig\x12\x1e\n" +
 	"\n" +
@@ -3974,7 +4058,7 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"\x1dApplyRuntimeConfigNoResidency\"\x86\x01\n" +
 	"\x1aApplyRuntimeConfigRejected\x12J\n" +
 	"\x06reason\x18\x01 \x01(\x0e22.tetral.agent_runtime.v1.ApplyRuntimeConfigFailureR\x06reason\x12\x1c\n" +
-	"\tretryable\x18\x02 \x01(\bR\tretryable\"\xc6\x02\n" +
+	"\tretryable\x18\x02 \x01(\bR\tretryable\"\xf4\x02\n" +
 	"\x15CleanupSessionRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1d\n" +
 	"\n" +
@@ -3984,7 +4068,8 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"\x12binding_generation\x18\x04 \x01(\x03R\x11bindingGeneration\x12$\n" +
 	"\x0etarget_pod_uid\x18\x05 \x01(\tR\ftargetPodUid\x120\n" +
 	"\x14cleanup_operation_id\x18\x06 \x01(\tR\x12cleanupOperationId\x12E\n" +
-	"\x06reason\x18\a \x01(\x0e2-.tetral.agent_runtime.v1.CleanupSessionReasonR\x06reason\"\x96\x02\n" +
+	"\x06reason\x18\a \x01(\x0e2-.tetral.agent_runtime.v1.CleanupSessionReasonR\x06reason\x12,\n" +
+	"\x12runtime_process_id\x18\b \x01(\tR\x10runtimeProcessId\"\x96\x02\n" +
 	"\x16CleanupSessionResponse\x12P\n" +
 	"\tcompleted\x18\x01 \x01(\v20.tetral.agent_runtime.v1.CleanupSessionCompletedH\x00R\tcompleted\x12P\n" +
 	"\tduplicate\x18\x02 \x01(\v20.tetral.agent_runtime.v1.CleanupSessionDuplicateH\x00R\tduplicate\x12M\n" +

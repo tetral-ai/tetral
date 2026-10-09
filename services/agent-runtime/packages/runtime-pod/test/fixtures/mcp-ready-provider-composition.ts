@@ -41,12 +41,15 @@ const loader = new RecordingContextLoader([], {
 	],
 });
 const thread = new ThreadRuntime({
+	threadRole: "main",
+	threadVisibility: "public",
 	workspaceId: input.workspaceId,
 	sessionId: input.sessionId,
 	sessionThreadId: input.sessionThreadId,
 	bindingId: "bind_oauth_manifest",
 	bindingGeneration: 1,
 	targetPodUid: "pod_oauth_manifest",
+	runtimeProcessId: "process-test",
 	runtimeBindingToken: "runtime-binding-token",
 });
 const result = await Effect.runPromise(
@@ -57,13 +60,9 @@ const result = await Effect.runPromise(
 		Effect.provide(
 			runtimeThreadLoopLayer(loader, {
 				events: [
-					{ type: "text-start", id: "text-oauth-manifest" },
-					{
-						type: "text-delta",
-						id: "text-oauth-manifest",
-						text_delta: "ready",
-					},
-					{ type: "text-end", id: "text-oauth-manifest" },
+
+
+					{type:"text-complete" as const,providerPartId:"text-oauth-manifest",eventId:"evt_0a594fb65cccae789656fa7ad890564c",text:("ready")},
 					{ type: "finish", finishReason: "stop" },
 				],
 				providerCallRuntime: {

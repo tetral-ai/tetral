@@ -1,0 +1,75 @@
+{{- $receivers := dict }}
+{{- range $path := .Files.Get "files/internal-routing.json" | fromJsonArray }}
+{{- if has $.Values.transport.profile $path.protectedProfiles }}
+{{- $receiver := get $receivers $path.destination | default (dict "role" $path.destination "port" $path.port "callers" (list)) }}
+{{- $_ := set $receiver "callers" (append $receiver.callers $path.sourceURI | uniq) }}
+{{- $_ := set $receivers $path.destination $receiver }}
+{{- end }}{{- end }}
+{{- range $receiver := $receivers }}
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: tetral-{{ $receiver.role }}-protected
+  namespace: tetral-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $receiver.role }}
+  portLevelMtls:
+    {{ $receiver.port | quote }}:
+      mode: STRICT
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: tetral-{{ $receiver.role }}-protected
+  namespace: tetral-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $receiver.role }}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+{{- range $caller := $receiver.callers }}
+              # Canonical inventory retains full URI; Istio adds its prefix.
+              - {{ $caller | replace "spiffe://cluster.local/" (printf "spiffe://%s/" $.Values.routing.trustDomain) | trimPrefix "spiffe://" | quote }}
+{{- end }}
+      to:
+        - operation:
+            ports: [{{ $receiver.port | quote }}]
+    # Probes and nonbusiness listeners retain their owning NetworkPolicy.
+    - to:
+        - operation:
+            notPorts: [{{ $receiver.port | quote }}]
+{{- end }}
+{{- $sources := list (dict "role" "agent-runtime" "ns" "tetral-agent-runtime") (dict "role" "job-runner" "ns" "tetral-system") (dict "role" "bridge" "ns" "tetral-system") (dict "role" "mcp-connector" "ns" "tetral-system") (dict "role" "provider-gateway" "ns" "tetral-system") (dict "role" "sandbox" "ns" "tetral-system") }}
+{{- if eq .Values.transport.profile "hardened" }}{{ $sources = concat $sources (list (dict "role" "queue" "ns" "tetral-system") (dict "role" "web-connector" "ns" "tetral-system")) }}{{ end }}
+{{- range $source := $sources }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tetral-{{ $source.role }}-istiod
+  namespace: {{ $source.ns }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $source.role }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+          podSelector:
+            matchLabels:
+              app: istiod
+              istio.io/rev: {{ $.Values.routing.revision | quote }}
+      ports:
+        - protocol: TCP
+          port: 15012
+{{- end }}

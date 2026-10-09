@@ -20,6 +20,9 @@ import (
 type PostgreSQLQueueStore struct {
 	client      *dbconnect.Client
 	retryPolicy RetryPolicy
+	// jobRunner is the process's direct Job Runner scheduler; a Queue process
+	// constructs exactly one store.
+	jobRunner *jobRunnerScheduler
 }
 
 func NewPostgreSQLStore(client *dbconnect.Client) *PostgreSQLQueueStore {
@@ -34,7 +37,9 @@ type RetryPolicy struct {
 }
 
 func NewPostgreSQLStoreWithRetryPolicy(client *dbconnect.Client, policy RetryPolicy) *PostgreSQLQueueStore {
-	return &PostgreSQLQueueStore{client: client, retryPolicy: normalizeRetryPolicy(policy)}
+	store := &PostgreSQLQueueStore{client: client, retryPolicy: normalizeRetryPolicy(policy)}
+	store.jobRunner = newJobRunnerScheduler(store)
+	return store
 }
 
 func normalizeRetryPolicy(policy RetryPolicy) RetryPolicy {
@@ -80,6 +85,7 @@ func (s *PostgreSQLQueueStore) Metrics(ctx context.Context, now time.Time) ([]Me
 		rows, err := tx.Query(ctx,
 			`SELECT kind,
 			        COUNT(*) FILTER (WHERE status = 'pending') AS pending_jobs,
+			        COUNT(*) FILTER (WHERE status = 'pending' AND available_at <= $1) AS ready_jobs,
 			        COUNT(*) FILTER (WHERE status = 'leased') AS leased_jobs,
 			        COUNT(*) FILTER (WHERE status = 'pending' AND attempt_count > 0) AS retry_pending_jobs,
 			        COUNT(*) FILTER (WHERE status = 'dead_lettered') AS dead_lettered_jobs,
@@ -105,6 +111,7 @@ func (s *PostgreSQLQueueStore) Metrics(ctx context.Context, now time.Time) ([]Me
 			if err := rows.Scan(
 				&snapshot.Kind,
 				&snapshot.PendingJobs,
+				&snapshot.ReadyJobs,
 				&snapshot.LeasedJobs,
 				&snapshot.RetryPendingJobs,
 				&snapshot.DeadLetteredJobs,
@@ -403,7 +410,7 @@ func EnqueueBatchTx(ctx context.Context, tx enqueueTransaction, requests []Enque
 			notifyClasses[consumerClass] = struct{}{}
 		}
 	}
-	for _, consumerClass := range []string{ConsumerClassBridge, ConsumerClassSandbox} {
+	for _, consumerClass := range []string{ConsumerClassJobRunner, ConsumerClassSandbox} {
 		if _, ok := notifyClasses[consumerClass]; !ok {
 			continue
 		}
@@ -583,27 +590,65 @@ func leaseKindPredicate(kinds []string, placeholderStart int) (string, []any) {
 	return strings.Join(parts, ", "), args
 }
 
+// leaseCandidatesQuery discovers workspace-scoped Lease candidates without
+// row locks. Its eligibility is the shared leaseEligibilityPredicate evaluated
+// at the caller's lease time.
 func leaseCandidatesQuery(kindPredicate string) string {
 	return `SELECT candidate.id, candidate.partition_key, candidate.kind, candidate.priority,
 	                candidate.available_at, candidate.queue_partition_sequence,
 	                COALESCE(candidate.causal_session_id, ''), candidate.delivery_scope,
 	                COALESCE(candidate.delivery_thread_id, ''), candidate.control_class
 	   FROM queue_jobs candidate
-	   LEFT JOIN sessions candidate_session
-	     ON candidate_session.workspace_id = candidate.workspace_id
-	    AND candidate_session.id = candidate.causal_session_id
 	  WHERE candidate.workspace_id = $1
 	    AND candidate.kind IN (` + kindPredicate + `)
-	    AND candidate.status = 'pending'
-	    AND candidate.available_at <= $2
+	    AND ` + leaseEligibilityPredicate("$2") + `
+	  ORDER BY candidate.priority DESC, candidate.available_at ASC,
+	           candidate.partition_key ASC, candidate.queue_partition_sequence ASC
+	  LIMIT $3`
+}
+
+// leaseEligibilityPredicate is the one lease-compatibility rule set shared by
+// workspace-scoped Lease discovery, its exact token-mint UPDATE and the direct
+// Job Runner lease. It reads the structured birth facts of the queue_jobs row
+// aliased candidate, current Session lifecycle and current Queue custody;
+// payload JSON is never authority. now is the SQL expression of the due-time
+// boundary: the caller's lease time for Lease and clock_timestamp() for the
+// direct lease. Blockers of every kind count, whether or not the calling
+// method can return that kind.
+//
+//   - Due: the candidate is pending and available_at is at or before now.
+//   - Session lifecycle: no causal Session admits partition work;
+//     session_delete_cleanup requires an existing deleted Session; every other
+//     kind admits a missing Session but rejects a deleted or terminated one.
+//     The correlated scalar lookup keeps this a primary-key probe per
+//     candidate; an EXISTS form lets discovery hash every Session.
+//   - Leased partition, Thread and Session custody: another leased partition
+//     job blocks its partition; a Thread candidate is blocked by a leased
+//     Session-scope job of its Session or a leased job of its Thread, except
+//     that an interrupt ignores runtime_config_update; a Session candidate is
+//     blocked by any leased Thread or Session job of its Session.
+//   - Pending predecessors: a due same-partition job blocks on higher
+//     priority or equal priority and earlier sequence; a due earlier Thread or
+//     Session job blocks a Session candidate (delete cleanup ignores other
+//     kinds); Thread rules ignore due time: an earlier Session job blocks
+//     (interrupt ignores config), and on the same Thread a pending recovery
+//     blocks an interrupt, a pending interrupt blocks ordinary work and later
+//     interrupts, and an earlier ordinary job blocks ordinary work; a recovery
+//     candidate ignores pending interrupts.
+func leaseEligibilityPredicate(now string) string {
+	return `candidate.status = 'pending'
+	    AND candidate.available_at <= ` + now + `
 	    AND (
 	      candidate.causal_session_id IS NULL
-	      OR (candidate.kind = 'session_delete_cleanup'
-	          AND candidate_session.lifecycle_state = 'deleted')
-	      OR (candidate.kind <> 'session_delete_cleanup'
-	          AND (candidate_session.id IS NULL
-	               OR (candidate_session.lifecycle_state <> 'deleted'
-	                   AND candidate_session.status <> 'terminated')))
+	      OR COALESCE((
+	        SELECT CASE WHEN candidate.kind = 'session_delete_cleanup'
+	                    THEN session.lifecycle_state = 'deleted'
+	                    ELSE session.lifecycle_state <> 'deleted' AND session.status <> 'terminated'
+	               END
+	          FROM sessions session
+	         WHERE session.workspace_id = candidate.workspace_id
+	           AND session.id = candidate.causal_session_id
+	      ), candidate.kind <> 'session_delete_cleanup')
 	    )
 	    AND (candidate.delivery_scope <> 'partition' OR NOT EXISTS (
 	      SELECT 1 FROM queue_jobs leased
@@ -642,7 +687,7 @@ func leaseCandidatesQuery(kindPredicate string) string {
 	           (candidate.delivery_scope = 'partition'
 	             AND pending.delivery_scope = 'partition'
 	             AND pending.partition_key = candidate.partition_key
-	             AND pending.available_at <= $2
+	             AND pending.available_at <= ` + now + `
 	             AND (pending.priority > candidate.priority
 	                  OR (pending.priority = candidate.priority
 	                      AND pending.queue_partition_sequence < candidate.queue_partition_sequence)))
@@ -651,13 +696,13 @@ func leaseCandidatesQuery(kindPredicate string) string {
 	             AND pending.delivery_scope IN ('thread', 'session')
 	             AND NOT (candidate.kind = 'session_delete_cleanup'
 	                      AND pending.kind <> 'session_delete_cleanup')
-	             AND pending.available_at <= $2
+	             AND pending.available_at <= ` + now + `
 	             AND pending.queue_partition_sequence < candidate.queue_partition_sequence)
-	               OR (candidate.delivery_scope = 'thread'
-	                 AND pending.causal_session_id = candidate.causal_session_id
-	                 AND NOT (candidate.kind = 'runtime_recovery'
-	                          AND pending.control_class = 'interrupt')
-	                 AND (
+	           OR (candidate.delivery_scope = 'thread'
+	             AND pending.causal_session_id = candidate.causal_session_id
+	             AND NOT (candidate.kind = 'runtime_recovery'
+	                      AND pending.control_class = 'interrupt')
+	             AND (
 	               (pending.delivery_scope = 'session'
 	                 AND pending.queue_partition_sequence < candidate.queue_partition_sequence
 	                 AND NOT (candidate.control_class = 'interrupt'
@@ -667,8 +712,7 @@ func leaseCandidatesQuery(kindPredicate string) string {
 	                 AND (
 	                   (pending.kind = 'runtime_recovery'
 	                     AND candidate.control_class = 'interrupt')
-	                   OR
-	                   (pending.control_class = 'interrupt'
+	                   OR (pending.control_class = 'interrupt'
 	                     AND (candidate.control_class <> 'interrupt'
 	                          OR pending.queue_partition_sequence < candidate.queue_partition_sequence))
 	                   OR (candidate.control_class <> 'interrupt'
@@ -677,10 +721,28 @@ func leaseCandidatesQuery(kindPredicate string) string {
 	                 ))
 	             ))
 	         )
-	    )
-	  ORDER BY candidate.priority DESC, candidate.available_at ASC,
-	           candidate.partition_key ASC, candidate.queue_partition_sequence ASC
-	  LIMIT $3`
+	    )`
+}
+
+// leaseAttemptCountExpression is the attempt bookkeeping of every token mint:
+// one more attempt, except that interrupt, cleanup and agent-mail
+// finalization leases are clamped at their effective budget so a final
+// barrier can be re-leased. defaultMaxAttempts is the SQL parameter of the
+// Queue default for an unset max_attempts.
+func leaseAttemptCountExpression(defaultMaxAttempts string) string {
+	return `CASE
+		          WHEN candidate.control_class = 'interrupt'
+		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), ` + defaultMaxAttempts + `)
+		          THEN attempt_count
+		          WHEN candidate.kind = 'cleanup_session'
+		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), ` + defaultMaxAttempts + `)
+		          THEN attempt_count
+		          WHEN candidate.kind = 'runtime_input'
+		           AND candidate.control_class = 'agent_mail'
+		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), ` + defaultMaxAttempts + `) + 1
+		          THEN attempt_count
+		          ELSE attempt_count + 1
+		        END`
 }
 
 type leaseCandidateRow struct {
@@ -707,117 +769,23 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 		        lease_token = $6,
 		        leased_at = clock_timestamp(),
 		        leased_until = clock_timestamp() + ($8::bigint * interval '1 millisecond'),
-		        attempt_count = CASE
-		          WHEN candidate.control_class = 'interrupt'
-		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $12)
-		          THEN attempt_count
-		          WHEN candidate.kind = 'cleanup_session'
-		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $12)
-		          THEN attempt_count
-		          WHEN candidate.kind = 'runtime_input'
-		           AND candidate.control_class = 'agent_mail'
-		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $12) + 1
-		          THEN attempt_count
-		          ELSE attempt_count + 1
-		        END,
+		        attempt_count = `+leaseAttemptCountExpression("$11")+`,
 		        updated_at = clock_timestamp()
 		  WHERE candidate.workspace_id = $1
 		    AND candidate.id = $2
 		    AND candidate.kind = $3
 		    AND candidate.partition_key = $4
-		    AND candidate.status = 'pending'
 		    AND candidate.available_at = $9
 		    AND candidate.queue_partition_sequence = $10
-		    AND candidate.causal_session_id IS NOT DISTINCT FROM NULLIF($13, '')
-		    AND candidate.delivery_scope = $14
-		    AND candidate.delivery_thread_id IS NOT DISTINCT FROM NULLIF($15, '')
-		    AND candidate.control_class = $16
-		    AND (
-		      candidate.causal_session_id IS NULL
-		      OR (candidate.kind = 'session_delete_cleanup' AND EXISTS (
-		        SELECT 1 FROM sessions session
-		         WHERE session.workspace_id = candidate.workspace_id
-		           AND session.id = candidate.causal_session_id
-		           AND session.lifecycle_state = 'deleted'
-		      ))
-		      OR (candidate.kind <> 'session_delete_cleanup' AND NOT EXISTS (
-		        SELECT 1 FROM sessions session
-		         WHERE session.workspace_id = candidate.workspace_id
-		           AND session.id = candidate.causal_session_id
-		           AND (session.lifecycle_state = 'deleted' OR session.status = 'terminated')
-		      ))
-		    )
-		    AND NOT EXISTS (
-		      SELECT 1 FROM queue_jobs leased
-		       WHERE leased.workspace_id = candidate.workspace_id
-		         AND leased.status = 'leased'
-		         AND leased.id <> candidate.id
-		         AND (
-		           (candidate.delivery_scope = 'partition'
-		             AND leased.delivery_scope = 'partition'
-		             AND leased.partition_key = candidate.partition_key)
-		           OR (candidate.delivery_scope = 'thread'
-		             AND leased.causal_session_id = candidate.causal_session_id
-			             AND NOT (candidate.control_class = 'interrupt'
-			                      AND leased.kind = 'runtime_config_update')
-			             AND (leased.delivery_scope = 'session'
-			                  OR (leased.delivery_scope = 'thread'
-			                      AND leased.delivery_thread_id = candidate.delivery_thread_id)))
-		           OR (candidate.delivery_scope = 'session'
-		             AND leased.causal_session_id = candidate.causal_session_id
-		             AND leased.delivery_scope IN ('thread', 'session'))
-		         )
-		    )
-		    AND NOT EXISTS (
-		      SELECT 1 FROM queue_jobs pending
-		       WHERE pending.workspace_id = candidate.workspace_id
-		         AND pending.status = 'pending'
-		         AND pending.id <> candidate.id
-		         AND (
-		           (candidate.delivery_scope = 'partition'
-		             AND pending.delivery_scope = 'partition'
-		             AND pending.partition_key = candidate.partition_key
-		             AND pending.available_at <= $7
-		             AND (pending.priority > $11
-		                  OR (pending.priority = $11 AND pending.queue_partition_sequence < $10)))
-			           OR (candidate.delivery_scope = 'session'
-			             AND pending.causal_session_id = candidate.causal_session_id
-			             AND pending.delivery_scope IN ('thread', 'session')
-			             AND NOT (candidate.kind = 'session_delete_cleanup'
-			                      AND pending.kind <> 'session_delete_cleanup')
-			             AND pending.available_at <= $7
-		             AND pending.queue_partition_sequence < $10)
-		           OR (candidate.delivery_scope = 'thread'
-		             AND pending.causal_session_id = candidate.causal_session_id
-		             AND NOT (candidate.kind = 'runtime_recovery'
-		                      AND pending.control_class = 'interrupt')
-		             AND (
-		               (pending.delivery_scope = 'session'
-		                 AND pending.queue_partition_sequence < $10
-			                 AND NOT (candidate.control_class = 'interrupt'
-			                          AND pending.kind = 'runtime_config_update'))
-		               OR (pending.delivery_scope = 'thread'
-		                 AND pending.delivery_thread_id = candidate.delivery_thread_id
-		                 AND (
-		                   (pending.kind = 'runtime_recovery'
-		                     AND candidate.control_class = 'interrupt')
-		                   OR
-					                   (pending.control_class = 'interrupt'
-					                     AND (candidate.control_class <> 'interrupt'
-					                          OR pending.queue_partition_sequence < $10))
-					                   OR (candidate.control_class <> 'interrupt'
-					                     AND pending.control_class <> 'interrupt'
-		                     AND pending.queue_partition_sequence < $10)
-		                 ))
-		             ))
-		         )
-		    )
-		  RETURNING id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key, payload_version,
-		            status, payload_json, priority, available_at, leased_by, lease_token,
-		            leased_at, leased_until, attempt_count, max_attempts, created_at, updated_at`,
+		    AND candidate.causal_session_id IS NOT DISTINCT FROM NULLIF($12, '')
+		    AND candidate.delivery_scope = $13
+		    AND candidate.delivery_thread_id IS NOT DISTINCT FROM NULLIF($14, '')
+		    AND candidate.control_class = $15
+		    AND `+leaseEligibilityPredicate("$7")+`
+		  RETURNING `+queueJobColumns,
 		string(request.WorkspaceID), candidate.id, candidate.kind, candidate.partitionKey,
 		request.LeaseOwner, leaseToken, request.Now, request.LeaseDuration.Milliseconds(),
-		candidate.availableAt, candidate.partitionSequence, candidate.priority,
+		candidate.availableAt, candidate.partitionSequence,
 		defaultMaxAttempts, candidate.causalSessionID, candidate.deliveryScope,
 		candidate.deliveryThreadID, candidate.controlClass,
 	)
@@ -888,6 +856,7 @@ func (s *PostgreSQLQueueStore) ReclaimExpiredLeases(ctx context.Context, request
 				        leased_by = NULL,
 				        leased_at = NULL,
 				        leased_until = NULL,
+				        lease_previous_attempt_count = NULL,
 				        last_error_kind = $3,
 				        last_error_message = $4,
 				        updated_at = clock_timestamp()
@@ -1074,6 +1043,52 @@ func (s *PostgreSQLQueueStore) SweepSandboxTerminalJobs(ctx context.Context, req
 		return deleted, &IntegrityError{Message: "sandbox terminal queue job is missing its status timestamp"}
 	}
 	return deleted, nil
+}
+
+// PruneJobRunnerTerminalJobs deletes old terminal rows of the five Job Runner
+// kinds through the Queue-only security-definer tetral_prune_job_runner_jobs,
+// one transaction per terminal state in acknowledged, cancelled,
+// dead_lettered order. A state's error is recorded and the remaining states
+// are still attempted while ctx permits; the returned error joins them. It
+// never touches Sandbox or Environment kinds, nonterminal rows or partition
+// counters.
+func (s *PostgreSQLQueueStore) PruneJobRunnerTerminalJobs(ctx context.Context, request JobRunnerTerminalRetentionRequest) (JobRunnerTerminalRetentionResult, error) {
+	var result JobRunnerTerminalRetentionResult
+	if s == nil || s.client == nil {
+		return result, &ValidationError{Message: "queue store is required"}
+	}
+	if request.Now.IsZero() {
+		request.Now = storage.Now()
+	}
+	var errs []error
+	for _, state := range JobRunnerTerminalStates {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
+		age := JobRunnerTerminalRetentionAge
+		if state == StatusDeadLettered {
+			age = JobRunnerDeadLetterRetentionAge
+		}
+		var deleted, malformed int
+		var moreRemaining bool
+		err := s.client.WithTx(ctx, "queue.prune_job_runner_terminal_jobs", nil, func(tx *dbconnect.Tx) error {
+			return tx.QueryRow(ctx,
+				`SELECT deleted_count, malformed_count, more_remaining FROM public.tetral_prune_job_runner_jobs($1, $2, $3)`,
+				state, request.Now.UTC().Add(-age), JobRunnerRetentionStateLimit,
+			).Scan(&deleted, &malformed, &moreRemaining)
+		})
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		result.Deleted += deleted
+		result.Malformed += malformed
+		if deleted >= JobRunnerRetentionStateLimit && moreRemaining {
+			result.ExhaustedStates++
+		}
+	}
+	return result, errors.Join(errs...)
 }
 
 // SweepEmptyPartitionCounters removes counters only after every Queue job in
@@ -1434,7 +1449,7 @@ func CancelLeasedRuntimeInputCustodyTx(ctx context.Context, tx *dbconnect.Tx, re
 		`UPDATE queue_jobs
 		    SET status='cancelled', cancelled_at=$4,
 		        lease_token=NULL, leased_by=NULL, leased_at=NULL, leased_until=NULL,
-		        updated_at=$4
+		        lease_previous_attempt_count=NULL, updated_at=$4
 		  WHERE workspace_id=$1 AND id=$2 AND lease_token=$3
 		    AND status='leased' AND leased_until > clock_timestamp()`,
 		string(request.Lease.WorkspaceID), request.Lease.JobID, request.Lease.LeaseToken, request.Now.UTC(),
@@ -1490,6 +1505,7 @@ func DeferLeasedRuntimeInputCustodyTx(ctx context.Context, tx *dbconnect.Tx, req
 		   UPDATE queue_jobs
 		      SET status='pending', available_at=$4, attempt_count=attempt_count-1,
 		          lease_token=NULL, leased_by=NULL, leased_at=NULL, leased_until=NULL,
+		          lease_previous_attempt_count=NULL,
 		          last_error_kind=NULL, last_error_message=NULL, updated_at=$4
 		    WHERE workspace_id=$1 AND id=$6 AND lease_token=$7
 		      AND status='leased' AND leased_until > clock_timestamp()
@@ -1546,7 +1562,7 @@ func AckTx(ctx context.Context, tx queueMutationTransaction, request AckRequest)
 		`UPDATE queue_jobs
 		    SET status = 'acknowledged', acknowledged_at = $4,
 		        lease_token = NULL, leased_by = NULL, leased_at = NULL,
-		        leased_until = NULL, last_error_kind = NULL,
+		        leased_until = NULL, lease_previous_attempt_count = NULL, last_error_kind = NULL,
 		        last_error_message = NULL, updated_at = $4
 		  WHERE workspace_id = $1 AND id = $2 AND lease_token = $3 AND status = 'leased'
 		    AND leased_until > clock_timestamp()`,
@@ -1612,6 +1628,7 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 						        leased_by = NULL,
 						        leased_at = NULL,
 						        leased_until = NULL,
+						        lease_previous_attempt_count = NULL,
 						        last_error_kind = $5,
 						        last_error_message = $6,
 						        updated_at = $4
@@ -1637,6 +1654,7 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 				        leased_by = NULL,
 				        leased_at = NULL,
 				        leased_until = NULL,
+				        lease_previous_attempt_count = NULL,
 				        last_error_kind = $5,
 				        last_error_message = $6,
 				        updated_at = $4
@@ -1667,6 +1685,7 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 			        leased_by = NULL,
 			        leased_at = NULL,
 			        leased_until = NULL,
+			        lease_previous_attempt_count = NULL,
 			        last_error_kind = $5,
 			        last_error_message = $6,
 			        updated_at = $7
@@ -1777,6 +1796,7 @@ func (s *PostgreSQLQueueStore) Defer(ctx context.Context, request DeferRequest) 
 			        leased_by = NULL,
 			        leased_at = NULL,
 			        leased_until = NULL,
+			        lease_previous_attempt_count = NULL,
 			        updated_at = $5
 			  WHERE workspace_id = $1
 			    AND id = $2
@@ -1799,6 +1819,103 @@ func (s *PostgreSQLQueueStore) Defer(ctx context.Context, request DeferRequest) 
 		return false, err
 	}
 	return updated, nil
+}
+
+// ReleaseUnstartedJob returns one direct Job Runner lease that its trusted
+// caller observed but never dispatched. Queue does not infer non-execution
+// from the token: the Runner coordinator calls this only before dispatch, and
+// the private lease_previous_attempt_count proves the token came from the
+// direct lease. The saved attempt count is restored exactly, including a
+// clamped finalization attempt, and the row is immediately pending; dedupe,
+// partition sequence, payload, defer count, errors and Inbox state are kept.
+// A stale, duplicate or expired token reports false; a live token without
+// direct-lease provenance is a precondition failure, never a guessed refund.
+func (s *PostgreSQLQueueStore) ReleaseUnstartedJob(ctx context.Context, request ReleaseUnstartedJobRequest) (bool, error) {
+	if err := validateFencedRequest(request.WorkspaceID, request.JobID, request.LeaseToken); err != nil {
+		return false, err
+	}
+	if s == nil || s.client == nil {
+		return false, &ValidationError{Message: "queue store is required"}
+	}
+	released := false
+	err := s.client.WithWorkspaceTx(ctx, string(request.WorkspaceID), "queue.release_unstarted_job", func(tx *dbconnect.Tx) error {
+		var causalSessionID sql.NullString
+		err := tx.QueryRow(ctx,
+			`SELECT causal_session_id FROM queue_jobs WHERE workspace_id = $1 AND id = $2`,
+			string(request.WorkspaceID), request.JobID,
+		).Scan(&causalSessionID)
+		if dbconnect.IsNoRows(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		// Session arbitration precedes the exact Queue row lock, as in every
+		// writer of Session-scoped custody.
+		if causalSessionID.Valid {
+			if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, string(request.WorkspaceID), causalSessionID.String); err != nil {
+				return err
+			}
+		}
+		var kind string
+		var leasedUntil time.Time
+		var previousAttemptCount sql.NullInt64
+		err = tx.QueryRow(ctx,
+			`SELECT kind, leased_until, lease_previous_attempt_count
+			   FROM queue_jobs
+			  WHERE workspace_id = $1 AND id = $2 AND lease_token = $3 AND status = 'leased'
+			  FOR UPDATE`,
+			string(request.WorkspaceID), request.JobID, request.LeaseToken,
+		).Scan(&kind, &leasedUntil, &previousAttemptCount)
+		if dbconnect.IsNoRows(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		// Sample database time only after any row-lock wait: a lease that
+		// expired while waiting must not be refunded.
+		var now time.Time
+		if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+			return err
+		}
+		if !leasedUntil.After(now) {
+			return nil
+		}
+		if !IsJobRunnerKind(kind) || !previousAttemptCount.Valid {
+			return &PreconditionError{Message: "queue lease was not issued by direct Job Runner leasing"}
+		}
+		result, err := tx.Exec(ctx,
+			`UPDATE queue_jobs
+			    SET status = 'pending',
+			        available_at = $4,
+			        attempt_count = lease_previous_attempt_count,
+			        lease_previous_attempt_count = NULL,
+			        lease_token = NULL,
+			        leased_by = NULL,
+			        leased_at = NULL,
+			        leased_until = NULL,
+			        updated_at = $4
+			  WHERE workspace_id = $1 AND id = $2 AND lease_token = $3 AND status = 'leased'
+			    AND lease_previous_attempt_count IS NOT NULL`,
+			string(request.WorkspaceID), request.JobID, request.LeaseToken, now,
+		)
+		if err != nil {
+			return err
+		}
+		if !rowsAffected(result) {
+			return &IntegrityError{Message: "locked queue lease changed during release"}
+		}
+		if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, NotificationChannel, ConsumerClassJobRunner); err != nil {
+			return err
+		}
+		released = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return released, nil
 }
 
 // queueRetryDelay is the Queue-owned retry/defer backoff. Retry carries no
@@ -1875,6 +1992,7 @@ func DeadLetterTx(ctx context.Context, tx queueMutationTransaction, request Dead
 		        leased_by = NULL,
 		        leased_at = NULL,
 		        leased_until = NULL,
+		        lease_previous_attempt_count = NULL,
 		        last_error_kind = $5,
 		        last_error_message = $6,
 		        updated_at = $4
@@ -1956,6 +2074,7 @@ func (s *PostgreSQLQueueStore) ReplaceMalformedRuntimeInputCustody(
 			`UPDATE queue_jobs
 			    SET status = 'dead_lettered', dead_lettered_at = $4,
 			        lease_token = NULL, leased_by = NULL, leased_at = NULL, leased_until = NULL,
+			        lease_previous_attempt_count = NULL,
 			        last_error_kind = 'invalid_runtime_job_payload',
 			        last_error_message = 'runtime queue payload conflicts with durable custody',
 			        updated_at = $4
@@ -2113,6 +2232,11 @@ func (s *PostgreSQLQueueStore) Cancel(ctx context.Context, request CancelRequest
 	}
 	return cancelled, nil
 }
+
+// queueJobColumns is the RETURNING/SELECT projection read by scanJob.
+const queueJobColumns = `id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key, payload_version,
+		            status, payload_json, priority, available_at, leased_by, lease_token,
+		            leased_at, leased_until, attempt_count, max_attempts, created_at, updated_at`
 
 func scanJob(row interface{ Scan(dest ...any) error }) (*Job, error) {
 	var job Job

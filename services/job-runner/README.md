@@ -1,0 +1,549 @@
+# job-runner
+
+## Responsibilities
+
+Job Runner is an independent Deployment and ServiceAccount that consumes
+`runtime_input`, `runtime_recovery`, `runtime_config_update`, `cleanup_session` and
+`session_delete_cleanup` Queue jobs. It declares and replaces Session Runtime
+bindings, delivers commands directly to their bound Pod, reconciles lost Pod
+custody, and finalizes hot-state cleanup. It has no inbound business gRPC
+surface or TokenReview receiver. [Bridge](../bridge/README.md) owns Runtime
+RPC acceptance, receipts and durable context reads.
+
+## Process lifecycle
+
+`cmd/job-runner` owns its database pool, Queue client, Kubernetes visibility
+watches, Queue wake listener, acquisition coordinator, Pod-loss repair owner
+and outbound Runtime/MCP clients. Startup validates configuration, schema and
+runtime role before opening listeners or business clients. Shutdown closes
+acquisition first and cancels the repair owner.
+Already running jobs keep their Queue heartbeats and settlement clients through
+`TETRAL_DRAIN_TIMEOUT_MS` (30000 by default). At expiry their work contexts are
+cancelled, then jobs, the repair owner and Queue notifications join before
+native channels, Blob/database clients and visibility watches close. A lease
+response observed after acquisition closed starts no Runtime command: each of
+its jobs returns through Queue `ReleaseUnstartedJob` (see
+[Acquisition](#acquisition)). `TETRAL_CANCEL_JOIN_TIMEOUT_MS` defaults to 5000; exceeding
+the executable exits with status 1 at the original drain-plus-join deadline,
+without closing dependencies beneath live workers. Reusable runners still join
+before resource closure. Drain plus join may not exceed 35000 ms, reserving
+10000 ms within the 45-second Pod grace for proxy and scheduling. Bridge cancellation does not stop these
+resources. Health readiness depends on synchronized Pod/EndpointSlice visibility.
+
+The process uses shared `internal/workload` diagnostics: `info` by default;
+`TETRAL_LOG_LEVEL` accepts `debug`, `info`, `warn` or `error`. Metadata and bounded
+record, limiter and sink controls are read once at boot; changes require a
+process restart. The owned sink closes after business resources with a bounded
+shutdown budget. Diagnostic backpressure never becomes Queue or receipt
+custody. Health metrics expose diagnostic drop/failure counts. Secrets, token
+contents and connection credentials are excluded from diagnostic records.
+
+`TETRAL_DB_MAX_OPEN_CONNS` defaults to 20 and must be at least 2. One connection
+belongs to the Queue listener; at least one remains for business transactions.
+Queue insertion and wakeup share a transaction. The notification payload for
+Job Runner work is the transient wire value `bridge`, which Queue producers and
+this listener share through `ConsumerClassJobRunner`. Hints carry no work:
+reconnect triggers catch-up, and Queue's retry hint (at most 1000 ms) bounds
+the wait after a lost or coalesced hint. The same connection maps the
+`runtime_process` payload, which Bridge sends after committing a Runtime
+process takeover, to a Pod-loss repair request; it leases no work.
+
+Configuration and wire identifiers keep their established names when process
+ownership moves: boot keys use `TETRAL_BRIDGE_JOB_RUNNER_*` names and the
+default Queue lease owner is `bridge-job-runner`. Diagnostics name the owner:
+records carry `service.name` `job-runner`, the acquisition and delivery-attempt events
+use the `job_runner.` prefix, and transaction labels use `jobrunner.*`. Runtime
+and MCP outbound calls use projected internal gRPC audience credentials.
+Kubernetes visibility uses its separate Kubernetes API audience credential.
+Runner receives Blob credentials for Session cleanup and no Sandbox provider
+credentials.
+
+## Acquisition
+
+Queue chooses the work; the Runner supplies only capacity. The coordinator owns
+`TETRAL_BRIDGE_JOB_RUNNER_MAX_JOBS` slots (default 8, bounded by the Queue
+direct-lease transport maximum). With no request in flight it reserves every
+free slot and makes one `LeaseJobRunnerJobs` call (2000 ms deadline) carrying
+only that count, the lease owner and the lease duration; Queue selects
+workspaces and kinds as described in the
+[Queue contract](../queue/README.md#direct-job-runner-leasing). No workspace is
+listed. Each returned job starts at once in its own slot; `processRuntimeJob`
+keeps its malformed-input custody and finalization-replay gates and its initial
+synchronous Heartbeat before any Runtime delivery. A slot frees only after the
+job, its heartbeat and its final Queue transition finish, and that completion
+wakes acquisition even while other jobs still run. No request is made while
+every slot is busy, and leased work never waits in a local backlog.
+
+A response with jobs is followed immediately by a request for the remaining
+free slots. An empty response waits for Queue's `retry_after_ms`, a committed
+Job Runner notification or listener reconnect, or a slot completion, whichever
+comes first; the wake generation is captured before each request, so a
+notification during the request is not lost. A failed request backs off
+100, 200, 400, 800, then 1000 ms, and any successful response resets it. There
+is no Runner poll-interval setting.
+
+`TETRAL_BRIDGE_JOB_RUNNER_LEASE_DURATION_MS` must be between 5000 and 300000
+(default 30000), and the heartbeat interval must stay below it; startup rejects
+other values before serving. When acquisition closes while a request is in
+flight, the jobs it returns are not dispatched: each goes back through
+`ReleaseUnstartedJob` with a 1000 ms deadline, at most MaxJobs at a time, which
+restores its prior attempt count. A failed release is logged and the lease
+expires normally.
+
+## Binding, repair and cleanup
+
+### The binding fence and pod visibility
+
+The binding names the Pod UID and the registered `runtime_process_id` for
+one process boot. Session arbitration, the exact binding row and a shared
+process-row lock fence each mutation. Promotion holds the matching process row
+until earlier admitted mutations commit or roll back. Report time lives apart
+from lifecycle, in `runtime_process_liveness`, which Bridge writes at
+registration (no report yet) and on every successful report; an unchanged
+report updates only that row. The installer grants Runner SELECT on the global
+process tables and EXECUTE on the two fixed lock-only functions, one for the
+process row and one for its liveness row; Bridge owns registration, promotion
+and liveness writes.
+
+Delivery, placement, cleanup and proactive loss repair share one process-aware
+classifier. Every delivery store, in production and in tests, is built with a
+target resolver; there is no mode that reads a binding directly and skips the
+classifier. A store without a resolver fails delivery and cleanup decisions with
+retryable `runtime_visibility_unavailable`. Compositions supply Kubernetes
+observations through `jobrunnertest.BindingVisibility`, which shows the Pods of
+committed bindings as ready and never proves loss, so delivery still requires a
+current accepting process:
+
+| Rechecked evidence | Action |
+| --- | --- |
+| Matching committed release | Continue its handoff receipt; no loss settlement |
+| Later process completed promotion on the same Pod | Fence and repair the old process binding, even after the replacement starts draining |
+| Fresh GET proves old Pod absent or UID replaced | Fenced loss repair |
+| Current accepting process and reusable Kubernetes target | Reuse, including an expired heartbeat |
+| Draining/deleting or temporarily unready current process with fresh heartbeat | Keep custody pending; no new placement |
+| Non-reusable target, expired matching heartbeat, confirming GET remains non-reusable | Fenced loss repair after locked liveness recheck |
+| Missing registration, unsynchronized watcher or failed confirming GET | Retry without inferring loss |
+
+A cached deletion timestamp, IP change or missing cache entry alone cannot
+prove loss. Confirming GET runs outside Session transactions with a two-second
+bound. The subsequent transaction rechecks exact binding/process and heartbeat;
+a newer report or release wins over an earlier discovery-page observation.
+For a current process the final decision takes Session, binding and process
+`FOR SHARE`, then the liveness row `FOR SHARE`, and reads database time in a
+separate statement after that lock. A report holding the liveness row
+therefore commits (fresh, no loss) or rolls back (the old time decides) before
+the decision, and a report arriving later waits until the decision commits. A
+current process whose liveness row is missing or has no report yet is
+unavailable: it is never reused and never proven lost. A retired process is
+classified from the committed promotion watermark alone; its last report,
+including one acknowledged while promotion committed, does not block repair.
+The durable promotion watermark proves retirement independently of the new
+process's current admission phase. Registering or abandoning a candidate does
+not advance that watermark and cannot displace the current owner.
+
+New placement samples two distinct eligible Pods uniformly, probes their native
+PodIP:8080 `/metrics` concurrently and chooses the lower resident Session count.
+One valid report suffices; ties use a uniform draw. If both fail, one further
+round uses unprobed Pods. The bounded policy defaults are one second per probe,
+two seconds total and at most two rounds/four distinct Pods; shorter caller
+deadlines win. The owning environment keys are
+`TETRAL_RUNTIME_LOAD_PROBE_TIMEOUT_MS`, `TETRAL_RUNTIME_PLACEMENT_TIMEOUT_MS`,
+`TETRAL_RUNTIME_PLACEMENT_ROUNDS`, `TETRAL_RUNTIME_LOAD_MAX_BYTES` (262144) and
+`TETRAL_RUNTIME_PLACEMENT_MEMORY_CUTOFF` (0.8). Required scalar samples must be
+unique, finite and valid: `runtimepod_active_sessions`,
+`runtimepod_session_capacity`, `runtimepod_container_memory_usage_bytes`,
+`runtimepod_container_memory_limit_bytes`, `runtimepod_ready` and
+`runtimepod_accepting_commands`. Unknown/unlimited container limits, full
+capacity, usage at the cutoff, nonready or nonaccepting state exclude a candidate.
+A real zero resident count is valid. Redirects, excess bytes and malformed
+reports fail closed. There are no automatic HTTP retries.
+
+Sampling follows rollback of the initial preparation transaction. Commit then
+rechecks Kubernetes identity and current accepting process under Session
+arbitration; a concurrent committed binding is reused. Existing valid bindings
+perform no load probe. The single `runtime_placement` attempt record identifies
+committed/reused custody and observed load without payloads or credentials.
+Its `kubernetes.uid` and `runtime.process.id` identify the binding winner;
+`runtime.placement.sampled_pod_uid` identifies the sampled choice, which can
+differ when another Runner commits first. `runtime.placement.rounds` and
+`runtime.placement.probes` record the bounded work, and
+`runtime.load.active_sessions`, `runtime.load.session_capacity` and
+`runtime.load.memory_ratio` retain the validated choice's finite load values.
+`runtime_placement_probe_total`, `runtime_placement_total` and their duration
+counters use only finite outcome labels. The attempt also emits at most four
+`runtime.placement.candidate.1` through `.4` groups, including losing candidates.
+Each group retains the exact Pod UID, observed process ID, bounded reason and,
+when valid, finite active-session/capacity/memory measurements. Reasons distinguish
+registry unavailability, timeout/cancellation, transport or HTTP failure, invalid
+metrics, response size, admission and capacity exclusions. The overall reason
+distinguishes no candidates, exhausted probes and selection; it stays separate
+from the actual binding outcome when another Runner commits first.
+
+For `runtime_input` the runner reconciles referenced events first — all
+already processed → stale with no command; superseded by a processed
+interrupt fence → never delivered — then upserts the delivery-inbox row and
+sends the typed command addressed to the bound pod
+**directly** (never through a load-balanced service, which could livelock on
+identity rejection). At each interrupt claim it also cancels older same-thread
+pending message jobs below the interrupt fence — inputs the user retracted by
+interrupting.
+
+### Repair (Job Runner, on proven-gone)
+
+One repair owner runs independently of acquisition capacity: once at
+startup, then on a 30-second deadline or a coalesced request from an observed
+Pod deletion or a `runtime_process` notification, at least one second apart
+and never two at a time. A run has a 25-second budget and holds no acquisition
+lock; shutdown cancels and joins it before database and client closure.
+
+Discovery pages raw binding membership across workspaces in
+`(workspace_id, session_id)` key order through the Job Runner-only functions
+`tetral_job_runner_binding_upper()` and `tetral_job_runner_binding_page(...)`.
+A cycle captures its upper key first. A page selects at most 128 raw bindings
+before joining runtime status, Session state, accepted Inbox and process facts,
+and reports each binding as active when its exact binding runs, its Session is
+rescheduling, or an accepted Inbox names that exact binding. The page query
+runs in a read-only repeatable-read transaction under a one-second limit, the
+watcher snapshot is taken after that query, and the transaction closes before
+any mutation. An active binding whose registered process is past startup and
+noncurrent, not visibly reusable or not accepting is nominated. Running
+Runtime status or a rescheduling Session admits proactive closeout; an idle
+retained binding remains for the next input to replace through the same
+Session lock and binding-generation/process fence.
+
+The owner keeps one page of nominated candidates and drains them before reading
+another page; a run performs at most 8 candidate mutations (3 seconds each)
+and reads at most 8 pages. The cursor moves past a page, including an
+all-inactive one, only once its candidates are owner state; a page error or an
+unready watcher keeps it. Reaching the upper key ends the cycle and the run;
+bindings created behind the cursor are reached in the next cycle. A run thus
+reads at most 1,024 raw bindings, so a lost Pod's bindings are reached within
+about ceil(bindings / 1024) runs. Each candidate converges through the locked
+mutation, which re-decides it under Session arbitration, the process lock, the
+current-liveness check, the replacement fence and a fresh confirmation lookup;
+a failed candidate is logged and reconsidered in the next cycle.
+
+Under the Session arbitration owner and binding fence, durable evidence is
+reconstructed per Thread. Threads already owned by an exact interrupt keep
+their open Request and control custody for the replacement interrupt owner;
+unaffected Threads with unfinished work are repaired independently. For each
+included repair scope, unfinished
+request spans close as errors (`runtime_pod_lost`, original
+`model_request_id` reused). Nonterminal `pending` or `resolving` tool routes
+remain durable, including reconstructible `resolving` / `allow` routes, with
+the old Runtime scope fenced. The replacement continues
+the same tool identity and eventually commits exactly one terminal result;
+loss repair does not synthesize a result for these retained routes. Other
+orphaned public tool uses receive exactly one terminal result
+(`spawn_agent` / `send_message` settle delivery-aware by their
+`delivery_id`, keyed on the durable inter-agent delivery state); a delivered-
+but-uncommitted input replays from the inbox; pending waits owned by the lost
+binding are cancelled; every included scope the loss left unsettled
+resolves to idle with its `session.error` — **except** a scope whose committed
+Request End already owns provider reschedule, where repair retires only the
+lost residency row and preserves the accepted retry facts, and an interrupted-then-
+lost scope, which settles quietly as `end_turn` with no error because the
+user's own processed `user.interrupt` (the thread's highest-sequence committed
+input) is the durable proof the stop was requested; the retry budget resets;
+only then is the stale Runtime binding released. Sandbox lifecycle is
+independent of Runtime Pod loss. Provider text is never reconstructed
+— only ledgers are repaired.
+
+For each closed request whose Thread is not interrupt-owned, repair then
+appends to that request's Assistant message only the Tool facts its immutable
+Tool events prove and its parts lack. Candidates are scalar event identities
+in event order: a Tool Use yields its call, an ordinary or MCP result yields a
+result keyed by the call ID of the Tool Use it references, and a synthetic
+invalid-tool repair yields its call then its result. Each candidate is
+anti-joined on the message's part-identity index; at most 128 missing
+candidates are selected per page, with keyset continuation under the held
+fence, and only those are projected from their event projections (numbers
+decoded without a float64 round trip) and appended through the shared
+`runtimecontrol` primitive. Existing parts are never read, validated or
+rewritten, a repeated repair writes nothing, and a request without an
+Assistant message stays without one. The weaker projection checks remain:
+a completed result rebuilt from its `{text,truncated}` projection commits, and
+the next context read rejects it, as before. Repair adds no reasoning, so the
+admitted reasoning counters are unchanged.
+
+### Cleanup order (hot Runtime state only)
+
+1. Runtime Pod accepts `CleanupSession` and clears its hot state (or is proven gone), proving no active run can still resolve a wait;
+2. durable `approval` waits and their recoverable Sandbox execution records remain for a later confirmation; other `pending` external waits and unowned Sandbox executions expire by terminal projection;
+3. the Runtime binding and `session_runtime_status` finalize after those settlements are durable;
+4. durable `session_threads`, `session_events`, `session_messages`, Sandbox bindings, and provider resources are never deleted by TTL cleanup.
+
+**The tree fence.** The cleanup alarm is a hint and may be stale (armed while
+children still run); the **claim** carries the proof. Inside the claim
+transaction — which holds the `session_runtime_status` row lock and which
+finalize re-executes — the claim additionally proves no `session_threads` row
+is busy (`running` or `rescheduling`; `idle`, `requires_action`,
+`closed_for_runtime`, `terminated`, `failed` are quiescent, and
+`requires_action` is expressly quiescent — an approval may wait days on a
+durable, wake-fenced confirmation). A busy result **reschedules at both
+enforcement points** (clearing `cleanup_job_id`, `cleanup_claimed_at`,
+`cleanup_enqueued_at` and pushing `cleanup_after` forward); a bare stale result at
+finalize would strand `cleanup_job_id` set on a past-due row forever. The
+pod-side eviction refusal (`session_busy` while any run slot is active or any
+thread's accepted-input queue is non-empty) remains the final authority.
+
+**Delete exception.** The Session-delete transaction is the producer of the
+durable `sandbox_release` operation. The `session_delete_cleanup` branch clears
+hot Runtime custody, joins that release operation idempotently, and waits for
+Sandbox Service and Sandbox Queue custody to close before deleting private
+Sandbox rows. Job Runner never performs the provider call. The serving
+`job_runner` role can lock and schedule cleanup of output-capture operations and
+retire their private operation/blob rows after release and Queue custody close.
+It cannot create captures. Staged captures first retain one durable Sandbox
+cleanup job; adopted or cleaned receipts can retire without another provider
+call. The installed-role regression in
+[runtime_output_capture_role_test.go](runtime_output_capture_role_test.go) checks
+these phases, missing-grant rollback and workspace isolation.
+
+## Delivery and custody
+
+### Delivery and durable wake machinery
+
+- **Contract.** Message producers commit `session_runtime_inbox` and Queue
+  custody beside their source facts. The Job Runner (`job_runner.go`,
+  `runtime_delivery.go`) binds that existing custody, sends typed commands to
+  the bound pod, and maps replies onto queue transitions.
+  Child completion returns to the parent through one
+  `agent.thread_message_sent` envelope written in the child's settling
+  transaction (`completion_mail.go`), with a durable agent-mail wake enqueued
+  in the same transaction.
+- **Lifecycle.** Completion is decided by an event discriminator, never by stop
+  reason alone: a clean `end_turn` mails a completed envelope; `retries_
+  exhausted`, an `end_turn` carrying a terminal `session.error`, and a child-
+  scoped termination mail an errored envelope; a processed `user.interrupt`,
+  `requires_action`, reviewer settlements, and pod-loss repairs mail nothing.
+- **Invariants a replacement must preserve.** There is no settled-without-mail,
+  mail-without-Inbox, or Inbox-without-Queue birth state. Completion replay
+  joins the same durable identities; delivery never scans the event ledger to
+  reconstruct custody. Delivery targets the bound pod directly, never a
+  load-balanced service. A leased interrupt owns only its target Thread lane:
+  later inputs still commit their Event, Inbox, and Queue custody, sibling
+  Threads continue, and no later target-Thread job is leased until the
+  interrupt's atomic Request End,
+  Tool settlements, and receipt are durable and its Queue job is acknowledged.
+  Runtime acceptance alone never acknowledges an interrupt. Exact receipt
+  replay acknowledges without another Runtime call; a 30-second interrupt send
+  timeout covers command admission through Tool cancellation/join, durable
+  closeout writes, and receipt return. A caller timeout remains outcome-unknown
+  and retains the same barrier and attempt identity. Proven pod loss may
+  transfer that identity only while attempts remain. At exhaustion, the exact
+  live Queue lease owner replays a receipt or terminalizes the target Thread;
+  only main-Thread exhaustion terminalizes the Session. Neither path sends the
+  interrupt to a replacement Runtime. For inputs other than queued user
+  messages, initial MCP manifest capture gives each list call a fixed
+  180-second deadline; a queued user message instead spends its per-input
+  discovery budget (see [Manifest discovery](#manifest-discovery)), where each
+  list call receives only the remainder of one shared 120-second deadline.
+  Either bound limits one Job Runner worker slot per stalled call. Expiry ends
+  the Runner wait and reaches the connector as the gRPC deadline;
+  connector-side cancellation follows the
+  [Gateway discovery contract](../gateway/README.md#discovery-and-manifest-delivery).
+- **Agent-mail custody.** Child creation atomically persists the child, context
+  prefix, first mail, Inbox row, Queue job, and spawn receipt. First and later
+  mail then share one delivery path: `CommitInputs` makes the Message durable,
+  Runtime admits that input into hot state, Bridge records the agent-mail-only
+  accepted transition, and JobRunner acknowledges the exact Queue lease.
+  Request Start remains a Runtime declaration and is never delivery or ACK
+  authority. If the accepted Runtime is lost before Request Start, the generic
+  pod-loss owner returns the same durable input identity to Queue custody. At
+  exhaustion, a finalization-only lease performs no Runtime call and atomically
+  fails only the target subagent, settles the exact Inbox and Queue custody, and
+  emits one existing completion notification to its parent.
+- **Conformance.** Runner-owned:
+  [job_runner_test.go](job_runner_test.go),
+  [runtime_delivery_test.go](runtime_delivery_test.go),
+  [runtime_delivery_store_test.go](runtime_delivery_store_test.go),
+  [runtime_delivery_exhaustion_test.go](runtime_delivery_exhaustion_test.go),
+  [completion_mail_test.go](completion_mail_test.go),
+  [completion_mail_delivery_test.go](completion_mail_delivery_test.go).
+  Cross-owner compositions:
+  [completion_mail_test.go](../../integration/completion_mail_test.go),
+  [completion_mail_delivery_test.go](../../integration/completion_mail_delivery_test.go),
+  [runtime_pod_lost_delivery_repair_test.go](../../integration/runtime_pod_lost_delivery_repair_test.go).
+
+### Runtime recovery
+
+- **Contract.** A `runtime_recovery` job names one Session Thread and exactly
+  one source: an event-origin `source_event_id` or a handoff-origin
+  `handoff_id` written by Bridge's `ReleaseRuntimeBinding`. A payload with both
+  or neither is invalid. Partition and dedupe keys must equal the payload's
+  canonical keys (`runtimecontrol.RecoveryDedupeKey`).
+- **Source verification.** Under Session arbitration and the exact live Queue
+  lease, `runtimecontrol.VerifyRecoverySourceTx` accepts a handoff source only
+  while the exact handoff Thread row has the `RECOVER` disposition and records
+  this leased job's Queue ID, and no later handoff of the Session has a higher
+  binding generation. An event source must still exist on the same Thread with
+  a recoverable event type. A source that is no longer current is acknowledged
+  as a duplicate without a Runtime call.
+- **Delivery.** Activation resolves the current binding through the
+  process-aware target resolver, marks the Session running and sends
+  `RecoverThread` to the bound Pod with the source and a `RecoveryLeaseRef`
+  naming the exact job, lease token, partition and dedupe keys.
+- **Exhaustion.** When attempts are exhausted, the exact live lease owner
+  records `runtime_recovery_exhausted` through the shared termination
+  settlement. A main Thread terminalizes the Session and its pending recovery
+  custody; a child Thread is terminalized alone, its exact lease is
+  dead-lettered and Session residency is recomputed. A Session that is already
+  terminated cancels the lease without another termination.
+- **Conformance.**
+  [runtime_handoff_test.go](runtime_handoff_test.go),
+  [runtime_delivery_store_test.go](runtime_delivery_store_test.go);
+  cross-owner:
+  [runtime_delivery_store_test.go](../../integration/runtime_delivery_store_test.go),
+  [replica_runtime_handoff_test.go](../../integration/replica_runtime_handoff_test.go).
+
+## Direct command transport and policy
+
+Standard routing uses native PodIP:19090; hardened routing uses PodIP:19443
+with the fixed Runtime Service DNS and exact Runtime URI SAN from mounted trust.
+`TETRAL_TRANSPORT_PROFILE` selects `standard-routed` or `hardened`; the configured
+port must match. Captured Queue/MCP business traffic retains its mesh transport.
+Mandatory proxy readiness precedes admission when
+`TETRAL_ROUTING_PROXY_REQUIRED=true`.
+
+The process retains channels until its users join. A valid trust-bundle change
+withdraws old channels from new admission, lets admitted RPCs finish under their
+own bounds, then closes them. Leaf-only renewal preserves admitted work. Each
+direct command has one attempt; Queue owns later delivery and receipt recovery.
+The descriptor-complete policy covers AcceptInput, RecoverThread, AcceptAgentMail,
+AcceptTaskNotification, Interrupt, ResolveToolConfirmation, ApplyRuntimeConfig
+and CleanupSession. Each initial attempt bound is 30000ms and can be configured
+with `TETRAL_RUNTIME_<METHOD_IN_SNAKE_CASE>_TIMEOUT_MS`; caller and lease deadlines
+remain shorter where applicable. The interrupt plan and native client consume
+that same typed policy rather than separate fixed limits.
+
+## Manifest discovery
+
+Initial and restoration discovery is Runner-owned; hot change acceptance is
+Bridge-owned. Both use `internal/mcpmanifest` canonicalization and acceptance
+inside their caller-owned transaction. External connector I/O occurs outside
+that transaction. The connector endpoint is the independent `mcp-connector`
+workload; no provider gateway business package is imported.
+
+- **Discovery lifecycle.** For a configured server without a usable complete
+  manifest, one queued user input owns at most 3 whole-discovery attempts and a shared
+  120-second deadline. Job Runner reserves attempts in `session_runtime_inbox`
+  before external I/O; process restart and Queue lease replay cannot replenish
+  them. Once delivery may have reached Runtime, existing custody reconciliation
+  applies instead of retroactively failing that input for discovery. The fresh canonical schema includes these counters, deadline and safe diagnostic
+  fields. Connector authentication
+  refresh consumes the same wall-clock budget. Validation and the final 256 KiB
+  canonical cap are part of discovery acceptance. All discovery errors, including
+  internal/protocol failures, consume this finite budget.
+  After exhaustion, one transaction records unready state, marks the input
+  processed/dead-lettered, and emits one safe `session.error` to the application.
+  Operator logs identify the input, server, attempt and failure class. This input
+  never reaches Runtime/model execution. An otherwise inactive main Session
+  emits idle; other running threads and control operations remain intact. The
+  error's `retry_status: exhausted` describes the input discovery budget,
+  including credential failures; it is distinct from a connector operation's
+  terminal status. While a configured directory remains unavailable, each new
+  user message can exhaust its own budget and be rejected before model execution.
+  The idle event may therefore have no preceding running event for that input;
+  it reports settlement, not proof that a model request ran. See the
+  [public event lifecycle](../event-stream/README.md#discovery-failure-before-model-execution).
+  The Session is not terminated. A distinct later user input may retry and restore
+  `unready -> ready` with a higher generation; a matching etag does not prevent
+  recovery. Inputs that performed discovery apply the accepted manifest through
+  Runtime config control before `AcceptInput`. A cold Pod's `no_residency` result
+  defers installation to its existing `LoadContext` path. Busy/rejected config
+  application does not send the input; Queue delivery retry reuses the durable
+  manifest and discovery budget. The independent config carrier remains durable.
+  Existing usable manifests are reused on cold restoration. Stop/interrupt does
+  not wait for discovery. Discovery retry never retries a tool's external write.
+## Visibility
+
+### Kubernetes pod visibility (engine-root `internal/kubernetes`)
+
+- **Contract.** `internal/kubernetes` and `internal/internalgrpc/auth` are
+  engine-root shared packages; Job Runner consumes them but does not own them.
+  `internal/kubernetes` owns Pod and EndpointSlice visibility clients
+  (`VisibilityClient`: list/watch) and a `WatcherCache` that the Job Runner
+  consumes via `BindingVisibilitySnapshot`. It holds no control-plane
+  ownership and receives explicit inputs; `internal/internalgrpc/auth` may
+  import the Kubernetes client libraries only for TokenReview authentication.
+- **Lifecycle.** The runner's readiness depends on the cache being synced;
+  `SyncAndWatch` primes it and keeps it current. The snapshot classifies the
+  bound pod into the `BindingVisibility*` observations consumed by the shared
+  process-aware classifier. `ClientsetVisibilityClient.GetPod` supplies its
+  outside-transaction confirming observation (see the binding fence table).
+- **Invariants a replacement must preserve.** Visibility is read-only — it never
+  mutates pods or bindings; proven-gone must be distinguishable from merely-
+  unavailable, because only the former is allowed to replace a binding; a
+  not-ready snapshot must retry, never finalize.
+- **Conformance.** Cross-owner loss recovery:
+  [runtime_pod_lost_store_test.go](../../integration/runtime_pod_lost_store_test.go).
+  Engine-root (under
+  `internal/kubernetes/`): `visibility_client_test.go`, `cache_test.go`
+  (covering the `WatcherCache` type in `watcher_cache.go`),
+  `static_visibility_test.go`.
+
+## Shared durable boundaries
+
+`internal/runtimeconfig` interprets the Session-pinned agent version's system
+configuration, installed tool families/policy and attached memory resources.
+`internal/runtimecontrol` owns reusable locks, fences, receipts and atomic
+settlement projections. Runner projects its owned RuntimeJob into explicit
+custody DTOs; Queue lease identity remains Runner-owned. Helpers receive the
+caller's transaction so context mutations and exact Queue ACK/NACK remain
+atomic. Shared packages never import Bridge or Runner business code.
+
+## Testing
+
+Placement's existing probe and attempt timers also populate fixed-bucket
+`tetral_operation_duration_seconds{service="job-runner",operation="runtime_placement_probe"|"runtime_placement",outcome=...}`.
+A probe covers the process registry proof and actual HTTP load query. An
+attempt covers bounded sampling through all started probes joining; it ends
+before transactional binding arbitration and command delivery. Eligible probes
+and selected attempts are `success`; timeout/cancellation retain those outcomes;
+capacity, not-accepting, no-candidate and exhausted sampling are `rejected`.
+Registry, transport, invalid-response, visibility, policy and randomness
+failures are `error`. An exhausted attempt means no eligible candidate was
+found; the original probe reason counters retain the exclusion/dependency cause.
+
+`runtime_placement_probe_total{outcome}` and `runtime_placement_total{outcome}`
+count the fine-grained probe and attempt reasons that the histogram's
+success/rejected/error outcome folds together; placement durations are exported
+only through the histogram. Both use the same owning hooks and exported
+collector, with race-safe zero-value initialization. No pod, process, Session
+or request labels enter these families.
+`TestPostgreSQLRuntimePlacementDiagnosticReasons` exercises actual registry and
+HTTP probe boundaries and compares completed histogram populations with the
+distinguishing reason counters; the concurrent collector test separately checks
+initialization and retention.
+
+Owner-local unit and PostgreSQL suites are in this directory; real Bridge and
+Runner compositions are in `integration/`. Runtime/Bun and Blob fixtures retain
+their declared dependencies. The command tests enforce schema/capacity failure
+before listeners and clients; Kubernetes lifecycle tests prove watch workers
+join before Stop returns. Run repository `make test-affected` for the declared
+owner closure and managed dependencies; direct database tests require an
+administrative test DSN and create restricted private clones.
+
+Acquisition and repair controls are `job_runner_slots_test.go` (slot refill,
+release after closure, retry hint and capped backoff),
+`runtime_pod_loss_repair_test.go` (startup, signal and deadline runs; bounded
+pages and mutations), `runtime_binding_discovery_test.go` (the discovery
+functions under the installed role) and the composed
+`integration/job_runner_loop_sdk_test.go`, which drives `RunJobRunnerLoop`
+over the generated Queue client with SDK-admitted work in two Workspaces, the
+notification listener and the timer paths.
+
+New process/placement/lifecycle controls include `runtime_visibility_test.go`,
+`runtime_placement_test.go`, `runtime_load_probe_test.go`,
+`runtime_command_policy_test.go`, `queue_client_test.go`, and the real
+`integration/replica_placement_test.go` PostgreSQL composition. Process freshness
+uses the shared `TETRAL_RUNTIME_PROCESS_FRESHNESS_MS` setting (10000), validated
+with the registration/report interval policy consumed by Runtime and Bridge.
+
+`message_parts_test.go` drives Pod-loss repair under the real Job Runner role
+with a statement tracer: it appends exactly the missing call and result facts
+in event order, keeps existing part rows and reasoning counters unchanged,
+preserves numeric input tokens, writes nothing on a repeated repair, creates no
+Assistant message for a request without one, and leaves the baseline
+`{text,truncated}` completion to fail the next context read.

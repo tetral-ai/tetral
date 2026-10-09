@@ -2,21 +2,45 @@ package eventstream_test
 
 import (
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
 
+// This source guard rejects any database-client call other than the two
+// workspace read-only transaction helpers. The behavioral guards are
+// TestPostgreSQLRequestFinalMessagesAndPreviewAdmission and
+// TestPostgreSQLSessionChangeLifecyclePreservesDeletion, which open the reader
+// through the SELECT-only event_stream role.
 func TestPostgreSQLReaderUsesReadOnlyTransactions(t *testing.T) {
-	source, err := os.ReadFile("postgresql_reader.go")
+	files, err := filepath.Glob("*.go")
 	if err != nil {
-		t.Fatalf("read postgresql_reader.go: %v", err)
+		t.Fatal(err)
 	}
-	text := string(source)
-	if strings.Contains(text, ".WithWorkspaceTx(") {
-		t.Fatalf("PostgreSQLReader must not use read-write workspace transactions")
+	clientCall := regexp.MustCompile(`\.client\.(\w+)\(`)
+	count := 0
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		source, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(source)
+		if strings.Contains(text, ".WithWorkspaceTx") {
+			t.Fatalf("%s uses read-write workspace transactions", name)
+		}
+		for _, call := range clientCall.FindAllStringSubmatch(text, -1) {
+			if call[1] != "WithWorkspaceReadOnlyTx" && call[1] != "WithWorkspaceReadOnlyRepeatableReadTx" {
+				t.Fatalf("%s calls database client method %s outside a read-only workspace transaction", name, call[1])
+			}
+			count++
+		}
 	}
-	if got := strings.Count(text, ".WithWorkspaceReadOnlyTx("); got != 6 {
-		t.Fatalf("read-only workspace transaction count = %d; want 6", got)
+	if count == 0 {
+		t.Fatal("reader must use workspace read-only transactions")
 	}
 }
 

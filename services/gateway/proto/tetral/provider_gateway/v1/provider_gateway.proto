@@ -47,19 +47,29 @@ enum ProviderContextRole {
 
 enum ProviderStreamEventType {
   PROVIDER_STREAM_EVENT_TYPE_UNSPECIFIED = 0;
-  PROVIDER_STREAM_EVENT_TYPE_TEXT_START = 1;
-  PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA = 2;
-  PROVIDER_STREAM_EVENT_TYPE_TEXT_END = 3;
-  PROVIDER_STREAM_EVENT_TYPE_REASONING_START = 4;
-  PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA = 5;
-  PROVIDER_STREAM_EVENT_TYPE_REASONING_END = 6;
-  PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START = 7;
-  PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA = 8;
-  PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END = 9;
-  PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL = 10;
+  reserved 1 to 10;
+  reserved "PROVIDER_STREAM_EVENT_TYPE_TEXT_START", "PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA", "PROVIDER_STREAM_EVENT_TYPE_TEXT_END", "PROVIDER_STREAM_EVENT_TYPE_REASONING_START", "PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA", "PROVIDER_STREAM_EVENT_TYPE_REASONING_END", "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START", "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA", "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END", "PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL";
   PROVIDER_STREAM_EVENT_TYPE_FINISH = 11;
   PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR = 12;
   PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS = 13;
+  PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED = 14;
+  PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE = 15;
+  PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE = 16;
+  PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE = 17;
+}
+
+// Loaded thread identity; unspecified values never authorize previews.
+enum ProviderThreadRole {
+  PROVIDER_THREAD_ROLE_UNSPECIFIED = 0;
+  PROVIDER_THREAD_ROLE_MAIN = 1;
+  PROVIDER_THREAD_ROLE_SUBAGENT = 2;
+  PROVIDER_THREAD_ROLE_APPROVAL_REVIEWER = 3;
+}
+
+enum ProviderThreadVisibility {
+  PROVIDER_THREAD_VISIBILITY_UNSPECIFIED = 0;
+  PROVIDER_THREAD_VISIBILITY_PUBLIC = 1;
+  PROVIDER_THREAD_VISIBILITY_INTERNAL = 2;
 }
 
 enum ProviderAttachmentRejectionReason {
@@ -134,6 +144,12 @@ message ProviderRequest {
   repeated ProviderRequestAttachment attachments = 15;
   ProviderRequestLimits limits = 16;
   optional string output_schema_json = 17;
+  string runtime_process_id = 18;
+  // Version 2 is mandatory; there is no fragment-wire fallback.
+  uint32 output_contract_version = 19;
+  string model_request_start_event_id = 20;
+  ProviderThreadRole thread_role = 21;
+  ProviderThreadVisibility thread_visibility = 22;
 }
 
 message ModelRef {
@@ -243,12 +259,16 @@ message ProviderRequestLimits {
 message ProviderStreamEvent {
   reserved 1, 2;
   reserved "request_id", "model_request_id";
+  reserved 4 to 7;
+  reserved "text", "reasoning", "tool_input", "tool_call";
   ProviderStreamEventType type = 3;
+  // Consecutive from one across every frame of this RPC, including controls.
+  uint32 frame_sequence = 11;
   oneof payload {
-    ProviderTextPayload text = 4;
-    ProviderReasoningPayload reasoning = 5;
-    ProviderToolInputPayload tool_input = 6;
-    ProviderToolCallPayload tool_call = 7;
+    ProviderThinkingStartedPayload thinking_started = 12;
+    ProviderTextCompletePayload text_complete = 13;
+    ProviderReasoningCompletePayload reasoning_complete = 14;
+    ProviderToolCallCompletePayload tool_call_complete = 15;
     ProviderFinishPayload finish = 8;
     ProviderErrorPayload provider_error = 9;
     ProviderAttachmentRejectionsPayload attachment_rejections = 10;
@@ -267,30 +287,30 @@ message ProviderAttachmentRejectionsPayload {
   repeated ProviderAttachmentRejection rejections = 1;
 }
 
-message ProviderTextPayload {
-  string id = 1;
-  string text = 2;
-  string metadata_json = 3;
+// Public progress control: no reasoning body or provider metadata.
+message ProviderThinkingStartedPayload {
+  string provider_part_id = 1;
+  string event_id = 2;
 }
 
-message ProviderReasoningPayload {
-  string id = 1;
-  string text = 2;
-  string metadata_json = 3;
-}
-
-message ProviderToolInputPayload {
-  string id = 1;
-  string name = 2;
+message ProviderTextCompletePayload {
+  string provider_part_id = 1;
+  string event_id = 2;
   string text = 3;
-  string metadata_json = 4;
 }
 
-message ProviderToolCallPayload {
-  string id = 1;
+message ProviderReasoningCompletePayload {
+  string provider_part_id = 1;
+  string thinking_event_id = 2;
+  string text = 3;
+  string provider_metadata_json = 4;
+}
+
+message ProviderToolCallCompletePayload {
+  string model_tool_call_id = 1;
   string name = 2;
   string input_json = 3;
-  string metadata_json = 4;
+  string provider_metadata_json = 4;
 }
 
 message RequestUsage {
@@ -336,6 +356,7 @@ message RunWebRequest {
   string binding_id = 6;
   int64 binding_generation = 7;
   string runtime_binding_token = 8;
+  string runtime_process_id = 9;
 }
 
 message RunWebResponse {
@@ -399,6 +420,7 @@ message RunMcpToolRequest {
   string binding_id = 9;
   int64 binding_generation = 10;
   string runtime_binding_token = 11;
+  string runtime_process_id = 12;
 }
 
 message RunMcpToolResponse {

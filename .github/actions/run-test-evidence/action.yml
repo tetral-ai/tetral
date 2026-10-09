@@ -49,7 +49,7 @@ runs:
     - name: Set up Go
       uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
       with:
-        go-version: '1.25.13'
+        go-version: '1.26.9'
         cache-dependency-path: go.sum
 
     - name: Set up Bun
@@ -103,6 +103,7 @@ runs:
         fi
         go run ./internal/testinfra/cmd/tetral-test \
           --profile full \
+          --workers 2 \
           --dependency-audit '${{ inputs.dependency-audit }}' \
           "${group_args[@]}" \
           --shard-index '${{ inputs.shard-index }}' \

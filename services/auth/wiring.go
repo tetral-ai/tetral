@@ -15,7 +15,8 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-const defaultShutdownTimeout = 10 * time.Second
+// DefaultShutdownTimeout bounds each Auth listener drain.
+const DefaultShutdownTimeout = 10 * time.Second
 
 type StartupDatabase struct {
 	OpenResult dbconnect.OpenResult
@@ -30,19 +31,37 @@ type StartupReadinessClient interface {
 type StartupOpenFunc func(context.Context) (StartupDatabase, error)
 
 type Application struct {
-	Handler http.Handler
-	Client  *dbconnect.Client
+	ExternalAuthorization *ExternalAuthorization
+	Handler               http.Handler
+	Client                *dbconnect.Client
+	Verifier              *auth.AssertionVerifier
+	Pruner                *auth.TokenPruner
+	PruningMetrics        workload.MetricsCollector
+	UsageRecorder         *auth.APIKeyUsageRecorder
+	UsageMetrics          workload.MetricsCollector
 }
 
+// Close is idempotent. The usage recorder stops first, discarding unwritten
+// samples, so neither shutdown nor pool close waits for best-effort usage.
 func (a *Application) Close() error {
-	if a == nil || a.Client == nil {
+	if a == nil {
+		return nil
+	}
+	a.UsageRecorder.Close()
+	if a.Pruner != nil {
+		a.Pruner.Close()
+	}
+	if a.Verifier != nil {
+		a.Verifier.Close()
+	}
+	if a.Client == nil {
 		return nil
 	}
 	return a.Client.Close()
 }
 
 func OpenStartupDatabaseFromEnv(ctx context.Context) (StartupDatabase, error) {
-	openResult, err := dbconnect.OpenPlainDSNFromEnv(ctx)
+	openResult, err := dbconnect.OpenProtectedDSNFromEnv(ctx)
 	if err != nil {
 		return StartupDatabase{}, err
 	}
@@ -63,21 +82,46 @@ func BuildApplication(ctx context.Context, cfg Config, open StartupOpenFunc, opt
 	if err != nil {
 		return nil, err
 	}
-	handler, err := BuildRouter(ctx, RouterBuildConfig{
-		RawDatabase:    database.OpenResult.RawDatabaseForExcludedStores,
-		Config:         cfg,
-		Logger:         opts.logger,
-		RequestMetrics: opts.requestMetrics,
-	})
+	verifier, err := auth.NewConfiguredAssertionVerifier(ctx, auth.AssertionVerifierConfig{KeyCacheTTL: cfg.JWKSCacheTTL})
 	if err != nil {
 		_ = database.OpenResult.Client.Close()
 		return nil, err
 	}
-	return &Application{Handler: handler, Client: database.OpenResult.Client}, nil
+	// HTTP and Check share one resolver and therefore this one recorder. Its
+	// worker starts only after startup validation, before any listener opens.
+	usage := auth.NewAPIKeyUsageRecorder(database.OpenResult.RawDatabaseForExcludedStores, opts.logger)
+	routerConfig, err := buildRouterConfig(ctx, RouterBuildConfig{
+		RawDatabase:       database.OpenResult.RawDatabaseForExcludedStores,
+		AssertionVerifier: verifier,
+		APIKeyUsage:       usage,
+		Config:            cfg,
+		Logger:            opts.logger,
+		RequestMetrics:    opts.requestMetrics,
+	})
+	if err != nil {
+		verifier.Close()
+		_ = database.OpenResult.Client.Close()
+		return nil, err
+	}
+	adapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: routerConfig.Resolver}, Signer: routerConfig.Signer, PrincipalTTL: cfg.InternalPrincipalTTL, Logger: opts.logger})
+	if err != nil {
+		verifier.Close()
+		_ = database.OpenResult.Client.Close()
+		return nil, err
+	}
+	handler := NewRouter(routerConfig)
+	usage.Start(ctx)
+	pruner := auth.StartTokenPruner(ctx, routerConfig.Resolver, opts.logger)
+	return &Application{ExternalAuthorization: adapter, Handler: handler, Client: database.OpenResult.Client, Verifier: verifier, Pruner: pruner, PruningMetrics: pruner.Collector(), UsageRecorder: usage, UsageMetrics: usage.Collector()}, nil
 }
 
 type RouterBuildConfig struct {
-	RawDatabase    *sql.DB
+	AssertionVerifier *auth.AssertionVerifier
+	RawDatabase       *sql.DB
+	// APIKeyUsage receives committed API-key admissions through the router's
+	// resolver. Its owner starts and closes it; BuildRouter never starts a
+	// worker, and nil records no usage.
+	APIKeyUsage    *auth.APIKeyUsageRecorder
 	Config         Config
 	Logger         *slog.Logger
 	RequestMetrics httpapi.RequestMetricsRecorder
@@ -103,28 +147,38 @@ func WithRequestMetrics(metrics httpapi.RequestMetricsRecorder) ApplicationOptio
 }
 
 func BuildRouter(ctx context.Context, cfg RouterBuildConfig) (http.Handler, error) {
+	routerConfig, err := buildRouterConfig(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return NewRouter(routerConfig), nil
+}
+
+func buildRouterConfig(ctx context.Context, cfg RouterBuildConfig) (RouterConfig, error) {
 	if cfg.RawDatabase == nil {
-		return nil, fmt.Errorf("raw database is required")
+		return RouterConfig{}, fmt.Errorf("raw database is required")
 	}
 	signer, err := auth.NewInternalPrincipalSignerFromBase64(cfg.Config.InternalPrincipalPrivateKeyB64)
 	if err != nil {
-		return nil, err
+		return RouterConfig{}, err
 	}
 	store := auth.NewAPIKeyStore(cfg.RawDatabase)
 	workspaceStore := workspace.NewStore(cfg.RawDatabase)
 	if _, err := workspaceStore.Get(ctx, cfg.Config.BootstrapWorkspaceID); err != nil {
-		return nil, err
+		return RouterConfig{}, err
 	}
 	if err := auth.RefreshBootstrap(ctx, store, cfg.Config.BootstrapWorkspaceID, cfg.Config.BootstrapAPIKey); err != nil {
-		return nil, fmt.Errorf("bootstrap api key: %w", err)
+		return RouterConfig{}, fmt.Errorf("bootstrap api key: %w", err)
 	}
-	return NewRouter(RouterConfig{
-		Store:               store,
-		Signer:              signer,
-		PrincipalTTLSeconds: int(cfg.Config.InternalPrincipalTTL.Seconds()),
-		Logger:              cfg.Logger,
-		RequestMetrics:      cfg.RequestMetrics,
-	}), nil
+	return RouterConfig{
+		Store:             store,
+		Resolver:          auth.NewAuthorityResolver(cfg.RawDatabase, cfg.Config.BootstrapWorkspaceID, cfg.APIKeyUsage),
+		AssertionVerifier: cfg.AssertionVerifier,
+		ExchangeLimits:    cfg.Config.ExchangeLimits,
+		Signer:            signer,
+		Logger:            cfg.Logger,
+		RequestMetrics:    cfg.RequestMetrics,
+	}, nil
 }
 
 func prepareStartupDatabase(ctx context.Context, open StartupOpenFunc) (StartupDatabase, error) {
@@ -167,7 +221,7 @@ func WorkloadConfig(cfg Config, handler http.Handler, readiness *workload.Readin
 		ListenConfigKey:       EnvHTTPAddress,
 		Handler:               handler,
 		Readiness:             readiness,
-		ShutdownTimeout:       defaultShutdownTimeout,
+		ShutdownTimeout:       DefaultShutdownTimeout,
 		Logger:                logger,
 	}
 }

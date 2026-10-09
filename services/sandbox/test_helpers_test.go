@@ -10,6 +10,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
@@ -328,4 +329,18 @@ func waitForSandboxLockWait(t *testing.T, db *sql.DB, queryFragment string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("sandbox writer did not block on %s", queryFragment)
+}
+
+func registerSandboxFixtureProcess(t *testing.T, db *sql.DB, namespace, podUID string) string {
+	t.Helper()
+	id := runtimecontrol.ProcessIdentity{Namespace: namespace, PodUID: podUID, ID: "process_" + podUID}
+	client := dbconnect.NewClientForTesting(db)
+	process, err := runtimecontrol.RegisterProcess(context.Background(), client, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runtimecontrol.ReportProcess(context.Background(), client, id, process.RegistrationReceipt, runtimecontrol.ProcessAccepting); err != nil {
+		t.Fatal(err)
+	}
+	return id.ID
 }

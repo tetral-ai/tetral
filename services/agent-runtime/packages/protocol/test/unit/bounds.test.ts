@@ -46,7 +46,7 @@ describe("method-specific Runtime ingress bounds", () => {
 
   test("validates each dedicated operation's owned fields", () => {
     const scope = threadScope();
-    const recovery = {
+    const recovery = { handoffId: "",
       ...scope,
       sourceEventId: "evt_recovery",
       recoveryLeaseRef: {
@@ -95,13 +95,13 @@ describe("method-specific Runtime ingress bounds", () => {
       { ...base, bindingId: "" },
       { ...base, bindingGeneration: 0 },
       { ...base, bindingGeneration: MaxBindingGeneration + 1 },
-      { ...base, targetPodUid: "" },
+      { ...base, targetPodUid: "", runtimeProcessId: "process-test" },
     ]) expectInvalid(validateAcceptInputRequest(input));
   });
 });
 
 function sessionScope() {
-  return { workspaceId: "wksp_1", sessionId: "sesn_1", bindingId: "bind_1", bindingGeneration: 1, targetPodUid: "pod-uid" };
+  return { workspaceId: "wksp_1", sessionId: "sesn_1", bindingId: "bind_1", bindingGeneration: 1, targetPodUid: "pod-uid", runtimeProcessId: "process-test" };
 }
 
 function threadScope() {

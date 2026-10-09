@@ -1,20 +1,183 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import { closeSync, fchmodSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ProviderFinishReason, ProviderContextRole } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { decryptAES256GCM } from "../../src/providers/crypto.js";
 import { ProviderClientRegistry } from "../../src/providers/clients.js";
 import { CachedPlatformCredentialPool, ProviderCredentialResolver, SQLGatewayCredentialStore } from "../../src/providers/credentials.js";
-import { parsePlatformKeyArgs, runPlatformKeyCLI } from "../../../../scripts/platform-key.js";
+import { createPlatformKeyPhaseObserver, parsePlatformKeyArgs, runPlatformKeyCLI } from "../../../../scripts/platform-key.js";
 import { validProviderRequest } from "./fixtures.js";
 import type { FetchFunction } from "@ai-sdk/provider-utils";
 import type { ProviderRequest, ProviderStreamEvent } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import type { PlatformKeySQL } from "../../../../scripts/platform-key.js";
+import type { PlatformKeyPhase, PlatformKeySQL } from "../../../../scripts/platform-key.js";
 
 const MasterKeyHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const DatabaseUrl = "postgres://ops.example/tetral";
 const OpenAIFixtureUrl = new URL("../golden/fixtures/openai-gpt-5.5-responses-live-2026-07-06.sse", import.meta.url);
 
 describe("Gateway platform-key ops CLI", () => {
+  test("actual entrypoint flushes help to stdout before successful exit", async () => {
+    const result = await runActualPlatformKeyCLI(["--help"]);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("Usage:\n");
+    expect(result.stdout).toContain("insert reads the plaintext provider key from stdin only.\n");
+    expect(result.stderr).toBe("");
+  });
+
+  test("actual entrypoint flushes redacted invalid-command error before failed exit", async () => {
+    // A public fixture key is intentionally also the invalid command so this
+    // checks real error redaction, rather than absence of an unused secret.
+    const result = await runActualPlatformKeyCLI([MasterKeyHex]);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("unknown platform-key command: [REDACTED]\n");
+    expect(result.stderr).not.toContain(MasterKeyHex);
+  });
+
+  test.each(["disabled", "enabled", "throwing"] as const)("%s phase observer preserves encrypted insert and await/close order", async (mode) => {
+    const phases: PlatformKeyPhase[] = [];
+    const operations: string[] = [];
+    const fakeSQL = createFakeSQL();
+    const sql = Object.assign(async <T = unknown>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T> => {
+      operations.push("query");
+      return await fakeSQL.sql<T>(strings, ...values);
+    }, { close: async () => { operations.push("close"); await fakeSQL.sql.close(); } });
+    const code = await runPlatformKeyCLI({
+      argv: ["insert", "--provider", "anthropic", "--key-id", "pfk_observed", "--cache-scope", "scope"],
+      env: { TETRAL_DATABASE_URL: DatabaseUrl, ENGINE_VAULT_KEY: MasterKeyHex },
+      stdin: { async *[Symbol.asyncIterator]() { operations.push("stdin"); yield new TextEncoder().encode("observer-secret\n"); operations.push("stdin_eof"); } },
+      sqlFactory: () => sql,
+      randomBytes: () => new Uint8Array(12).fill(7),
+      observePhase: mode === "disabled" ? undefined : (phase) => { phases.push(phase); operations.push(phase); if (mode === "throwing") throw new Error("observer failed"); },
+    });
+    expect(code).toBe(0);
+    expect(operations).toEqual(mode === "disabled" ? ["stdin", "stdin_eof", "query", "close"] : ["cli_enter", "stdin_begin", "stdin", "stdin_eof", "stdin_complete", "query_begin", "query", "query_complete", "close_begin", "close", "close_complete"]);
+    expect(fakeSQL.closed).toBe(true);
+    expect(phases).toEqual(mode === "disabled" ? [] : ["cli_enter", "stdin_begin", "stdin_complete", "query_begin", "query_complete", "close_begin", "close_complete"]);
+    expect(new TextDecoder().decode(await decryptAES256GCM(fakeSQL.queries[0]!.values[2] as Uint8Array, MasterKeyHex))).toBe("observer-secret");
+  });
+
+  test.each(["disabled", "enabled", "throwing"] as const)("%s observer preserves held query and close awaits", async (mode) => {
+    const gate = () => {
+      let resolve!: () => void;
+      const promise = new Promise<void>((done) => { resolve = done; });
+      return { promise, resolve };
+    };
+    const queryReached = gate(), queryRelease = gate(), closeReached = gate(), closeRelease = gate();
+    const phases: PlatformKeyPhase[] = [];
+    let settled = false;
+    const sql = Object.assign(async <T = unknown>(): Promise<T> => {
+      queryReached.resolve();
+      await queryRelease.promise;
+      return [{ key_id: "pfk_gated" }] as T;
+    }, { close: async (options?: { readonly timeout?: number }) => {
+      expect(options).toEqual({ timeout: 1 });
+      closeReached.resolve();
+      await closeRelease.promise;
+    } });
+    const pending = runPlatformKeyCLI({
+      argv: ["insert", "--provider", "anthropic", "--key-id", "pfk_gated", "--cache-scope", "scope"],
+      env: { TETRAL_DATABASE_URL: DatabaseUrl, ENGINE_VAULT_KEY: MasterKeyHex },
+      stdin: textChunks("gated-secret"), sqlFactory: () => sql,
+      observePhase: mode === "disabled" ? undefined : (phase) => { phases.push(phase); if (mode === "throwing") throw new Error("observer failed"); },
+    }).then((code) => { settled = true; return code; });
+    try {
+      await queryReached.promise;
+      expect(settled).toBe(false);
+      expect(phases).toEqual(mode === "disabled" ? [] : ["cli_enter", "stdin_begin", "stdin_complete", "query_begin"]);
+      queryRelease.resolve();
+      await closeReached.promise;
+      expect(settled).toBe(false);
+      expect(phases).toEqual(mode === "disabled" ? [] : ["cli_enter", "stdin_begin", "stdin_complete", "query_begin", "query_complete", "close_begin"]);
+      closeRelease.resolve();
+      expect(await pending).toBe(0);
+      expect(phases).toEqual(mode === "disabled" ? [] : ["cli_enter", "stdin_begin", "stdin_complete", "query_begin", "query_complete", "close_begin", "close_complete"]);
+    } finally {
+      queryRelease.resolve(); closeRelease.resolve();
+      await pending;
+    }
+  });
+
+  test("observer failures preserve query error handling and native close rejection", async () => {
+    for (const rejectClose of [false, true]) {
+      const phases: PlatformKeyPhase[] = [];
+      let closes = 0;
+      const nativeCloseError = new Error("native close failure");
+      const sql = Object.assign(async <T = unknown>(): Promise<T> => { throw new Error("query failure"); }, {
+        close: async () => { closes += 1; if (rejectClose) throw nativeCloseError; },
+      });
+      const stderr = createTextSink();
+      const pending = runPlatformKeyCLI({
+        argv: ["insert", "--provider", "openai", "--key-id", "pfk_error", "--cache-scope", "scope"],
+        env: { TETRAL_DATABASE_URL: DatabaseUrl, ENGINE_VAULT_KEY: MasterKeyHex },
+        stdin: textChunks("secret"), sqlFactory: () => sql, stderr: stderr.writer,
+        observePhase: (phase) => { phases.push(phase); throw new Error("observer failed"); },
+      });
+      if (rejectClose) await expect(pending).rejects.toBe(nativeCloseError);
+      else expect(await pending).toBe(1);
+      expect(closes).toBe(1);
+      expect(stderr.text()).toContain("query failure");
+      expect(stderr.text()).not.toContain("observer failed");
+      expect(phases).toEqual(["cli_enter", "stdin_begin", "stdin_complete", "query_begin", "body_error", "close_begin", ...(rejectClose ? [] : ["close_complete" as const])]);
+    }
+  });
+
+  test("explicit private descriptor bounds phase records and fails open after closure", () => {
+    const directory = mkdtempSync(join(tmpdir(), "platform-key-observer-"));
+    const path = join(directory, "phases");
+    const fd = openSync(path, "wx", 0o600);
+    let closed = false;
+    try {
+      expect(createPlatformKeyPhaseObserver({})).toBeUndefined();
+      for (const value of ["", "0", "1", "2", "03", "3x", "1025"]) {
+        expect(createPlatformKeyPhaseObserver({ TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD: value })).toBeUndefined();
+      }
+      const observer = createPlatformKeyPhaseObserver({ TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD: String(fd) });
+      expect(observer).toBeDefined();
+      for (let index = 0; index < 12; index++) observer!("cli_enter");
+      const records = readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(records).toHaveLength(9);
+      expect(readFileSync(path).byteLength).toBeLessThanOrEqual(4096);
+      let previous = 0;
+      for (const record of records) {
+        expect(Object.keys(record)).toEqual(["phase", "elapsed_ms"]);
+        expect(record.phase).toBe("cli_enter");
+        expect(Number.isFinite(record.elapsed_ms)).toBe(true);
+        expect(record.elapsed_ms as number).toBeGreaterThanOrEqual(previous);
+        previous = record.elapsed_ms as number;
+      }
+      const failing = createPlatformKeyPhaseObserver({ TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD: String(fd) })!;
+      closeSync(fd); closed = true;
+      expect(() => failing("stdin_begin")).not.toThrow();
+      expect(() => failing("query_begin")).not.toThrow();
+      expect(readFileSync(path, "utf8").trim().split("\n")).toHaveLength(9);
+      expect(createPlatformKeyPhaseObserver({ TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD: String(fd) })).toBeUndefined();
+    } finally {
+      if (!closed) closeSync(fd);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("nonprivate files and out-of-contract phase values disable observations", () => {
+    const directory = mkdtempSync(join(tmpdir(), "platform-key-observer-"));
+    const path = join(directory, "phases");
+    const fd = openSync(path, "wx", 0o644);
+    fchmodSync(fd, 0o644);
+    try {
+      expect(createPlatformKeyPhaseObserver({ TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD: String(fd) })).toBeUndefined();
+    } finally { closeSync(fd); }
+    const privateFD = openSync(join(directory, "private"), "wx", 0o600);
+    try {
+      const observer = createPlatformKeyPhaseObserver({ TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD: String(privateFD) })!;
+      observer("secret-sentinel" as PlatformKeyPhase);
+      observer("cli_enter");
+      expect(readFileSync(join(directory, "private")).byteLength).toBe(0);
+    } finally { closeSync(privateFD); rmSync(directory, { recursive: true, force: true }); }
+  });
+
   test.each([
     ["retired master key flag", ["insert", "--provider", "openai", "--key-id", "pfk_rejected", "--cache-scope", "scope", "--master-key-hex", "argv-master-key-sentinel"]],
     ["retired database URL flag", ["disable", "--key-id", "pfk_rejected", "--database-url", "argv-database-secret-sentinel"]],
@@ -511,8 +674,8 @@ function openAIGoldenRequest(): ProviderRequest {
   });
 }
 
-async function collectEvents(events: AsyncIterable<ProviderStreamEvent>): Promise<readonly ProviderStreamEvent[]> {
-  const output: ProviderStreamEvent[] = [];
+async function collectEvents<T>(events: AsyncIterable<T>): Promise<readonly T[]> {
+  const output: T[] = [];
   for await (const event of events) {
     output.push(event);
   }
@@ -538,4 +701,19 @@ async function* textChunks(...chunks: readonly string[]): AsyncIterable<Uint8Arr
   for (const chunk of chunks) {
     yield new TextEncoder().encode(chunk);
   }
+}
+
+// Exercise import.meta.main and actual buffered FileSinks through OS pipes.
+// No SQL is reached by either help or argument validation, and no sink is mocked.
+async function runActualPlatformKeyCLI(argv: readonly string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  const command = Bun.spawn([process.execPath, fileURLToPath(new URL("../../../../scripts/platform-key.ts", import.meta.url)), ...argv], {
+    env: { ...process.env, ENGINE_VAULT_KEY: MasterKeyHex, TETRAL_DATABASE_URL: DatabaseUrl, TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD: "" },
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: 5000,
+    killSignal: "SIGKILL",
+  });
+  const [code, stdout, stderr] = await Promise.all([command.exited, new Response(command.stdout).text(), new Response(command.stderr).text()]);
+  return { code, stdout, stderr };
 }

@@ -8,8 +8,8 @@ import {
 } from "../../../src/thread-loop/turn/load.js";
 import { deriveThreadTurnSnapshot } from "../../../src/thread-loop/turn/reducer.js";
 import {
-	projectFailedRequestProviderContext,
-	projectFailedRequestsProviderContext,
+	normalizeRequestMessages,
+	normalizeLoadedMessages,
 } from "../../../src/thread-loop/turn/provider-context.js";
 
 function entry(
@@ -25,7 +25,7 @@ const noFacts: ThreadTurnLoadFacts = { events: [], internalRepairs: [] };
 describe("cold Thread-turn reconstruction", () => {
 	test("checkpoint retains pending input by context sequence, never DB Message identity", () => {
 		const checkpoint = extractThreadTurnCheckpoint({
-			contextEntries: [
+			messages: [
 				entry(1, "user", "first"),
 				entry(2, "assistant", "reply"),
 				entry(3, "runtime_notification", "task completed"),
@@ -62,7 +62,7 @@ describe("cold Thread-turn reconstruction", () => {
 		};
 		expect(
 			extractThreadTurnCheckpoint({
-				contextEntries: [
+				messages: [
 					entry(1, "user", "served"),
 					entry(2, "user", "queued"),
 				],
@@ -132,7 +132,7 @@ describe("cold Thread-turn reconstruction", () => {
 			internalRepairs: [],
 		};
 		const checkpoint = extractThreadTurnCheckpoint({
-			contextEntries: [entry(1, "user", "go")],
+			messages: [entry(1, "user", "go")],
 			facts,
 		});
 		expect(checkpoint.request?.toolMembers).toEqual([
@@ -327,7 +327,7 @@ describe("cold Thread-turn reconstruction", () => {
 
 		for (const testCase of cases) {
 			const checkpoint = extractThreadTurnCheckpoint({
-				contextEntries: [entry(1, "user", "go")],
+				messages: [entry(1, "user", "go")],
 				facts: testCase.facts,
 			});
 			const routes = extractColdThreadToolRouteView({
@@ -393,7 +393,7 @@ describe("cold Thread-turn reconstruction", () => {
 		});
 	});
 
-	test("failed Request projection drops partial text and retains exact Tool ownership", () => {
+	test("failed Request keeps unfinished canonical ownership and normalizes after terminal results", () => {
 		const checkpoint = parseThreadTurnCheckpoint({
 			executionRunId: "evt_run",
 			pendingInputContextSequences: [],
@@ -436,8 +436,8 @@ describe("cold Thread-turn reconstruction", () => {
 				],
 			},
 		});
-		const projected = projectFailedRequestProviderContext({
-			contextEntries: [
+		const projected = normalizeRequestMessages({
+			messages: [
 				entry(1, "user", "go"),
 				{
 					messageSequence: 2,
@@ -456,20 +456,18 @@ describe("cold Thread-turn reconstruction", () => {
 			checkpoint,
 		});
 
-		expect(projected.contextEntries).toEqual([entry(1, "user", "go")]);
-		expect(projected.openRequestDraft).toMatchObject({
-			modelRequestId: "req_failed",
-			messageSequence: 2,
-		});
-		expect(projected.openRequestDraft?.parts.map((part) => part.type)).toEqual([
-			"reasoning",
-			"tool_call",
-			"tool_call",
-			"tool_result",
-		]);
-		expect(JSON.stringify(projected)).not.toContain("failed partial");
-		expect(JSON.stringify(projected)).not.toContain("failed trailing thought");
-		expect(JSON.stringify(projected)).not.toContain("failed trailing text");
+    expect(projected).toHaveLength(2);
+    expect(projected[1]?.parts.map(part=>part.type)).toEqual(["reasoning","tool_call","tool_call","tool_result"]);
+    expect(JSON.stringify(projected)).not.toContain("failed partial");
+    expect(JSON.stringify(projected)).not.toContain("failed trailing thought");
+    expect(JSON.stringify(projected)).not.toContain("failed trailing text");
+    const terminalMessages:RuntimeContextEntry[] = projected.map(message=>message.messageSequence!==2?message:{...message,parts:[...message.parts,{type:"tool_result",modelToolCallId:"call_pending",result:{type:"completed",output:{text:"done"}}}]});
+    const terminal = parseThreadTurnCheckpoint({...checkpoint,request:{...checkpoint.request!,toolMembers:checkpoint.request!.toolMembers.map(member=>({...member,terminalResult:{outcome:"success"}}))}});
+    const normalized = normalizeRequestMessages({messages:terminalMessages,checkpoint:terminal});
+    expect(normalized[1]?.parts.map(part=>part.type)).toEqual(["reasoning","tool_call","tool_call","tool_result","tool_result"]);
+    expect(JSON.stringify(normalized)).not.toContain("failed partial");
+    expect(JSON.stringify(normalized)).not.toContain("failed trailing thought");
+    expect(JSON.stringify(normalized)).not.toContain("failed trailing text");
 	});
 
 	test("cold eligibility removes older failed partials after a later request closes", () => {
@@ -511,51 +509,16 @@ describe("cold Thread-turn reconstruction", () => {
 			],
 			internalRepairs: [],
 		};
-		const projected = projectFailedRequestsProviderContext({
-			contextEntries: [
-				entry(1, "user", "go"),
-				entry(2, "assistant", "failed partial must remain audit-only"),
-				entry(3, "assistant", "successful answer"),
-			],
-			openRequestDraft: {
-				modelRequestId: "current-open",
-				messageSequence: 4,
-				parts: [{ type: "text", text: "current retry draft" }],
-			},
-			facts,
-		});
-
-			expect(projected.contextEntries).toEqual([
-			entry(1, "user", "go"),
-			entry(3, "assistant", "successful answer"),
-		]);
-		expect(projected.openRequestDraft?.modelRequestId).toBe("current-open");
-
-		const alreadyExcluded = projectFailedRequestsProviderContext({
-			contextEntries: [
-				entry(1, "user", "go"),
-				entry(3, "assistant", "successful answer"),
-			],
-			openRequestDraft: {
-				modelRequestId: "current-open",
-				messageSequence: 4,
-				parts: [{ type: "text", text: "current retry draft" }],
-			},
-			facts,
-		});
-		expect(alreadyExcluded.contextEntries).toEqual([
-			entry(1, "user", "go"),
-			entry(3, "assistant", "successful answer"),
-		]);
-		expect(alreadyExcluded.openRequestDraft?.modelRequestId).toBe(
-			"current-open",
-		);
+		const messages = [entry(1,"user","go"),entry(2,"assistant","failed partial must remain audit-only"),entry(3,"assistant","successful answer"),entry(4,"assistant","current retry draft")];
+    const projected = normalizeLoadedMessages({messages,facts});
+    expect(projected).toEqual([messages[0]!,messages[2]!,messages[3]!]);
+    expect(normalizeLoadedMessages({messages:projected,facts})).toEqual(projected);
 	});
 
 	test("malformed direct facts fail closed", () => {
 		expect(() =>
 			extractThreadTurnCheckpoint({
-				contextEntries: [entry(1, "user", "go")],
+				messages: [entry(1, "user", "go")],
 				facts: {
 					events: [
 						{
@@ -570,4 +533,34 @@ describe("cold Thread-turn reconstruction", () => {
 			}),
 		).toThrow();
 	});
+});
+
+// Physical Runtime loss produced running2/start3/end4/idle6 and a new User2.
+// The captured Bridge envelope omitted failure5. Keep that incomplete envelope
+// rejected; only the independently paired exhausted failure permits admission.
+test("pod-loss cold facts require the exhausted failure before fresh input admission", () => {
+	const messages = [entry(1, "user", "start-content-fixture"), entry(2, "user", "after-crash")];
+	const events: ThreadTurnLoadFacts["events"] = [
+		{ eventId: "evt_running", eventSequence: 2, type: "session.status_running" },
+		{ eventId: "evt_start", eventSequence: 3, type: "span.model_request_start", modelRequestId: "req_lost",
+			requestStart: { requestKind: "agent_provider_request", contextThroughMessageSequence: 1 } },
+		{ eventId: "evt_end", eventSequence: 4, type: "span.model_request_end", modelRequestId: "req_lost",
+			requestEnd: { requestStartEventId: "evt_start", isError: true, errorKind: "runtime_pod_lost",
+				providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] } } },
+		{ eventId: "evt_idle", eventSequence: 6, type: "session.status_idle", idle: { stopReason: "retries_exhausted" } },
+	];
+	expect(() => extractThreadTurnCheckpoint({ messages, facts: { events, internalRepairs: [] } }))
+		.toThrow("terminal closeout has no preceding failure fact");
+	const failure: ThreadTurnLoadFacts["events"][number] = {
+		eventId: "evt_failure", eventSequence: 5, type: "session.error",
+		failure: { errorType: "unknown_error", retryStatus: "exhausted" },
+	};
+	const checkpoint = extractThreadTurnCheckpoint({ messages, facts: {
+		events: [...events.slice(0, 3), failure, events[3]!], internalRepairs: [],
+	} });
+	expect(checkpoint).toEqual({ pendingInputContextSequences: [2],
+		terminalCloseout: { failureEventId: "evt_failure", closeoutEventId: "evt_idle", disposition: "retries_exhausted" },
+		idleCloseout: { eventId: "evt_idle", stopReason: "retries_exhausted" } });
+	expect(deriveThreadTurnSnapshot(checkpoint, { routes: [] }, ["new_input"], { hasPendingAttachments: false }).nextStep)
+		.toEqual({ action: "commit_accepted_input", runtimeInputId: "new_input" });
 });

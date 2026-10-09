@@ -1,17 +1,18 @@
+import { registeredServer } from "../fixtures/registered-server.js";
 import { describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { SQLGitHubMcpCredentialResolver } from "../../src/credential.js";
+import { SQLMcpCredentialResolver } from "../../src/credential.js";
 import { MCP_REFRESH_HTTP_TIMEOUT_MS } from "../../src/phase-budgets.js";
 import type { McpCredentialSQL } from "../../src/credential.js";
-import { SQLVaultGitHubMcpCredentialUpdatePath } from "../../src/credential-update-path.js";
-import type { GitHubMcpCredentialRefreshWriter, McpOAuthRefreshFailureKind } from "../../src/credential-update-path.js";
+import { SQLVaultMcpCredentialUpdatePath } from "../../src/credential-update-path.js";
+import type { McpCredentialRefreshWriter, McpOAuthRefreshFailureKind } from "../../src/credential-update-path.js";
 import type { McpOAuthRefreshCompletedEvent } from "../../src/credential-update-path.js";
 import { recordMcpOAuthRefreshCompleted } from "../../src/logger.js";
 
 type OwnerFetch = (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => ReturnType<typeof fetch>;
 
-describe("SQLGitHubMcpCredentialResolver", () => {
+describe("SQLMcpCredentialResolver", () => {
   test("sets the workspace RLS GUC inside the credential read transaction", async () => {
     const calls: string[] = [];
     const tx = (async <T = unknown>(strings: TemplateStringsArray) => {
@@ -21,12 +22,12 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     }) as McpCredentialSQL;
     const sql = (async <T = unknown>() => [] as T) as McpCredentialSQL;
     sql.begin = async <T>(fn: (transaction: McpCredentialSQL) => Promise<T>) => await fn(tx);
-    const resolver = new SQLGitHubMcpCredentialResolver(sql, "00".repeat(32));
+    const resolver = new SQLMcpCredentialResolver(sql, "00".repeat(32));
 
     await resolver.resolve({
       workspaceId: "wksp_rls",
       sessionId: "sesn_rls",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
     });
 
     expect(calls).toHaveLength(2);
@@ -40,7 +41,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
       mcp_server_url: "https://api.githubcopilot.com/mcp",
       token: "github-token-sentinel",
     })), keyHex);
-    const resolver = new SQLGitHubMcpCredentialResolver(asyncSQL([{
+    const resolver = new SQLMcpCredentialResolver(asyncSQL([{
       id: "cred_1",
       vault_id: "vlt_1",
       mcp_server_url: "https://stale.example.com/mcp",
@@ -51,7 +52,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     const resolved = await resolver.resolve({
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
     });
 
     expect(resolved).toEqual({
@@ -71,7 +72,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
       mcp_server_url: "https://api.githubcopilot.com/mcp/",
       token: "rejected-static-token",
     })), keyHex);
-    const resolver = new SQLGitHubMcpCredentialResolver(asyncSQL([{
+    const resolver = new SQLMcpCredentialResolver(asyncSQL([{
       id: "cred_static",
       vault_id: "vlt_1",
       mcp_server_url: "https://api.githubcopilot.com/mcp/",
@@ -82,7 +83,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     await expect(resolver.refresh({
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
       vaultId: "vlt_1",
       credentialId: "cred_static",
       previousTokenHash: sha256("rejected-static-token"),
@@ -97,7 +98,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
       mcp_server_url: "https://api.githubcopilot.com/mcp//",
       token: "github-token-sentinel",
     })), keyHex);
-    const resolver = new SQLGitHubMcpCredentialResolver(asyncSQL([{
+    const resolver = new SQLMcpCredentialResolver(asyncSQL([{
       id: "cred_1",
       vault_id: "vlt_1",
       mcp_server_url: "https://api.githubcopilot.com/mcp//",
@@ -108,7 +109,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     const resolved = await resolver.resolve({
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
     });
 
     expect(resolved).toEqual({ ok: false, error: "credential_required" });
@@ -116,7 +117,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
 
   test("does not match credential URL with query, fragment, or userinfo", async () => {
     const keyHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    const resolver = new SQLGitHubMcpCredentialResolver(asyncSQL([
+    const resolver = new SQLMcpCredentialResolver(asyncSQL([
       {
         id: "cred_query",
         vault_id: "vlt_1",
@@ -144,7 +145,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     const resolved = await resolver.resolve({
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
     });
 
     expect(resolved).toEqual({ ok: false, error: "credential_required" });
@@ -152,7 +153,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
 
   test("does not normalize credential URL host case or default port", async () => {
     const keyHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    const resolver = new SQLGitHubMcpCredentialResolver(asyncSQL([
+    const resolver = new SQLMcpCredentialResolver(asyncSQL([
       {
         id: "cred_upper_host",
         vault_id: "vlt_1",
@@ -180,20 +181,20 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     const resolved = await resolver.resolve({
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
     });
 
     expect(resolved).toEqual({ ok: false, error: "credential_required" });
   });
 
   test("runs every MCP credential vector", async () => {
-    const vectors = await loadGitHubCredentialVectors();
+    const vectors = await loadMcpCredentialVectors();
     expect(vectors.cases).toHaveLength(10);
     for (const vector of vectors.cases) {
       const rows = await encryptedRowsForVector(vector);
       const state = statefulSQL(rows);
       const refreshRequests: Array<{ readonly url: string; readonly body: string }> = [];
-      const resolver = new SQLGitHubMcpCredentialResolver(
+      const resolver = new SQLMcpCredentialResolver(
         state.sql,
         vectorKeyHex,
         () => new Date(vectors.now),
@@ -217,7 +218,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
       const resolved = await resolver.resolve({
         workspaceId: "wksp_1",
         sessionId: "sesn_1",
-        mcpServerName: "github",
+        mcpServerName: "github", resolvedServer: registeredServer(),
       });
 
       switch (vector.expected.outcome) {
@@ -242,7 +243,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
   });
 
   test("fails closed when more than one matching credential is present", async () => {
-    const resolver = new SQLGitHubMcpCredentialResolver(asyncSQL([
+    const resolver = new SQLMcpCredentialResolver(asyncSQL([
       { id: "cred_1", vault_id: "vlt_1", mcp_server_url: "https://api.githubcopilot.com/mcp/", auth_public_json: publicAuthJSON("https://api.githubcopilot.com/mcp/"), encrypted_auth: new Uint8Array([1]) },
       { id: "cred_2", vault_id: "vlt_2", mcp_server_url: "https://api.githubcopilot.com/mcp", auth_public_json: publicAuthJSON("https://api.githubcopilot.com/mcp"), encrypted_auth: new Uint8Array([2]) },
     ]), "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
@@ -250,17 +251,17 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     await expect(resolver.resolve({
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
     })).resolves.toEqual({ ok: false, error: "ambiguous" });
   });
 
   test("fails closed on the live connector path when no credential exists", async () => {
-    const resolver = new SQLGitHubMcpCredentialResolver(asyncSQL([]), vectorKeyHex);
+    const resolver = new SQLMcpCredentialResolver(asyncSQL([]), vectorKeyHex);
 
     await expect(resolver.resolve({
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
     })).resolves.toEqual({ ok: false, error: "credential_required" });
   });
 
@@ -292,20 +293,20 @@ describe("SQLGitHubMcpCredentialResolver", () => {
       }]);
       let writerCalls = 0;
       let fetchCalls = 0;
-      const writer: GitHubMcpCredentialRefreshWriter = {
+      const writer: McpCredentialRefreshWriter = {
         refreshOAuthCredential: async () => {
           writerCalls += 1;
           return { ok: false, error: "refresh_failed" };
         },
       };
-      const resolver = new SQLGitHubMcpCredentialResolver(
+      const resolver = new SQLMcpCredentialResolver(
         state.sql,
         keyHex,
         () => new Date("2026-01-01T00:00:00.000Z"),
         async () => { fetchCalls += 1; throw new Error("token endpoint must not be called"); },
         writer,
       );
-      const identity = { workspaceId: "wksp_1", sessionId: "sesn_1", mcpServerName: "github" };
+      const identity = { workspaceId: "wksp_1", sessionId: "sesn_1", mcpServerName: "github", resolvedServer: registeredServer() };
       const resolved = scenario.force
         ? await resolver.refresh({ ...identity, vaultId: "vlt_1", credentialId: "cred_oauth", previousTokenHash: "previous", force: true })
         : await resolver.resolve(identity);
@@ -367,7 +368,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
         encryptSpy = spyOn(crypto.subtle, "encrypt").mockRejectedValueOnce(new Error("encryption unavailable"));
       }
       const events: McpOAuthRefreshCompletedEvent[] = [];
-      const owner = new SQLVaultGitHubMcpCredentialUpdatePath(
+      const owner = new SQLVaultMcpCredentialUpdatePath(
         sql, keyHex, () => new Date("2026-01-01T00:00:00.000Z"), fetchFn, timeoutMs, (event) => {
           events.push(event);
           recordMcpOAuthRefreshCompleted({ info: (record) => logRecords.push(record) }, undefined, event);
@@ -421,7 +422,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
       })), keyHex),
     }]);
     const refreshRequests: Array<{ readonly url: string; readonly accept: string | null; readonly body: string }> = [];
-    const resolver = new SQLGitHubMcpCredentialResolver(
+    const resolver = new SQLMcpCredentialResolver(
       state.sql,
       keyHex,
       () => now,
@@ -439,7 +440,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     const resolved = await resolver.resolve({
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
     });
 
     expect(resolved).toMatchObject({ ok: true, token: "new-access" });
@@ -483,7 +484,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
       })), keyHex),
     }]);
     const refreshRequests: Array<{ readonly url: string; readonly body: string }> = [];
-    const resolver = new SQLGitHubMcpCredentialResolver(
+    const resolver = new SQLMcpCredentialResolver(
       state.sql,
       keyHex,
       () => now,
@@ -496,7 +497,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     const resolved = await resolver.resolve({
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
     });
 
     expect(resolved).toMatchObject({ ok: true, token: "fresh-access" });
@@ -529,7 +530,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
       })), keyHex),
     }]);
     let fetchSignal: AbortSignal | undefined;
-    const resolver = new SQLGitHubMcpCredentialResolver(
+    const resolver = new SQLMcpCredentialResolver(
       state.sql,
       keyHex,
       () => now,
@@ -547,7 +548,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     await expect(resolver.resolve({
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
     })).resolves.toEqual({ ok: false, error: "refresh_unavailable" });
     expect(fetchSignal?.aborted).toBe(true);
     expect(MCP_REFRESH_HTTP_TIMEOUT_MS).toBe(10_000);
@@ -575,7 +576,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
       })), keyHex),
     }]);
     const refreshEvents: McpOAuthRefreshCompletedEvent[] = [];
-    const resolver = new SQLGitHubMcpCredentialResolver(
+    const resolver = new SQLMcpCredentialResolver(
       state.sql,
       keyHex,
       () => now,
@@ -603,7 +604,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     await expect(resolver.resolve({
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
     })).resolves.toEqual({ ok: false, error: "refresh_unavailable" });
     expect(state.updateCount).toBe(0);
     expect(refreshEvents).toEqual([expect.objectContaining({
@@ -627,8 +628,8 @@ describe("SQLGitHubMcpCredentialResolver", () => {
         token_endpoint_auth: { type: "none" },
       },
     })), keyHex);
-    const calls: Array<Parameters<GitHubMcpCredentialRefreshWriter["refreshOAuthCredential"]>[0]> = [];
-    const writer: GitHubMcpCredentialRefreshWriter = {
+    const calls: Array<Parameters<McpCredentialRefreshWriter["refreshOAuthCredential"]>[0]> = [];
+    const writer: McpCredentialRefreshWriter = {
       refreshOAuthCredential: async (input) => {
         calls.push(input);
         return {
@@ -642,7 +643,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
         };
       },
     };
-    const resolver = new SQLGitHubMcpCredentialResolver(
+    const resolver = new SQLMcpCredentialResolver(
       asyncSQL([{
         id: "cred_oauth",
         vault_id: "vlt_1",
@@ -661,7 +662,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     const resolved = await resolver.resolve({
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
     });
 
     expect(resolved).toEqual({
@@ -707,7 +708,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
       })), keyHex),
     }]);
     const refreshRequests: string[] = [];
-    const resolver = new SQLGitHubMcpCredentialResolver(
+    const resolver = new SQLMcpCredentialResolver(
       state.sql,
       keyHex,
       () => new Date("2026-01-01T00:00:00.000Z"),
@@ -720,7 +721,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     const resolved = await resolver.refresh({
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
       vaultId: "vlt_1",
       credentialId: "cred_oauth",
       previousTokenHash: sha256("stale-access"),
@@ -765,7 +766,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
       })), keyHex),
     }]);
     const refreshRequests: string[] = [];
-    const resolver = new SQLGitHubMcpCredentialResolver(
+    const resolver = new SQLMcpCredentialResolver(
       state.sql,
       keyHex,
       () => new Date("2026-01-01T00:00:00.000Z"),
@@ -778,7 +779,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     const resolved = await resolver.resolve({
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
     });
 
     expect(resolved).toMatchObject({ ok: true, token: "same-access" });
@@ -816,7 +817,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
       })), keyHex),
     }]);
     const refreshRequests: string[] = [];
-    const resolver = new SQLGitHubMcpCredentialResolver(
+    const resolver = new SQLMcpCredentialResolver(
       state.sql,
       keyHex,
       () => new Date("2026-01-01T00:00:00.000Z"),
@@ -829,7 +830,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     const resolved = await resolver.refresh({
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
       vaultId: "vlt_1",
       credentialId: "cred_oauth",
       previousTokenHash: sha256("same-access"),
@@ -870,7 +871,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     };
     const state = statefulSQL([original], [replacement]);
     const refreshRequests: string[] = [];
-    const resolver = new SQLGitHubMcpCredentialResolver(
+    const resolver = new SQLMcpCredentialResolver(
       state.sql,
       keyHex,
       () => new Date("2026-01-01T00:00:00.000Z"),
@@ -883,7 +884,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     await expect(resolver.refresh({
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
       vaultId: "vlt_original",
       credentialId: "cred_original",
       previousTokenHash: sha256("stale-access"),
@@ -999,39 +1000,39 @@ function arrayBuffer(bytes: Uint8Array): ArrayBuffer {
 
 const vectorKeyHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-interface GitHubCredentialVectorFile {
+interface McpCredentialVectorFile {
   readonly catalog_url: string;
   readonly now: string;
-  readonly cases: readonly GitHubCredentialVectorCase[];
+  readonly cases: readonly McpCredentialVectorCase[];
 }
 
-interface GitHubCredentialVectorCase {
+interface McpCredentialVectorCase {
   readonly name: string;
-  readonly credentials: readonly GitHubCredentialVectorCredential[];
-  readonly refresh_response?: GitHubCredentialVectorRefreshResponse | undefined;
-  readonly expected: GitHubCredentialVectorExpected;
+  readonly credentials: readonly McpCredentialVectorCredential[];
+  readonly refresh_response?: McpCredentialVectorRefreshResponse | undefined;
+  readonly expected: McpCredentialVectorExpected;
 }
 
-interface GitHubCredentialVectorCredential {
+interface McpCredentialVectorCredential {
   readonly auth_type: "mcp_oauth" | "static_bearer";
   readonly mcp_server_url: string;
   readonly secret_mcp_server_url?: string | undefined;
   readonly token?: string | undefined;
   readonly access_token?: string | undefined;
   readonly expires_at?: string | undefined;
-  readonly refresh?: GitHubCredentialVectorRefreshBlock | undefined;
+  readonly refresh?: McpCredentialVectorRefreshBlock | undefined;
   readonly archived?: boolean | undefined;
   readonly encrypted_auth?: "corrupt" | undefined;
 }
 
-interface GitHubCredentialVectorRefreshBlock {
+interface McpCredentialVectorRefreshBlock {
   readonly refresh_token: string;
   readonly client_id: string;
   readonly token_endpoint: string;
   readonly token_endpoint_auth?: { readonly type?: string | undefined } | undefined;
 }
 
-interface GitHubCredentialVectorRefreshResponse {
+interface McpCredentialVectorRefreshResponse {
   readonly status: number;
   readonly access_token?: string | undefined;
   readonly refresh_token?: string | undefined;
@@ -1039,15 +1040,15 @@ interface GitHubCredentialVectorRefreshResponse {
   readonly body?: string | undefined;
 }
 
-interface GitHubCredentialVectorExpected {
+interface McpCredentialVectorExpected {
   readonly outcome: "use" | "error";
-  readonly error?: GitHubCredentialVectorError | undefined;
+  readonly error?: McpCredentialVectorError | undefined;
   readonly token?: string | undefined;
   readonly bearer_authorization?: string | undefined;
   readonly refresh_triggered?: boolean | undefined;
 }
 
-type GitHubCredentialVectorError =
+type McpCredentialVectorError =
   | "credential_required"
   | "ambiguous"
   | "undecryptable"
@@ -1055,7 +1056,7 @@ type GitHubCredentialVectorError =
   | "refresh_unavailable"
   | "refresh_failed";
 
-interface GitHubCredentialVectorRow {
+interface McpCredentialVectorRow {
   readonly id: string;
   readonly vault_id: string;
   readonly mcp_server_url: string;
@@ -1063,15 +1064,15 @@ interface GitHubCredentialVectorRow {
   readonly encrypted_auth: Uint8Array;
 }
 
-async function loadGitHubCredentialVectors(): Promise<GitHubCredentialVectorFile> {
+async function loadMcpCredentialVectors(): Promise<McpCredentialVectorFile> {
   const body = await readFile(new URL("../testdata/mcp-credential-vectors.json", import.meta.url), "utf8");
-  const parsed = JSON.parse(body) as GitHubCredentialVectorFile;
+  const parsed = JSON.parse(body) as McpCredentialVectorFile;
   expect(parsed.catalog_url).toBe("https://api.githubcopilot.com/mcp/");
   return parsed;
 }
 
-async function encryptedRowsForVector(vector: GitHubCredentialVectorCase): Promise<readonly GitHubCredentialVectorRow[]> {
-  const rows: GitHubCredentialVectorRow[] = [];
+async function encryptedRowsForVector(vector: McpCredentialVectorCase): Promise<readonly McpCredentialVectorRow[]> {
+  const rows: McpCredentialVectorRow[] = [];
   for (const [index, credential] of vector.credentials.entries()) {
     if (credential.archived === true) {
       continue;
@@ -1104,9 +1105,23 @@ function requireVectorString(value: string | undefined, message: string): string
   return value;
 }
 
-function requireVectorError(value: GitHubCredentialVectorError | undefined, vectorName: string): GitHubCredentialVectorError {
+function requireVectorError(value: McpCredentialVectorError | undefined, vectorName: string): McpCredentialVectorError {
   if (value === undefined) {
     throw new Error(`${vectorName}: expected error`);
   }
   return value;
 }
+
+for(const method of ['client_secret_post','client_secret_basic']as const)for(const reject of [false,true])test(`Slack real token HTTP ${method} ${reject?'200 ok:false fails without write':'rotates confidential material'}`,async()=>{
+ const keyHex='01'.repeat(32),now=new Date('2026-01-01T00:00:00Z');const endpoint='https://mcp.slack.com/mcp';
+ const original={type:'mcp_oauth',mcp_server_url:endpoint,access_token:'SLACK_OLD_ACCESS_SENTINEL',expires_at:'2025-12-31T23:59:00Z',refresh:{refresh_token:'SLACK_OLD_REFRESH_SENTINEL',client_id:'slack-client',scope:'users:read',token_endpoint:'https://slack.com/api/oauth.v2.user.access',token_endpoint_auth:{type:method,client_secret:'SLACK_CLIENT_SECRET_SENTINEL'}}};
+ const encrypted=await encryptAES256GCM(new TextEncoder().encode(JSON.stringify(original)),keyHex);
+ const state=statefulSQL([{id:'cred_slack',vault_id:'vlt_slack',mcp_server_url:endpoint,auth_public_json:publicAuthJSON(endpoint),encrypted_auth:encrypted}]);
+ let requests=0;let receivedAuth:string|null=null;let receivedForm:URLSearchParams|undefined;
+ const peer=Bun.serve({port:0,hostname:'127.0.0.1',async fetch(request){requests++;receivedAuth=request.headers.get('authorization');receivedForm=new URLSearchParams(await request.text());return Response.json(reject?{ok:false,error:'invalid_refresh_token',access_token:'UNACCEPTED_ACCESS_SENTINEL'}:{ok:true,access_token:'SLACK_NEW_ACCESS_SENTINEL',refresh_token:'SLACK_NEW_REFRESH_SENTINEL',expires_in:3600});}});
+ const resolver=new SQLMcpCredentialResolver(state.sql,keyHex,()=>now,async(url,init)=>{expect(String(url)).toBe('https://slack.com/api/oauth.v2.user.access');return fetch(new URL('/token',peer.url),init);});
+ try{const resolution=await resolver.resolve({workspaceId:'w',sessionId:'s',mcpServerName:'work-slack',resolvedServer:registeredServer('slack','work-slack')});expect(requests).toBe(1);expect(receivedForm!.get('grant_type')).toBe('refresh_token');expect(receivedForm!.get('refresh_token')).toBe(original.refresh.refresh_token);expect(receivedForm!.get('scope')).toBe('users:read');
+ if(method==='client_secret_post'){expect(receivedAuth).toBeNull();expect(receivedForm!.get('client_id')).toBe('slack-client');expect(receivedForm!.get('client_secret')).toBe(original.refresh.token_endpoint_auth.client_secret);}else{expect(receivedAuth as string|null).toBe('Basic '+Buffer.from('slack-client:'+original.refresh.token_endpoint_auth.client_secret).toString('base64'));expect(receivedForm!.has('client_secret')).toBe(false);}
+ if(reject){expect(resolution).toEqual({ok:false,error:'refresh_unavailable'});expect(state.updateCount).toBe(0);expect(state.row().encrypted_auth).toEqual(encrypted);}else{expect(resolution).toMatchObject({ok:true,token:'SLACK_NEW_ACCESS_SENTINEL',refreshTriggered:true});expect(state.updateCount).toBe(1);const rotated=JSON.parse(new TextDecoder().decode(await decryptAES256GCM(state.row().encrypted_auth,keyHex)));expect(rotated.access_token).toBe('SLACK_NEW_ACCESS_SENTINEL');expect(rotated.refresh.refresh_token).toBe('SLACK_NEW_REFRESH_SENTINEL');expect(state.publicAuthJSON).not.toContain('SENTINEL');}
+ }finally{await peer.stop(true);}
+},10000);

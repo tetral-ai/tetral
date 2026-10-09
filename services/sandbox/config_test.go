@@ -332,3 +332,22 @@ func TestConfigFromEnvCarriesRcloneCacheKnobs(t *testing.T) {
 		}
 	})
 }
+
+func TestLifecycleConfigFitsPodApplicationAllocation(t *testing.T) {
+	for _, tc := range []struct {
+		drain, join string
+		valid       bool
+	}{
+		{"2000", "3000", true}, {"45000", "5000", true}, {"45001", "5000", false}, {"120000", "5000", false}, {"9223372036854", "9223372036854", false},
+	} {
+		env := validSandboxConfigEnv()
+		env["TETRAL_DRAIN_TIMEOUT_MS"], env["TETRAL_CANCEL_JOIN_TIMEOUT_MS"] = tc.drain, tc.join
+		cfg, err := ConfigFromEnv(env)
+		if (err == nil) != tc.valid {
+			t.Fatalf("drain=%s join=%s error=%v", tc.drain, tc.join, err)
+		}
+		if tc.valid && cfg.DrainTimeout+cfg.CancelJoinTimeout > 50000*time.Millisecond {
+			t.Fatal("invalid application allocation")
+		}
+	}
+}

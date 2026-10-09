@@ -1,0 +1,613 @@
+{
+  "schema": "tetral.previous-resource-dispositions/v1",
+  "sourceRevision": "11a85f8593144f9581de68a83ff05ee7ab56eaa7",
+  "resources": [
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "namespace": "tetral-agent-runtime",
+      "name": "agent-runtime",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "namespace": "tetral-system",
+      "name": "api",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "namespace": "tetral-system",
+      "name": "auth",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "namespace": "tetral-system",
+      "name": "bridge",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "namespace": "tetral-system",
+      "name": "event-stream",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "namespace": "tetral-system",
+      "name": "gateway",
+      "disposition": "retired"
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "namespace": "tetral-system",
+      "name": "git-proxy",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "namespace": "tetral-system",
+      "name": "queue",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "namespace": "tetral-system",
+      "name": "sandbox",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "autoscaling/v2",
+      "kind": "HorizontalPodAutoscaler",
+      "namespace": "tetral-system",
+      "name": "gateway",
+      "disposition": "retired"
+    },
+    {
+      "apiVersion": "autoscaling/v2",
+      "kind": "HorizontalPodAutoscaler",
+      "namespace": "tetral-system",
+      "name": "git-proxy",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "batch/v1",
+      "kind": "CronJob",
+      "namespace": "tetral-system",
+      "name": "cleanup",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "cilium.io/v2",
+      "kind": "CiliumNetworkPolicy",
+      "namespace": "tetral-agent-runtime",
+      "name": "agent-runtime-apiserver-egress",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "cilium.io/v2",
+      "kind": "CiliumNetworkPolicy",
+      "namespace": "tetral-system",
+      "name": "bridge-apiserver-egress",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "cilium.io/v2",
+      "kind": "CiliumNetworkPolicy",
+      "namespace": "tetral-system",
+      "name": "gateway-apiserver-egress",
+      "disposition": "retired"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "Ingress",
+      "namespace": "tetral-system",
+      "name": "git-proxy",
+      "disposition": "retired"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "Ingress",
+      "namespace": "tetral-system",
+      "name": "tetral-event-stream",
+      "disposition": "retired"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "Ingress",
+      "namespace": "tetral-system",
+      "name": "tetral-public-api",
+      "disposition": "retired"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "namespace": "tetral-agent-runtime",
+      "name": "agent-runtime",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "namespace": "tetral-system",
+      "name": "api",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "namespace": "tetral-system",
+      "name": "auth",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "namespace": "tetral-system",
+      "name": "bridge",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "namespace": "tetral-system",
+      "name": "cleanup",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "namespace": "tetral-system",
+      "name": "event-stream",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "namespace": "tetral-system",
+      "name": "gateway",
+      "disposition": "retired"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "namespace": "tetral-system",
+      "name": "git-proxy",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "namespace": "tetral-system",
+      "name": "queue",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "namespace": "tetral-system",
+      "name": "sandbox",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "namespace": "",
+      "name": "agent-runtime-tokenreview",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "namespace": "",
+      "name": "bridge-tokenreview",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "namespace": "",
+      "name": "gateway-tokenreview",
+      "disposition": "retired"
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "namespace": "",
+      "name": "agent-runtime-tokenreview",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "namespace": "",
+      "name": "bridge-tokenreview",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "namespace": "",
+      "name": "gateway-tokenreview",
+      "disposition": "retired"
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "namespace": "tetral-agent-runtime",
+      "name": "bridge-visibility",
+      "disposition": "retired"
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "namespace": "tetral-agent-runtime",
+      "name": "bridge-visibility",
+      "disposition": "retired"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "namespace": "tetral-system",
+      "name": "api-config",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "namespace": "tetral-system",
+      "name": "auth-config",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "namespace": "tetral-system",
+      "name": "bridge-config",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "namespace": "tetral-system",
+      "name": "gateway-config",
+      "disposition": "retired"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "namespace": "tetral-system",
+      "name": "queue-config",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "namespace": "tetral-system",
+      "name": "sandbox-config",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "namespace": "tetral-agent-runtime",
+      "name": "agent-runtime",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "namespace": "tetral-system",
+      "name": "api",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "namespace": "tetral-system",
+      "name": "api-metrics",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "namespace": "tetral-system",
+      "name": "auth",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "namespace": "tetral-system",
+      "name": "auth-metrics",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "namespace": "tetral-system",
+      "name": "bridge",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "namespace": "tetral-system",
+      "name": "event-stream",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "namespace": "tetral-system",
+      "name": "event-stream-metrics",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "namespace": "tetral-system",
+      "name": "gateway",
+      "disposition": "retired"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "namespace": "tetral-system",
+      "name": "git-proxy",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "namespace": "tetral-system",
+      "name": "queue",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "namespace": "tetral-system",
+      "name": "sandbox",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "namespace": "tetral-agent-runtime",
+      "name": "agent-runtime",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "namespace": "tetral-system",
+      "name": "api",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "namespace": "tetral-system",
+      "name": "auth",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "namespace": "tetral-system",
+      "name": "bridge",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "namespace": "tetral-system",
+      "name": "cleanup",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "namespace": "tetral-system",
+      "name": "event-stream",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "namespace": "tetral-system",
+      "name": "gateway",
+      "disposition": "retired"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "namespace": "tetral-system",
+      "name": "git-proxy",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "namespace": "tetral-system",
+      "name": "queue",
+      "disposition": "retained"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "namespace": "tetral-system",
+      "name": "sandbox",
+      "disposition": "retained"
+    }
+  ],
+  "retirements": [
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "namespace": "tetral-system",
+      "name": "gateway",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "gateway",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "independent-provider-gateway-mcp-web-workloads"
+    },
+    {
+      "apiVersion": "autoscaling/v2",
+      "kind": "HorizontalPodAutoscaler",
+      "namespace": "tetral-system",
+      "name": "gateway",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "gateway",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "independent-provider-gateway-mcp-web-workloads"
+    },
+    {
+      "apiVersion": "cilium.io/v2",
+      "kind": "CiliumNetworkPolicy",
+      "namespace": "tetral-system",
+      "name": "gateway-apiserver-egress",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "gateway",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "independent-provider-gateway-mcp-web-workloads"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "Ingress",
+      "namespace": "tetral-system",
+      "name": "git-proxy",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "git-proxy",
+        "app.kubernetes.io/part-of": "tetral",
+        "tetral.ai/edge-adapter": "ingress-nginx"
+      },
+      "replacementOwner": "public-envoy-gateway"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "Ingress",
+      "namespace": "tetral-system",
+      "name": "tetral-event-stream",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "tetral-public-edge",
+        "app.kubernetes.io/part-of": "tetral",
+        "tetral.ai/edge-adapter": "ingress-nginx"
+      },
+      "replacementOwner": "public-envoy-gateway"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "Ingress",
+      "namespace": "tetral-system",
+      "name": "tetral-public-api",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "tetral-public-edge",
+        "app.kubernetes.io/part-of": "tetral",
+        "tetral.ai/edge-adapter": "ingress-nginx"
+      },
+      "replacementOwner": "public-envoy-gateway"
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "namespace": "tetral-system",
+      "name": "gateway",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "gateway",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "independent-provider-gateway-mcp-web-workloads"
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "namespace": "",
+      "name": "gateway-tokenreview",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "gateway",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "independent-provider-gateway-mcp-web-workloads"
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "namespace": "",
+      "name": "gateway-tokenreview",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "gateway",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "independent-provider-gateway-mcp-web-workloads"
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "namespace": "tetral-agent-runtime",
+      "name": "bridge-visibility",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "bridge",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "job-runner-runtime-visibility"
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "namespace": "tetral-agent-runtime",
+      "name": "bridge-visibility",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "bridge",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "job-runner-runtime-visibility"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "namespace": "tetral-system",
+      "name": "gateway-config",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "gateway",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "independent-provider-gateway-mcp-web-workloads"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "namespace": "tetral-system",
+      "name": "gateway",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "gateway",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "independent-provider-gateway-mcp-web-workloads"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "namespace": "tetral-system",
+      "name": "gateway",
+      "requiredLabels": {
+        "app.kubernetes.io/name": "gateway",
+        "app.kubernetes.io/part-of": "tetral"
+      },
+      "replacementOwner": "independent-provider-gateway-mcp-web-workloads"
+    }
+  ]
+}

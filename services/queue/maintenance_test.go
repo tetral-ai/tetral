@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,7 +20,7 @@ func TestMaintenanceTickReclaimsThenSweepsSandboxJobsAndCounters(t *testing.T) {
 	now := time.Date(2026, 7, 31, 15, 0, 0, 0, time.UTC)
 	runMaintenanceTick(context.Background(), store, MaintenanceConfig{Limit: 37}, now)
 
-	wantCalls := []string{"reclaim:37", "sandbox-terminal:100", "empty-counters:100"}
+	wantCalls := []string{"reclaim:37", "sandbox-terminal:100", "empty-counters:100", "job-runner-terminal"}
 	if len(store.calls) != len(wantCalls) {
 		t.Fatalf("maintenance calls = %v; want %v", store.calls, wantCalls)
 	}
@@ -44,9 +45,64 @@ func TestMaintenanceTickStopsAfterReclaimFailure(t *testing.T) {
 func TestMaintenanceTickContinuesCounterSweepAfterTerminalRowIntegritySignal(t *testing.T) {
 	store := &recordingMaintenanceStore{sandboxSweepErr: &queue.IntegrityError{Message: "terminal timestamp is missing"}}
 	runMaintenanceTick(context.Background(), store, MaintenanceConfig{Limit: 10}, time.Now())
-	wantCalls := []string{"reclaim:10", "sandbox-terminal:100", "empty-counters:100"}
+	wantCalls := []string{"reclaim:10", "sandbox-terminal:100", "empty-counters:100", "job-runner-terminal"}
 	if !reflect.DeepEqual(store.calls, wantCalls) {
 		t.Fatalf("maintenance calls after terminal integrity signal = %v; want %v", store.calls, wantCalls)
+	}
+}
+
+// Job Runner terminal retention runs last in a tick, under its own two-second
+// deadline and with the tick's time. The budget counter grows by one per pass
+// in which the store reports any exhausted state (full page and another
+// eligible row), however many, and never for a full page alone; the number of
+// exhausted states is logged; retained rows with a NULL terminal timestamp are
+// reported as an integrity count; a failure logs no driver text.
+func TestMaintenanceTickRunsJobRunnerRetentionLastWithItsOwnBudget(t *testing.T) {
+	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	metrics := NewRetentionMetrics()
+	counter := func() float64 {
+		samples, err := metrics.Collector()(context.Background())
+		if err != nil || len(samples) != 1 || samples[0].Name != "queue_retention_budget_exhausted_total" ||
+			len(samples[0].Labels) != 1 || samples[0].Labels[0].Name != "phase" || samples[0].Labels[0].Value != "job_runner_terminal" {
+			t.Fatalf("retention samples = %#v/%v", samples, err)
+		}
+		return samples[0].Value
+	}
+	var buffer bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buffer, nil))
+	for _, pass := range []struct {
+		result      queue.JobRunnerTerminalRetentionResult
+		err         error
+		wantCounter float64
+		wantLog     string
+	}{
+		{queue.JobRunnerTerminalRetentionResult{Deleted: 256}, nil, 0, `"budget.exhausted":false`},
+		{queue.JobRunnerTerminalRetentionResult{Deleted: 512, ExhaustedStates: 2}, nil, 1, `"target.count":2`},
+		{queue.JobRunnerTerminalRetentionResult{Malformed: 2}, nil, 1, `"malformed.count":2`},
+		{queue.JobRunnerTerminalRetentionResult{Deleted: 1}, errors.New("raw driver detail"), 1, `"error.code":"queue_retention_failed"`},
+	} {
+		buffer.Reset()
+		store := &recordingMaintenanceStore{runnerRetention: pass.result, runnerRetentionErr: pass.err}
+		started := time.Now()
+		runMaintenanceTick(context.Background(), store, MaintenanceConfig{Limit: 10, Logger: logger, Metrics: metrics}, now)
+		finished := time.Now()
+		if got := store.calls[len(store.calls)-1]; got != "job-runner-terminal" || !store.runnerRetentionNow.Equal(now) {
+			t.Fatalf("last call %s at %s; want Runner retention at the tick time", got, store.runnerRetentionNow)
+		}
+		if deadline := store.runnerRetentionDeadline; deadline.Before(started.Add(jobRunnerRetentionDeadline)) || deadline.After(finished.Add(jobRunnerRetentionDeadline)) {
+			t.Fatalf("Runner retention deadline = %s; want %s after the phase started", deadline, jobRunnerRetentionDeadline)
+		}
+		if got := counter(); got != pass.wantCounter {
+			t.Fatalf("budget counter = %v; want %v", got, pass.wantCounter)
+		}
+		if !strings.Contains(buffer.String(), pass.wantLog) || strings.Contains(buffer.String(), "raw driver detail") {
+			t.Fatalf("retention log = %s; want %s without driver text", buffer.String(), pass.wantLog)
+		}
+	}
+	store := &recordingMaintenanceStore{reclaimErr: errors.New("reclaim failed")}
+	runMaintenanceTick(context.Background(), store, MaintenanceConfig{Limit: 10, Metrics: metrics}, now)
+	if len(store.calls) != 1 {
+		t.Fatalf("calls after reclaim failure = %v; want the existing early stop", store.calls)
 	}
 }
 
@@ -111,10 +167,14 @@ func decodeJSONLogRecords(t *testing.T, body []byte) []map[string]any {
 }
 
 type recordingMaintenanceStore struct {
-	calls           []string
-	sandboxSweepNow time.Time
-	reclaimErr      error
-	sandboxSweepErr error
+	calls                   []string
+	sandboxSweepNow         time.Time
+	reclaimErr              error
+	sandboxSweepErr         error
+	runnerRetention         queue.JobRunnerTerminalRetentionResult
+	runnerRetentionErr      error
+	runnerRetentionNow      time.Time
+	runnerRetentionDeadline time.Time
 }
 
 func (s *recordingMaintenanceStore) ReclaimExpiredLeases(_ context.Context, request queue.ReclaimExpiredLeasesRequest) (int, error) {
@@ -131,4 +191,11 @@ func (s *recordingMaintenanceStore) SweepSandboxTerminalJobs(_ context.Context, 
 func (s *recordingMaintenanceStore) SweepEmptyPartitionCounters(_ context.Context, request queue.EmptyPartitionCounterSweepRequest) (int, error) {
 	s.calls = append(s.calls, "empty-counters:"+strconv.Itoa(request.Limit))
 	return 0, nil
+}
+
+func (s *recordingMaintenanceStore) PruneJobRunnerTerminalJobs(ctx context.Context, request queue.JobRunnerTerminalRetentionRequest) (queue.JobRunnerTerminalRetentionResult, error) {
+	s.calls = append(s.calls, "job-runner-terminal")
+	s.runnerRetentionNow = request.Now
+	s.runnerRetentionDeadline, _ = ctx.Deadline()
+	return s.runnerRetention, s.runnerRetentionErr
 }

@@ -1,7 +1,7 @@
 // Package childcontrol owns the derived durable no-new-work predicate shared by
 // public input admission and Bridge runtime writers. The predicate reads only
-// existing Thread, internal control-event, Runtime Inbox, and lifecycle receipt
-// facts; it introduces no second control state.
+// existing Thread, internal control-event, Runtime Inbox, lifecycle receipt and
+// indexed Tool relation facts; it introduces no second control state.
 package childcontrol
 
 import (
@@ -123,13 +123,20 @@ func threadOrAncestorClosingTx(ctx context.Context, tx *dbconnect.Tx, workspaceI
 	return false, nil
 }
 
+// sourceToolTerminalTx reports whether the control's source Tool Use already
+// has a result. The source may live on any Thread of the Session; its result
+// shares that Thread through the relation key. A nonexistent source is not
+// terminal.
 func sourceToolTerminalTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, sessionID, sourceID string) (bool, error) {
 	var terminal bool
 	err := tx.QueryRow(ctx, `SELECT EXISTS (
-		SELECT 1 FROM session_events result
-		WHERE result.workspace_id=$1 AND result.session_id=$2
-		 AND result.type IN ('agent.tool_result','agent.mcp_tool_result')
-		 AND COALESCE(result.payload_json::jsonb->>'tool_use_event_id',result.payload_json::jsonb->>'tool_use_id',result.payload_json::jsonb->>'mcp_tool_use_id')=$3)`,
+		SELECT 1 FROM session_events source
+		JOIN session_events result
+		  ON result.workspace_id=source.workspace_id AND result.session_id=source.session_id
+		 AND result.session_thread_id=source.session_thread_id AND result.tool_use_event_id=source.event_id
+		WHERE source.workspace_id=$1 AND source.session_id=$2 AND source.event_id=$3
+		 AND source.type IN ('agent.tool_use','agent.mcp_tool_use')
+		 AND result.type IN ('agent.tool_result','agent.mcp_tool_result'))`,
 		workspaceID, sessionID, sourceID).Scan(&terminal)
 	return terminal, err
 }

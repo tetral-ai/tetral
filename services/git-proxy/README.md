@@ -2,8 +2,9 @@
 
 ## Responsibilities
 
-Streaming git smart-HTTP relay between sandboxes and `github.com`, and the
-platform's only internet-reachable ingress. Sandboxes hold no git credentials;
+Streaming git smart-HTTP relay between sandboxes and `github.com`, served
+through the shared public edge's separate Git host listener, which makes no API
+credential check. Sandboxes hold no git credentials;
 this service is the single site that injects the per-repository access token on
 the upstream leg of each request. It owns no durable tables, holds no
 cross-request state beyond the per-ticket in-flight counter
@@ -14,8 +15,8 @@ a compile-time constant (`githubHost` in `relay.go`), so the request-time SSRF
 surface is structurally zero. Go standard library only (`net/http`,
 `net/http/httputil`, `crypto/sha256`, `crypto/subtle`) plus `engine/internal`
 packages for store access, AES-GCM decryption, and structured logging. The core
-request pipeline runs across `routes.go` (grammar + ticket and owner/repo
-extraction), `ticket.go` (validation), `credential.go` (token lookup and
+request pipeline runs across `routes.go` (grammar + owner/repo extraction),
+`ticket.go` (ticket validation), `credential.go` (token lookup and
 injection), `policy.go` (allowlist decision), `relay.go`
 (`httputil.ReverseProxy` wiring), and `observability.go` (logging) — this is the
 pipeline, not the full tree. `cmd/git-proxy/main.go` is a thin shim over `run.go`, which holds
@@ -23,6 +24,11 @@ the `Run()` entrypoint and wires the public and metrics listeners, the database,
 and the encryptor; `config.go`, `handler.go`, `limits.go`, `metrics.go`, and
 `transport.go` carry config, handler assembly, limit constants, the metrics
 registry, and the upstream transport respectively.
+
+The production database connection requires `TETRAL_DATABASE_TLS_CA_PATH` and
+`TETRAL_DATABASE_TLS_SERVER_NAME`. It verifies trust and hostname with no
+plaintext fallback. New connections load the current validated trust generation;
+shutdown joins requests/work before closing the database and trust observer.
 
 ## States & lifecycle
 
@@ -64,10 +70,9 @@ POST /git-receive-pack
 
 Dumb-protocol `GET /info/refs` without `service`, any `/info/lfs/` path, any
 non-`github.com` host segment, and any other method are `404`. The upstream URL
-relays the `.git` suffix exactly as received. A bounded migration flag
-`TETRAL_GIT_PROXY_LEGACY_PATH_CUTOVER` (default off — the target end state)
-gates a legacy fifth shape carrying the ticket as the leading URL segment; with
-it off, URL-borne tickets are never accepted.
+relays the `.git` suffix exactly as received. A ticket is accepted only in
+`X-Tetral-Git-Ticket`: any leading path segment other than `github.com`,
+including a ticket placed in the URL, is `404` and is never validated.
 
 ### Ticket states
 
@@ -124,9 +129,11 @@ introduce one.
 
 On SIGTERM: readiness flips false, the listener stops accepting, in-flight
 transfers run to completion within `DefaultDrainGraceSeconds`, then the process
-exits. New connections after SIGTERM are refused. Deployment sets
-`terminationGracePeriodSeconds >= DRAIN_GRACE_SECONDS`, so a rolling deploy
-never truncates a clone/push that fits the window. Sandboxes must be able to
+exits. New connections after SIGTERM are refused. The process deadline equals
+`DRAIN_GRACE_SECONDS`, and the Deployment's `terminationGracePeriodSeconds` is
+`DRAIN_GRACE_SECONDS` plus a five-second signal margin (1805 seconds), so a
+rolling deploy never truncates a clone/push that fits the window and the bounded
+shutdown diagnostic and database close run before the kubelet kills the process. Sandboxes must be able to
 reach the proxy host for git to work at all: a sandbox environment configured
 with a `cidr_allow_list` must include the proxy's published CIDR, or git is
 unavailable in that sandbox — documented behavior, not a defect.
@@ -231,7 +238,7 @@ detector on. What proves what:
 | Guarantee | Test(s) |
 | --- | --- |
 | four accepted shapes; everything else `404` before upstream | `TestParseGitRequestWhitelist`, `TestParseGitRequestRejectsNonWhitelistedEndpoints`, `TestProxyRejectsInvalidRoutesBeforeUpstream`, `TestProxyRejectsMalformedQueryBeforeUpstream` |
-| legacy path segment gated behind the cutover flag | `TestParseGitRequestLegacyPathRequiresCutover`, `TestProxyDedicatedHeaderAndLegacyCutoverTable` |
+| ticket accepted only from `X-Tetral-Git-Ticket`; a URL-borne ticket is `404` with no validation or upstream call | `TestParseGitRequestRejectsURLBorneTicket`, `TestProxyAcceptsTicketOnlyFromHeader` |
 | ticket live/rotated-grace accept, hash-mismatch reject | `TestTicketValidatorLiveAndRotatedGrace`, `TestTicketValidatorRejectsHashMismatch`, `TestProxyRejectsBadTicketsBeforeUpstream`, `TestProxyAllowsTwoRequestOperationAcrossTicketRotationGrace` |
 | credential arms (inject / anonymous / `424`) | `git-credential-vectors.json` via `TestGitCredentialVectorFileIsExercisedCompletely`, `TestProxyInjectsAuthorizationOnlyForAllowlistedRepositories` |
 | per-request re-read observes rotation without cache; excludes detached/deleting rows | `TestPostgreSQLRepositoryTokenResolverObservesRotationWithoutCache`, `TestPostgreSQLRepositoryTokenResolverExcludesDetachedAndDeletingRows` |
@@ -249,3 +256,52 @@ detector on. What proves what:
 If a PR changes routing, ticket validation, the credential-injection boundary,
 streaming, or egress behavior in this folder, it updates the matching section
 here.
+
+## Process diagnostics
+
+The command follows the shared [Go process diagnostic contract](../../internal/workload/README.md#diagnostics)
+for the restart-only `TETRAL_LOG_*` controls, the default Info level, bounded
+suppression summaries, diagnostic drop and sink-failure metrics, and the
+diagnostic close after listeners and business resources.
+
+Deployment environment and service version retain their existing parsing:
+leading/trailing whitespace is trimmed, then empty values default to `local`
+and `unknown`. The shared resource parser selects that policy explicitly.
+
+## Public backend TLS
+
+`TETRAL_HTTP_TRANSPORT` defaults to `plaintext` for the standard routed profile.
+The hardened profile selects `native-mtls` on the existing business listener and
+requires `TETRAL_HTTP_TLS_CA_PATH`, `TETRAL_HTTP_TLS_CERT_PATH`,
+`TETRAL_HTTP_TLS_KEY_PATH` and the exact `TETRAL_HTTP_TLS_EDGE_CLIENT_URI`.
+The server verifies the edge client certificate and full role URI before HTTP
+admission; Envoy verifies this service's DNS/server identity independently.
+There is no additional plaintext business listener. Health/metrics use their
+separate restricted listener.
+
+Mount the complete CA/certificate/key directories read-only without `subPath`.
+The shared validated loader activates valid generations for fresh TLS handshakes,
+preserves established requests during leaf renewal, and retains valid last-known-good
+material after malformed replacement. Its observer closes only after the public
+listener and admitted requests join. CA replacement follows the
+[native CA rotation order](../../deploy/cert-manager/README.md); at this
+receiver, old connections drain through the service's bounded drain/join and
+restart, because removing trust alone does not retire an established connection.
+The [deployment guide](../../deploy/helm/tetral/README.md) owns Secret
+projections, native role issuance and profile prerequisites.
+
+## Operation measurement
+
+The additive `tetral_operation_duration_seconds` family uses
+`service="git-proxy"` and the four parsed operations `refs-upload`,
+`refs-receive`, `upload-pack`, `receive-pack`; an unparsed request uses
+`unknown_method`. It reuses the actual existing request duration from entry
+through relay return. HTTP statuses below 400 are `success`, 4xx `rejected`
+and 5xx `error`; these describe the observed HTTP result, not repository state.
+The family also records actual `shutdown_http_drain` and
+`shutdown_http_join` phases. Existing Git histogram, request counters and
+active connection gauge remain unchanged. The per-ticket concurrency bound
+is not a process-wide capacity gauge.
+
+Fixed seconds buckets and replica percentile queries follow the
+[shared operation duration contract](../../internal/workload/README.md#operation-durations).

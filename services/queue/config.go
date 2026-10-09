@@ -29,6 +29,7 @@ const (
 	EnvRetryBaseMS                     = "TETRAL_QUEUE_RETRY_BASE_MS"
 	EnvRetryCapMS                      = "TETRAL_QUEUE_RETRY_CAP_MS"
 	EnvRetryMaxAttempts                = "TETRAL_QUEUE_RETRY_MAX_ATTEMPTS"
+	EnvDrainTimeoutMS                  = "TETRAL_DRAIN_TIMEOUT_MS"
 	defaultLeaseReclaimIntervalSeconds = 30
 	defaultLeaseReclaimLimit           = 100
 	defaultRetryBaseMS                 = 1000
@@ -50,6 +51,8 @@ type Config struct {
 	RetryBaseDelay         time.Duration
 	RetryMaxDelay          time.Duration
 	RetryMaxAttempts       int
+	DrainTimeout           time.Duration
+	CancelJoinTimeout      time.Duration
 }
 
 func ConfigFromEnv(env Env) (Config, error) {
@@ -64,14 +67,7 @@ func ConfigFromEnv(env Env) (Config, error) {
 	if grpcAddress == "" {
 		grpcAddress = ":9090"
 	}
-	deploymentEnvironment := env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT")
-	if deploymentEnvironment == "" {
-		deploymentEnvironment = "local"
-	}
-	serviceVersion := env.Getenv("TETRAL_SERVICE_VERSION")
-	if serviceVersion == "" {
-		serviceVersion = "unknown"
-	}
+	resource := workload.ResourceConfigFromEnv(env.Getenv)
 	reclaimInterval := time.Duration(defaultLeaseReclaimIntervalSeconds) * time.Second
 	if raw := env.Getenv(EnvLeaseReclaimIntervalSeconds); raw != "" {
 		seconds, err := strconv.Atoi(raw)
@@ -106,16 +102,39 @@ func ConfigFromEnv(env Env) (Config, error) {
 	if retryCapMS < retryBaseMS {
 		return Config{}, workload.NewConfigError(EnvRetryCapMS + " must be greater than or equal to " + EnvRetryBaseMS)
 	}
+	drainMS, err := nonNegativeOrDefault(env.Getenv(EnvDrainTimeoutMS), 10000, EnvDrainTimeoutMS)
+	if err != nil {
+		return Config{}, err
+	}
+	if drainMS <= 0 || drainMS > 25000 {
+		return Config{}, workload.NewConfigError(EnvDrainTimeoutMS + " must be between 1 and 25000 milliseconds, leaving cancellation join time inside the 25-second application allocation")
+	}
+	joinMS, err := nonNegativeOrDefault(env.Getenv("TETRAL_CANCEL_JOIN_TIMEOUT_MS"), 5000, "TETRAL_CANCEL_JOIN_TIMEOUT_MS")
+	if err != nil {
+		return Config{}, err
+	}
+	profile := env.Getenv("TETRAL_TRANSPORT_PROFILE")
+	if profile != "" && profile != "standard-routed" && profile != "hardened" {
+		return Config{}, workload.NewConfigError("TETRAL_TRANSPORT_PROFILE must be standard-routed or hardened")
+	}
+	// Both profiles keep five seconds of the 30-second Pod grace for signal delivery and proxy
+	// shutdown, so the process deadline (drain plus join) always runs before the kubelet kills it.
+	const applicationMS = 25000
+	if joinMS <= 0 || joinMS > applicationMS-drainMS {
+		return Config{}, workload.NewConfigError("queue drain and cancellation join must fit the 25-second application allocation inside the 30-second Pod grace")
+	}
 	return Config{
 		HTTPAddress:            httpAddress,
 		GRPCAddress:            grpcAddress,
-		DeploymentEnvironment:  deploymentEnvironment,
-		ServiceVersion:         serviceVersion,
+		DeploymentEnvironment:  resource.DeploymentEnvironment,
+		ServiceVersion:         resource.ServiceVersion,
 		LeaseReclaimInterval:   reclaimInterval,
 		LeaseReclaimBatchLimit: reclaimLimit,
 		RetryBaseDelay:         time.Duration(retryBaseMS) * time.Millisecond,
 		RetryMaxDelay:          time.Duration(retryCapMS) * time.Millisecond,
 		RetryMaxAttempts:       retryMaxAttempts,
+		DrainTimeout:           time.Duration(drainMS) * time.Millisecond,
+		CancelJoinTimeout:      time.Duration(joinMS) * time.Millisecond,
 	}, nil
 }
 

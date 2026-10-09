@@ -1,0 +1,23 @@
+{
+  "configured": {
+    "hot": {
+      "config_generation": 7,
+      "approval_mode": "approve_for_me",
+      "system": "Operate as the session specialist.",
+      "memory_stores": [{"memoryStoreId":"memstore_runtime_config","name":"Project notes","access":"read_write","instructions":"Preserve this guidance."}],
+      "tool_policy": {"approvalMode":"approve_for_me","mcpServers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"mcpToolsets":[{"mcpServerName":"github","defaultConfig":{"enabled":false,"permission_policy":{"type":"always_ask"}},"configs":[{"name":"github_search","enabled":true,"permission_policy":{"type":"always_allow"}}]}]}
+    },
+    "cold": {
+      "configGeneration": 7,
+      "approvalMode": "approve_for_me",
+      "system": "Operate as the session specialist.",
+      "memoryStores": [{"memoryStoreId":"memstore_runtime_config","name":"Project notes","access":"read_write","instructions":"Preserve this guidance."}],
+      "toolPolicy": {"approvalMode":"approve_for_me","mcpServers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"mcpToolsets":[{"mcpServerName":"github","defaultConfig":{"enabled":false,"permission_policy":{"type":"always_ask"}},"configs":[{"name":"github_search","enabled":true,"permission_policy":{"type":"always_allow"}}]}]},
+      "installedTools": [{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"github","default_config":{"enabled":false,"permission_policy":{"type":"always_ask"}},"configs":[{"name":"github_search","enabled":true,"permission_policy":{"type":"always_allow"}}]}]
+    }
+  },
+  "empty": {
+    "hot": {"config_generation":7,"approval_mode":"approve_for_me","system":null,"memory_stores":[],"tool_policy":{"approvalMode":"approve_for_me","mcpServers":[],"mcpToolsets":[]}},
+    "cold": {"configGeneration":7,"approvalMode":"approve_for_me","system":null,"memoryStores":[],"toolPolicy":{"approvalMode":"approve_for_me","mcpServers":[],"mcpToolsets":[]},"installedTools":[{"type":"tetral_agent_toolset","family":"claude"}]}
+  }
+}

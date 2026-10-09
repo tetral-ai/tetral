@@ -1,0 +1,41 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tetral-nats
+  namespace: tetral-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nats
+      app.kubernetes.io/instance: tetral-nats
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: provider-gateway}
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: event-stream}
+      ports: [{protocol: TCP, port: 4222}]
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nats
+              app.kubernetes.io/instance: tetral-nats
+      ports: [{protocol: TCP, port: 6222}]
+    - from:
+        - namespaceSelector:
+            matchLabels: {tetral.ai/network-role: monitoring}
+      ports: [{protocol: TCP, port: 7777}]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nats
+              app.kubernetes.io/instance: tetral-nats
+      ports: [{protocol: TCP, port: 6222}]
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]

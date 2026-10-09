@@ -4,7 +4,7 @@
  * Adapts the generated MCP connector gRPC service to the service shell on the
  * process's dedicated internal listener. Runtime-facing RunMcpTool carries
  * bounded JSON input and refs-only results; Bridge-facing ListMcpTools carries
- * scoped catalog requests and tool definitions. Raw decoded media leaves the
+ * scoped configured Server requests and tool definitions. Raw decoded media leaves the
  * connector only through its separate Bridge commit client. This adapter applies
  * symmetric message limits and preserves only intentional service status errors,
  * mapping every unexpected failure to a bounded internal error. The process
@@ -13,6 +13,7 @@
  * tool execution.
  */
 
+import { McpConnectorError } from "./errors.js";
 import {
   Metadata,
   Server,
@@ -21,18 +22,13 @@ import {
 } from "@grpc/grpc-js";
 import type {
   sendUnaryData,
-  ServerUnaryCall,
   ServiceError,
 } from "@grpc/grpc-js";
 import {
   McpConnectorServiceService,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type {
-  ListMcpToolsRequest,
-  ListMcpToolsResponse,
   McpConnectorServiceServer,
-  RunMcpToolRequest,
-  RunMcpToolResponse,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { MCP_BLOB_MAX_BYTES } from "./formatter.js";
 import { mcpGrpcServerKeepaliveOptions } from "./transport.js";
@@ -47,7 +43,7 @@ export const MCP_CONNECTOR_GRPC_MAX_MESSAGE_BYTES = MCP_BLOB_MAX_BYTES + MCP_CON
 export interface McpConnectorGrpcServer {
   readonly server: Server;
   readonly bind: (address: string) => Promise<number>;
-  readonly shutdown: () => Promise<void>;
+  readonly shutdown: (deadline?: Date) => Promise<void>;
 }
 
 /**
@@ -61,7 +57,25 @@ export function createMcpConnectorGrpcServer(service: McpConnectorServiceShell):
     ...mcpGrpcServerKeepaliveOptions(),
   });
   const implementation: McpConnectorServiceServer = {
-    runMcpTool: unaryHandler((request, metadata) => service.runMcpTool(request, metadata)),
+    runMcpTool: (call, callback) => {
+      const controller = new AbortController();
+      const cancel = () => {
+        const deadline = call.getDeadline();
+        // grpc-js reconstructs this deadline from a relative wire timeout;
+        // cancellation cannot distinguish client expiry from early abandonment.
+        // Both end a finite caller's execution allowance without replay authority.
+        const bounded = Number.isFinite(deadline instanceof Date ? deadline.getTime() : deadline);
+        controller.abort(bounded ? new McpConnectorError("mcp_timeout", "MCP tool call timed out.") : new Error("MCP execution caller cancelled"));
+      };
+      call.on("cancelled", cancel);
+      if (call.cancelled) cancel();
+      const deadline = call.getDeadline();
+      const remaining = (deadline instanceof Date ? deadline.getTime() : deadline) - Date.now();
+      void unary(() => service.runMcpTool(call.request, call.metadata, {
+        signal: controller.signal,
+        ...(Number.isFinite(remaining) ? {timeoutMs: Math.max(1, remaining)} : {}),
+      }), callback).finally(() => call.removeListener("cancelled", cancel));
+    },
     listMcpTools: (call, callback) => {
       const controller = new AbortController();
       const cancel = () => controller.abort(new Error("MCP discovery caller cancelled"));
@@ -80,26 +94,32 @@ export function createMcpConnectorGrpcServer(service: McpConnectorServiceShell):
     server,
     bind: async (address) =>
       await new Promise<number>((resolve, reject) => {
-        server.bindAsync(address, ServerCredentials.createInsecure(), (error, port) => {
-          if (error !== null) {
-            reject(new Error("mcp connector grpc listener unavailable"));
-            return;
-          }
-          resolve(port);
+        server.bindAsync(
+          address,
+          ServerCredentials.createInsecure(),
+          (error, port) => {
+            if (error !== null) {
+              reject(new Error("mcp connector grpc listener unavailable"));
+              return;
+            }
+            resolve(port);
+          },
+        );
+      }),
+    shutdown: async (deadline = new Date(Date.now() + 5000)) =>
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(
+          () => {
+            server.forceShutdown();
+            resolve();
+          },
+          Math.max(0, deadline.getTime() - Date.now()),
+        );
+        server.tryShutdown(() => {
+          clearTimeout(timer);
+          resolve();
         });
       }),
-    shutdown: async () =>
-      await new Promise<void>((resolve) => {
-        server.tryShutdown(() => resolve());
-      }),
-  };
-}
-
-function unaryHandler<Request extends RunMcpToolRequest | ListMcpToolsRequest, Response extends RunMcpToolResponse | ListMcpToolsResponse>(
-  handler: (request: Request, metadata: Metadata) => Promise<Response>,
-): (call: ServerUnaryCall<Request, Response>, callback: sendUnaryData<Response>) => void {
-  return (call, callback) => {
-    void unary(() => handler(call.request, call.metadata), callback);
   };
 }
 

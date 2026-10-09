@@ -67,8 +67,13 @@ func TestAppendClientEventsChecksCommittedChildCloseWithAPIRole(t *testing.T) {
 	// Once the parent records the terminal source Tool Result, this idle child
 	// is no longer fenced by that control. Rejection did not consume the key.
 	if _, err := admin.Exec(`INSERT INTO session_events (
-   workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,created_at,updated_at
- ) VALUES ('default',$1,$2,'evt_close_result',1,'agent.tool_result','{"tool_use_event_id":"evt_close_source"}',now(),now())`, sessionID, sessionEventMainThreadID(sessionID)); err != nil {
+   workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,
+   model_request_id,model_tool_call_id,tool_use_event_id,created_at,updated_at
+ ) VALUES
+ ('default',$1,$2,'evt_close_source',1,'agent.tool_use','{"name":"close_agent","input":{}}',
+  'mreq_close_source','call_close_source',NULL,now(),now()),
+ ('default',$1,$2,'evt_close_result',2,'agent.tool_result','{"tool_use_id":"evt_close_source"}',
+  'mreq_close_source',NULL,'evt_close_source',now(),now())`, sessionID, sessionEventMainThreadID(sessionID)); err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
@@ -77,8 +82,8 @@ func TestAppendClientEventsChecksCommittedChildCloseWithAPIRole(t *testing.T) {
 		}
 	}
 	rows := readSessionEventLedgerRows(t, admin, sessionID)
-	if len(rows) != 3 {
-		t.Fatalf("ledger rows = %d; want control, terminal result and one tool confirmation", len(rows))
+	if len(rows) != 4 {
+		t.Fatalf("ledger rows = %d; want control, source Tool Use, terminal result and one tool confirmation", len(rows))
 	}
 	var confirmations int
 	for _, row := range rows {

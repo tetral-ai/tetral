@@ -154,6 +154,8 @@ func classifyError(err error) errorClassification {
 	// Auth-layer error types. Public API-key management lives in
 	// auth, but target route families still use auth errors
 	// when signed principal or test authenticator checks fail.
+	var authPkgUnavailableError *authErrors.UnavailableError
+	var authPkgPermissionError *authErrors.PermissionError
 	var authPkgAuthenticationError *authErrors.AuthenticationError
 	var authPkgValidationError *authErrors.ValidationError
 	var authPkgNotFoundError *authErrors.NotFoundError
@@ -196,6 +198,10 @@ func classifyError(err error) errorClassification {
 	switch {
 	case errors.As(err, &auth):
 		return classified(http.StatusUnauthorized, "authentication_error", auth.Message)
+	case errors.As(err, &authPkgUnavailableError):
+		return classified(http.StatusServiceUnavailable, "api_error", "authentication unavailable")
+	case errors.As(err, &authPkgPermissionError):
+		return classified(http.StatusForbidden, "permission_error", "permission denied")
 	case errors.As(err, &authPkgAuthenticationError):
 		return classified(http.StatusUnauthorized, "authentication_error", authPkgAuthenticationError.Message)
 	case errors.Is(err, workspaceErrors.ErrNoWorkspaceInContext):

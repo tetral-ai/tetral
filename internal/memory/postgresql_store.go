@@ -381,10 +381,10 @@ func (s *PostgreSQLMemoryStore) CreateMemory(ctx context.Context, ws workspace.I
 			return err
 		}
 		_, err := tx.Exec(ctx,
-			`INSERT INTO memory_versions (workspace_id, memory_store_id, memory_id, memory_version_id, operation, path, content, content_sha256, content_size_bytes, created_at, created_actor_type, created_api_key_id, created_session_id, created_user_id)
-			 VALUES ($1, $2, $3, $4, 'created', $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+			`INSERT INTO memory_versions (workspace_id, memory_store_id, memory_id, memory_version_id, operation, path, content, content_sha256, content_size_bytes, created_at, created_actor_type, created_api_key_id, created_session_id, created_user_id, created_service_id)
+			 VALUES ($1, $2, $3, $4, 'created', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 			string(ws), storeID, memoryID, versionID, request.Path, request.Content, contentHash, contentSize, now,
-			actor.Type, nullable(actor.APIKeyID), nullable(actor.SessionID), nullable(actor.UserID))
+			actor.Type, nullable(actor.APIKeyID), nullable(actor.SessionID), nullable(actor.UserID), nullable(actor.ServiceID))
 		return err
 	})
 	if err != nil {
@@ -516,10 +516,10 @@ func (s *PostgreSQLMemoryStore) UpdateMemory(ctx context.Context, ws workspace.I
 			return err
 		}
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO memory_versions (workspace_id, memory_store_id, memory_id, memory_version_id, operation, path, content, content_sha256, content_size_bytes, created_at, created_actor_type, created_api_key_id, created_session_id, created_user_id)
-			 VALUES ($1, $2, $3, $4, 'modified', $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+			`INSERT INTO memory_versions (workspace_id, memory_store_id, memory_id, memory_version_id, operation, path, content, content_sha256, content_size_bytes, created_at, created_actor_type, created_api_key_id, created_session_id, created_user_id, created_service_id)
+			 VALUES ($1, $2, $3, $4, 'modified', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 			string(ws), storeID, memoryID, versionID, targetPath, targetContent, targetHash, targetSize, now,
-			actor.Type, nullable(actor.APIKeyID), nullable(actor.SessionID), nullable(actor.UserID)); err != nil {
+			actor.Type, nullable(actor.APIKeyID), nullable(actor.SessionID), nullable(actor.UserID), nullable(actor.ServiceID)); err != nil {
 			return err
 		}
 		result = &Memory{
@@ -610,10 +610,10 @@ func (s *PostgreSQLMemoryStore) DeleteMemory(ctx context.Context, ws workspace.I
 			return err
 		}
 		_, err := tx.Exec(ctx,
-			`INSERT INTO memory_versions (workspace_id, memory_store_id, memory_id, memory_version_id, operation, path, created_at, created_actor_type, created_api_key_id, created_session_id, created_user_id)
-			 VALUES ($1, $2, $3, $4, 'deleted', $5, $6, $7, $8, $9, $10)`,
+			`INSERT INTO memory_versions (workspace_id, memory_store_id, memory_id, memory_version_id, operation, path, created_at, created_actor_type, created_api_key_id, created_session_id, created_user_id, created_service_id)
+			 VALUES ($1, $2, $3, $4, 'deleted', $5, $6, $7, $8, $9, $10, $11)`,
 			string(ws), storeID, memoryID, versionID, path, now,
-			actor.Type, nullable(actor.APIKeyID), nullable(actor.SessionID), nullable(actor.UserID))
+			actor.Type, nullable(actor.APIKeyID), nullable(actor.SessionID), nullable(actor.UserID), nullable(actor.ServiceID))
 		return err
 	})
 	if err != nil {
@@ -736,8 +736,8 @@ func (s *PostgreSQLMemoryStore) GetMemoryVersion(ctx context.Context, ws workspa
 	err := s.client.WithWorkspaceTx(ctx, string(ws), "memory.transaction", func(tx *dbconnect.Tx) error {
 		row := tx.QueryRow(ctx,
 			`SELECT memory_version_id, memory_store_id, memory_id, operation, path, content, content_sha256, content_size_bytes, created_at,
-			        created_actor_type, created_api_key_id, created_session_id, created_user_id,
-			        redacted_at, redacted_actor_type, redacted_api_key_id, redacted_session_id, redacted_user_id
+			        created_actor_type, created_api_key_id, created_session_id, created_user_id, created_service_id,
+			        redacted_at, redacted_actor_type, redacted_api_key_id, redacted_session_id, redacted_user_id, redacted_service_id
 			   FROM memory_versions
 			  WHERE workspace_id = $1 AND memory_store_id = $2 AND memory_version_id = $3`,
 			string(ws), storeID, versionID)
@@ -779,8 +779,8 @@ func (s *PostgreSQLMemoryStore) ListMemoryVersions(ctx context.Context, ws works
 			return err
 		}
 		query := `SELECT memory_version_id, memory_store_id, memory_id, operation, path, content, content_sha256, content_size_bytes, created_at,
-			        created_actor_type, created_api_key_id, created_session_id, created_user_id,
-			        redacted_at, redacted_actor_type, redacted_api_key_id, redacted_session_id, redacted_user_id
+			        created_actor_type, created_api_key_id, created_session_id, created_user_id, created_service_id,
+			        redacted_at, redacted_actor_type, redacted_api_key_id, redacted_session_id, redacted_user_id, redacted_service_id
 			   FROM memory_versions
 			  WHERE workspace_id = $1 AND memory_store_id = $2`
 		args := []any{string(ws), storeID}
@@ -899,12 +899,12 @@ func (s *PostgreSQLMemoryStore) RedactMemoryVersion(ctx context.Context, ws work
 		row := tx.QueryRow(ctx,
 			`UPDATE memory_versions
 			    SET path = NULL, content = NULL, content_sha256 = NULL, content_size_bytes = NULL,
-			        redacted_at = $1, redacted_actor_type = $2, redacted_api_key_id = $3, redacted_session_id = $4, redacted_user_id = $5
-			  WHERE workspace_id = $6 AND memory_store_id = $7 AND memory_version_id = $8
+			        redacted_at = $1, redacted_actor_type = $2, redacted_api_key_id = $3, redacted_session_id = $4, redacted_user_id = $5, redacted_service_id = $6
+			  WHERE workspace_id = $7 AND memory_store_id = $8 AND memory_version_id = $9
 			  RETURNING memory_version_id, memory_store_id, memory_id, operation, path, content, content_sha256, content_size_bytes, created_at,
-			        created_actor_type, created_api_key_id, created_session_id, created_user_id,
-			        redacted_at, redacted_actor_type, redacted_api_key_id, redacted_session_id, redacted_user_id`,
-			now, actor.Type, nullable(actor.APIKeyID), nullable(actor.SessionID), nullable(actor.UserID), string(ws), storeID, versionID)
+			        created_actor_type, created_api_key_id, created_session_id, created_user_id, created_service_id,
+			        redacted_at, redacted_actor_type, redacted_api_key_id, redacted_session_id, redacted_user_id, redacted_service_id`,
+			now, actor.Type, nullable(actor.APIKeyID), nullable(actor.SessionID), nullable(actor.UserID), nullable(actor.ServiceID), string(ws), storeID, versionID)
 		redacted, scanErr := scanMemoryVersion(row, true)
 		if scanErr != nil {
 			return scanErr
@@ -1196,12 +1196,12 @@ func scanMemoryVersion(row rowScanner, includeContent bool) (*MemoryVersion, err
 	version.Type = memoryVersionType
 	var path, content, hash sql.NullString
 	var size sql.NullInt64
-	var apiKeyID, sessionID, userID sql.NullString
-	var redactedAt, redactedActorType, redactedAPIKeyID, redactedSessionID, redactedUserID sql.NullString
+	var apiKeyID, sessionID, userID, serviceID sql.NullString
+	var redactedAt, redactedActorType, redactedAPIKeyID, redactedSessionID, redactedUserID, redactedServiceID sql.NullString
 	var versionCreatedAt time.Time
 	if err := row.Scan(&version.ID, &version.MemoryStoreID, &version.MemoryID, &version.Operation, &path, &content, &hash, &size, &versionCreatedAt,
-		&version.CreatedBy.Type, &apiKeyID, &sessionID, &userID,
-		&redactedAt, &redactedActorType, &redactedAPIKeyID, &redactedSessionID, &redactedUserID); err != nil {
+		&version.CreatedBy.Type, &apiKeyID, &sessionID, &userID, &serviceID,
+		&redactedAt, &redactedActorType, &redactedAPIKeyID, &redactedSessionID, &redactedUserID, &redactedServiceID); err != nil {
 		return nil, err
 	}
 	version.CreatedAt = versionCreatedAt.UTC().Format(time.RFC3339)
@@ -1228,6 +1228,9 @@ func scanMemoryVersion(row rowScanner, includeContent bool) (*MemoryVersion, err
 	if userID.Valid {
 		version.CreatedBy.UserID = userID.String
 	}
+	if serviceID.Valid {
+		version.CreatedBy.ServiceID = serviceID.String
+	}
 	if redactedAt.Valid {
 		version.RedactedAt = &redactedAt.String
 		actor := Actor{Type: redactedActorType.String}
@@ -1240,6 +1243,9 @@ func scanMemoryVersion(row rowScanner, includeContent bool) (*MemoryVersion, err
 		if redactedUserID.Valid {
 			actor.UserID = redactedUserID.String
 		}
+		if redactedServiceID.Valid {
+			actor.ServiceID = redactedServiceID.String
+		}
 		version.RedactedBy = &actor
 	}
 	return &version, nil
@@ -1248,8 +1254,8 @@ func scanMemoryVersion(row rowScanner, includeContent bool) (*MemoryVersion, err
 func selectMemoryVersionForUpdate(ctx context.Context, tx *dbconnect.Tx, workspaceID string, storeID string, versionID string) (*MemoryVersion, error) {
 	row := tx.QueryRow(ctx,
 		`SELECT memory_version_id, memory_store_id, memory_id, operation, path, content, content_sha256, content_size_bytes, created_at,
-		        created_actor_type, created_api_key_id, created_session_id, created_user_id,
-		        redacted_at, redacted_actor_type, redacted_api_key_id, redacted_session_id, redacted_user_id
+		        created_actor_type, created_api_key_id, created_session_id, created_user_id, created_service_id,
+		        redacted_at, redacted_actor_type, redacted_api_key_id, redacted_session_id, redacted_user_id, redacted_service_id
 		   FROM memory_versions
 		  WHERE workspace_id = $1 AND memory_store_id = $2 AND memory_version_id = $3
 		  FOR UPDATE`,
@@ -1314,15 +1320,19 @@ func normalizeView(view string) string {
 func validateActor(actor Actor) error {
 	switch actor.Type {
 	case ActorAPI:
-		if actor.APIKeyID == "" || actor.SessionID != "" || actor.UserID != "" {
+		if actor.APIKeyID == "" || actor.SessionID != "" || actor.UserID != "" || actor.ServiceID != "" {
 			return &ValidationError{Message: "invalid actor"}
 		}
 	case ActorSession:
-		if actor.APIKeyID != "" || actor.SessionID == "" || actor.UserID != "" {
+		if actor.APIKeyID != "" || actor.SessionID == "" || actor.UserID != "" || actor.ServiceID != "" {
 			return &ValidationError{Message: "invalid actor"}
 		}
 	case ActorUser:
-		if actor.APIKeyID != "" || actor.SessionID != "" || actor.UserID == "" {
+		if actor.APIKeyID != "" || actor.SessionID != "" || actor.UserID == "" || actor.ServiceID != "" {
+			return &ValidationError{Message: "invalid actor"}
+		}
+	case ActorService:
+		if actor.APIKeyID != "" || actor.SessionID != "" || actor.UserID != "" || actor.ServiceID == "" {
 			return &ValidationError{Message: "invalid actor"}
 		}
 	default:

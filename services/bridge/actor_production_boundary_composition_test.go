@@ -1,7 +1,6 @@
 package agentruntimebridge
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -22,11 +21,10 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
-	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
-	"github.com/tetral-ai/tetral/internal/workspace"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
 
 type lostACKSubagentBridge struct {
@@ -91,7 +89,53 @@ func runSubagentProductionComposition(
 	if err != nil {
 		t.Fatalf("listen for subagent ToolRunner composition: %v", err)
 	}
-	server := grpc.NewServer()
+	// A failed composition reports the last declaration attempts the actual
+	// Bridge handler received; tool inputs themselves are never recorded.
+	type declarationAttempt struct {
+		WriteID             string `json:"writeId"`
+		EnteredAtUnixMS     int64  `json:"enteredAtUnixMs"`
+		RemainingDeadlineMS int64  `json:"remainingDeadlineMs"`
+		InputBytes          int    `json:"inputBytes"`
+		Pending             bool   `json:"pending"`
+		ElapsedMS           int64  `json:"elapsedMs"`
+		ReturnContext       string `json:"returnContext,omitempty"`
+		ReturnCode          string `json:"returnCode,omitempty"`
+	}
+	var declarationMu sync.Mutex
+	var declarationAttempts []*declarationAttempt
+	server := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, request any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		write, ok := request.(*bridgev1.WriteEventRequest)
+		if !ok || write.GetToolDeclaration() == nil {
+			return handler(ctx, request)
+		}
+		started := time.Now()
+		var remainingMS int64
+		if deadline, ok := ctx.Deadline(); ok {
+			remainingMS = time.Until(deadline).Milliseconds()
+		}
+		observation := &declarationAttempt{
+			WriteID: write.GetRuntimeWriteId()[:min(len(write.GetRuntimeWriteId()), 128)], EnteredAtUnixMS: started.UnixMilli(),
+			RemainingDeadlineMS: remainingMS,
+			InputBytes:          len(write.GetToolDeclaration().GetPublicExecutionInputJson()), Pending: true,
+		}
+		declarationMu.Lock()
+		declarationAttempts = append(declarationAttempts, observation)
+		if len(declarationAttempts) > 3 {
+			declarationAttempts = declarationAttempts[1:]
+		}
+		declarationMu.Unlock()
+		response, err := handler(ctx, request)
+		declarationMu.Lock()
+		observation.Pending, observation.ElapsedMS, observation.ReturnCode = false, time.Since(started).Milliseconds(), status.Code(err).String()
+		observation.ReturnContext = "active"
+		if ctx.Err() == context.DeadlineExceeded {
+			observation.ReturnContext = "deadline"
+		} else if ctx.Err() == context.Canceled {
+			observation.ReturnContext = "canceled"
+		}
+		declarationMu.Unlock()
+		return response, err
+	}))
 	bridgev1.RegisterAgentRuntimeBridgeServiceServer(server, bridgeServer)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() {
@@ -101,7 +145,7 @@ func runSubagentProductionComposition(
 	input, err := json.Marshal(map[string]any{
 		"bridgeAddress": listener.Addr().String(), "workspaceId": "default",
 		"sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": bindingID, "bindingGeneration": bindingGeneration, "targetPodUid": podUID,
+		"bindingId": bindingID, "bindingGeneration": bindingGeneration, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID,
 		"taskName": taskName, "prompt": prompt, "forkTurns": forkTurns,
 	})
 	if err != nil {
@@ -117,7 +161,14 @@ func runSubagentProductionComposition(
 	command.Dir = "../agent-runtime"
 	output, err := command.CombinedOutput()
 	if err != nil {
-		t.Fatalf("run subagent ToolRunner composition: %v: %s", err, output)
+		// Snapshot pending handlers under the same lock as their actual return observations.
+		declarationMu.Lock()
+		observations, encodeErr := json.Marshal(declarationAttempts)
+		declarationMu.Unlock()
+		if encodeErr != nil {
+			t.Fatal("encode subagent declaration observations")
+		}
+		t.Fatalf("run subagent ToolRunner composition: %v: %s declarationAttempts=%s", err, output, observations)
 	}
 	var result subagentProductionCompositionResult
 	if err := json.Unmarshal(output, &result); err != nil {
@@ -125,251 +176,6 @@ func runSubagentProductionComposition(
 	}
 	result.BridgeAddress = listener.Addr().String()
 	return result
-}
-
-func TestPostgreSQLThreadLoopToolRunnerCreatesOneAuthorizedSubagentAfterLostACK(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const (
-		sessionID = "sesn_subagent_toolrunner"
-		threadID  = "thr_subagent_toolrunner"
-		bindingID = "bind_subagent_toolrunner"
-		podUID    = "pod_subagent_toolrunner"
-		taskName  = "production-worker"
-	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_subagent_toolrunner_user", "evt_subagent_toolrunner_user", 1)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
-		SET data_json='{"parts":[{"type":"text","text":"start a worker"}]}'
-		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND sequence=1`, sessionID, threadID); err != nil {
-		t.Fatalf("seed subagent ToolRunner user context: %v", err)
-	}
-
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.RuntimeBindingTokenHMACKey = []byte("subagent-toolrunner-composition-signing-key")
-	wrapped := &lostACKSubagentBridge{AgentRuntimeBridgeServiceServer: BridgeAPIServer{store: store}}
-	result := runSubagentProductionComposition(t, wrapped, sessionID, threadID, bindingID, 1, podUID, taskName, "complete the delegated task", "all")
-	if result.ResultType != "observed" || result.ProviderInvocations != 3 || wrapped.calls() != 2 {
-		t.Fatalf("subagent ToolRunner result = %+v create calls=%d", result, wrapped.calls())
-	}
-	requests := wrapped.capturedRequests()
-	if len(requests) != 2 || !proto.Equal(requests[0], requests[1]) {
-		t.Fatalf("lost-ack subagent declarations were not exact replay: %#v", requests)
-	}
-	declaration := requests[0]
-	if declaration.GetTaskName() != taskName || declaration.GetAgentType() != "worker" ||
-		declaration.GetInitialPrompt() != "complete the delegated task" ||
-		len(declaration.GetParentMessageSequences()) != 1 || declaration.GetParentMessageSequences()[0] != 1 {
-		t.Fatalf("Runtime-selected private subagent declaration = %#v", declaration)
-	}
-
-	var childID, prefixEntries, publicInput, receiptJSON string
-	var children, createOperations, toolUses, toolResults, deliveries, openingSent, openingReceived, queuedJobs, reschedules int
-	if err := admin.QueryRowContext(context.Background(), `SELECT
-		(SELECT id FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND parent_thread_id=$2 AND role='subagent'),
-		(SELECT entries_json FROM session_thread_context_prefixes WHERE workspace_id='default' AND session_id=$1 AND child_thread_id=(SELECT id FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND parent_thread_id=$2 AND role='subagent')),
-		(SELECT payload_json::jsonb->'input' FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_use' AND payload_json::jsonb->>'name'='spawn_agent'),
-		(SELECT count(*) FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND parent_thread_id=$2 AND role='subagent'),
-		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='create_child_thread' AND source_kind='subagent_spawn'),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_use' AND payload_json::jsonb->>'name'='spawn_agent'),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result'),
-		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND input_kind='agent_mail'),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.thread_message_sent'),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.thread_message_received'),
-		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND payload_json::jsonb->>'session_id'=$1 AND payload_json::jsonb->>'input_kind'='agent_mail'),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_rescheduled'),
-		(SELECT result_json FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='create_child_thread' AND source_kind='subagent_spawn')`, sessionID, threadID).
-		Scan(&childID, &prefixEntries, &publicInput, &children, &createOperations, &toolUses, &toolResults, &deliveries,
-			&openingSent, &openingReceived, &queuedJobs, &reschedules, &receiptJSON); err != nil {
-		t.Fatalf("read subagent ToolRunner durable census: %v", err)
-	}
-	if childID == "" || children != 1 || createOperations != 1 || toolUses != 1 || toolResults != 1 || deliveries != 1 || openingSent != 1 || openingReceived != 1 || queuedJobs != 1 || reschedules != 1 {
-		t.Fatalf("subagent durable census child=%s children/ops/uses/results/deliveries/sent/received/queue=%d/%d/%d/%d/%d/%d/%d/%d",
-			childID, children, createOperations, toolUses, toolResults, deliveries, openingSent, openingReceived, queuedJobs)
-	}
-	if receiptJSON != `{"child_thread_id":"`+childID+`"}` {
-		t.Fatalf("minimal subagent replay receipt = %s", receiptJSON)
-	}
-	if !strings.Contains(prefixEntries, "start a worker") || strings.Contains(prefixEntries, "call_subagent_production") {
-		t.Fatalf("subagent immutable prefix = %s", prefixEntries)
-	}
-	var persistedPrefix []bridgeRuntimeContextEntry
-	if err := json.Unmarshal([]byte(prefixEntries), &persistedPrefix); err != nil {
-		t.Fatalf("decode persisted subagent prefix: %v", err)
-	}
-	if !slices.Equal(contextEntrySequences(persistedPrefix), []int64{1}) {
-		t.Fatalf("persisted subagent prefix sequences = %v; want [1]", contextEntrySequences(persistedPrefix))
-	}
-	canonicalPublicInput, err := canonicalRunToolJSON(publicInput)
-	if err != nil {
-		t.Fatalf("canonicalize subagent public provider input: %v", err)
-	}
-	if canonicalPublicInput != `{"agent_type":"worker","fork_turns":"all","prompt":"complete the delegated task","task_name":"production-worker"}` {
-		t.Fatalf("subagent public provider input = %s", publicInput)
-	}
-
-	coldRuntime := startAttachmentRecoveryRuntime(t, result.BridgeAddress, "complete", sessionID, childID, bindingID, 1, podUID)
-	deliverAttachmentRuntimeInput(t, runtime, admin, coldRuntime.port, sessionID, "runtime-pod-0", podUID)
-	providerStart := coldRuntime.providerStart(t)
-	providerWire := string(providerStart.ProviderRequest)
-	prefixOffset := strings.Index(providerWire, "start a worker")
-	openingOffset := strings.Index(providerWire, "complete the delegated task")
-	if providerStart.ProviderInvocations != 1 || providerStart.GatewayRequests != 1 || prefixOffset < 0 || openingOffset <= prefixOffset {
-		t.Fatalf("cold child Provider request = invocations:%d gateway:%d prefix/opening:%d/%d wire:%s",
-			providerStart.ProviderInvocations, providerStart.GatewayRequests, prefixOffset, openingOffset, providerWire)
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		var childEnds int
-		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
-			WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_end'`, sessionID, childID).Scan(&childEnds); err == nil && childEnds == 1 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	coldRuntime.kill(t)
-	var childEnds int
-	var inboxStatus, queueStatus string
-	if err := admin.QueryRowContext(context.Background(), `SELECT
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_end'),
-		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND input_kind='agent_mail'),
-		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND payload_json::jsonb->>'session_id'=$1 AND payload_json::jsonb->>'session_thread_id'=$2)`, sessionID, childID).
-		Scan(&childEnds, &inboxStatus, &queueStatus); err != nil {
-		t.Fatalf("read cold child delivery settlement: %v", err)
-	}
-	if childEnds != 1 || inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged {
-		t.Fatalf("cold child settlement ends/Inbox/Queue = %d/%s/%s; want 1/accepted/acknowledged", childEnds, inboxStatus, queueStatus)
-	}
-}
-
-func TestPostgreSQLChildControlExhaustionRejoinsParentToolResult(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const (
-		sessionID = "sesn_child_control_rejoin"
-		parentID  = "thr_child_control_parent"
-		bindingID = "bind_child_control_rejoin"
-		podUID    = "pod_child_control_rejoin"
-		taskName  = "child-control-target"
-		spawnID   = "evt_child_control_spawn"
-	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.RuntimeBindingTokenHMACKey = []byte("child-control-rejoin-key")
-	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, parentID, "msg_child_control_prefix", "evt_child_control_prefix", 1)
-	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, spawnID, 1, "agent.tool_use",
-		`{"type":"agent.tool_use","name":"spawn_agent","input":{"task_name":"`+taskName+`","agent_type":"worker","fork_turns":"all"},"evaluated_permission":"allow"}`)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET visibility='public',session_visible=true,model_request_id='mreq_child_control_spawn'
-		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, spawnID); err != nil {
-		t.Fatalf("authorize child control spawn source: %v", err)
-	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, "mreq_child_control_spawn", spawnID, "call_child_control_spawn", "spawn_agent")
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, spawnID)
-	created, err := store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
-		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: spawnID,
-		TaskName: taskName, AgentType: "worker", InitialPrompt: "perform child work", ParentMessageSequences: []int64{1},
-	})
-	if err != nil || created.GetCommitted().GetChildThreadId() == "" {
-		t.Fatalf("create child control target = %#v/%v", created, err)
-	}
-	childID := created.GetCommitted().GetChildThreadId()
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='running'
-		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, childID); err != nil {
-		t.Fatalf("activate child control target: %v", err)
-	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen for child control composition: %v", err)
-	}
-	server := grpc.NewServer()
-	RegisterBridgeAPI(server, store)
-	go func() { _ = server.Serve(listener) }()
-	t.Cleanup(func() {
-		server.Stop()
-		_ = listener.Close()
-	})
-	input, err := json.Marshal(map[string]any{
-		"bridgeAddress": listener.Addr().String(), "workspaceId": "default", "sessionId": sessionID,
-		"sessionThreadId": parentID, "bindingId": bindingID, "bindingGeneration": 1,
-		"targetPodUid": podUID, "taskName": taskName,
-	})
-	if err != nil {
-		t.Fatalf("encode child control composition: %v", err)
-	}
-	inputPath := t.TempDir() + "/child-control.json"
-	if err := os.WriteFile(inputPath, input, 0o600); err != nil {
-		t.Fatalf("write child control composition: %v", err)
-	}
-	var output bytes.Buffer
-	command := exec.Command("bun", "packages/runtime-pod/test/fixtures/child-control-exhaustion-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
-	command.Dir = "../agent-runtime"
-	command.Stdout = &output
-	command.Stderr = &output
-	if err := command.Start(); err != nil {
-		t.Fatalf("start child control composition: %v", err)
-	}
-	t.Cleanup(func() {
-		if command.ProcessState == nil {
-			_ = command.Process.Kill()
-			_ = command.Wait()
-		}
-	})
-
-	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		var jobs int
-		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM queue_jobs
-			WHERE workspace_id='default' AND payload_json::jsonb->>'session_id'=$1
-			  AND payload_json::jsonb->>'session_thread_id'=$2
-			  AND payload_json::jsonb->>'input_kind'='interrupt_control'`, sessionID, childID).Scan(&jobs); err == nil && jobs == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("Runtime did not create child interrupt custody: %s", output.String())
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs
-		SET attempt_count=max_attempts,available_at=clock_timestamp()-interval '1 second'
-		WHERE workspace_id='default' AND payload_json::jsonb->>'session_id'=$1
-		  AND payload_json::jsonb->>'session_thread_id'=$2
-		  AND payload_json::jsonb->>'input_kind'='interrupt_control'`, sessionID, childID); err != nil {
-		t.Fatalf("advance child control to final delivery owner: %v", err)
-	}
-	deliverer := &postgresFinalizingDeliverer{store: NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)}
-	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
-		Config: JobRunnerConfig{LeaseOwner: "child-control-rejoin", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
-	}
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("run child control final owner: %v", err)
-	}
-	if err := command.Wait(); err != nil {
-		t.Fatalf("run child control composition: %v: %s", err, output.String())
-	}
-	var composed struct {
-		ProviderInvocations int               `json:"providerInvocations"`
-		ProviderContexts    []json.RawMessage `json:"providerContexts"`
-	}
-	if err := json.Unmarshal(output.Bytes(), &composed); err != nil {
-		t.Fatalf("decode child control composition: %v: %s", err, output.String())
-	}
-	var childStatus string
-	var toolUses, toolResults, parentEnds, completionMails int
-	if err := admin.QueryRowContext(context.Background(), `SELECT
-		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$2),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$3 AND type='agent.tool_use' AND payload_json::jsonb->>'name'='interrupt_agent'),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$3 AND type='agent.tool_result'),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$3 AND type='span.model_request_end'),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='agent.thread_message_sent')`,
-		sessionID, childID, parentID).Scan(&childStatus, &toolUses, &toolResults, &parentEnds, &completionMails); err != nil {
-		t.Fatalf("read child control durable rejoin: %v", err)
-	}
-	if composed.ProviderInvocations != 2 || childStatus != "failed" || toolUses != 1 || toolResults != 1 || parentEnds != 2 || completionMails != 1 || deliverer.deliveries != 0 {
-		t.Fatalf("child control rejoin = providers:%d child:%s uses/results/ends/mail/runtime:%d/%d/%d/%d/%d contexts:%s",
-			composed.ProviderInvocations, childStatus, toolUses, toolResults, parentEnds, completionMails, deliverer.deliveries, output.String())
-	}
 }
 
 func TestPostgreSQLThreadLoopSelectsPrivateSubagentPrefixReferencesFromPublicForkTurns(t *testing.T) {
@@ -388,7 +194,7 @@ func TestPostgreSQLThreadLoopSelectsPrivateSubagentPrefixReferencesFromPublicFor
 			threadID := "thr_subagent_fork_" + suffix
 			bindingID := "bind_subagent_fork_" + suffix
 			podUID := "pod_subagent_fork_" + suffix
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_subagent_fork_"+suffix, "evt_subagent_fork_"+suffix, 1)
 			if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
@@ -422,7 +228,7 @@ func TestPostgreSQLThreadLoopSelectsPrivateSubagentPrefixReferencesFromPublicFor
 				t.Fatalf("decode selected prefix: %v", err)
 			}
 			loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-				Scope: scopeForThread(bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), childID),
+				Scope: runtimecontrol.ScopeForThread(sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), childID),
 			})
 			if err != nil {
 				t.Fatalf("cold-load selected prefix: %v", err)
@@ -447,7 +253,7 @@ func TestPostgreSQLThreadLoopRejectsOversizedSubagentPromptBeforeBridgeMutation(
 		bindingID = "bind_subagent_prompt_bound"
 		podUID    = "pod_subagent_prompt_bound"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_subagent_prompt_bound", "evt_subagent_prompt_bound", 1)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
@@ -482,8 +288,8 @@ func TestPostgreSQLNestedSubagentOpeningUsesDurableSourceTaskName(t *testing.T) 
 		bindingID = "bind_nested_subagent"
 		podUID    = "pod_nested_subagent"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, parentID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, parentID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads
 		SET task_name='durable-parent',title='durable-parent',agent_type='worker'
@@ -512,8 +318,8 @@ func TestPostgreSQLNestedSubagentOpeningUsesDurableSourceTaskName(t *testing.T) 
 		Scan(&openingPayload); err != nil {
 		t.Fatalf("read nested opening provenance: %v", err)
 	}
-	if testJSONPathString(t, openingPayload, "source_thread_id") != parentID ||
-		testJSONPathString(t, openingPayload, "source_task_name") != "durable-parent" {
+	if sessionfixture.JSONPathString(t, openingPayload, "source_thread_id") != parentID ||
+		sessionfixture.JSONPathString(t, openingPayload, "source_task_name") != "durable-parent" {
 		t.Fatalf("nested opening provenance = %s", openingPayload)
 	}
 }
@@ -551,7 +357,7 @@ func TestSubagentMailColdLoadAcrossGeneratedGRPCAndPostgreSQL(t *testing.T) {
 		mailSourceID   = "evt_actor_production_mail"
 		mailContent    = "inspect the target-owned durable envelope"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_messages (
 		workspace_id,session_id,session_thread_id,message_id,sequence,kind,data_json,created_at,updated_at
@@ -566,11 +372,11 @@ func TestSubagentMailColdLoadAcrossGeneratedGRPCAndPostgreSQL(t *testing.T) {
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$3`, sessionID, spawnRequestID, spawnSourceID); err != nil {
 		t.Fatalf("authorize durable spawn source: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, spawnRequestID, spawnSourceID, "call_actor_production_spawn", "spawn_agent")
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, spawnSourceID)
+	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, spawnRequestID, spawnSourceID, "call_actor_production_spawn", "spawn_agent")
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, spawnSourceID)
 
 	client := startActorProductionBridge(t, runtime)
-	parentScope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+	parentScope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 	spawnRequest := &bridgev1.CreateSubagentThreadRequest{
 		Scope: parentScope, SourceToolUseEventId: spawnSourceID, TaskName: taskName, AgentType: "worker", InitialPrompt: "inspect the target-owned durable envelope", ParentMessageSequences: []int64{1},
 	}
@@ -591,14 +397,8 @@ func TestSubagentMailColdLoadAcrossGeneratedGRPCAndPostgreSQL(t *testing.T) {
 	if strings.Contains(prefixEntries, "call_actor_production_spawn") {
 		t.Fatalf("live spawn draft leaked into child prefix: %s", prefixEntries)
 	}
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
-		SET data_json = jsonb_set(data_json::jsonb, '{parts}',
-			(data_json::jsonb -> 'parts') || '[{"type":"text","text":"late parent growth"}]'::jsonb)::text,
-			updated_at=clock_timestamp()
-		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
-		sessionID, parentID, spawnRequestID); err != nil {
-		t.Fatalf("grow parent Assistant after child creation: %v", err)
-	}
+	sessionfixture.AppendAssistantMessagePartsForTest(t, admin, "default", sessionID, parentID, spawnRequestID,
+		`{"type":"text","text":"late parent growth"}`)
 	const repeatedSourceID = "evt_actor_production_spawn_repeated"
 	const repeatedRequestID = "mreq_actor_production_spawn_repeated"
 	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, repeatedSourceID, 3, "agent.tool_use",
@@ -608,8 +408,8 @@ func TestSubagentMailColdLoadAcrossGeneratedGRPCAndPostgreSQL(t *testing.T) {
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$3`, sessionID, repeatedRequestID, repeatedSourceID); err != nil {
 		t.Fatalf("authorize repeated durable spawn source: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, repeatedRequestID, repeatedSourceID, "call_actor_production_spawn_repeated", "spawn_agent")
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, repeatedSourceID)
+	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, repeatedRequestID, repeatedSourceID, "call_actor_production_spawn_repeated", "spawn_agent")
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, repeatedSourceID)
 	if repeated, err := client.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
 		Scope: parentScope, SourceToolUseEventId: repeatedSourceID, TaskName: taskName, AgentType: "worker", InitialPrompt: "inspect the target-owned durable envelope", ParentMessageSequences: []int64{1},
 	}); status.Code(err) != codes.AlreadyExists || repeated != nil {
@@ -642,7 +442,7 @@ func TestSubagentMailColdLoadAcrossGeneratedGRPCAndPostgreSQL(t *testing.T) {
 		t.Fatalf("replayed child prefix/census = %s children:%d operations:%d events:%d prefixes:%d inbox:%d queue:%d",
 			replayPrefixEntries, children, operations, createdEvents, prefixes, runtimeInputs, queuedJobs)
 	}
-	childScope := bridgeAPIScope(sessionID, childID, bindingID, 1, podUID)
+	childScope := sessionfixture.BridgeAPIScope(sessionID, childID, bindingID, 1, podUID)
 	firstLoaded, err := client.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: childScope})
 	if err != nil {
 		t.Fatalf("cold-load child first provider context: %v", err)
@@ -663,8 +463,8 @@ func TestSubagentMailColdLoadAcrossGeneratedGRPCAndPostgreSQL(t *testing.T) {
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, mailSourceID); err != nil {
 		t.Fatalf("authorize durable mail source: %v", err)
 	}
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, mailSourceID)
-	deliveryID := agentMailDeliveryID(mailSourceID, childID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, mailSourceID)
+	deliveryID := runtimecontrol.AgentMailDeliveryID(mailSourceID, childID)
 	delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
 		Scope: parentScope, DeliveryId: deliveryID, TargetThreadId: childID, SourceToolUseEventId: mailSourceID, Content: mailContent,
 	})
@@ -719,8 +519,8 @@ func assertRuntimeDirectContextComposition(t *testing.T, contextJSON string) {
 	if err := json.Unmarshal([]byte(contextJSON), &direct); err != nil {
 		t.Fatalf("decode generated LoadContext direct facts: %v", err)
 	}
-	if _, ok := direct["contextEntries"]; !ok {
-		t.Fatalf("generated LoadContext omitted contextEntries: %s", contextJSON)
+	if _, ok := direct["messages"]; !ok {
+		t.Fatalf("generated LoadContext omitted messages: %s", contextJSON)
 	}
 	input, err := json.Marshal(map[string]any{"contextJson": contextJSON, "providerComposition": true})
 	if err != nil {
@@ -783,10 +583,10 @@ func TestReviewerTrunkSuccessionAndSidecarReplayAcrossGeneratedGRPCAndPostgreSQL
 		bindingID = "bind_reviewer_production"
 		podUID    = "pod_reviewer_production"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	client := startActorProductionBridge(t, runtime)
-	scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 
 	firstRequest := &bridgev1.EnsureApprovalReviewerTrunkRequest{Scope: scope, EnsureOperationId: "ensure_reviewer_manager_1"}
 	first, err := client.EnsureApprovalReviewerTrunk(context.Background(), firstRequest)
@@ -847,7 +647,7 @@ func TestReviewerTrunkSuccessionAndSidecarReplayAcrossGeneratedGRPCAndPostgreSQL
 	if err != nil || admissionReplay.GetDuplicate().GetRuntimeInputId() != reviewInputID {
 		t.Fatalf("replay review-keyed input admission = %#v/%v", admissionReplay, err)
 	}
-	reviewerScope := bridgeAPIScope(sessionID, sidecarID, bindingID, 1, podUID)
+	reviewerScope := sessionfixture.BridgeAPIScope(sessionID, sidecarID, bindingID, 1, podUID)
 	committedInput, err := client.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope: reviewerScope, RuntimeInputId: reviewInputID,
 		ApprovalReviewText: []string{"review the bounded approval evidence"},

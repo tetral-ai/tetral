@@ -1,3 +1,6 @@
+import { OperationMetricsRegistry } from "@tetral/ts-observability";
+import type { OperationOutcome } from "@tetral/ts-observability";
+import type { ProviderAssemblyResources } from "./providers/block-assembler.js";
 /**
  * @packageDocumentation
  *
@@ -13,7 +16,32 @@
 
 /** Aggregates process-local admitted-turn observations for operations exposition. */
 export class ProviderGatewayMetricsRegistry {
+  readonly operations = new OperationMetricsRegistry("provider-gateway", ["StreamProviderRequest", "provider_first_fragment", "provider_first_complete", "complete_frame_write", "shutdown_drain", "shutdown_cancel_join"]);
+  #capacity = 0;
+  #admissionRejections = 0;
+  setCapacity(capacity: number): void { this.#capacity = Math.max(0, capacity); }
+  recordAdmissionRejection(): void { this.#admissionRejections++; }
+  observeRequest(outcome: OperationOutcome, durationSeconds: number): void { this.operations.observe("StreamProviderRequest", outcome, durationSeconds); }
   #activeProviderStreams = 0;
+  #assemblyResources: ProviderAssemblyResources = {retainedBytes:0,cumulativeContentBytes:0,segments:0,openBlocks:0,identities:0};
+  #pendingFrameBytes = 0;
+  /** Stage durations are exported only through the shared operation histogram. */
+  observeProviderStage(sample: ProviderStageSample): void {
+    this.operations.observe(sample.stage, sample.outcome, sample.durationMs / 1000);
+  }
+  holdCompleteFrame(bytes: number): () => void {
+    this.#pendingFrameBytes += bytes;
+    let released = false;
+    return () => { if (!released) { released = true; this.#pendingFrameBytes -= bytes; } };
+  }
+  startContentAssembly(): { readonly observe: (resources:ProviderAssemblyResources)=>void; readonly close:()=>void } {
+    let previous:ProviderAssemblyResources={retainedBytes:0,cumulativeContentBytes:0,segments:0,openBlocks:0,identities:0};
+    const observe=(resources:ProviderAssemblyResources):void=>{
+      for(const key of Object.keys(previous) as (keyof ProviderAssemblyResources)[]) this.#assemblyResources = {...this.#assemblyResources,[key]:this.#assemblyResources[key]+resources[key]-previous[key]};
+      previous=resources;
+    };
+    return {observe,close:()=>observe({retainedBytes:0,cumulativeContentBytes:0,segments:0,openBlocks:0,identities:0})};
+  }
   #providerStreamsTotal = 0;
   #providerStreamFailuresTotal = 0;
   #providerStreamDurationMsSum = 0;
@@ -45,11 +73,16 @@ export class ProviderGatewayMetricsRegistry {
   render(input: { readonly ready: boolean }): string {
     const memory = process.memoryUsage();
     return [
+      this.operations.render(),
+      metric("providergateway_provider_stream_capacity", "Configured concurrent provider stream admission capacity.", "gauge", this.#capacity),
+      metric("providergateway_admission_rejections_total", "Provider streams rejected by concurrent admission capacity.", "counter", this.#admissionRejections),
       metric("providergateway_ready", "Provider Gateway readiness state.", "gauge", input.ready ? 1 : 0),
       metric("providergateway_provider_streams_active", "Active provider streams admitted by Provider Gateway.", "gauge", this.#activeProviderStreams),
       metric("providergateway_provider_streams_total", "Provider streams admitted by Provider Gateway.", "counter", this.#providerStreamsTotal),
       metric("providergateway_provider_stream_failures_total", "Provider streams that ended with a classified failure.", "counter", this.#providerStreamFailuresTotal),
       metric("providergateway_provider_stream_duration_ms_sum", "Cumulative provider stream duration in milliseconds.", "counter", this.#providerStreamDurationMsSum),
+      metric("providergateway_complete_frame_pending_bytes", "Encoded complete frames held through write callback and required drain.", "gauge", this.#pendingFrameBytes),
+      ...Object.entries(this.#assemblyResources).map(([key,value])=>metric(`providergateway_content_${key.replace(/[A-Z]/g,letter=>`_${letter.toLowerCase()}`)}`,"Live request-local provider content resources.","gauge",value)),
       metric("process_heap_used_bytes", "JavaScript heap bytes currently used by the process.", "gauge", memory.heapUsed),
       metric("process_rss_bytes", "Resident set size bytes for the process.", "gauge", memory.rss),
     ].join("");
@@ -65,4 +98,16 @@ function formatMetricValue(value: number): string {
     return "0";
   }
   return String(Math.max(0, value));
+}
+
+/** Closed per-operation observations; raw samples are emitted by the owning service. */
+export type ProviderStageOutcome = "success" | "error" | "cancelled";
+export type ProviderContentKind = "none" | "text" | "reasoning" | "tool";
+export interface ProviderStageSample {
+  readonly stage: "provider_first_fragment" | "provider_first_complete" | "complete_frame_write";
+  readonly outcome: ProviderStageOutcome;
+  readonly kind: ProviderContentKind;
+  readonly durationMs: number;
+  readonly canonicalBytes: number;
+  readonly encodedBytes: number;
 }

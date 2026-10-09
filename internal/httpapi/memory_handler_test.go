@@ -56,9 +56,9 @@ func TestMemoryHTTPStoreMemoryAndVersionHappyPath(t *testing.T) {
 	env := newAuthTestEnv(t)
 	service := memory.NewService(memory.NewPostgreSQLStore(dbconnect.NewClientForTesting(env.runtime)))
 	router := env.router(httpapi.WithMemoryHandler(httpapi.NewMemoryHandler(service)))
-	principal, err := env.store.AuthenticateRawKey(defaultWorkspaceContext(), env.envKey)
+	principal, err := auth.NewAuthorityResolver(env.runtime, "", nil).AuthenticateKey(defaultWorkspaceContext(), env.envKey)
 	if err != nil {
-		t.Fatalf("AuthenticateRawKey: %v", err)
+		t.Fatalf("AuthenticateKey: %v", err)
 	}
 
 	code, body := performJSONRequest(t, router, http.MethodPost, "/v1/memory_stores", env.envKey, `{"name":"http-store","metadata":{"team":"runtime"}}`)
@@ -249,7 +249,7 @@ func TestMemoryHTTPOversizedMemoryContentIsInvalidRequest(t *testing.T) {
 func TestMemoryHTTPCreateMemoryRejectsNullContentAndAcceptsEmptyContent(t *testing.T) {
 	service := &createMemoryCaptureService{}
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
-		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_memory_empty_content"}, nil
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_memory_empty_content"), nil
 	})
 	router := httpapi.NewRouter(nil, "", httpapi.WithAuthenticator(authenticator), httpapi.WithMemoryHandler(httpapi.NewMemoryHandler(service)))
 
@@ -284,7 +284,7 @@ func TestMemoryHTTPCreateMemoryRejectsNullContentAndAcceptsEmptyContent(t *testi
 func TestMemoryHTTPUpdateMemoryDefaultsToBasicView(t *testing.T) {
 	service := &updateMemoryCaptureService{}
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
-		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_memory_basic_update"}, nil
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_memory_basic_update"), nil
 	})
 	router := httpapi.NewRouter(nil, "", httpapi.WithAuthenticator(authenticator), httpapi.WithMemoryHandler(httpapi.NewMemoryHandler(service)))
 
@@ -307,6 +307,14 @@ type createMemoryCaptureService struct {
 type updateMemoryCaptureService struct {
 	panicMemoryService
 	request *memory.UpdateMemoryRequest
+}
+
+// These capture fixtures explicitly supply the trusted pre-mutation owner fact.
+func (s *createMemoryCaptureService) GetStore(_ context.Context, _ workspace.ID, storeID string) (*memory.Store, error) {
+	return &memory.Store{ID: storeID}, nil
+}
+func (s *updateMemoryCaptureService) GetMemory(_ context.Context, _ workspace.ID, storeID, memoryID, _ string) (*memory.Memory, error) {
+	return &memory.Memory{ID: memoryID, MemoryStoreID: storeID}, nil
 }
 
 func (s *updateMemoryCaptureService) UpdateMemory(_ context.Context, _ workspace.ID, storeID string, memoryID string, request memory.UpdateMemoryRequest, _ memory.Actor) (*memory.Memory, error) {
@@ -333,7 +341,7 @@ func (s *createMemoryCaptureService) CreateMemory(_ context.Context, _ workspace
 
 func newMemoryValidationRouter() http.Handler {
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
-		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_memory_content_validation"}, nil
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_memory_content_validation"), nil
 	})
 	return httpapi.NewRouter(nil, "", httpapi.WithAuthenticator(authenticator), httpapi.WithMemoryHandler(httpapi.NewMemoryHandler(panicMemoryService{})))
 }
@@ -594,9 +602,9 @@ func decodeMemoryJSON(t *testing.T, body string, target any) {
 
 func authenticatedAPIKeyID(t *testing.T, env *authTestEnv) string {
 	t.Helper()
-	result, err := env.store.AuthenticateRawKey(defaultWorkspaceContext(), env.envKey)
+	result, err := auth.NewAuthorityResolver(env.runtime, "", nil).AuthenticateKey(defaultWorkspaceContext(), env.envKey)
 	if err != nil {
-		t.Fatalf("AuthenticateRawKey: %v", err)
+		t.Fatalf("AuthenticateKey: %v", err)
 	}
 	if result.APIKeyID == "" {
 		t.Fatal("authenticated API key id is empty")

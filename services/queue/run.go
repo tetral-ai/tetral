@@ -2,9 +2,14 @@ package tetralqueue
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/internalgrpc"
@@ -20,10 +25,11 @@ type ListenFunc func(network string, address string) (net.Listener, error)
 type RunHTTPFunc func(context.Context, workload.Config) error
 
 type RuntimeConfig struct {
-	Listen          ListenFunc
-	RunHTTP         RunHTTPFunc
-	Logger          *slog.Logger
-	DBStatsProvider workload.DBStatsProvider
+	Listen           ListenFunc
+	RunHTTP          RunHTTPFunc
+	Logger           *slog.Logger
+	DBStatsProvider  workload.DBStatsProvider
+	MaintenanceStore MaintenanceStore
 }
 
 func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) error {
@@ -40,7 +46,9 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 	}
 	logger := runtime.Logger
 	if logger == nil {
-		logger = workload.NewLogger(nil, "queue", cfg.DeploymentEnvironment, cfg.ServiceVersion)
+		owner := workload.NewProcessLogger(nil, "queue", cfg.DeploymentEnvironment, cfg.ServiceVersion, workload.DefaultDiagnosticConfig())
+		defer owner.CloseWithBudget()
+		logger = owner.Logger
 	}
 	grpcListener, err := listen("tcp", cfg.GRPCAddress)
 	if err != nil {
@@ -56,12 +64,16 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	serverCtx, cancel := context.WithCancel(ctx)
+	serverCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	readiness := workload.NewReadiness()
-	httpMetrics := workload.NewHTTPMetrics()
-	grpcMetrics := workload.NewGRPCMetrics()
+	httpMetrics := workload.NewHTTPMetrics("queue")
+	grpcMetrics := workload.NewGRPCMetrics("queue")
+	// Queue owns these drain phases; the shared registry only knows the
+	// generic HTTP and gRPC shutdown operations.
+	grpcMetrics.Operations.SetOperations([]string{"shutdown_queue_drain", "shutdown_queue_cancel_join"})
 	grpcOptions := append(internalgrpc.QueueRPCServerOptions(),
+		grpc.WaitForHandlers(true),
 		grpc.ChainUnaryInterceptor(internalgrpc.MetricsUnaryInterceptor(grpcMetrics)),
 		grpc.ChainStreamInterceptor(internalgrpc.MetricsStreamInterceptor(grpcMetrics)),
 	)
@@ -70,6 +82,36 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 	healthServer.SetServingStatus("", healthv1.HealthCheckResponse_NOT_SERVING)
 	healthv1.RegisterHealthServer(grpcServer, healthServer)
 	Register(grpcServer, store, logger)
+	// The process's single direct Job Runner scheduler lives in its store; its
+	// one cleanup worker starts here and quiesces before Run returns.
+	scheduler, _ := store.(jobRunnerSchedulerOwner)
+	if scheduler != nil {
+		scheduler.StartJobRunnerScheduler()
+	}
+	var metricMethods []string
+	for service, info := range grpcServer.GetServiceInfo() {
+		for _, method := range info.Methods {
+			metricMethods = append(metricMethods, "/"+service+"/"+method.Name)
+		}
+	}
+	grpcMetrics.Operations.SetOperations(metricMethods)
+
+	drainTimeout := cfg.DrainTimeout
+	if drainTimeout <= 0 {
+		drainTimeout = 10 * time.Second
+	}
+	workCtx, cancelWork := context.WithCancel(context.WithoutCancel(serverCtx))
+	defer cancelWork()
+	maintenanceAdmission := &maintenanceAdmission{stop: make(chan struct{}), admissionCtx: serverCtx}
+	maintenanceDone := make(chan struct{})
+	retentionMetrics := NewRetentionMetrics()
+	go func() {
+		defer close(maintenanceDone)
+		runStalledLeaseMaintenance(workCtx, runtime.MaintenanceStore, MaintenanceConfig{
+			Interval: cfg.LeaseReclaimInterval, Limit: cfg.LeaseReclaimBatchLimit, Logger: logger, Metrics: retentionMetrics,
+		}, maintenanceAdmission)
+	}()
+	httpUsers := &httpRequestOwner{}
 
 	grpcErr := make(chan error, 1)
 	go func() {
@@ -83,7 +125,8 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 
 	httpErr := make(chan error, 1)
 	go func() {
-		metricsOptions := []workload.HealthRouterOption{}
+		defer close(httpErr)
+		metricsOptions := []workload.HealthRouterOption{workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger))}
 		if runtime.DBStatsProvider != nil {
 			metricsOptions = append(metricsOptions, workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", runtime.DBStatsProvider)))
 		}
@@ -91,6 +134,7 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 			workload.WithHTTPMetrics(httpMetrics),
 			workload.WithMetricsCollector("http", httpMetrics.Collector()),
 			workload.WithMetricsCollector("grpc", grpcMetrics.Collector()),
+			workload.WithMetricsCollector("queue_retention", retentionMetrics.Collector()),
 		)
 		if metricsStore, ok := store.(interface {
 			Metrics(context.Context, time.Time) ([]queue.MetricsSnapshot, error)
@@ -104,7 +148,9 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 			ListenAddress:         cfg.HTTPAddress,
 			ListenConfigKey:       EnvHTTPAddress,
 			Listener:              httpListener,
-			Handler:               workload.HealthRouter(readiness, metricsOptions...),
+			Metrics:               httpMetrics.Operations,
+			Handler:               httpUsers.handler(workCtx, workload.HealthRouter(readiness, metricsOptions...)),
+			ShutdownTimeout:       drainTimeout,
 			Readiness:             readiness,
 			Logger:                logger,
 		})
@@ -115,29 +161,59 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 	case errOut = <-httpErr:
 	case errOut = <-grpcErr:
 	case <-serverCtx.Done():
-		errOut = serverCtx.Err()
+		// A signal or parent cancellation is a planned shutdown: a drain that joins every
+		// user within its budget returns success; only the forced path below reports an error.
 	}
+	workload.BeginProcessShutdown(ctx)
 	readiness.BeginShutdown()
 	healthServer.SetServingStatus("", healthv1.HealthCheckResponse_NOT_SERVING)
+	maintenanceAdmission.close()
+	httpUsers.closeAdmission()
 	cancel()
 	stopped := make(chan struct{})
 	go func() {
 		grpcServer.GracefulStop()
 		close(stopped)
 	}()
-	select {
-	case <-stopped:
-	case <-time.After(10 * time.Second):
-		grpcServer.Stop()
-	}
-	select {
-	case httpRunErr := <-httpErr:
-		if errOut == nil {
-			errOut = httpRunErr
+	joined := make(chan struct{})
+	var httpRunErr error
+	go func() {
+		defer close(joined)
+		if scheduler != nil {
+			// Rejects new direct leases, cancels admitted calls so they return
+			// their committed jobs, and joins them and the cleanup worker.
+			scheduler.QuiesceJobRunnerScheduler()
 		}
-	default:
+		<-stopped
+		<-grpcErr
+		httpRunErr = <-httpErr
+		<-maintenanceDone
+		httpUsers.users.Wait()
+	}()
+	drainStarted := time.Now()
+	timer := time.NewTimer(drainTimeout)
+	defer timer.Stop()
+	select {
+	case <-joined:
+		grpcMetrics.Operations.ObserveShutdown(logger, "shutdown_queue_drain", "success", time.Since(drainStarted))
+	case <-timer.C:
+		grpcMetrics.Operations.ObserveShutdown(logger, "shutdown_queue_drain", "timeout", time.Since(drainStarted))
+		joinStarted := time.Now()
+		// All store and metrics operations receive cancellation before force-stop.
+		// WaitForHandlers plus the explicit joins keep their database pool alive
+		// until every admitted user has returned, including a cancelled SQL call.
+		cancelWork()
+		grpcServer.Stop()
+		<-joined
+		grpcMetrics.Operations.ObserveShutdown(logger, "shutdown_queue_cancel_join", "success", time.Since(joinStarted))
+		errOut = errors.Join(errOut, context.DeadlineExceeded)
 	}
-	return errOut
+	return errors.Join(errOut, httpRunErr)
+}
+
+type jobRunnerSchedulerOwner interface {
+	StartJobRunnerScheduler()
+	QuiesceJobRunnerScheduler()
 }
 
 type queueMetricsStore interface {
@@ -153,11 +229,12 @@ func queueMetricsCollector(store queueMetricsStore, now func() time.Time) worklo
 		if err != nil {
 			return nil, err
 		}
-		metrics := make([]workload.Metric, 0, len(snapshots)*5)
+		metrics := make([]workload.Metric, 0, len(snapshots)*6)
 		for _, snapshot := range snapshots {
 			labels := []workload.MetricLabel{{Name: "kind", Value: snapshot.Kind}}
 			metrics = append(metrics,
 				workload.Metric{Name: "queue_pending_jobs", Help: "Pending queue jobs.", Type: "gauge", Labels: labels, Value: float64(snapshot.PendingJobs)},
+				workload.Metric{Name: "queue_ready_jobs", Help: "Pending queue jobs whose available_at is at or before the observation time.", Type: "gauge", Labels: labels, Value: float64(snapshot.ReadyJobs)},
 				workload.Metric{Name: "queue_leased_jobs", Help: "Leased queue jobs.", Type: "gauge", Labels: labels, Value: float64(snapshot.LeasedJobs)},
 				workload.Metric{Name: "queue_retry_pending_jobs", Help: "Pending queue jobs that have retried at least once.", Type: "gauge", Labels: labels, Value: float64(snapshot.RetryPendingJobs)},
 				workload.Metric{Name: "queue_dead_lettered_jobs", Help: "Dead-lettered queue jobs.", Type: "gauge", Labels: labels, Value: float64(snapshot.DeadLetteredJobs)},
@@ -166,4 +243,32 @@ func queueMetricsCollector(store queueMetricsStore, now func() time.Time) worklo
 		}
 		return metrics, nil
 	}
+}
+
+// HTTP metrics can own database work too. Closing admission under the same
+// mutex as Add makes the final Wait safe even when a new request races drain.
+type httpRequestOwner struct {
+	mu       sync.Mutex
+	stopping bool
+	users    sync.WaitGroup
+}
+
+func (o *httpRequestOwner) closeAdmission() { o.mu.Lock(); o.stopping = true; o.mu.Unlock() }
+func (o *httpRequestOwner) handler(workCtx context.Context, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		o.mu.Lock()
+		if o.stopping {
+			o.mu.Unlock()
+			http.Error(w, "queue is draining", http.StatusServiceUnavailable)
+			return
+		}
+		o.users.Add(1)
+		o.mu.Unlock()
+		defer o.users.Done()
+		ctx, cancel := context.WithCancel(r.Context())
+		stop := context.AfterFunc(workCtx, cancel)
+		defer stop()
+		defer cancel()
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }

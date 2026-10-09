@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -15,11 +16,17 @@ import (
 )
 
 const (
-	NotificationChannel      = "tetral_queue_wakeup"
-	ConsumerClassBridge      = "bridge"
-	ConsumerClassSandbox     = "sandbox"
-	listenerReconnectBase    = 100 * time.Millisecond
-	listenerReconnectMaximum = 10 * time.Second
+	NotificationChannel = "tetral_queue_wakeup"
+	// ConsumerClassJobRunner is the wake payload for Job Runner work. The wire
+	// value keeps its established name when process ownership moves; Queue
+	// producers and the Job Runner listener share this constant.
+	ConsumerClassJobRunner = "bridge"
+	ConsumerClassSandbox   = "sandbox"
+	// NotificationClassRuntimeProcess announces a committed Runtime process
+	// takeover. It requests a Job Runner Pod-loss repair run and leases no work.
+	NotificationClassRuntimeProcess = "runtime_process"
+	listenerReconnectBase           = 100 * time.Millisecond
+	listenerReconnectMaximum        = 10 * time.Second
 )
 
 // ConsumerClassForKind maps every admitted Queue kind to the service that can
@@ -27,7 +34,7 @@ const (
 func ConsumerClassForKind(kind string) (string, bool) {
 	switch kind {
 	case KindRuntimeInput, KindRuntimeRecovery, KindRuntimeConfigUpdate, KindCleanupSession, KindSessionDeleteCleanup:
-		return ConsumerClassBridge, true
+		return ConsumerClassJobRunner, true
 	case KindEnvironmentBuild, KindEnvironmentReadyFanout,
 		KindSandboxToolExecute, KindSandboxActivate, KindSandboxMaterialize,
 		KindSandboxRelease, KindSandboxToolCancel, KindSandboxOutputCapture,
@@ -54,6 +61,12 @@ type WakeSignal struct {
 
 func NewWakeSignal() *WakeSignal {
 	return &WakeSignal{ready: make(chan struct{})}
+}
+
+// Ready is closed once any broadcast follows the snapshot. A zero snapshot,
+// taken without a wake signal, never becomes ready.
+func (s WakeSnapshot) Ready() <-chan struct{} {
+	return s.ready
 }
 
 func (s *WakeSignal) Snapshot() WakeSnapshot {
@@ -184,19 +197,47 @@ func RunListener(ctx context.Context, listener NotificationListener, channel str
 // RunNotificationListener reconnects one service-owned LISTEN connection.
 // Initial connection and every reconnect broadcast a catch-up poll.
 func RunNotificationListener(ctx context.Context, listener NotificationListener, consumerClass string, wake *WakeSignal, logger *slog.Logger) error {
+	return RunNotificationListenerWithSignals(ctx, listener, consumerClass, wake, nil, logger)
+}
+
+// RunNotificationListenerWithSignals is RunNotificationListener plus extra
+// payload classes on the same connection, each mapped to its own signal.
+// Every signal also fires after the initial LISTEN and every reconnect, since
+// a notification may have been missed while disconnected.
+func RunNotificationListenerWithSignals(ctx context.Context, listener NotificationListener, consumerClass string, wake *WakeSignal, signals map[string]func(), logger *slog.Logger) error {
 	if listener == nil || wake == nil {
 		return errors.New("queue notification listener and wake signal are required")
 	}
-	if consumerClass != ConsumerClassBridge && consumerClass != ConsumerClassSandbox {
+	if consumerClass != ConsumerClassJobRunner && consumerClass != ConsumerClassSandbox {
 		return errors.New("queue notification consumer class is invalid")
 	}
+	for class, signal := range signals {
+		if class == "" || class == consumerClass || signal == nil {
+			return errors.New("queue notification signal class is invalid")
+		}
+	}
+	var degraded atomic.Bool
 	var onDisconnect func(error)
 	if logger != nil {
-		onDisconnect = func(err error) { logNotificationListenerFailure(logger, consumerClass, err) }
+		onDisconnect = func(err error) { degraded.Store(true); logNotificationListenerFailure(logger, consumerClass, err) }
 	}
-	return RunListener(ctx, listener, NotificationChannel, wake.Broadcast, func(payload string) {
+	onReady := func() {
+		wake.Broadcast()
+		for _, signal := range signals {
+			signal()
+		}
+		if degraded.Swap(false) && logger != nil {
+			defer func() { _ = recover() }()
+			logger.Info("queue.notification_listener.recovered", slog.String("operation", "queue.notification_listener"), slog.String("consumer.class", consumerClass), slog.String("outcome", "recovered"), slog.String("recovery.event", "queue.notification_listener.disconnected"))
+		}
+	}
+	return RunListener(ctx, listener, NotificationChannel, onReady, func(payload string) {
 		if payload == consumerClass {
 			wake.Broadcast()
+			return
+		}
+		if signal := signals[payload]; signal != nil {
+			signal()
 		}
 	}, onDisconnect)
 }

@@ -2,15 +2,10 @@ package eventstream
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -21,29 +16,68 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-const (
-	defaultStreamBatchSize = 100
-	defaultStreamPollEvery = time.Second
-)
+const defaultStreamBatchSize = internaleventstream.MaxStreamBatchSize
 
 type Reader interface {
 	CurrentStreamPosition(context.Context, workspace.ID, string) (int64, error)
 	ListSessionEventChanges(context.Context, workspace.ID, string, int64, int) ([]StreamChange, error)
 	CurrentThreadStreamPosition(context.Context, workspace.ID, string, string) (int64, error)
 	ListThreadEventChanges(context.Context, workspace.ID, string, string, int64, int) ([]StreamChange, error)
+	ReadPreviewRequest(context.Context, workspace.ID, string, string, string, string) (PreviewRequest, error)
+	ListRequestFinalMessages(context.Context, ReadScope, string, int64, int) ([]RequestFinalMessage, error)
 }
 
 type Event = internaleventstream.Event
 type StreamChange = internaleventstream.StreamChange
+type ReadScope = internaleventstream.ReadScope
+type PreviewRequest = internaleventstream.PreviewRequest
+type RequestFinalMessage = internaleventstream.RequestFinalMessage
 
 type Option func(*options)
 
 type options struct {
-	logger              *slog.Logger
-	streamPollInterval  time.Duration
-	streamBatchSize     int
-	streamMaxEmptyPolls int
-	requestMetrics      httpapi.RequestMetricsRecorder
+	logger                *slog.Logger
+	streamBatchSize       int
+	requestMetrics        httpapi.RequestMetricsRecorder
+	streamConfig          StreamConfig
+	previewHub            *PreviewHub
+	previewMetrics        *PreviewMetrics
+	streamShutdownContext context.Context
+	idleChecks            *IdleCoalescer
+	completedCheckLimit   int
+}
+
+// WithIdleCoalescer supplies the process's shared idle checks. Every stream
+// registers its Session with them and waits on them when idle; a router
+// without them fails stream requests. The caller owns their lifetime.
+func WithIdleCoalescer(idleChecks *IdleCoalescer) Option {
+	return func(o *options) { o.idleChecks = idleChecks }
+}
+
+// WithStreamCompletedCheckLimit is a test hook for finite streams: a stream
+// returns once limit completed shared checks found its Session unchanged
+// while it waited with nothing to read. Production leaves it at zero, so an
+// unchanged check wakes no viewer and the connection stays open until the
+// client disconnects or session.deleted is emitted.
+func WithStreamCompletedCheckLimit(limit int) Option {
+	return func(o *options) {
+		if limit > 0 {
+			o.completedCheckLimit = limit
+		}
+	}
+}
+
+// WithStreamShutdownContext cancels long-lived SSE work when its process begins
+// shutdown, before the shared finite HTTP drain. The caller owns the lifetime.
+func WithStreamShutdownContext(ctx context.Context) Option {
+	return func(o *options) { o.streamShutdownContext = ctx }
+}
+func WithPreviewHub(hub *PreviewHub) Option { return func(o *options) { o.previewHub = hub } }
+func WithPreviewMetrics(metrics *PreviewMetrics) Option {
+	return func(o *options) { o.previewMetrics = metrics }
+}
+func WithStreamConfig(config StreamConfig) Option {
+	return func(o *options) { o.streamConfig = config }
 }
 
 func WithLogger(logger *slog.Logger) Option {
@@ -52,25 +86,6 @@ func WithLogger(logger *slog.Logger) Option {
 
 func WithRequestMetrics(metrics httpapi.RequestMetricsRecorder) Option {
 	return func(o *options) { o.requestMetrics = metrics }
-}
-
-func WithStreamPollInterval(interval time.Duration) Option {
-	return func(o *options) {
-		if interval > 0 {
-			o.streamPollInterval = interval
-		}
-	}
-}
-
-// WithStreamMaxEmptyPolls is a test hook. Production streams leave this at zero
-// so the connection stays open until the client disconnects or session.deleted
-// is emitted.
-func WithStreamMaxEmptyPolls(max int) Option {
-	return func(o *options) {
-		if max > 0 {
-			o.streamMaxEmptyPolls = max
-		}
-	}
 }
 
 func NewRouter(reader Reader, verifier *auth.InternalPrincipalVerifier, opts ...Option) http.Handler {
@@ -83,28 +98,25 @@ func NewRouter(reader Reader, verifier *auth.InternalPrincipalVerifier, opts ...
 	router.Use(httpapi.RequestLogMiddleware(options.logger, httpapi.DefaultSlowRequestThreshold, httpapi.WithRequestLogMetrics(options.requestMetrics)))
 	router.Route("/v1", func(r chi.Router) {
 		r.Use(internalPrincipalMiddleware(verifier))
-		r.Get("/sessions/{session_id}/events/stream", handler.streamSessionEvents)
-		r.Get("/sessions/{session_id}/threads/{thread_id}/stream", handler.streamThreadEvents)
+		r.Method(http.MethodGet, "/sessions/{session_id}/events/stream", httpapi.DeclarePublicOperation(http.MethodGet, "/v1/sessions/{session_id}/events/stream", handler.streamSessionEvents))
+		r.Method(http.MethodGet, "/sessions/{session_id}/threads/{thread_id}/stream", httpapi.DeclarePublicOperation(http.MethodGet, "/v1/sessions/{session_id}/threads/{thread_id}/stream", handler.streamThreadEvents))
 	})
 	return router
 }
 
 func newOptions(opts ...Option) *options {
 	options := &options{
-		streamPollInterval: defaultStreamPollEvery,
-		streamBatchSize:    defaultStreamBatchSize,
+		streamBatchSize: defaultStreamBatchSize,
+		streamConfig:    DefaultStreamConfig(),
+		previewMetrics:  NewPreviewMetrics(),
 	}
 	for _, option := range opts {
 		option(options)
 	}
 	if options.logger == nil {
-		options.logger = defaultLogger(os.Stderr)
+		options.logger = workload.ComponentLogger("event-stream")
 	}
 	return options
-}
-
-func defaultLogger(writer io.Writer) *slog.Logger {
-	return workload.NewLogger(writer, "event-stream", "", "")
 }
 
 type handler struct {
@@ -124,7 +136,8 @@ func internalPrincipalMiddleware(verifier *auth.InternalPrincipalVerifier) func(
 }
 
 func (h *handler) streamSessionEvents(w http.ResponseWriter, r *http.Request) {
-	if err := requireBetaStreamQuery(r); err != nil {
+	types, err := parseStreamQuery(r, true)
+	if err != nil {
 		httpapi.WriteError(w, r, err)
 		return
 	}
@@ -138,15 +151,16 @@ func (h *handler) streamSessionEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := chi.URLParam(r, "session_id")
-	h.streamEvents(w, r, func() (int64, error) {
-		return h.reader.CurrentStreamPosition(r.Context(), ws, sessionID)
-	}, func(after int64) ([]StreamChange, error) {
-		return h.reader.ListSessionEventChanges(r.Context(), ws, sessionID, after, h.options.streamBatchSize)
+	h.streamEvents(w, r, ReadScope{WorkspaceID: ws, SessionID: sessionID}, types, func(ctx context.Context) (int64, error) {
+		return h.reader.CurrentStreamPosition(ctx, ws, sessionID)
+	}, func(ctx context.Context, after int64) ([]StreamChange, error) {
+		return h.reader.ListSessionEventChanges(ctx, ws, sessionID, after, h.options.streamBatchSize)
 	})
 }
 
 func (h *handler) streamThreadEvents(w http.ResponseWriter, r *http.Request) {
-	if err := requireBetaStreamQuery(r); err != nil {
+	_, err := parseStreamQuery(r, false)
+	if err != nil {
 		httpapi.WriteError(w, r, err)
 		return
 	}
@@ -161,88 +175,38 @@ func (h *handler) streamThreadEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	sessionID := chi.URLParam(r, "session_id")
 	threadID := chi.URLParam(r, "thread_id")
-	h.streamEvents(w, r, func() (int64, error) {
-		return h.reader.CurrentThreadStreamPosition(r.Context(), ws, sessionID, threadID)
-	}, func(after int64) ([]StreamChange, error) {
-		return h.reader.ListThreadEventChanges(r.Context(), ws, sessionID, threadID, after, h.options.streamBatchSize)
+	h.streamEvents(w, r, ReadScope{WorkspaceID: ws, SessionID: sessionID, ThreadID: threadID}, nil, func(ctx context.Context) (int64, error) {
+		return h.reader.CurrentThreadStreamPosition(ctx, ws, sessionID, threadID)
+	}, func(ctx context.Context, after int64) ([]StreamChange, error) {
+		return h.reader.ListThreadEventChanges(ctx, ws, sessionID, threadID, after, h.options.streamBatchSize)
 	})
 }
 
-func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, currentPosition func() (int64, error), listChanges func(int64) ([]StreamChange, error)) {
-	cursor, err := currentPosition()
-	if err != nil {
-		httpapi.WriteError(w, r, err)
-		return
-	}
-
-	headers := w.Header()
-	headers.Set("Content-Type", "text/event-stream")
-	headers.Set("Cache-Control", "no-cache")
-	headers.Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	controller := http.NewResponseController(w)
-	_ = controller.Flush()
-
-	emptyPolls := 0
-	for {
-		changes, err := listChanges(cursor)
-		if err != nil {
-			return
-		}
-		if len(changes) == 0 {
-			emptyPolls++
-			if h.options.streamMaxEmptyPolls > 0 && emptyPolls >= h.options.streamMaxEmptyPolls {
-				return
-			}
-			if _, err := io.WriteString(w, ": heartbeat\n\n"); err != nil {
-				return
-			}
-			_ = controller.Flush()
-			if !sleepOrDone(r.Context(), h.options.streamPollInterval) {
-				return
-			}
-			continue
-		}
-		emptyPolls = 0
-		for _, change := range changes {
-			cursor = change.StreamPosition
-			event := normalizeEvent(change.Event)
-			data, err := json.Marshal(event)
-			if err != nil {
-				return
-			}
-			if _, err := fmt.Fprintf(w, "event: %s\n", event.Type); err != nil {
-				return
-			}
-			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
-				return
-			}
-			_ = controller.Flush()
-			if event.Type == "session.deleted" {
-				return
-			}
-		}
-	}
-}
-
-func requireBetaStreamQuery(r *http.Request) error {
+func parseStreamQuery(r *http.Request, session bool) (map[string]bool, error) {
 	values, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
-		return &httpapi.ValidationError{Message: "invalid query string"}
+		return nil, &httpapi.ValidationError{Message: "invalid query string"}
 	}
 	for key := range values {
-		if key != "beta" {
-			return &httpapi.ValidationError{Message: "unknown query parameter"}
+		if key != "beta" && (key != "event_deltas[]" || !session) {
+			return nil, &httpapi.ValidationError{Message: "unknown query parameter"}
 		}
 	}
 	raw, ok, err := singleQueryValue(values, "beta")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !ok || raw != "true" {
-		return &httpapi.ValidationError{Message: "beta must be true"}
+		return nil, &httpapi.ValidationError{Message: "beta must be true"}
 	}
-	return nil
+	types := map[string]bool{}
+	for _, value := range values["event_deltas[]"] {
+		if value != "agent.message" && value != "agent.thinking" {
+			return nil, &httpapi.ValidationError{Message: "unsupported event delta type"}
+		}
+		types[value] = true
+	}
+	return types, nil
 }
 
 func singleQueryValue(values map[string][]string, key string) (string, bool, error) {
@@ -258,17 +222,6 @@ func singleQueryValue(values map[string][]string, key string) (string, bool, err
 
 func normalizeEvent(event Event) Event {
 	return internaleventstream.NormalizeEvent(event)
-}
-
-func sleepOrDone(ctx context.Context, interval time.Duration) bool {
-	timer := time.NewTimer(interval)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
 }
 
 func requestWorkspace(ctx context.Context) (workspace.ID, error) {

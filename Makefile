@@ -34,6 +34,7 @@ lint:
 # dependency.
 vulncheck:
 	go tool govulncheck ./...
+	python3 scripts/check-envoy-secret-helper.py
 
 # run is an alias for the public API workload.
 run: run-api
@@ -45,7 +46,7 @@ run-bridge-api:
 	go run ./services/bridge/cmd/bridge-api
 
 run-job-runner:
-	go run ./services/bridge/cmd/job-runner
+	go run ./services/job-runner/cmd/job-runner
 
 run-sandbox:
 	go run ./services/sandbox/cmd/tetral-sandbox

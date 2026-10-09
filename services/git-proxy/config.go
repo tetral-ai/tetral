@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/transportsecurity"
 	"github.com/tetral-ai/tetral/internal/workload"
 )
 
@@ -17,10 +18,9 @@ const (
 	EnvDatabaseURL           = "TETRAL_DATABASE_URL"
 	EnvVaultKey              = "ENGINE_VAULT_KEY"
 	EnvPublicBaseURL         = "TETRAL_GIT_PROXY_PUBLIC_BASE_URL"
-	EnvDeploymentEnvironment = "TETRAL_DEPLOYMENT_ENVIRONMENT"
-	EnvServiceVersion        = "TETRAL_SERVICE_VERSION"
+	EnvDeploymentEnvironment = workload.EnvDeploymentEnvironment
+	EnvServiceVersion        = workload.EnvServiceVersion
 	EnvDrainGraceSeconds     = "TETRAL_GIT_PROXY_DRAIN_GRACE_SECONDS"
-	EnvLegacyPathCutover     = "TETRAL_GIT_PROXY_LEGACY_PATH_CUTOVER"
 
 	DefaultHTTPAddress    = ":8080"
 	DefaultMetricsAddress = ":8081"
@@ -31,6 +31,7 @@ type Env interface {
 }
 
 type Config struct {
+	HTTPTransport         transportsecurity.HTTPConfig
 	HTTPAddress           string
 	MetricsAddress        string
 	DatabaseURL           string
@@ -39,20 +40,25 @@ type Config struct {
 	DeploymentEnvironment string
 	ServiceVersion        string
 	DrainGrace            time.Duration
-	LegacyPathCutover     bool
 }
 
 func ConfigFromEnv(env Env) (Config, error) {
 	if env == nil {
 		return Config{}, workload.NewConfigError("environment is required")
 	}
+	resource := workload.ResourceConfigFromEnvWithTrimPolicy(env.Getenv, true)
+	httpTransport, err := transportsecurity.HTTPConfigFromEnv(env.Getenv)
+	if err != nil {
+		return Config{}, workload.NewConfigError(err.Error())
+	}
 	cfg := Config{
+		HTTPTransport:         httpTransport,
 		HTTPAddress:           valueOrDefault(env.Getenv(EnvHTTPAddress), DefaultHTTPAddress),
 		MetricsAddress:        valueOrDefault(env.Getenv(EnvMetricsAddress), DefaultMetricsAddress),
 		DatabaseURL:           strings.TrimSpace(env.Getenv(EnvDatabaseURL)),
 		VaultKey:              strings.TrimSpace(env.Getenv(EnvVaultKey)),
-		DeploymentEnvironment: valueOrDefault(env.Getenv(EnvDeploymentEnvironment), "local"),
-		ServiceVersion:        valueOrDefault(env.Getenv(EnvServiceVersion), "unknown"),
+		DeploymentEnvironment: resource.DeploymentEnvironment,
+		ServiceVersion:        resource.ServiceVersion,
 		DrainGrace:            time.Duration(DefaultDrainGraceSeconds) * time.Second,
 	}
 	if cfg.DatabaseURL == "" {
@@ -90,16 +96,6 @@ func ConfigFromEnv(env Env) (Config, error) {
 			return Config{}, workload.NewConfigError(EnvDrainGraceSeconds + " must be a positive integer")
 		}
 		cfg.DrainGrace = time.Duration(seconds) * time.Second
-	}
-	if raw := strings.TrimSpace(env.Getenv(EnvLegacyPathCutover)); raw != "" {
-		switch raw {
-		case "true":
-			cfg.LegacyPathCutover = true
-		case "false":
-			cfg.LegacyPathCutover = false
-		default:
-			return Config{}, workload.NewConfigError(EnvLegacyPathCutover + " must be true or false")
-		}
 	}
 	return cfg, nil
 }

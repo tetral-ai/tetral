@@ -2,235 +2,453 @@
 
 ## Responsibilities
 
-`auth` is the platform's public API-key authenticator and the only
-minter of signed internal principals. It turns a raw `X-Api-Key` into a
-short-lived Ed25519-signed principal token that every other public service
-trusts, and it owns the workspace-scoped `/v1/api_keys` management surface.
-Raw public keys stop here — target services never receive them, only the
-minted principal. The service owns four routes (`POST
-/internal/auth/authorize` plus the three `/v1/api_keys` handlers), bootstrap
-key seeding from `ENGINE_API_KEY`, API-key digest lookup / revoke checks /
-`last_used_at` updates, and internal-principal minting. It reads and writes
-exactly one table, `api_keys`, and reads `workspaces`; it holds no
-cross-request state beyond the injected signing key, and it never reaches
-sessions, resources, or any other domain table. Reusable auth domain logic
-lives in the `internal/auth` package; the service package
-(`github.com/tetral-ai/tetral/services/auth`, package `tetralauth`)
-only wires config, database, signer, and router. The binary is at
-`cmd/tetral-auth`.
+Auth authenticates selected public API keys and exchanged access tokens, resolves
+current Engine workspace authority, and mints request-bound Ed25519 internal
+principals. It owns `POST /v1/oauth/token`, `/v1/api_keys`, the Envoy v3
+`Authorization/Check` gRPC adapter, and bootstrap key refresh. Public API and
+Event Stream services receive signed principals rather than raw credentials.
+Reusable verification, authority, policy and credential logic lives in
+`internal/auth`; this service owns configuration, PostgreSQL, HTTP, gRPC and process
+lifecycle. The serving binary is `services/auth/cmd/tetral-auth`.
+
+Authentication identifies a credential and its truthful actor. Authorization is
+separate: every registered public business route invokes the shared operation
+gate against signed authority and trusted resource facts from its owning store.
+Only `workspace_full_access` is assignable; the schema and policy import accept
+no other role. It means every operation in the code-owned registry at admission
+time, and an unregistered operation name is always denied. Exchanged tokens and
+independent keys therefore gain a newly registered operation once the serving
+code includes it, while identity-derived keys keep the operation ceiling
+recorded at their issuance.
+
+`PolicyVersion` is a code constant recorded on grants, access tokens and
+identity-derived keys. When it changes, every access token and identity-derived
+key issued under the old version is permanently rejected, and new exchanges fail
+until grants are re-imported; the import records the new version and advances
+each grant's revision. Independent keys are unaffected. Maintainers bump it when
+a role's meaning changes; nothing derives it from the registry.
+
+The production database connection requires `TETRAL_DATABASE_TLS_CA_PATH` and
+`TETRAL_DATABASE_TLS_SERVER_NAME`. It verifies trust and hostname with no
+plaintext fallback. New connections load the current validated trust generation.
+Administrative policy provisioning uses a separate protected administrative
+connection; serving Auth cannot administer policy.
+
+For the exact SDK configuration, Engine workspace selectors and actor wire
+format, see [authentication](../../docs/authentication.md).
 
 ## States & lifecycle
 
 ### Request surfaces
 
-| Route | Caller identity | Input | Success | Failure |
-|-------|-----------------|-------|---------|---------|
-| `POST /internal/auth/authorize` | edge external-auth subrequest | `X-Api-Key`, `X-Original-Method`, `X-Original-Path`, `X-Request-Id`, `X-Forwarded-For` | `200 {"allow":true}` + `X-Tetral-Internal-Principal` header | missing key `401`; missing method/path or request-id/forwarded-for `400`; unknown/revoked key `401` |
-| `POST /v1/api_keys` | verified internal principal | `{ "name": ... }`, body capped 1 MiB, unknown fields rejected, exactly one JSON value | `200` metadata + one-time raw `api_key` | empty/oversized name `400`; body too large `413` |
-| `GET /v1/api_keys` | verified internal principal | `limit` (default 20, cap 100), opaque `page` cursor | `200 { "data": [...], "next_page": ... }` | cursor for another workspace or a different limit `400` |
-| `DELETE /v1/api_keys/{api_key_id}` | verified internal principal | id must carry the `ak_` prefix | `204` empty body | absent / already-revoked / other-workspace row `404`; malformed id `400` |
+| Route | Identity and input | Success | Failure |
+|-------|--------------------|---------|---------|
+| `POST /v1/oauth/token` | JSON JWT bearer exchange; registered rule, organization, upstream assertion, optional Engine workspace/service selector | opaque `access_token`, `token_type: Bearer`, integer `expires_in` | malformed/ambiguous input `400`; oversized body `413`; invalid assertion or missing/currently invalid authority `401`; issuer/database unavailable `503`; bounded admission exhausted `429` |
+| `envoy.service.auth.v3.Authorization/Check` | raw public headers, actual method/request URI, one trusted request ID and forwarded-for | OK Check response overwrites one `X-Tetral-Internal-Principal` and enumerates credential/untrusted header removals | JSON denied response: invalid credential `401`, invalid metadata `400`, internal/dependency failure `500`; edge Check transport unavailability maps to `503` |
+| `POST /v1/api_keys` | verified internal principal; `{ "name": ... }`, at most one MiB of strict JSON | metadata and one-time raw `api_key` at `200` | invalid name/body `400`; oversized body `413`; denied action `403`; stale authority/issuer credential `401` |
+| `GET /v1/api_keys` | verified internal principal; `limit` defaults to 20, cap 100; opaque `page` | metadata page at `200` | foreign/mismatched cursor `400`; denied action `403` |
+| `DELETE /v1/api_keys/{api_key_id}` | verified internal principal and tenant-resolved durable key facts | empty `204` | absent/revoked/foreign row `404`; malformed ID `400`; denied action `403` |
 
-The `/v1/api_keys` handlers consume `X-Tetral-Internal-Principal`, not the raw
-key: the edge already authorized the caller through the authorize subrequest
-and injected the principal. Each handler re-verifies that header against its
-own method and path, and takes workspace authority solely from the verified
-principal. A request body never supplies workspace identity.
+API-key management verifies the signed principal against the actual method and
+path before installing trusted principal/workspace context and invoking the
+registered-operation wrapper. Body and path fields never supply workspace
+authority. Delete resolves its key under the signed workspace before disclosure
+or mutation. The exchange route is a direct Auth HTTP surface; deployment-owned
+edge routing is a separate contract.
 
-The metadata DTO (`auth.APIKeyMetadata`) returned by create and list — this
-service is the only public home for its shape, since the forked SDK carries no
-api-keys resource — is pinned for raw-HTTP callers as
-`{ id, type = "api_key", workspace_id, name, key_prefix, key_kind =
-bootstrap|standard, created_at, last_used_at, revoked_at }`. `key_prefix` is
-non-authenticating metadata; the create response additionally carries the
-one-time raw `api_key`, never returned again. `last_used_at` and `revoked_at`
-are omit-when-empty (not required-nullable), and a revoked row is kept for audit
-but excluded from list responses.
+The API-key metadata DTO is `{ id, type: "api_key", workspace_id, name,
+key_prefix, key_kind: "bootstrap"|"standard", created_at, last_used_at?,
+revoked_at? }`. The SDK has no API-key management resource; use raw HTTP for this
+surface. Create returns raw key material exactly once. List returns no raw key,
+digest or authority lineage. Prefixes are non-authenticating identification
+metadata. Revoked keys are retained for audit and excluded from lists.
+`last_used_at` is approximate: the database time of a sampled successful
+admission, normally written about a second later and at most once per five
+minutes of admission time. Under overload, database failure or shutdown it can
+be missing or older than the latest use. It is neither security evidence nor a
+last-request guarantee. Access tokens record no usage.
 
-### Authorize subrequest steps
+### Credential selection and admission
 
-| Step | Action | Failure |
-|------|--------|---------|
-| 1. Digest lookup | `SHA-256` over the raw token compared against `api_keys.key_digest` where `revoked_at IS NULL`, joined to `workspaces` so the owning workspace resolves in one query | no matching active row `401` |
-| 2. Usage touch | `last_used_at` stamped through the workspace-scoped write path | row revoked or gone between steps `401` |
-| 3. Mint | Ed25519-signed principal bound to the original method and path written to `X-Tetral-Internal-Principal`; body `{"allow":true}` at `200` | signing unavailable `401` |
+A nonempty selected `Header.Get("X-Api-Key")` retains its existing precedence
+and exact bytes. Its invalidity never falls back to Bearer. A selected key does
+not borrow a simultaneously supplied Bearer's identity. With no selected key,
+Auth accepts one unambiguous `Authorization: Bearer <token>` value; repeated or
+combined Bearer values are rejected. Query-string credentials are ignored.
 
-The digest lookup runs in a read-only transaction that sets only the
-transaction-local `tetral.auth_lookup` flag and no workspace scope, so it may
-match a key before the owning workspace is known while any accidental write
-through that transaction is still blocked by the workspace-scoped write path.
+Check requires Envoy `encode_raw_headers: true`; its raw repeated entries preserve
+header order and mixed-case duplicate semantics. The first API-key value remains
+the selected value, including an empty first value admitting Bearer instead of a
+later key. Auth never calls its own HTTP surface or duplicates authority SQL.
 
-**Single active predicate (invariant).** The authenticate lookup
-(`AuthenticateRawKey`) and the usage touch (`TouchLastUsedForWorkspace`) MUST
-gate on the identical active predicate — both currently `revoked_at IS NULL` in
-`internal/auth/store.go`. Letting the two diverge (a key that authenticates but
-is no longer touched, or vice versa) is the primary way to weaken the auth model,
-so the predicate is one clause repeated verbatim, not two independent filters.
+Auth validates the actual HTTP method and request URI attributes, optional raw
+`:method`/`:path` consistency, and exactly one bounded request ID and forwarded-for.
+Envoy's `HttpRequest.Id` is a stream identifier, independent of `x-request-id`.
+The generated header supplies the signed principal's request ID, which Check
+diagnostics record as `request.id`. API, Auth API-key and Event Stream handlers
+keep their own `req_` request ID for the `request-id` response header, error
+envelopes and `request.id`; after verifying the principal they record its signed
+request ID as `edge.request.id`, so Check and backend records of one request
+join. That claim is diagnostic correlation only and authorizes nothing. The
+signed forwarded-for value is audit metadata that no service reads today. The
+edge owns fresh request-ID generation and trusted source forwarding. `X-Original-*` and
+`X-Tetral-*` values never supply authority. `url.ParseRequestURI` produces the
+same decoded `URL.Path` used by Go HTTP handlers, excluding the query from the
+signature. A Check uses at most five seconds and preserves a shorter caller
+cancellation; it neither requests nor buffers the public request body.
 
-### `api_keys` row states
+An allow response contains exactly one overwrite mutation for the newly minted
+principal. Auth enumerates all presented case-insensitive `X-Tetral-*` (except
+that overwritten principal), `X-Original-*`, `X-Api-Key`, and `Authorization`
+headers for removal. Denials contain no principal, carry the SDK JSON error
+envelope and an explicit HTTP status, and do not use Envoy's default `403`.
+Protected business routes perform their normal operation gate after admission.
 
-| State | Predicate | Enters via | Authenticates? |
-|-------|-----------|-----------|----------------|
-| absent | no row | — | no |
-| active | `revoked_at IS NULL` | `POST /v1/api_keys` (standard) or bootstrap seeding | yes |
-| revoked | `revoked_at` set | `DELETE /v1/api_keys/{id}` | no (row kept for audit) |
+Admission uses one bounded transaction:
 
-`key_kind` is `bootstrap` (the single seeded row) or `standard`
-(workspace-managed). Revoke sets `revoked_at` only where it was still `NULL`.
+1. A fixed owner-controlled function looks up only the selected SHA-256 digest,
+   resolving credential/workspace/provenance before workspace scope is known.
+2. Identity-derived credentials lock rule, identity and grant in that order and
+   require their current enabled state and exact recorded revisions.
+3. Auth installs the validated workspace and takes a share lock on the selected
+   credential row. A separate statement then rechecks the same digest,
+   revocation and expiry against fresh PostgreSQL time **after** the lock wait;
+   for an API key it also reads the usage generation and that database time.
+4. Auth reads the workspace, validates the complete typed principal and
+   commits. Admission writes nothing. Concurrent admissions of one credential
+   share its lock; a concurrent individual revoke or rotation either precedes
+   this decision or waits for the admission to commit, and token pruning skips
+   the share-locked row and deletes it on a later pass.
 
-### Bootstrap refresh (`auth.RefreshBootstrap` → `APIKeyStore.UpsertBootstrap`)
+**Atomic admission invariant.** Current root authority, selected credential
+material, expiry and revocation are checked under one transaction. A caller-set
+lookup flag cannot grant global access. No Bearer business request contacts the
+identity provider.
 
-Idempotent against the one `key_kind = 'bootstrap'` row:
+### API-key usage sampling
 
-| Existing bootstrap row | Action |
-|------------------------|--------|
-| none | insert row from digest + 16-char prefix |
-| digest matches, active | no-op |
-| digest matches, revoked | clear `revoked_at` on that row |
-| digest differs | replace digest + prefix in place, reset `last_used_at` |
+Only a committed API-key admission submits a usage observation: workspace, key
+ID, digest, usage generation and the admission's database time. A rollback,
+rejected principal or failed commit submits nothing, and access tokens are not
+sampled. Submission never waits: it tries the recorder's map once, and a
+contended map, a closed recorder, or a new credential instance beyond the 4,096
+tracked ones drops the observation. Repeated observations of one instance keep
+the newest time. Raw credentials never enter the recorder; digests are never
+logged or used as labels.
 
-Standard rows are never touched, so re-seeding the bootstrap key never
-invalidates or reactivates workspace-managed keys.
+One worker per Auth process writes on a one-second tick through the Auth pool,
+one transaction at a time. Each tick forgets idle instances whose suppression
+ended, takes at most 128 due instances, oldest eligibility first, and suppresses
+each locally for five minutes whether or not its write succeeds. A tick's SQL
+has a one-second total deadline and each transaction 100 ms, including pool
+acquisition; work not started by the tick deadline is dropped. A write sets
+`last_used_at` only for the observed workspace, ID, digest and generation of an
+unrevoked key, and only when the observation is at least five minutes after the
+stored value. Replicas therefore store at most one sample per five minutes of
+admission time and never move it backward, though delayed samples can land
+closer together in wall time. A sample admitted before expiry can still be
+written after it. `usage_generation` advances whenever a key's digest or
+revocation state changes, so a delayed sample cannot update the key after a
+rotation away and back or after revoke and reactivation. API responses do not
+expose it.
 
-### Startup gates (`BuildApplication` → `BuildRouter`)
+Usage writes contend with admission only on the same key: that key's admission
+waits for the worker's transaction, which its 100 ms deadline bounds. The
+worker also holds one pooled connection while it writes.
 
-| Gate | Check | On failure |
-|------|-------|-----------|
-| config | env decoded; `ENGINE_API_KEY` non-blank and ≥ 32 bytes after trim; signing key valid base64 Ed25519; metrics addr ≠ HTTP addr | startup error, no serve |
-| schema | `VerifySchema` | startup error |
-| runtime role | `VerifyRuntimeRole` | startup error |
-| bootstrap workspace | `ENGINE_BOOTSTRAP_WORKSPACE_ID` names an existing `workspaces` row | fail closed, refuse to seed |
-| bootstrap key | `RefreshBootstrap` upserts the seeded row | startup error |
+### Token exchange and authority selection
 
-### Internal principal token
+The exchange accepts `application/json` with exactly one strict JSON object:
+`grant_type` equal to `urn:ietf:params:oauth:grant-type:jwt-bearer`, `assertion`,
+`federation_rule_id`, `organization_id`, and optional `workspace_id` and
+`service_account_id`. Unknown, duplicate, escaped-equivalent and case-equivalent
+fields are rejected. Form bodies and query parameters do not supply selectors.
+Every exchange response uses `Cache-Control: no-store` and `Pragma: no-cache`.
 
-Compact `header.payload.signature` (EdDSA, `typ = tetral-internal-principal`).
-Claims: `workspace_id`, `api_key_id`, `aud = tetral-public-api`, bound
-`method`/`path`, `iat`/`exp`, `jti` (`itok_` token id), `request_id`,
-`forwarded_for`. TTL defaults to 60 seconds
-(`TETRAL_AUTH_INTERNAL_PRINCIPAL_TTL_SECONDS` overrides). Verification
-requires a valid signature, the fixed audience, an exact method-and-path
-match, a not-yet-expired `exp`, and non-empty workspace and key ids. The same
-key signs the `/v1/api_keys` list cursors (`typ = tetral-cursor`), which bind
-the workspace id, list position, and limit.
+The registered verifier establishes an immutable rule-revision proof outside
+any database issuance transaction. Auth then resolves a provisioned identity by
+registered organization, exact issuer and subject; it does not provision users
+or infer permissions from email, group claims or upstream organization names.
+Human identities cannot supply a service-account selector. A service selector
+must match the bound Engine service account.
 
-### Ports
+Workspace IDs select Engine grants. An omitted selector succeeds only for one
+eligible grant; multiple eligible grants are ambiguous. The exact selector
+`default` resolves the configured `ENGINE_BOOTSTRAP_WORKSPACE_ID`, then requires
+a matching grant. There is no per-identity default-grant fallback. Ordinary
+selectors are bounded opaque Engine IDs and must resolve an eligible grant.
 
-| Port | Serves |
-|------|--------|
-| `TETRAL_AUTH_HTTP_ADDR` (default `:8080`) | the four routes plus `/health` and `/ready`; `/metrics` returns `404` here |
-| `TETRAL_AUTH_METRICS_ADDR` (default `:8081`) | `/metrics` plus `/health` and `/ready` |
+Issuance locks and rechecks rule, identity and grant against the proof and
+selected revisions, then inserts a digest-only opaque token. The advertised
+integer lifetime is capped at 600 seconds and by upstream assertion expiry;
+after flooring it must exceed the SDK's 120-second renewal margin. Tokens
+retain exact root and policy revisions. Disable/re-enable or security changes
+cannot resurrect old tokens. An explicit token revoke affects only that token.
+
+### Registered issuer verification
+
+A rule fixes an HTTPS issuer, audience, RS256 algorithm, discovery or JWKS
+endpoint, permitted origins/CIDRs and CA trust. Assertions cannot supply a JWKS
+URL. Redirects and ambient proxies are rejected; every resolved DNS destination
+is checked before connecting. Private, loopback and link-local addresses need
+explicit allowed CIDRs. TLS verifies hostname and configured trust. Issuer calls
+have a five-second deadline and one-MiB response limit. Invalid assertions use
+`401`; unavailable issuer dependencies use a safe `503` envelope.
+A refresh is bounded by that deadline and by its initiating caller's
+cancellation. When the initiating caller's own context ends before the keys
+load, that caller receives its own context error and the refresh is abandoned:
+Auth records no issuer failure, cooldown or unknown-key forced refresh, and
+joined and later callers start a new bounded refresh under their own context.
+Keys that loaded and validated are published even if the initiating caller has
+ended. Because an abandoned refresh does not consume the forced refresh, each
+cancelled exchange can start one aborted issuer request; the per-process
+exchange limits below bound that rate. Issuer timeouts, transport failures and
+invalid responses for a live caller are recorded, and a completed malformed
+response for a live caller remains invalid.
+
+Caches are partitioned by rule and trust revision, bounded to 128 entries with
+at most 16 concurrent refreshes. Known keys refresh after 90 percent of recorded
+validity, and outage fallback ends exactly at expiry. Unknown-key and failed
+cold/expired refreshes that a live caller completes have a 30-second cooldown.
+Concurrent callers join one refresh; obsolete revisions cannot publish into the
+current cache. Shutdown cancels and joins verifier work. Verification supplies
+identity proof rather than workspace permission.
+
+### Derived and independent keys
+
+Bootstrap and explicitly created independent keys retain full workspace access.
+Missing provenance never defaults to independent authority. An identity-derived
+key records immutable rule/identity/grant IDs and revisions, policy version,
+workspace ceiling and explicit operations. Key issuance rechecks the admitted
+principal and its still-active issuer credential under root/credential locks;
+stale principals are rejected rather than restamped with new revisions. The
+child ceiling intersects the current role and the issuer's immutable ceiling.
+Restricted fixtures exercise this same production gate and issuance path.
+
+A derived key has its own durable lifetime. Its parent token expiring, being
+revoked or being physically pruned does not revoke the key; an individual parent
+key revoke also does not recursively revoke issued keys. Current root
+revocation, disabling or revision mismatch invalidates every affected derived
+credential. SQL guards prevent editing a key's provenance, workspace or ceiling.
+
+Bootstrap refresh takes its workspace advisory lock and upserts one
+`key_kind = 'bootstrap'` row. Matching active configuration is a no-op; matching
+revoked configuration reactivates it; changed material replaces digest/prefix in
+place and resets usage. Replacement and reactivation advance the usage
+generation; a no-op refresh does not. Standard keys are untouched. The locked
+digest recheck prevents old bootstrap material from authenticating across an
+in-place rotation.
+
+### Administrative policy changes
+
+Prepare the canonical database and role contract first, then run
+`tetral-auth-policy < policy.json` with `TETRAL_DATABASE_ADMIN_URL`,
+`TETRAL_DATABASE_TLS_CA_PATH` and `TETRAL_DATABASE_TLS_SERVER_NAME`. The
+release image ships it as `/usr/local/bin/tetral-auth-policy`; the
+[bootstrap guide](../../docs/bootstrap.md#5-import-the-declared-auth-policy)
+gives the one-shot in-cluster invocation, and a source checkout runs
+`go run ./services/auth/cmd/tetral-auth-policy`. Keep administrative
+credentials out of the serving Auth environment. The command verifies schema readiness and never
+migrates, imports default policy at startup, or overwrites omitted entries.
+
+The at-most-one-MiB document is an explicit change set: `federation_rules`,
+`identities`, `workspace_grants`, `remove_federation_rules`, `remove_identities`,
+`revoke_workspace_grants`, and `revoke_access_tokens` (ID plus workspace).
+Rules carry exact HTTPS trust configuration; identities explicitly distinguish
+`human` from `service`; grants name an existing Engine workspace and the sole
+assignable role. Callers do not provide security revisions. See the typed DTOs
+in [policy.go](../../internal/auth/policy.go) for complete fields.
+
+Whole-document validation precedes changes. Imports prelock affected roots in
+rule/identity/grant order and atomically apply them; unchanged rows preserve
+revisions. Omission preserves state. Removal retains disabled root tombstones;
+recreation advances revision. Grant revocation is terminal: regrant uses a new
+ID, and SQL cannot clear an old revocation. Disabling/replacing a grant in one
+change set is atomic. Output contains only change IDs and revisions; no-op
+returns an empty `changes` array. Failed commands emit a fixed safe diagnostic.
+
+### Maintenance and shutdown
+
+Each actual Auth process owns one cancellable minute timer. Each pass has a
+two-second database deadline and deletes at most 1,000 tokens strictly more than
+24 hours past expiry by PostgreSQL time, using ordered `FOR UPDATE SKIP LOCKED`.
+It deletes neither keys nor policy roots. Backlog aggregation is time bounded
+by that deadline; it is not a claim of a bounded aggregate scan.
+
+Auth's separate metrics listener exports fixed status counters
+`tetral_auth_token_prune_passes_total{status="success"|"failed"|"cancelled"}`,
+`deleted_total`, `expired_backlog`, `oldest_expiry_age_seconds`,
+`last_success_timestamp_seconds`, and `healthy`, all with the same
+`tetral_auth_token_prune_` prefix. Last successful capacity values remain
+available after a failed pass; initial values do not claim a completed pass.
+There are no token, identity or workspace metric labels. Healthy ticks are
+quiet; degradation/recovery diagnostics are bounded and contain safe tuples.
+The usage worker exports
+`tetral_auth_api_key_usage_submissions_dropped_total{reason="capacity"|"contended"|"closed"}`,
+`tetral_auth_api_key_usage_samples_dropped_total{reason="deadline"|"database"}`
+and `tetral_auth_api_key_usage_rows_updated_total`, with no key, workspace or
+credential labels. A tick with failed writes logs one warning with a fixed
+message and the aggregate failed count; shutdown cancellation logs nothing.
+All listeners bind and native credential material validates before readiness.
+A listener failure cancels its siblings and clears readiness. The separate gRPC
+health service reports `envoy.service.auth.v3.Authorization`; the process probes
+remain on HTTP/metrics. Listener shutdown joins requests within the ten-second
+drain budget, cancelling forced gRPC work, then Application closes the usage
+recorder (submissions close, its worker is cancelled and joined, and unwritten
+samples are discarded without a final flush) and joins pruning and issuer work
+before closing PostgreSQL and the trust observer. Process cancellation also
+stops the usage worker, so admissions that complete during drain record no
+usage.
+
+The same metrics listener exports fixed-bucket
+`tetral_operation_duration_seconds{service="auth",operation="/envoy.service.auth.v3.Authorization/Check",outcome=...}`
+from the actual Check unary boundary, including current-peer validation. A typed
+allow is `success`; a typed 4xx denial is `rejected`; a typed 5xx or transport
+failure is `error`. Actual caller/transport cancellation or deadline expiry is
+`cancelled`/`timeout`. A nil gRPC error on a denied response never means success.
+An internal dependency expiry returned as HTTP 500 remains `error` unless the
+caller/transport context itself expired. No request, credential or workspace
+labels are added, and HTTP token/key metrics retain their names and units.
+
+`shutdown_grpc_drain` measures the actual bounded GracefulStop wait; expiry is
+`timeout`. Forced `shutdown_grpc_cancel_join` records only after Stop and the
+handler owner join, without a new join budget. The existing process logger
+records the same phase duration even if the metrics listener is already closed,
+subject to [shared collection limits](../../internal/workload/README.md#operation-durations).
+The owning PostgreSQL Check test verifies typed denial populations, a real
+closed Auth-role database failure with no principal or credential usage, and
+the existing held native Check transaction completing during graceful drain.
+
+### Config and ports
+
+| Setting | Default | Supported bound |
+|---------|---------|-----------------|
+| `TETRAL_AUTH_HTTP_ADDR` | `:8080` | public routes plus `/health` and `/ready`; `/metrics` is `404` |
+| `TETRAL_AUTH_METRICS_ADDR` | `:8081` | must differ from HTTP and gRPC; `/metrics`, `/health`, `/ready` |
+| `TETRAL_AUTH_GRPC_ADDR` | `:9095` | separate Check and gRPC health listener |
+| `TETRAL_AUTH_GRPC_TRANSPORT` | `plaintext` when unset | `plaintext` for the standard routed profile or `native-mtls` for the hardened Auth/edge hop |
+| `TETRAL_AUTH_GRPC_TLS_CA_PATH`, `TETRAL_AUTH_GRPC_TLS_CERT_PATH`, `TETRAL_AUTH_GRPC_TLS_KEY_PATH` | none | all required for `native-mtls`; rejected for plaintext |
+| `TETRAL_AUTH_GRPC_TLS_EDGE_CLIENT_URI` | none | required for `native-mtls` and must be `spiffe://<trust-domain>/ns/envoy-gateway-system/sa/tetral-public-edge`; only the trust domain is configurable, unlike `TETRAL_HTTP_TLS_EDGE_CLIENT_URI`, which accepts any SPIFFE path |
+| `TETRAL_HTTP_TRANSPORT` | `plaintext` | public Auth HTTP only: `plaintext` or `native-mtls` |
+| `TETRAL_HTTP_TLS_CA_PATH`, `TETRAL_HTTP_TLS_CERT_PATH`, `TETRAL_HTTP_TLS_KEY_PATH`, `TETRAL_HTTP_TLS_EDGE_CLIENT_URI` | none | complete trust/leaf/edge role for native HTTP; metrics stay internal |
+| `TETRAL_AUTH_JWKS_CACHE_TTL_SECONDS` | 600 | integer 1–600 |
+| `TETRAL_AUTH_EXCHANGE_BODY_BYTES` | 32768 | integer 1024–65536 |
+| `TETRAL_AUTH_EXCHANGE_CONCURRENCY` | 32 | integer 1–32 |
+| `TETRAL_AUTH_EXCHANGE_REQUESTS_PER_MINUTE` | 60 | integer 1–6000, per actual process |
+| `TETRAL_AUTH_EXCHANGE_BODY_READ_TIMEOUT_MS` | 5000 | integer 100–5000 |
+| `TETRAL_AUTH_INTERNAL_PRINCIPAL_TTL_SECONDS` | 60 | integer 1–300 |
+
+Exchange admission includes parsing and body draining within the configured
+read deadline. A rejected request terminates its body read and connection
+without consuming a full drain budget outside a slot. The limiter retains no
+assertions or caller identifiers. Bootstrap requires an existing configured
+workspace, a strong `ENGINE_API_KEY`, and a valid Ed25519 private signing key.
+Startup verifies config, canonical schema and the serving role before refreshing
+the bootstrap key once. The workspace must already exist. HTTP and Check borrow
+the same authority resolver and signer; constructing the adapter does not create
+workspaces or repeat bootstrap writes. Native Check credentials reload complete
+mounted generations through `internal/transportsecurity`, require the exact edge
+client role, and never retry a failed TLS connection as plaintext. The hardened
+edge verifies the exact Auth DNS name `auth.tetral-system.svc.cluster.local`.
+Every new native RPC verifies the established peer against current trust, exact
+edge role and certificate validity. CA overlap keeps the listener and admitted
+requests alive. Operators distribute overlap trust, rotate leaves and observe
+fresh handshakes, then replace/drain old Auth Pods within the ten-second listener
+budget before removing old trust. Retirement does not silently stop the whole
+Auth process. A missed drain cannot admit a new Check on an old connection:
+retired or expired peer certificates produce transport unavailability, and the
+edge returns `503` without a principal.
 
 ## Seams
 
-### Edge external-auth boundary
-
-- **Interface contract.** The edge gateway is deployment infrastructure (an
-  adapter over Traefik ForwardAuth, Envoy `ext_authz`, ingress-nginx
-  `auth-url`, or equivalent). It calls `POST /internal/auth/authorize` with
-  the public key and original request metadata, receives allow/deny plus the
-  `X-Tetral-Internal-Principal` header, then strips the raw key and any
-  client-supplied `X-Tetral-*` headers, injects the minted principal, and
-  forwards to the target service.
-- **Reference manifest.** The edge is deployment infrastructure, but a reference
-  ingress manifest lives in-repo at
-  `deploy/kubernetes/edge-gateway/ingress-nginx.yaml`, routing `/v1/api_keys` to
-  `auth` with `pathType: Prefix` (the catch-all `/v1` routes to
-  `api`); `deploy/kubernetes/manifest_test.go` asserts that path→backend
-  map exactly. Because `/v1/api_keys` is a Prefix route, a new sub-path such as
-  `POST /v1/api_keys/{id}/rotate` routes to `auth` automatically and needs
-  no edge or manifest change.
-- **Lifecycle.** One subrequest precedes each public request, including
-  `/v1/api_keys` calls, which re-enter through the edge as an ordinary target
-  service.
-- **Invariants a replacement must preserve.** A client-supplied principal is
-  never trusted; the raw key is never forwarded past the edge; no public route
-  requires method-based backend selection (a read and a write on one path
-  terminate on the same service).
-- **Conformance tests.** `services/auth/routes_test.go`
-  (`TestAuthorizeMintsSignedInternalPrincipalAndTouchesKey`,
-  `TestAuthorizePathOnlyPrincipalVerifiesQueryBearingRequest`,
-  `TestAuthorizeRequiresAuditRateLimitMetadata`).
-
-### Internal principal signer
-
-- **Interface contract.** `auth.InternalPrincipalSigner` mints and
-  `auth.InternalPrincipalVerifier` verifies. The signing key is an Ed25519
-  private key handed to this service alone as deployment config; target public
-  services receive only the verify key
-  (`NewInternalPrincipalVerifierFromBase64`), so they can check principals but
-  can never mint them.
-- **Lifecycle.** Minted per authorize call, verified once per downstream
-  request, expired at `exp`.
-- **Invariants a replacement must preserve.** Asymmetric signing with
-  verify-only distribution; per-request binding of audience, method, and path;
-  a positive TTL; non-empty workspace and key ids. A different scheme must keep
-  all four or downstream trust breaks.
-- **Conformance tests.** `services/auth/routes_test.go` (mint side);
-  consumer verification in `internal/eventstream/eventstream_test.go`
-  (`TestEventStreamRoutesRequireSignedInternalPrincipal`) and the
-  `api` / `event-stream` command tests.
-
-### API-key store (persistence)
-
-- **Interface contract.** `auth.APIKeyStore` over a `pgx` connection: create,
-  list, revoke, touch, authenticate, and bootstrap upsert against `api_keys`,
-  with `workspaces` read for the join and the startup check.
-- **Lifecycle.** Every mutating call runs inside a workspace-scoped
-  transaction (`storage.WithWorkspaceTx`) that sets `tetral.workspace_id`; the
-  authenticate lookup is the one read-only transaction that sets no workspace
-  scope.
-- **Invariants a replacement must preserve.** Only public-safe metadata and
-  the non-recoverable `SHA-256` digest are stored; the raw token is never
-  written to any column and never read back; the stored `key_prefix` is
-  identification metadata that cannot authenticate. Tenant isolation is signed
-  principal binding with `workspace_id` in every primary-key predicate: reads
-  and writes bind the principal's `workspace_id`, and a cross-workspace row is
-  a `404`, never a fallback. Time columns are written as
-  `time.Now().UTC().Format(time.RFC3339)` (`internal/auth/store.go`) — fixed
-  width, always `Z`, no fractional seconds — so lexicographic string comparison
-  equals chronological order. Any new time-window predicate depends on that
-  format; switching to `RFC3339Nano` or a local offset would silently break the
-  ordering.
-- **Conformance tests.** `internal/auth/store_test.go`
-  (`TestCreateForWorkspaceReturnsRawKeyOnceAndStoresMetadataOnly`,
-  `TestListActiveForWorkspaceRejectsCrossWorkspaceCursor`,
-  `TestRevokeForWorkspaceCannotCrossWorkspace`),
-  `internal/auth/bootstrap_test.go`
-  (`TestRefreshBootstrapPreservesStandardKeys`,
-  `TestRefreshBootstrapReactivatesRevokedBootstrapRow`).
-
-### Key distribution (admin, out of band)
-
-- **Interface contract.** Keys are issued and revoked only through the
-  admin/raw-HTTP `/v1/api_keys` surface; the client SDK deliberately carries no
-  api-keys resource. `ENGINE_API_KEY` is a bootstrap credential for first
-  administrative access — not a user public API key and not a provider API key.
-  Flow: an admin sets `ENGINE_API_KEY` at deploy → startup
-  seeds the bootstrap row → the admin calls `POST /v1/api_keys` with the
-  bootstrap key to mint a `standard` key (raw value returned once) → the admin
-  hands it to the user out of band → the user sets it as the SDK `apiKey`.
-- **Lifecycle.** Rotation is mint-new then `DELETE /v1/api_keys/{id}` (`204`);
-  the revoked row stays for audit.
-- **Invariants a replacement must preserve.** The raw key is emitted exactly
-  once, from the create body, and in no log line. A future SDK api-keys
-  resource, if ever added, must be generated from the pinned DTO, not
-  hand-authored.
-- **Conformance tests.** `services/auth/routes_test.go`
-  (`TestAPIKeyManagementUsesSignedPrincipalAndManagedAgentsCursorShape`,
-  `TestAPIKeyManagementErrorsUseSDKEnvelopeWithRequestID`).
+- **Edge adapter:** `NewExternalAuthorization(ExternalAuthorizationConfig)` borrows
+  the real request authenticator and signer; `Register(grpc.ServiceRegistrar)`
+  installs the v3 Check service. `OpenExternalAuthorizationServer` owns its
+  separately bound listener, native credential observer, gRPC health, and drain.
+  Deployment routing and its real Envoy proof live with the public edge. The
+  former nginx HTTP authorization endpoint has been removed.
+- **Principal signer:** only Auth owns the private signing key. Public services
+  receive the verify key. Claims bind audience, exact method/path, request audit
+  metadata, issuance/expiry and a mandatory discriminated credential/identity/
+  authority union. API-key actors retain their actual durable key ID; direct
+  human/service Bearers carry stable Engine identity IDs and no API-key ID.
+- **Usage recorder:** `Application` owns the one `APIKeyUsageRecorder` and
+  injects it into the resolver that HTTP and Check share, starting its worker
+  after startup validation and before listeners open. `BuildRouter` starts no
+  worker; without an injected recorder it records no usage.
+- **Persistence:** pre-workspace access is restricted to fixed owner-controlled
+  lookup/lock/prune functions. Serving roots are read-only; workspace writes
+  require trusted scope. Raw keys, access tokens and assertions are never stored
+  or logged; SHA-256 digests alone authenticate stored credentials. Parent
+  credential IDs are audit lineage, not a dependency on retained token rows.
 
 ## Testing guide
 
-| Suite | Proves |
-|-------|--------|
-| `services/auth/routes_test.go` | authorize mints and touches; path-only principals verify query-bearing requests; audit/rate-limit metadata required; `/v1/api_keys` uses the signed principal and the cursor shape; errors use the SDK error envelope with a request id, including `413` for oversized bodies |
-| `services/auth/schema_startup_test.go` | schema verified before runtime role; a behind schema stops before runtime-role and bootstrap seeding |
-| `services/auth/cmd/tetral-auth/main_test.go` | the public handler does not expose `/metrics`; metrics serve on a separate listener; startup-failure logs use shared fields |
-| `internal/auth/store_test.go` | raw key returned once and only metadata stored; list excludes revoked and honors limit + cursor; cross-workspace cursor and cross-workspace revoke rejected; unknown/empty keys rejected |
-| `internal/auth/bootstrap_test.go` | strength floor enforced; insert / rotate / no-op / reactivate branches; standard keys preserved and revoked standard keys not reactivated |
-| `internal/auth/generator_test.go` | `tetral_sk_` prefix, single ASCII token, 32 decoded secret bytes, `SHA-256` digest, 16-char prefix |
-| `internal/auth/middleware_test.go` | missing/invalid key rejected; query-string keys ignored; workspace and principal attached on success; the provided key is never logged |
+`make test` runs pure checks; `make test-affected` and `make test-full` provision
+native declared dependencies. Focused PostgreSQL roots still accept an
+administrative `TETRAL_TEST_DATABASE_URL` and create isolated clones/roles.
 
-If a PR changes the authorize flow, the internal-principal token shape, the
-`/v1/api_keys` handlers, or bootstrap seeding in this folder, it updates the
-matching section here.
+- `services/auth/exchange_bounds_test.go`: strict exchange fields, typed config,
+  protected responses and real-socket slow body/admission bounds.
+- `services/auth/exchange_postgresql_test.go`: actual HTTP exchange, Engine
+  selectors, human/service bindings, ported Check credential precedence and error classes.
+- `services/auth/ext_authz_test.go`: actual gRPC Check, real Auth-role private
+  PostgreSQL, signature/typed actor/sampled usage/path binding, foreign and revoked keys,
+  frozen Bearer selection/duplicates, malformed metadata, actual lock-graph
+  revoke/admission orders and interrupted database waits.
+- `services/auth/grpc_test.go`: listener configuration and, within the owning
+  PostgreSQL root, real native TLS peer rejection without credential admission,
+  held Check across leaf renewal and trust overlap, retired-channel rejection,
+  and readiness withdrawal with an admitted Check completing before listener,
+  credential observer and pool shutdown join.
+- `services/auth/application_test.go`: the production Application closes usage
+  submissions and joins the in-flight usage worker before closing the pool, with
+  no final flush; repeated Close succeeds.
+- `services/auth/operation_coverage_test.go`: actual Auth route registrations.
+- `internal/auth/authority_resolver_test.go` and `authority_transactions_test.go`:
+  durable lineage/ceilings, parent pruning, exact revisions, actual Auth-role
+  row-lock barriers, concurrent admissions sharing the credential lock, both
+  revocation orders, post-lock expiry/digest checks, no admission writes and
+  usage submitted only after commit.
+- `internal/auth/api_key_usage_test.go`: actual Auth-role worker/admission
+  contention (paused worker, other-key and same-key updates, cancellation,
+  exhausted pool, request versus application cancellation), two recorders
+  sampling by database time at the five-minute boundary, generation fencing
+  across rotation and reactivation, and map, batch, deadline and suppression
+  bounds.
+- `internal/auth/policy_test.go`, database role tests and the policy command tests:
+  atomic/no-op/tombstone imports, narrow role isolation and protected operator
+  entry with serving-role rejection.
+- Verifier/bounds tests: controlled HTTPS trust, claims, malicious metadata,
+  rotation, retirement, cancellation, cache pressure and revision isolation.
+- Pruner tests: strict retention, bounded batches, replica progress, role
+  isolation, admission's credential share lock deferring pruning of that
+  credential, failure recovery, metrics and joined cancellation.
+- Actual OIDC integration roots: unchanged SDK/real HTTPS Keycloak exchange and
+  reactive 401 recovery, real Keycloak/Auth rotation, two actual Auth processes
+  sharing PostgreSQL with frozen Bearers and zero issuer calls, and exact test
+  edge forwarding. Native inventory owns their dependency lifecycle.
+
+## Process diagnostics
+
+The command uses the shared [Go process diagnostic contract](../../internal/workload/README.md).
+Restart-only `TETRAL_LOG_LEVEL`, `TETRAL_LOG_MAX_RECORD_BYTES`,
+`TETRAL_LOG_SUMMARY_INTERVAL_MS` and `TETRAL_LOG_BURST` default to Info-level
+bounded diagnostics. Failure records retain safe error tuples; repeated
+degradation emits suppression summaries. Cleanup completes before bounded
+process-diagnostic close. Credentials and assertion contents never enter logs.
+
+Auth outcomes use fixed `auth.stage` and `auth.result` values. Invalid input,
+credentials, and assertions differ from grant/operation denial, exchange limits,
+PostgreSQL unavailability (`auth_store_unavailable`), and issuer/JWKS
+unavailability (`auth_jwks_unavailable`). Successful exchange records retain
+trusted human/service kind and positive rule, identity, and grant revision
+numbers. Denials retain these facts only after their lookup or signed admission
+establishes them. Operation denials include the registered semantic
+`auth.operation`; resource selectors and identity IDs are omitted. Unknown facts
+stay absent. Successful request admission and operation checks stay quiet at the
+default level. Repeated failures share fixed stage/code suppression partitions;
+kind, revisions, and actions never expand limiter keys. The same shared audit
+context covers Auth, API (including its event-list routes), and EventStream
+gates. Diagnostic sink failure cannot change the authorization result or
+business effects.

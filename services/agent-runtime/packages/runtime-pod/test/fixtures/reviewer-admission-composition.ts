@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { access, readFile, writeFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
 import { AutoApprovalReviewerManager } from "@tetral/agent-runtime-core/src/session/approval-reviewer-manager.js";
@@ -25,6 +26,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly parentBoundaryEventId: string;
 	readonly beforeTrunkReleasePath?: string;
 	readonly trunkReleasePath?: string;
@@ -88,18 +90,14 @@ const runtimeSleep = async (
 };
 const decisionStream = (id: string) =>
 	Stream.fromIterable([
-		{ type: "text-start" as const, id },
-		{
-			type: "text-delta" as const,
-			id,
-			text_delta: JSON.stringify({
+
+
+		{type:"text-complete" as const,providerPartId:id,eventId:`evt_${createHash("sha256").update(JSON.stringify(["reviewer-admission-composition.ts", input.sessionId, id])).digest("hex").slice(0,32)}`,text:(JSON.stringify({
 				outcome: "allow",
 				risk_level: "low",
 				user_authorization: "high",
 				rationale: "composed allow",
-			}),
-		},
-		{ type: "text-end" as const, id },
+			}))},
 		{ type: "finish" as const, finishReason: "stop" as const },
 	]);
 const hosts = await buildRuntimeCoreHosts({
@@ -252,6 +250,7 @@ function reviewRequest(
 		bindingId: input.bindingId,
 		bindingGeneration: input.bindingGeneration,
 		targetPodUid: input.targetPodUid,
+		runtimeProcessId: input.runtimeProcessId,
 		runtimeBindingToken: "reviewer-composition-token",
 		modelRequestId: "mreq_reviewer_composition_parent",
 		parentBoundaryEventId: input.parentBoundaryEventId,

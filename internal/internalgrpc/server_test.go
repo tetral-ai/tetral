@@ -3,6 +3,7 @@ package internalgrpc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -58,9 +59,42 @@ func TestInternalGRPCRegistersCallbackAndHealthService(t *testing.T) {
 	}
 }
 
+// Only Run binds: the constructors return a server for a caller-owned listener
+// and never open one that nothing serves or closes.
+func TestInternalGRPCConstructorsNeverBind(t *testing.T) {
+	binds := 0
+	cfg := Config{
+		ServiceName:   "test-service",
+		Authenticator: &allowingAuthenticator{},
+		Register:      func(*grpc.Server) {},
+		Listen: func(network, address string) (net.Listener, error) {
+			binds++
+			return net.Listen(network, "127.0.0.1:0")
+		},
+	}
+	if _, err := NewServer(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := NewServerWithHealth(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if binds != 0 {
+		t.Fatalf("constructors bound %d listeners", binds)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg.OnServing = cancel
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if binds != 1 {
+		t.Fatalf("Run bound %d listeners; want 1", binds)
+	}
+}
+
 func TestInternalGRPCAuthenticatesBeforeDispatchAndLogsSafely(t *testing.T) {
 	var buffer bytes.Buffer
-	metrics := workload.NewGRPCMetrics()
+	metrics := workload.NewGRPCMetrics("queue")
 	dispatches := 0
 	client, cleanup := newInternalGRPCClient(t, Config{
 		ServiceName:   "test-service",
@@ -128,7 +162,7 @@ func TestInternalGRPCOKBoundaryLogOmitsFailureClassification(t *testing.T) {
 	client, cleanup := newInternalGRPCClient(t, Config{
 		ServiceName:   "test-service",
 		Authenticator: &allowingAuthenticator{},
-		Logger:        newTestLogger(&buffer),
+		Logger:        slog.New(slog.NewJSONHandler(&buffer, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Register: func(server *grpc.Server) {
 			registerTestService(server, func(context.Context) error { return nil })
 		},
@@ -481,3 +515,120 @@ func hasMetricLabel(labels []workload.MetricLabel, name string, value string) bo
 }
 
 var _ io.Writer = (*bytes.Buffer)(nil)
+
+func TestHealthyAuthenticatedRPCsAreQuietAtDefaultLevel(t *testing.T) {
+	var buffer bytes.Buffer
+	client, cleanup := newInternalGRPCClient(t, Config{ServiceName: "test-service", Authenticator: &allowingAuthenticator{}, Logger: workload.NewLogger(&buffer, "test-service", "test", "unit"), Register: func(server *grpc.Server) { registerTestService(server, func(context.Context) error { return nil }) }})
+	defer cleanup()
+	ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer ok-token"))
+	for n := 0; n < 1000; n++ {
+		if err := client.Invoke(ctx, testMethod, &emptypb.Empty{}, &emptypb.Empty{}); err != nil {
+			t.Fatalf("healthy RPC %d: %v", n, err)
+		}
+	}
+	if buffer.Len() != 0 {
+		t.Fatalf("healthy RPC chatter at default Info: %s", buffer.String())
+	}
+}
+
+func TestInternalGRPCForcedStopJoinsAfterCancellationBudget(t *testing.T) {
+	for _, scenario := range []struct {
+		name                     string
+		overrun, listenerFailure bool
+	}{
+		{name: "within_budget"},
+		{name: "budget_exhausted", overrun: true},
+		{name: "listener_failed", overrun: true, listenerFailure: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			listener := bufconn.Listen(1024 * 1024)
+			entered, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
+			ctx, cancel := context.WithCancel(context.Background())
+			finished := make(chan struct{})
+			var runErr error
+			observation := &joinBudgetLogWriter{reported: make(chan struct{})}
+			joinBudget := time.Second
+			if scenario.overrun {
+				joinBudget = 10 * time.Millisecond
+			}
+			go func() {
+				runErr = Run(ctx, Config{
+					ServiceName: "test-forced-join", Authenticator: &allowingAuthenticator{}, Listener: listener,
+					ShutdownTimeout: 5 * time.Millisecond, CancelJoinTimeout: joinBudget,
+					Logger: slog.New(slog.NewJSONHandler(observation, nil)),
+					Register: func(server *grpc.Server) {
+						registerTestService(server, func(ctx context.Context) error {
+							close(entered)
+							<-ctx.Done()
+							close(cancelled)
+							<-release
+							return ctx.Err()
+						})
+					},
+				})
+				close(finished)
+			}()
+			defer func() { cancel(); releaseHandler(); <-finished }()
+			conn, err := grpc.NewClient("passthrough:///bufnet",
+				grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }),
+				grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = conn.Close() }()
+			callCtx, cancelCall := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancelCall()
+			authCtx := metadata.NewOutgoingContext(callCtx, metadata.Pairs("authorization", "Bearer join-fixture"))
+			callFinished := make(chan struct{})
+			go func() { _ = conn.Invoke(authCtx, testMethod, &emptypb.Empty{}, &emptypb.Empty{}); close(callFinished) }()
+			defer func() { cancelCall(); <-callFinished }()
+			await := func(ch <-chan struct{}, boundary string) {
+				t.Helper()
+				select {
+				case <-ch:
+				case <-time.After(3 * time.Second):
+					t.Fatalf("missing %s", boundary)
+				}
+			}
+			await(entered, "handler admission")
+			if scenario.listenerFailure {
+				if err := listener.Close(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				cancel()
+			}
+			await(cancelled, "forced handler cancellation")
+			if scenario.overrun {
+				await(observation.reported, "configured join budget observation")
+				select {
+				case <-finished:
+					t.Fatalf("server released handler ownership before join: %v", runErr)
+				case <-time.After(20 * time.Millisecond):
+				}
+			}
+			releaseHandler()
+			await(finished, "joined server")
+			if scenario.overrun && !errors.Is(runErr, ErrCancelJoinTimeout) {
+				t.Fatalf("join result = %v", runErr)
+			}
+			if !scenario.overrun && runErr != nil {
+				t.Fatalf("within-budget join = %v", runErr)
+			}
+		})
+	}
+}
+
+type joinBudgetLogWriter struct {
+	reported chan struct{}
+	once     sync.Once
+}
+
+func (w *joinBudgetLogWriter) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte(`"error.code":"cancellation_join_timeout"`)) {
+		w.once.Do(func() { close(w.reported) })
+	}
+	return len(p), nil
+}

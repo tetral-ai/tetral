@@ -7,7 +7,7 @@ import type {
 	RuntimeAssistantContextAppend,
 	RuntimeContextEntry,
 } from "../../src/contracts/runtime.js";
-import { ProviderStreamAccumulator } from "../../src/runtime/accumulator.js";
+import { RequestContentProcessor } from "../../src/runtime/accumulator.js";
 import { toGatewayProviderContext } from "../../src/runtime/context-projection.js";
 import {
 	applyAssistantAppendResult,
@@ -25,7 +25,7 @@ describe("Runtime context lifetimes", () => {
 				parts: [{ type: "text", text: "before request" }],
 			},
 		]);
-		const accumulator = new ProviderStreamAccumulator({
+		const accumulator = new RequestContentProcessor({
 			modelRequestId: "request_owner",
 			requestId: "provider_request_owner",
 			workspaceId: "default",
@@ -34,7 +34,8 @@ describe("Runtime context lifetimes", () => {
 			bindingId: "binding",
 			bindingGeneration: 1,
 			targetPodUid: "pod",
-			contextOwner: context,
+			runtimeProcessId: "process-test",
+			contextOwner: context,activeToolReferences:()=>[],onCommittedApplicationFailure:()=>{},onAssistantMessageCommitted:()=>{},
 			writer: {} as never,
 		});
 		context.appendEntry({
@@ -43,14 +44,13 @@ describe("Runtime context lifetimes", () => {
 			parts: [{ type: "text", text: "committed concurrently" }],
 		});
 
-		expect(accumulator.contextEntries()).toEqual(context.entries());
-		expect(accumulator.applyRequestEndAppend(undefined, {})).toBe(true);
-		expect(context.entries().map((entry) => entry.messageSequence)).toEqual([
+		expect(accumulator.messages()).toEqual(context.historyMessages());
+		expect(context.historyMessages().map((entry) => entry.messageSequence)).toEqual([
 			1, 2,
 		]);
 	});
 
-	test("an open Assistant draft stays outside provider history until it is sealed", () => {
+	test("a committed current Assistant stays outside history until checkpoint eligibility changes", () => {
 		const userEntry: RuntimeContextEntry = {
 			messageSequence: 1,
 			contextKind: "user",
@@ -93,15 +93,15 @@ describe("Runtime context lifetimes", () => {
 			],
 		};
 		const applied = applyAssistantAppendResult({
-			modelRequestId: "request_open",
 			append,
 			result: {
 				messageSequence: 2,
 				createdToolUseEventIds: ["tool_a", "tool_b"],
 			},
 		});
-		const context = new ContextManager("session", [userEntry]);
-		context.installOpenRequestDraft(applied.draft);
+		let eligible=false;
+ const context=new ContextManager("session",[userEntry],()=>({assistantMessageSequence:2}),message=>message.messageSequence!==2||eligible);
+ context.installAssistantMessage(applied.message);
 
 		expect(context.providerEntries()).toEqual([userEntry]);
 		expect(toGatewayProviderContext(context.providerEntries())).toEqual({
@@ -114,13 +114,14 @@ describe("Runtime context lifetimes", () => {
 			],
 		});
 
-		const sealed = context.sealOpenRequestDraft();
+		eligible=true;context.invalidateHistory();
+ const sealed=context.currentAssistantMessage();
 		expect(sealed).toEqual({
 			messageSequence: 2,
 			contextKind: "assistant",
-			parts: applied.draft.parts,
+			parts: applied.message.parts,
 		});
-		expect(context.openRequestDraft()).toBeUndefined();
+		expect(context.currentAssistantMessage()).toEqual(applied.message);
 		const projected = toGatewayProviderContext(context.providerEntries());
 		expect(projected).toMatchObject({
 			ok: true,
@@ -171,9 +172,9 @@ describe("Runtime context lifetimes", () => {
 		};
 		const context = new ContextManager("session", [sealed]);
 
-		context.replaceEntries(
+		context.replaceMessages(
 			applyToolSettlementToContext({
-				entries: context.entries(),
+				entries: context.historyMessages(),
 				assistantMessageSequence: 2,
 				modelToolCallId: "call_b",
 				settlement: {
@@ -208,9 +209,9 @@ describe("Runtime context lifetimes", () => {
 			],
 		});
 
-		context.replaceEntries(
+		context.replaceMessages(
 			applyToolSettlementToContext({
-				entries: context.entries(),
+				entries: context.historyMessages(),
 				assistantMessageSequence: 2,
 				modelToolCallId: "call_a",
 				settlement: {
@@ -237,10 +238,10 @@ describe("Runtime context lifetimes", () => {
 		const cold = new ContextManager(
 			"session",
 			JSON.parse(
-				JSON.stringify(context.entries()),
+				JSON.stringify(context.historyMessages()),
 			) as readonly RuntimeContextEntry[],
 		);
-		expect(cold.entries()).toEqual(context.entries());
+		expect(cold.historyMessages()).toEqual(context.historyMessages());
 		expect(toGatewayProviderContext(cold.providerEntries())).toEqual(
 			fullySettled,
 		);
@@ -250,12 +251,14 @@ describe("Runtime context lifetimes", () => {
 		for (const rules of GatewayProviderRules) {
 			const assembled = assembleProviderCallRequest({
 				identity: {
+					threadRole: "main", threadVisibility: "public",
 					workspaceId: "default",
 					sessionId: "session",
 					sessionThreadId: "thread",
 					bindingId: "binding",
 					bindingGeneration: 1,
 					targetPodUid: "pod",
+					runtimeProcessId: "process-test",
 					runtimeBindingToken: "runtime-binding-token",
 				},
 				requestId: `provider_${rules.providerFamily}`,
@@ -270,7 +273,7 @@ describe("Runtime context lifetimes", () => {
 			expect(assembled.ok, rules.providerFamily).toBe(true);
 			if (!assembled.ok) continue;
 			expect(
-				validateProviderRequest(assembled.request),
+				validateProviderRequest({...assembled.request,modelRequestStartEventId:"evt_0000000000000001"}),
 				rules.providerFamily,
 			).toEqual({ ok: true });
 

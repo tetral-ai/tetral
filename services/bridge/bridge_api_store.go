@@ -2,14 +2,15 @@ package agentruntimebridge
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/tetral-ai/tetral/internal/mcpmanifest"
+
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 
 	"github.com/tetral-ai/tetral/internal/storage"
 
@@ -34,7 +35,8 @@ const MaxProviderRequestAttachments = 32
 // aggregate (per-part content and metadata caps unchanged) apply to the union,
 // not to each vector separately. An attached set or a settlement that breaches
 // either limit is rejected as a contract violation before any durable write.
-// UPDATE-WITH: services/agent-runtime/packages/core/src/contracts/runtime.ts
+// Canonical policy: services/gateway/packages/protocol/src/content-limits.json;
+// checked against these actual Bridge limits by content_limits_test.go.
 const (
 	MaxStableReasoningPartsPerRequest = 16
 	MaxStableReasoningBytesPerRequest = 2 * 1024 * 1024
@@ -53,33 +55,25 @@ const (
 const MaxMemoryPathConflicts = 32
 
 const (
-	bridgeAckCommitted = "committed"
-	bridgeAckRejected  = "rejected"
-
-	bridgeOpCommitInputs                   = "commit_inputs"
-	bridgeOpCommitTaskNotificationResult   = "commit_task_notification_result"
-	runtimeTaskNotificationPayloadMaxBytes = 16 * 1024
-	bridgeOpWriteEvent                     = "write_event"
-	bridgeOpSettleToolResult               = "settle_tool_result"
-	bridgeOpWriteRequestEnd                = "write_request_end"
-	bridgeOpFinishIdle                     = "finish_idle"
-	bridgeOpCreateChildThread              = "create_child_thread"
-	bridgeOpDeliverInterAgentMail          = "deliver_inter_agent_mail"
-	bridgeOpResolveChildThread             = "resolve_child_thread"
-	bridgeOpListChildThreads               = "list_child_threads"
-	bridgeOpCloseChildControl              = "close_child_control"
-	bridgeOpCloseApprovalReviewer          = "close_approval_reviewer"
-	bridgeOpMarkChildThreadActive          = "mark_child_thread_active"
-	bridgeOpReadCommandResult              = "read_command_result"
-	bridgeOpSendCommandInput               = "send_command_input"
-	bridgeOpCancelCommand                  = "cancel_command"
-	bridgeOpRunMemory                      = "run_memory"
-	bridgeOpMcpManifestChanged             = "mcp_manifest_changed"
-	bridgeOpCommitMcpToolResult            = "commit_mcp_tool_result"
-	bridgeOpRelinquishMcpToolResult        = "relinquish_mcp_tool_result"
-	bridgeOpCommitInternalToolRepair       = "commit_internal_tool_repair"
-	bridgeOpCommitRuntimeTermination       = "commit_runtime_termination"
-	mcpManifestAcceptanceLockCategory      = int32(0x6D63_7061) // "mcpa"
+	bridgeOpWriteEvent               = "write_event"
+	bridgeOpSettleToolResult         = "settle_tool_result"
+	bridgeOpWriteRequestEnd          = "write_request_end"
+	bridgeOpFinishIdle               = "finish_idle"
+	bridgeOpCreateChildThread        = "create_child_thread"
+	bridgeOpDeliverInterAgentMail    = "deliver_inter_agent_mail"
+	bridgeOpResolveChildThread       = "resolve_child_thread"
+	bridgeOpListChildThreads         = "list_child_threads"
+	bridgeOpCloseChildControl        = "close_child_control"
+	bridgeOpCloseApprovalReviewer    = "close_approval_reviewer"
+	bridgeOpMarkChildThreadActive    = "mark_child_thread_active"
+	bridgeOpReadCommandResult        = "read_command_result"
+	bridgeOpSendCommandInput         = "send_command_input"
+	bridgeOpCancelCommand            = "cancel_command"
+	bridgeOpRunMemory                = "run_memory"
+	bridgeOpCommitMcpToolResult      = "commit_mcp_tool_result"
+	bridgeOpRelinquishMcpToolResult  = "relinquish_mcp_tool_result"
+	bridgeOpCommitInternalToolRepair = "commit_internal_tool_repair"
+	bridgeOpCommitRuntimeTermination = "commit_runtime_termination"
 
 	bridgeToolKindSandbox           = "sandbox_tool"
 	bridgeToolKindSandboxBackground = "sandbox_background"
@@ -100,10 +94,6 @@ const (
 	mcpClaimLeaseTTL       = 180 * time.Second
 	mcpClaimInFlightCode   = "mcp_claim_in_flight"
 	mcpClaimNotOwnedCode   = "mcp_claim_not_owned"
-
-	requestKindAgentProviderRequest = "agent_provider_request"
-	requestKindCompactionSummary    = "compaction_summary"
-	requestKindApprovalReviewer     = "approval_reviewer"
 
 	// memoryToolContentMaxBytes caps the content of a memory tool write. It MUST
 	// stay equal to internal/memory's memoryContentMaxBytes, which caps the
@@ -143,18 +133,20 @@ const (
 	// turn parks those resources. Worst-case hold for a run is the reschedule
 	// budget times this value (budget x backoff), not a retry cadence.
 	defaultRuntimeBindingTokenTTL = 5 * time.Minute
-	defaultIdleCleanupDelay       = 30 * time.Minute
+
 	defaultTransientAttachmentTTL = 15 * time.Minute
 	maxRescheduleBackoff          = 120 * time.Second
 )
 
 type PostgreSQLBridgeAPIStore struct {
 	Client                     *dbconnect.Client
+	ProcessPolicy              runtimecontrol.ProcessPolicy
+	LifecyclePolicy            BridgeLifecyclePolicy
 	Logger                     *slog.Logger
 	Clock                      func() time.Time
 	AttachmentBlobStore        blob.BlobStore
 	FileBlobStore              blob.BlobStore
-	MCPManifestLister          MCPManifestLister
+	MCPManifestLister          mcpmanifest.Lister
 	RuntimeBindingTokenHMACKey []byte
 	RuntimeBindingTokenTTL     time.Duration
 	ProviderRescheduleBudget   int64
@@ -180,6 +172,8 @@ type transientAttachmentGCRow struct {
 func NewPostgreSQLBridgeAPIStore(client *dbconnect.Client) *PostgreSQLBridgeAPIStore {
 	return &PostgreSQLBridgeAPIStore{
 		Client:                     client,
+		ProcessPolicy:              runtimecontrol.DefaultProcessPolicy(),
+		LifecyclePolicy:            DefaultBridgeLifecyclePolicy(),
 		Clock:                      func() time.Time { return storage.Now() },
 		RuntimeBindingTokenTTL:     defaultRuntimeBindingTokenTTL,
 		ProviderRescheduleBudget:   defaultProviderRescheduleBudget,
@@ -246,20 +240,6 @@ type bridgeOperation struct {
 	StdinWriteSeq sql.NullInt64
 }
 
-type bridgeOperationInsert struct {
-	Operation      string
-	SourceKind     string
-	IdempotencyKey string
-	RequestHash    string
-	AckStatus      string
-	RuntimeInputID sql.NullString
-	RuntimeWriteID sql.NullString
-	ErrorCode      sql.NullString
-	ResultJSON     string
-	StdinWriteSeq  sql.NullInt64
-	Now            time.Time
-}
-
 type bridgeDeclarationOperation struct {
 	DeclarationDigest string
 	ReceiptJSON       string
@@ -301,37 +281,6 @@ func readBridgeOperationBySourceTx(
 		return bridgeOperation{}, false, err
 	}
 	return existing, true, nil
-}
-
-func insertBridgeOperationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, op bridgeOperationInsert) error {
-	if op.ResultJSON == "" {
-		op.ResultJSON = "{}"
-	}
-	if op.SourceKind == "" {
-		op.SourceKind = op.Operation
-	}
-	_, err := tx.Exec(ctx,
-		`INSERT INTO session_bridge_operations (
-			workspace_id, session_id, session_thread_id, operation, source_kind, idempotency_key,
-			request_hash, ack_status, runtime_input_id, runtime_write_id, error_code,
-			result_json, stdin_write_seq, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		op.Operation,
-		op.SourceKind,
-		op.IdempotencyKey,
-		op.RequestHash,
-		op.AckStatus,
-		op.RuntimeInputID,
-		op.RuntimeWriteID,
-		op.ErrorCode,
-		op.ResultJSON,
-		op.StdinWriteSeq,
-		op.Now,
-	)
-	return err
 }
 
 func readBridgeDeclarationOperationTx(
@@ -395,7 +344,7 @@ func insertBridgeDeclarationOperationTx(
 		sourceID,
 		declarationDigest,
 		receiptJSON,
-		bridgeAckCommitted,
+		runtimecontrol.AckCommitted,
 		now,
 	)
 	return err
@@ -437,14 +386,25 @@ type runtimeToolResultInsert struct {
 }
 
 func readRuntimeToolResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string) (runtimeToolResult, bool, error) {
-	return readRuntimeToolResult(ctx, tx, scope, toolUseEventID, true)
+	return readRuntimeToolResult(ctx, tx, scope, toolUseEventID, true, false)
 }
 
-func readRuntimeToolResultReadOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string) (runtimeToolResult, bool, error) {
-	return readRuntimeToolResult(ctx, tx, scope, toolUseEventID, false)
+func readRuntimeToolReceiptReadOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string) (runtimeToolResult, bool, error) {
+	return readRuntimeToolResult(ctx, tx, scope, toolUseEventID, false, true)
 }
 
-func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, forUpdate bool) (runtimeToolResult, bool, error) {
+// Ordinary receipt disclosure linearizes with this exact binding proof in the
+// sensitive SELECT's snapshot. A preceding validation alone is insufficient at
+// READ COMMITTED. Retired processes retain only unchanged-binding replay.
+const runtimeReceiptBindingPredicate = ` AND EXISTS (SELECT 1 FROM session_runtime_bindings binding JOIN runtime_processes process
+ ON (process.namespace,process.pod_uid,process.runtime_process_id)=(binding.agent_runtime_namespace,binding.agent_runtime_pod_uid,binding.runtime_process_id)
+ WHERE binding.workspace_id=$1 AND binding.session_id=$2 AND binding.binding_id=$5 AND binding.binding_generation=$6 AND binding.agent_runtime_pod_uid=$7 AND binding.runtime_process_id=$8)`
+
+func runtimeReceiptBindingArgs(scope *bridgev1.RuntimeScope) []any {
+	return []any{scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration(), scope.GetBinding().GetTargetPodUid(), scope.GetBinding().GetRuntimeProcessId()}
+}
+
+func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, forUpdate bool, receiptProof bool) (runtimeToolResult, bool, error) {
 	query := `SELECT tool_kind, normalized_input_hash, tool_name, input_json, ack_status,
 	               COALESCE(result_json, ''), COALESCE(result_digest, ''), model_tool_call_id, execution_state,
 	               background_task_started, task_id, memory_projection_state,
@@ -454,17 +414,16 @@ func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev
 		    AND session_id = $2
 		    AND session_thread_id = $3
 		    AND tool_use_event_id = $4`
+	args := []any{scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID}
+	if receiptProof {
+		query += runtimeReceiptBindingPredicate
+		args = append(args, runtimeReceiptBindingArgs(scope)...)
+	}
 	if forUpdate {
 		query += `
 		  FOR UPDATE`
 	}
-	row := tx.QueryRow(ctx,
-		query,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		toolUseEventID,
-	)
+	row := tx.QueryRow(ctx, query, args...)
 	var existing runtimeToolResult
 	if err := row.Scan(
 		&existing.ToolKind, &existing.NormalizedInputHash, &existing.ToolName, &existing.InputJSON,
@@ -472,6 +431,9 @@ func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev
 		&existing.BackgroundTaskStarted, &existing.TaskID, &existing.MemoryProjectionState,
 		&existing.MCPClaimStatus, &existing.MCPClaimID, &existing.MCPClaimLeaseExpiresAt,
 	); dbconnect.IsNoRows(err) {
+		if receiptProof {
+			return runtimeToolResult{}, false, runtimecontrol.ScopeSupersededError(runtimecontrol.LifecycleError(codes.FailedPrecondition, "RUNTIME_BINDING_STALE", "accepted executor receipt or binding is stale"))
+		}
 		return runtimeToolResult{}, false, nil
 	} else if err != nil {
 		return runtimeToolResult{}, false, err
@@ -511,26 +473,90 @@ func insertRuntimeToolResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 
 func validateRuntimeScope(scope *bridgev1.RuntimeScope) error {
 	if scope == nil || scope.GetWorkspaceId() == "" || scope.GetSessionId() == "" || scope.GetSessionThreadId() == "" || scope.GetBinding() == nil ||
-		scope.GetBinding().GetBindingId() == "" || scope.GetBinding().GetBindingGeneration() <= 0 || scope.GetBinding().GetTargetPodUid() == "" {
-		return closeoutUnrepairableError(status.Error(codes.InvalidArgument, "invalid runtime scope"))
+		scope.GetBinding().GetBindingId() == "" || scope.GetBinding().GetBindingGeneration() <= 0 || scope.GetBinding().GetTargetPodUid() == "" || scope.GetBinding().GetRuntimeProcessId() == "" {
+		return runtimecontrol.CloseoutUnrepairableError(status.Error(codes.InvalidArgument, "invalid runtime scope"))
 	}
 	return nil
 }
 
+// verifyRuntimeScopeTx fences every new mutation with the exact current
+// process: one receipt-scope proof, then the pure current check on it.
 func verifyRuntimeScopeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
-	if err := validateRuntimeScope(scope); err != nil {
+	proof, err := lockRuntimeReceiptScopeTx(ctx, tx, scope)
+	if err != nil {
 		return err
+	}
+	return proof.requireCurrent(tx)
+}
+
+// lockedRuntimeScope proves, inside one transaction, that the caller's Pod UID,
+// the Session mutation lock and nonterminal state, the exact binding row and
+// the exact process row FOR SHARE were all verified. The locks it describes
+// last until that transaction ends, so the proof is passed explicitly down one
+// RPC's transaction closure and is never stored on the Service or a context,
+// nor reused after commit or rollback.
+type lockedRuntimeScope struct {
+	tx      *dbconnect.Tx
+	process runtimecontrol.Process
+}
+
+// lockRuntimeReceiptScopeTx permits only an existing receipt to be replayed
+// by a retired process. The unchanged binding and exact process remain locked;
+// callers must call requireCurrent on the returned proof before any new
+// mutation.
+func lockRuntimeReceiptScopeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (lockedRuntimeScope, error) {
+	if err := validateRuntimeScope(scope); err != nil {
+		return lockedRuntimeScope{}, err
 	}
 	if err := verifyRuntimeCallerPodUID(ctx, scope); err != nil {
-		return err
+		return lockedRuntimeScope{}, err
 	}
-	if err := lockRuntimeMutationSessionTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
-		return err
+	if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
+		return lockedRuntimeScope{}, err
 	}
 	if err := verifyRuntimeSessionNonTerminalTx(ctx, tx, scope); err != nil {
+		return lockedRuntimeScope{}, err
+	}
+	process, err := lockRuntimeBindingProcessTx(ctx, tx, scope)
+	if err != nil {
+		return lockedRuntimeScope{}, err
+	}
+	return lockedRuntimeScope{tx: tx, process: process}, nil
+}
+
+// requireCurrent authorizes a new mutation from the process row this
+// transaction already holds FOR SHARE: promotion cannot retire the process
+// until the transaction ends, so no binding or process SQL is repeated.
+func (proof lockedRuntimeScope) requireCurrent(tx *dbconnect.Tx) error {
+	if proof.tx == nil || proof.tx != tx {
+		return status.Error(codes.Internal, "runtime scope proof belongs to another transaction")
+	}
+	if !proof.process.Current || proof.process.RetiredAt.Valid || proof.process.Phase == runtimecontrol.ProcessStarting {
+		return runtimecontrol.ScopeSupersededError(runtimecontrol.LifecycleError(codes.FailedPrecondition, "RUNTIME_PROCESS_STALE", "runtime process is stale"))
+	}
+	return nil
+}
+
+// verifyRuntimeReceiptScopeTx is used only by the Sandbox-serving entrypoints,
+// which follow it with requireRuntimeProcessCurrentTx; it is removed when the
+// Sandbox service split rewrites them.
+func verifyRuntimeReceiptScopeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	_, err := lockRuntimeReceiptScopeTx(ctx, tx, scope)
+	return err
+}
+
+// requireRuntimeProcessCurrentTx locks the binding and process again and
+// requires current process authority. It serves entrypoints that hold no
+// receipt-scope proof.
+func requireRuntimeProcessCurrentTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	process, err := lockRuntimeBindingProcessTx(ctx, tx, scope)
+	if err != nil {
 		return err
 	}
-	return verifyRuntimeBindingTx(ctx, tx, scope)
+	if !process.Current || process.RetiredAt.Valid || process.Phase == runtimecontrol.ProcessStarting {
+		return runtimecontrol.ScopeSupersededError(runtimecontrol.LifecycleError(codes.FailedPrecondition, "RUNTIME_PROCESS_STALE", "runtime process is stale"))
+	}
+	return nil
 }
 
 func verifyRuntimeSessionNonTerminalTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
@@ -543,40 +569,32 @@ func verifyRuntimeSessionNonTerminalTx(ctx context.Context, tx *dbconnect.Tx, sc
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 	).Scan(&sessionStatus); dbconnect.IsNoRows(err) {
-		return scopeSupersededError(status.Error(codes.NotFound, "session not found"))
+		return runtimecontrol.ScopeSupersededError(status.Error(codes.NotFound, "session not found"))
 	} else if err != nil {
 		return err
 	}
 	if sessionStatus == "terminated" {
-		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime session is terminal"))
+		return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime session is terminal"))
 	}
 	return nil
 }
 
 func verifyRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
-	row := tx.QueryRow(ctx,
-		`SELECT agent_runtime_pod_uid
-		   FROM session_runtime_bindings
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND binding_id = $3
-		    AND binding_generation = $4
-		  FOR UPDATE`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetBinding().GetBindingId(),
-		scope.GetBinding().GetBindingGeneration(),
-	)
-	var podUID string
-	if err := row.Scan(&podUID); dbconnect.IsNoRows(err) {
-		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime binding is stale"))
-	} else if err != nil {
-		return err
+	return requireRuntimeProcessCurrentTx(ctx, tx, scope)
+}
+
+func lockRuntimeBindingProcessTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (runtimecontrol.Process, error) {
+	var identity runtimecontrol.ProcessIdentity
+	err := tx.QueryRow(ctx, `SELECT agent_runtime_namespace, agent_runtime_pod_uid, runtime_process_id
+	 FROM session_runtime_bindings WHERE workspace_id=$1 AND session_id=$2 AND binding_id=$3 AND binding_generation=$4 FOR UPDATE`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration()).Scan(&identity.Namespace, &identity.PodUID, &identity.ID)
+	if dbconnect.IsNoRows(err) || (err == nil && (identity.PodUID != scope.GetBinding().GetTargetPodUid() || identity.ID != scope.GetBinding().GetRuntimeProcessId())) {
+		return runtimecontrol.Process{}, runtimecontrol.ScopeSupersededError(runtimecontrol.LifecycleError(codes.FailedPrecondition, "RUNTIME_BINDING_STALE", "runtime binding is stale"))
 	}
-	if podUID != scope.GetBinding().GetTargetPodUid() {
-		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime binding is stale"))
+	if err != nil {
+		return runtimecontrol.Process{}, err
 	}
-	return nil
+	return runtimecontrol.LockProcessTx(ctx, tx, identity)
 }
 
 func verifyRuntimeDeclarationCaller(ctx context.Context, scope *bridgev1.RuntimeScope) error {
@@ -586,38 +604,6 @@ func verifyRuntimeDeclarationCaller(ctx context.Context, scope *bridgev1.Runtime
 	return verifyRuntimeCallerPodUID(ctx, scope)
 }
 
-func lockSessionRuntimeArbitrationTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) (string, error) {
-	if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, workspaceID, sessionID); err != nil {
-		return "", err
-	}
-	var lifecycleState string
-	if err := tx.QueryRow(ctx,
-		`SELECT lifecycle_state
-		   FROM sessions
-		  WHERE workspace_id = $1
-		    AND id = $2
-		  FOR UPDATE`,
-		workspaceID,
-		sessionID,
-	).Scan(&lifecycleState); dbconnect.IsNoRows(err) {
-		return "", scopeSupersededError(status.Error(codes.NotFound, "session not found"))
-	} else if err != nil {
-		return "", err
-	}
-	return lifecycleState, nil
-}
-
-func lockRuntimeMutationSessionTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) error {
-	lifecycleState, err := lockSessionRuntimeArbitrationTx(ctx, tx, workspaceID, sessionID)
-	if err != nil {
-		return err
-	}
-	if lifecycleState == "deleted" {
-		return scopeSupersededError(status.Error(codes.FailedPrecondition, "session is deleted"))
-	}
-	return nil
-}
-
 func verifyRuntimeScopeReadOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
 	if err := validateRuntimeScope(scope); err != nil {
 		return err
@@ -625,26 +611,36 @@ func verifyRuntimeScopeReadOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *
 	if err := verifyRuntimeCallerPodUID(ctx, scope); err != nil {
 		return err
 	}
-	row := tx.QueryRow(ctx,
-		`SELECT agent_runtime_pod_uid
-		   FROM session_runtime_bindings
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND binding_id = $3
-		    AND binding_generation = $4`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetBinding().GetBindingId(),
-		scope.GetBinding().GetBindingGeneration(),
-	)
-	var podUID string
-	if err := row.Scan(&podUID); dbconnect.IsNoRows(err) {
-		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime binding is stale"))
-	} else if err != nil {
+	var current bool
+	err := tx.QueryRow(ctx, `SELECT process.is_current AND process.retired_at IS NULL AND process.phase IN ('accepting','draining')
+	 FROM session_runtime_bindings binding JOIN runtime_processes process
+	 ON (process.namespace,process.pod_uid,process.runtime_process_id)=(binding.agent_runtime_namespace,binding.agent_runtime_pod_uid,binding.runtime_process_id)
+	 WHERE binding.workspace_id=$1 AND binding.session_id=$2 AND binding.binding_id=$3 AND binding.binding_generation=$4 AND binding.agent_runtime_pod_uid=$5 AND binding.runtime_process_id=$6`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration(), scope.GetBinding().GetTargetPodUid(), scope.GetBinding().GetRuntimeProcessId()).Scan(&current)
+	if dbconnect.IsNoRows(err) || (err == nil && !current) {
+		return runtimecontrol.ScopeSupersededError(runtimecontrol.LifecycleError(codes.FailedPrecondition, "RUNTIME_PROCESS_STALE", "runtime scope is stale"))
+	}
+	return err
+}
+
+// Receipt reads expose only an already accepted executor identity under its
+// unchanged authenticated binding; they never authorize a new mutation.
+func verifyRuntimeReceiptScopeReadOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	if err := validateRuntimeScope(scope); err != nil {
 		return err
 	}
-	if podUID != scope.GetBinding().GetTargetPodUid() {
-		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime binding is stale"))
+	if err := verifyRuntimeCallerPodUID(ctx, scope); err != nil {
+		return err
+	}
+	var exists bool
+	err := tx.QueryRow(ctx, `SELECT /* runtime receipt scope validation */ EXISTS(SELECT 1 FROM session_runtime_bindings binding JOIN runtime_processes process
+ ON (process.namespace,process.pod_uid,process.runtime_process_id)=(binding.agent_runtime_namespace,binding.agent_runtime_pod_uid,binding.runtime_process_id)
+ WHERE binding.workspace_id=$1 AND binding.session_id=$2 AND binding.binding_id=$3 AND binding.binding_generation=$4 AND binding.agent_runtime_pod_uid=$5 AND binding.runtime_process_id=$6)`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration(), scope.GetBinding().GetTargetPodUid(), scope.GetBinding().GetRuntimeProcessId()).Scan(&exists)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return runtimecontrol.ScopeSupersededError(runtimecontrol.LifecycleError(codes.FailedPrecondition, "RUNTIME_BINDING_STALE", "runtime binding is stale"))
 	}
 	return nil
 }
@@ -662,7 +658,7 @@ func verifyRuntimeThreadScopeTx(ctx context.Context, tx *dbconnect.Tx, scope *br
 	)
 	var threadID string
 	if err := row.Scan(&threadID); dbconnect.IsNoRows(err) {
-		return closeoutUnrepairableError(status.Error(codes.FailedPrecondition, "runtime thread is stale"))
+		return runtimecontrol.CloseoutUnrepairableError(status.Error(codes.FailedPrecondition, "runtime thread is stale"))
 	} else if err != nil {
 		return err
 	}
@@ -676,14 +672,6 @@ func nullableInt64(value *int64) sql.NullInt64 {
 	return sql.NullInt64{Int64: *value, Valid: true}
 }
 
-func rowsAffected(result sql.Result) bool {
-	if result == nil {
-		return false
-	}
-	count, err := result.RowsAffected()
-	return err == nil && count > 0
-}
-
 // defaultTime parses a wire timestamp, falling back when the caller omitted it.
 // Wire timestamps are RFC 3339; durable columns are native timestamps, so an
 // unparsable value is rejected here rather than stored.
@@ -691,13 +679,6 @@ func rowsAffected(result sql.Result) bool {
 // Truncate like a minted timestamp: the column keeps microseconds, so an
 // untruncated wire value would be echoed and hashed at nanosecond precision
 // while the stored row holds something else.
-
-func defaultString(value string, fallback string) string {
-	if value == "" {
-		return fallback
-	}
-	return value
-}
 
 func bridgeRawJSON(value string, fallback string) json.RawMessage {
 	if json.Valid([]byte(value)) {
@@ -720,18 +701,6 @@ func bridgeJSONFieldRaw(raw json.RawMessage, field string, fallback string) json
 
 func nullableSQLString(value string) sql.NullString {
 	return sql.NullString{String: value, Valid: value != ""}
-}
-
-func bridgeRequestHash(parts ...string) string {
-	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return hex.EncodeToString(digest[:])
-}
-
-func nullableJSONString(value sql.NullString) any {
-	if !value.Valid {
-		return nil
-	}
-	return value.String
 }
 
 var _ BridgeAPIStore = (*PostgreSQLBridgeAPIStore)(nil)

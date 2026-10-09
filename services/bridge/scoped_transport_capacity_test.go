@@ -7,16 +7,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tetral-ai/tetral/internal/sessionrpc"
-	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-	providergatewayv1 "github.com/tetral-ai/tetral/services/gateway/gen/tetral/provider_gateway/v1"
-
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+
+	"github.com/tetral-ai/tetral/internal/mcpmanifest"
+	"github.com/tetral-ai/tetral/internal/sessionrpc"
+	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
+	providergatewayv1 "github.com/tetral-ai/tetral/services/gateway/gen/tetral/provider_gateway/v1"
 )
 
 type largeMCPManifestTransportServer struct {
@@ -31,7 +32,7 @@ type failingMCPManifestTransportServer struct {
 
 func (s failingMCPManifestTransportServer) ListMcpTools(ctx context.Context, _ *providergatewayv1.ListMcpToolsRequest) (*providergatewayv1.ListMcpToolsResponse, error) {
 	if len(s.values) > 0 {
-		_ = grpc.SetTrailer(ctx, metadata.MD{mcpFailureKindMetadataKey: s.values})
+		_ = grpc.SetTrailer(ctx, metadata.MD{mcpmanifest.FailureKindMetadataKey: s.values})
 	}
 	return nil, status.Error(s.code, "safe test failure")
 }
@@ -71,12 +72,12 @@ func TestGatewayMCPManifestListerReceivesManifestAboveSharedSessionCap(t *testin
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 
-	lister := NewGatewayMCPManifestLister(
+	lister := mcpmanifest.NewConnectorLister(
 		"passthrough:///mcp-manifest-capacity",
 		&countingRuntimeCommandTokenSource{},
 		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }),
 	)
-	result, err := lister.ListMCPTools(context.Background(), MCPManifestListRequest{WorkspaceID: "default", SessionID: "sesn_capacity", MCPServerName: "github"})
+	result, err := lister.ListMCPTools(context.Background(), mcpmanifest.ListRequest{WorkspaceID: "default", SessionID: "sesn_capacity", MCPServerName: "github"})
 	if err != nil {
 		t.Fatalf("ListMCPTools above shared session cap: %v", err)
 	}
@@ -92,12 +93,12 @@ func TestGatewayMCPManifestListerRequiresExactFailureMetadataPair(t *testing.T) 
 		values     []string
 		diagnostic string
 	}{
-		{name: "credential unavailable", code: codes.FailedPrecondition, values: []string{"credential_unavailable"}, diagnostic: mcpManifestDiagnosticCredentialUnavailable},
-		{name: "server unavailable", code: codes.Unavailable, values: []string{"server_unavailable"}, diagnostic: mcpManifestDiagnosticDiscoveryUnavailable},
-		{name: "discovery timeout", code: codes.DeadlineExceeded, values: []string{"discovery_timeout"}, diagnostic: mcpManifestDiagnosticDiscoveryUnavailable},
-		{name: "manifest invalid", code: codes.FailedPrecondition, values: []string{"manifest_invalid"}, diagnostic: mcpManifestDiagnosticInvalid},
-		{name: "untyped unavailable transport", code: codes.Unavailable, diagnostic: mcpManifestDiagnosticDiscoveryUnavailable},
-		{name: "untyped deadline transport", code: codes.DeadlineExceeded, diagnostic: mcpManifestDiagnosticDiscoveryUnavailable},
+		{name: "credential unavailable", code: codes.FailedPrecondition, values: []string{"credential_unavailable"}, diagnostic: mcpmanifest.DiagnosticCredentialUnavailable},
+		{name: "server unavailable", code: codes.Unavailable, values: []string{"server_unavailable"}, diagnostic: mcpmanifest.DiagnosticDiscoveryUnavailable},
+		{name: "discovery timeout", code: codes.DeadlineExceeded, values: []string{"discovery_timeout"}, diagnostic: mcpmanifest.DiagnosticDiscoveryUnavailable},
+		{name: "manifest invalid", code: codes.FailedPrecondition, values: []string{"manifest_invalid"}, diagnostic: mcpmanifest.DiagnosticInvalid},
+		{name: "untyped unavailable transport", code: codes.Unavailable, diagnostic: mcpmanifest.DiagnosticDiscoveryUnavailable},
+		{name: "untyped deadline transport", code: codes.DeadlineExceeded, diagnostic: mcpmanifest.DiagnosticDiscoveryUnavailable},
 		{name: "untyped failed precondition", code: codes.FailedPrecondition},
 		{name: "duplicate token", code: codes.Unavailable, values: []string{"server_unavailable", "server_unavailable"}},
 		{name: "known token with wrong status", code: codes.FailedPrecondition, values: []string{"server_unavailable"}},
@@ -112,15 +113,15 @@ func TestGatewayMCPManifestListerRequiresExactFailureMetadataPair(t *testing.T) 
 			go func() { _ = server.Serve(listener) }()
 			t.Cleanup(server.Stop)
 
-			lister := NewGatewayMCPManifestLister(
+			lister := mcpmanifest.NewConnectorLister(
 				"passthrough:///mcp-manifest-failure",
 				&countingRuntimeCommandTokenSource{},
 				grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }),
 			)
-			_, err := lister.ListMCPTools(context.Background(), MCPManifestListRequest{WorkspaceID: "default", SessionID: "sesn_failure", MCPServerName: "github"})
-			var discoveryError mcpManifestDiscoveryError
+			_, err := lister.ListMCPTools(context.Background(), mcpmanifest.ListRequest{WorkspaceID: "default", SessionID: "sesn_failure", MCPServerName: "github"})
+			var discoveryError mcpmanifest.DiscoveryError
 			if test.diagnostic != "" {
-				if !errors.As(err, &discoveryError) || discoveryError.diagnostic != test.diagnostic {
+				if !errors.As(err, &discoveryError) || discoveryError.Diagnostic != test.diagnostic {
 					t.Fatalf("classified error = %T/%v; want discovery diagnostic %q", err, err, test.diagnostic)
 				}
 				return

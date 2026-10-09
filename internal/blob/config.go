@@ -19,6 +19,8 @@ const (
 	EnvSecretKey      = "TETRAL_BLOB_SECRET_KEY" //nolint:gosec // G101: env-var name, not a credential value
 	EnvAllowInsecure  = "TETRAL_BLOB_ALLOW_INSECURE"
 	EnvLocalTestMode  = "TETRAL_BLOB_LOCAL_TEST_MODE"
+	EnvTLSCAPath      = "TETRAL_BLOB_TLS_CA_PATH"
+	EnvTLSServerName  = "TETRAL_BLOB_TLS_SERVER_NAME"
 	maxEndpointLength = 4096
 )
 
@@ -38,6 +40,8 @@ type Config struct {
 	SessionToken  string
 	AllowInsecure bool
 	LocalTestMode bool
+	TLSCAPath     string
+	TLSServerName string
 }
 
 // ConfigPresent reports whether any of the BlobStore env vars are set.
@@ -66,6 +70,8 @@ func LoadConfig() (*Config, error) {
 		SecretKey:     os.Getenv(EnvSecretKey),
 		AllowInsecure: os.Getenv(EnvAllowInsecure) == "true",
 		LocalTestMode: os.Getenv(EnvLocalTestMode) == "true",
+		TLSCAPath:     os.Getenv(EnvTLSCAPath),
+		TLSServerName: os.Getenv(EnvTLSServerName),
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err

@@ -43,3 +43,37 @@ func TestConfigFromEnvRejectsInvalidQueueRetryPolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestQueueLifecycleConfigFitsPodApplicationAllocation(t *testing.T) {
+	for _, tc := range []struct {
+		profile, drain, join string
+		valid                bool
+	}{
+		{"standard-routed", "2000", "3000", true}, {"standard-routed", "20000", "5000", true}, {"standard-routed", "25000", "5000", false}, {"standard-routed", "20001", "5000", false},
+		{"hardened", "20000", "5000", true}, {"hardened", "20001", "5000", false}, {"hardened", "24000", "1000", true}, {"hardened", "2000", "0", false},
+		{"standard-routed", "2000", "9223372036854775807", false},
+		{"unknown", "2000", "3000", false},
+	} {
+		cfg, err := ConfigFromEnv(configEnv{"TETRAL_TRANSPORT_PROFILE": tc.profile, EnvDrainTimeoutMS: tc.drain, "TETRAL_CANCEL_JOIN_TIMEOUT_MS": tc.join})
+		if (err == nil) != tc.valid {
+			t.Fatalf("%+v error=%v", tc, err)
+		}
+		if tc.valid && tc.join == "3000" && cfg.CancelJoinTimeout != 3*time.Second {
+			t.Fatal("join configuration lost")
+		}
+	}
+}
+
+func TestQueueDrainUsesTheSharedApplicationDrainKey(t *testing.T) {
+	if EnvDrainTimeoutMS != "TETRAL_DRAIN_TIMEOUT_MS" {
+		t.Fatalf("Queue drain key=%s", EnvDrainTimeoutMS)
+	}
+	cfg, err := ConfigFromEnv(configEnv{"TETRAL_DRAIN_TIMEOUT_MS": "2000"})
+	if err != nil || cfg.DrainTimeout != 2*time.Second {
+		t.Fatalf("shared drain key=%s/%v", cfg.DrainTimeout, err)
+	}
+	cfg, err = ConfigFromEnv(configEnv{"TETRAL_QUEUE_DRAIN_TIMEOUT_MS": "2000"})
+	if err != nil || cfg.DrainTimeout != 10*time.Second {
+		t.Fatalf("unrecognized drain key changed the default=%s/%v", cfg.DrainTimeout, err)
+	}
+}

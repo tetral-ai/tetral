@@ -8,6 +8,7 @@ export interface RuntimeThreadAddressState {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 }
 
 /** Queue-owned input identity and ordering fact admitted to one thread. */

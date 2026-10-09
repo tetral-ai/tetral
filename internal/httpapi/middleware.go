@@ -74,7 +74,9 @@ func RequestLogMiddleware(logger *slog.Logger, slowThreshold time.Duration, opti
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tracker := &statusTrackingWriter{ResponseWriter: w, status: http.StatusOK}
 			start := time.Now()
-			next.ServeHTTP(tracker, r)
+			ctx := auth.WithEdgeRequestIDRecorder(r.Context())
+			ctx = auth.WithAuditRecorder(ctx, authLogRecorder{logger: logger})
+			next.ServeHTTP(tracker, r.WithContext(ctx))
 			duration := time.Since(start)
 			if opts.metrics != nil {
 				opts.metrics.ObserveHTTPRequest(r.Method, tracker.status, duration)
@@ -96,6 +98,7 @@ func RequestLogMiddleware(logger *slog.Logger, slowThreshold time.Duration, opti
 				slog.Int("http.response.status_code", tracker.status),
 				slog.Int64("duration.ms", duration.Milliseconds()),
 			}
+			attrs = appendEdgeRequestID(ctx, attrs)
 			if tracker.status >= http.StatusInternalServerError {
 				attrs = append(attrs,
 					slog.String("error.class", "http_error"),
@@ -103,7 +106,11 @@ func RequestLogMiddleware(logger *slog.Logger, slowThreshold time.Duration, opti
 					slog.String("error.message_safe", "HTTP request failed"),
 				)
 			}
-			logger.Info("http.request", attrs...)
+			if tracker.status >= http.StatusInternalServerError {
+				logger.Error("http.request", attrs...)
+			} else {
+				logger.Info("http.request", attrs...)
+			}
 		})
 	}
 }
@@ -133,14 +140,15 @@ func (w *statusTrackingWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
-// authMiddleware composes the auth.Middleware with the centralized
-// writeError envelope and the local RequestIDFromContext extractor,
-// returning a chi-compatible middleware constructor.
+// authMiddleware composes the raw-key test harness with the centralized
+// writeError envelope and the local RequestIDFromContext extractor. Production
+// /v1 routes use internalPrincipalMiddleware instead.
 func authMiddleware(authenticator auth.Authenticator, logger *slog.Logger) func(http.Handler) http.Handler {
 	return PublicAuthMiddleware(authenticator, logger)
 }
 
-// PublicAuthMiddleware authenticates x-api-key and reports failures through the standard public error envelope.
+// PublicAuthMiddleware is the raw x-api-key test harness. It authenticates the
+// key and reports failures through the standard public error envelope.
 func PublicAuthMiddleware(authenticator auth.Authenticator, logger *slog.Logger) func(http.Handler) http.Handler {
 	return auth.MiddlewareWithAudit(authenticator, WriteError, RequestIDFromContext, authLogRecorder{logger: logger})
 }
@@ -153,7 +161,11 @@ type authLogRecorder struct {
 	logger *slog.Logger
 }
 
-func (r authLogRecorder) RecordAuthEvent(_ context.Context, event auth.AuditEvent) {
+func (r authLogRecorder) RecordAuthEvent(ctx context.Context, event auth.AuditEvent) {
+	if event.Stage != "" {
+		r.recordDecision(ctx, event)
+		return
+	}
 	eventKind := "auth_failure"
 	if event.Result == "error" {
 		eventKind = "auth_error"
@@ -213,9 +225,61 @@ func PublicRecoveryMiddleware(logger *slog.Logger) func(http.Handler) http.Handl
 	}
 }
 
+// appendEdgeRequestID adds the verified edge request ID under edge.request.id.
+// request.id remains this service's own request ID, which is also the public
+// request-id response header; the edge ID joins this record to the Auth Check
+// record of the same request.
+func appendEdgeRequestID(ctx context.Context, attrs []any) []any {
+	if edgeRequestID := auth.EdgeRequestIDFromContext(ctx); edgeRequestID != "" {
+		attrs = append(attrs, slog.String("edge.request.id", edgeRequestID))
+	}
+	return attrs
+}
+
 func safeRequestPath(r *http.Request) string {
 	if strings.HasPrefix(r.URL.Path, "/v1/api_keys/") {
 		return "/v1/api_keys/{api_key_id}"
 	}
 	return r.URL.Path
+}
+
+// recordDecision accepts only the fixed Auth builder vocabulary and emits no
+// path, workspace selector, subject, identity ID, issuer URL, or credential.
+func (r authLogRecorder) recordDecision(ctx context.Context, event auth.AuditEvent) {
+	if r.logger == nil {
+		return
+	}
+	attrs := []any{slog.String("operation", "auth."+event.Stage), slog.String("component", "auth"), slog.String("auth.stage", event.Stage), slog.String("auth.result", event.Result), slog.String("request.id", RequestIDFromContext(ctx))}
+	attrs = appendEdgeRequestID(ctx, attrs)
+	if event.Operation != "" {
+		attrs = append(attrs, slog.String("auth.operation", string(event.Operation)))
+	}
+	if event.IdentityKind != "" {
+		attrs = append(attrs, slog.String("auth.identity.kind", event.IdentityKind))
+	}
+	for key, value := range map[string]int64{"auth.rule.revision": event.RuleRevision, "auth.identity.revision": event.IdentityRevision, "auth.grant.revision": event.GrantRevision} {
+		if value > 0 {
+			attrs = append(attrs, slog.Int64(key, value))
+		}
+	}
+	if event.Result == "success" {
+		if event.Stage == "grant" {
+			r.logger.Info("auth.exchange.success", attrs...)
+		} else {
+			r.logger.Debug("auth."+event.Stage+".success", attrs...)
+		}
+		return
+	}
+	class := "authentication_error"
+	if event.Result == "denied" {
+		class = "permission_error"
+	}
+	if event.Result == "limited" {
+		class = "rate_limit_error"
+	}
+	if event.Result == "unavailable" {
+		class = "dependency_unavailable"
+	}
+	attrs = append(attrs, slog.String("error.class", class), slog.String("error.code", event.Code), slog.String("error.message_safe", "authentication decision failed"))
+	r.logger.Warn("auth."+event.Stage+"."+event.Result, attrs...)
 }

@@ -17,23 +17,32 @@ type RunWorkloadFunc func(context.Context, workload.Config) error
 // Run is the service-local api process bootstrap. cmd/tetral-api is
 // intentionally thin: it supplies os env/stderr and exits with the mapped code.
 func Run(ctx context.Context, env Env, stderr io.Writer, buildApplication BuildApplicationFunc, runWorkload RunWorkloadFunc) error {
-	logger := workload.NewLogger(stderr, "api", env.Getenv(EnvDeploymentEnvironment), env.Getenv(EnvServiceVersion))
+	diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(env.Getenv)
+	diagnosticOwner := workload.NewProcessLogger(stderr, "api", env.Getenv(EnvDeploymentEnvironment), env.Getenv(EnvServiceVersion), diagnostics)
+	defer diagnosticOwner.CloseWithBudget()
+	logger := diagnosticOwner.Logger
+	defer workload.InstallDefaultLogger(logger)()
+	if diagnosticErr != nil {
+		return workload.LogStartupFailure(logger, "api", diagnosticErr)
+	}
 	cfg, err := ConfigFromEnv(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, "api", err)
 	}
+	workload.ConfigureProcessShutdown(ctx, defaultShutdownTimeout+5*time.Second, diagnosticOwner)
 	if buildApplication == nil {
 		buildApplication = BuildProductionApplication
 	}
-	httpMetrics := workload.NewHTTPMetrics()
+	httpMetrics := workload.NewHTTPMetrics("api")
 	application, err := buildApplication(ctx, ApplicationConfig(cfg, env, logger, httpMetrics))
 	if err != nil {
 		return workload.LogStartupFailure(logger, "api", err)
 	}
-	defer func() { _ = application.Close() }()
+	defer workload.ProcessCleanup(ctx, func() { _ = application.Close() })
 	readiness := workload.NewReadiness()
 	handler := BuildHTTPHandler(readiness, application.Handler)
 	metricsHandler := workload.HealthRouter(readiness,
+		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
 		workload.WithHTTPMetrics(httpMetrics),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
 		workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", application.Client)),
@@ -42,7 +51,7 @@ func Run(ctx context.Context, env Env, stderr io.Writer, buildApplication BuildA
 	if runWorkload == nil {
 		runWorkload = workload.Run
 	}
-	return runPublicAndMetricsHTTP(ctx, runWorkload, cfg, readiness, logger, handler, metricsHandler)
+	return runPublicAndMetricsHTTP(ctx, runWorkload, cfg, readiness, logger, handler, metricsHandler, httpMetrics.Operations)
 }
 
 func runPublicAndMetricsHTTP(
@@ -53,10 +62,22 @@ func runPublicAndMetricsHTTP(
 	logger *slog.Logger,
 	publicHandler http.Handler,
 	metricsHandler http.Handler,
+	metrics *workload.OperationMetrics,
 ) error {
+	if metrics == nil {
+		return workload.NewConfigError("HTTP operation metrics are required")
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	tlsOwner, tlsConfig, err := cfg.HTTPTransport.Open(ctx)
+	if err != nil {
+		return workload.NewConfigError("native HTTP credential preparation failed")
+	}
+	if tlsOwner != nil {
+		defer func() { _ = tlsOwner.Close() }()
+	}
+
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := make(chan error, 2)
@@ -67,6 +88,8 @@ func runPublicAndMetricsHTTP(
 			ServiceVersion:        cfg.ServiceVersion,
 			ListenAddress:         cfg.ListenAddress,
 			ListenConfigKey:       EnvHTTPAddress,
+			TLSConfig:             tlsConfig,
+			Metrics:               metrics,
 			Handler:               publicHandler,
 			Readiness:             readiness,
 			ShutdownTimeout:       defaultShutdownTimeout,
@@ -80,6 +103,7 @@ func runPublicAndMetricsHTTP(
 			ServiceVersion:        cfg.ServiceVersion,
 			ListenAddress:         cfg.MetricsAddress,
 			ListenConfigKey:       EnvMetricsAddress,
+			Metrics:               metrics,
 			Handler:               metricsHandler,
 			Readiness:             readiness,
 			ShutdownTimeout:       defaultShutdownTimeout,

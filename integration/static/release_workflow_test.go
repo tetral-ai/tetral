@@ -260,6 +260,7 @@ func TestReleaseSurfacesContainNoMovingOrUnnumberedIdentity(t *testing.T) {
 		"deploy/helm/tetral/values.yaml", "deploy/kubernetes", "services/api/k8s", "services/auth/k8s",
 		"services/bridge/k8s", "services/cleanup/k8s", "services/event-stream/k8s", "services/gateway/k8s",
 		"services/git-proxy/k8s", "services/queue/k8s", "services/sandbox/k8s", "services/agent-runtime/k8s",
+		"services/job-runner/k8s", "services/web-connector/k8s",
 	}
 	for _, relative := range paths {
 		info, err := os.Stat(filepath.Join(root, relative))

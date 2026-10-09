@@ -1,6 +1,7 @@
 package webconnector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	grpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
+	"github.com/tetral-ai/tetral/internal/workload"
 	providergatewayv1 "github.com/tetral-ai/tetral/services/gateway/gen/tetral/provider_gateway/v1"
 )
 
@@ -364,6 +366,8 @@ func TestJobStoreFailuresAreRuntimeFailuresNotDeliveryConflicts(t *testing.T) {
 			objects := &jobFailureBlobStore{BlobStore: inner, mode: mode}
 			backend := &fakeBackend{search: []SearchHit{{URL: "https://example.com/", Title: "Example"}}, searchOutcome: BackendOutcome{Kind: BackendSuccess, Requests: 1}}
 			service, key, now := testService(objects, backend)
+			var logs bytes.Buffer
+			service.WithLogger(workload.NewLogger(&logs, "web-connector", "test", "unit"))
 			response, err := service.RunWeb(testContext(), testRequest(&providergatewayv1.WebToolInput{SearchQuery: []*providergatewayv1.WebSearchQuery{{Q: "query"}}}, "event-job-failure-"+mode, key, now))
 			if err != nil {
 				t.Fatal(err)
@@ -373,6 +377,13 @@ func TestJobStoreFailuresAreRuntimeFailuresNotDeliveryConflicts(t *testing.T) {
 			}
 			if response.GetResultText() == "tool delivery conflict" {
 				t.Fatal("storage failure was misclassified as an idempotency conflict")
+			}
+			var record map[string]any
+			if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &record); err != nil {
+				t.Fatal(err)
+			}
+			if record["level"] != "WARN" || record["error.class"] != "storage_error" || record["error.code"] != "cache_unavailable" || record["error.message_safe"] != "web idempotency lookup unavailable" {
+				t.Fatalf("lookup diagnostic = %#v", record)
 			}
 		})
 	}
@@ -496,6 +507,8 @@ func TestIdempotentReplayIsExactAndConflictingInputDoesNotReexecute(t *testing.T
 	objects := blob.NewFakeBlobStore()
 	backend := &fakeBackend{search: []SearchHit{{URL: "https://example.com/", Title: "Example"}}}
 	service, key, now := testService(objects, backend)
+	var logs bytes.Buffer
+	service.WithLogger(workload.NewLogger(&logs, "web-connector", "test", "unit"))
 	request := testRequest(&providergatewayv1.WebToolInput{SearchQuery: []*providergatewayv1.WebSearchQuery{{Q: "one"}}}, "event-replay", key, now)
 	first, err := service.RunWeb(testContext(), request)
 	if err != nil {
@@ -511,6 +524,9 @@ func TestIdempotentReplayIsExactAndConflictingInputDoesNotReexecute(t *testing.T
 	if backend.calls != 1 {
 		t.Fatalf("backend calls=%d", backend.calls)
 	}
+	if logs.Len() != 0 {
+		t.Fatalf("healthy execution/replay noise: %s", logs.String())
+	}
 	conflict := testRequest(&providergatewayv1.WebToolInput{SearchQuery: []*providergatewayv1.WebSearchQuery{{Q: "two"}}}, "event-replay", key, now)
 	response, err := service.RunWeb(testContext(), conflict)
 	if err != nil {
@@ -522,6 +538,14 @@ func TestIdempotentReplayIsExactAndConflictingInputDoesNotReexecute(t *testing.T
 	if backend.calls != 1 {
 		t.Fatalf("conflict reexecuted backend: %d", backend.calls)
 	}
+	var record map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record["level"] != "WARN" || record["error.class"] != "idempotency_error" || record["error.code"] != "idempotency_conflict" || record["error.message_safe"] != "web tool delivery conflict" {
+		t.Fatalf("conflict diagnostic = %#v", record)
+	}
+
 }
 
 func TestRuntimeFailureIsDurableAndSameIdentityDoesNotReexecute(t *testing.T) {
@@ -623,7 +647,7 @@ func TestMaximumWebCallWithThreeKeyJinaRotationRemainsOwnedUntilExactReplay(t *t
 	input := maximumWebCallInput()
 	request := &providergatewayv1.RunWebRequest{
 		WorkspaceId: "ws", SessionId: "ses", SessionThreadId: "thr",
-		ToolUseEventId: "event-maximum-claim", BindingId: "bind", BindingGeneration: 1,
+		ToolUseEventId: "event-maximum-claim", BindingId: "bind", BindingGeneration: 1, RuntimeProcessId: "process_web_fixture",
 		Input: input,
 	}
 	started := clock.Now()
@@ -1563,7 +1587,7 @@ func testService(objects blob.BlobStore, backend Backend) (*Service, []byte, fun
 	return NewService(objects, backend, NewBindingVerifier(key, now), NewMetrics(), now, nil), key, now
 }
 func testRequest(input *providergatewayv1.WebToolInput, event string, key []byte, now func() time.Time) *providergatewayv1.RunWebRequest {
-	request := &providergatewayv1.RunWebRequest{WorkspaceId: "ws", SessionId: "ses", SessionThreadId: "thr", ToolUseEventId: event, BindingId: "bind", BindingGeneration: 1, Input: input}
+	request := &providergatewayv1.RunWebRequest{WorkspaceId: "ws", SessionId: "ses", SessionThreadId: "thr", ToolUseEventId: event, BindingId: "bind", BindingGeneration: 1, RuntimeProcessId: "process_web_fixture", Input: input}
 	request.RuntimeBindingToken = signRequest(request, "runtime-pod", now().Add(time.Hour), key)
 	return request
 }

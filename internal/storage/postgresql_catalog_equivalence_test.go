@@ -28,14 +28,13 @@ const (
 	stageABaselineTree   = "767408b04eab8e7a11f09814ad2a164a0de2dd47"
 )
 
-// Upgrade a database created by the historical source through the real migrator.
-// Fresh and upgraded catalogs must match exactly, including column positions,
-// constraints, dependencies, RLS and privileges. The old helper snapshot is
-// independently extended by the explicit Git identity, discovery budget, and build observation deltas below.
-func TestGitIdentityMigrationPreservesDataAndMatchesFreshCatalog(t *testing.T) {
+// Fresh initialization and repeat preparation preserve canonical catalog and data.
+// A database produced by actual predecessor source must be rejected without
+// changing its catalog, tenant records or original migration stamp.
+func TestPostgreSQLFreshCatalogAndPredecessorPreservation(t *testing.T) {
 	controlDSN := os.Getenv(storagetest.EnvTestDatabaseURL)
 	if controlDSN == "" {
-		t.Skip("TETRAL_TEST_DATABASE_URL is required for migration catalog equivalence")
+		t.Fatal("TETRAL_TEST_DATABASE_URL is required for canonical catalog proof")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -74,110 +73,96 @@ func TestGitIdentityMigrationPreservesDataAndMatchesFreshCatalog(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(baselineRoot, "go.mod")); err != nil {
 		t.Fatal(err)
 	}
-	copyCatalogHelper(t, baselineRoot)
-
 	baselineDSN, baselineCleanup := freshCatalogDatabase(ctx, t, controlDSN)
 	defer baselineCleanup()
 	currentDSN, currentCleanup := freshCatalogDatabase(ctx, t, controlDSN)
 	defer currentCleanup()
-	baselinePath := filepath.Join(t.TempDir(), "baseline-catalog.json")
-	baselineHelperPath := filepath.Join(t.TempDir(), "baseline-helper.json")
-	writeBaselineSnapshotTest(t, baselineRoot)
-	command := exec.CommandContext(ctx, "go", "test", "./internal/storage", "-run", "^TestWriteStageABaselineCatalog$", "-count=1")
+	writeHistoricalInitializerTest(t, baselineRoot)
+	command := exec.CommandContext(ctx, "go", "test", "./internal/storage", "-run", "^TestInitializeHistoricalBaseline$", "-count=1")
 	command.Dir = baselineRoot
 	command.Env = append(os.Environ(),
 		"TETRAL_STAGE_A_CATALOG_DSN="+baselineDSN,
-		"TETRAL_STAGE_A_CATALOG_OUTPUT="+baselinePath,
-		"TETRAL_STAGE_A_HELPER_OUTPUT="+baselineHelperPath,
 		storagetest.EnvTestDatabaseURL+"="+controlDSN,
 	)
 	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("construct exact baseline catalog: %v\n%s", err, output)
+		t.Fatalf("initialize exact historical baseline: %v\n%s", err, output)
 	}
 
 	currentDB := openCatalogDatabase(t, currentDSN)
 	defer func() { _ = currentDB.Close() }()
 	if err := storage.MigrateSchema(ctx, currentDB); err != nil {
-		t.Fatalf("construct current catalog: %v", err)
+		t.Fatal(err)
 	}
 	currentSnapshot, err := catalogtest.Snapshot(ctx, currentDB)
 	if err != nil {
 		t.Fatal(err)
 	}
+	seedCatalogTenantData(t, currentDB)
+	currentData := catalogTenantData(t, currentDB)
+	if err := storage.MigrateSchema(ctx, currentDB); err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := catalogtest.Snapshot(ctx, currentDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(currentSnapshot) != string(repeated) {
+		t.Fatalf("repeat changed canonical catalog: %s", firstSnapshotDifference(currentSnapshot, repeated))
+	}
+	if currentData != catalogTenantData(t, currentDB) {
+		t.Fatal("repeat changed current tenant data")
+	}
 	baselineDB := openCatalogDatabase(t, baselineDSN)
 	defer func() { _ = baselineDB.Close() }()
-	seedGitIdentityMigrationData(t, baselineDB)
-	beforeData := gitIdentityMigrationData(t, baselineDB)
+	seedCatalogTenantData(t, baselineDB)
+	beforeData := catalogTenantData(t, baselineDB)
+	beforeCatalog, err := catalogtest.Snapshot(ctx, baselineDB)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var oldChecksum string
 	var oldAppliedAt time.Time
-	if err := baselineDB.QueryRowContext(ctx, `SELECT checksum, applied_at FROM tetral_schema_migrations WHERE version = 1`).Scan(&oldChecksum, &oldAppliedAt); err != nil {
+	if err := baselineDB.QueryRowContext(ctx, `SELECT checksum,applied_at FROM tetral_schema_migrations WHERE version=1`).Scan(&oldChecksum, &oldAppliedAt); err != nil {
 		t.Fatal(err)
 	}
-	if oldChecksum != storage.PostgreSQLSchemaVersionOneChecksum {
-		t.Fatal("historical database does not match immutable V1")
+	if oldChecksum == storage.PostgreSQLSchemaVersionOneChecksum {
+		t.Fatal("historical fixture unexpectedly matches canonical identity")
 	}
-	assertSchemaErrorKind(t, storage.VerifySchema(ctx, baselineDB), storage.SchemaErrorBehind)
-	// Fail the second ALTER after the first has added columns. A failed upgrade
-	// must leave neither partial columns nor a V2 stamp, and must release its lock.
-	if _, err := baselineDB.ExecContext(ctx, `ALTER TABLE session_github_repository_resources ADD CONSTRAINT session_github_repository_git_identity_shape CHECK (true)`); err != nil {
-		t.Fatal(err)
+	assertSchemaErrorKind(t, storage.VerifySchema(ctx, baselineDB), storage.SchemaErrorChecksumDrift)
+	for attempt := 0; attempt < 2; attempt++ {
+		assertSchemaErrorKind(t, storage.MigrateSchema(ctx, baselineDB), storage.SchemaErrorChecksumDrift)
 	}
-	assertSchemaErrorKind(t, storage.MigrateSchema(ctx, baselineDB), storage.SchemaErrorApply)
-	var columns, stamps int
-	if err := baselineDB.QueryRowContext(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'session_github_repository_resources' AND column_name IN ('git_identity_name', 'git_identity_email')`).Scan(&columns); err != nil {
-		t.Fatal(err)
-	}
-	if err := baselineDB.QueryRowContext(ctx, `SELECT count(*) FROM tetral_schema_migrations`).Scan(&stamps); err != nil {
-		t.Fatal(err)
-	}
-	if columns != 0 || stamps != 1 {
-		t.Fatalf("failed V2 left columns=%d stamps=%d; want 0/1", columns, stamps)
-	}
-	if _, err := baselineDB.ExecContext(ctx, `ALTER TABLE session_github_repository_resources DROP CONSTRAINT session_github_repository_git_identity_shape`); err != nil {
-		t.Fatal(err)
-	}
-	if err := storage.MigrateSchema(ctx, baselineDB); err != nil {
-		t.Fatalf("upgrade historical database: %v", err)
-	}
-	if err := storage.VerifySchema(ctx, baselineDB); err != nil {
-		t.Fatalf("verify upgraded database: %v", err)
-	}
-	if afterData := gitIdentityMigrationData(t, baselineDB); beforeData != afterData {
-		t.Fatal("upgrade changed existing workspace, Session, or repository data")
-	}
-	var unchangedStamp, defaultIdentities bool
-	if err := baselineDB.QueryRowContext(ctx, `SELECT checksum = $1 AND applied_at = $2 FROM tetral_schema_migrations WHERE version = 1`, oldChecksum, oldAppliedAt).Scan(&unchangedStamp); err != nil {
-		t.Fatal(err)
-	}
-	if err := baselineDB.QueryRowContext(ctx, `SELECT count(*) = 2 AND bool_and(git_identity_name IS NULL AND git_identity_email IS NULL) FROM session_github_repository_resources`).Scan(&defaultIdentities); err != nil {
-		t.Fatal(err)
-	}
-	if !unchangedStamp || !defaultIdentities {
-		t.Fatalf("V1 history preserved=%t, old repositories retain default identity=%t", unchangedStamp, defaultIdentities)
-	}
-	baselineSnapshot, err := catalogtest.Snapshot(ctx, baselineDB)
+	afterCatalog, err := catalogtest.Snapshot(ctx, baselineDB)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(baselineSnapshot) != string(currentSnapshot) {
-		t.Fatalf("upgraded catalog differs from fresh V1 + V2 + V3 + V4: %s", firstSnapshotDifference(baselineSnapshot, currentSnapshot))
+	if string(beforeCatalog) != string(afterCatalog) {
+		t.Fatalf("predecessor rejection changed catalog: %s", firstSnapshotDifference(beforeCatalog, afterCatalog))
 	}
-
-	runtimeDB, adminDB := storagetest.NewPostgreSQLDBWithAdmin(t)
-	currentHelperSnapshot, err := catalogtest.HelperSnapshot(ctx, runtimeDB, adminDB)
+	if beforeData != catalogTenantData(t, baselineDB) {
+		t.Fatal("predecessor rejection changed workspace, Session, repository or token data")
+	}
+	var unchanged bool
+	if err := baselineDB.QueryRowContext(ctx, `SELECT count(*)=1 AND bool_and(version=1 AND checksum=$1 AND applied_at=$2) FROM tetral_schema_migrations`, oldChecksum, oldAppliedAt).Scan(&unchanged); err != nil || !unchanged {
+		t.Fatalf("predecessor stamp changed=%v/%v", unchanged, err)
+	}
+	independentDSN, cleanup := freshCatalogDatabase(ctx, t, controlDSN)
+	defer cleanup()
+	independentDB := openCatalogDatabase(t, independentDSN)
+	defer func() { _ = independentDB.Close() }()
+	if err := storage.MigrateSchema(ctx, independentDB); err != nil {
+		t.Fatal(err)
+	}
+	independentSnapshot, err := catalogtest.Snapshot(ctx, independentDB)
 	if err != nil {
 		t.Fatal(err)
 	}
-	baselineHelperSnapshot, err := os.ReadFile(baselineHelperPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(baselineHelperSnapshot) != string(currentHelperSnapshot) {
-		t.Fatalf("storage-test catalog, seed, runtime-role, or privileges differ from Stage A plus Git identity, discovery budget, and build observation: %s", firstSnapshotDifference(baselineHelperSnapshot, currentHelperSnapshot))
+	if string(currentSnapshot) != string(independentSnapshot) {
+		t.Fatalf("independent fresh catalogs differ: %s", firstSnapshotDifference(currentSnapshot, independentSnapshot))
 	}
 }
 
-func seedGitIdentityMigrationData(t *testing.T, db *sql.DB) {
+func seedCatalogTenantData(t *testing.T, db *sql.DB) {
 	t.Helper()
 	// Two tenants with real foreign keys, metadata, checkout and token bytes.
 	// Only fixture values are synthetic; neither constraints nor RLS are removed.
@@ -190,23 +175,23 @@ func seedGitIdentityMigrationData(t *testing.T, db *sql.DB) {
 		`INSERT INTO session_resources (workspace_id, session_id, resource_id, type, created_at, updated_at) VALUES ($1, $1 || '-session', 'repository', 'github_repository', NOW(), NOW())`,
 		`INSERT INTO session_github_repository_resources (workspace_id, session_id, resource_id, url, mount_path, checkout_type, checkout_ref, authorization_token_encrypted) VALUES ($1, $1 || '-session', 'repository', 'https://github.com/example/repository.git', '/workspace/repository', 'branch', 'main', decode('010203', 'hex'))`,
 	}
-	for _, workspace := range []string{"migration-a", "migration-b"} {
+	for _, workspace := range []string{"tenant-a", "tenant-b"} {
 		for _, statement := range statements {
 			if _, err := db.ExecContext(context.Background(), statement, workspace); err != nil {
-				t.Fatalf("seed historical database: %v", err)
+				t.Fatalf("seed tenant data: %v", err)
 			}
 		}
 	}
 }
 
-func gitIdentityMigrationData(t *testing.T, db *sql.DB) string {
+func catalogTenantData(t *testing.T, db *sql.DB) string {
 	t.Helper()
 	var snapshot strings.Builder
 	for _, table := range []string{"workspaces", "environments", "agents", "agent_versions", "sessions", "session_resources", "session_github_repository_resources"} {
 		var rows string
 		// Compare all original columns, including IDs, timestamps and token bytes.
 		//nolint:gosec // Fixed fixture table names, quoted as PostgreSQL identifiers.
-		query := fmt.Sprintf(`SELECT COALESCE(jsonb_agg(value ORDER BY value::text), '[]')::text FROM (SELECT to_jsonb(r) - 'git_identity_name' - 'git_identity_email' AS value FROM %s r) original_rows`, pgx.Identifier{table}.Sanitize())
+		query := fmt.Sprintf(`SELECT COALESCE(jsonb_agg(value ORDER BY value::text), '[]')::text FROM (SELECT to_jsonb(r) AS value FROM %s r) original_rows`, pgx.Identifier{table}.Sanitize())
 		if err := db.QueryRowContext(context.Background(), query).Scan(&rows); err != nil {
 			t.Fatal(err)
 		}
@@ -240,72 +225,15 @@ func assertGitObject(ctx context.Context, t *testing.T, object, want string) {
 	}
 }
 
-func copyCatalogHelper(t *testing.T, root string) {
-	t.Helper()
-	source, err := os.ReadFile(filepath.Join("catalogtest", "catalog.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	directory := filepath.Join(root, "internal", "storage", "catalogtest")
-	if err := os.MkdirAll(directory, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// The destination is rooted in the test-owned temporary checkout.
-	//nolint:gosec
-	if err := os.WriteFile(filepath.Join(directory, "catalog.go"), source, 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func writeBaselineSnapshotTest(t *testing.T, root string) {
+// writeHistoricalInitializerTest adds a test to the extracted historical tree
+// that initializes its own schema; it imports only that tree's storage package.
+func writeHistoricalInitializerTest(t *testing.T, root string) {
 	t.Helper()
 	const source = `package storage_test
-
-import (
-  "context"
-  "database/sql"
-  "os"
-  "testing"
-  _ "github.com/jackc/pgx/v5/stdlib"
-  "github.com/tetral-ai/tetral/internal/storage"
-  "github.com/tetral-ai/tetral/internal/storage/catalogtest"
-  "github.com/tetral-ai/tetral/internal/storage/storagetest"
-)
-
-func TestWriteStageABaselineCatalog(t *testing.T) {
-  db, err := sql.Open("pgx", os.Getenv("TETRAL_STAGE_A_CATALOG_DSN"))
-  if err != nil { t.Fatal(err) }
-  defer db.Close()
-  if err := storage.MigrateSchema(context.Background(), db); err != nil { t.Fatal(err) }
-  snapshot, err := catalogtest.Snapshot(context.Background(), db)
-  if err != nil { t.Fatal(err) }
-  if err := os.WriteFile(os.Getenv("TETRAL_STAGE_A_CATALOG_OUTPUT"), snapshot, 0600); err != nil { t.Fatal(err) }
-  runtimeDB, adminDB := storagetest.NewPostgreSQLDBWithAdmin(t)
-  applyExpectedGitIdentityDelta(t, adminDB)
-  helperSnapshot, err := catalogtest.HelperSnapshot(context.Background(), runtimeDB, adminDB)
-  if err != nil { t.Fatal(err) }
-  if err := os.WriteFile(os.Getenv("TETRAL_STAGE_A_HELPER_OUTPUT"), helperSnapshot, 0600); err != nil { t.Fatal(err) }
-}
-
-// This fixture states the intended delta independently of the current DDL.
-// Do not derive it from storage's current schema or migration constants.
-func applyExpectedGitIdentityDelta(t *testing.T, db *sql.DB) {
-  t.Helper()
-  statements := []string{
-    "ALTER TABLE session_github_repository_resources ADD COLUMN git_identity_name TEXT, ADD COLUMN git_identity_email TEXT",
-    "ALTER TABLE session_github_repository_resources ADD CONSTRAINT session_github_repository_git_identity_shape CHECK ((git_identity_name IS NULL AND git_identity_email IS NULL) OR (git_identity_name IS NOT NULL AND git_identity_name <> '' AND git_identity_email IS NOT NULL AND git_identity_email <> ''))",
-    "INSERT INTO tetral_schema_migrations (version, checksum) VALUES (2, '36b50e4c53b62e8a7b38b8d91b3128400ff06394bf71dcd3e1d992df32b55458')",
-    "ALTER TABLE session_runtime_inbox ADD COLUMN mcp_discovery_attempts INTEGER NOT NULL DEFAULT 0, ADD COLUMN mcp_discovery_deadline_at TIMESTAMPTZ, ADD COLUMN mcp_discovery_diagnostic TEXT, ADD CONSTRAINT session_runtime_inbox_mcp_discovery_budget_shape CHECK ((mcp_discovery_attempts = 0 AND mcp_discovery_deadline_at IS NULL) OR (mcp_discovery_attempts > 0 AND mcp_discovery_deadline_at IS NOT NULL)), ADD CONSTRAINT session_runtime_inbox_mcp_discovery_diagnostic_shape CHECK (mcp_discovery_diagnostic IS NULL OR mcp_discovery_diagnostic IN ('credential_unavailable', 'discovery_unavailable', 'manifest_invalid', 'internal'))",
-    "ALTER TABLE environment_artifacts ADD COLUMN build_started_at TIMESTAMPTZ, ADD COLUMN build_warn_at TIMESTAMPTZ, ADD COLUMN build_deadline_at TIMESTAMPTZ, ADD COLUMN build_warned_at TIMESTAMPTZ, ADD COLUMN provider_build_ref TEXT, ADD COLUMN provider_build_state TEXT, ADD CONSTRAINT environment_artifacts_build_timing_shape CHECK ((build_started_at IS NULL AND build_warn_at IS NULL AND build_deadline_at IS NULL AND build_warned_at IS NULL) OR (build_started_at IS NOT NULL AND build_warn_at IS NOT NULL AND build_deadline_at IS NOT NULL AND build_warn_at > build_started_at AND build_deadline_at > build_warn_at)), ADD CONSTRAINT environment_artifacts_build_ref_shape CHECK (length(provider_build_ref) BETWEEN 1 AND 128), ADD CONSTRAINT environment_artifacts_build_state_shape CHECK (provider_build_state IN ('awaiting_visibility', 'pending', 'building', 'pulling', 'active', 'error', 'build_failed'))",
-    "INSERT INTO tetral_schema_migrations (version, checksum) VALUES (3, 'be73f97aa7ebc41ec39ad270aed25a2b9d5228eb8ab49e814032283cb9dbd90f')",
-    "INSERT INTO tetral_schema_migrations (version, checksum) VALUES (4, 'ce7bda672824e406b569caaea79723ca0932150bd54f5d153b9f781ee426bb19')",
-  }
-  for _, statement := range statements {
-    if _, err := db.ExecContext(context.Background(), statement); err != nil { t.Fatal(err) }
-  }
-}
+import("context";"database/sql";"os";"testing";_ "github.com/jackc/pgx/v5/stdlib";"github.com/tetral-ai/tetral/internal/storage")
+func TestInitializeHistoricalBaseline(t *testing.T){db,err:=sql.Open("pgx",os.Getenv("TETRAL_STAGE_A_CATALOG_DSN"));if err!=nil{t.Fatal(err)};defer db.Close();if err:=storage.MigrateSchema(context.Background(),db);err!=nil{t.Fatal(err)}}
 `
-	if err := os.WriteFile(filepath.Join(root, "internal", "storage", "stage_a_catalog_test.go"), []byte(source), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "internal", "storage", "historical_baseline_initialize_test.go"), []byte(source), 0600); err != nil {
 		t.Fatal(err)
 	}
 }

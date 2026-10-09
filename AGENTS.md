@@ -11,20 +11,24 @@ is restated here.
 |-----|---------------|
 | `README.md` | The front page: what Tetral is, how to install it, where to go next. |
 | `services/<name>/README.md` | Per-service contract: responsibilities, lifecycle, seams, testing. `services/api` also holds the boot environment, the workspace isolation model, and `/v1` surface status. |
+| `internal/<name>/README.md` | Shared-package contracts: process lifecycle and diagnostics (`internal/workload`), Runtime configuration and control, MCP manifests, TypeScript observability and database pools. |
+| `deploy/**/README.md` | Installation and deployment contracts for the Helm chart (`deploy/helm/tetral`), the raw manifests and any separately installed dependency. |
+| `docs/*.md` | Cross-service guides, for example testing and CI ownership, bootstrap, authentication (`docs/authentication.md`), and the service-stack upgrade from the previous release (`docs/upgrade-service-stack.md`). |
 | `CONTRIBUTING.md` | The pre-PR self-check every contribution runs. |
 
 ## Service map
 
 | Service | Role |
 |---------|------|
-| `services/auth` | API-key auth at the edge; signed internal principals; `/v1/api_keys`. |
+| `services/auth` | API-key and federated bearer authentication; current workspace authority; signed principals; token exchange and `/v1/api_keys`. |
 | `services/api` | Public REST control plane (sessions, agents, environments, vaults, memory, files, skills). |
 | `services/queue` | Durable job queue: lease, transition, wake. |
 | `services/sandbox` | Provider-backed Sandbox lifecycle, tool execution, and resource projection. |
-| `services/bridge` | Durable runtime reconciliation, Runtime APIs, settlement, cleanup. |
+| `services/bridge` | Runtime RPC APIs, context loading, declaration and result settlement, attachment reads. |
+| `services/job-runner` | Queue consumption, Runtime placement/delivery, binding-loss recovery and Session cleanup. |
 | `services/agent-runtime` | Hot in-pod TypeScript Runtime Core (agent loop, tools). |
-| `services/gateway` | Provider lowering + MCP connector. |
-| `services/web-connector` | Web search/fetch backend (gateway pod container). |
+| `services/gateway` | Provider lowering and MCP connector packages, deployed as independent workloads. |
+| `services/web-connector` | Independently deployed web search/fetch backend. |
 | `services/event-stream` | Read-only public event list and SSE. |
 | `services/git-proxy` | Credential-injecting Git smart-HTTP proxy. |
 | `services/cleanup` | Scheduled cleanup. |

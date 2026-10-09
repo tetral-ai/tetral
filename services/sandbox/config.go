@@ -73,6 +73,7 @@ type Env interface {
 }
 
 type Config struct {
+	DrainTimeout, CancelJoinTimeout   time.Duration
 	HTTPAddress                       string
 	PostgresDSN                       string
 	Daytona                           driver.Config
@@ -91,6 +92,7 @@ type Config struct {
 	AutoStopInterval                  time.Duration
 	AutoArchiveInterval               time.Duration
 	AutoDeleteInterval                time.Duration
+	BlobTLSCAPath, BlobTLSServerName  string
 	BlobEndpoint                      string
 	BlobRegion                        string
 	BlobBucket                        string
@@ -112,6 +114,7 @@ func ConfigFromEnv(env Env) (Config, error) {
 		return Config{}, workload.NewConfigError("environment is required")
 	}
 	cfg := Config{
+		DrainTimeout: 30 * time.Second, CancelJoinTimeout: 5 * time.Second,
 		HTTPAddress:                       valueOrDefault(env.Getenv(EnvHTTPAddress), defaultHTTPAddress),
 		PostgresDSN:                       strings.TrimSpace(env.Getenv(EnvPostgresDSN)),
 		QueueGRPCAddress:                  strings.TrimSpace(env.Getenv(EnvQueueGRPCAddress)),
@@ -129,19 +132,20 @@ func ConfigFromEnv(env Env) (Config, error) {
 		AutoStopInterval:                  defaultSandboxAutoStopInterval,
 		AutoArchiveInterval:               defaultSandboxAutoArchiveInterval,
 		AutoDeleteInterval:                defaultSandboxAutoDeleteInterval,
-		BlobEndpoint:                      strings.TrimSpace(env.Getenv(EnvBlobEndpoint)),
-		BlobRegion:                        strings.TrimSpace(env.Getenv(EnvBlobRegion)),
-		BlobBucket:                        strings.TrimSpace(env.Getenv(EnvBlobBucket)),
-		BlobAccessKey:                     strings.TrimSpace(env.Getenv(EnvBlobAccessKey)),
-		BlobSecretKey:                     strings.TrimSpace(env.Getenv(EnvBlobSecretKey)),
-		R2AccountID:                       strings.TrimSpace(env.Getenv(EnvR2AccountID)),
-		R2ParentAPIToken:                  strings.TrimSpace(env.Getenv(EnvR2ParentAPIToken)),
-		R2ParentAccessKeyID:               strings.TrimSpace(env.Getenv(EnvR2ParentAccessKeyID)),
-		ResourceCredentialTTL:             defaultResourceCredentialTTL,
-		ResourceCredentialRefreshMargin:   defaultResourceCredentialRefreshMargin,
-		RcloneVFSCacheMaxSize:             valueOrDefault(env.Getenv(EnvRcloneVFSCacheMaxSize), defaultRcloneVFSCacheMaxSize),
-		RcloneVFSMinFree:                  valueOrDefault(env.Getenv(EnvRcloneVFSMinFree), defaultRcloneVFSMinFree),
-		GitProxyHost:                      strings.TrimSpace(env.Getenv(EnvGitProxyHost)),
+		BlobTLSCAPath:                     strings.TrimSpace(env.Getenv("TETRAL_BLOB_TLS_CA_PATH")), BlobTLSServerName: strings.TrimSpace(env.Getenv("TETRAL_BLOB_TLS_SERVER_NAME")),
+		BlobEndpoint:                    strings.TrimSpace(env.Getenv(EnvBlobEndpoint)),
+		BlobRegion:                      strings.TrimSpace(env.Getenv(EnvBlobRegion)),
+		BlobBucket:                      strings.TrimSpace(env.Getenv(EnvBlobBucket)),
+		BlobAccessKey:                   strings.TrimSpace(env.Getenv(EnvBlobAccessKey)),
+		BlobSecretKey:                   strings.TrimSpace(env.Getenv(EnvBlobSecretKey)),
+		R2AccountID:                     strings.TrimSpace(env.Getenv(EnvR2AccountID)),
+		R2ParentAPIToken:                strings.TrimSpace(env.Getenv(EnvR2ParentAPIToken)),
+		R2ParentAccessKeyID:             strings.TrimSpace(env.Getenv(EnvR2ParentAccessKeyID)),
+		ResourceCredentialTTL:           defaultResourceCredentialTTL,
+		ResourceCredentialRefreshMargin: defaultResourceCredentialRefreshMargin,
+		RcloneVFSCacheMaxSize:           valueOrDefault(env.Getenv(EnvRcloneVFSCacheMaxSize), defaultRcloneVFSCacheMaxSize),
+		RcloneVFSMinFree:                valueOrDefault(env.Getenv(EnvRcloneVFSMinFree), defaultRcloneVFSMinFree),
+		GitProxyHost:                    strings.TrimSpace(env.Getenv(EnvGitProxyHost)),
 		Daytona: driver.Config{
 			DaytonaAPIURL:     strings.TrimSpace(env.Getenv(EnvDaytonaAPIURL)),
 			DaytonaTarget:     strings.TrimSpace(env.Getenv(EnvDaytonaTarget)),
@@ -309,6 +313,18 @@ func ConfigFromEnv(env Env) (Config, error) {
 		AutoDeleteInterval:  cfg.AutoDeleteInterval,
 	}
 	cfg.Daytona.CommandTimeout = cfg.ProviderCommandTimeout
+	for key, target := range map[string]*time.Duration{"TETRAL_DRAIN_TIMEOUT_MS": &cfg.DrainTimeout, "TETRAL_CANCEL_JOIN_TIMEOUT_MS": &cfg.CancelJoinTimeout} {
+		if raw := strings.TrimSpace(env.Getenv(key)); raw != "" {
+			ms, parseErr := strconv.ParseInt(raw, 10, 64)
+			if parseErr != nil || ms <= 0 || ms > int64((1<<63-1)/time.Millisecond) {
+				return Config{}, workload.NewConfigError(key + " must be a positive millisecond duration")
+			}
+			*target = time.Duration(ms) * time.Millisecond
+		}
+	}
+	if cfg.DrainTimeout > 50*time.Second || cfg.CancelJoinTimeout > 50*time.Second-cfg.DrainTimeout {
+		return Config{}, workload.NewConfigError("drain and cancellation join exceed the Pod application shutdown allocation")
+	}
 	return cfg, nil
 }
 

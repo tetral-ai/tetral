@@ -1,0 +1,277 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mcp-connector
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: mcp-connector
+    app.kubernetes.io/part-of: tetral
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-connector
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: mcp-connector
+    app.kubernetes.io/part-of: tetral
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-connector
+  template:
+    metadata:
+      annotations:
+        sidecar.istio.io/inject: "true"
+        sidecar.istio.io/nativeSidecar: "true"
+        sidecar.istio.io/proxyImage: "docker.io/istio/proxyv2:1.31.1@sha256:d86cba0dd1eb15c00b6901c69ce5ae3d2d5f8427a47751098cf8c3ab2a4a62e9"
+        proxy.istio.io/config: '{"holdApplicationUntilProxyStarts":true,"terminationDrainDuration":"5s"}'
+      labels:
+        app.kubernetes.io/name: mcp-connector
+        app.kubernetes.io/part-of: tetral
+        istio.io/rev: "1-31-1"
+    spec:
+      serviceAccountName: mcp-connector
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: mcp-connector
+          image: ghcr.io/tetral-ai/gateway:0.0.0-dev
+          imagePullPolicy: IfNotPresent
+          command:
+            - bun
+            - /app/dist/mcp-connector/src-command.js
+          env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
+            - name: TETRAL_DATABASE_TLS_CA_PATH
+              value: /var/run/tetral/store-trust/database-ca.crt
+            - name: TETRAL_DATABASE_TLS_SERVER_NAME
+              value: "tetral-postgres.tetral-system.svc.cluster.local"
+            - name: TETRAL_DATABASE_POOL_MAX
+              value: "10"
+            - name: TETRAL_DRAIN_TIMEOUT_MS
+              value: "30000"
+            - name: TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS
+              value: "5000"
+            - name: TETRAL_MCP_CONNECTOR_GRPC_ADDR
+              value: 0.0.0.0:9091
+            - name: TETRAL_MCP_CONNECTOR_HTTP_ADDR
+              value: 0.0.0.0:8081
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              value: "local"
+            - name: TETRAL_SERVICE_VERSION
+              value: "dev"
+            - name: TETRAL_INTERNAL_GRPC_AUDIENCE
+              value: tetral-internal-grpc
+            - name: TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS
+              value: tetral-agent-runtime/agent-runtime
+            - name: TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS
+              value: tetral-system/bridge,tetral-system/job-runner
+            - name: TETRAL_BRIDGE_API_GRPC_ADDR
+              value: bridge.tetral-system.svc.cluster.local:9090
+            - name: TETRAL_MCP_CONNECTOR_BRIDGE_TOKEN_PATH
+              value: /var/run/secrets/tetral-internal-grpc/bridge/token
+            - name: TETRAL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "tetral-database"
+                  key: mcp-connector-url
+            - name: ENGINE_VAULT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: "api-secrets"
+                  key: engine-vault-key
+            - name: TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: "runtime-binding-token"
+                  key: hmac-key
+            - name: KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH
+              value: /var/run/secrets/tetral-kubernetes-api/mcp-connector-tokenreview/token
+            - name: KUBERNETES_API_SERVER_URL
+              value: https://kubernetes.default.svc
+            - name: KUBERNETES_API_CA_CERT_PATH
+              value: /var/run/secrets/tetral-kubernetes-api/ca.crt
+          ports:
+            - name: mcp-grpc
+              containerPort: 9091
+            - name: mcp-http
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: mcp-http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: mcp-http
+          resources:
+
+            limits:
+              cpu: 500m
+              ephemeral-storage: 512Mi
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              ephemeral-storage: 128Mi
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
+            - name: mcp-connector-kubernetes-api
+              mountPath: /var/run/secrets/tetral-kubernetes-api
+              readOnly: true
+            - name: mcp-connector-bridge-token
+              mountPath: /var/run/secrets/tetral-internal-grpc/bridge
+              readOnly: true
+      volumes:
+        - name: store-trust
+          configMap:
+            name: "tetral-store-trust"
+        - name: mcp-connector-kubernetes-api
+          projected:
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 600
+                  path: mcp-connector-tokenreview/token
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+        - name: mcp-connector-bridge-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: tetral-internal-grpc
+                  expirationSeconds: 600
+                  path: token
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-connector
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: mcp-connector
+    app.kubernetes.io/part-of: tetral
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mcp-connector
+  ports:
+    - name: mcp-grpc
+      port: 9091
+      targetPort: mcp-grpc
+    - name: mcp-http
+      port: 8081
+      targetPort: mcp-http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp-connector
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: mcp-connector
+    app.kubernetes.io/part-of: tetral
+  annotations:
+    tetral.ai/egress-intent: "api.githubcopilot.com,mcp.slack.com,slack.com"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-connector
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: tetral
+      ports:
+        - protocol: TCP
+          port: 8081
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-agent-runtime
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent-runtime
+      ports:
+        - protocol: TCP
+          port: 9091
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: bridge
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: job-runner
+      ports:
+        - protocol: TCP
+          port: 9091
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tetral-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: bridge
+      ports:
+        - protocol: TCP
+          port: 9090
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
