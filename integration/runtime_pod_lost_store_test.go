@@ -212,16 +212,16 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+			visibility, session_visible, model_request_id, model_tool_call_id, projection_json, created_at, updated_at
 		) VALUES
 		('default', 'sesn_bridge_pod_loss', 'thr_bridge_pod_loss', 'evt_pod_loss_start', 5, 'span.model_request_start',
 		 '{}',
-		 'internal', false, 'mrq_pod_loss',
+		 'internal', false, 'mrq_pod_loss', NULL,
 		 '{"type":"span.model_request_start","model_request_id":"mrq_pod_loss","context_through_message_sequence":0,"request_kind":"agent_provider_request"}',
 		 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
 		('default', 'sesn_bridge_pod_loss', 'thr_bridge_pod_loss', 'evt_pod_loss_tool', 6, 'agent.tool_use',
 		 '{"type":"agent.tool_use","name":"Write","input":{"file_path":"src/a.ts"},"evaluated_permission":"ask"}',
-		 'public', true, 'mrq_pod_loss',
+		 'public', true, 'mrq_pod_loss', 'tool-call-pod-loss',
 		 '{}',
 		'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatalf("seed lost request events: %v", err)
@@ -328,20 +328,20 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+			visibility, session_visible, model_request_id, model_tool_call_id, projection_json, created_at, updated_at
 		) VALUES
 		('default', 'sesn_bridge_pod_loss', 'thr_bridge_pod_loss_closed', 'evt_pod_loss_closed_start', 1, 'span.model_request_start',
 		 '{"type":"span.model_request_start","model_request_id":"mrq_pod_loss_closed","request_kind":"agent_provider_request"}',
-		 'internal', false, 'mrq_pod_loss_closed',
+		 'internal', false, 'mrq_pod_loss_closed', NULL,
 		 '{"context_through_message_sequence":1,"request_kind":"agent_provider_request"}',
 		 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
 		('default', 'sesn_bridge_pod_loss', 'thr_bridge_pod_loss_closed', 'evt_pod_loss_closed_tool', 2, 'agent.tool_use',
 		 '{"type":"agent.tool_use","name":"Read","input":{"file_path":"src/b.ts"},"evaluated_permission":"allow"}',
-		 'public', false, 'mrq_pod_loss_closed', '{}',
+		 'public', false, 'mrq_pod_loss_closed', 'call_evt_pod_loss_closed_tool', '{}',
 		 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
 		('default', 'sesn_bridge_pod_loss', 'thr_bridge_pod_loss_closed', 'evt_pod_loss_closed_end', 3, 'span.model_request_end',
 		 '{"type":"span.model_request_end","model_request_id":"mrq_pod_loss_closed","model_request_start_id":"evt_pod_loss_closed_start","finish_reason":"tool_calls","is_error":false}',
-		 'internal', false, 'mrq_pod_loss_closed', '{}',
+		 'internal', false, 'mrq_pod_loss_closed', NULL, '{}',
 		 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatalf("seed closed request with running tool: %v", err)
 	}
@@ -448,7 +448,7 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		  WHERE workspace_id = 'default'
 		    AND session_id = 'sesn_bridge_pod_loss'
 		    AND type = 'agent.tool_result'
-		    AND payload_json::jsonb ->> 'tool_use_event_id' = 'evt_pod_loss_tool'`).Scan(&liveToolResultCount); err != nil {
+		    AND tool_use_event_id = 'evt_pod_loss_tool'`).Scan(&liveToolResultCount); err != nil {
 		t.Fatalf("count pod-loss tool results: %v", err)
 	}
 	if liveToolResultCount != 0 {
@@ -461,7 +461,7 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		  WHERE workspace_id = 'default'
 		    AND session_id = 'sesn_bridge_pod_loss'
 		    AND type = 'agent.tool_result'
-		    AND payload_json::jsonb ->> 'tool_use_event_id' = 'evt_pod_loss_closed_tool'`).Scan(&closedToolResultCount); err != nil {
+		    AND tool_use_event_id = 'evt_pod_loss_closed_tool'`).Scan(&closedToolResultCount); err != nil {
 		t.Fatalf("read closed-request pod-loss tool result: %v", err)
 	}
 	if closedToolResultCount != 1 {
@@ -584,13 +584,13 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 			if _, err := admin.ExecContext(context.Background(),
 				`INSERT INTO session_events (
 					workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-					visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+					visibility, session_visible, model_request_id, model_tool_call_id, projection_json, created_at, updated_at
 				) VALUES
 				('default', $1, $2, $5, 1, 'span.model_request_start',
-				 $6, 'internal', false, $3,
+				 $6, 'internal', false, $3, NULL,
 				 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', now(), now()),
 				('default', $1, $2, $4, 2, 'agent.tool_use',
-				 $7, 'public', true, $3, '{}', now(), now())`,
+				 $7, 'public', true, $3, 'call_' || $4, '{}', now(), now())`,
 				sessionID,
 				threadID,
 				modelRequestID,
@@ -751,8 +751,7 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 				   FROM session_events
 				  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2
 				    AND type = 'agent.tool_result'
-				    AND (payload_json::jsonb ->> 'tool_use_event_id' = $3
-				         OR payload_json::jsonb ->> 'tool_use_id' = $3)`,
+				    AND tool_use_event_id = $3`,
 				sessionID, threadID, toolUseEventID,
 			).Scan(&resultCount, &resultEventID, &resultPayload); err != nil {
 				t.Fatalf("read approval pod-loss result: %v", err)

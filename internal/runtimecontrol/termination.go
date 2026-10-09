@@ -109,11 +109,8 @@ func runtimeTerminationOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, s
 			         WHERE result.workspace_id = e.workspace_id
 			           AND result.session_id = e.session_id
 			           AND result.session_thread_id = e.session_thread_id
-		           AND ((result.type = 'agent.tool_result'
-		             AND (result.payload_json::jsonb ->> 'tool_use_event_id' = e.event_id
-		               OR result.payload_json::jsonb ->> 'tool_use_id' = e.event_id))
-		             OR (result.type = 'agent.mcp_tool_result'
-		               AND result.payload_json::jsonb ->> 'mcp_tool_use_id' = e.event_id))
+		           AND result.type IN ('agent.tool_result','agent.mcp_tool_result')
+		           AND result.tool_use_event_id = e.event_id
 		    )
 		  ORDER BY e.sequence ASC, e.event_id ASC
 		  FOR UPDATE OF e`,
@@ -160,7 +157,7 @@ func settleRuntimeTerminationDurableFactsTx(
 			},
 		}
 		resultEventType := "agent.tool_result"
-		identityField := "tool_use_event_id"
+		identityField := "tool_use_id"
 		if toolUse.EventType == "agent.mcp_tool_use" {
 			resultEventType = "agent.mcp_tool_result"
 			identityField = "mcp_tool_use_id"
@@ -193,14 +190,14 @@ func settleRuntimeTerminationDurableFactsTx(
 			`INSERT INTO session_events (
 				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 				visibility, session_visible, runtime_write_id, model_request_id, projection_json,
-				created_at, updated_at, processed_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13,$13)`,
+				tool_use_event_id, created_at, updated_at, processed_at
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$14)`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), eventID, sequence,
 			resultEventType, payloadJSON, visibility, sessionVisible,
 			StableRuntimeID("runtime_termination_tool_result", runtimeWriteID, toolUse.EventID),
-			toolUse.ModelRequestID, projectionJSON, now,
+			toolUse.ModelRequestID, projectionJSON, toolUse.EventID, now,
 		); err != nil {
-			return err
+			return ToolRelationInsertError(err)
 		}
 		if _, err := AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
 			return err

@@ -136,21 +136,22 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 			`INSERT INTO session_events (
 				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 				visibility, session_visible, runtime_write_id, model_request_id,
-				projection_json, created_at, updated_at, processed_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10, $11, $12, $12, $12)`,
+				projection_json, tool_use_event_id, created_at, updated_at, processed_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10, $11, $12, $13, $13, $13)`,
 			request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(),
-			eventID, sequence, resultEventType, payloadJSON, visibility, sessionVisible, tool.ModelRequestID, projectionJSON, now,
+			eventID, sequence, resultEventType, payloadJSON, visibility, sessionVisible, tool.ModelRequestID, projectionJSON,
+			toolUseEventID, now,
 		); err != nil {
-			return err
+			return runtimecontrol.ToolRelationInsertError(err)
 		}
 		if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
 			return err
 		}
-		if err := applyToolEventBookkeepingTx(ctx, tx, request.GetScope(), eventID, resultEventType, payloadJSON, projection, now); err != nil {
+		if err := applyToolResultBookkeepingTx(ctx, tx, request.GetScope(), eventID, resultEventType, toolUseEventID, projection, now); err != nil {
 			return err
 		}
 		if resultEventType == "agent.mcp_tool_result" && settlement.GetCompleted() != nil {
-			stagedMCPResult, err = consumeStagedMCPResultTx(ctx, tx, request.GetScope(), resultEventType, payloadJSON, now)
+			stagedMCPResult, err = consumeStagedMCPResultTx(ctx, tx, request.GetScope(), resultEventType, toolUseEventID, now)
 			if err != nil {
 				return err
 			}
@@ -203,11 +204,7 @@ func durableToolResultExistsTx(
 			SELECT 1 FROM session_events
 			 WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
 			   AND type IN ('agent.tool_result','agent.mcp_tool_result')
-			   AND COALESCE(
-			         payload_json::jsonb ->> 'tool_use_event_id',
-			         payload_json::jsonb ->> 'tool_use_id',
-			         payload_json::jsonb ->> 'mcp_tool_use_id'
-			       ) = $4
+			   AND tool_use_event_id = $4
 		)`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
 	).Scan(&exists)

@@ -3359,16 +3359,18 @@ func insertPendingToolTerminalResultTx(ctx context.Context, tx *dbconnect.Tx, sc
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, model_request_id, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $12)`,
+			visibility, session_visible, model_request_id, projection_json, tool_use_event_id,
+			created_at, updated_at, processed_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $13)`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
 		eventID,
 		sequence,
-		eventType, payloadJSON, visibility, sessionVisible, wait.ModelRequestID, projectionJSON, now,
+		eventType, payloadJSON, visibility, sessionVisible, wait.ModelRequestID, projectionJSON,
+		wait.ToolUseEventID, now,
 	); err != nil {
-		return "", err
+		return "", runtimecontrol.ToolRelationInsertError(err)
 	}
 	if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
 		return "", err

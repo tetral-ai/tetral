@@ -376,7 +376,7 @@ func loadCommittedChildControlCommandTx(ctx context.Context, tx *dbconnect.Tx, s
 
 func childControlSourceTerminalTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sourceID string) (bool, error) {
 	var terminal bool
-	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND type IN ('agent.tool_result','agent.mcp_tool_result') AND (payload_json::jsonb ->> 'tool_use_event_id'=$4 OR payload_json::jsonb ->> 'tool_use_id'=$4 OR payload_json::jsonb ->> 'mcp_tool_use_id'=$4))`,
+	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND type IN ('agent.tool_result','agent.mcp_tool_result') AND tool_use_event_id=$4)`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), sourceID).Scan(&terminal)
 	return terminal, err
 }

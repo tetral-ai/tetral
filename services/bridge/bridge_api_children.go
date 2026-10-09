@@ -1742,7 +1742,7 @@ func loadDurablePrefixEntriesThroughTx(ctx context.Context, tx *dbconnect.Tx, sc
 		       WHERE repair.workspace_id=m.workspace_id AND repair.session_id=m.session_id
 		         AND repair.session_thread_id=m.session_thread_id AND repair.model_request_id=m.model_request_id
 		         AND repair.type='agent.tool_result'
-		         AND repair.payload_json::jsonb ->> 'repair_kind'='invalid_tool'
+		         AND repair.model_tool_call_id IS NOT NULL
 		    )
 		  )
 		  AND NOT EXISTS (
@@ -1755,11 +1755,7 @@ func loadDurablePrefixEntriesThroughTx(ctx context.Context, tx *dbconnect.Tx, sc
 		          WHERE tool_result.workspace_id=tool_use.workspace_id AND tool_result.session_id=tool_use.session_id
 		            AND tool_result.session_thread_id=tool_use.session_thread_id
 		            AND tool_result.type IN ('agent.tool_result','agent.mcp_tool_result')
-		            AND COALESCE(
-		                  tool_result.payload_json::jsonb ->> 'tool_use_event_id',
-		                  tool_result.payload_json::jsonb ->> 'tool_use_id',
-		                  tool_result.payload_json::jsonb ->> 'mcp_tool_use_id'
-		                )=tool_use.event_id
+		            AND tool_result.tool_use_event_id=tool_use.event_id
 		       )
 		  )
 		) AS complete_tool_repair

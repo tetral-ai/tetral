@@ -319,8 +319,23 @@ const (
 	// once from 0, never updated) and used as the session-level list cursor.
 	// Thread-level list paging uses the per-thread sequence column instead.
 	//
+	// model_tool_call_id and tool_use_event_id are the Tool relation. A Tool
+	// Use or MCP Tool Use carries its model call ID; an ordinary or MCP Tool
+	// Result carries the event ID of the Tool Use it answers; only the
+	// synthetic invalid-tool repair result carries a call ID and no Tool Use.
+	// The single writer of each row derives these columns, its payload and its
+	// projection from one validated fact. session_events_tool_relation_shape
+	// checks presence from scalar columns only: a PostgreSQL JSON field read
+	// fails on every key of a document containing an escaped U+0000.
+	// idx_session_events_model_tool_call_unique is the only Thread-scoped
+	// call-ID admission check; idx_session_events_tool_result_unique admits at
+	// most one result of either kind per Tool Use. Tool Use rows alone must stay
+	// JSONB-storable, because readers still cast their payload and projection.
+	//
 	// UPDATE-WITH: services/bridge and internal/session event
-	// append/delivery paths; internal/eventstream list/cursor reader.
+	// append/delivery paths; internal/eventstream list/cursor reader;
+	// internal/runtimecontrol, services/bridge and services/job-runner Tool
+	// relation writers and readers.
 	createPostgreSQLSessionEventsTable = `CREATE TABLE IF NOT EXISTS session_events (
 		workspace_id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
@@ -337,6 +352,8 @@ const (
 		runtime_write_id TEXT,
 		model_request_id TEXT,
 		projection_json TEXT NOT NULL DEFAULT '{}',
+		model_tool_call_id TEXT,
+		tool_use_event_id TEXT,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		processed_at TIMESTAMPTZ,
@@ -346,10 +363,36 @@ const (
 		CONSTRAINT session_events_attachment_scope_key UNIQUE (workspace_id, session_id, session_thread_id, event_id),
 		FOREIGN KEY (workspace_id, session_id) REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
+		CONSTRAINT session_events_tool_use_event_fkey
+			FOREIGN KEY (workspace_id, session_id, session_thread_id, tool_use_event_id)
+			REFERENCES session_events(workspace_id, session_id, session_thread_id, event_id) ON DELETE CASCADE,
 		CONSTRAINT session_events_revision_shape CHECK (revision > 0),
 		CONSTRAINT session_events_visibility_shape CHECK (visibility IN ('public', 'internal')),
 		CONSTRAINT session_events_latest_stream_position_shape CHECK (latest_stream_position >= 0),
-		CONSTRAINT session_events_insert_stream_position_shape CHECK (insert_stream_position >= 0)
+		CONSTRAINT session_events_insert_stream_position_shape CHECK (insert_stream_position >= 0),
+		CONSTRAINT session_events_tool_relation_shape CHECK (COALESCE(
+			(type IN ('agent.tool_use', 'agent.mcp_tool_use')
+				AND model_tool_call_id IS NOT NULL AND model_tool_call_id <> ''
+				AND tool_use_event_id IS NULL
+				AND session_thread_id IS NOT NULL
+				AND model_request_id IS NOT NULL AND model_request_id <> '')
+			OR (type = 'agent.tool_result'
+				AND ((model_tool_call_id IS NOT NULL AND model_tool_call_id <> '' AND tool_use_event_id IS NULL)
+					OR (model_tool_call_id IS NULL AND tool_use_event_id IS NOT NULL AND tool_use_event_id <> ''))
+				AND session_thread_id IS NOT NULL
+				AND model_request_id IS NOT NULL AND model_request_id <> '')
+			OR (type = 'agent.mcp_tool_result'
+				AND model_tool_call_id IS NULL
+				AND tool_use_event_id IS NOT NULL AND tool_use_event_id <> ''
+				AND session_thread_id IS NOT NULL
+				AND model_request_id IS NOT NULL AND model_request_id <> '')
+			OR (type NOT IN ('agent.tool_use', 'agent.mcp_tool_use', 'agent.tool_result', 'agent.mcp_tool_result')
+				AND model_tool_call_id IS NULL
+				AND tool_use_event_id IS NULL),
+			FALSE)),
+		CONSTRAINT session_events_tool_use_jsonb_storable CHECK (CASE WHEN type IN ('agent.tool_use','agent.mcp_tool_use')
+			THEN payload_json::jsonb IS NOT NULL AND projection_json::jsonb IS NOT NULL
+			ELSE TRUE END)
 	)`
 
 	createPostgreSQLSessionEventStreamChangesTable = `CREATE TABLE IF NOT EXISTS session_event_stream_changes (
@@ -1739,6 +1782,8 @@ END $$`
 	createPostgreSQLSessionEventsThreadRequestTypeIndex     = `CREATE INDEX IF NOT EXISTS idx_session_events_thread_request_type ON session_events(workspace_id, session_id, session_thread_id, model_request_id, type, sequence) WHERE model_request_id IS NOT NULL`
 	createPostgreSQLSessionEventsThreadRunningIndex         = `CREATE INDEX IF NOT EXISTS idx_session_events_thread_running_sequence ON session_events(workspace_id, session_id, session_thread_id, sequence) WHERE type IN ('session.status_running', 'session.thread_status_running')`
 	createPostgreSQLSessionEventsThreadCloseIndex           = `CREATE INDEX IF NOT EXISTS idx_session_events_thread_close_sequence ON session_events(workspace_id, session_id, session_thread_id, sequence) WHERE type IN ('session.status_idle', 'session.thread_status_idle', 'session.status_terminated', 'session.thread_status_terminated')`
+	createPostgreSQLSessionEventsModelToolCallUniqueIndex   = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_events_model_tool_call_unique ON session_events(workspace_id, session_id, session_thread_id, model_tool_call_id) WHERE model_tool_call_id IS NOT NULL`
+	createPostgreSQLSessionEventsToolResultUniqueIndex      = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_events_tool_result_unique ON session_events(workspace_id, session_id, session_thread_id, tool_use_event_id) WHERE tool_use_event_id IS NOT NULL`
 	createPostgreSQLSessionMessagesKindSeqIndex             = `CREATE INDEX IF NOT EXISTS idx_session_messages_kind_seq ON session_messages(workspace_id, session_id, session_thread_id, kind, sequence)`
 	createPostgreSQLSessionMessagesSourceEventIndex         = `CREATE INDEX IF NOT EXISTS idx_session_messages_source_event ON session_messages(workspace_id, source_event_id)`
 	createPostgreSQLSessionMessagesSourceEventUniqueIndex   = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_source_event_unique ON session_messages(workspace_id, session_id, session_thread_id, source_event_id) WHERE source_event_id IS NOT NULL`
@@ -1965,6 +2010,8 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_session_events_thread_request_type", createPostgreSQLSessionEventsThreadRequestTypeIndex},
 		{"index_session_events_thread_running_sequence", createPostgreSQLSessionEventsThreadRunningIndex},
 		{"index_session_events_thread_close_sequence", createPostgreSQLSessionEventsThreadCloseIndex},
+		{"index_session_events_model_tool_call_unique", createPostgreSQLSessionEventsModelToolCallUniqueIndex},
+		{"index_session_events_tool_result_unique", createPostgreSQLSessionEventsToolResultUniqueIndex},
 		{"index_session_messages_kind_seq", createPostgreSQLSessionMessagesKindSeqIndex},
 		{"index_session_messages_source_event", createPostgreSQLSessionMessagesSourceEventIndex},
 		{"index_session_messages_source_event_unique", createPostgreSQLSessionMessagesSourceEventUniqueIndex},

@@ -1266,7 +1266,7 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3),
 		(SELECT count(*) FROM session_events
 		  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
-		    AND type='agent.tool_result' AND payload_json::jsonb ->> 'tool_use_event_id'=$3),
+		    AND type='agent.tool_result' AND tool_use_event_id=$3),
 		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1)`,
 		sessionID, threadID, toolUse.GetCommitted().GetEventId(),
 	).Scan(&routeStatus, &routeDecision, &terminalToolResults, &oldBindings); err != nil {

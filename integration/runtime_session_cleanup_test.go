@@ -36,19 +36,19 @@ func TestCleanupExpiredSandboxToolAppendsNarrowResultToOriginalAssistantContext(
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_cleanup_narrow_tool", 1, "pod_cleanup_narrow_tool")
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
 		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-		visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+		visibility, session_visible, model_request_id, model_tool_call_id, projection_json, created_at, updated_at
 	) VALUES
 	('default', $1, $2, 'evt_cleanup_narrow_start', 1, 'span.model_request_start',
-	 '{}', 'internal', false, $3,
+	 '{}', 'internal', false, $3, NULL,
 	 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}',
 	 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
 	('default', $1, $2, $4, 2, 'agent.tool_use',
 	 '{"type":"agent.tool_use","name":"Read","input":{"file_path":"README.md"},"evaluated_permission":"allow"}',
-	 'public', true, $3, '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+	 'public', true, $3, $5, '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
 	('default', $1, $2, 'evt_cleanup_narrow_end', 3, 'span.model_request_end',
 	 '{"type":"span.model_request_end","model_request_start_id":"evt_cleanup_narrow_start","is_error":false,"provider_context_retention":{"disposition":"completed","assistant_message_sequence":1,"tool_use_event_ids":["evt_cleanup_narrow_tool_use"],"repair_event_ids":[]}}',
-	 'internal', false, $3, '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		sessionID, threadID, modelRequestID, toolUseEventID,
+	 'internal', false, $3, NULL, '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		sessionID, threadID, modelRequestID, toolUseEventID, modelToolCallID,
 	); err != nil {
 		t.Fatalf("seed cleanup Tool turn: %v", err)
 	}
@@ -166,7 +166,8 @@ func TestSessionDeleteCleanupCompletesAfterConsumedAttachmentGC(t *testing.T) {
 	attachment := createBridgeTransientAttachmentForTest(t, admin, store,
 		sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_delete_consumed_attachment", 1, "pod_delete_consumed_attachment"),
 		"delete_consumed_attachment", toolUseID, []byte("consumed-attachment"))
-	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, resultID, 1, "agent.tool_result", `{"type":"agent.tool_result"}`)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, toolUseID, 1, "agent.tool_use", `{"type":"agent.tool_use","name":"view_image","input":{}}`)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, resultID, 2, "agent.tool_result", `{"type":"agent.tool_result","tool_use_id":"`+toolUseID+`"}`)
 	if _, err := admin.Exec(`INSERT INTO session_runtime_tool_results (
 		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
 		normalized_input_hash, tool_name, input_json, ack_status, result_json,

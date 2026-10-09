@@ -45,6 +45,17 @@ The lock graph is:
 - Unchanged report: the liveness row only; the process row is read without a
   lock and no later Pod or process lock is taken in that transaction.
 
+Tool closeout writes and reads the scalar Tool relation of `session_events`.
+The termination and shared terminal result writers set `tool_use_event_id` to
+the Tool Use they answer and emit the public `tool_use_id` (or
+`mcp_tool_use_id`) for the same event. Orphan discovery, result existence and
+the checkpoint fence join results on that column within the Thread, and read
+a Tool Use's call ID from `model_tool_call_id`. `ToolRelationInsertError`
+maps a unique violation of a Tool event INSERT by constraint name: a reused
+call ID is `AlreadyExists`, a global event ID collision is a non-disclosing
+`AlreadyExists`, and a second result for one Tool Use is an internal invariant
+error that rolls the whole transaction back without retry.
+
 Moved literal SQL and payload values are conserved from the accepted extraction
 base; owner tests and PostgreSQL compositions supply the behavioral evidence.
 Shared pure vector tests cover deterministic delivery identities.

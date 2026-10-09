@@ -369,7 +369,7 @@ changes provider-context eligibility while retaining the original audit events.
   event's `evaluated_permission`. `ask` upserts an approval route with
   `status='pending'` and no decision; `allow` and `deny` upsert
   `status='resolving'` routes with the corresponding decision
-  (`applyToolEventBookkeepingTx` in `bridge_api_events.go`). An allowed route
+  (`applyToolUseBookkeepingTx` in `bridge_api_events.go`). An allowed route
   records the execution decision; it does not itself prove execution acceptance
   or a terminal result. A public tool event may
   carry an anchored reasoning prefix. `SettleToolResult` is the sole ordinary
@@ -381,6 +381,32 @@ changes provider-context eligibility while retaining the original audit events.
   those direct facts. Web usage is part of the bounded outcome and increments
   `sessions.usage` exactly once. Neither digest nor settlement payload is
   returned to Runtime.
+- **Tool relation.** Every Tool event writer stores its relation in scalar
+  `session_events` columns derived, together with the payload and projection,
+  from the one validated fact it is writing. A Tool Use or MCP Tool Use row
+  carries `model_tool_call_id`, and `WriteEvent` inserts it once with its
+  complete projection. An ordinary or MCP Tool Result carries
+  `tool_use_event_id`, the event ID of the Tool Use it answers; its public
+  payload names the same event as `tool_use_id` or `mcp_tool_use_id`. The
+  synthetic invalid-tool repair result carries its call ID and references no
+  Tool Use. The Thread-scoped unique call-ID index is the only call-ID
+  admission check: reusing a call ID in the Thread, including after
+  compaction, returns `AlreadyExists`; another Thread may use it. No
+  declaration reads message history. Every result, interrupt, settlement,
+  context and child-control association joins on `tool_use_event_id` within
+  its workspace, Session and Thread, and a repair result is recognized by its
+  call-ID column. Tool declaration validation already rejects an unpaired
+  surrogate escape or a number beyond float64 range in the provider input,
+  which is the execution input unless a distinct provider input is declared.
+  Values that pass it but PostgreSQL JSONB cannot store fail the Tool Use
+  storability CHECK at the declaration INSERT: escaped U+0000 in either input
+  or the MCP server name, an unpaired surrogate escape or a number outside the
+  PostgreSQL numeric range only in an execution input that has a distinct
+  provider input, and in either input a nonzero number whose magnitude is
+  below that range. Both rejections return `InvalidArgument` and write
+  nothing. The CHECK exists because other readers still cast Tool Use payloads
+  and projections to JSONB; assistant text, reasoning and Tool Results carry
+  no such requirement.
 - **Lifecycle.** `WriteEvent` is idempotency-keyed by `runtime_write_id`; the attached
   reasoning set folds into the request hash. `agent.message` and `agent.thinking`
   additionally require the Gateway-supplied `preallocated_event_id` (`evt_`
@@ -405,7 +431,10 @@ changes provider-context eligibility while retaining the original audit events.
   the declaration class is whitelisted by event type; a replay is byte-identical or a
   fatal conflict; no double-count on replay; per-request stable-reasoning
   byte/part budgets roll back the enclosing transaction when validation fails.
-- **Conformance.** `bridge_api_events_test.go`.
+- **Conformance.** `bridge_api_events_test.go`; `tool_relation_test.go` drives
+  every Bridge Tool event writer, the relation constraints, Tool Use
+  storability, call-ID identity across compaction, text-only compaction and
+  the Sandbox entrypoints' shared result checks under the real Bridge role.
 
 ### Settlement transaction
 
@@ -416,7 +445,12 @@ changes provider-context eligibility while retaining the original audit events.
   request's final not-yet-durable Assistant members and then seals the existing
   assistant projection without replacing its owning event. Its closed result
   distinguishes ordinary, rescheduled, and compacted commits and returns only
-  Bridge-assigned facts with an immediate caller.
+  Bridge-assigned facts with an immediate caller. A compacted commit's
+  checkpoint is text only: a nonempty list of text parts (empty text allowed,
+  each within the text byte bound). Any reasoning, Tool call or Tool result
+  part is `InvalidArgument` before anything commits, so the previous
+  compaction and inherited prefix stay intact. Compaction changes the selected
+  context window and never removes historical Tool identity events.
   A no-content end still commits the request boundary so a stale custodian
   cannot continue merely because there is no assistant projection.
   An interrupt received while the request is open carries only its admitted
@@ -521,7 +555,7 @@ changes provider-context eligibility while retaining the original audit events.
   again. Request End retains only transient attachment settlement.
 - **Conformance.** `bridge_api_events_test.go` drives PostgreSQL `WriteEvent`
   and `WriteRequestEnd` to prove ordered durable members, deterministic replay,
-  global Tool Call identity, target-only Tool settlement, and exact/one-over
+  Thread-scoped Tool Call identity, target-only Tool settlement, and exact/one-over
   count and byte bounds with transactional rollback. Context-load and Pod-loss
   tests distinguish ordinary failed/rescheduled preservation from incomplete
   Pod-loss repair exclusion.

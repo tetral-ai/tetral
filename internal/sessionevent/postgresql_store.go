@@ -55,8 +55,9 @@ func NewPostgreSQLStore(client *dbconnect.Client, options ...PostgreSQLStoreOpti
 // session_events only through childcontrol.ThreadOrAncestorClosingTx: it
 // share-locks and JSON-decodes every child-interrupt request event of the
 // target Thread and its ancestors to find pending ones and, for a committed
-// request, scans the Session's tool result events, decoding each payload, for
-// one that answers the request's source Tool Use.
+// request, looks up the request's source Tool Use by event ID and joins its
+// result through the indexed tool_use_event_id relation; no result payload is
+// decoded.
 func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, workspaceID workspace.ID, sessionID string, events []preparedEvent, idempotency appendIdempotency, settings appendSettings) (*appendOutcome, error) {
 	if s == nil || s.client == nil {
 		return nil, &ValidationError{Message: "session event store is required"}

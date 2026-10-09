@@ -85,16 +85,16 @@ func TestRuntimePodLossSettlesMCPToolNamedLikeSubAgentToolWithoutConnectorReplay
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+			visibility, session_visible, model_request_id, projection_json, model_tool_call_id, tool_use_event_id, created_at, updated_at
 		) VALUES
 		('default', $1, $2, 'evt_mcp_pod_loss_start', 1, 'span.model_request_start',
 		 '{"type":"span.model_request_start","model_request_id":"mreq_mcp_pod_loss","request_kind":"agent_provider_request"}',
 		 'internal', false, $3,
-		 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}',
+		 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', NULL, NULL,
 		 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
 		('default', $1, $2, $4, 2, 'agent.mcp_tool_use',
 		 '{"type":"agent.mcp_tool_use","name":"spawn_agent","mcp_server_name":"github","input":{"q":"x"},"evaluated_permission":"allow"}',
-		 'public', true, $3, '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		 'public', true, $3, '{}', 'call_' || $4, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		sessionID, threadID, modelRequestID, toolUseEventID,
 	); err != nil {
 		t.Fatalf("seed MCP pod-loss events: %v", err)
@@ -199,16 +199,16 @@ func TestRuntimePodLossDetectsInternalApprovalReviewerToolUse(t *testing.T) {
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+			visibility, session_visible, model_request_id, projection_json, model_tool_call_id, tool_use_event_id, created_at, updated_at
 		) VALUES
 		('default', $1, $2, 'evt_reviewer_pod_loss_start', 1, 'span.model_request_start',
 		 '{"type":"span.model_request_start","model_request_id":"mreq_reviewer_pod_loss","request_kind":"approval_reviewer"}',
 		 'internal', false, $3,
-		 '{"context_through_message_sequence":0,"request_kind":"approval_reviewer"}',
+		 '{"context_through_message_sequence":0,"request_kind":"approval_reviewer"}', NULL, NULL,
 		 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
 		('default', $1, $2, $4, 2, 'agent.tool_use',
 		 '{"type":"agent.tool_use","name":"Read","input":{"file_path":"README.md"},"evaluated_permission":"allow"}',
-		 'internal', false, $3, '{}',
+		 'internal', false, $3, '{}', 'call_' || $4, NULL,
 		 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		sessionID, reviewerID, modelRequestID, toolUseEventID,
 	); err != nil {
@@ -238,20 +238,9 @@ func TestRuntimePodLossOrphanDetectionKeepsToolFamilyAndThreadClosed(t *testing.
 	const (
 		sessionID = "sesn_pod_loss_closed_result_identity"
 		threadID  = "thr_pod_loss_closed_result_identity"
-		otherID   = "thr_pod_loss_closed_result_other"
 		toolUseID = "evt_pod_loss_closed_result_tool"
 	)
 	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	if _, err := admin.ExecContext(context.Background(),
-		`INSERT INTO session_threads (
-			workspace_id, id, session_id, parent_thread_id, role, visibility, status,
-			agent_type, title, task_name, is_trunk, created_at, last_active_at, updated_at
-		) VALUES ('default', $1, $2, $3, 'subagent', 'public', 'idle',
-			'worker', 'worker', 'worker', false, NOW(), NOW(), NOW())`,
-		otherID, sessionID, threadID,
-	); err != nil {
-		t.Fatalf("seed sibling thread: %v", err)
-	}
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, toolUseID, 1, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`)
 	if _, err := admin.ExecContext(context.Background(),
@@ -262,7 +251,9 @@ func TestRuntimePodLossOrphanDetectionKeepsToolFamilyAndThreadClosed(t *testing.
 		t.Fatalf("stamp Tool Use request identity: %v", err)
 	}
 	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, "mreq_closed_result_identity", toolUseID, "call_closed_result_identity", "Read")
-	seedBridgeAPIEvent(t, admin, "default", sessionID, otherID, "evt_pod_loss_wrong_family_result", 1, "agent.mcp_tool_result",
+	// The relation key keeps every result on its Tool Use's Thread, so only a
+	// result of the other Tool family can reference this Tool Use.
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_pod_loss_wrong_family_result", 2, "agent.mcp_tool_result",
 		`{"type":"agent.mcp_tool_result","mcp_tool_use_id":"`+toolUseID+`","is_error":false}`)
 
 	client := dbconnect.NewClientForTesting(runtime)
@@ -275,7 +266,7 @@ func TestRuntimePodLossOrphanDetectionKeepsToolFamilyAndThreadClosed(t *testing.
 		t.Fatalf("load orphan Tool Uses: %v", err)
 	}
 	if len(orphans) != 1 || orphans[0].EventID != toolUseID || orphans[0].SessionThreadID != threadID {
-		t.Fatalf("orphan Tool Uses = %+v; want ordinary Tool Use preserved across cross-Thread MCP result", orphans)
+		t.Fatalf("orphan Tool Uses = %+v; want ordinary Tool Use preserved across an MCP result", orphans)
 	}
 }
 
@@ -354,19 +345,19 @@ func TestRuntimePodLossPreservesEveryPendingApprovalExactlyOnce(t *testing.T) {
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+			visibility, session_visible, model_request_id, projection_json, model_tool_call_id, tool_use_event_id, created_at, updated_at
 		) VALUES
 		('default', $1, $2, 'evt_pod_loss_multiple_start', 1, 'span.model_request_start',
 		 $4, 'internal', false, $3,
-		 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', now(), now()),
+		 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', NULL, NULL, now(), now()),
 		('default', $1, $2, 'evt_pod_loss_multiple_tool_pending', 2, 'agent.tool_use',
 		 '{"type":"agent.tool_use","name":"Write","input":{"file_path":"src/a.ts"},"evaluated_permission":"ask"}',
-		 'public', true, $3, '{}', now(), now()),
+		 'public', true, $3, '{}', 'tool-call-pod-loss-multiple-pending', NULL, now(), now()),
 		('default', $1, $2, 'evt_pod_loss_multiple_tool_resolving', 3, 'agent.tool_use',
 		 '{"type":"agent.tool_use","name":"Write","input":{"file_path":"src/b.ts"},"evaluated_permission":"ask"}',
-		 'public', true, $3, '{}', now(), now()),
+		 'public', true, $3, '{}', 'tool-call-pod-loss-multiple-resolving', NULL, now(), now()),
 		('default', $1, $2, 'evt_pod_loss_multiple_end', 4, 'span.model_request_end',
-		 $5, 'internal', false, $3, '{}', now(), now())`,
+		 $5, 'internal', false, $3, '{}', NULL, NULL, now(), now())`,
 		sessionID,
 		threadID,
 		modelRequestID,
@@ -432,16 +423,16 @@ func TestRuntimePodLossPreservesEveryPendingApprovalExactlyOnce(t *testing.T) {
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+			visibility, session_visible, model_request_id, projection_json, model_tool_call_id, tool_use_event_id, created_at, updated_at
 		) VALUES
 		('default', $1, $2, 'evt_pod_loss_sibling_start', 1, 'span.model_request_start',
 		 $4, 'internal', false, $3,
-		 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', now(), now()),
+		 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', NULL, NULL, now(), now()),
 		('default', $1, $2, 'evt_pod_loss_sibling_tool', 2, 'agent.tool_use',
 		 '{"type":"agent.tool_use","name":"Write","input":{"file_path":"src/sibling.ts"},"evaluated_permission":"ask"}',
-		 'public', true, $3, '{}', now(), now()),
+		 'public', true, $3, '{}', 'tool-call-pod-loss-sibling', NULL, now(), now()),
 		('default', $1, $2, 'evt_pod_loss_sibling_end', 3, 'span.model_request_end',
-		 $5, 'internal', false, $3, '{}', now(), now())`,
+		 $5, 'internal', false, $3, '{}', NULL, NULL, now(), now())`,
 		sessionID,
 		siblingThreadID,
 		siblingModelRequestID,
@@ -468,21 +459,21 @@ func TestRuntimePodLossPreservesEveryPendingApprovalExactlyOnce(t *testing.T) {
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+			visibility, session_visible, model_request_id, projection_json, model_tool_call_id, tool_use_event_id, created_at, updated_at
 		) VALUES
 		('default', $1, $2, 'evt_pod_loss_idle_start', 1, 'span.model_request_start',
 		 '{"type":"span.model_request_start","model_request_id":"mreq_pod_loss_idle"}',
 		 'internal', false, 'mreq_pod_loss_idle',
-		 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', now(), now()),
+		 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', NULL, NULL, now(), now()),
 		('default', $1, $2, 'evt_pod_loss_idle_tool', 2, 'agent.tool_use',
 		 '{"type":"agent.tool_use","name":"Read","input":{"file_path":"README.md"},"evaluated_permission":"allow"}',
-		 'public', true, 'mreq_pod_loss_idle', '{}', now(), now()),
+		 'public', true, 'mreq_pod_loss_idle', '{}', 'call_evt_pod_loss_idle_tool', NULL, now(), now()),
 		('default', $1, $2, 'evt_pod_loss_idle_result', 3, 'agent.tool_result',
-		 '{"type":"agent.tool_result","tool_use_event_id":"evt_pod_loss_idle_tool","content":[{"type":"text","text":"done"}]}',
-		 'public', true, 'mreq_pod_loss_idle', '{}', now(), now()),
+		 '{"type":"agent.tool_result","tool_use_id":"evt_pod_loss_idle_tool","content":[{"type":"text","text":"done"}]}',
+		 'public', true, 'mreq_pod_loss_idle', '{}', NULL, 'evt_pod_loss_idle_tool', now(), now()),
 		('default', $1, $2, 'evt_pod_loss_idle_end', 4, 'span.model_request_end',
 		 '{"type":"span.model_request_end","model_request_id":"mreq_pod_loss_idle","model_request_start_id":"evt_pod_loss_idle_start","finish_reason":"stop","is_error":false}',
-		 'internal', false, 'mreq_pod_loss_idle', '{}', now(), now())`,
+		 'internal', false, 'mreq_pod_loss_idle', '{}', NULL, NULL, now(), now())`,
 		sessionID,
 		idleSiblingThreadID,
 	); err != nil {
@@ -534,7 +525,7 @@ func TestRuntimePodLossPreservesEveryPendingApprovalExactlyOnce(t *testing.T) {
 		            AND result.session_id = p.session_id
 		            AND result.session_thread_id = p.session_thread_id
 		            AND result.type = 'agent.tool_result'
-		            AND result.payload_json::jsonb ->> 'tool_use_event_id' = p.tool_use_event_id)
+		            AND result.tool_use_event_id = p.tool_use_event_id)
 		   FROM session_pending_tool_uses p
 		  WHERE p.workspace_id = 'default' AND p.session_id = $1 AND p.session_thread_id = $2
 		    AND p.tool_use_event_id = 'evt_pod_loss_sibling_tool'`,

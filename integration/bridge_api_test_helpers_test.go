@@ -425,12 +425,14 @@ func seedRuntimeInboxBirthForJob(t *testing.T, db *sql.DB, job jobrunner.Runtime
 
 func seedBridgeAPIEvent(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, eventID string, sequence int64, eventType string, payloadJSON string) {
 	t.Helper()
+	relation := sessionfixture.ToolEventRelationForTest(t, db, workspaceID, eventID, eventType, payloadJSON)
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type,
-			payload_json, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		workspaceID, sessionID, threadID, eventID, sequence, eventType, payloadJSON); err != nil {
+			payload_json, model_request_id, model_tool_call_id, tool_use_event_id, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		workspaceID, sessionID, threadID, eventID, sequence, eventType, payloadJSON,
+		relation.ModelRequestID, relation.ModelToolCallID, relation.ToolUseEventID); err != nil {
 		t.Fatalf("seed bridge api event: %v", err)
 	}
 }
@@ -450,8 +452,10 @@ func seedBridgeAPIChildLifecycleToolSource(t *testing.T, db *sql.DB, sessionID s
 		t.Fatalf("marshal child lifecycle source: %v", err)
 	}
 	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_events (
-		workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,visibility,session_visible,created_at,updated_at
-	) SELECT 'default',$1,$2,$3,COALESCE(max(sequence),0)+1,'agent.tool_use',$4,'public',true,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'
+		workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,visibility,session_visible,
+		model_request_id,model_tool_call_id,created_at,updated_at
+	) SELECT 'default',$1,$2,$3,COALESCE(max(sequence),0)+1,'agent.tool_use',$4,'public',true,
+		'mreq_' || $3,'call_' || $3,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'
 	FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`, sessionID, parentID, sourceID, string(payload)); err != nil {
 		t.Fatalf("seed child lifecycle Tool Use: %v", err)
 	}
@@ -491,7 +495,8 @@ func seedBridgeAPINotifiableBackgroundTask(t *testing.T, db *sql.DB, workspaceID
 	seedBridgeAPIBackgroundTask(t, db, workspaceID, sessionID, threadID, bindingID, taskID, sourceToolUseEventID)
 	if _, err := db.ExecContext(context.Background(), `UPDATE session_events
 		SET type='agent.tool_use',
-		    payload_json='{"type":"agent.tool_use","name":"exec_command","input":{},"evaluated_permission":"allow"}'
+		    payload_json='{"type":"agent.tool_use","name":"exec_command","input":{},"evaluated_permission":"allow"}',
+		    model_request_id='mreq_' || event_id, model_tool_call_id='call_' || event_id
 		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND event_id=$4`,
 		workspaceID, sessionID, threadID, sourceToolUseEventID); err != nil {
 		t.Fatalf("mark background task source Tool Use: %v", err)
@@ -500,11 +505,11 @@ func seedBridgeAPINotifiableBackgroundTask(t *testing.T, db *sql.DB, workspaceID
 		"mreq_"+sourceToolUseEventID, sourceToolUseEventID, "call_"+sourceToolUseEventID, "exec_command")
 	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_events (
 		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-		visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+		visibility, session_visible, model_request_id, tool_use_event_id, projection_json, created_at, updated_at
 	) SELECT $1, $2, $3, 'evt_result_' || $4,
 		COALESCE((SELECT MAX(sequence) + 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2), 1),
-		'agent.tool_result', jsonb_build_object('type','agent.tool_result','tool_use_event_id',$4,'content',jsonb_build_array(jsonb_build_object('type','text','text','Background command accepted.'))),
-		'internal', false, 'mreq_' || $4,
+		'agent.tool_result', jsonb_build_object('type','agent.tool_result','tool_use_id',$4,'content',jsonb_build_array(jsonb_build_object('type','text','text','Background command accepted.'))),
+		'internal', false, 'mreq_' || $4, $4,
 		jsonb_build_object(
 			'model_tool_call_id','call_' || $4,'tool_name','exec_command',
 			'provider_input','{}'::jsonb,'canonical_execution_input','{}'::jsonb,'state','completed',
@@ -539,9 +544,9 @@ func seedBridgeAPIPendingApproval(t *testing.T, db *sql.DB, workspaceID string, 
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+			visibility, session_visible, model_request_id, model_tool_call_id, projection_json, created_at, updated_at
 		) VALUES ($1, $2, $3, $4, $5, 'agent.tool_use', $6, 'public', true, 'mrq_pending_approval',
-			'{"model_tool_call_id":"toolu_cleanup_wait"}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+			'toolu_cleanup_wait', '{"model_tool_call_id":"toolu_cleanup_wait"}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		workspaceID,
 		sessionID,
 		threadID,

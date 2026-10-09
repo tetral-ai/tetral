@@ -901,7 +901,7 @@ func TestPostgreSQLMarkChildThreadActiveUsesRuntimeDeclaredTarget(t *testing.T) 
 	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, terminalSourceID, 4, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"resume_agent","input":{"task_name":"task_`+childID+`"}}`)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, "evt_durable_resume_terminal_result", 5, "agent.tool_result",
-		`{"type":"agent.tool_result","tool_use_event_id":"`+terminalSourceID+`","result":{"status":"completed"}}`)
+		`{"type":"agent.tool_result","tool_use_id":"`+terminalSourceID+`","result":{"status":"completed"}}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET visibility='public'
 		WHERE workspace_id='default' AND session_id=$1 AND event_id IN ($2,$3)`, sessionID, terminalSourceID, "evt_durable_resume_terminal_result"); err != nil {
 		t.Fatalf("make terminal resume source public: %v", err)

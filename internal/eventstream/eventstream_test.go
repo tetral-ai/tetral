@@ -22,6 +22,7 @@ import (
 	eventstream "github.com/tetral-ai/tetral/internal/eventstream"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	eventstreamservice "github.com/tetral-ai/tetral/services/event-stream"
 )
@@ -1013,12 +1014,15 @@ func seedEventStreamEventAt(t *testing.T, db *sql.DB, workspaceID string, sessio
 	if threadID == "" {
 		thread = nil
 	}
+	relation := sessionfixture.ToolEventRelationForTest(t, db, workspaceID, eventID, eventType, payloadJSON)
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $11)`,
-		workspaceID, sessionID, thread, eventID, sequence, eventType, payloadJSON, visibility, sessionVisible, createdAt, processed); err != nil {
+			visibility, session_visible, model_request_id, model_tool_call_id, tool_use_event_id,
+			created_at, updated_at, processed_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14)`,
+		workspaceID, sessionID, thread, eventID, sequence, eventType, payloadJSON, visibility, sessionVisible,
+		relation.ModelRequestID, relation.ModelToolCallID, relation.ToolUseEventID, createdAt, processed); err != nil {
 		t.Fatalf("seed event %s: %v", eventID, err)
 	}
 }

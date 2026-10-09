@@ -99,7 +99,7 @@ func RuntimeOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID 
 	}
 	rows, err := tx.Query(ctx,
 		`SELECT e.session_thread_id, e.event_id, e.type, e.model_request_id,
-		        COALESCE(e.projection_json::jsonb ->> 'model_tool_call_id', ''), e.payload_json
+		        e.model_tool_call_id, e.payload_json
 		   FROM session_events e
 		   JOIN session_threads thread_scope
 		     ON thread_scope.workspace_id = e.workspace_id
@@ -133,14 +133,10 @@ func RuntimeOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID 
 			           AND result.session_id = e.session_id
 			           AND result.session_thread_id = e.session_thread_id
 			           AND (
-			                (e.type = 'agent.tool_use'
-			                 AND result.type = 'agent.tool_result'
-			                 AND (result.payload_json::jsonb ->> 'tool_use_event_id' = e.event_id
-			                      OR result.payload_json::jsonb ->> 'tool_use_id' = e.event_id))
-			             OR (e.type = 'agent.mcp_tool_use'
-			                 AND result.type = 'agent.mcp_tool_result'
-			                 AND result.payload_json::jsonb ->> 'mcp_tool_use_id' = e.event_id)
+			                (e.type = 'agent.tool_use' AND result.type = 'agent.tool_result')
+			             OR (e.type = 'agent.mcp_tool_use' AND result.type = 'agent.mcp_tool_result')
 			           )
+			           AND result.tool_use_event_id = e.event_id
 		    )
 		  ORDER BY e.sequence ASC, e.event_id ASC
 		  FOR UPDATE OF e`,
@@ -356,7 +352,7 @@ func InsertRuntimeTerminalToolResultForScopeTx(ctx context.Context, tx *dbconnec
 		return false, err
 	}
 	resultEventType := "agent.tool_result"
-	toolUseField := "tool_use_event_id"
+	toolUseField := "tool_use_id"
 	if toolUse.EventType == "agent.mcp_tool_use" {
 		resultEventType = "agent.mcp_tool_result"
 		toolUseField = "mcp_tool_use_id"
@@ -394,8 +390,9 @@ func InsertRuntimeTerminalToolResultForScopeTx(ctx context.Context, tx *dbconnec
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, runtime_write_id, model_request_id, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $13)`,
+			visibility, session_visible, runtime_write_id, model_request_id, projection_json,
+			tool_use_event_id, created_at, updated_at, processed_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14, $14)`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		toolUse.SessionThreadID,
@@ -408,9 +405,10 @@ func InsertRuntimeTerminalToolResultForScopeTx(ctx context.Context, tx *dbconnec
 		terminal.WriteIDPrefix+toolUse.EventID,
 		toolUse.ModelRequestID,
 		projectionJSON,
+		toolUse.EventID,
 		now,
 	); err != nil {
-		return false, err
+		return false, ToolRelationInsertError(err)
 	}
 	if _, err := AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
 		return false, err
@@ -535,13 +533,7 @@ func ToolResultForToolUseExistsTx(ctx context.Context, tx *dbconnect.Tx, workspa
 			    AND session_id = $2
 			    AND session_thread_id = $3
 			    AND type = $4
-			    AND (
-			         ($4 = 'agent.tool_result' AND (
-			              payload_json::jsonb ->> 'tool_use_event_id' = $5
-			           OR payload_json::jsonb ->> 'tool_use_id' = $5
-			         ))
-			      OR ($4 = 'agent.mcp_tool_result' AND payload_json::jsonb ->> 'mcp_tool_use_id' = $5)
-			    )
+			    AND tool_use_event_id = $5
 		  ORDER BY sequence ASC
 		  LIMIT 1`,
 		workspaceID,

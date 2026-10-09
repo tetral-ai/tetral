@@ -141,7 +141,7 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 				   FROM session_events
 				  WHERE workspace_id = 'default' AND session_id = $1
 				    AND type = 'agent.tool_result'
-				    AND payload_json::jsonb ->> 'tool_use_event_id' = $2`, fixture.sessionID, fixture.toolUseEventID).Scan(&resultCount, &resultPayload); err != nil {
+				    AND tool_use_event_id = $2`, fixture.sessionID, fixture.toolUseEventID).Scan(&resultCount, &resultPayload); err != nil {
 				t.Fatalf("read parent terminal result: %v", err)
 			}
 			if resultCount != 1 || !strings.Contains(resultPayload, tc.wantResultText) {
@@ -190,7 +190,7 @@ func TestPostgreSQLRuntimePodLossAllowsErroredRequestWithDeliveredSpawn(t *testi
 		`SELECT count(*) FROM session_events
 		  WHERE workspace_id = 'default' AND session_id = $1
 		    AND type = 'agent.tool_result'
-		    AND payload_json::jsonb ->> 'tool_use_event_id' = $2
+		    AND tool_use_event_id = $2
 		    AND COALESCE((payload_json::jsonb ->> 'is_error')::boolean, false) = false`, fixture.sessionID, fixture.toolUseEventID).Scan(&deliveredResultCount); err != nil {
 		t.Fatalf("count delivered spawn result: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestPostgreSQLRuntimePodLossDeliveryStaleBindingFencePreventsSettlement(t *
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT count(*) FROM session_events
 		  WHERE workspace_id = 'default' AND session_id = $1 AND type = 'agent.tool_result'
-		    AND payload_json::jsonb ->> 'tool_use_event_id' = $2`, fixture.sessionID, fixture.toolUseEventID).Scan(&resultCount); err != nil {
+		    AND tool_use_event_id = $2`, fixture.sessionID, fixture.toolUseEventID).Scan(&resultCount); err != nil {
 		t.Fatalf("count stale-fenced result: %v", err)
 	}
 	if resultCount != 0 {
@@ -311,7 +311,7 @@ func seedRuntimePodLostDeliveryFixture(
 		}
 	}
 	if withTerminal {
-		payload := fmt.Sprintf(`{"type":"agent.tool_result","tool_use_event_id":%q,"content":[{"type":"text","text":"existing terminal"}],"is_error":false}`, fixture.toolUseEventID)
+		payload := fmt.Sprintf(`{"type":"agent.tool_result","tool_use_id":%q,"content":[{"type":"text","text":"existing terminal"}],"is_error":false}`, fixture.toolUseEventID)
 		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_result_"+fixture.toolUseEventID, sequence, "agent.tool_result", payload, "public", true)
 		if _, err := db.ExecContext(context.Background(), `UPDATE session_pending_tool_uses
 			SET status='resolved',result_event_id=$5,resolved_at=$6,updated_at=$6
@@ -424,7 +424,7 @@ func TestPostgreSQLRuntimePodLossDeliveryRequiresExactInboxCustody(t *testing.T)
 				count(*) FILTER (WHERE COALESCE((payload_json::jsonb ->> 'is_error')::boolean, false) = false),
 				count(*) FILTER (WHERE payload_json::jsonb ->> 'reason' = 'runtime_pod_lost_delivery_failed')
 				FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result'
-				AND payload_json::jsonb ->> 'tool_use_event_id'=$2`, fixture.sessionID, fixture.toolUseEventID).Scan(&delivered, &failed); err != nil {
+				AND tool_use_event_id=$2`, fixture.sessionID, fixture.toolUseEventID).Scan(&delivered, &failed); err != nil {
 				t.Fatalf("read delivery settlement: %v", err)
 			}
 			if test.wantDelivered {
@@ -475,13 +475,16 @@ func seedRuntimePodLostDeliveryEvent(t *testing.T, db *sql.DB, fixture runtimePo
 	if eventType == "span.model_request_start" {
 		projectionJSON = `{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}`
 	}
+	relation := sessionfixture.ToolEventRelationForTest(t, db, "default", eventID, eventType, payloadJSON)
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
-		) VALUES ('default', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+			visibility, session_visible, model_request_id, projection_json,
+			model_tool_call_id, tool_use_event_id, created_at, updated_at
+		) VALUES ('default', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
 			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		fixture.sessionID, threadID, eventID, sequence, eventType, payloadJSON, visibility, sessionVisible, fixture.modelRequestID, projectionJSON); err != nil {
+		fixture.sessionID, threadID, eventID, sequence, eventType, payloadJSON, visibility, sessionVisible, fixture.modelRequestID, projectionJSON,
+		relation.ModelToolCallID, relation.ToolUseEventID); err != nil {
 		t.Fatalf("seed %s event %s: %v", eventType, eventID, err)
 	}
 }

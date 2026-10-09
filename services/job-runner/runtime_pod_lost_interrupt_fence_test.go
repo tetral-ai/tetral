@@ -214,9 +214,9 @@ func TestPostgreSQLRuntimePodLossRepairsSiblingWithoutClosingInterruptedThread(t
 	var interruptedStatus, siblingStatus string
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_end' AND model_request_id=$4),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_event_id'=$5),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='agent.tool_result' AND tool_use_event_id=$5),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$3 AND type='span.model_request_end' AND model_request_id=$6),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$3 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_event_id'=$7),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$3 AND type='agent.tool_result' AND tool_use_event_id=$7),
 		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1),
 		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$2),
 		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$3)`,

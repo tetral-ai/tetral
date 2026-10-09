@@ -655,6 +655,8 @@ func TestSessionEventsSchemaMatchesDraftLedger(t *testing.T) {
 		"runtime_write_id",
 		"model_request_id",
 		"projection_json",
+		"model_tool_call_id",
+		"tool_use_event_id",
 		"created_at",
 		"updated_at",
 		"processed_at",

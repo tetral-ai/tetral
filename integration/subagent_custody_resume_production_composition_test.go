@@ -1162,8 +1162,8 @@ func TestSubagentFirstMailInterruptedCloseColdResumeAndLaterInputProductionCompo
 		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_end'),
 		(SELECT payload_json::jsonb->>'model_request_start_id' FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_end'),
 		(SELECT payload_json::jsonb#>>'{provider_context_retention,disposition}' FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_end'),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='agent.tool_result' AND COALESCE(payload_json::jsonb->>'tool_use_event_id',payload_json::jsonb->>'tool_use_id')=$6),
-		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='agent.tool_result' AND COALESCE(payload_json::jsonb->>'tool_use_event_id',payload_json::jsonb->>'tool_use_id')=$6),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='agent.tool_result' AND tool_use_event_id=$6),
+		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='agent.tool_result' AND tool_use_event_id=$6),
 		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='session.thread_status_idle' ORDER BY sequence DESC LIMIT 1),
 		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND id=$2 AND status IN ('pending','leased'))`,
 		fixture.runtimeInputID, fixture.jobID, fixture.sessionID, fixture.childID, siblingID, toolUseID).Scan(

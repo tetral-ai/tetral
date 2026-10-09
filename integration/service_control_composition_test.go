@@ -216,7 +216,7 @@ func TestPostgreSQLSeparatedOwnersSettlementRecovery(t *testing.T) {
 				}
 				separatedEqual(t, []int{f.count(t, `SELECT count(*) FROM session_events WHERE session_id=$1`, f.sessionID), f.count(t, `SELECT count(*) FROM session_bridge_operations WHERE session_id=$1`, f.sessionID), f.count(t, `SELECT count(*) FROM session_runtime_tool_results WHERE session_id=$1`, f.sessionID)}, factsBeforeFence)
 				if first == "recovery" {
-					if f.count(t, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='agent.tool_result' AND COALESCE(payload_json::jsonb->>'tool_use_event_id',payload_json::jsonb->>'tool_use_id')=$2`, f.sessionID, toolID) != 0 || f.count(t, `SELECT count(*) FROM session_pending_tool_uses WHERE session_id=$1 AND tool_use_event_id=$2 AND status='resolving' AND decision='allow' AND model_tool_call_id='call_race'`, f.sessionID, toolID) != 1 {
+					if f.count(t, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='agent.tool_result' AND tool_use_event_id=$2`, f.sessionID, toolID) != 0 || f.count(t, `SELECT count(*) FROM session_pending_tool_uses WHERE session_id=$1 AND tool_use_event_id=$2 AND status='resolving' AND decision='allow' AND model_tool_call_id='call_race'`, f.sessionID, toolID) != 1 {
 						t.Fatal("recovery must preserve original unaccepted resolving route without synthetic Result")
 					}
 					replacement := declareReplacementScope(t, f.bridge.Client, f.runner.Client, scope)
@@ -255,7 +255,7 @@ func TestPostgreSQLSeparatedOwnersSettlementRecovery(t *testing.T) {
 					t.Logf("replacement continuation: actual acceptance+duplicate, production Sandbox Runner+Coordinator terminal commit, Bridge await+settlement+duplicate; execution rows=1 work jobs=1 paired results=1 controlled provider invocations=%d", providerCalls)
 				}
 				var resultSequence, endSequence int64
-				if err := f.admin.QueryRowContext(f.ctx, `SELECT event_id,payload_json,sequence FROM session_events WHERE session_id=$1 AND type='agent.tool_result' AND COALESCE(payload_json::jsonb->>'tool_use_event_id',payload_json::jsonb->>'tool_use_id')=$2`, f.sessionID, toolID).Scan(&resultID, &payload, &resultSequence); err != nil {
+				if err := f.admin.QueryRowContext(f.ctx, `SELECT event_id,payload_json,sequence FROM session_events WHERE session_id=$1 AND type='agent.tool_result' AND tool_use_event_id=$2`, f.sessionID, toolID).Scan(&resultID, &payload, &resultSequence); err != nil {
 					t.Fatalf("one durable result for original Tool Use %s: %v", toolID, err)
 				}
 				if first == "settlement" {
@@ -276,7 +276,7 @@ func TestPostgreSQLSeparatedOwnersSettlementRecovery(t *testing.T) {
 				if first == "settlement" && resultSequence >= endSequence {
 					t.Fatal("persisted order does not show settlement before loss closeout")
 				}
-				if f.count(t, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='agent.tool_result' AND COALESCE(payload_json::jsonb->>'tool_use_event_id',payload_json::jsonb->>'tool_use_id')=$2`, f.sessionID, toolID) != 1 {
+				if f.count(t, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='agent.tool_result' AND tool_use_event_id=$2`, f.sessionID, toolID) != 1 {
 					t.Fatal("duplicate Tool Result")
 				}
 				if f.count(t, `SELECT count(*) FROM session_runtime_bindings WHERE session_id=$1 AND binding_id=$2 AND binding_generation=$3`, f.sessionID, scope.Binding.BindingId, scope.Binding.BindingGeneration) != 0 {
@@ -521,7 +521,7 @@ func separatedRouteFacts(t *testing.T, f *separatedOwners, scope *bridgev1.Runti
 	t.Helper()
 	var route, decision string
 	var executions, results, ends, bindings int
-	if err := f.admin.QueryRowContext(f.ctx, `SELECT p.status,COALESCE(p.decision,''),(SELECT count(*) FROM session_runtime_tool_results WHERE session_id=$1 AND tool_use_event_id=$2),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='agent.tool_result' AND COALESCE(payload_json::jsonb->>'tool_use_event_id',payload_json::jsonb->>'tool_use_id')=$2),(SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id=$3 AND type='span.model_request_end' AND model_request_id='mreq_race'),(SELECT count(*) FROM session_runtime_bindings WHERE session_id=$1) FROM session_pending_tool_uses p WHERE p.session_id=$1 AND p.tool_use_event_id=$2`, f.sessionID, toolID, scope.SessionThreadId).Scan(&route, &decision, &executions, &results, &ends, &bindings); err != nil {
+	if err := f.admin.QueryRowContext(f.ctx, `SELECT p.status,COALESCE(p.decision,''),(SELECT count(*) FROM session_runtime_tool_results WHERE session_id=$1 AND tool_use_event_id=$2),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='agent.tool_result' AND tool_use_event_id=$2),(SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id=$3 AND type='span.model_request_end' AND model_request_id='mreq_race'),(SELECT count(*) FROM session_runtime_bindings WHERE session_id=$1) FROM session_pending_tool_uses p WHERE p.session_id=$1 AND p.tool_use_event_id=$2`, f.sessionID, toolID, scope.SessionThreadId).Scan(&route, &decision, &executions, &results, &ends, &bindings); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("phase=%s original_tool=%s route=%s decision=%s accepted_executions=%d paired_results=%d request_ends=%d live_bindings=%d", phase, toolID, route, decision, executions, results, ends, bindings)

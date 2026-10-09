@@ -1388,7 +1388,7 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 		}
 		waitHandoffCondition(t, "competing original child tool continues", func() bool { return next.calls(session) == 2 })
 		var resultCount, loss int
-		if err := admin.QueryRow(`SELECT (SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id=$2 AND type='agent.tool_result' AND COALESCE(payload_json::jsonb->>'tool_use_event_id',payload_json::jsonb->>'tool_use_id')=$3),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.error')`, session, child, tool).Scan(&resultCount, &loss); err != nil || resultCount != 1 || loss != 0 || external.calls.Load() != 1 {
+		if err := admin.QueryRow(`SELECT (SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id=$2 AND type='agent.tool_result' AND tool_use_event_id=$3),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.error')`, session, child, tool).Scan(&resultCount, &loss); err != nil || resultCount != 1 || loss != 0 || external.calls.Load() != 1 {
 			t.Fatalf("competing original result=%d loss=%d external=%d err=%v", resultCount, loss, external.calls.Load(), err)
 		}
 		next.signal(t, "quiesce")

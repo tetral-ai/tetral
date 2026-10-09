@@ -454,14 +454,10 @@ func runtimePodLostAffectedThreadsTx(
 		                AND result.session_id = tool_use.session_id
 		                AND result.session_thread_id = tool_use.session_thread_id
 		                AND (
-		                     (tool_use.type = 'agent.tool_use'
-		                      AND result.type = 'agent.tool_result'
-		                      AND (result.payload_json::jsonb ->> 'tool_use_event_id' = tool_use.event_id
-		                           OR result.payload_json::jsonb ->> 'tool_use_id' = tool_use.event_id))
-		                  OR (tool_use.type = 'agent.mcp_tool_use'
-		                      AND result.type = 'agent.mcp_tool_result'
-		                      AND result.payload_json::jsonb ->> 'mcp_tool_use_id' = tool_use.event_id)
+		                     (tool_use.type = 'agent.tool_use' AND result.type = 'agent.tool_result')
+		                  OR (tool_use.type = 'agent.mcp_tool_use' AND result.type = 'agent.mcp_tool_result')
 		                )
+		                AND result.tool_use_event_id = tool_use.event_id
 		           )
 		      )
 		    )
@@ -675,11 +671,7 @@ func runtimePodLostNonterminalToolOwnerTx(ctx context.Context, tx *dbconnect.Tx,
 		           AND result.session_id=route.session_id
 		           AND result.session_thread_id=route.session_thread_id
 		           AND result.type IN ('agent.tool_result','agent.mcp_tool_result')
-		           AND COALESCE(
-		                 result.payload_json::jsonb ->> 'tool_use_event_id',
-		                 result.payload_json::jsonb ->> 'tool_use_id',
-		                 result.payload_json::jsonb ->> 'mcp_tool_use_id'
-		               )=route.tool_use_event_id
+		           AND result.tool_use_event_id=route.tool_use_event_id
 		      )
 		    ORDER BY tool_use.sequence, route.tool_use_event_id
 		    LIMIT 1
@@ -1433,7 +1425,7 @@ func runtimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, w
 		`SELECT tool_use.session_thread_id,
 		        tool_use.event_id,
 		        COALESCE(tool_use.model_request_id, ''),
-		        COALESCE(tool_use.projection_json::jsonb ->> 'model_tool_call_id', ''),
+		        tool_use.model_tool_call_id,
 		        tool_use.payload_json,
 		        COALESCE(tool_use.payload_json::jsonb ->> 'name', ''),
 		        COALESCE(sent.event_id, ''),
@@ -1463,10 +1455,7 @@ func runtimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, w
 			           AND result.session_id = tool_use.session_id
 			           AND result.session_thread_id = tool_use.session_thread_id
 		           AND result.type = 'agent.tool_result'
-		           AND (
-		                result.payload_json::jsonb ->> 'tool_use_event_id' = tool_use.event_id
-		             OR result.payload_json::jsonb ->> 'tool_use_id' = tool_use.event_id
-		           )
+		           AND result.tool_use_event_id = tool_use.event_id
 		    )
 		  ORDER BY tool_use.sequence ASC, tool_use.event_id ASC
 		  FOR UPDATE OF tool_use`,

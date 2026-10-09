@@ -103,13 +103,14 @@ func settleInterruptedThreadToolsTx(
 			`INSERT INTO session_events (
 				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 				visibility, session_visible, runtime_write_id, model_request_id, projection_json,
-				created_at, updated_at, processed_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $13)`,
+				tool_use_event_id, created_at, updated_at, processed_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14, $14)`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), resultEventID,
 			resultSequence, resultEventType, payloadJSON, visibility, sessionVisible,
-			runtimecontrol.StableRuntimeID("interrupt_tool_result", interruptEventID, tool.eventID), tool.modelRequestID, projectionJSON, now,
+			runtimecontrol.StableRuntimeID("interrupt_tool_result", interruptEventID, tool.eventID), tool.modelRequestID, projectionJSON,
+			tool.eventID, now,
 		); err != nil {
-			return nil, err
+			return nil, runtimecontrol.ToolRelationInsertError(err)
 		}
 		if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, scope, resultEventID, visibility, sessionVisible, now); err != nil {
 			return nil, err
@@ -172,8 +173,8 @@ func lockUnfinishedRuntimeToolsTx(
 		      SELECT 1 FROM session_events result
 		       WHERE result.workspace_id=e.workspace_id AND result.session_id=e.session_id
 		         AND result.session_thread_id=e.session_thread_id
-		         AND ((result.type='agent.tool_result' AND COALESCE(result.payload_json::jsonb->>'tool_use_event_id', result.payload_json::jsonb->>'tool_use_id')=e.event_id)
-		           OR (result.type='agent.mcp_tool_result' AND result.payload_json::jsonb->>'mcp_tool_use_id'=e.event_id))
+		         AND result.type IN ('agent.tool_result','agent.mcp_tool_result')
+		         AND result.tool_use_event_id=e.event_id
 		    )
 		  ORDER BY e.sequence, e.event_id
 		  FOR UPDATE OF e`,

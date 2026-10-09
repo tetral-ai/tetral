@@ -113,7 +113,7 @@ var bridgeLoadContextTurnEventTypes = []string{
 // the independent Turn read: every row is reached through a bounded lifecycle
 // boundary or a direct Request/Tool identity selected by its durable relation.
 const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
-		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
+		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id, tool_use_event_id
 		  FROM session_events
 		 WHERE workspace_id = $1
 		   AND session_id = $2
@@ -187,7 +187,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		 ORDER BY sequence DESC
 		 LIMIT 1
 	), selected_thread_running AS MATERIALIZED (
-		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
+		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id, tool_use_event_id
 		  FROM session_events
 		 WHERE workspace_id = $1
 		   AND session_id = $2
@@ -412,14 +412,14 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		UNION SELECT event_id FROM committed_interrupt_events
 	),
 	selected_events AS MATERIALIZED (
-		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
+		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id, tool_use_event_id
 		  FROM session_events event
 		 WHERE event.workspace_id = $1
 		   AND event.session_id = $2
 		   AND event.session_thread_id = $3
 		   AND event.event_id = ANY (ARRAY(SELECT event_id FROM selected_event_ids))
 		UNION
-		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
+		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id, tool_use_event_id
 		  FROM session_events event
 		 WHERE event.workspace_id = $1
 		   AND event.session_id = $2
@@ -429,7 +429,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND EXISTS (SELECT 1 FROM retained_requests)
 		   AND event.model_request_id IN (SELECT model_request_id FROM retained_requests)
 		UNION
-		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
+		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id, tool_use_event_id
 		  FROM session_events event
 		 WHERE event.workspace_id = $1
 		   AND event.session_id = $2
@@ -438,13 +438,9 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND event.type IN ('agent.tool_result', 'agent.mcp_tool_result')
 		   AND EXISTS (SELECT 1 FROM retained_tool_requests)
 		   AND event.model_request_id IN (SELECT model_request_id FROM retained_tool_requests)
-		   AND COALESCE(
-		         event.payload_json::jsonb ->> 'tool_use_event_id',
-		         event.payload_json::jsonb ->> 'tool_use_id',
-		         event.payload_json::jsonb ->> 'mcp_tool_use_id'
-		       ) IN (SELECT event_id FROM retained_tools)
+		   AND event.tool_use_event_id IN (SELECT event_id FROM retained_tools)
 		UNION
-		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
+		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id, tool_use_event_id
 		  FROM session_events event
 		 WHERE event.workspace_id = $1
 		   AND event.session_id = $2
@@ -453,18 +449,19 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND event.type = 'agent.tool_result'
 		   AND EXISTS (SELECT 1 FROM retained_requests)
 		   AND event.model_request_id IN (SELECT model_request_id FROM retained_requests)
-		   AND event.payload_json::jsonb ? 'repair_kind'
+		   AND event.model_tool_call_id IS NOT NULL
 		UNION
-		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
+		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id, tool_use_event_id
 		  FROM turn_root
 		 WHERE sequence < $4
 		UNION
-		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
+		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id, tool_use_event_id
 		  FROM selected_thread_running
 		 WHERE sequence < $4
 	)
 	SELECT event.event_id, event.sequence, event.type, event.model_request_id,
 	       event.payload_json, event.projection_json, event.runtime_write_id,
+	       COALESCE(event.tool_use_event_id, ''),
 	       COALESCE(reschedule.projection_json, ''), COALESCE(receipt.receipt_json, '')
 	  FROM selected_events event
 	  LEFT JOIN request_reschedules reschedule
@@ -537,6 +534,7 @@ func loadThreadTurnFactsTx(
 		payloadJSON    string
 		projectionJSON string
 		runtimeWriteID sql.NullString
+		toolUseEventID string
 		rescheduleJSON string
 		endReceiptJSON string
 	}
@@ -551,6 +549,7 @@ func loadThreadTurnFactsTx(
 			&raw.payloadJSON,
 			&raw.projectionJSON,
 			&raw.runtimeWriteID,
+			&raw.toolUseEventID,
 			&raw.rescheduleJSON,
 			&raw.endReceiptJSON,
 		); err != nil {
@@ -580,7 +579,7 @@ func loadThreadTurnFactsTx(
 	for _, raw := range rawEvents {
 		event, err := bridgeTurnEventFact(
 			ctx, tx, scope, raw.eventID, raw.eventSequence, raw.eventType, raw.modelRequestID,
-			raw.payloadJSON, raw.projectionJSON, raw.runtimeWriteID,
+			raw.payloadJSON, raw.projectionJSON, raw.runtimeWriteID, raw.toolUseEventID,
 			requestKinds[raw.modelRequestID.String], raw.rescheduleJSON, raw.endReceiptJSON,
 		)
 		if err != nil {
@@ -727,6 +726,7 @@ func bridgeTurnEventFact(
 	payloadJSON string,
 	projectionJSON string,
 	runtimeWriteID sql.NullString,
+	toolUseEventID string,
 	requestKind string,
 	rescheduleProjectionJSON string,
 	requestEndReceiptJSON string,
@@ -809,7 +809,7 @@ func bridgeTurnEventFact(
 		}
 		event.ToolUse = toolUse
 	case "agent.tool_result", "agent.mcp_tool_result":
-		result, resultModelRequestID, err := bridgeTurnToolResultFact(ctx, tx, scope, eventType, payloadJSON, projectionJSON, runtimeWriteID)
+		result, resultModelRequestID, err := bridgeTurnToolResultFact(ctx, tx, scope, eventType, payloadJSON, projectionJSON, runtimeWriteID, toolUseEventID)
 		if err != nil {
 			return event, err
 		}
@@ -928,11 +928,9 @@ func bridgeTurnToolResultFact(
 	payloadJSON string,
 	projectionJSON string,
 	runtimeWriteID sql.NullString,
+	toolUseEventID string,
 ) (*bridgeLoadContextToolResult, string, error) {
 	var payload struct {
-		ToolUseEventID  string `json:"tool_use_event_id"`
-		ToolUseID       string `json:"tool_use_id"`
-		MCPToolUseID    string `json:"mcp_tool_use_id"`
 		RepairKind      string `json:"repair_kind"`
 		ModelToolCallID string `json:"model_tool_call_id"`
 		ToolName        string `json:"tool_name"`
@@ -947,13 +945,10 @@ func bridgeTurnToolResultFact(
 		}
 		return &bridgeLoadContextToolResult{RepairKey: runtimeWriteID.String}, "", nil
 	}
-	toolUseEventID, err := durableToolResultUseEventID(eventType, durableToolResultEventPayload{
-		ToolUseEventID: payload.ToolUseEventID,
-		ToolUseID:      payload.ToolUseID,
-		MCPToolUseID:   payload.MCPToolUseID,
-	})
-	if err != nil {
-		return nil, "", err
+	// An ordinary or MCP result reaches its Tool Use only through the
+	// relation column its writer set from the settled target.
+	if toolUseEventID == "" {
+		return nil, "", status.Error(codes.FailedPrecondition, "tool result event is missing its tool-use identity")
 	}
 	var modelRequestID, toolUsePayloadJSON, toolUseProjectionJSON string
 	if err := tx.QueryRow(ctx,

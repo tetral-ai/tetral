@@ -266,9 +266,25 @@ func seedClosedTurnPlanHistory(t *testing.T, db *sql.DB, sessionID, threadID str
 		created_at, updated_at, processed_at
 	) VALUES
 	('default',$1,$2,'evt_closed_plan_running_'||$4,$3,'session.thread_status_running','{"type":"session.thread_status_running"}','internal',false,'rwrite_closed_plan_running_'||$4,NULL,'{}',now(),now(),now()),
-	('default',$1,$2,'evt_closed_plan_start_'||$4,$3+1,'span.model_request_start','{"type":"span.model_request_start","model_request_id":"mreq_closed_plan_'||$4||'"}','internal',false,'rwrite_closed_plan_start_'||$4,'mreq_closed_plan_'||$4,'{"context_through_message_sequence":1,"request_kind":"agent_provider_request"}',now(),now(),now()),
-	('default',$1,$2,'evt_closed_plan_tool_'||$4,$3+2,'agent.tool_use','{"type":"agent.tool_use"}','internal',false,'rwrite_closed_plan_tool_'||$4,'mreq_closed_plan_'||$4,'{"model_tool_call_id":"call_closed_plan_'||$4||'","tool_name":"Bash"}',now(),now(),now()),
-	('default',$1,$2,'evt_closed_plan_result_'||$4,$3+3,'agent.tool_result','{"type":"agent.tool_result","tool_use_event_id":"evt_closed_plan_tool_'||$4||'"}','internal',false,'rwrite_closed_plan_result_'||$4,'mreq_closed_plan_'||$4,'{"state":"completed"}',now(),now(),now()),
+	('default',$1,$2,'evt_closed_plan_start_'||$4,$3+1,'span.model_request_start','{"type":"span.model_request_start","model_request_id":"mreq_closed_plan_'||$4||'"}','internal',false,'rwrite_closed_plan_start_'||$4,'mreq_closed_plan_'||$4,'{"context_through_message_sequence":1,"request_kind":"agent_provider_request"}',now(),now(),now())`,
+		sessionID, threadID, floor, fmt.Sprint(historySize)); err != nil {
+		t.Fatalf("seed post-floor closed turn start: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_events (
+		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+		visibility, session_visible, runtime_write_id, model_request_id, projection_json,
+		model_tool_call_id, tool_use_event_id, created_at, updated_at, processed_at
+	) VALUES
+	('default',$1,$2,'evt_closed_plan_tool_'||$4,$3+2,'agent.tool_use','{"type":"agent.tool_use"}','internal',false,'rwrite_closed_plan_tool_'||$4,'mreq_closed_plan_'||$4,'{"model_tool_call_id":"call_closed_plan_'||$4||'","tool_name":"Bash"}','call_closed_plan_'||$4,NULL,now(),now(),now()),
+	('default',$1,$2,'evt_closed_plan_result_'||$4,$3+3,'agent.tool_result','{"type":"agent.tool_result","tool_use_id":"evt_closed_plan_tool_'||$4||'"}','internal',false,'rwrite_closed_plan_result_'||$4,'mreq_closed_plan_'||$4,'{"state":"completed"}',NULL,'evt_closed_plan_tool_'||$4,now(),now(),now())`,
+		sessionID, threadID, floor, fmt.Sprint(historySize)); err != nil {
+		t.Fatalf("seed post-floor closed turn Tool pair: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_events (
+		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+		visibility, session_visible, runtime_write_id, model_request_id, projection_json,
+		created_at, updated_at, processed_at
+	) VALUES
 	('default',$1,$2,'evt_closed_plan_end_'||$4,$3+4,'span.model_request_end','{"model_request_start_id":"evt_closed_plan_start_'||$4||'","is_error":false,"provider_context_retention":{"disposition":"completed","assistant_message_sequence":2,"tool_use_event_ids":["evt_closed_plan_tool_'||$4||'"],"repair_event_ids":[]}}','internal',false,'rwrite_closed_plan_end_'||$4,'mreq_closed_plan_'||$4,'{}',now(),now(),now()),
 	('default',$1,$2,'evt_closed_plan_idle_'||$4,$3+5,'session.thread_status_idle','{"type":"session.thread_status_idle","stop_reason":{"type":"end_turn"}}','internal',false,'rwrite_closed_plan_idle_'||$4,NULL,'{}',now(),now(),now()),
 	('default',$1,$2,'evt_closed_plan_close_'||$4,$3+6,'session.thread_status_idle','{"type":"session.thread_status_idle","stop_reason":{"type":"end_turn"}}','internal',false,'rwrite_closed_plan_close_'||$4,NULL,'{}',now(),now(),now()),
@@ -284,14 +300,15 @@ func seedClosedTurnPostFloorNoise(t *testing.T, db *sql.DB, sessionID, threadID 
 	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_events (
 		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 		visibility, session_visible, runtime_write_id, model_request_id, projection_json,
-		created_at, updated_at, processed_at
+		model_tool_call_id, created_at, updated_at, processed_at
 	)
 	SELECT 'default', $1, $2, 'evt_closed_plan_noise_' || $4 || '_' || value,
 	       $3 + 100 + value, 'agent.tool_result',
-	       '{"type":"agent.tool_result","tool_use_id":"evt_unrelated_tool_' || $4 || '_' || value || '","content":[]}',
+	       '{"type":"agent.tool_result","repair_kind":"invalid_tool","model_tool_call_id":"call_unrelated_tool_' || $4 || '_' || value || '","tool_name":"Bash"}',
 	       'internal', false, 'rwrite_closed_plan_noise_' || $4 || '_' || value,
 	       'mreq_closed_plan_noise_' || $4 || '_' || value,
 	       '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}',
+	       'call_unrelated_tool_' || $4 || '_' || value,
 	       now(), now(), now()
 	  FROM generate_series(1, $4) value`, sessionID, threadID, floor, historySize); err != nil {
 		t.Fatalf("seed %d post-floor irrelevant events: %v", historySize, err)

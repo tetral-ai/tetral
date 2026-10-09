@@ -231,11 +231,7 @@ func lockExecutableToolRouteTx(
 		             AND result.session_id=route.session_id
 		             AND result.session_thread_id=route.session_thread_id
 		             AND result.type IN ('agent.tool_result','agent.mcp_tool_result')
-		             AND COALESCE(
-		                   result.payload_json::jsonb ->> 'tool_use_event_id',
-		                   result.payload_json::jsonb ->> 'tool_use_id',
-		                   result.payload_json::jsonb ->> 'mcp_tool_use_id'
-		                 ) = route.tool_use_event_id
+		             AND result.tool_use_event_id = route.tool_use_event_id
 		        )
 		   FROM session_pending_tool_uses route
 		   JOIN session_events source
@@ -622,11 +618,6 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 		if err := verifyModelRequestAcceptsMembersTx(ctx, tx, request.GetScope(), request.GetModelRequestId()); err != nil {
 			return err
 		}
-		if err := verifyModelToolCallIDAvailableTx(
-			ctx, tx, request.GetScope(), request.GetModelToolCallId(),
-		); err != nil {
-			return err
-		}
 		eventID, _, err := insertInternalToolRepairEventTx(ctx, tx, request, threadScope, repairKey, now)
 		if err != nil {
 			return err
@@ -645,14 +636,6 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 			now,
 		)
 		if err != nil {
-			return err
-		}
-		if err := verifyModelToolCallIDUniqueTx(
-			ctx,
-			tx,
-			request.GetScope(),
-			request.GetModelToolCallId(),
-		); err != nil {
 			return err
 		}
 		resultJSON, err := runtimecontrol.MarshalJSON(facts)
@@ -770,12 +753,15 @@ func insertInternalToolRepairEventTx(
 	if err != nil {
 		return "", 0, err
 	}
+	// The synthetic result owns the call ID and references no Tool Use: the
+	// call was never a public Tool Use. The Thread's call-ID index rejects a
+	// call ID that any earlier declaration or repair already used.
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, runtime_write_id, model_request_id, projection_json,
-			created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, 'agent.tool_result', $6, $7, $8, $9, $10, $11, $12, $12, $12)`,
+			model_tool_call_id, created_at, updated_at, processed_at
+		) VALUES ($1, $2, $3, $4, $5, 'agent.tool_result', $6, $7, $8, $9, $10, $11, $12, $13, $13, $13)`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
@@ -787,9 +773,10 @@ func insertInternalToolRepairEventTx(
 		repairKey,
 		request.GetModelRequestId(),
 		projectionJSON,
+		request.GetModelToolCallId(),
 		now,
 	); err != nil {
-		return "", 0, err
+		return "", 0, runtimecontrol.ToolRelationInsertError(err)
 	}
 	if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
 		return "", 0, err

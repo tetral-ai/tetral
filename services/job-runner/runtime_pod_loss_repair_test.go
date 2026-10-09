@@ -55,7 +55,7 @@ func TestPostgreSQLRuntimePodLossSweepPreservesActiveToolOwnerAndIsIdempotent(t 
 	}
 	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
 		WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result'
-		  AND payload_json::jsonb ->> 'tool_use_event_id'=$2
+		  AND tool_use_event_id=$2
 		  AND payload_json::jsonb ->> 'reason'='runtime_pod_lost'`, fixture.sessionID, fixture.toolUseEventID).Scan(&toolResults); err != nil {
 		t.Fatalf("count repaired tool result: %v", err)
 	}
@@ -693,7 +693,7 @@ func TestPostgreSQLRuntimePodLossSweepRacingInputWritesOneCloseout(t *testing.T)
 	}
 	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
 		WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result'
-		  AND payload_json::jsonb ->> 'tool_use_event_id'=$2
+		  AND tool_use_event_id=$2
 		  AND payload_json::jsonb ->> 'reason'='runtime_pod_lost'`, fixture.sessionID, fixture.toolUseEventID).Scan(&toolResults); err != nil {
 		t.Fatalf("count racing tool results: %v", err)
 	}

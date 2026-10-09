@@ -53,9 +53,11 @@ func TestPostgreSQLTaskNotificationProducerAndJobRunnerTerminalizeQueuedInbox(t 
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
 	if _, err := adminDB.ExecContext(context.Background(), `INSERT INTO session_events (
-		workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,created_at,updated_at
+		workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,
+		model_request_id,model_tool_call_id,created_at,updated_at
 	) VALUES ('ws_execution_store','sesn_execution_store','thr_execution_store','evt_execution_a',1,
-		'agent.tool_use','{"type":"agent.tool_use","name":"exec_command","input":{}}',now(),now())`); err != nil {
+		'agent.tool_use','{"type":"agent.tool_use","name":"exec_command","input":{}}',
+		'mreq_execution_a','evt_execution_a_call',now(),now())`); err != nil {
 		t.Fatalf("seed background task source event: %v", err)
 	}
 	client := dbconnect.NewClientForTesting(runtimeDB)

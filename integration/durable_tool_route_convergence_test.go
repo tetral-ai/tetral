@@ -71,7 +71,7 @@ func TestPostgreSQLRuntimeTerminationClosesMainAndSiblingToolRoutesAtomically(t 
 	var interruptInboxStatus, interruptQueueStatus string
 	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type IN ('session.status_terminated','session.thread_status_terminated')),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_event_id' IN ($2,$3)),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result' AND tool_use_event_id IN ($2,$3)),
 		(SELECT count(*) FROM session_pending_tool_uses WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id IN ($2,$3) AND status IN ('pending','resolving'))`,
 		fixture.sessionID, mainToolID, childToolID).Scan(&terminalEvents, &results, &nonterminalRoutes); err != nil {
 		t.Fatalf("read rolled-back termination routes: %v", err)
@@ -88,7 +88,7 @@ func TestPostgreSQLRuntimeTerminationClosesMainAndSiblingToolRoutesAtomically(t 
 	}
 	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type IN ('session.status_terminated','session.thread_status_terminated')),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_event_id' IN ($2,$3)),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result' AND tool_use_event_id IN ($2,$3)),
 		(SELECT count(*) FROM session_pending_tool_uses WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id IN ($2,$3) AND status IN ('pending','resolving')),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_end' AND model_request_id=$4),
 		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$5),

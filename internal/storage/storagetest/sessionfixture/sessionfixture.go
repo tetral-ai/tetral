@@ -298,8 +298,8 @@ func SeedBridgeAPISession(t *testing.T, db *sql.DB, workspaceID string, sessionI
 }
 
 // SeedBridgeAPIDurableToolMessage inserts the assistant message carrying the
-// tool call for toolUseEventID and stamps that event with its model request and
-// running declaration projection.
+// tool call for toolUseEventID and stamps that event with its model request,
+// call-ID relation column and running declaration projection.
 func SeedBridgeAPIDurableToolMessage(
 	t *testing.T,
 	db *sql.DB,
@@ -356,6 +356,7 @@ func SeedBridgeAPIDurableToolMessage(
 	if _, err := db.ExecContext(context.Background(),
 		`UPDATE session_events
 		    SET model_request_id = $4,
+		        model_tool_call_id = CASE WHEN type IN ('agent.tool_use','agent.mcp_tool_use') THEN $5 ELSE model_tool_call_id END,
 		        projection_json = COALESCE(projection_json, '{}')::jsonb || jsonb_build_object(
 		          'event_type', type,
 		          'evaluated_permission', COALESCE(payload_json::jsonb ->> 'evaluated_permission','allow'),
@@ -396,7 +397,7 @@ func SeedBridgeAPIAllowedToolRoute(
 		    projection_json=jsonb_build_object(
 		      'event_type', event.type,
 		      'evaluated_permission', COALESCE(NULLIF(event.projection_json::jsonb ->> 'evaluated_permission',''),event.payload_json::jsonb ->> 'evaluated_permission','allow'),
-		      'model_tool_call_id', COALESCE(NULLIF(event.projection_json::jsonb ->> 'model_tool_call_id',''),'call_' || event.event_id),
+		      'model_tool_call_id', event.model_tool_call_id,
 		      'tool_name', COALESCE(NULLIF(event.projection_json::jsonb ->> 'tool_name',''),event.payload_json::jsonb ->> 'name'),
 		      'provider_input', COALESCE(event.projection_json::jsonb -> 'provider_input',event.payload_json::jsonb -> 'input'),
 		      'canonical_execution_input', COALESCE(event.projection_json::jsonb -> 'canonical_execution_input',event.payload_json::jsonb -> 'input'),
@@ -427,7 +428,7 @@ func SeedBridgeAPIAllowedToolRoute(
 			tool_name, input_json, status, decision, created_at, updated_at
 		)
 		SELECT e.workspace_id, e.session_id, e.session_thread_id, e.event_id,
-		       COALESCE(e.projection_json::jsonb ->> 'model_tool_call_id', 'call_' || e.event_id),
+		       e.model_tool_call_id,
 		       COALESCE(e.projection_json::jsonb ->> 'tool_name', e.payload_json::jsonb ->> 'name'),
 		       COALESCE(e.projection_json::jsonb -> 'canonical_execution_input', e.payload_json::jsonb -> 'input')::text,
 		       'resolving', 'allow', clock_timestamp(), clock_timestamp()

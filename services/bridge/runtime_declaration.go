@@ -933,6 +933,14 @@ func insertCompactionContextEntryTx(
 		return durableContextWrite{}, status.Error(codes.InvalidArgument, "runtime context create identity is invalid")
 	}
 	const contextKind = "compaction"
+	// A compaction summary is text only. Its parts never carry reasoning,
+	// provider metadata or Tool identity, so no Tool relation is admitted from
+	// compaction and the historical identity events stay authoritative.
+	for _, part := range delta.GetParts() {
+		if part.GetText() == nil {
+			return durableContextWrite{}, status.Error(codes.InvalidArgument, "compaction context must contain only text")
+		}
+	}
 	parts, err := canonicalRuntimeContextParts(delta)
 	if err != nil {
 		return durableContextWrite{}, err

@@ -61,7 +61,7 @@ func TestPostgreSQLJobRunnerReclaimsRejectedTaskNotificationAndACKsWithoutRuntim
 	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, taskID, "sevt_task_rejection_reclaim")
 	storedResult := `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", storedResult)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET type='agent.message'
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET type='agent.message', model_tool_call_id=NULL
 		WHERE workspace_id='default' AND session_id=$1 AND event_id='sevt_task_rejection_reclaim'`, sessionID); err != nil {
 		t.Fatalf("corrupt durable task source: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestPostgreSQLTaskNotificationRejectionBeforeAcceptanceFinalizationACKsOwne
 	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, taskID, "sevt_task_rejection_acceptance")
 	storedResult := `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", storedResult)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET type='agent.message'
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET type='agent.message', model_tool_call_id=NULL
 		WHERE workspace_id='default' AND session_id=$1 AND event_id='sevt_task_rejection_acceptance'`, sessionID); err != nil {
 		t.Fatalf("corrupt durable task source: %v", err)
 	}

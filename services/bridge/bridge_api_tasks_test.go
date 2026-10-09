@@ -227,9 +227,10 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultSurvivesConsumptionWhileWaitin
 		t.Fatalf("settle background task: %v", err)
 	}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO session_events (
-		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json, created_at, updated_at
-	) VALUES ($1,$2,$3,$4,2,'agent.tool_result',$5,now(),now())`,
-		workspaceID, sessionID, threadID, terminalEventID, `{"tool_use_id":"`+toolUseEventID+`"}`); err != nil {
+		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+		model_request_id, tool_use_event_id, created_at, updated_at
+	) VALUES ($1,$2,$3,$4,2,'agent.tool_result',$5,'mreq_' || $6,$6,now(),now())`,
+		workspaceID, sessionID, threadID, terminalEventID, `{"tool_use_id":"`+toolUseEventID+`"}`, toolUseEventID); err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("seed terminal event: %v", err)
 	}
@@ -683,7 +684,7 @@ func TestPostgreSQLBridgeAPIStoreRejectsInvalidTaskNotificationSourceEventPerInp
 	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, taskID, sourceID)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET type='agent.message'
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET type='agent.message', model_tool_call_id=NULL
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, sourceID); err != nil {
 		t.Fatalf("change task source event type: %v", err)
 	}

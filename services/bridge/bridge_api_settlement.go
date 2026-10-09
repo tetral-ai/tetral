@@ -544,13 +544,11 @@ func verifyProviderContextRetentionReferencesTx(ctx context.Context, tx *dbconne
 		 WHERE result.workspace_id=member.workspace_id AND result.session_id=member.session_id
 		   AND result.session_thread_id=member.session_thread_id AND result.model_request_id=member.model_request_id
 		   AND result.type IN ('agent.tool_result','agent.mcp_tool_result')
-		   AND COALESCE(result.payload_json::jsonb ->> 'tool_use_event_id',
-		                result.payload_json::jsonb ->> 'tool_use_id',
-		                result.payload_json::jsonb ->> 'mcp_tool_use_id')=member.event_id)
+		   AND result.tool_use_event_id=member.event_id)
 		FROM session_events member
 		WHERE member.workspace_id=$1 AND member.session_id=$2 AND member.session_thread_id=$3 AND member.model_request_id=$4
 		  AND (member.type IN ('agent.tool_use','agent.mcp_tool_use') OR
-		       (member.type='agent.tool_result' AND member.payload_json::jsonb ->> 'repair_kind'='invalid_tool'))`,
+		       (member.type='agent.tool_result' AND member.model_tool_call_id IS NOT NULL))`,
 		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
 		request.GetScope().GetSessionThreadId(), request.GetModelRequestId())
 	if err != nil {

@@ -1185,7 +1185,7 @@ func TestPostgreSQLRecoveredOpenRequestJoinedReplayCompletesResidentFence(t *tes
 		 AND session_thread_id=$4 AND type='span.model_request_end' AND model_request_id=$5),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3
 		 AND session_thread_id=$4 AND type='agent.tool_result'
-		 AND COALESCE(payload_json::jsonb->>'tool_use_event_id', payload_json::jsonb->>'tool_use_id')=$6),
+		 AND tool_use_event_id=$6),
 		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$3
 		 AND source_kind='interrupt_control' AND idempotency_key=$1 AND receipt_json <> ''),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3
@@ -1268,7 +1268,7 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
 		 AND type='span.model_request_end' AND model_request_id=$4),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
-		 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_event_id'=$5),
+		 AND type='agent.tool_result' AND tool_use_event_id=$5),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$3
 		 AND type='span.model_request_end' AND model_request_id=$6),
 		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1)`,
@@ -1454,14 +1454,12 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$4 AND session_thread_id=$5
 		 AND type='span.model_request_end'),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$4 AND session_thread_id=$5
-		 AND type='agent.tool_result' AND (payload_json::jsonb->>'tool_use_event_id'=$6 OR payload_json::jsonb->>'tool_use_id'=$6)),
+		 AND type='agent.tool_result' AND tool_use_event_id=$6),
 		(SELECT count(*) FROM session_events tool_use WHERE tool_use.workspace_id='default' AND tool_use.session_id=$4
 		 AND tool_use.session_thread_id=$5 AND tool_use.type IN ('agent.tool_use','agent.mcp_tool_use')
 		 AND NOT EXISTS (SELECT 1 FROM session_events result WHERE result.workspace_id=tool_use.workspace_id
 		  AND result.session_id=tool_use.session_id AND result.session_thread_id=tool_use.session_thread_id
-		  AND ((result.type='agent.tool_result' AND (result.payload_json::jsonb->>'tool_use_event_id'=tool_use.event_id
-		    OR result.payload_json::jsonb->>'tool_use_id'=tool_use.event_id))
-		    OR (result.type='agent.mcp_tool_result' AND result.payload_json::jsonb->>'mcp_tool_use_id'=tool_use.event_id))))`,
+		  AND result.type IN ('agent.tool_result','agent.mcp_tool_result') AND result.tool_use_event_id=tool_use.event_id))`,
 		interruptID, jobID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptID), sessionID,
 		threadID, mainToolID).
 		Scan(&finalInbox, &finalQueue, &attemptsAfter, &lineage, &receipts, &activeBarriers, &mainEnds, &mainResults, &danglingTools); err != nil {

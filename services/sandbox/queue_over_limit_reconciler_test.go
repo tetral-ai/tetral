@@ -318,9 +318,10 @@ func TestPostgreSQLSandboxQueueOverLimitFinalizerPreservesConsumedToolResult(t *
 				t.Fatalf("encode cancellation reference: %v", err)
 			}
 			if _, err := adminDB.Exec(`INSERT INTO session_events (
-				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json, created_at, updated_at
+				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+				model_request_id, model_tool_call_id, created_at, updated_at
 			) VALUES ('ws_execution_store','sesn_execution_store','thr_execution_store',
-				'evt_limit_consumed_result',1,'agent.tool_result','{}',$1,$1)`, now); err != nil {
+				'evt_limit_consumed_result',1,'agent.tool_result','{}','mreq_limit_consumed_result','call_limit_consumed_result',$1,$1)`, now); err != nil {
 				t.Fatalf("seed consumed Tool Result: %v", err)
 			}
 			if _, err := adminDB.Exec(`UPDATE session_runtime_tool_results
