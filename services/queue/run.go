@@ -82,6 +82,12 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 	healthServer.SetServingStatus("", healthv1.HealthCheckResponse_NOT_SERVING)
 	healthv1.RegisterHealthServer(grpcServer, healthServer)
 	Register(grpcServer, store, logger)
+	// The process's single direct Job Runner scheduler lives in its store; its
+	// one cleanup worker starts here and quiesces before Run returns.
+	scheduler, _ := store.(jobRunnerSchedulerOwner)
+	if scheduler != nil {
+		scheduler.StartJobRunnerScheduler()
+	}
 	var metricMethods []string
 	for service, info := range grpcServer.GetServiceInfo() {
 		for _, method := range info.Methods {
@@ -171,6 +177,11 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 	var httpRunErr error
 	go func() {
 		defer close(joined)
+		if scheduler != nil {
+			// Rejects new direct leases, cancels admitted calls so they return
+			// their committed jobs, and joins them and the cleanup worker.
+			scheduler.QuiesceJobRunnerScheduler()
+		}
 		<-stopped
 		<-grpcErr
 		httpRunErr = <-httpErr
@@ -196,6 +207,11 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 		errOut = errors.Join(errOut, context.DeadlineExceeded)
 	}
 	return errors.Join(errOut, httpRunErr)
+}
+
+type jobRunnerSchedulerOwner interface {
+	StartJobRunnerScheduler()
+	QuiesceJobRunnerScheduler()
 }
 
 type queueMetricsStore interface {

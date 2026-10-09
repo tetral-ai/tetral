@@ -101,10 +101,10 @@ func TestPostgreSQLJobRunnerReclaimsRejectedTaskNotificationAndACKsWithoutRuntim
 	}
 	deliverer := &taskNotificationReplayOnlyDeliverer{store: fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)}
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
+		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
 		Config: jobrunner.JobRunnerConfig{LeaseOwner: "rejection-after-crash", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("replay rejected task notification after reclaim = active:%t err:%v", active, err)
 	}
 	var queueStatus, inboxStatus string

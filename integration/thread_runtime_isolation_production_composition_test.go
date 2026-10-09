@@ -118,15 +118,31 @@ func TestPostgreSQLJobRunnerExecutesSiblingThreadsInOneRuntimeSession(t *testing
 		}})
 	}})
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queueStore, nil),
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "hot-thread-isolation", MaxJobs: 2, LeaseDuration: time.Minute, HeartbeatInterval: time.Second},
 	}
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	defer cancelRun()
-	runDone := make(chan error, 1)
-	go func() { runDone <- runner.RunOnce(runCtx) }()
+	// Thread A's slot and Runtime run hold the Session lock at times until A's
+	// job is acknowledged and its Tool blocks, so Thread B is leased only after
+	// both; A's slot has finished by then, and B's whole Turn runs in the same
+	// Runtime Session while A's Tool stays blocked.
+	if dispatched, err := acquireJobRunnerJobs(runCtx, runner, 1); err != nil || dispatched != 1 {
+		t.Fatalf("dispatch Thread A job = %d/%v", dispatched, err)
+	}
 	waitForCompositionFile(t, toolStartedPath, "Thread A Tool execution", &output)
+	waitHandoffCondition(t, "Thread A job acknowledgement", func() bool {
+		var queueStatus string
+		err := admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$1`,
+			queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, jobs[0].RuntimeInputID)).Scan(&queueStatus)
+		return err == nil && queueStatus == queue.StatusAcknowledged
+	})
+	if dispatched, err := acquireJobRunnerJobs(runCtx, runner, 1); err != nil || dispatched != 1 {
+		t.Fatalf("dispatch Thread B job = %d/%v", dispatched, err)
+	}
+	runDone := make(chan error, 1)
+	go func() { runDone <- runner.JoinDispatched(runCtx) }()
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -160,7 +176,10 @@ func TestPostgreSQLJobRunnerExecutesSiblingThreadsInOneRuntimeSession(t *testing
 	}
 	seedRuntimeInboxBirthForJob(t, admin, followup)
 	enqueueRuntimeCompositionJob(t, queueStore, sessionID, followup, 0)
-	if err := runner.RunOnce(context.Background()); err != nil {
+	// After Thread B's Request End its FinishIdle holds the Session lock until
+	// it records the Turn's output capture, which nothing here runs.
+	waitForThreadOutputCaptureRecord(t, admin, sessionID, threadB)
+	if err := acquireAndJoinJobRunner(context.Background(), runner); err != nil {
 		t.Fatalf("deliver second same-Thread input: %v", err)
 	}
 	var followupQueueStatus string

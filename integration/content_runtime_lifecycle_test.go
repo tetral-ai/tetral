@@ -28,7 +28,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
-	"github.com/tetral-ai/tetral/internal/workspace"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
@@ -245,8 +244,8 @@ func deliverContentRuntimeInput(t *testing.T, db *sql.DB, q *tetralqueue.Server,
 	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(db), port, jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{Namespace: "tetral-agent-runtime", PodName: "content-runtime", PodUID: podUID, PodIP: "127.0.0.1"}})
 	}})
-	runner := &jobrunner.JobRunner{Queue: q, Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: store, Sender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}, Config: jobrunner.JobRunnerConfig{LeaseOwner: "content-runtime-delivery", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour}}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	runner := &jobrunner.JobRunner{Queue: q, Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: store, Sender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}, Config: jobrunner.JobRunnerConfig{LeaseOwner: "content-runtime-delivery", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour}}
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("actual Queue/Runtime delivery active=%t err=%v", active, err)
 	}
 }

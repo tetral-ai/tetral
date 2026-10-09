@@ -2,8 +2,11 @@ package jobrunner
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
@@ -13,264 +16,344 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage"
 )
 
-const runtimePodLossCensusPageSize = 32
+// Repair discovery cadence and bounds are fixed source constants. One run reads
+// at most 8 pages of 128 raw bindings and performs at most 8 candidate
+// mutations; with a 30 s cadence a lost Pod's bindings are reached within about
+// ceil(bindings / 1024) runs.
+const (
+	runtimePodLossRepairInterval        = 30 * time.Second
+	runtimePodLossRepairMinSpacing      = time.Second
+	runtimePodLossRepairRunBudget       = 25 * time.Second
+	runtimePodLossRepairPageTimeout     = time.Second
+	runtimePodLossRepairMutationTimeout = 3 * time.Second
+	runtimePodLossRepairPageSize        = 128
+	runtimePodLossRepairPagesPerRun     = 8
+	runtimePodLossRepairMutationsPerRun = 8
+)
 
 type runtimeBindingVisibilitySnapshotter interface {
 	BindingVisibilitySnapshot() enginekubernetes.BindingVisibilitySnapshot
 }
 
+// RuntimePodLossRepairSignal coalesces Pod-deletion and process-takeover
+// signals into one dirty bit for the repair owner.
+type RuntimePodLossRepairSignal struct {
+	dirty chan struct{}
+}
+
+func NewRuntimePodLossRepairSignal() *RuntimePodLossRepairSignal {
+	return &RuntimePodLossRepairSignal{dirty: make(chan struct{}, 1)}
+}
+
+// Mark requests one repair run; repeated marks before it starts coalesce.
+func (s *RuntimePodLossRepairSignal) Mark() {
+	if s == nil {
+		return
+	}
+	select {
+	case s.dirty <- struct{}{}:
+	default:
+	}
+}
+
+type runtimeBindingKey struct {
+	workspaceID string
+	sessionID   string
+}
+
 type runtimePodLossCandidate struct {
+	workspaceID       string
 	sessionID         string
 	bindingID         string
 	bindingGeneration int64
 	visibility        enginekubernetes.BindingVisibilityState
 }
 
-type runtimePodLossCensus struct {
-	snapshotReady bool
-	pageCount     int
-	candidates    []runtimePodLossCandidate
+// RuntimePodLossRepair is the Runner's independent Pod-loss repair owner. It
+// pages raw binding membership across Workspaces, nominates bindings whose
+// process the existing predicate shows lost, and converges each through
+// mutateLostRuntimeBinding, whose locked current-state checks stay
+// authoritative. The cursor and pending candidates live only in this owner.
+type RuntimePodLossRepair struct {
+	store  *PostgreSQLRuntimeDeliveryStore
+	signal *RuntimePodLossRepairSignal
+	logger *slog.Logger
+
+	mu       sync.Mutex
+	inCycle  bool
+	upper    runtimeBindingKey
+	hasAfter bool
+	cursor   runtimeBindingKey
+	pending  []runtimePodLossCandidate
+
+	// after, when set by in-package tests, replaces time.After for Run's
+	// spacing and deadline timers so their order is observable without
+	// wall-clock waits.
+	after func(time.Duration) <-chan time.Time
 }
 
-type runtimePodLossCandidateRepairError struct {
-	sessionID string
-	cause     error
+// NewRuntimePodLossRepair builds the repair owner over the production delivery
+// store. signal may be created first and shared with the Pod watcher and the
+// notification listener.
+func NewRuntimePodLossRepair(store *PostgreSQLRuntimeDeliveryStore, signal *RuntimePodLossRepairSignal, logger *slog.Logger) *RuntimePodLossRepair {
+	if signal == nil {
+		signal = NewRuntimePodLossRepairSignal()
+	}
+	return &RuntimePodLossRepair{store: store, signal: signal, logger: logger}
 }
 
-func (e runtimePodLossCandidateRepairError) Error() string {
-	return "runtime pod-loss repair failed for session " + e.sessionID
+// Run starts one repair run at once, then one per 30 s deadline or coalesced
+// signal, at least 1 s apart and never two at a time, until ctx ends. Both
+// bounds count from the previous run's start.
+func (r *RuntimePodLossRepair) Run(ctx context.Context) {
+	if r == nil {
+		return
+	}
+	after := r.after
+	if after == nil {
+		after = time.After
+	}
+	for {
+		spacing, deadline := after(runtimePodLossRepairMinSpacing), after(runtimePodLossRepairInterval)
+		r.RepairRun(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-spacing:
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline:
+		case <-r.signal.dirty:
+		}
+	}
 }
 
-func (e runtimePodLossCandidateRepairError) Unwrap() error { return e.cause }
+// RuntimePodLossRepairRun reports one repair run: raw pages read, candidates
+// nominated, and the outcome of each candidate mutation. Outcome is
+// "completed", "failed" (a discovery query failed) or "snapshot_not_ready".
+type RuntimePodLossRepairRun struct {
+	Pages, Candidates, Repaired, Stale, Failed int
+	Outcome                                    string
+}
 
-// RepairLostRuntimeBindings freezes the active binding membership for one workspace,
-// closes the read snapshot, and then converges each proven-gone identity through the
-// same Session-locked mutation used by input-triggered recovery.
-func (s *PostgreSQLRuntimeDeliveryStore) RepairLostRuntimeBindings(ctx context.Context, workspaceID string) (int, error) {
+// Err reports a failed discovery query or failed candidate mutations; a stale
+// candidate or an unready watcher is not an error.
+func (run RuntimePodLossRepairRun) Err() error {
+	if run.Outcome == "failed" || run.Failed > 0 {
+		return fmt.Errorf("runtime pod-loss repair run %s with %d failed candidates", run.Outcome, run.Failed)
+	}
+	return nil
+}
+
+// RepairRun is the repair owner's entry point: one bounded run that drains
+// pending candidates (at most 8 mutations), then reads further raw pages (at
+// most 8) until the cycle reaches its upper bound, which ends the run. A page
+// error or a not-ready watcher keeps the cursor for the next run.
+func (r *RuntimePodLossRepair) RepairRun(ctx context.Context) RuntimePodLossRepairRun {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	started := time.Now()
-	census, err := s.runtimePodLossCensus(ctx, workspaceID)
-	if err != nil {
-		s.logRuntimePodLossSweep(workspaceID, census, 0, 0, 0, started, "failed", true)
-		return 0, err
-	}
-	if !census.snapshotReady {
-		s.logRuntimePodLossSweep(workspaceID, census, 0, 0, 0, started, "snapshot_not_ready", false)
-		return 0, nil
-	}
-	for _, candidate := range census.candidates {
-		s.logRuntimePodLossDetected(workspaceID, candidate)
-	}
-
-	repaired := 0
-	stale := 0
-	failed := 0
-	var candidateErrs []error
-	for _, candidate := range census.candidates {
-		if ctx.Err() != nil {
-			candidateErrs = append(candidateErrs, ctx.Err())
+	runCtx, cancel := context.WithTimeout(ctx, runtimePodLossRepairRunBudget)
+	defer cancel()
+	summary := RuntimePodLossRepairRun{Outcome: "completed"}
+	mutations := 0
+	cycleEnded := false
+	for {
+		for len(r.pending) > 0 && mutations < runtimePodLossRepairMutationsPerRun && runCtx.Err() == nil {
+			candidate := r.pending[0]
+			r.pending = r.pending[1:]
+			mutations++
+			r.mutateCandidate(runCtx, candidate, &summary)
+		}
+		if len(r.pending) > 0 || cycleEnded || summary.Pages >= runtimePodLossRepairPagesPerRun || runCtx.Err() != nil {
 			break
 		}
-		candidateStarted := time.Now()
-		result, mutationErr := s.mutateLostRuntimeBinding(
-			ctx,
-			workspaceID,
-			candidate.sessionID,
-			runtimecontrol.Binding{
-				BindingID:         candidate.bindingID,
-				BindingGeneration: candidate.bindingGeneration,
-			},
-			s.runtimePodLossNow(),
-			true,
-		)
-		if mutationErr != nil {
-			failed++
-			s.logRuntimePodLossRepairFailed(workspaceID, candidate, "mutation")
-			candidateErrs = append(candidateErrs, runtimePodLossCandidateRepairError{
-				sessionID: candidate.sessionID,
-				cause:     mutationErr,
-			})
-			continue
+		if !r.inCycle {
+			upper, found, err := r.store.runtimeBindingUpper(runCtx)
+			if err != nil {
+				summary.Outcome = "failed"
+				break
+			}
+			if !found {
+				break
+			}
+			r.inCycle, r.upper, r.hasAfter = true, upper, false
 		}
-		if result.status == runtimePodLossMutationStale {
-			stale++
-			s.logRuntimePodLossStale(workspaceID, candidate, result.staleReason)
-			continue
+		page, ready, err := r.store.runtimeBindingPage(runCtx, r.hasAfter, r.cursor, r.upper)
+		if err != nil {
+			summary.Outcome = "failed"
+			break
 		}
-		repaired++
-		s.logRuntimePodLossRepaired(workspaceID, candidate, candidateStarted)
+		if !ready {
+			summary.Outcome = "snapshot_not_ready"
+			break
+		}
+		summary.Pages++
+		summary.Candidates += len(page.candidates)
+		for _, candidate := range page.candidates {
+			r.logDetected(candidate)
+		}
+		// The worklist is owner state before the cursor moves past its page.
+		r.pending = append(r.pending[:0], page.candidates...)
+		if page.rows > 0 {
+			r.hasAfter, r.cursor = true, page.last
+		}
+		if page.rows < runtimePodLossRepairPageSize || (r.hasAfter && r.cursor == r.upper) {
+			r.inCycle, r.hasAfter = false, false
+			cycleEnded = true
+		}
 	}
-	joined := errors.Join(candidateErrs...)
-	outcome := "completed"
-	if joined != nil {
-		outcome = "failed"
-	}
-	s.logRuntimePodLossSweep(
-		workspaceID,
-		census,
-		repaired,
-		stale,
-		failed,
-		started,
-		outcome,
-		joined != nil,
-	)
-	return repaired, joined
+	r.logRun(summary, started)
+	return summary
 }
 
-// runtimePodLossCensus holds one repeatable-read transaction only while paging
-// durable identities. The first page query establishes the database snapshot before
-// the watcher snapshot is read; mutations begin only after this function returns.
-func (s *PostgreSQLRuntimeDeliveryStore) runtimePodLossCensus(ctx context.Context, workspaceID string) (runtimePodLossCensus, error) {
-	var census runtimePodLossCensus
+func (r *RuntimePodLossRepair) mutateCandidate(ctx context.Context, candidate runtimePodLossCandidate, summary *RuntimePodLossRepairRun) {
+	mutationCtx, cancel := context.WithTimeout(ctx, runtimePodLossRepairMutationTimeout)
+	defer cancel()
+	started := time.Now()
+	result, err := r.store.mutateLostRuntimeBinding(mutationCtx, candidate.workspaceID, candidate.sessionID, runtimecontrol.Binding{
+		BindingID:         candidate.bindingID,
+		BindingGeneration: candidate.bindingGeneration,
+	}, r.store.runtimePodLossNow(), true)
+	switch {
+	case err != nil:
+		summary.Failed++
+		r.logRepairFailed(candidate)
+	case result.status == runtimePodLossMutationStale:
+		summary.Stale++
+		r.logStale(candidate, result.staleReason)
+	default:
+		summary.Repaired++
+		r.logRepaired(candidate, started)
+	}
+}
+
+type runtimeBindingPage struct {
+	rows       int
+	last       runtimeBindingKey
+	candidates []runtimePodLossCandidate
+}
+
+// runtimeBindingUpper captures a discovery cycle's upper bound by reverse
+// binding primary-key seek.
+func (s *PostgreSQLRuntimeDeliveryStore) runtimeBindingUpper(ctx context.Context) (runtimeBindingKey, bool, error) {
 	if s == nil || s.Client == nil {
-		return census, errors.New("runtime pod-loss repair store is unavailable")
+		return runtimeBindingKey{}, false, errors.New("runtime pod-loss repair store is unavailable")
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, runtimePodLossRepairPageTimeout)
+	defer cancel()
+	var upper runtimeBindingKey
+	err := s.Client.QueryRow(queryCtx, "jobrunner.runtime_binding_upper",
+		`SELECT workspace_id, session_id FROM public.tetral_job_runner_binding_upper()`,
+	).Scan(&upper.workspaceID, &upper.sessionID)
+	if dbconnect.IsNoRows(err) {
+		return runtimeBindingKey{}, false, nil
+	}
+	if err != nil {
+		return runtimeBindingKey{}, false, err
+	}
+	return upper, true, nil
+}
+
+type runtimeBindingRawRow struct {
+	key                runtimeBindingKey
+	binding            runtimecontrol.Binding
+	active, registered bool
+	current            bool
+	phase              string
+}
+
+// runtimeBindingPage reads one raw page in a short read-only repeatable-read
+// transaction. Its query establishes the database snapshot before the single
+// watcher snapshot for the page; the transaction closes before any mutation.
+// ready is false when the watcher is not ready.
+func (s *PostgreSQLRuntimeDeliveryStore) runtimeBindingPage(ctx context.Context, hasAfter bool, after runtimeBindingKey, upper runtimeBindingKey) (runtimeBindingPage, bool, error) {
+	var page runtimeBindingPage
+	if s == nil || s.Client == nil {
+		return page, false, errors.New("runtime pod-loss repair store is unavailable")
 	}
 	snapshotter, ok := s.TargetResolver.(runtimeBindingVisibilitySnapshotter)
 	if !ok || snapshotter == nil {
-		return census, errors.New("runtime pod-loss visibility snapshot is unavailable")
+		return page, false, errors.New("runtime pod-loss visibility snapshot is unavailable")
 	}
-	err := s.Client.WithWorkspaceReadOnlyRepeatableReadTx(
-		ctx,
-		workspaceID,
-		"jobrunner.runtime_pod_loss_census",
-		func(tx *dbconnect.Tx) error {
-			cursorSessionID := ""
-			var cursorGeneration int64
-			cursorBindingID := ""
-			firstPage := true
-			var snapshot enginekubernetes.BindingVisibilitySnapshot
-			for {
-				page, err := runtimePodLossCensusPageTx(ctx, tx, workspaceID, cursorSessionID, cursorGeneration, cursorBindingID)
-				if err != nil {
-					return err
-				}
-				if firstPage {
-					firstPage = false
-					snapshot = snapshotter.BindingVisibilitySnapshot()
-					census.snapshotReady = snapshot.Ready
-					if !snapshot.Ready {
-						return nil
-					}
-				}
-				if len(page) == 0 {
-					return nil
-				}
-				census.pageCount++
-				for _, row := range page {
-					visibility := snapshot.VisibilityFor(enginekubernetes.BoundRuntimePod{
-						Namespace: row.binding.Namespace,
-						PodName:   row.binding.PodName,
-						PodUID:    row.binding.PodUID,
-						PodIP:     row.binding.PodIP,
-					})
-					var current, registered bool
-					var phase string
-					processErr := tx.QueryRow(ctx, `SELECT is_current,phase FROM runtime_processes WHERE namespace=$1 AND pod_uid=$2 AND runtime_process_id=$3`, row.binding.Namespace, row.binding.PodUID, row.binding.RuntimeProcessID).Scan(&current, &phase)
-					if processErr != nil && !dbconnect.IsNoRows(processErr) {
-						return processErr
-					}
-					registered = processErr == nil
-					if registered && phase != runtimecontrol.ProcessStarting && (!current || visibility != enginekubernetes.BindingVisibilityReusable || phase != runtimecontrol.ProcessAccepting) {
-						census.candidates = append(census.candidates, runtimePodLossCandidate{
-							sessionID:         row.sessionID,
-							bindingID:         row.binding.BindingID,
-							bindingGeneration: row.binding.BindingGeneration,
-							visibility:        visibility,
-						})
-					}
-				}
-				last := page[len(page)-1]
-				cursorSessionID = last.sessionID
-				cursorGeneration = last.binding.BindingGeneration
-				cursorBindingID = last.binding.BindingID
-				if len(page) < runtimePodLossCensusPageSize {
-					return nil
-				}
-			}
-		},
-	)
-	return census, err
-}
-
-type runtimePodLossCensusRow struct {
-	sessionID string
-	binding   runtimecontrol.Binding
-}
-
-func runtimePodLossCensusPageTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	workspaceID string,
-	cursorSessionID string,
-	cursorGeneration int64,
-	cursorBindingID string,
-) ([]runtimePodLossCensusRow, error) {
-	rows, err := tx.Query(ctx,
-		`SELECT binding.session_id,
-		        binding.binding_id,
-		        binding.binding_generation,
-		        binding.agent_runtime_namespace,
-		        binding.agent_runtime_pod_name,
-		        binding.agent_runtime_pod_uid,
-		        binding.agent_runtime_pod_ip, binding.runtime_process_id
-		   FROM session_runtime_bindings binding
-		   JOIN session_runtime_status runtime
-		     ON runtime.workspace_id = binding.workspace_id
-		    AND runtime.session_id = binding.session_id
-		    AND runtime.binding_id = binding.binding_id
-		    AND runtime.binding_generation = binding.binding_generation
-		   JOIN sessions session
-		     ON session.workspace_id = binding.workspace_id
-		    AND session.id = binding.session_id
-		  WHERE binding.workspace_id = $1
-		    AND (
-		      runtime.status = 'running'
-		      OR session.status = 'rescheduling'
-		      OR EXISTS (
-		        SELECT 1
-		          FROM session_runtime_inbox inbox
-		         WHERE inbox.workspace_id = binding.workspace_id
-		           AND inbox.session_id = binding.session_id
-		           AND inbox.status = 'accepted'
-		           AND inbox.binding_id = binding.binding_id
-		           AND inbox.binding_generation = binding.binding_generation
-		           AND inbox.target_pod_uid = binding.agent_runtime_pod_uid
-		      )
-		    )
-		    AND ($2 = '' OR (binding.session_id, binding.binding_generation, binding.binding_id) > ($2, $3, $4))
-		  ORDER BY binding.session_id, binding.binding_generation, binding.binding_id
-		  LIMIT $5`,
-		workspaceID,
-		cursorSessionID,
-		cursorGeneration,
-		cursorBindingID,
-		runtimePodLossCensusPageSize,
-	)
-	if err != nil {
-		return nil, err
+	var afterWorkspace, afterSession any
+	if hasAfter {
+		afterWorkspace, afterSession = after.workspaceID, after.sessionID
 	}
-	defer func() { _ = rows.Close() }()
-	page := make([]runtimePodLossCensusRow, 0, runtimePodLossCensusPageSize)
-	for rows.Next() {
-		var row runtimePodLossCensusRow
-		if err := rows.Scan(
-			&row.sessionID,
-			&row.binding.BindingID,
-			&row.binding.BindingGeneration,
-			&row.binding.Namespace,
-			&row.binding.PodName,
-			&row.binding.PodUID,
-			&row.binding.PodIP,
-			&row.binding.RuntimeProcessID,
-		); err != nil {
-			return nil, err
+	ready := false
+	queryCtx, cancel := context.WithTimeout(ctx, runtimePodLossRepairPageTimeout)
+	defer cancel()
+	err := s.Client.WithTx(queryCtx, "jobrunner.runtime_binding_page", &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead}, func(tx *dbconnect.Tx) error {
+		page, ready = runtimeBindingPage{}, false
+		rows, err := tx.Query(queryCtx,
+			`SELECT workspace_id, session_id, binding_id, binding_generation,
+			        agent_runtime_namespace, agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip,
+			        runtime_process_id, active, process_registered, is_current, phase
+			   FROM public.tetral_job_runner_binding_page($1, $2, $3, $4, $5)`,
+			afterWorkspace, afterSession, upper.workspaceID, upper.sessionID, runtimePodLossRepairPageSize,
+		)
+		if err != nil {
+			return err
 		}
-		page = append(page, row)
+		defer func() { _ = rows.Close() }()
+		var raw []runtimeBindingRawRow
+		for rows.Next() {
+			var row runtimeBindingRawRow
+			if err := rows.Scan(
+				&row.key.workspaceID, &row.key.sessionID, &row.binding.BindingID, &row.binding.BindingGeneration,
+				&row.binding.Namespace, &row.binding.PodName, &row.binding.PodUID, &row.binding.PodIP,
+				&row.binding.RuntimeProcessID, &row.active, &row.registered, &row.current, &row.phase,
+			); err != nil {
+				return err
+			}
+			raw = append(raw, row)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		snapshot := snapshotter.BindingVisibilitySnapshot()
+		if !snapshot.Ready {
+			return nil
+		}
+		ready = true
+		page = nominateRuntimePodLossCandidates(raw, snapshot)
+		return nil
+	})
+	if err != nil {
+		return runtimeBindingPage{}, false, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	return page, ready, nil
+}
+
+// nominateRuntimePodLossCandidates applies the existing loss nomination to an
+// active raw binding: a registered process past startup that is not current,
+// not visibly reusable, or not accepting. Process absence or startup never
+// nominates; the locked mutation re-decides every candidate.
+func nominateRuntimePodLossCandidates(raw []runtimeBindingRawRow, snapshot enginekubernetes.BindingVisibilitySnapshot) runtimeBindingPage {
+	page := runtimeBindingPage{rows: len(raw)}
+	if len(raw) > 0 {
+		page.last = raw[len(raw)-1].key
 	}
-	return page, nil
+	for _, row := range raw {
+		if !row.active || !row.registered || row.phase == runtimecontrol.ProcessStarting {
+			continue
+		}
+		visibility := snapshot.VisibilityFor(enginekubernetes.BoundRuntimePod{
+			Namespace: row.binding.Namespace, PodName: row.binding.PodName,
+			PodUID: row.binding.PodUID, PodIP: row.binding.PodIP,
+		})
+		if row.current && visibility == enginekubernetes.BindingVisibilityReusable && row.phase == runtimecontrol.ProcessAccepting {
+			continue
+		}
+		page.candidates = append(page.candidates, runtimePodLossCandidate{
+			workspaceID: row.key.workspaceID, sessionID: row.key.sessionID,
+			bindingID: row.binding.BindingID, bindingGeneration: row.binding.BindingGeneration,
+			visibility: visibility,
+		})
+	}
+	return page
 }
 
 func (s *PostgreSQLRuntimeDeliveryStore) runtimePodLossNow() time.Time {
@@ -280,105 +363,97 @@ func (s *PostgreSQLRuntimeDeliveryStore) runtimePodLossNow() time.Time {
 	return storage.Now()
 }
 
-func runtimePodLossIdentityAttrs(workspaceID string, candidate runtimePodLossCandidate) []any {
+func runtimePodLossIdentityAttrs(candidate runtimePodLossCandidate) []any {
 	return []any{
-		slog.String("workspace.id", workspaceID),
+		slog.String("workspace.id", candidate.workspaceID),
 		slog.String("session.id", candidate.sessionID),
 		slog.String("binding.id", candidate.bindingID),
 		slog.Int64("binding.generation", candidate.bindingGeneration),
 	}
 }
 
-func (s *PostgreSQLRuntimeDeliveryStore) logRuntimePodLossDetected(workspaceID string, candidate runtimePodLossCandidate) {
-	if s.Logger == nil {
+func (r *RuntimePodLossRepair) logDetected(candidate runtimePodLossCandidate) {
+	if r.logger == nil {
 		return
 	}
-	attrs := append(runtimePodLossIdentityAttrs(workspaceID, candidate),
+	attrs := append(runtimePodLossIdentityAttrs(candidate),
 		slog.String("event", "runtime_pod_loss_detected"),
 		slog.String("event.kind", "runtime_pod_loss_detected"),
 		slog.String("component", ServiceNameJobRunner),
 		slog.String("visibility.state", string(candidate.visibility)),
 	)
-	s.Logger.Info("runtime_pod_loss_detected", attrs...)
+	r.logger.Info("runtime_pod_loss_detected", attrs...)
 }
 
-func (s *PostgreSQLRuntimeDeliveryStore) logRuntimePodLossRepaired(workspaceID string, candidate runtimePodLossCandidate, started time.Time) {
-	if s.Logger == nil {
+func (r *RuntimePodLossRepair) logRepaired(candidate runtimePodLossCandidate, started time.Time) {
+	if r.logger == nil {
 		return
 	}
-	attrs := append(runtimePodLossIdentityAttrs(workspaceID, candidate),
+	attrs := append(runtimePodLossIdentityAttrs(candidate),
 		slog.String("event", "runtime_pod_loss_repaired"),
 		slog.String("event.kind", "runtime_pod_loss_repaired"),
 		slog.String("component", ServiceNameJobRunner),
 		slog.String("outcome", "repaired"),
 		slog.Int64("duration.ms", max(time.Since(started).Milliseconds(), 0)),
 	)
-	s.Logger.Info("runtime_pod_loss_repaired", attrs...)
+	r.logger.Info("runtime_pod_loss_repaired", attrs...)
 }
 
-func (s *PostgreSQLRuntimeDeliveryStore) logRuntimePodLossStale(workspaceID string, candidate runtimePodLossCandidate, reason string) {
-	if s.Logger == nil {
+func (r *RuntimePodLossRepair) logStale(candidate runtimePodLossCandidate, reason string) {
+	if r.logger == nil {
 		return
 	}
-	attrs := append(runtimePodLossIdentityAttrs(workspaceID, candidate),
+	attrs := append(runtimePodLossIdentityAttrs(candidate),
 		slog.String("event", "runtime_pod_loss_stale"),
 		slog.String("event.kind", "runtime_pod_loss_stale"),
 		slog.String("component", ServiceNameJobRunner),
 		slog.String("stale.reason", reason),
 	)
-	s.Logger.Info("runtime_pod_loss_stale", attrs...)
+	r.logger.Info("runtime_pod_loss_stale", attrs...)
 }
 
-func (s *PostgreSQLRuntimeDeliveryStore) logRuntimePodLossRepairFailed(workspaceID string, candidate runtimePodLossCandidate, stage string) {
-	if s.Logger == nil {
+func (r *RuntimePodLossRepair) logRepairFailed(candidate runtimePodLossCandidate) {
+	if r.logger == nil {
 		return
 	}
-	attrs := append(runtimePodLossIdentityAttrs(workspaceID, candidate),
+	attrs := append(runtimePodLossIdentityAttrs(candidate),
 		slog.String("event", "runtime_pod_loss_repair_failed"),
 		slog.String("event.kind", "runtime_pod_loss_repair_failed"),
 		slog.String("component", ServiceNameJobRunner),
-		slog.String("stage", stage),
+		slog.String("stage", "mutation"),
 		slog.String("error.class", "runtime_pod_loss_repair"),
 		slog.String("error.code", "candidate_mutation_failed"),
 		slog.String("error.message_safe", "runtime pod-loss candidate repair failed"),
 	)
-	s.Logger.Error("runtime_pod_loss_repair_failed", attrs...)
+	r.logger.Error("runtime_pod_loss_repair_failed", attrs...)
 }
 
-func (s *PostgreSQLRuntimeDeliveryStore) logRuntimePodLossSweep(
-	workspaceID string,
-	census runtimePodLossCensus,
-	repaired int,
-	stale int,
-	failed int,
-	started time.Time,
-	outcome string,
-	isError bool,
-) {
-	if s.Logger == nil {
+func (r *RuntimePodLossRepair) logRun(summary RuntimePodLossRepairRun, started time.Time) {
+	if r.logger == nil {
 		return
 	}
 	attrs := []any{
-		slog.String("event", "runtime_pod_loss_sweep_completed"),
-		slog.String("event.kind", "runtime_pod_loss_sweep_completed"),
+		slog.String("event", "runtime_pod_loss_repair_run_completed"),
+		slog.String("event.kind", "runtime_pod_loss_repair_run_completed"),
 		slog.String("component", ServiceNameJobRunner),
-		slog.String("workspace.id", workspaceID),
-		slog.Int("page.count", census.pageCount),
-		slog.Int("candidate.count", len(census.candidates)),
-		slog.Int("repaired.count", repaired),
-		slog.Int("stale.count", stale),
-		slog.Int("failed.count", failed),
+		slog.Int("page.count", summary.Pages),
+		slog.Int("candidate.count", summary.Candidates),
+		slog.Int("repaired.count", summary.Repaired),
+		slog.Int("stale.count", summary.Stale),
+		slog.Int("failed.count", summary.Failed),
 		slog.Int64("duration.ms", max(time.Since(started).Milliseconds(), 0)),
-		slog.String("outcome", outcome),
+		slog.String("outcome", summary.Outcome),
 	}
-	if isError {
+	if summary.Outcome == "failed" || summary.Failed > 0 {
 		attrs = append(attrs,
-			slog.String("error.class", "runtime_pod_loss_sweep"),
-			slog.String("error.code", "sweep_failed"),
-			slog.String("error.message_safe", "runtime pod-loss sweep completed with failures"),
+			slog.String("error.class", "runtime_pod_loss_repair"),
+			slog.String("error.code", "repair_run_failed"),
+			slog.String("error.message_safe", "runtime pod-loss repair run completed with failures"),
 		)
-		s.Logger.Error("runtime_pod_loss_sweep_completed", attrs...)
+		r.logger.Error("runtime_pod_loss_repair_run_completed", attrs...)
 		return
 	}
-	s.Logger.Info("runtime_pod_loss_sweep_completed", attrs...)
+	if summary.Outcome != "completed" || summary.Pages > 0 {
+		r.logger.Info("runtime_pod_loss_repair_run_completed", attrs...)
+	}
 }

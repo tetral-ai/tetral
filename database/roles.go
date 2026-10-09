@@ -64,7 +64,9 @@ func LoadRoleContract() (RoleContract, error) {
 		}
 		for _, function := range role.Functions {
 			allowed := (function == "tetral_lock_runtime_process(text, text, text)" && (workload == "bridge" || workload == "job_runner")) ||
-				(function == "tetral_lock_runtime_process_liveness(text, text, text)" && workload == "job_runner")
+				(function == "tetral_lock_runtime_process_liveness(text, text, text)" && workload == "job_runner") ||
+				(function == "tetral_job_runner_binding_upper()" && workload == "job_runner") ||
+				(function == "tetral_job_runner_binding_page(text, text, text, text, integer)" && workload == "job_runner")
 			if workload == "auth" {
 				switch function {
 				case "tetral_auth_lookup_key(bytea)", "tetral_auth_lookup_token(bytea)", "tetral_auth_lookup_grants(text, text)", "tetral_auth_lock_authority(text, text, text, text)", "tetral_auth_prune_tokens(integer)":

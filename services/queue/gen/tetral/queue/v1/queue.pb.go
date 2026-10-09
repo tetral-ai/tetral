@@ -309,6 +309,226 @@ func (x *LeaseResponse) GetJobs() []*QueueJob {
 	return nil
 }
 
+// Queue selects the workspaces and the five Job Runner kinds itself; the
+// caller supplies only its free capacity, label and lease duration.
+type LeaseJobRunnerJobsRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	MaxJobs         int32                  `protobuf:"varint,1,opt,name=max_jobs,json=maxJobs,proto3" json:"max_jobs,omitempty"`
+	LeaseOwner      string                 `protobuf:"bytes,2,opt,name=lease_owner,json=leaseOwner,proto3" json:"lease_owner,omitempty"`
+	LeaseDurationMs int64                  `protobuf:"varint,3,opt,name=lease_duration_ms,json=leaseDurationMs,proto3" json:"lease_duration_ms,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *LeaseJobRunnerJobsRequest) Reset() {
+	*x = LeaseJobRunnerJobsRequest{}
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LeaseJobRunnerJobsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LeaseJobRunnerJobsRequest) ProtoMessage() {}
+
+func (x *LeaseJobRunnerJobsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LeaseJobRunnerJobsRequest.ProtoReflect.Descriptor instead.
+func (*LeaseJobRunnerJobsRequest) Descriptor() ([]byte, []int) {
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *LeaseJobRunnerJobsRequest) GetMaxJobs() int32 {
+	if x != nil {
+		return x.MaxJobs
+	}
+	return 0
+}
+
+func (x *LeaseJobRunnerJobsRequest) GetLeaseOwner() string {
+	if x != nil {
+		return x.LeaseOwner
+	}
+	return ""
+}
+
+func (x *LeaseJobRunnerJobsRequest) GetLeaseDurationMs() int64 {
+	if x != nil {
+		return x.LeaseDurationMs
+	}
+	return 0
+}
+
+// retry_after_ms is the Queue-owned delay before the next request when the
+// response does not fill the requested capacity.
+type LeaseJobRunnerJobsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Jobs          []*QueueJob            `protobuf:"bytes,1,rep,name=jobs,proto3" json:"jobs,omitempty"`
+	RetryAfterMs  int32                  `protobuf:"varint,2,opt,name=retry_after_ms,json=retryAfterMs,proto3" json:"retry_after_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LeaseJobRunnerJobsResponse) Reset() {
+	*x = LeaseJobRunnerJobsResponse{}
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LeaseJobRunnerJobsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LeaseJobRunnerJobsResponse) ProtoMessage() {}
+
+func (x *LeaseJobRunnerJobsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LeaseJobRunnerJobsResponse.ProtoReflect.Descriptor instead.
+func (*LeaseJobRunnerJobsResponse) Descriptor() ([]byte, []int) {
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *LeaseJobRunnerJobsResponse) GetJobs() []*QueueJob {
+	if x != nil {
+		return x.Jobs
+	}
+	return nil
+}
+
+func (x *LeaseJobRunnerJobsResponse) GetRetryAfterMs() int32 {
+	if x != nil {
+		return x.RetryAfterMs
+	}
+	return 0
+}
+
+type ReleaseUnstartedJobRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	WorkspaceId   string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	JobId         string                 `protobuf:"bytes,2,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	LeaseToken    string                 `protobuf:"bytes,3,opt,name=lease_token,json=leaseToken,proto3" json:"lease_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReleaseUnstartedJobRequest) Reset() {
+	*x = ReleaseUnstartedJobRequest{}
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReleaseUnstartedJobRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReleaseUnstartedJobRequest) ProtoMessage() {}
+
+func (x *ReleaseUnstartedJobRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReleaseUnstartedJobRequest.ProtoReflect.Descriptor instead.
+func (*ReleaseUnstartedJobRequest) Descriptor() ([]byte, []int) {
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ReleaseUnstartedJobRequest) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *ReleaseUnstartedJobRequest) GetJobId() string {
+	if x != nil {
+		return x.JobId
+	}
+	return ""
+}
+
+func (x *ReleaseUnstartedJobRequest) GetLeaseToken() string {
+	if x != nil {
+		return x.LeaseToken
+	}
+	return ""
+}
+
+type ReleaseUnstartedJobResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Updated       bool                   `protobuf:"varint,1,opt,name=updated,proto3" json:"updated,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReleaseUnstartedJobResponse) Reset() {
+	*x = ReleaseUnstartedJobResponse{}
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReleaseUnstartedJobResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReleaseUnstartedJobResponse) ProtoMessage() {}
+
+func (x *ReleaseUnstartedJobResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReleaseUnstartedJobResponse.ProtoReflect.Descriptor instead.
+func (*ReleaseUnstartedJobResponse) Descriptor() ([]byte, []int) {
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ReleaseUnstartedJobResponse) GetUpdated() bool {
+	if x != nil {
+		return x.Updated
+	}
+	return false
+}
+
 type HeartbeatRequest struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	WorkspaceId     string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
@@ -321,7 +541,7 @@ type HeartbeatRequest struct {
 
 func (x *HeartbeatRequest) Reset() {
 	*x = HeartbeatRequest{}
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[3]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -333,7 +553,7 @@ func (x *HeartbeatRequest) String() string {
 func (*HeartbeatRequest) ProtoMessage() {}
 
 func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[3]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -346,7 +566,7 @@ func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatRequest.ProtoReflect.Descriptor instead.
 func (*HeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{3}
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *HeartbeatRequest) GetWorkspaceId() string {
@@ -387,7 +607,7 @@ type HeartbeatResponse struct {
 
 func (x *HeartbeatResponse) Reset() {
 	*x = HeartbeatResponse{}
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[4]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -399,7 +619,7 @@ func (x *HeartbeatResponse) String() string {
 func (*HeartbeatResponse) ProtoMessage() {}
 
 func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[4]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -412,7 +632,7 @@ func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*HeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{4}
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *HeartbeatResponse) GetUpdated() bool {
@@ -440,7 +660,7 @@ type AckRequest struct {
 
 func (x *AckRequest) Reset() {
 	*x = AckRequest{}
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[5]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -452,7 +672,7 @@ func (x *AckRequest) String() string {
 func (*AckRequest) ProtoMessage() {}
 
 func (x *AckRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[5]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -465,7 +685,7 @@ func (x *AckRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AckRequest.ProtoReflect.Descriptor instead.
 func (*AckRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{5}
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *AckRequest) GetWorkspaceId() string {
@@ -502,7 +722,7 @@ type RetryRequest struct {
 
 func (x *RetryRequest) Reset() {
 	*x = RetryRequest{}
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[6]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -514,7 +734,7 @@ func (x *RetryRequest) String() string {
 func (*RetryRequest) ProtoMessage() {}
 
 func (x *RetryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[6]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -527,7 +747,7 @@ func (x *RetryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetryRequest.ProtoReflect.Descriptor instead.
 func (*RetryRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{6}
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *RetryRequest) GetWorkspaceId() string {
@@ -576,7 +796,7 @@ type DeferRequest struct {
 
 func (x *DeferRequest) Reset() {
 	*x = DeferRequest{}
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[7]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -588,7 +808,7 @@ func (x *DeferRequest) String() string {
 func (*DeferRequest) ProtoMessage() {}
 
 func (x *DeferRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[7]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -601,7 +821,7 @@ func (x *DeferRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeferRequest.ProtoReflect.Descriptor instead.
 func (*DeferRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{7}
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *DeferRequest) GetWorkspaceId() string {
@@ -638,7 +858,7 @@ type DeadLetterRequest struct {
 
 func (x *DeadLetterRequest) Reset() {
 	*x = DeadLetterRequest{}
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[8]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -650,7 +870,7 @@ func (x *DeadLetterRequest) String() string {
 func (*DeadLetterRequest) ProtoMessage() {}
 
 func (x *DeadLetterRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[8]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -663,7 +883,7 @@ func (x *DeadLetterRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeadLetterRequest.ProtoReflect.Descriptor instead.
 func (*DeadLetterRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{8}
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *DeadLetterRequest) GetWorkspaceId() string {
@@ -713,7 +933,7 @@ type CancelRequest struct {
 
 func (x *CancelRequest) Reset() {
 	*x = CancelRequest{}
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[9]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -725,7 +945,7 @@ func (x *CancelRequest) String() string {
 func (*CancelRequest) ProtoMessage() {}
 
 func (x *CancelRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[9]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -738,7 +958,7 @@ func (x *CancelRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelRequest.ProtoReflect.Descriptor instead.
 func (*CancelRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{9}
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *CancelRequest) GetWorkspaceId() string {
@@ -778,7 +998,7 @@ type CancelResponse struct {
 
 func (x *CancelResponse) Reset() {
 	*x = CancelResponse{}
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[10]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -790,7 +1010,7 @@ func (x *CancelResponse) String() string {
 func (*CancelResponse) ProtoMessage() {}
 
 func (x *CancelResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[10]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -803,7 +1023,7 @@ func (x *CancelResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelResponse.ProtoReflect.Descriptor instead.
 func (*CancelResponse) Descriptor() ([]byte, []int) {
-	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{10}
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *CancelResponse) GetCancelledCount() int32 {
@@ -822,7 +1042,7 @@ type TransitionResponse struct {
 
 func (x *TransitionResponse) Reset() {
 	*x = TransitionResponse{}
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[11]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -834,7 +1054,7 @@ func (x *TransitionResponse) String() string {
 func (*TransitionResponse) ProtoMessage() {}
 
 func (x *TransitionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[11]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -847,7 +1067,7 @@ func (x *TransitionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransitionResponse.ProtoReflect.Descriptor instead.
 func (*TransitionResponse) Descriptor() ([]byte, []int) {
-	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{11}
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *TransitionResponse) GetUpdated() bool {
@@ -890,7 +1110,22 @@ const file_tetral_queue_v1_queue_proto_rawDesc = "" +
 	"\bmax_jobs\x18\x04 \x01(\x05R\amaxJobs\x12*\n" +
 	"\x11lease_duration_ms\x18\x05 \x01(\x03R\x0fleaseDurationMs\">\n" +
 	"\rLeaseResponse\x12-\n" +
-	"\x04jobs\x18\x01 \x03(\v2\x19.tetral.queue.v1.QueueJobR\x04jobs\"\x99\x01\n" +
+	"\x04jobs\x18\x01 \x03(\v2\x19.tetral.queue.v1.QueueJobR\x04jobs\"\x83\x01\n" +
+	"\x19LeaseJobRunnerJobsRequest\x12\x19\n" +
+	"\bmax_jobs\x18\x01 \x01(\x05R\amaxJobs\x12\x1f\n" +
+	"\vlease_owner\x18\x02 \x01(\tR\n" +
+	"leaseOwner\x12*\n" +
+	"\x11lease_duration_ms\x18\x03 \x01(\x03R\x0fleaseDurationMs\"q\n" +
+	"\x1aLeaseJobRunnerJobsResponse\x12-\n" +
+	"\x04jobs\x18\x01 \x03(\v2\x19.tetral.queue.v1.QueueJobR\x04jobs\x12$\n" +
+	"\x0eretry_after_ms\x18\x02 \x01(\x05R\fretryAfterMs\"w\n" +
+	"\x1aReleaseUnstartedJobRequest\x12!\n" +
+	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x15\n" +
+	"\x06job_id\x18\x02 \x01(\tR\x05jobId\x12\x1f\n" +
+	"\vlease_token\x18\x03 \x01(\tR\n" +
+	"leaseToken\"7\n" +
+	"\x1bReleaseUnstartedJobResponse\x12\x18\n" +
+	"\aupdated\x18\x01 \x01(\bR\aupdated\"\x99\x01\n" +
 	"\x10HeartbeatRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x15\n" +
 	"\x06job_id\x18\x02 \x01(\tR\x05jobId\x12\x1f\n" +
@@ -936,9 +1171,11 @@ const file_tetral_queue_v1_queue_proto_rawDesc = "" +
 	"\x0eCancelResponse\x12'\n" +
 	"\x0fcancelled_count\x18\x01 \x01(\x05R\x0ecancelledCount\".\n" +
 	"\x12TransitionResponse\x12\x18\n" +
-	"\aupdated\x18\x01 \x01(\bR\aupdated2\xaf\x04\n" +
+	"\aupdated\x18\x01 \x01(\bR\aupdated2\x90\x06\n" +
 	"\fQueueService\x12F\n" +
-	"\x05Lease\x12\x1d.tetral.queue.v1.LeaseRequest\x1a\x1e.tetral.queue.v1.LeaseResponse\x12R\n" +
+	"\x05Lease\x12\x1d.tetral.queue.v1.LeaseRequest\x1a\x1e.tetral.queue.v1.LeaseResponse\x12m\n" +
+	"\x12LeaseJobRunnerJobs\x12*.tetral.queue.v1.LeaseJobRunnerJobsRequest\x1a+.tetral.queue.v1.LeaseJobRunnerJobsResponse\x12p\n" +
+	"\x13ReleaseUnstartedJob\x12+.tetral.queue.v1.ReleaseUnstartedJobRequest\x1a,.tetral.queue.v1.ReleaseUnstartedJobResponse\x12R\n" +
 	"\tHeartbeat\x12!.tetral.queue.v1.HeartbeatRequest\x1a\".tetral.queue.v1.HeartbeatResponse\x12G\n" +
 	"\x03Ack\x12\x1b.tetral.queue.v1.AckRequest\x1a#.tetral.queue.v1.TransitionResponse\x12K\n" +
 	"\x05Retry\x12\x1d.tetral.queue.v1.RetryRequest\x1a#.tetral.queue.v1.TransitionResponse\x12K\n" +
@@ -959,42 +1196,51 @@ func file_tetral_queue_v1_queue_proto_rawDescGZIP() []byte {
 	return file_tetral_queue_v1_queue_proto_rawDescData
 }
 
-var file_tetral_queue_v1_queue_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_tetral_queue_v1_queue_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_tetral_queue_v1_queue_proto_goTypes = []any{
-	(*QueueJob)(nil),           // 0: tetral.queue.v1.QueueJob
-	(*LeaseRequest)(nil),       // 1: tetral.queue.v1.LeaseRequest
-	(*LeaseResponse)(nil),      // 2: tetral.queue.v1.LeaseResponse
-	(*HeartbeatRequest)(nil),   // 3: tetral.queue.v1.HeartbeatRequest
-	(*HeartbeatResponse)(nil),  // 4: tetral.queue.v1.HeartbeatResponse
-	(*AckRequest)(nil),         // 5: tetral.queue.v1.AckRequest
-	(*RetryRequest)(nil),       // 6: tetral.queue.v1.RetryRequest
-	(*DeferRequest)(nil),       // 7: tetral.queue.v1.DeferRequest
-	(*DeadLetterRequest)(nil),  // 8: tetral.queue.v1.DeadLetterRequest
-	(*CancelRequest)(nil),      // 9: tetral.queue.v1.CancelRequest
-	(*CancelResponse)(nil),     // 10: tetral.queue.v1.CancelResponse
-	(*TransitionResponse)(nil), // 11: tetral.queue.v1.TransitionResponse
+	(*QueueJob)(nil),                    // 0: tetral.queue.v1.QueueJob
+	(*LeaseRequest)(nil),                // 1: tetral.queue.v1.LeaseRequest
+	(*LeaseResponse)(nil),               // 2: tetral.queue.v1.LeaseResponse
+	(*LeaseJobRunnerJobsRequest)(nil),   // 3: tetral.queue.v1.LeaseJobRunnerJobsRequest
+	(*LeaseJobRunnerJobsResponse)(nil),  // 4: tetral.queue.v1.LeaseJobRunnerJobsResponse
+	(*ReleaseUnstartedJobRequest)(nil),  // 5: tetral.queue.v1.ReleaseUnstartedJobRequest
+	(*ReleaseUnstartedJobResponse)(nil), // 6: tetral.queue.v1.ReleaseUnstartedJobResponse
+	(*HeartbeatRequest)(nil),            // 7: tetral.queue.v1.HeartbeatRequest
+	(*HeartbeatResponse)(nil),           // 8: tetral.queue.v1.HeartbeatResponse
+	(*AckRequest)(nil),                  // 9: tetral.queue.v1.AckRequest
+	(*RetryRequest)(nil),                // 10: tetral.queue.v1.RetryRequest
+	(*DeferRequest)(nil),                // 11: tetral.queue.v1.DeferRequest
+	(*DeadLetterRequest)(nil),           // 12: tetral.queue.v1.DeadLetterRequest
+	(*CancelRequest)(nil),               // 13: tetral.queue.v1.CancelRequest
+	(*CancelResponse)(nil),              // 14: tetral.queue.v1.CancelResponse
+	(*TransitionResponse)(nil),          // 15: tetral.queue.v1.TransitionResponse
 }
 var file_tetral_queue_v1_queue_proto_depIdxs = []int32{
 	0,  // 0: tetral.queue.v1.LeaseResponse.jobs:type_name -> tetral.queue.v1.QueueJob
-	1,  // 1: tetral.queue.v1.QueueService.Lease:input_type -> tetral.queue.v1.LeaseRequest
-	3,  // 2: tetral.queue.v1.QueueService.Heartbeat:input_type -> tetral.queue.v1.HeartbeatRequest
-	5,  // 3: tetral.queue.v1.QueueService.Ack:input_type -> tetral.queue.v1.AckRequest
-	6,  // 4: tetral.queue.v1.QueueService.Retry:input_type -> tetral.queue.v1.RetryRequest
-	7,  // 5: tetral.queue.v1.QueueService.Defer:input_type -> tetral.queue.v1.DeferRequest
-	8,  // 6: tetral.queue.v1.QueueService.DeadLetter:input_type -> tetral.queue.v1.DeadLetterRequest
-	9,  // 7: tetral.queue.v1.QueueService.Cancel:input_type -> tetral.queue.v1.CancelRequest
-	2,  // 8: tetral.queue.v1.QueueService.Lease:output_type -> tetral.queue.v1.LeaseResponse
-	4,  // 9: tetral.queue.v1.QueueService.Heartbeat:output_type -> tetral.queue.v1.HeartbeatResponse
-	11, // 10: tetral.queue.v1.QueueService.Ack:output_type -> tetral.queue.v1.TransitionResponse
-	11, // 11: tetral.queue.v1.QueueService.Retry:output_type -> tetral.queue.v1.TransitionResponse
-	11, // 12: tetral.queue.v1.QueueService.Defer:output_type -> tetral.queue.v1.TransitionResponse
-	11, // 13: tetral.queue.v1.QueueService.DeadLetter:output_type -> tetral.queue.v1.TransitionResponse
-	10, // 14: tetral.queue.v1.QueueService.Cancel:output_type -> tetral.queue.v1.CancelResponse
-	8,  // [8:15] is the sub-list for method output_type
-	1,  // [1:8] is the sub-list for method input_type
-	1,  // [1:1] is the sub-list for extension type_name
-	1,  // [1:1] is the sub-list for extension extendee
-	0,  // [0:1] is the sub-list for field type_name
+	0,  // 1: tetral.queue.v1.LeaseJobRunnerJobsResponse.jobs:type_name -> tetral.queue.v1.QueueJob
+	1,  // 2: tetral.queue.v1.QueueService.Lease:input_type -> tetral.queue.v1.LeaseRequest
+	3,  // 3: tetral.queue.v1.QueueService.LeaseJobRunnerJobs:input_type -> tetral.queue.v1.LeaseJobRunnerJobsRequest
+	5,  // 4: tetral.queue.v1.QueueService.ReleaseUnstartedJob:input_type -> tetral.queue.v1.ReleaseUnstartedJobRequest
+	7,  // 5: tetral.queue.v1.QueueService.Heartbeat:input_type -> tetral.queue.v1.HeartbeatRequest
+	9,  // 6: tetral.queue.v1.QueueService.Ack:input_type -> tetral.queue.v1.AckRequest
+	10, // 7: tetral.queue.v1.QueueService.Retry:input_type -> tetral.queue.v1.RetryRequest
+	11, // 8: tetral.queue.v1.QueueService.Defer:input_type -> tetral.queue.v1.DeferRequest
+	12, // 9: tetral.queue.v1.QueueService.DeadLetter:input_type -> tetral.queue.v1.DeadLetterRequest
+	13, // 10: tetral.queue.v1.QueueService.Cancel:input_type -> tetral.queue.v1.CancelRequest
+	2,  // 11: tetral.queue.v1.QueueService.Lease:output_type -> tetral.queue.v1.LeaseResponse
+	4,  // 12: tetral.queue.v1.QueueService.LeaseJobRunnerJobs:output_type -> tetral.queue.v1.LeaseJobRunnerJobsResponse
+	6,  // 13: tetral.queue.v1.QueueService.ReleaseUnstartedJob:output_type -> tetral.queue.v1.ReleaseUnstartedJobResponse
+	8,  // 14: tetral.queue.v1.QueueService.Heartbeat:output_type -> tetral.queue.v1.HeartbeatResponse
+	15, // 15: tetral.queue.v1.QueueService.Ack:output_type -> tetral.queue.v1.TransitionResponse
+	15, // 16: tetral.queue.v1.QueueService.Retry:output_type -> tetral.queue.v1.TransitionResponse
+	15, // 17: tetral.queue.v1.QueueService.Defer:output_type -> tetral.queue.v1.TransitionResponse
+	15, // 18: tetral.queue.v1.QueueService.DeadLetter:output_type -> tetral.queue.v1.TransitionResponse
+	14, // 19: tetral.queue.v1.QueueService.Cancel:output_type -> tetral.queue.v1.CancelResponse
+	11, // [11:20] is the sub-list for method output_type
+	2,  // [2:11] is the sub-list for method input_type
+	2,  // [2:2] is the sub-list for extension type_name
+	2,  // [2:2] is the sub-list for extension extendee
+	0,  // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_tetral_queue_v1_queue_proto_init() }
@@ -1008,7 +1254,7 @@ func file_tetral_queue_v1_queue_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_tetral_queue_v1_queue_proto_rawDesc), len(file_tetral_queue_v1_queue_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

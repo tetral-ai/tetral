@@ -38,11 +38,11 @@ func TestPostgreSQLRuntimePodLossSweepPreservesActiveToolOwnerAndIsIdempotent(t 
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
 
-	repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default")
+	repaired, err := runRuntimePodLossRepair(context.Background(), store)
 	if err != nil || repaired != 1 {
 		t.Fatalf("first pod-loss sweep = %d/%v; want 1/nil", repaired, err)
 	}
-	if repaired, err = store.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 0 {
+	if repaired, err = runRuntimePodLossRepair(context.Background(), store); err != nil || repaired != 0 {
 		t.Fatalf("second pod-loss sweep = %d/%v; want 0/nil", repaired, err)
 	}
 
@@ -72,7 +72,7 @@ func TestPostgreSQLRuntimePodLossSweepPreservesActiveToolOwnerAndIsIdempotent(t 
 	if requestEnds != 1 || toolResults != 0 || sessionErrors != 0 || sessionStatus != "idle" || bindingRows != 0 {
 		t.Fatalf("recovery facts end=%d result=%d errors=%d status=%s bindings=%d; want 1/0/0/idle/0", requestEnds, toolResults, sessionErrors, sessionStatus, bindingRows)
 	}
-	for _, event := range []string{"runtime_pod_loss_detected", "runtime_pod_loss_repaired", "runtime_pod_loss_sweep_completed"} {
+	for _, event := range []string{"runtime_pod_loss_detected", "runtime_pod_loss_repaired", "runtime_pod_loss_repair_run_completed"} {
 		if !strings.Contains(logs.String(), `"event":"`+event+`"`) {
 			t.Fatalf("pod-loss logs missing %s: %s", event, logs.String())
 		}
@@ -96,11 +96,12 @@ func TestPostgreSQLRuntimePodLossSweepPreservesActiveToolOwnerAndIsIdempotent(t 
 	}
 	var summaries []map[string]any
 	for _, record := range records {
-		if record["event"] == "runtime_pod_loss_sweep_completed" {
+		if record["event"] == "runtime_pod_loss_repair_run_completed" {
 			summaries = append(summaries, record)
 		}
 	}
-	if len(summaries) != 2 || summaries[0]["level"] != "INFO" || summaries[0]["outcome"] != "completed" || summaries[0]["candidate.count"] != float64(1) || summaries[0]["repaired.count"] != float64(1) || summaries[1]["candidate.count"] != float64(0) || summaries[1]["repaired.count"] != float64(0) {
+	// The second run finds no binding at all and stays quiet.
+	if len(summaries) != 1 || summaries[0]["level"] != "INFO" || summaries[0]["outcome"] != "completed" || summaries[0]["candidate.count"] != float64(1) || summaries[0]["repaired.count"] != float64(1) {
 		t.Fatalf("idempotent pod-loss summaries = %#v; want one repair then no work", summaries)
 	}
 }
@@ -122,7 +123,7 @@ func TestPostgreSQLRuntimePodLossPreservesRequestForExactInterruptOwner(t *testi
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
 
-	repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default")
+	repaired, err := runRuntimePodLossRepair(context.Background(), store)
 	if err != nil || repaired != 1 {
 		t.Fatalf("pod-loss repair under interrupt = %d/%v; want 1/nil", repaired, err)
 	}
@@ -227,7 +228,7 @@ func TestPostgreSQLRuntimePodLossSweepRequiresFreshLossEvidence(t *testing.T) {
 				return pod, nil
 			}
 			store.TargetResolver = resolver
-			repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default")
+			repaired, err := runRuntimePodLossRepair(context.Background(), store)
 			if (err != nil) != tc.wantErr || repaired != tc.wantRepaired {
 				t.Fatalf("sweep = %d/%v; want %d repaired, error %t", repaired, err, tc.wantRepaired, tc.wantErr)
 			}
@@ -254,7 +255,7 @@ func TestPostgreSQLRuntimePodLossSweepRequiresFreshLossEvidence(t *testing.T) {
 			}
 			if !tc.ready {
 				records := decodeRuntimePodLossLogRecords(t, &logs)
-				if len(records) != 1 || records[0]["event"] != "runtime_pod_loss_sweep_completed" || records[0]["level"] != "INFO" || records[0]["outcome"] != "snapshot_not_ready" || records[0]["candidate.count"] != float64(0) {
+				if len(records) != 1 || records[0]["event"] != "runtime_pod_loss_repair_run_completed" || records[0]["level"] != "INFO" || records[0]["outcome"] != "snapshot_not_ready" || records[0]["candidate.count"] != float64(0) {
 					t.Fatalf("snapshot-not-ready logs = %#v; want one finite no-work summary", records)
 				}
 			}
@@ -268,7 +269,7 @@ func TestPostgreSQLRuntimePodLossSweepLeavesIdleBindingForInputRecovery(t *testi
 	store := runtimePodLossSweepStore(t, runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
-	if repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 0 {
+	if repaired, err := runRuntimePodLossRepair(context.Background(), store); err != nil || repaired != 0 {
 		t.Fatalf("idle proactive sweep = %d/%v; want 0/nil", repaired, err)
 	}
 
@@ -328,7 +329,7 @@ func TestPostgreSQLRuntimePodLossSweepIncludesReschedulingSession(t *testing.T) 
 	store := runtimePodLossSweepStore(t, runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
-	if repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 1 {
+	if repaired, err := runRuntimePodLossRepair(context.Background(), store); err != nil || repaired != 1 {
 		t.Fatalf("rescheduling-session sweep = %d/%v; want 1/nil", repaired, err)
 	}
 }
@@ -360,7 +361,7 @@ func TestPostgreSQLRuntimePodLossSweepIncludesAcceptedInputBeforeRunningStatus(t
 	store := runtimePodLossSweepStore(t, runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
-	if repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 1 {
+	if repaired, err := runRuntimePodLossRepair(context.Background(), store); err != nil || repaired != 1 {
 		t.Fatalf("pre-running accepted-input sweep = %d/%v; want 1/nil", repaired, err)
 	}
 	var inboxStatus, queueStatus string
@@ -375,7 +376,7 @@ func TestPostgreSQLRuntimePodLossSweepIncludesAcceptedInputBeforeRunningStatus(t
 	if inboxStatus != "queued" || queueStatus != queue.StatusPending {
 		t.Fatalf("pre-running accepted-input handoff = inbox %q / Queue %q; want queued / pending", inboxStatus, queueStatus)
 	}
-	if repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 0 {
+	if repaired, err := runRuntimePodLossRepair(context.Background(), store); err != nil || repaired != 0 {
 		t.Fatalf("repeated pre-running accepted-input sweep = %d/%v; want 0/nil", repaired, err)
 	}
 }
@@ -389,7 +390,7 @@ func TestPostgreSQLRuntimePodLossSweepRequiresMatchingRuntimeStatusBinding(t *te
 	store := runtimePodLossSweepStore(t, runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
-	if repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 0 {
+	if repaired, err := runRuntimePodLossRepair(context.Background(), store); err != nil || repaired != 0 {
 		t.Fatalf("mismatched-status sweep = %d/%v; want 0/nil", repaired, err)
 	}
 	var bindingRows int
@@ -398,78 +399,88 @@ func TestPostgreSQLRuntimePodLossSweepRequiresMatchingRuntimeStatusBinding(t *te
 	}
 }
 
-func TestPostgreSQLRuntimePodLossSweepFreezesCensusBeforeWatcherAndContinuesPages(t *testing.T) {
+// Trace: one large Workspace's first raw page nominates 12 lost bindings. A
+// watcher that is not ready leaves the cycle's cursor where it was. A run then
+// performs 8 mutations and keeps the other 4; the next run drains them before
+// reading on, crosses an all-inactive page and ends the cycle. A binding
+// replaced after nomination is stale at its locked recheck and is not mutated.
+func TestPostgreSQLRuntimePodLossRepairRunsBoundedPagesAcrossRuns(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const healthyCount = 33
-	const lostCount = 33
-	healthy := make([]enginekubernetes.BindingCandidate, 0, healthyCount)
-	for index := 0; index < healthyCount+lostCount; index++ {
-		candidate := seedRuntimePodLossSweepSession(t, admin, 100+index, "running")
-		if index < healthyCount {
-			healthy = append(healthy, enginekubernetes.BindingCandidate{
-				Namespace: candidate.binding.Namespace,
-				PodName:   candidate.binding.PodName,
-				PodUID:    candidate.binding.PodUID,
-				PodIP:     candidate.binding.PodIP,
-			})
-		}
+	active := map[int]bool{260: true, 261: true}
+	for index := 0; index < 12; index++ {
+		active[3+index*10] = true
 	}
-	rebound := seedRuntimePodLossSweepSession(t, admin, 180, "running")
-	watcherCalls := 0
-	inserted := runtimePodLossSweepSeed{}
-	reboundBindingID := "bind_pod_loss_rebound"
+	seeds := map[int]runtimePodLossSweepSeed{}
+	for index := 0; index < 262; index++ {
+		status := "idle"
+		if active[index] {
+			status = "running"
+		}
+		seeds[index] = seedRuntimePodLossSweepSession(t, admin, index, status)
+	}
+	ready := false
+	rebound := seeds[3]
+	var rebindOnce sync.Once
 	var logs bytes.Buffer
 	store := runtimePodLossSweepStore(t, runtime, &logs, func() enginekubernetes.BindingVisibilitySnapshot {
-		watcherCalls++
-		if watcherCalls == 1 {
-			inserted = seedRuntimePodLossSweepSession(t, admin, 190, "running")
-			if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings
-			SET binding_id=$2, binding_generation=binding_generation+100
-			WHERE workspace_id='default' AND session_id=$1`, rebound.sessionID, reboundBindingID); err != nil {
-				t.Fatalf("rebind after census snapshot: %v", err)
-			}
-			if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
-			SET binding_id=$2, binding_generation=binding_generation+100
-			WHERE workspace_id='default' AND session_id=$1`, rebound.sessionID, reboundBindingID); err != nil {
-				t.Fatalf("rebind status after census snapshot: %v", err)
-			}
+		if ready {
+			// The page query already ran: the nominated identity is frozen.
+			rebindOnce.Do(func() {
+				for _, statement := range []string{
+					`UPDATE session_runtime_bindings SET binding_generation=binding_generation+1000 WHERE workspace_id='default' AND session_id=$1`,
+					`UPDATE session_runtime_status SET binding_generation=binding_generation+1000 WHERE workspace_id='default' AND session_id=$1`,
+				} {
+					if _, err := admin.ExecContext(context.Background(), statement, rebound.sessionID); err != nil {
+						t.Errorf("replace nominated binding: %v", err)
+					}
+				}
+			})
 		}
-		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, healthy)
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(ready, nil)
 	})
+	owner := NewRuntimePodLossRepair(store, nil, store.Logger)
+	runningBindings := func() int {
+		var count int
+		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_bindings binding
+			JOIN session_runtime_status runtime ON runtime.workspace_id=binding.workspace_id AND runtime.session_id=binding.session_id
+			WHERE runtime.status='running'`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
 
-	repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default")
-	if err != nil {
-		t.Fatalf("frozen pod-loss sweep: %v", err)
+	notReady := owner.RepairRun(context.Background())
+	if notReady.Outcome != "snapshot_not_ready" || notReady.Pages != 0 || !owner.inCycle || owner.hasAfter {
+		t.Fatalf("unready run = %+v inCycle=%t hasAfter=%t; want no page consumed", notReady, owner.inCycle, owner.hasAfter)
 	}
-	if watcherCalls < 2 || runtimePodLossCensusPageSize != 32 || repaired != lostCount {
-		t.Fatalf("frozen sweep calls=%d page_size=%d repaired=%d; want rechecked snapshots/32/%d", watcherCalls, runtimePodLossCensusPageSize, repaired, lostCount)
+	ready = true
+	first := owner.RepairRun(context.Background())
+	if first.Pages != 1 || first.Candidates != 12 || first.Repaired != 7 || first.Stale != 1 || len(owner.pending) != 4 {
+		t.Fatalf("first run = %+v pending=%d; want one page, 12 candidates, 8 mutations (one stale), 4 retained", first, len(owner.pending))
 	}
-	var insertedRows, reboundRows, remainingInitiallyLost int
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1`, inserted.sessionID).Scan(&insertedRows); err != nil {
-		t.Fatalf("count post-snapshot insert: %v", err)
+	if !owner.hasAfter || owner.cursor.sessionID != seeds[127].sessionID {
+		t.Fatalf("cursor after the first page = %+v; want the last raw key of page one", owner.cursor)
 	}
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1 AND binding_id=$2`, rebound.sessionID, reboundBindingID).Scan(&reboundRows); err != nil {
-		t.Fatalf("count post-snapshot rebind: %v", err)
+	if got := runningBindings(); got != 7 {
+		t.Fatalf("running bindings after the first run = %d; want 7", got)
 	}
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_bindings
-		WHERE workspace_id='default' AND session_id >= 'sesn_pod_loss_sweep_133' AND session_id <= 'sesn_pod_loss_sweep_165'`).Scan(&remainingInitiallyLost); err != nil {
-		t.Fatalf("count initially visible lost bindings: %v", err)
+	second := owner.RepairRun(context.Background())
+	if second.Pages != 2 || second.Candidates != 2 || second.Repaired != 6 || owner.inCycle || len(owner.pending) != 0 {
+		t.Fatalf("second run = %+v inCycle=%t; want 4 retained repairs, then the inactive page and the last page", second, owner.inCycle)
 	}
-	if insertedRows != 1 || reboundRows != 1 || remainingInitiallyLost != 0 {
-		t.Fatalf("frozen sweep survivors inserted=%d rebound=%d initially_lost=%d; want 1/1/0", insertedRows, reboundRows, remainingInitiallyLost)
+	if got := runningBindings(); got != 1 {
+		t.Fatalf("running bindings after the cycle = %d; want only the replaced binding", got)
 	}
-	records := decodeRuntimePodLossLogRecords(t, &logs)
-	var summary map[string]any
-	for _, record := range records {
-		if record["event"] == "runtime_pod_loss_sweep_completed" {
-			summary = record
+	var staleReason any
+	var unreadyLogged bool
+	for _, record := range decodeRuntimePodLossLogRecords(t, &logs) {
+		if record["event"] == "runtime_pod_loss_stale" && record["session.id"] == rebound.sessionID {
+			staleReason = record["stale.reason"]
 		}
-		if record["event"] == "runtime_pod_loss_stale" && record["level"] != "INFO" {
-			t.Fatalf("stale record level = %v; want INFO", record["level"])
-		}
+		unreadyLogged = unreadyLogged || (record["event"] == "runtime_pod_loss_repair_run_completed" && record["outcome"] == "snapshot_not_ready")
 	}
-	if summary == nil || summary["page.count"] != float64(3) || summary["candidate.count"] != float64(lostCount+1) || summary["repaired.count"] != float64(lostCount) || summary["stale.count"] != float64(1) {
-		t.Fatalf("frozen sweep summary = %#v; want pages/candidates/repaired/stale 3/%d/%d/1", summary, lostCount+1, lostCount)
+	if staleReason != "binding_changed" || !unreadyLogged {
+		t.Fatalf("stale reason = %v, unready run logged = %t; want binding_changed and a logged unready run", staleReason, unreadyLogged)
 	}
 }
 
@@ -497,7 +508,7 @@ func TestPostgreSQLRuntimePodLossSweepConvergesConcurrentReplicasAndActiveFences
 	results := make(chan result, 2)
 	for _, store := range stores {
 		go func(store *PostgreSQLRuntimeDeliveryStore) {
-			repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default")
+			repaired, err := runRuntimePodLossRepair(context.Background(), store)
 			results <- result{repaired: repaired, err: err}
 		}(store)
 	}
@@ -513,7 +524,7 @@ func TestPostgreSQLRuntimePodLossSweepConvergesConcurrentReplicasAndActiveFences
 		}
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
-	if repaired, err := inactiveStore.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 0 {
+	if repaired, err := runRuntimePodLossRepair(context.Background(), inactiveStore); err != nil || repaired != 0 {
 		t.Fatalf("inactive-fenced sweep = %d/%v; want 0/nil", repaired, err)
 	}
 	var bindingRows int
@@ -550,7 +561,7 @@ func TestPostgreSQLRuntimePodLossSweepTreatsDeletedFrozenCandidateAsInactiveAndC
 		}
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
-	repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default")
+	repaired, err := runRuntimePodLossRepair(context.Background(), store)
 	if err != nil || repaired != 1 {
 		t.Fatalf("pod-loss sweep after frozen candidate deletion = %d/%v; want 1/nil", repaired, err)
 	}
@@ -598,7 +609,7 @@ func TestPostgreSQLRuntimePodLossSweepTreatsDeletedFrozenCandidateAsInactiveAndC
 		if record["event"] == "runtime_pod_loss_stale" && record["session.id"] == deleted.sessionID {
 			staleRecord = record
 		}
-		if record["event"] == "runtime_pod_loss_sweep_completed" {
+		if record["event"] == "runtime_pod_loss_repair_run_completed" {
 			summary = record
 		}
 	}
@@ -665,7 +676,7 @@ func TestPostgreSQLRuntimePodLossSweepRacingInputWritesOneCloseout(t *testing.T)
 	}
 	seedRuntimeInboxBirthForJob(t, admin, job)
 	go func() {
-		repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default")
+		repaired, err := runRuntimePodLossRepair(context.Background(), store)
 		sweepResults <- sweepResult{repaired: repaired, err: err}
 	}()
 	go func() {
@@ -749,12 +760,16 @@ func TestPostgreSQLRuntimePodLossSweepIsolatesEarlyPageFailureWithListenerConnec
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	repaired, sweepErr := store.RepairLostRuntimeBindings(ctx, "default")
-	if repaired != candidateCount-1 || sweepErr == nil || !strings.Contains(sweepErr.Error(), broken.sessionID) {
-		t.Fatalf("isolated candidate sweep = %d/%v; want %d later repairs plus early error", repaired, sweepErr, candidateCount-1)
+	owner := NewRuntimePodLossRepair(store, nil, store.Logger)
+	var repaired, failed int
+	for run := 0; run < 5; run++ {
+		summary := owner.RepairRun(ctx)
+		repaired += summary.Repaired
+		failed += summary.Failed
 	}
-	if strings.Contains(sweepErr.Error(), "invalid") {
-		t.Fatalf("candidate error was not normalized: %v", sweepErr)
+	// A later cycle legitimately retries the broken candidate.
+	if repaired != candidateCount-1 || failed < 1 {
+		t.Fatalf("isolated candidate runs repaired=%d failed=%d; want %d later repairs despite the early failure", repaired, failed, candidateCount-1)
 	}
 	var laterBindings int
 	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1`, later.sessionID).Scan(&laterBindings); err != nil || laterBindings != 0 {
@@ -769,15 +784,17 @@ func TestPostgreSQLRuntimePodLossSweepIsolatesEarlyPageFailureWithListenerConnec
 		switch record["event"] {
 		case "runtime_pod_loss_repair_failed":
 			failure = record
-		case "runtime_pod_loss_sweep_completed":
-			summary = record
+		case "runtime_pod_loss_repair_run_completed":
+			if summary == nil {
+				summary = record
+			}
 		}
 	}
 	if failure == nil || failure["level"] != "ERROR" || failure["error.code"] != "candidate_mutation_failed" || failure["error.message_safe"] != "runtime pod-loss candidate repair failed" {
 		t.Fatalf("candidate failure record = %#v; want normalized ERROR tuple", failure)
 	}
-	if summary == nil || summary["level"] != "ERROR" || summary["page.count"] != float64(2) || summary["candidate.count"] != float64(candidateCount) || summary["repaired.count"] != float64(candidateCount-1) || summary["failed.count"] != float64(1) {
-		t.Fatalf("candidate failure summary = %#v; want two-page aggregate", summary)
+	if summary == nil || summary["level"] != "ERROR" || summary["page.count"] != float64(1) || summary["candidate.count"] != float64(candidateCount) || summary["failed.count"] != float64(1) {
+		t.Fatalf("first run summary = %#v; want one page of every candidate with the early failure", summary)
 	}
 }
 
@@ -872,5 +889,138 @@ func registerPlacementCandidateForTest(t *testing.T, admin *sql.DB, candidate en
 	}
 	if _, _, err := runtimecontrol.ReportProcess(context.Background(), client, identity, registered.RegistrationReceipt, runtimecontrol.ProcessAccepting); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// runRuntimePodLossRepair performs one production repair run from a new
+// discovery cycle and reports its repairs; any failed candidate or page is an
+// error.
+func runRuntimePodLossRepair(ctx context.Context, store *PostgreSQLRuntimeDeliveryStore) (int, error) {
+	run := NewRuntimePodLossRepair(store, nil, store.Logger).RepairRun(ctx)
+	return run.Repaired, run.Err()
+}
+
+// repairRunRecorder forwards the repaired count of each completed repair run.
+type repairRunRecorder struct{ repaired chan<- int64 }
+
+func (repairRunRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (h repairRunRecorder) Handle(_ context.Context, record slog.Record) error {
+	if record.Message != "runtime_pod_loss_repair_run_completed" {
+		return nil
+	}
+	record.Attrs(func(attr slog.Attr) bool {
+		if attr.Key == "repaired.count" {
+			h.repaired <- attr.Value.Int64()
+			return false
+		}
+		return true
+	})
+	return nil
+}
+func (h repairRunRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h repairRunRecorder) WithGroup(string) slog.Handler      { return h }
+
+type repairOwnerTimer struct {
+	duration time.Duration
+	fire     chan time.Time
+}
+
+func TestRuntimePodLossRepairRunsAtStartupOnPodDeletionAndAtItsDeadline(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	// An idle retained binding gives every run one raw page, so each run is
+	// reported; it is never nominated.
+	seedRuntimePodLossSweepSession(t, admin, 0, "idle")
+	store := runtimePodLossSweepStore(t, runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
+	})
+	repaired := make(chan int64, 8)
+	signal := NewRuntimePodLossRepairSignal()
+	owner := NewRuntimePodLossRepair(store, signal, slog.New(repairRunRecorder{repaired: repaired}))
+	timers := make(chan repairOwnerTimer, 8)
+	// Unbuffered timer channels: a fire completes only while Run waits on it.
+	owner.after = func(duration time.Duration) <-chan time.Time {
+		timer := repairOwnerTimer{duration: duration, fire: make(chan time.Time)}
+		timers <- timer
+		return timer.fire
+	}
+	// The production Pod watcher cache is the Pod-deletion signal source.
+	pods := enginekubernetes.NewWatcherCache("tetral-agent-runtime", enginekubernetes.WithPodDeleted(signal.Mark))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stopped := make(chan struct{})
+	go func() { defer close(stopped); owner.Run(ctx) }()
+
+	nextRun := func(step string) (spacing, deadline repairOwnerTimer) {
+		t.Helper()
+		for index, want := range []time.Duration{runtimePodLossRepairMinSpacing, runtimePodLossRepairInterval} {
+			select {
+			case timer := <-timers:
+				if timer.duration != want {
+					t.Fatalf("%s timer %d = %s; want %s", step, index, timer.duration, want)
+				}
+				if index == 0 {
+					spacing = timer
+				} else {
+					deadline = timer
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("%s did not start a repair run", step)
+			}
+		}
+		return spacing, deadline
+	}
+	runRepaired := func(step string, want int64) {
+		t.Helper()
+		select {
+		case got := <-repaired:
+			if got != want {
+				t.Fatalf("%s repaired %d bindings; want %d", step, got, want)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s run did not complete", step)
+		}
+	}
+
+	fire := func(timer repairOwnerTimer, name string) {
+		t.Helper()
+		select {
+		case timer.fire <- time.Now():
+		case <-time.After(10 * time.Second):
+			t.Fatalf("repair owner did not wait on its %s timer", name)
+		}
+	}
+
+	// Startup runs once without waiting for any timer or signal.
+	spacing, _ := nextRun("startup")
+	runRepaired("startup", 0)
+
+	// A Pod deletion before the 1 s spacing elapses is held: Run must still be
+	// waiting on the spacing timer, not starting a run. Once the spacing
+	// elapses, the deletion starts the next run before the periodic deadline,
+	// and that run repairs a binding lost since startup.
+	seedRuntimePodLossSweepSession(t, admin, 1, "running")
+	pods.DeletePod("runtime-pod-sweep-001")
+	select {
+	case spacing.fire <- time.Now():
+	case timer := <-timers:
+		t.Fatalf("a Pod deletion started a run (timer %s) before the minimum spacing elapsed", timer.duration)
+	case <-time.After(10 * time.Second):
+		t.Fatal("repair owner did not wait on its spacing timer after startup")
+	}
+	spacing, deadline := nextRun("pod deletion")
+	runRepaired("pod deletion", 1)
+
+	// With no further signal, the periodic deadline starts the next run.
+	seedRuntimePodLossSweepSession(t, admin, 2, "running")
+	fire(spacing, "spacing")
+	fire(deadline, "deadline")
+	nextRun("deadline")
+	runRepaired("deadline", 1)
+
+	cancel()
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("repair owner did not stop after cancellation")
 	}
 }

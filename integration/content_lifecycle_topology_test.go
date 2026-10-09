@@ -227,11 +227,11 @@ func startContentE2EWithOptions(t *testing.T, scenario string, lost, cold bool, 
 	}
 	execute := &tetralsandbox.SandboxToolExecutionJobRunner{Queue: q, Coordinator: tetralsandbox.NewPostgreSQLSandboxExecutionCoordinator(client, 30*time.Minute), Providers: providers, Media: tetralsandbox.NewPostgreSQLSandboxMediaMaterializer(client, objects), Config: tetralsandbox.SandboxToolExecutionRunnerConfig{WorkspaceID: "default", LeaseOwner: "content-e2e-tool", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Second, PreparationTimeout: preparationTimeout}}
 	delivery := contentCrashDeliveryStore(t, pools.OpenWorkload(t, "job_runner", nil), &contentCrashRuntime{contentRuntimeChild: runtime, httpURL: httpURL}, pod)
-	runner := &jobrunner.JobRunner{Queue: q, Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: delivery, Sender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}, Config: jobrunner.JobRunnerConfig{LeaseOwner: "content-e2e-delivery", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Second}}
+	runner := &jobrunner.JobRunner{Queue: q, Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: delivery, Sender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}, Config: jobrunner.JobRunnerConfig{LeaseOwner: "content-e2e-delivery", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Second}}
 	for _, worker := range []struct {
 		name string
 		run  func(context.Context) (bool, error)
-	}{{"activation", activate.RunOnceWithActivity}, {"materialization", materialize.RunOnceWithActivity}, {"capture", capture.RunOnceWithActivity}, {"execution", execute.RunOnceWithActivity}, {"delivery", runner.RunOnceWithActivity}} {
+	}{{"activation", activate.RunOnceWithActivity}, {"materialization", materialize.RunOnceWithActivity}, {"capture", capture.RunOnceWithActivity}, {"execution", execute.RunOnceWithActivity}, {"delivery", func(ctx context.Context) (bool, error) { return acquireAndJoinJobRunnerActive(ctx, runner) }}} {
 		startContentWorkerContext(ctx, t, worker.run, worker.name)
 	}
 	for worker := 1; worker < overrides.ExecutionWorkers; worker++ {
@@ -273,7 +273,7 @@ func startContentE2EWithOptions(t *testing.T, scenario string, lost, cold bool, 
 			t.Fatal("successor Runtime readiness missing")
 		}
 		repair := contentCrashDeliveryStore(t, pools.OpenWorkload(t, "job_runner", nil), &contentCrashRuntime{contentRuntimeChild: successor, httpURL: address}, pod)
-		count, err := repair.RepairLostRuntimeBindings(ctx, "default")
+		count, err := repairRuntimePodLoss(ctx, repair)
 		if err != nil || count < 0 || count > 1 {
 			t.Fatalf("actual superseded Runtime repair=%d/%v", count, err)
 		}

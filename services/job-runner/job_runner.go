@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
@@ -19,17 +18,14 @@ import (
 )
 
 type QueueClient interface {
-	Lease(context.Context, *queuev1.LeaseRequest) (*queuev1.LeaseResponse, error)
+	LeaseJobRunnerJobs(context.Context, *queuev1.LeaseJobRunnerJobsRequest) (*queuev1.LeaseJobRunnerJobsResponse, error)
+	ReleaseUnstartedJob(context.Context, *queuev1.ReleaseUnstartedJobRequest) (*queuev1.ReleaseUnstartedJobResponse, error)
 	Heartbeat(context.Context, *queuev1.HeartbeatRequest) (*queuev1.HeartbeatResponse, error)
 	Ack(context.Context, *queuev1.AckRequest) (*queuev1.TransitionResponse, error)
 	Retry(context.Context, *queuev1.RetryRequest) (*queuev1.TransitionResponse, error)
 	Defer(context.Context, *queuev1.DeferRequest) (*queuev1.TransitionResponse, error)
 	DeadLetter(context.Context, *queuev1.DeadLetterRequest) (*queuev1.TransitionResponse, error)
 	Cancel(context.Context, *queuev1.CancelRequest) (*queuev1.CancelResponse, error)
-}
-
-type WorkspaceLister interface {
-	ListIDs(context.Context) ([]workspace.ID, error)
 }
 
 type queueServiceClientAdapter struct {
@@ -40,8 +36,12 @@ func QueueClientFromGRPC(client queuev1.QueueServiceClient) QueueClient {
 	return queueServiceClientAdapter{client: client}
 }
 
-func (a queueServiceClientAdapter) Lease(ctx context.Context, request *queuev1.LeaseRequest) (*queuev1.LeaseResponse, error) {
-	return a.client.Lease(ctx, request)
+func (a queueServiceClientAdapter) LeaseJobRunnerJobs(ctx context.Context, request *queuev1.LeaseJobRunnerJobsRequest) (*queuev1.LeaseJobRunnerJobsResponse, error) {
+	return a.client.LeaseJobRunnerJobs(ctx, request)
+}
+
+func (a queueServiceClientAdapter) ReleaseUnstartedJob(ctx context.Context, request *queuev1.ReleaseUnstartedJobRequest) (*queuev1.ReleaseUnstartedJobResponse, error) {
+	return a.client.ReleaseUnstartedJob(ctx, request)
 }
 
 func (a queueServiceClientAdapter) Heartbeat(ctx context.Context, request *queuev1.HeartbeatRequest) (*queuev1.HeartbeatResponse, error) {
@@ -92,17 +92,24 @@ type malformedRuntimeInputCustodyFinalizer interface {
 	FinalizeMalformedRuntimeInputCustody(context.Context, MalformedRuntimeInputLease) (MalformedRuntimeInputCustodyResult, error)
 }
 
-type RuntimePodLossRepairer interface {
-	RepairLostRuntimeBindings(context.Context, string) (int, error)
-}
-
+// JobRunner executes Queue-selected Runtime jobs in at most Config.MaxJobs
+// slots. Queue chooses workspaces; the Runner supplies only free capacity.
+// AcquisitionContext, when set, closes acquisition: no response observed
+// afterwards is dispatched. Repair, when set, is the independent Pod-loss
+// repair owner that RunJobRunnerLoop starts and joins.
 type JobRunner struct {
 	Queue              QueueClient
 	AcquisitionContext context.Context
-	Workspaces         WorkspaceLister
 	Deliverer          RuntimeJobDeliverer
+	Repair             *RuntimePodLossRepair
 	Config             JobRunnerConfig
 	Logger             *slog.Logger
+
+	slots *jobRunnerSlots
+	wake  *queue.WakeSignal
+	// waitTimer, when set by in-package tests, replaces the coordinator's wait
+	// timer so delay choices are observable without wall-clock waits.
+	waitTimer func(time.Duration) <-chan time.Time
 }
 
 type RuntimeJob struct {
@@ -156,132 +163,6 @@ type RuntimeDeliveryResult struct {
 	AttemptedBindingGeneration int64
 	AttemptedTargetPodUID      string
 	AttemptedRuntimeProcessID  string
-}
-
-func (r *JobRunner) RunOnce(ctx context.Context) error {
-	_, err := r.RunOnceWithActivity(ctx)
-	return err
-}
-
-func (r *JobRunner) RunOnceWithActivity(ctx context.Context) (bool, error) {
-	if r == nil || r.Queue == nil {
-		return false, errors.New("job runner queue client is required")
-	}
-	if r.Workspaces == nil {
-		return false, errors.New("job runner workspace lister is required")
-	}
-	if r.Deliverer == nil {
-		return false, errors.New("job runner runtime job deliverer is required")
-	}
-	cfg := r.Config
-	if cfg.LeaseOwner == "" {
-		cfg.LeaseOwner = defaultJobRunnerLeaseOwner
-	}
-	if cfg.MaxJobs <= 0 {
-		cfg.MaxJobs = defaultJobRunnerMaxJobs
-	}
-	if cfg.LeaseDuration <= 0 {
-		cfg.LeaseDuration = defaultJobRunnerLeaseDuration
-	}
-	if cfg.HeartbeatInterval <= 0 {
-		cfg.HeartbeatInterval = cfg.LeaseDuration / 3
-	}
-	workspaceIDs, err := r.Workspaces.ListIDs(ctx)
-	if err != nil {
-		return false, err
-	}
-	hadWork := false
-	// One workspace's failure must not starve the workspaces after it: the list
-	// is deterministically ordered, so aborting the sweep would permanently
-	// withhold repair from every workspace sorted later. Failures are collected
-	// and reported after the whole list has had its turn. A cancelled context is
-	// the exception — it means the runner itself is stopping.
-	var sweepErrs []error
-	for _, workspaceID := range workspaceIDs {
-		if ctx.Err() != nil || (r.AcquisitionContext != nil && r.AcquisitionContext.Err() != nil) {
-			sweepErrs = append(sweepErrs, ctx.Err())
-			break
-		}
-		if workspaceID == "" {
-			sweepErrs = append(sweepErrs, errors.New("job runner discovered an empty workspace id"))
-			continue
-		}
-		workspaceHadWork, err := r.runWorkspaceOnce(ctx, workspaceID.String(), cfg)
-		hadWork = hadWork || workspaceHadWork
-		if err != nil {
-			sweepErrs = append(sweepErrs, fmt.Errorf("workspace %s: %w", workspaceID, err))
-		}
-	}
-	return hadWork, errors.Join(sweepErrs...)
-}
-
-func (r *JobRunner) runWorkspaceOnce(ctx context.Context, workspaceID string, cfg JobRunnerConfig) (bool, error) {
-	hadWork := false
-	var phaseErrs []error
-	if repairer, ok := r.Deliverer.(RuntimePodLossRepairer); ok {
-		repaired, err := repairer.RepairLostRuntimeBindings(ctx, workspaceID)
-		hadWork = repaired > 0
-		if err != nil {
-			phaseErrs = append(phaseErrs, fmt.Errorf("runtime pod-loss repair: %w", err))
-		}
-		if ctx.Err() != nil {
-			return hadWork, errors.Join(append(phaseErrs, ctx.Err())...)
-		}
-	}
-	acquisitionCtx := ctx
-	if r.AcquisitionContext != nil {
-		acquisitionCtx = r.AcquisitionContext
-	}
-	if acquisitionCtx.Err() != nil {
-		return hadWork, errors.Join(phaseErrs...)
-	}
-	lease, err := r.Queue.Lease(acquisitionCtx, &queuev1.LeaseRequest{
-		WorkspaceId:     workspaceID,
-		Kinds:           []string{queue.KindRuntimeInput, queue.KindRuntimeRecovery, queue.KindRuntimeConfigUpdate, queue.KindCleanupSession, queue.KindSessionDeleteCleanup},
-		LeaseOwner:      cfg.LeaseOwner,
-		MaxJobs:         int32(cfg.MaxJobs),
-		LeaseDurationMs: cfg.LeaseDuration.Milliseconds(),
-	})
-	if err != nil {
-		phaseErrs = append(phaseErrs, fmt.Errorf("queue lease: %w", err))
-		return hadWork, errors.Join(phaseErrs...)
-	}
-	hadWork = hadWork || len(lease.GetJobs()) > 0
-	jobs := lease.GetJobs()
-	for _, job := range jobs {
-		if job.GetWorkspaceId() != workspaceID {
-			phaseErrs = append(phaseErrs, errors.New("queue returned a cross-workspace job"))
-			return hadWork, errors.Join(phaseErrs...)
-		}
-	}
-	if acquisitionCtx.Err() != nil {
-		// The actual Lease may commit before its response races quiesce. Return
-		// every observed capability without dispatching a new Runtime command.
-		for _, job := range jobs {
-			if err := transitionUpdated(r.Queue.Defer(ctx, &queuev1.DeferRequest{WorkspaceId: workspaceID, JobId: job.GetId(), LeaseToken: job.GetLeaseToken()})); err != nil {
-				phaseErrs = append(phaseErrs, err)
-			}
-		}
-		return hadWork, errors.Join(phaseErrs...)
-	}
-	var wait sync.WaitGroup
-	jobErrs := make(chan error, len(jobs))
-	for _, job := range jobs {
-		job := job
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			if err := r.processRuntimeJob(ctx, job, cfg); err != nil {
-				jobErrs <- err
-			}
-		}()
-	}
-	wait.Wait()
-	close(jobErrs)
-	for err := range jobErrs {
-		phaseErrs = append(phaseErrs, err)
-	}
-	return hadWork, errors.Join(phaseErrs...)
 }
 
 func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg JobRunnerConfig) error {

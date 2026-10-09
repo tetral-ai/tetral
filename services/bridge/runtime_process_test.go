@@ -18,6 +18,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/internalgrpc/auth"
+	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
@@ -1035,5 +1036,56 @@ func TestPostgreSQLRuntimeProcessLifecycleAndLivenessCommitTogether(t *testing.T
 	}
 	if phase, current, _, _ := f.lifecycle(registered.RuntimeProcessId); phase != runtimecontrol.ProcessDraining || !current || !f.reportedAt(registered.RuntimeProcessId).Valid {
 		t.Fatalf("phase change committed without its report: phase=%s current=%t", phase, current)
+	}
+}
+
+// A committed promotion wakes Job Runner acquisition and, separately, requests
+// a Pod-loss repair run for the process it replaced.
+func TestPostgreSQLRuntimeProcessPromotionWakesRunnerAndRequestsRepair(t *testing.T) {
+	runtime, _ := storagetest.NewPostgreSQLDBWithAdmin(t)
+	client := dbconnect.NewClientForTesting(runtime)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	payloads := make(chan string, 16)
+	ready := make(chan struct{})
+	var readyOnce sync.Once
+	listenCtx, stopListening := context.WithCancel(ctx)
+	listened := make(chan error, 1)
+	go func() {
+		listened <- (queue.PostgreSQLNotificationListener{Client: client}).Listen(listenCtx, queue.NotificationChannel,
+			func() { readyOnce.Do(func() { close(ready) }) }, func(payload string) { payloads <- payload })
+	}()
+	defer func() {
+		stopListening()
+		<-listened
+	}()
+	select {
+	case <-ready:
+	case <-ctx.Done():
+		t.Fatal("notification listener did not become ready")
+	}
+	rpc := processRegistryRPC(t, client, "pod-promotion-wake")
+	accepting := bridgev1.RuntimeProcessPhase_RUNTIME_PROCESS_PHASE_ACCEPTING
+	for _, processID := range []string{"process-promotion-first", "process-promotion-takeover"} {
+		registered, err := rpc.RegisterRuntimeProcess(ctx, &bridgev1.RegisterRuntimeProcessRequest{RuntimeProcessId: processID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := rpc.ReportRuntimeProcess(ctx, &bridgev1.ReportRuntimeProcessRequest{RuntimeProcessId: processID, RegistrationReceipt: registered.RegistrationReceipt, Phase: accepting})
+		if err != nil || !response.GetCurrent() {
+			t.Fatalf("promote %s = %+v/%v", processID, response, err)
+		}
+		received := map[string]int{}
+		for len(received) < 2 {
+			select {
+			case payload := <-payloads:
+				received[payload]++
+			case <-ctx.Done():
+				t.Fatalf("promotion of %s notified %v; want Job Runner wake and repair request", processID, received)
+			}
+		}
+		if received[queue.ConsumerClassJobRunner] != 1 || received[queue.NotificationClassRuntimeProcess] != 1 {
+			t.Fatalf("promotion of %s notified %v; want one Job Runner wake and one repair request", processID, received)
+		}
 	}
 }

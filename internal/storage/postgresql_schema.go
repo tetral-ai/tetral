@@ -1254,10 +1254,12 @@ const (
 		status TEXT NOT NULL,
 		payload_json TEXT NOT NULL,
 		priority INTEGER NOT NULL DEFAULT 0,
+		negative_priority BIGINT GENERATED ALWAYS AS (-(priority::bigint)) STORED,
 		lease_token TEXT,
 		leased_by TEXT,
 		leased_at TIMESTAMPTZ,
 		leased_until TIMESTAMPTZ,
+		lease_previous_attempt_count INTEGER,
 		attempt_count INTEGER NOT NULL DEFAULT 0,
 		defer_count INTEGER NOT NULL DEFAULT 0,
 		max_attempts INTEGER NOT NULL DEFAULT 10,
@@ -1288,6 +1290,11 @@ const (
 		CONSTRAINT queue_jobs_lease_shape CHECK (
 			(status = 'leased' AND lease_token IS NOT NULL AND leased_by IS NOT NULL AND leased_at IS NOT NULL AND leased_until IS NOT NULL)
 			OR (status <> 'leased')
+		),
+		CONSTRAINT queue_jobs_lease_previous_attempt_count_shape CHECK (lease_previous_attempt_count >= 0),
+		CONSTRAINT queue_jobs_lease_previous_attempt_custody_shape CHECK (
+			lease_previous_attempt_count IS NULL
+			OR (status = 'leased' AND kind IN ('runtime_input', 'runtime_recovery', 'runtime_config_update', 'cleanup_session', 'session_delete_cleanup'))
 		)
 	)`
 
@@ -1939,6 +1946,17 @@ END $$`
 
 )
 
+// Direct Job Runner discovery indexes, restricted to pending rows of the five
+// Job Runner kinds: tenant seeks and per-tenant raw windows ordered by the scan
+// key, and the next-future-job seek. The scan key leads with the stored
+// negative_priority column rather than an expression: unary minus is not
+// leakproof, so under row-level security a range bound on the expression would
+// run as a filter after the policy instead of an index condition.
+const (
+	createPostgreSQLQueueJobsJobRunnerScanIndex = `CREATE INDEX IF NOT EXISTS idx_queue_job_runner_scan ON queue_jobs(workspace_id, negative_priority, available_at, partition_key, queue_partition_sequence, id) WHERE status = 'pending' AND kind IN ('runtime_input', 'runtime_recovery', 'runtime_config_update', 'cleanup_session', 'session_delete_cleanup')`
+	createPostgreSQLQueueJobsJobRunnerDueIndex  = `CREATE INDEX IF NOT EXISTS idx_queue_job_runner_due ON queue_jobs(available_at, id) WHERE status = 'pending' AND kind IN ('runtime_input', 'runtime_recovery', 'runtime_config_update', 'cleanup_session', 'session_delete_cleanup')`
+)
+
 // postgresqlContract enumerates the workspace-owned tables on which Engine's
 // runtime traffic must be subject to RLS. Each table is enabled with
 // FORCE ROW LEVEL SECURITY so even the table owner is subject to RLS
@@ -2095,6 +2113,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_session_events_pending_media", createPostgreSQLSessionEventsPendingMediaIndex},
 		{"index_session_file_attachment_consumptions_pending", createPostgreSQLSessionFileAttachmentPendingIndex},
 		{"index_session_runtime_inbox_attachment_authority", createPostgreSQLSessionRuntimeInboxAttachmentIndex},
+		{"index_session_runtime_inbox_accepted_binding", createPostgreSQLSessionRuntimeInboxAcceptedBindingIndex},
 		{"index_session_events_agent_mail_delivery", createPostgreSQLSessionEventsAgentMailDeliveryIndex},
 		{"index_session_pending_tool_uses_status", createPostgreSQLPendingToolUsesStatusIndex},
 		{"index_session_background_tasks_status", createPostgreSQLBackgroundTasksStatusIndex},
@@ -2115,6 +2134,8 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_queue_jobs_leased_session", createPostgreSQLQueueJobsLeasedSessionIndex},
 		{"index_queue_jobs_partition_sequence", createPostgreSQLQueueJobsPartitionSequenceIndex},
 		{"index_queue_jobs_available", createPostgreSQLQueueJobsAvailableIndex},
+		{"index_queue_job_runner_scan", createPostgreSQLQueueJobsJobRunnerScanIndex},
+		{"index_queue_job_runner_due", createPostgreSQLQueueJobsJobRunnerDueIndex},
 		{"index_queue_jobs_sandbox_terminal_retention", createPostgreSQLQueueJobsSandboxTerminalRetentionIndex},
 		{"index_queue_jobs_sandbox_session_cleanup", createPostgreSQLQueueJobsSandboxSessionCleanupIndex},
 		{"index_session_resources_session_seq", createPostgreSQLSessionResourcesSessionSeqIndex},
@@ -2203,6 +2224,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		)
 	}
 	steps = append(steps, postgresqlAuthFunctionSteps()...)
+	steps = append(steps, postgresqlJobRunnerDiscoverySteps()...)
 
 	// Narrow git-ticket lookup policy on session_git_tickets: the git
 	// proxy validates a capability ticket before it knows the workspace.

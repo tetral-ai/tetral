@@ -9,18 +9,11 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
-	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
 	"github.com/tetral-ai/tetral/services/job-runner/jobrunnertest"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
-
-type runtimeInputExhaustionWorkspaceLister struct{}
-
-func (runtimeInputExhaustionWorkspaceLister) ListIDs(context.Context) ([]workspace.ID, error) {
-	return []workspace.ID{"ws_execution_store"}, nil
-}
 
 type runtimeInputExhaustionSender struct {
 	jobrunner.RuntimeCommandSender
@@ -94,12 +87,17 @@ func TestPostgreSQLTaskNotificationProducerAndJobRunnerTerminalizeQueuedInbox(t 
 	visibility := jobrunnertest.NewBindingVisibility(adminDB)
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 9090, jobrunner.KubernetesRuntimeTargetResolver{Snapshot: visibility.Snapshot, GetPod: visibility.GetPod, LoadClient: jobrunnertest.UnavailableLoadClient()})
 	runner := &jobrunner.JobRunner{
-		Queue:      tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil),
-		Workspaces: runtimeInputExhaustionWorkspaceLister{},
-		Deliverer:  runtimeInputExhaustionDeliverer{direct: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}},
-		Config:     jobrunner.JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+		Queue:     tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil),
+		Deliverer: runtimeInputExhaustionDeliverer{direct: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}},
+		Config:    jobrunner.JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if err := runner.RunOnce(context.Background()); err != nil {
+	// One production acquisition dispatches the final attempt; the production
+	// join waits for it.
+	acquisition, err := runner.AcquireAndDispatch(context.Background())
+	if err != nil || acquisition.Dispatched != 1 {
+		t.Fatalf("acquire final task-notification attempt = %+v/%v; want one dispatched job", acquisition, err)
+	}
+	if err := runner.JoinDispatched(context.Background()); err != nil {
 		t.Fatalf("run final task-notification attempt: %v", err)
 	}
 	var inboxStatus, queueStatus, errorKind string

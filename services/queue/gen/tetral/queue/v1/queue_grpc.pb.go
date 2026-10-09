@@ -19,13 +19,15 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	QueueService_Lease_FullMethodName      = "/tetral.queue.v1.QueueService/Lease"
-	QueueService_Heartbeat_FullMethodName  = "/tetral.queue.v1.QueueService/Heartbeat"
-	QueueService_Ack_FullMethodName        = "/tetral.queue.v1.QueueService/Ack"
-	QueueService_Retry_FullMethodName      = "/tetral.queue.v1.QueueService/Retry"
-	QueueService_Defer_FullMethodName      = "/tetral.queue.v1.QueueService/Defer"
-	QueueService_DeadLetter_FullMethodName = "/tetral.queue.v1.QueueService/DeadLetter"
-	QueueService_Cancel_FullMethodName     = "/tetral.queue.v1.QueueService/Cancel"
+	QueueService_Lease_FullMethodName               = "/tetral.queue.v1.QueueService/Lease"
+	QueueService_LeaseJobRunnerJobs_FullMethodName  = "/tetral.queue.v1.QueueService/LeaseJobRunnerJobs"
+	QueueService_ReleaseUnstartedJob_FullMethodName = "/tetral.queue.v1.QueueService/ReleaseUnstartedJob"
+	QueueService_Heartbeat_FullMethodName           = "/tetral.queue.v1.QueueService/Heartbeat"
+	QueueService_Ack_FullMethodName                 = "/tetral.queue.v1.QueueService/Ack"
+	QueueService_Retry_FullMethodName               = "/tetral.queue.v1.QueueService/Retry"
+	QueueService_Defer_FullMethodName               = "/tetral.queue.v1.QueueService/Defer"
+	QueueService_DeadLetter_FullMethodName          = "/tetral.queue.v1.QueueService/DeadLetter"
+	QueueService_Cancel_FullMethodName              = "/tetral.queue.v1.QueueService/Cancel"
 )
 
 // QueueServiceClient is the client API for QueueService service.
@@ -33,6 +35,8 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type QueueServiceClient interface {
 	Lease(ctx context.Context, in *LeaseRequest, opts ...grpc.CallOption) (*LeaseResponse, error)
+	LeaseJobRunnerJobs(ctx context.Context, in *LeaseJobRunnerJobsRequest, opts ...grpc.CallOption) (*LeaseJobRunnerJobsResponse, error)
+	ReleaseUnstartedJob(ctx context.Context, in *ReleaseUnstartedJobRequest, opts ...grpc.CallOption) (*ReleaseUnstartedJobResponse, error)
 	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
 	Ack(ctx context.Context, in *AckRequest, opts ...grpc.CallOption) (*TransitionResponse, error)
 	Retry(ctx context.Context, in *RetryRequest, opts ...grpc.CallOption) (*TransitionResponse, error)
@@ -53,6 +57,26 @@ func (c *queueServiceClient) Lease(ctx context.Context, in *LeaseRequest, opts .
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(LeaseResponse)
 	err := c.cc.Invoke(ctx, QueueService_Lease_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queueServiceClient) LeaseJobRunnerJobs(ctx context.Context, in *LeaseJobRunnerJobsRequest, opts ...grpc.CallOption) (*LeaseJobRunnerJobsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LeaseJobRunnerJobsResponse)
+	err := c.cc.Invoke(ctx, QueueService_LeaseJobRunnerJobs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queueServiceClient) ReleaseUnstartedJob(ctx context.Context, in *ReleaseUnstartedJobRequest, opts ...grpc.CallOption) (*ReleaseUnstartedJobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReleaseUnstartedJobResponse)
+	err := c.cc.Invoke(ctx, QueueService_ReleaseUnstartedJob_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -124,6 +148,8 @@ func (c *queueServiceClient) Cancel(ctx context.Context, in *CancelRequest, opts
 // for forward compatibility.
 type QueueServiceServer interface {
 	Lease(context.Context, *LeaseRequest) (*LeaseResponse, error)
+	LeaseJobRunnerJobs(context.Context, *LeaseJobRunnerJobsRequest) (*LeaseJobRunnerJobsResponse, error)
+	ReleaseUnstartedJob(context.Context, *ReleaseUnstartedJobRequest) (*ReleaseUnstartedJobResponse, error)
 	Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
 	Ack(context.Context, *AckRequest) (*TransitionResponse, error)
 	Retry(context.Context, *RetryRequest) (*TransitionResponse, error)
@@ -142,6 +168,12 @@ type UnimplementedQueueServiceServer struct{}
 
 func (UnimplementedQueueServiceServer) Lease(context.Context, *LeaseRequest) (*LeaseResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Lease not implemented")
+}
+func (UnimplementedQueueServiceServer) LeaseJobRunnerJobs(context.Context, *LeaseJobRunnerJobsRequest) (*LeaseJobRunnerJobsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method LeaseJobRunnerJobs not implemented")
+}
+func (UnimplementedQueueServiceServer) ReleaseUnstartedJob(context.Context, *ReleaseUnstartedJobRequest) (*ReleaseUnstartedJobResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReleaseUnstartedJob not implemented")
 }
 func (UnimplementedQueueServiceServer) Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Heartbeat not implemented")
@@ -196,6 +228,42 @@ func _QueueService_Lease_Handler(srv interface{}, ctx context.Context, dec func(
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(QueueServiceServer).Lease(ctx, req.(*LeaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueueService_LeaseJobRunnerJobs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LeaseJobRunnerJobsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueueServiceServer).LeaseJobRunnerJobs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueueService_LeaseJobRunnerJobs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueueServiceServer).LeaseJobRunnerJobs(ctx, req.(*LeaseJobRunnerJobsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueueService_ReleaseUnstartedJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReleaseUnstartedJobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueueServiceServer).ReleaseUnstartedJob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueueService_ReleaseUnstartedJob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueueServiceServer).ReleaseUnstartedJob(ctx, req.(*ReleaseUnstartedJobRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -318,6 +386,14 @@ var QueueService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Lease",
 			Handler:    _QueueService_Lease_Handler,
+		},
+		{
+			MethodName: "LeaseJobRunnerJobs",
+			Handler:    _QueueService_LeaseJobRunnerJobs_Handler,
+		},
+		{
+			MethodName: "ReleaseUnstartedJob",
+			Handler:    _QueueService_ReleaseUnstartedJob_Handler,
 		},
 		{
 			MethodName: "Heartbeat",

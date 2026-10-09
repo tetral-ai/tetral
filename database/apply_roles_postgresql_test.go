@@ -65,13 +65,15 @@ func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
 					"GRANT EXECUTE ON FUNCTION public.tetral_lock_runtime_process_liveness(text,text,text) TO " + pgx.Identifier{declarations.Roles["bridge"].Name}.Sanitize(),
 					"REVOKE EXECUTE ON FUNCTION public.tetral_lock_runtime_process_liveness(text,text,text) FROM " + pgx.Identifier{declarations.Roles["job_runner"].Name}.Sanitize(),
 					"GRANT UPDATE ON runtime_process_liveness TO " + pgx.Identifier{declarations.Roles["job_runner"].Name}.Sanitize(),
+					"GRANT EXECUTE ON FUNCTION public.tetral_job_runner_binding_page(text,text,text,text,integer) TO " + pgx.Identifier{declarations.Roles["cleanup"].Name}.Sanitize(),
+					"REVOKE EXECUTE ON FUNCTION public.tetral_job_runner_binding_upper() FROM " + pgx.Identifier{declarations.Roles["job_runner"].Name}.Sanitize(),
 				} {
 					if _, err := admin.Exec(statement); err != nil {
 						t.Fatal(err)
 					}
 				}
 				drift := workloadPrivilegeMismatches(t, admin, roleContract, declarations)
-				for _, want := range []string{"sandbox environments UPDATE", "auth queue_jobs SELECT", "auth session_runtime_binding_generation_seq UPDATE", "auth tetral_lock_runtime_process EXECUTE", "job_runner tetral_lock_runtime_process EXECUTE", "bridge tetral_lock_runtime_process_liveness EXECUTE", "job_runner tetral_lock_runtime_process_liveness EXECUTE", "job_runner runtime_process_liveness UPDATE"} {
+				for _, want := range []string{"sandbox environments UPDATE", "auth queue_jobs SELECT", "auth session_runtime_binding_generation_seq UPDATE", "auth tetral_lock_runtime_process EXECUTE", "job_runner tetral_lock_runtime_process EXECUTE", "bridge tetral_lock_runtime_process_liveness EXECUTE", "job_runner tetral_lock_runtime_process_liveness EXECUTE", "job_runner runtime_process_liveness UPDATE", "cleanup tetral_job_runner_binding_page EXECUTE", "job_runner tetral_job_runner_binding_upper EXECUTE"} {
 					if !contains(drift, want) {
 						t.Fatalf("catalog checker missed injected drift %s: %v", want, drift)
 					}
@@ -298,13 +300,18 @@ func workloadPrivilegeMismatches(t *testing.T, admin *sql.DB, contract database.
 		_ = rows.Close()
 	}
 	var allowed bool
-	for _, function := range []string{"tetral_lock_runtime_process", "tetral_lock_runtime_process_liveness"} {
+	for _, function := range []struct{ name, catalog, declared string }{
+		{"tetral_lock_runtime_process", "public.tetral_lock_runtime_process(text,text,text)", "tetral_lock_runtime_process(text, text, text)"},
+		{"tetral_lock_runtime_process_liveness", "public.tetral_lock_runtime_process_liveness(text,text,text)", "tetral_lock_runtime_process_liveness(text, text, text)"},
+		{"tetral_job_runner_binding_upper", "public.tetral_job_runner_binding_upper()", "tetral_job_runner_binding_upper()"},
+		{"tetral_job_runner_binding_page", "public.tetral_job_runner_binding_page(text,text,text,text,integer)", "tetral_job_runner_binding_page(text, text, text, text, integer)"},
+	} {
 		for workload, role := range contract.Workloads {
-			if err := admin.QueryRow(`SELECT has_function_privilege($1,'public.'||$2||'(text,text,text)','EXECUTE')`, declarations.Roles[workload].Name, function).Scan(&allowed); err != nil {
+			if err := admin.QueryRow(`SELECT has_function_privilege($1,$2,'EXECUTE')`, declarations.Roles[workload].Name, function.catalog).Scan(&allowed); err != nil {
 				t.Fatal(err)
 			}
-			if allowed != contains(role.Functions, function+"(text, text, text)") {
-				mismatches = append(mismatches, workload+" "+function+" EXECUTE")
+			if allowed != contains(role.Functions, function.declared) {
+				mismatches = append(mismatches, workload+" "+function.name+" EXECUTE")
 			}
 		}
 	}

@@ -101,16 +101,16 @@ func TestJobRunnerConfigRequiresTwoDatabaseConnections(t *testing.T) {
 
 func TestJobRunnerConfigDerivesAndValidatesHeartbeatInterval(t *testing.T) {
 	env := validJobRunnerConfigEnv()
-	env[EnvJobRunnerLeaseDurationMS] = "300"
+	env[EnvJobRunnerLeaseDurationMS] = "30000"
 	cfg, err := JobRunnerConfigFromEnv(env)
 	if err != nil {
 		t.Fatalf("JobRunnerConfigFromEnv: %v", err)
 	}
-	if cfg.HeartbeatInterval != 100*time.Millisecond {
+	if cfg.HeartbeatInterval != 10*time.Second {
 		t.Fatalf("HeartbeatInterval = %s; want lease/3", cfg.HeartbeatInterval)
 	}
 
-	env[EnvJobRunnerHeartbeatIntervalMS] = "300"
+	env[EnvJobRunnerHeartbeatIntervalMS] = "30000"
 	if _, err := JobRunnerConfigFromEnv(env); err == nil || !strings.Contains(err.Error(), "must be less than") {
 		t.Fatalf("JobRunnerConfigFromEnv heartbeat >= lease error = %v; want validation", err)
 	}
@@ -118,7 +118,7 @@ func TestJobRunnerConfigDerivesAndValidatesHeartbeatInterval(t *testing.T) {
 
 func TestJobRunnerConfigRejectsMillisecondDurationOverflow(t *testing.T) {
 	maxSafeMillis := int64(math.MaxInt64) / int64(time.Millisecond)
-	for _, key := range []string{EnvJobRunnerLeaseDurationMS, EnvJobRunnerHeartbeatIntervalMS, EnvJobRunnerPollIntervalMS} {
+	for _, key := range []string{EnvJobRunnerLeaseDurationMS, EnvJobRunnerHeartbeatIntervalMS} {
 		env := validJobRunnerConfigEnv()
 		env[key] = strconv.FormatInt(maxSafeMillis+1, 10)
 		if _, err := JobRunnerConfigFromEnv(env); err == nil || !strings.Contains(err.Error(), key+" is too large") {
@@ -129,9 +129,34 @@ func TestJobRunnerConfigRejectsMillisecondDurationOverflow(t *testing.T) {
 
 func TestJobRunnerConfigRejectsLeaseBatchAboveTransportCapacity(t *testing.T) {
 	env := validJobRunnerConfigEnv()
-	env[EnvJobRunnerMaxJobs] = strconv.Itoa(queue.MaxQueueLeaseJobs() + 1)
+	env[EnvJobRunnerMaxJobs] = strconv.Itoa(queue.MaxJobRunnerLeaseJobs())
+	if cfg, err := JobRunnerConfigFromEnv(env); err != nil || cfg.MaxJobs != queue.MaxJobRunnerLeaseJobs() {
+		t.Fatalf("JobRunnerConfigFromEnv maximum batch = %+v/%v; want accepted", cfg.MaxJobs, err)
+	}
+	env[EnvJobRunnerMaxJobs] = strconv.Itoa(queue.MaxJobRunnerLeaseJobs() + 1)
 	if _, err := JobRunnerConfigFromEnv(env); err == nil || !strings.Contains(err.Error(), EnvJobRunnerMaxJobs) {
 		t.Fatalf("JobRunnerConfigFromEnv oversized batch error = %v; want knob-owned startup validation", err)
+	}
+}
+
+func TestJobRunnerConfigBoundsLeaseDurationToDirectLeaseRange(t *testing.T) {
+	cfg, err := JobRunnerConfigFromEnv(validJobRunnerConfigEnv())
+	if err != nil || cfg.LeaseDuration != 30*time.Second {
+		t.Fatalf("default lease duration = %s/%v; want 30000 ms", cfg.LeaseDuration, err)
+	}
+	for _, accepted := range []string{"5000", "300000"} {
+		env := validJobRunnerConfigEnv()
+		env[EnvJobRunnerLeaseDurationMS] = accepted
+		if _, err := JobRunnerConfigFromEnv(env); err != nil {
+			t.Fatalf("lease duration %s ms rejected: %v", accepted, err)
+		}
+	}
+	for _, rejected := range []string{"4999", "300001"} {
+		env := validJobRunnerConfigEnv()
+		env[EnvJobRunnerLeaseDurationMS] = rejected
+		if _, err := JobRunnerConfigFromEnv(env); err == nil || !strings.Contains(err.Error(), EnvJobRunnerLeaseDurationMS+" must be between 5000 and 300000") {
+			t.Fatalf("lease duration %s ms error = %v; want startup rejection", rejected, err)
+		}
 	}
 }
 

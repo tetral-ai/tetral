@@ -25,10 +25,10 @@ import (
 	grpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/workload"
-	"github.com/tetral-ai/tetral/internal/workspace"
 	providergatewayv1 "github.com/tetral-ai/tetral/services/gateway/gen/tetral/provider_gateway/v1"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
+	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 	webconnector "github.com/tetral-ai/tetral/services/web-connector"
 )
 
@@ -189,7 +189,7 @@ func runProcessTestChild(t *testing.T, mode string) {
 			return tetralqueue.Run(ctx, tetralqueue.Config{GRPCAddress: "127.0.0.1:0", HTTPAddress: "127.0.0.1:0", LeaseReclaimInterval: time.Millisecond, DrainTimeout: 2 * time.Second, CancelJoinTimeout: 3 * time.Second}, store, tetralqueue.RuntimeConfig{Logger: owner.Logger, MaintenanceStore: store})
 		}
 		if strings.HasPrefix(mode, "runner") {
-			runner := &jobrunner.JobRunner{Queue: &processRunnerQueue{}, Deliverer: &processRunnerDeliverer{}, Workspaces: processWorkspaces{hold: hold}, Config: jobrunner.JobRunnerConfig{DrainTimeout: 2 * time.Second, CancelJoinTimeout: 3 * time.Second, PollInterval: time.Millisecond}}
+			runner := &jobrunner.JobRunner{Queue: &processRunnerQueue{hold: hold}, Deliverer: &processRunnerDeliverer{}, Config: jobrunner.JobRunnerConfig{DrainTimeout: 2 * time.Second, CancelJoinTimeout: 3 * time.Second}}
 			return jobrunner.RunJobRunnerLoop(ctx, runner, owner.Logger, queue.NewWakeSignal())
 		}
 		if strings.HasPrefix(mode, "grpc") {
@@ -266,13 +266,17 @@ func (*processQueueStore) SweepEmptyPartitionCounters(context.Context, queue.Emp
 	return 0, nil
 }
 
-type processRunnerQueue struct{ jobrunner.QueueClient }
+type processRunnerQueue struct {
+	jobrunner.QueueClient
+	hold func()
+}
 type processRunnerDeliverer struct{ jobrunner.RuntimeJobDeliverer }
-type processWorkspaces struct{ hold func() }
 
-func (s processWorkspaces) ListIDs(context.Context) ([]workspace.ID, error) {
-	s.hold()
-	return nil, nil
+// LeaseJobRunnerJobs is the Runner's acquisition dependency; a stalled Queue
+// call must hold the process like any other owned dependency.
+func (q *processRunnerQueue) LeaseJobRunnerJobs(context.Context, *queuev1.LeaseJobRunnerJobsRequest) (*queuev1.LeaseJobRunnerJobsResponse, error) {
+	q.hold()
+	return &queuev1.LeaseJobRunnerJobsResponse{}, nil
 }
 
 // Authentication is an owned external dependency: a stalled TokenReview must

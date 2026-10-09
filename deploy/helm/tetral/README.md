@@ -598,9 +598,10 @@ a predecessor migration or reverse data rewrite.
 maximum record bytes, summary interval and burst into every application process.
 Defaults are Info, 16384 bytes, 30000 milliseconds and one record per failure
 window. Changes take effect on restart. `queue` exposes reclaim interval/batch and
-retry base/cap/attempts; `jobRunner` exposes lease duration, heartbeat, batch and
-poll interval. Retry cap must cover its base and heartbeat must be shorter than
-lease. The owning startup parsers also enforce transport and shutdown constraints.
+retry base/cap/attempts; `jobRunner` exposes lease duration, heartbeat and batch.
+Retry cap must cover its base and heartbeat must be shorter than lease. The
+owning startup parsers also enforce transport and shutdown constraints and the
+Job Runner's 5000-300000 millisecond lease duration range.
 
 `deploy/managed/configuration-inventory.json` records each semantic family's
 owner, defaults, units, unset/zero policy, constraints and portable projection

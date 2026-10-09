@@ -16,7 +16,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/transportsecurity"
 	"github.com/tetral-ai/tetral/internal/workload"
-	"github.com/tetral-ai/tetral/internal/workspace"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 
@@ -68,12 +67,11 @@ func run(ctx context.Context, env jobrunner.Env) error {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
 	}
 	// Workspace isolation is enforced by row-level policies that a superuser or
-	// BYPASSRLS role silently defeats. The Job Runner sweeps every workspace, so
-	// it refuses to serve on a role that would bypass them.
+	// BYPASSRLS role silently defeats. The Job Runner acts on jobs and bindings
+	// of every workspace, so it refuses to serve on a role that would bypass them.
 	if err := database.Client.VerifyRuntimeRole(ctx); err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
-	workspaceStore := workspace.NewStore(database.RawDatabaseForExcludedStores)
 	if err := transportsecurity.WaitForRoutingProxy(ctx, env.Getenv(transportsecurity.EnvRoutingProxyRequired) == "true"); err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, err)
 	}
@@ -125,9 +123,13 @@ func run(ctx context.Context, env jobrunner.Env) error {
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
-	kubernetesCache := enginekubernetes.NewWatcherCache(cfg.KubernetesNamespace, enginekubernetes.WithLogger(
-		logger,
-	))
+	// Pod deletions and Runtime process takeovers request a repair run; the
+	// repair owner also runs on its own periodic deadline.
+	repairSignal := jobrunner.NewRuntimePodLossRepairSignal()
+	kubernetesCache := enginekubernetes.NewWatcherCache(cfg.KubernetesNamespace,
+		enginekubernetes.WithLogger(logger),
+		enginekubernetes.WithPodDeleted(repairSignal.Mark),
+	)
 	kubernetesClient, err := enginekubernetes.NewInClusterVisibilityClient()
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
@@ -190,18 +192,19 @@ func run(ctx context.Context, env jobrunner.Env) error {
 	loopWorkers.Add(1)
 	go func() {
 		defer loopWorkers.Done()
-		_ = queue.RunNotificationListener(acquisitionCtx, queue.PostgreSQLNotificationListener{Client: database.Client}, queue.ConsumerClassJobRunner, queueWake, logger)
+		_ = queue.RunNotificationListenerWithSignals(acquisitionCtx, queue.PostgreSQLNotificationListener{Client: database.Client}, queue.ConsumerClassJobRunner, queueWake,
+			map[string]func(){queue.NotificationClassRuntimeProcess: repairSignal.Mark}, logger)
 	}()
 	loopWorkers.Add(1)
 	go func() {
 		defer loopWorkers.Done()
 		_ = jobrunner.RunJobRunnerLoop(acquisitionCtx, &jobrunner.JobRunner{
-			Queue:      jobrunner.QueueClientFromGRPC(queuev1.NewQueueServiceClient(queueConn)),
-			Workspaces: workspaceStore,
+			Queue: jobrunner.QueueClientFromGRPC(queuev1.NewQueueServiceClient(queueConn)),
 			Deliverer: jobrunner.RuntimePodDirectDeliverer{
 				Store:  deliveryStore,
 				Sender: commandClient,
 			},
+			Repair: jobrunner.NewRuntimePodLossRepair(deliveryStore, repairSignal, logger),
 			Config: cfg,
 		}, logger, queueWake)
 	}()

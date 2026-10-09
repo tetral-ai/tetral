@@ -415,7 +415,7 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 	if replacementReleaseJobID.Valid {
 		t.Fatalf("pod-loss release job = %q; want release blocked by preserved Tool owner", replacementReleaseJobID.String)
 	}
-	if repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 0 {
+	if repaired, err := repairRuntimePodLoss(context.Background(), store); err != nil || repaired != 0 {
 		t.Fatalf("duplicate pod-loss repair = %d, %v; want 0,nil", repaired, err)
 	}
 	var releaseJobCount int
@@ -713,11 +713,11 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 				}
 			}
 			runner := &jobrunner.JobRunner{
-				Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+				Queue:     tetralqueue.NewServer(queueStore, nil),
 				Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
 				Config:    jobrunner.JobRunnerConfig{LeaseOwner: "bridge-runtime-recovery", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 			}
-			active, err := runner.RunOnceWithActivity(context.Background())
+			active, err := acquireAndJoinJobRunnerActive(context.Background(), runner)
 			if err != nil || !active {
 				t.Fatalf("deliver Runtime recovery job = active:%t err:%v; want one accepted delivery", active, err)
 			}

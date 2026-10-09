@@ -3,7 +3,6 @@ package integration
 import (
 	"context"
 
-	"github.com/tetral-ai/tetral/internal/workspace"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
@@ -23,13 +22,27 @@ func (q *issuedLeaseQueueFixture) Lease(context.Context, *queuev1.LeaseRequest) 
 	}
 	return &queuev1.LeaseResponse{Jobs: []*queuev1.QueueJob{job}}, nil
 }
+
+// LeaseJobRunnerJobs returns the issued lease once to the Job Runner.
+func (q *issuedLeaseQueueFixture) LeaseJobRunnerJobs(context.Context, *queuev1.LeaseJobRunnerJobsRequest) (*queuev1.LeaseJobRunnerJobsResponse, error) {
+	job := q.job
+	q.job = nil
+	if job == nil {
+		return &queuev1.LeaseJobRunnerJobsResponse{RetryAfterMs: 1000}, nil
+	}
+	return &queuev1.LeaseJobRunnerJobsResponse{Jobs: []*queuev1.QueueJob{job}, RetryAfterMs: 100}, nil
+}
+
 func runIssuedLeaseThroughRunner(ctx context.Context, runner *jobrunner.JobRunner, job *queuev1.QueueJob, cfg jobrunner.JobRunnerConfig) error {
-	// Use a value copy so response replay does not change the next caller's inputs.
-	consumer := *runner
-	consumer.Queue = &issuedLeaseQueueFixture{QueueClient: runner.Queue, job: job}
-	consumer.Workspaces = staticWorkspaceLister{workspace.ID(job.GetWorkspaceId())}
-	consumer.Config = cfg
-	return consumer.RunOnce(ctx)
+	// A separate runner so response replay does not change the next caller's inputs.
+	consumer := &jobrunner.JobRunner{
+		Queue:              &issuedLeaseQueueFixture{QueueClient: runner.Queue, job: job},
+		AcquisitionContext: runner.AcquisitionContext,
+		Deliverer:          runner.Deliverer,
+		Config:             cfg,
+		Logger:             runner.Logger,
+	}
+	return acquireAndJoinJobRunner(ctx, consumer)
 }
 
 // observedRuntimeDeliverer records the result of one actual delivery while the

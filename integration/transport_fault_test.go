@@ -25,7 +25,6 @@ import (
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
-	"github.com/tetral-ai/tetral/internal/workspace"
 
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
@@ -567,8 +566,8 @@ func deliverMCPContinuationInput(t *testing.T, runtimeDB, admin *sql.DB, port in
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: scope.Binding.TargetPodUid, PodIP: "127.0.0.1"}})
 	}})
 	deliverer := &continuationDeliverer{RuntimePodDirectDeliverer: jobrunner.RuntimePodDirectDeliverer{Store: store, Sender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}}
-	runner := &jobrunner.JobRunner{Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer, Config: jobrunner.JobRunnerConfig{LeaseOwner: "mcp-continuation", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour}}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	runner := &jobrunner.JobRunner{Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Deliverer: deliverer, Config: jobrunner.JobRunnerConfig{LeaseOwner: "mcp-continuation", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour}}
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("continuation Runner attempt active=%t: %v", active, err)
 	}
 	if deliverer.err != nil || (deliverer.result.Status != jobrunner.RuntimeDeliveryAccepted && deliverer.result.Status != jobrunner.RuntimeDeliveryDuplicate) {

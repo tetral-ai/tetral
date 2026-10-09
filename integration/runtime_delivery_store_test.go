@@ -213,11 +213,11 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureSettlesSingleAttemptInpu
 			deliveryStore.MCPManifestLister = test.lister(t)
 			sender := &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}
 			runner := &jobrunner.JobRunner{
-				Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{"default"},
+				Queue:     tetralqueue.NewServer(queueStore, nil),
 				Deliverer: manifestCompositionDeliverer{direct: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}},
 				Config:    jobrunner.JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 			}
-			if err := runner.RunOnce(context.Background()); err != nil {
+			if err := acquireAndJoinJobRunner(context.Background(), runner); err != nil {
 				t.Fatalf("run single-attempt input: %v", err)
 			}
 			if len(sender.requests) != 0 {
@@ -564,7 +564,7 @@ func TestPostgreSQLMCPManifestExhaustionDefersAndRedrivesCurrentGenerationBefore
 	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	composedDeliverer := manifestCompositionDeliverer{direct: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}}
 	runner := &jobrunner.JobRunner{
-		Queue: queueServer, Workspaces: staticWorkspaceLister{"default"},
+		Queue:     queueServer,
 		Deliverer: composedDeliverer,
 		Config:    jobrunner.JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
@@ -572,7 +572,7 @@ func TestPostgreSQLMCPManifestExhaustionDefersAndRedrivesCurrentGenerationBefore
 		if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()-interval '1 second' WHERE workspace_id='default' AND id=$1`, manifestJobID); err != nil {
 			t.Fatalf("make manifest attempt %d available: %v", attempt, err)
 		}
-		if err := runner.RunOnce(context.Background()); err != nil {
+		if err := acquireAndJoinJobRunner(context.Background(), runner); err != nil {
 			t.Fatalf("run manifest attempt %d: %v", attempt, err)
 		}
 	}
@@ -601,7 +601,7 @@ func TestPostgreSQLMCPManifestExhaustionDefersAndRedrivesCurrentGenerationBefore
 	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()-interval '1 second' WHERE workspace_id='default' AND id=$1`, manifestJobID); err != nil {
 		t.Fatalf("make deferred manifest available: %v", err)
 	}
-	if err := runner.RunOnce(context.Background()); err != nil {
+	if err := acquireAndJoinJobRunner(context.Background(), runner); err != nil {
 		t.Fatalf("redrive deferred manifest: %v", err)
 	}
 	if len(sender.requests) != manifestMaxAttempts+1 {
@@ -801,11 +801,11 @@ func TestPostgreSQLInitialMCPRefreshReachesRuntimeWithReadyToolCatalog(t *testin
 
 	sender := &oauthReadyRuntimeSender{recordingRuntimeCommandSender: recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}, admin: admin, client: client, inputPath: t.TempDir() + "/oauth-ready-provider.json", runtimeConfigPayload: runtimeConfigPayload}
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queueStore, nil),
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "oauth-manifest-composition", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	active, err := runner.RunOnceWithActivity(context.Background())
+	active, err := acquireAndJoinJobRunnerActive(context.Background(), runner)
 	if err != nil || !active {
 		t.Fatalf("deliver OAuth-backed initial manifest = active:%t err:%v", active, err)
 	}
@@ -1311,13 +1311,13 @@ func TestPostgreSQLJobRunnerReplaysIdleInterruptReceiptBeforeAckAndFollowerDeliv
 		installFixtureRuntimeLoad(t, freshStore)
 		freshStore.Clock = deliveryStore.Clock
 		return &jobrunner.JobRunner{
-			Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+			Queue:     tetralqueue.NewServer(queueStore, nil),
 			Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: freshStore, Sender: sender},
 			Config:    jobrunner.JobRunnerConfig{LeaseOwner: "interrupt-receipt-composition", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 		}
 	}
 
-	if err := newRunner().RunOnce(context.Background()); err != nil {
+	if err := acquireAndJoinJobRunner(context.Background(), newRunner()); err != nil {
 		t.Fatalf("run hot-accepted interrupt without receipt: %v", err)
 	}
 	var interruptQueueStatus, followerQueueStatus, interruptInboxStatus string
@@ -1392,7 +1392,7 @@ func TestPostgreSQLJobRunnerReplaysIdleInterruptReceiptBeforeAckAndFollowerDeliv
 		t.Fatalf("reclaim lost receipt response lease = %d/%v", reclaimed, err)
 	}
 
-	if err := newRunner().RunOnce(context.Background()); err != nil {
+	if err := acquireAndJoinJobRunner(context.Background(), newRunner()); err != nil {
 		t.Fatalf("run retry-start receipt replay: %v", err)
 	}
 	if err := admin.QueryRowContext(context.Background(), `SELECT
@@ -1409,7 +1409,7 @@ func TestPostgreSQLJobRunnerReplaysIdleInterruptReceiptBeforeAckAndFollowerDeliv
 			interruptQueueStatus, followerQueueStatus, interruptInboxStatus, sender.interruptCalls, len(sender.requests))
 	}
 
-	if err := newRunner().RunOnce(context.Background()); err != nil {
+	if err := acquireAndJoinJobRunner(context.Background(), newRunner()); err != nil {
 		t.Fatalf("deliver receipt-released follower: %v", err)
 	}
 	var followerInboxStatus string

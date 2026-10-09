@@ -157,11 +157,11 @@ func TestPostgreSQLCompletionMailProducerAndJobRunnerTerminalizeQueuedInbox(t *t
 	sender := &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}
 	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queueStore, nil),
 		Deliverer: manifestCompositionDeliverer{direct: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}},
 		Config:    jobrunner.JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if err := runner.RunOnce(context.Background()); err != nil {
+	if err := acquireAndJoinJobRunner(context.Background(), runner); err != nil {
 		t.Fatalf("run final completion-mail attempt: %v", err)
 	}
 	var inboxStatus, queueStatus, errorKind string

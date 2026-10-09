@@ -5,11 +5,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"reflect"
 	"sync"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
@@ -116,7 +119,7 @@ func (f *separatedOwners) cold(t *testing.T, scope *bridgev1.RuntimeScope) map[s
 }
 
 func (f *separatedOwners) worker(sender jobrunner.RuntimeCommandSender) *jobrunner.JobRunner {
-	return &jobrunner.JobRunner{Queue: tetralqueue.NewServer(f.queue, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: f.runner, Sender: sender}, Config: jobrunner.JobRunnerConfig{LeaseOwner: "separated-owners", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour}}
+	return &jobrunner.JobRunner{Queue: tetralqueue.NewServer(f.queue, nil), Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: f.runner, Sender: sender}, Config: jobrunner.JobRunnerConfig{LeaseOwner: "separated-owners", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour}}
 }
 
 func separatedJSON(t *testing.T, raw string) any {
@@ -223,10 +226,121 @@ func (f *separatedOwners) input(t *testing.T) (jobrunner.RuntimeJob, *queue.Job)
 	return jobrunner.RuntimeJob{JobID: row.ID, LeaseToken: row.LeaseToken, Kind: row.Kind, PartitionKey: row.PartitionKey, DedupeKey: row.DedupeKey, WorkspaceID: payload.WorkspaceID, SessionID: payload.SessionID, SessionThreadID: payload.ThreadID, RuntimeInputID: payload.InputID, EventIDs: payload.Events, SequenceFrom: payload.From, SequenceTo: payload.To, InputKind: payload.Kind, PayloadJSON: string(row.PayloadJSON), AttemptCount: int32(row.AttemptCount), MaxAttempts: int32(row.MaxAttempts)}, row
 }
 
-type staticWorkspaceLister []workspace.ID
+// jobRunnerFixtureEmptyAcquisitions bounds consecutive empty production
+// acquisitions. Queue keeps each tenant's pass across calls, and a call that
+// ends a retained pass returns no job even when work admitted or made due after
+// that pass began is ready; the next call starts a fresh pass. Two consecutive
+// empty acquisitions therefore mean no work is dispatchable, and no fixture
+// waits between them. A fixture in which another owner can hold a candidate's
+// Session lock waits for that owner before acquiring, because Queue skips a
+// busy Session instead of waiting for it. It waits until the owner's last
+// Session-locking write before the acquisition is visible: a dispatched job's
+// acknowledgement; a Runtime FinishIdle's output-capture record when the
+// fixture does not run that capture, or its adoption when it does. When the
+// owner keeps calling the Bridge until the acquired job settles, it acquires
+// behind a closed bridgeAdmissionGate instead.
+const jobRunnerFixtureEmptyAcquisitions = 2
 
-func (l staticWorkspaceLister) ListIDs(context.Context) ([]workspace.ID, error) {
-	return append([]workspace.ID(nil), l...), nil
+// acquireAndJoinJobRunner performs production Job Runner acquisitions until one
+// dispatches work or two consecutive acquisitions are empty, then performs the
+// production join of the dispatched jobs.
+func acquireAndJoinJobRunner(ctx context.Context, runner *jobrunner.JobRunner) error {
+	_, err := acquireAndJoinJobRunnerActive(ctx, runner)
+	return err
+}
+
+// acquireAndJoinJobRunnerActive is acquireAndJoinJobRunner reporting whether
+// any acquisition dispatched a job.
+func acquireAndJoinJobRunnerActive(ctx context.Context, runner *jobrunner.JobRunner) (bool, error) {
+	dispatched, err := acquireAndJoinJobRunnerJobs(ctx, runner, 1)
+	return dispatched > 0, err
+}
+
+// acquireAndJoinJobRunnerJobs performs acquireJobRunnerJobs, then joins every
+// dispatched job.
+func acquireAndJoinJobRunnerJobs(ctx context.Context, runner *jobrunner.JobRunner, want int) (int, error) {
+	dispatched, acquireErr := acquireJobRunnerJobs(ctx, runner, want)
+	return dispatched, errors.Join(acquireErr, runner.JoinDispatched(ctx))
+}
+
+// acquireJobRunnerJobs performs production acquisitions until they have
+// dispatched want jobs or two consecutive acquisitions are empty, without
+// joining, so dispatched jobs run concurrently in their slots; Queue leases at
+// most one job per workspace in one call.
+func acquireJobRunnerJobs(ctx context.Context, runner *jobrunner.JobRunner, want int) (int, error) {
+	dispatched, empty := 0, 0
+	for dispatched < want && empty < jobRunnerFixtureEmptyAcquisitions {
+		acquisition, err := runner.AcquireAndDispatch(ctx)
+		dispatched += acquisition.Dispatched
+		if err != nil {
+			return dispatched, err
+		}
+		if acquisition.Dispatched == 0 {
+			empty++
+		} else {
+			empty = 0
+		}
+	}
+	return dispatched, nil
+}
+
+// bridgeAdmissionGate holds a test Bridge server's unary calls at admission.
+// close returns once every admitted call has returned, so no Bridge
+// transaction holds a Session lock until open. A fixture closes it across an
+// acquisition when its Runtime keeps calling the Bridge until the acquired job
+// settles. It does not fit a Runtime whose admitted call waits for later
+// fixture work, such as FinishIdle waiting for output capture: close would
+// wait for that call.
+type bridgeAdmissionGate struct {
+	mu     sync.Mutex
+	change *sync.Cond
+	closed bool
+	active int
+}
+
+func newBridgeAdmissionGate() *bridgeAdmissionGate {
+	gate := &bridgeAdmissionGate{}
+	gate.change = sync.NewCond(&gate.mu)
+	return gate
+}
+
+func (g *bridgeAdmissionGate) unary(ctx context.Context, request any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+	g.mu.Lock()
+	for g.closed {
+		g.change.Wait()
+	}
+	g.active++
+	g.mu.Unlock()
+	defer func() {
+		g.mu.Lock()
+		g.active--
+		g.change.Broadcast()
+		g.mu.Unlock()
+	}()
+	return handler(ctx, request)
+}
+
+func (g *bridgeAdmissionGate) close() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.closed = true
+	for g.active > 0 {
+		g.change.Wait()
+	}
+}
+
+func (g *bridgeAdmissionGate) open() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.closed = false
+	g.change.Broadcast()
+}
+
+// repairRuntimePodLoss performs one production Pod-loss repair run from a new
+// discovery cycle and reports its repairs; failed candidates are an error.
+func repairRuntimePodLoss(ctx context.Context, store *jobrunner.PostgreSQLRuntimeDeliveryStore) (int, error) {
+	run := jobrunner.NewRuntimePodLossRepair(store, nil, nil).RepairRun(ctx)
+	return run.Repaired, run.Err()
 }
 
 type lockedBuffer struct {

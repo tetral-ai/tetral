@@ -29,6 +29,7 @@ type WatcherCache struct {
 	endpointSlicesStale  bool
 	podsFailed           bool
 	endpointSlicesFailed bool
+	onPodDeleted         func()
 }
 
 type CacheOption func(*WatcherCache)
@@ -36,6 +37,14 @@ type CacheOption func(*WatcherCache)
 func WithLogger(logger *slog.Logger) CacheOption {
 	return func(cache *WatcherCache) {
 		cache.logger = logger
+	}
+}
+
+// WithPodDeleted calls notify after each observed Pod deletion, outside the
+// cache lock. The Job Runner uses it to request a Pod-loss repair run.
+func WithPodDeleted(notify func()) CacheOption {
+	return func(cache *WatcherCache) {
+		cache.onPodDeleted = notify
 	}
 }
 
@@ -109,6 +118,9 @@ func (c *WatcherCache) DeletePod(name string) {
 		c.mutex.Unlock()
 		if recovered {
 			c.logWatchRecovery("pods")
+		}
+		if c.onPodDeleted != nil {
+			c.onPodDeleted()
 		}
 	}()
 	delete(c.pods, name)

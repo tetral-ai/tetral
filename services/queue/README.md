@@ -13,8 +13,10 @@ store (`internal/queue`, `EnqueueTx` / `EnqueueBatchTx`), so a work item can
 never exist without its queue entry or the reverse. What the workload exposes
 is everything *after*
 admission — a gRPC transition API (`services/queue/proto/tetral/queue/v1`,
-`QueueService`) that consumers drive, plus one background goroutine that rescues
-leases their owners abandoned and bounds Sandbox notification retention. The store reads and writes only `queue_jobs` and
+`QueueService`) that consumers drive, one per-process Job Runner scheduler that
+chooses which workspace's Runner work to lease next, and one background
+goroutine that rescues leases their owners abandoned and bounds Sandbox
+notification retention. The store reads and writes only `queue_jobs` and
 `queue_partition_counters`; it never touches the business tables (`session_events`,
 `session_sandbox_bindings`, `sandbox_lifecycle_operations`, and the rest), never calls Runtime Pod,
 Bridge, Sandbox Service, or any provider, and never infers that referenced work
@@ -33,7 +35,8 @@ key; no consumer takes its serving workspace from configuration.
 `partition_key`, an optional `dedupe_key`, a `payload_json` of durable references,
 a `payload_version` (positive integer; the payload-schema-version guard, rejected
 at admission when negative, while an unset or zero value defaults to 1), lease bookkeeping (`leased_by`, `lease_token`,
-`leased_at`, `leased_until`), `attempt_count` / `max_attempts`, the config/build observation
+`leased_at`, `leased_until`, and the private `lease_previous_attempt_count`
+described under [Direct Job Runner leasing](#direct-job-runner-leasing)), `attempt_count` / `max_attempts`, the config/build observation
 `defer_count`, a `priority`, an `available_at`, and a `status`. Runtime-facing
 rows also carry structured scheduling authority: `causal_session_id` preserves
 Session causal order, `delivery_scope` is `thread` or `session`,
@@ -55,8 +58,8 @@ order. Caller timestamps and random job ids never establish causal order.
 
 | Status | Meaning | Writers (`internal/queue/postgresql_store.go`) | Transitions to |
 |---|---|---|---|
-| `pending` | admitted, awaiting a lease; `Retry`/`Defer` re-admit with a backoff-delayed `available_at`; reclaim re-admits at `available_at = now` | `Enqueue` (insert), `Retry` (budget left), `Defer`, `ReclaimExpiredLeases` | `leased`, `cancelled`, `dead_lettered` |
-| `leased` | one consumer holds the row under a `lease_token` for the lease window | `Lease` | `pending`, `acknowledged`, `dead_lettered` |
+| `pending` | admitted, awaiting a lease; `Retry`/`Defer` re-admit with a backoff-delayed `available_at`; reclaim and `ReleaseUnstartedJob` re-admit at `available_at = now` | `Enqueue` (insert), `Retry` (budget left), `Defer`, `ReclaimExpiredLeases`, `ReleaseUnstartedJob` | `leased`, `cancelled`, `dead_lettered` |
+| `leased` | one consumer holds the row under a `lease_token` for the lease window | `Lease`, `LeaseJobRunnerJobs` | `pending`, `acknowledged`, `dead_lettered` |
 | `acknowledged` | terminal; the leased work committed | `Ack` | (none) |
 | `cancelled` | terminal; pending work was fenced out — reached only straight from `pending`, never from `leased` | `Cancel` (`runtime_input` rows), `CancelTx` (one exact Sandbox notification identity) | (none) |
 | `dead_lettered` | terminal; attempts exhausted or an explicit dead-letter | `Retry` (exhausted), `DeadLetter`, `DeadLetterExhaustedTx` after Sandbox business settlement | (none) |
@@ -70,7 +73,9 @@ changes nothing.
 
 | Call | Fencing | Kinds | Effect |
 |---|---|---|---|
-| `Lease` | mints a fresh `lease_token` | any requested kind | discovers a bounded candidate set without row locks, locks distinct Session arbitration owners in canonical order, then locks and revalidates each exact Queue row; partition rows remain mutually exclusive, Thread rows conflict only with the same Thread or Session-exclusive work, and Session rows conflict with every Thread in that Session; increments `attempt_count`; projects an "unset" `max_attempts = 0` to the effective default in the response |
+| `Lease` | mints a fresh `lease_token` | any requested kind | workspace-scoped and generic (Sandbox kinds and environment build/fanout in production); discovers a bounded candidate set without row locks, locks distinct Session arbitration owners in canonical order, then locks and revalidates each exact Queue row against the shared lease eligibility; partition rows remain mutually exclusive, Thread rows conflict only with the same Thread or Session-exclusive work, and Session rows conflict with every Thread in that Session; increments `attempt_count`; projects an "unset" `max_attempts = 0` to the effective default in the response |
+| `LeaseJobRunnerJobs` | mints a fresh `lease_token` per job | the five Job Runner kinds only | Queue chooses the workspaces (see [Direct Job Runner leasing](#direct-job-runner-leasing)); the request carries only `max_jobs`, `lease_owner` and `lease_duration_ms` (5000–300000); same eligibility, attempt increment and clamps as `Lease`; records the previous attempt count privately; returns `retry_after_ms` |
+| `ReleaseUnstartedJob` | lease-token | the five Job Runner kinds, direct leases only | returns an observed but undispatched direct lease to `pending` at database time with its saved attempt count restored exactly; stale, duplicate or expired tokens report `updated = false`; a live token without direct-lease provenance is `FailedPrecondition` |
 | `Heartbeat` | lease-token | any | pushes an unexpired `leased_until` forward and returns the database-written expiry; an expired lease cannot be revived |
 | `Ack` | lease-token | any | → `acknowledged`; legal only after the consumer reconciled durable state and delivered/resolved the command |
 | `Retry` | lease-token | any | carries an error kind/message only, no delay authority. If `attempt_count` reached the effective `max_attempts`, dead-letters instead. Otherwise → `pending` with capped exponential backoff + full jitter |
@@ -79,8 +84,93 @@ changes nothing.
 | `Cancel` | partition-scoped, **not** lease-fenced | `runtime_input` `input_kind = messages` only | requires `workspace_id`, `session_id`, `session_thread_id`, and a positive `interrupt_fence_sequence`; marks `cancelled` every `pending` matching row in that thread whose `sequence_to` is below the fence; touches no `leased`/terminal row and deletes no `session_events` |
 | `ReclaimExpiredLeases` | exempt (matches `workspace_id`/`id`/`status = 'leased'` without the stale token) | any | background loop only; clears lease bookkeeping on rows `leased` with `leased_until <= PostgreSQL clock time` and returns them to `pending` at a database-written `available_at` with a `lease_expired` error stamp |
 
-`Lease`, `Heartbeat`, and reclaim author durable lease timestamps from fresh
-PostgreSQL clock time; consumer wall clocks control only local scheduling.
+`Lease`, `LeaseJobRunnerJobs`, `Heartbeat`, `ReleaseUnstartedJob` and reclaim
+author durable lease timestamps from fresh PostgreSQL clock time; consumer wall
+clocks control only local scheduling.
+
+### Direct Job Runner leasing
+
+`LeaseJobRunnerJobs` moves workspace selection from the Runner into Queue. The
+Runner asks for at most its free capacity; Queue discovers, rotates and leases.
+Workspace is returned task scope, never a Runner scheduling input. The method
+admits exactly `runtime_input`, `runtime_recovery`, `runtime_config_update`,
+`cleanup_session` and `session_delete_cleanup`; every other kind, including
+environment build/fanout, stays on workspace-scoped `Lease`, which keeps its
+generic contract and is not restricted by kind.
+
+**Discovery.** Two partial indexes over pending rows of those five kinds serve
+it: `idx_queue_job_runner_scan` on `(workspace_id, negative_priority,
+available_at, partition_key, queue_partition_sequence, id)` and
+`idx_queue_job_runner_due` on `(available_at, id)`. The scan key K is that
+index's suffix. `negative_priority` is the stored generated column
+`-(priority::bigint)` (cast before negation); it is a plain column because
+unary minus is not leakproof, so under row-level security a window bound on
+the expression would be filtered after the policy instead of seeking. A turn first seeks the next
+workspace after the scheduler cursor (`ORDER BY workspace_id LIMIT 1`), and
+when none follows, the first workspace; there is no workspace-table listing,
+`DISTINCT` or eligibility filter before that `LIMIT`. For the chosen tenant it
+fetches a raw window of at most 32 rows of its current pass in K order,
+before any time, lifecycle or barrier evaluation. Discovery reads only
+`queue_jobs`, in read-only transactions with the `tetral.queue_maintenance`
+setting, each statement under a 40 ms statement timeout.
+
+**Exact lease.** Each examined candidate gets a fresh workspace transaction
+with a 40 ms statement and 10 ms lock timeout: `pg_try_advisory_xact_lock` on
+the candidate Session's arbitration key, then `FOR UPDATE SKIP LOCKED` on the
+exact row, then one token-mint `UPDATE` that rechecks the shared eligibility
+(the same predicate `Lease` uses, evaluated at `clock_timestamp()`). A busy
+Session owner, a locked or missing row, an ineligible candidate or a local
+timeout leaves no mutation and moves on. Any other database failure stops the
+call: committed jobs are still returned, with a 100 ms hint; with none
+committed, the call fails. Eligibility counts blockers of every kind, whether
+or not this method returns that kind, and payload JSON is never authority.
+
+**Fairness and progress.** The scheduler keeps per process a shared cursor and
+generation; a turn commits its tenant proposal only if the generation is
+unchanged, and a stale proposal is discarded. Each tenant has a pass with an
+upper key and database time captured at pass start; only rows due and admitted
+by then are considered, and later work waits for the next pass. The cursor
+advances through the rows actually examined, never past an unexamined suffix
+of a fetched window, and a tenant whose turn another call holds is skipped,
+not awaited. One call takes at most one job per tenant, ends when the cursor
+returns to a tenant it already visited, and is bounded by 16 tenant turns, 128
+fetched rows (charged on fetch), 16 lease transactions and a 1000 ms budget.
+Requests above 16 jobs therefore receive partial responses. Fairness is per
+process: replicas keep their own cursors and exact row custody chooses one
+winner. With T tenants holding only blocked or future Runner work, a newly
+ready job is reached within about ⌈T ÷ 16⌉ calls. Pass state is memory only
+and proportional to visited unfinished tenant passes; it has no LRU eviction.
+
+**Retry hint.** `retry_after_ms` is 100 ms when a budget or lock contention
+stopped the call and the process is not idle. The process becomes idle when
+its cursor wraps without any lease committed since the previous wrap, and any
+committed lease clears that. Otherwise the hint is the time until the next
+future Runner job clamped to 100–1000 ms, or 1000 ms when none exists. A job
+admitted after its tenant's current pass began is outside that pass. A call
+woken by that job's notification which completes discovery by ending the pass
+at its stored upper key returns no job and this future-clamped or 1000 ms hint;
+the next call starts a fresh pass and leases the job, so it waits up to about
+one hint.
+
+**Release.** The direct lease records the prior attempt count in the private
+`queue_jobs.lease_previous_attempt_count`. A CHECK allows a value only on a
+leased row of the five kinds, every transition out of `leased` clears it
+(Ack, Retry, Defer, DeadLetter, reclaim and the business-owner custody
+transitions), and `Lease` never sets it. `ReleaseUnstartedJob` takes the
+Session arbitration lock, then the exact row lock, samples database time only
+after that wait, and restores the saved count. Queue does not infer
+non-execution from a token: the Runner calls release only before dispatch.
+Success emits the Job Runner wake class.
+
+**Scheduler lifecycle.** The Queue process constructs one scheduler with its
+store before registering the RPC service, and `Run` starts its single cleanup
+worker. Each second the worker probes at most 128 pass entries with one
+read-only statement and removes an unchanged, idle entry whose tenant has no
+pending Runner work; it issues no SQL while no pass exists. Shutdown rejects
+new direct leases with `Unavailable`, cancels admitted calls so they return
+their committed jobs, joins them and the worker, and clears pass state before
+the database pool closes. Restart resets preference and progress, never jobs
+or leases.
 
 Four in-process Queue boundaries support Sandbox business transactions without
 moving business state into Queue. `CancelTx` cancels only the exact pending row
@@ -121,6 +211,7 @@ durable invariants; the transition writers uphold them under concurrency.
 | At most one Thread lease per `(workspace_id, causal_session_id, delivery_thread_id)` | `leased` Thread rows only | partial-unique Thread index plus compatibility checks against Session-exclusive leases |
 | At most one Session-exclusive lease per `(workspace_id, causal_session_id)` | `leased` Session rows only | partial-unique Session index plus compatibility checks against every Thread lease in that Session |
 | One causal position per partition | all jobs | the locked `(workspace_id, partition_key)` counter assigns `queue_partition_sequence`; Retry, Defer, and reclaim update availability/lease state without changing it |
+| Direct-lease provenance exists only on a live direct lease | `lease_previous_attempt_count` | `queue_jobs_lease_previous_attempt_custody_shape` CHECK (non-NULL only while `leased` and of a Runner kind); only `LeaseJobRunnerJobs` sets it and every exit from `leased` clears it |
 
 ### The maintenance loop
 
@@ -138,9 +229,10 @@ timestamp is reported as an integrity error and retained without preventing
 eligible peers in the same bounded pass from being deleted or the subsequent
 empty-partition-counter sweep from running.
 
-The serving process owns this loop together with its RPC and HTTP listeners.
+The serving process owns this loop together with its RPC and HTTP listeners
+and the Job Runner scheduler's cleanup worker.
 Shutdown marks readiness unavailable and closes both request and maintenance
-cycle admission. New maintenance cycles observe signal cancellation directly,
+cycle admission, and quiesces the scheduler as described above. New maintenance cycles observe signal cancellation directly,
 even before the main shutdown path is scheduled. A cycle already admitted may
 finish during the same drain window as existing RPCs. At the deadline the service
 cancels maintenance and HTTP database work and force-stops RPC transport, then joins every admitted
@@ -201,7 +293,11 @@ and DNS, and ingress on both ports to `api`, `job-runner`, and
 
 Each successful lease logs `duration.ms` for the database Lease call and
 `queue.ready_wait.ms` for time elapsed since that job's `available_at`; retry
-backoff before `available_at` is deliberately excluded. PostgreSQL LISTEN
+backoff before `available_at` is deliberately excluded. A direct Job Runner
+call additionally warns, with fixed fields only, when candidates were skipped
+on a local lock or statement timeout (`timeout.kind`, `failed.count`) or when a
+failure stopped the call after earlier leases committed (`db.sqlstate` when
+available). PostgreSQL LISTEN
 disconnects log only fixed authentication, permission, endpoint/transport,
 timeout, or unknown categories. Raw database errors, DSNs, queries, and
 credentials are never included, and polling remains the reconnect fallback.
@@ -274,8 +370,9 @@ background command's terminal completion; it is not a public user message and
 produces no second public user event.
 
 **Lifecycle.** A kind is admitted only through `EnqueueTx` or `EnqueueBatchTx`
-inside the producer's transaction; from there it flows through the shared status machine above. Consumers
-lease the kinds they serve by name in `Lease.kinds`; an unknown kind there is a
+inside the producer's transaction; from there it flows through the shared status machine above. The Job
+Runner receives its five kinds through `LeaseJobRunnerJobs`; Sandbox consumers
+lease the kinds they serve by name in `Lease.kinds`, where an unknown kind is a
 validation error.
 
 **Kind-specific behaviors a replacement must preserve.**
@@ -326,7 +423,11 @@ replaced without losing or double-committing work.
 
 **Interface contract.** `Lease(workspace_id, kinds, lease_owner, max_jobs,
 lease_duration_ms)` returns up to `max_jobs` leased rows, each with a fresh
-`lease_token`. The consumer then drives exactly one terminal transition per job
+`lease_token`. `LeaseJobRunnerJobs(max_jobs, lease_owner, lease_duration_ms)`
+returns up to `max_jobs` Runner jobs across workspaces and a `retry_after_ms`
+hint; `max_jobs` is bounded by `MaxJobRunnerLeaseJobs()`, which keeps a maximal
+response inside the 4 MiB Queue Lease transport fuse, and invalid values are
+rejected, never clamped. The consumer then drives exactly one terminal transition per job
 (`Ack` / `Retry` / `DeadLetter`, or an admitted `Defer` back to `pending`),
 calling `Heartbeat` to extend `leased_until` while it works.
 Heartbeat returns the new database-written expiry. Consumers derive a
@@ -355,6 +456,9 @@ the next holder re-leases under a new token.
   config boundary.
 - **No delay authority.** Backoff timing is Queue-owned; `Retry` carries only an
   error, not a delay.
+- **Release only what never started.** `ReleaseUnstartedJob` is for a direct
+  lease the consumer observed but never dispatched; Queue checks token
+  provenance, not execution.
 
 **Conformance tests.**
 `TestQueueServiceGeneratedClientLeasesAndFencesTransitions`,
@@ -374,17 +478,18 @@ the next holder re-leases under a new token.
 |---|---|
 | `internal/queue/queue_test.go` | admission validation: per-kind canonical shape, references-only payload bounds, event-reference limits, lease batch-capacity arithmetic |
 | `internal/queue/postgresql_store_test.go` | the store's durable behavior against PostgreSQL: Thread/Session lease compatibility, same-Thread interrupt precedence, partition exclusion, ack/retry/defer/dead-letter fencing, both cancellation boundaries, over-budget conditional dead-lettering, Sandbox terminal retention and empty-counter cleanup, backoff full-jitter, unset-`max_attempts` projection, cross-workspace maintenance, metrics summary |
-| `services/queue/server_test.go` | the gRPC surface over the generated client: lease + fenced transitions, maximum legal batch within the message fuse, the field census matching lease arithmetic, validation → `InvalidArgument` mapping |
+| `internal/queue/job_runner_lease_test.go` | direct Job Runner leasing under the real Queue role: future-tenant yield and window resumption, examined-prefix advancement under the transaction budget, per-call visited tenants with interleaved calls, per-process alternation and replica custody, committed tokens after a later failure, the eligibility matrix against `Lease`, discovery query plans on the Runner indexes, idle-aware retry hints, busy-tenant skipping, bounded pass cleanup, quiesce, exact release refunds, post-lock expiry, and provenance cleared by every transition |
+| `services/queue/server_test.go` | the gRPC surface over the generated client: lease + fenced transitions, maximum legal batch within the message fuse for both lease methods, the field census matching lease arithmetic, validation → `InvalidArgument`, release `FailedPrecondition` and draining-scheduler `Unavailable` mapping |
 | `services/queue/config_test.go` | `ConfigFromEnv` pins the retry policy and rejects invalid values |
 | `services/queue/maintenance_test.go` | each maintenance tick runs reclaim, bounded Sandbox terminal retention, then bounded empty-counter cleanup, and logs shared operation/error fields |
-| `services/queue/run_test.go` | admitted RPC, maintenance, and HTTP users join under graceful completion and forced cancellation; no later maintenance cycle starts after drain admission closes |
+| `services/queue/run_test.go` | admitted RPC, maintenance, and HTTP users join under graceful completion and forced cancellation; no later maintenance cycle starts after drain admission closes; the Job Runner scheduler starts once and quiesces before `Run` returns |
 | `integration/replica_queue_test.go` | three independent Queue receivers share lease authority; lost committed Lease/Ack responses, real expiry/reclaim, stale-token rejection on every transition, and Workspace/Session barriers |
 | `integration/replica_queue_maintenance_test.go` | a real reclaim UPDATE is held before commit; normal completion commits the whole batch, forced cancellation rolls it all back, the pool stays alive until join, and a replacement maintenance owner reclaims remaining work |
 | `services/queue/cmd/tetral-queue/main_test.go` | schema-behind startup stops before the store and listener; startup-failure logs use shared fields |
 
 Run the store suite (and any test that opens PostgreSQL) with the race detector
 on. If a PR changes the `queue_jobs` invariants, admission validation, lease
-selection or barrier, any transition, the backoff formula, or the maintenance loop in
+selection or barrier, the Job Runner scheduler, any transition, the backoff formula, or the maintenance loop in
 this folder, it updates the matching section here.
 
 ## Process diagnostics

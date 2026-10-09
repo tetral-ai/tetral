@@ -262,7 +262,7 @@ func runContentProcessRecovery(t *testing.T, spec contentCrashCase) {
 	second := startContentCrashRuntime(t, endpoint.Address, gateway.address, pod, "recovered_"+pod, "content-new", "none")
 	delivery := contentCrashDeliveryStore(t, runnerDB, second, pod)
 	observeContentCrashLoad(t, second)
-	if repaired, err := delivery.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 1 {
+	if repaired, err := repairRuntimePodLoss(context.Background(), delivery); err != nil || repaired != 1 {
 		var pgError *pgconn.PgError
 		if errors.As(err, &pgError) {
 			t.Logf("repair database cause code=%s table=%s constraint=%s routine=%s usage_table_permission_denied=%t", pgError.Code, pgError.TableName, pgError.ConstraintName, pgError.Routine, pgError.Code == "42501" && pgError.Message == "permission denied for table request_usage_details")
@@ -430,7 +430,7 @@ func deliverContentCrashJob(t *testing.T, db *sql.DB, delivery *jobrunner.Postgr
 		t.Fatal(err)
 	}
 	observed := &handoffObservedDeliverer{RuntimePodDirectDeliverer: jobrunner.RuntimePodDirectDeliverer{Store: delivery, Sender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}}
-	runner := &jobrunner.JobRunner{Queue: tetralqueue.NewServer(store, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: observed}
+	runner := &jobrunner.JobRunner{Queue: tetralqueue.NewServer(store, nil), Deliverer: observed}
 	if err := runIssuedLeaseThroughRunner(context.Background(), runner, queueJobProto(leases[0]), jobrunner.JobRunnerConfig{LeaseOwner: "content-crash-recovery", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour}); err != nil {
 		t.Fatal(err)
 	}

@@ -471,7 +471,7 @@ func cancelRuntimeTerminationInputsTx(
 		    UPDATE queue_jobs job
 		       SET status = 'cancelled', cancelled_at = $4,
 		           lease_token = NULL, leased_by = NULL, leased_at = NULL, leased_until = NULL,
-		           updated_at = $4
+		           lease_previous_attempt_count = NULL, updated_at = $4
 		     WHERE job.workspace_id = $1
 		       AND job.status IN ('pending', 'leased')
 		       AND EXISTS (
@@ -502,7 +502,7 @@ func cancelRuntimeTerminationInputsTx(
 		`UPDATE queue_jobs
 			    SET status='cancelled', cancelled_at=$3,
 		        lease_token=NULL, leased_by=NULL, leased_at=NULL, leased_until=NULL,
-		        updated_at=$3
+		        lease_previous_attempt_count=NULL, updated_at=$3
 			  WHERE workspace_id=$1 AND kind IN ($4, $5, $6, $7) AND partition_key=$2
 		    AND status IN ('pending','leased')`,
 		scope.GetWorkspaceId(),

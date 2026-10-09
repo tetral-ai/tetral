@@ -222,7 +222,7 @@ func TestPostgreSQLSeparatedOwnersResourceLifecycle(t *testing.T) {
 			sender := separatedSender()
 			worker := f.worker(sender)
 			worker.Logger = owners[0].Logger
-			if err := worker.RunOnce(f.ctx); err != nil {
+			if err := acquireAndJoinJobRunner(f.ctx, worker); err != nil {
 				t.Fatalf("deliver manifest Queue head: %v", err)
 			}
 			job, lease := f.input(t)

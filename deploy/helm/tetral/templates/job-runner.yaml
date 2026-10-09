@@ -89,8 +89,6 @@ spec:
               value: {{ .Values.jobRunner.heartbeatIntervalMs | quote }}
             - name: TETRAL_BRIDGE_JOB_RUNNER_MAX_JOBS
               value: {{ .Values.jobRunner.maxJobs | quote }}
-            - name: TETRAL_BRIDGE_JOB_RUNNER_POLL_INTERVAL_MS
-              value: {{ .Values.jobRunner.pollIntervalMs | quote }}
             - name: TETRAL_KUBERNETES_NAMESPACE
               value: tetral-agent-runtime
             - name: TETRAL_AGENT_RUNTIME_LABEL_SELECTOR

@@ -139,6 +139,10 @@ func TestQueueRunJoinsMaintenanceAndRPCBeforeReturning(t *testing.T) {
 			if store.cycles.Load() != 1 {
 				t.Fatalf("admitted %d maintenance cycles across shutdown; want one", store.cycles.Load())
 			}
+			if store.schedulerStarts.Load() != 1 || store.schedulerQuiesces.Load() != 1 {
+				t.Fatalf("Job Runner scheduler starts=%d quiesces=%d before Run returned; want one each",
+					store.schedulerStarts.Load(), store.schedulerQuiesces.Load())
+			}
 		})
 	}
 }
@@ -156,7 +160,11 @@ type barrierQueueStore struct {
 	recordingStore
 	rpcEntered, maintenanceEntered, rpcExited, maintenanceExited, release chan struct{}
 	cycles                                                                atomic.Int64
+	schedulerStarts, schedulerQuiesces                                    atomic.Int64
 }
+
+func (s *barrierQueueStore) StartJobRunnerScheduler()   { s.schedulerStarts.Add(1) }
+func (s *barrierQueueStore) QuiesceJobRunnerScheduler() { s.schedulerQuiesces.Add(1) }
 
 func (s *barrierQueueStore) Lease(ctx context.Context, _ queue.LeaseRequest) ([]*queue.Job, error) {
 	close(s.rpcEntered)

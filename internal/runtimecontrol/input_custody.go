@@ -138,7 +138,7 @@ func handBackRuntimeInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID,
 					`UPDATE queue_jobs
 					    SET status = 'pending', available_at = $3,
 					        lease_token = NULL, leased_by = NULL, leased_at = NULL, leased_until = NULL,
-					        updated_at = $3
+					        lease_previous_attempt_count = NULL, updated_at = $3
 					  WHERE workspace_id = $1 AND id = $2 AND status IN ('pending', 'leased')`,
 					workspaceID,
 					input.QueueJobID.String,
@@ -151,7 +151,7 @@ func handBackRuntimeInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID,
 					`UPDATE queue_jobs
 					    SET status = 'pending', available_at = $3,
 					        lease_token = NULL, leased_by = NULL, leased_at = NULL, leased_until = NULL,
-					        updated_at = $3
+					        lease_previous_attempt_count = NULL, updated_at = $3
 					  WHERE workspace_id = $1 AND id = $2 AND status = 'leased'`,
 					workspaceID,
 					input.QueueJobID.String,

@@ -95,6 +95,43 @@ const (
 	// Fixed response headroom covers the response envelope and unknown fields;
 	// it is independent from the identically sized payload fuse.
 	QueueLeaseResponseFixedOverhead = 64 * 1024
+	// The direct Job Runner response also carries retry_after_ms: one tag byte
+	// plus a five-byte non-negative int32 varint.
+	jobRunnerLeaseRetryHintBytes = 6
+)
+
+// Direct Job Runner leasing limits. They are Queue-owned source constants,
+// not deployment knobs.
+const (
+	// MinJobRunnerLeaseDuration and MaxJobRunnerLeaseDuration bound
+	// LeaseJobRunnerJobs lease_duration_ms; workspace-scoped Lease keeps its
+	// positive-duration rule.
+	MinJobRunnerLeaseDuration = 5 * time.Second
+	MaxJobRunnerLeaseDuration = 300 * time.Second
+
+	// One call stops beginning database work after this budget, leaving the
+	// caller's 2-second RPC deadline for serialization and transport.
+	jobRunnerCallBudget = 1000 * time.Millisecond
+	// Per call: tenant turn attempts, fetched raw candidates and exact lease
+	// transactions. A turn fetches at most one tenant window and commits at
+	// most one job.
+	jobRunnerCallTurns             = 16
+	jobRunnerCallRawCandidates     = 128
+	jobRunnerCallLeaseTransactions = 16
+	jobRunnerTenantWindow          = 32
+	// Every discovery statement and exact lease transaction runs under these
+	// local limits, shortened by the remaining call budget.
+	jobRunnerStatementTimeout = 40 * time.Millisecond
+	jobRunnerLockTimeout      = 10 * time.Millisecond
+	// Retry hints: the active value after a budget or contention stop, and
+	// the clamp for the next future job otherwise.
+	jobRunnerActiveRetryAfter = 100 * time.Millisecond
+	jobRunnerIdleRetryAfter   = 1000 * time.Millisecond
+	// The scheduler's single cleanup worker probes at most this many pass
+	// entries per tick under its own child deadline.
+	jobRunnerCleanupInterval = time.Second
+	jobRunnerCleanupKeys     = 128
+	jobRunnerCleanupTimeout  = 200 * time.Millisecond
 )
 
 type QueueJobFieldBound struct {
@@ -179,8 +216,9 @@ func QueueJobEnvelopeAllowance() int {
 //	-------------  --------------------------------------------  ------------------------------------  ----------------------------
 //	pending        admitted, awaiting a lease; Retry/Defer       Enqueue (insert), Retry (not          -> leased, -> cancelled,
 //	               re-admit with backoff-delayed available_at,   exhausted), Defer, ReclaimExpired-
-//	               reclaim re-admits at available_at = now       Leases                                -> dead_lettered
-//	leased         one consumer holds the row under a             Lease                                 -> pending, -> acknowledged,
+//	               reclaim and release re-admit at               Leases, ReleaseUnstartedJob           -> dead_lettered
+//	               available_at = now
+//	leased         one consumer holds the row under a             Lease, LeaseJobRunnerJobs             -> pending, -> acknowledged,
 //	               lease_token for the lease window                                                     -> dead_lettered
 //	acknowledged   terminal; the leased work committed            Ack                                   (none)
 //	cancelled      terminal; pending work was fenced out          Cancel, CancelTx                       (none)
@@ -188,9 +226,9 @@ func QueueJobEnvelopeAllowance() int {
 //	               dead-letter
 //	                                                            DeadLetterExhaustedTx
 //
-// Readers of status: Lease candidate selection with its delivery-scope barrier,
-// the active-dedupe lookup in EnqueueTx, Metrics, the Sandbox over-budget
-// census, and terminal-retention maintenance.
+// Readers of status: Lease and direct Job Runner candidate selection with
+// their shared delivery-scope barrier, the active-dedupe lookup in EnqueueTx,
+// Metrics, the Sandbox over-budget census, and terminal-retention maintenance.
 //
 // INVARIANTS:
 //   - At most one active job per (workspace_id, dedupe_key) across pending and
@@ -214,6 +252,12 @@ func QueueJobEnvelopeAllowance() int {
 //   - Lease discovers candidates without Queue row locks, acquires the bounded
 //     Session arbitration set in canonical order, then locks and revalidates
 //     each exact candidate. It never waits Queue-row-first on a Session owner.
+//   - LeaseJobRunnerJobs leases one candidate per transaction: it try-locks the
+//     Session arbitration owner, skips a locked Queue row, and rechecks the
+//     same eligibility predicate as Lease against database time. Only it
+//     records lease_previous_attempt_count, and every transition off leased
+//     clears that private provenance, so ReleaseUnstartedJob can refund only a
+//     live direct lease.
 //
 // UPDATE-WITH: internal/queue/postgresql_store.go (every transition writer plus
 // the ON CONFLICT and NOT EXISTS guards that enforce the two invariants).
@@ -248,6 +292,19 @@ type IntegrityError struct {
 }
 
 func (e *IntegrityError) Error() string { return e.Message }
+
+// PreconditionError reports a well-formed request whose durable Queue state
+// does not permit the operation, such as releasing a live lease that carries
+// no direct-lease provenance.
+type PreconditionError struct {
+	Message string
+}
+
+func (e *PreconditionError) Error() string { return e.Message }
+
+// ErrJobRunnerSchedulerClosed rejects direct Job Runner leasing after the
+// owning Queue process began quiescing.
+var ErrJobRunnerSchedulerClosed = errors.New("queue: job runner scheduler is closed")
 
 type Job struct {
 	ID                     string
@@ -316,6 +373,36 @@ type LeaseRequest struct {
 	MaxJobs       int
 	LeaseDuration time.Duration
 	Now           time.Time
+}
+
+// LeaseJobRunnerJobsRequest carries only the caller's free capacity, label
+// and lease duration. Queue chooses workspaces and admits only the five Job
+// Runner kinds; there is no caller-supplied scope or continuation.
+type LeaseJobRunnerJobsRequest struct {
+	LeaseOwner    string
+	MaxJobs       int
+	LeaseDuration time.Duration
+}
+
+// LeaseJobRunnerJobsResult returns every committed lease and the Queue-owned
+// delay before the caller should ask again when it still has capacity.
+type LeaseJobRunnerJobsResult struct {
+	Jobs       []*Job
+	RetryAfter time.Duration
+	// Bounded diagnostics for the serving boundary: candidates skipped on a
+	// local lock or statement timeout, and the failure that stopped a call
+	// after Jobs had already committed.
+	LockTimeouts      int
+	StatementTimeouts int
+	StopFailure       error
+}
+
+// ReleaseUnstartedJobRequest names one direct Job Runner lease whose job the
+// caller observed but never dispatched.
+type ReleaseUnstartedJobRequest struct {
+	WorkspaceID workspace.ID
+	JobID       string
+	LeaseToken  string
 }
 
 type HeartbeatRequest struct {
@@ -639,6 +726,58 @@ func ValidateLeaseRequest(request LeaseRequest) error {
 func MaxQueueLeaseJobs() int {
 	return (sessionrpc.MaxQueueLeaseGRPCMessageBytes - QueueLeaseResponseFixedOverhead) /
 		(MaxQueueJobPayloadBytes + QueueJobEnvelopeAllowance())
+}
+
+// MaxJobRunnerLeaseJobs is the largest LeaseJobRunnerJobs batch whose
+// maximal response fits the Queue Lease transport fuse, after the fixed
+// response headroom and the retry hint.
+func MaxJobRunnerLeaseJobs() int {
+	return (sessionrpc.MaxQueueLeaseGRPCMessageBytes - QueueLeaseResponseFixedOverhead - jobRunnerLeaseRetryHintBytes) /
+		(MaxQueueJobPayloadBytes + QueueJobEnvelopeAllowance())
+}
+
+// ValidateJobRunnerLeaseBatchSize rejects a non-positive or oversized direct
+// Job Runner batch; invalid requests are never clamped.
+func ValidateJobRunnerLeaseBatchSize(maxJobs int) error {
+	if maxJobs <= 0 {
+		return &ValidationError{Message: "max_jobs must be positive"}
+	}
+	if maximum := MaxJobRunnerLeaseJobs(); maxJobs > maximum {
+		return &ValidationError{Message: fmt.Sprintf("max_jobs must not exceed %d under the queue Lease message capacity", maximum)}
+	}
+	return nil
+}
+
+// ValidateJobRunnerLeaseDuration enforces the direct Job Runner lease range.
+func ValidateJobRunnerLeaseDuration(duration time.Duration) error {
+	if duration < MinJobRunnerLeaseDuration || duration > MaxJobRunnerLeaseDuration {
+		return jobRunnerLeaseDurationError()
+	}
+	return nil
+}
+
+// JobRunnerLeaseDurationFromMillis converts a wire lease_duration_ms only
+// after checking the direct Job Runner range, so no value can overflow.
+func JobRunnerLeaseDurationFromMillis(millis int64) (time.Duration, error) {
+	if millis < MinJobRunnerLeaseDuration.Milliseconds() || millis > MaxJobRunnerLeaseDuration.Milliseconds() {
+		return 0, jobRunnerLeaseDurationError()
+	}
+	return time.Duration(millis) * time.Millisecond, nil
+}
+
+func jobRunnerLeaseDurationError() error {
+	return &ValidationError{Message: fmt.Sprintf("lease_duration_ms must be between %d and %d",
+		MinJobRunnerLeaseDuration.Milliseconds(), MaxJobRunnerLeaseDuration.Milliseconds())}
+}
+
+func ValidateLeaseJobRunnerJobsRequest(request LeaseJobRunnerJobsRequest) error {
+	if err := ValidateLeaseOwner(request.LeaseOwner); err != nil {
+		return err
+	}
+	if err := ValidateJobRunnerLeaseBatchSize(request.MaxJobs); err != nil {
+		return err
+	}
+	return ValidateJobRunnerLeaseDuration(request.LeaseDuration)
 }
 
 func ValidateLeaseOwner(leaseOwner string) error {
@@ -1414,6 +1553,17 @@ func isKnownKind(kind string) bool {
 	}
 }
 
+// IsJobRunnerKind reports the five kinds that direct Job Runner leasing
+// admits; every other kind is leased through workspace-scoped Lease.
+func IsJobRunnerKind(kind string) bool {
+	switch kind {
+	case KindRuntimeInput, KindRuntimeRecovery, KindRuntimeConfigUpdate, KindCleanupSession, KindSessionDeleteCleanup:
+		return true
+	default:
+		return false
+	}
+}
+
 func IsSandboxJobKind(kind string) bool {
 	switch kind {
 	case KindSandboxToolExecute, KindSandboxActivate, KindSandboxMaterialize, KindSandboxRelease, KindSandboxToolCancel,
@@ -1450,4 +1600,9 @@ func IsValidationError(err error) bool {
 func IsIntegrityError(err error) bool {
 	var integrity *IntegrityError
 	return errors.As(err, &integrity)
+}
+
+func IsPreconditionError(err error) bool {
+	var precondition *PreconditionError
+	return errors.As(err, &precondition)
 }

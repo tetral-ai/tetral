@@ -148,7 +148,7 @@ func TestPostgreSQLSeparatedOwnersSettlementRecovery(t *testing.T) {
 					return nil
 				}
 				recover := func(ctx context.Context) error {
-					count, err := f.runner.RepairLostRuntimeBindings(ctx, "default")
+					count, err := repairRuntimePodLoss(ctx, f.runner)
 					results <- outcome{owner: "recovery", repaired: count, err: err}
 					return nil
 				}

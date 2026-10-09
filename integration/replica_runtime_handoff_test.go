@@ -512,7 +512,7 @@ func deliverHandoffRecovery(t *testing.T, runtimeDB *sql.DB, child *handoffRunti
 		}
 	}()
 	observed := &handoffObservedDeliverer{RuntimePodDirectDeliverer: jobrunner.RuntimePodDirectDeliverer{Store: delivery, Sender: sender}}
-	runner := &jobrunner.JobRunner{Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: observed}
+	runner := &jobrunner.JobRunner{Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: observed}
 	for _, lease := range leases {
 		if err := runIssuedLeaseThroughRunner(context.Background(), runner, queueJobProto(lease), jobrunner.JobRunnerConfig{LeaseOwner: "handoff-runner", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour}); err != nil {
 			t.Fatal(err)
@@ -576,7 +576,7 @@ func deliverHandoffInputWithPlacement(t *testing.T, runtimeDB *sql.DB, old, next
 	}()
 	deliverer := &handoffObservedDeliverer{RuntimePodDirectDeliverer: jobrunner.RuntimePodDirectDeliverer{Store: store, Sender: sender}}
 	queueStore := queue.NewPostgreSQLStore(client)
-	runner := &jobrunner.JobRunner{Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer}
+	runner := &jobrunner.JobRunner{Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer}
 	// Quiesce also queues B's recovery. Select the actual input owner rather
 	// than mistaking activity on that earlier recovery for fresh D admission.
 	leases, err := queueStore.Lease(context.Background(), queue.LeaseRequest{WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "handoff-placement", MaxJobs: 1, LeaseDuration: time.Minute})
@@ -687,7 +687,7 @@ func raceHandoffBinders(t *testing.T, runtimeDB, admin *sql.DB, child *handoffRu
 		}})
 		competing := &handoffCompetingStore{PostgreSQLRuntimeDeliveryStore: store, entered: entered, gate: gate, recovery: index == 1}
 		deliverer := &handoffObservedDeliverer{RuntimePodDirectDeliverer: jobrunner.RuntimePodDirectDeliverer{Store: competing, Sender: sender}}
-		runner := &jobrunner.JobRunner{Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer}
+		runner := &jobrunner.JobRunner{Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer}
 		lease := queueJobProto(leases[0])
 		owner := fmt.Sprintf("competing-%d", index)
 		owners.Add(1)
@@ -1483,7 +1483,7 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 				repair := runtimePodLossSweepStore(t, runtimeDB, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 					return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{Namespace: "tetral-agent-runtime", PodName: "runtime-pod-new", PodUID: "pod_new", PodIP: "127.0.0.1"}})
 				})
-				if repaired, err := repair.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 1 {
+				if repaired, err := repairRuntimePodLoss(context.Background(), repair); err != nil || repaired != 1 {
 					t.Fatalf("actual confirmed-death repair=%d err=%v", repaired, err)
 				}
 				var idle, errors, originalEnd, noReceipt, rewrittenEnds int
@@ -1872,7 +1872,7 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 				return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: pod, PodIP: "127.0.0.1"}})
 			},
 		})
-		if repaired, err := delivery.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 1 {
+		if repaired, err := repairRuntimePodLoss(context.Background(), delivery); err != nil || repaired != 1 {
 			t.Fatalf("same ready Pod superseded-process repair=%d err=%v", repaired, err)
 		}
 		if handoffBindingCount(t, admin, session) != 0 {
@@ -1894,7 +1894,7 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 			}
 		}()
 		observedDelivery := &handoffObservedDeliverer{RuntimePodDirectDeliverer: jobrunner.RuntimePodDirectDeliverer{Store: delivery, Sender: sender}}
-		runner := &jobrunner.JobRunner{Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: observedDelivery}
+		runner := &jobrunner.JobRunner{Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: observedDelivery}
 		if err := runIssuedLeaseThroughRunner(context.Background(), runner, queueJobProto(leases[0]), jobrunner.JobRunnerConfig{LeaseOwner: "container-restart-runner", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour}); err != nil {
 			t.Fatal(err)
 		}

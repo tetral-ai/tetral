@@ -12,7 +12,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
-	"github.com/tetral-ai/tetral/internal/workspace"
 	runtimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
@@ -75,8 +74,8 @@ func TestPostgreSQLReplicaWorkerDrain(t *testing.T) {
 			}})
 			acquire, quiesce := context.WithCancel(ctx)
 			defer quiesce()
-			cfg := jobrunner.JobRunnerConfig{LeaseOwner: "draining-runner", MaxJobs: 1, LeaseDuration: 3 * time.Second, HeartbeatInterval: 150 * time.Millisecond, PollInterval: 10 * time.Millisecond, DrainTimeout: 600 * time.Millisecond, CancelJoinTimeout: time.Second}
-			runner := &jobrunner.JobRunner{Queue: jobrunner.QueueClientFromGRPC(rpc), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: delivery, Sender: sender}, Config: cfg}
+			cfg := jobrunner.JobRunnerConfig{LeaseOwner: "draining-runner", MaxJobs: 1, LeaseDuration: 5 * time.Second, HeartbeatInterval: 150 * time.Millisecond, DrainTimeout: 600 * time.Millisecond, CancelJoinTimeout: time.Second}
+			runner := &jobrunner.JobRunner{Queue: jobrunner.QueueClientFromGRPC(rpc), Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: delivery, Sender: sender}, Config: cfg}
 			done := make(chan error, 1)
 			joined := make(chan struct{})
 			go func() { defer close(joined); done <- jobrunner.RunJobRunnerLoop(acquire, runner, nil, nil) }()
@@ -134,9 +133,9 @@ func TestPostgreSQLReplicaWorkerDrain(t *testing.T) {
 				}
 			}
 			nextDelivery := jobrunner.NewPostgreSQLRuntimeDeliveryStore(successorClient, child.port, delivery.TargetResolver)
-			successor := &jobrunner.JobRunner{Queue: jobrunner.QueueClientFromGRPC(serveQueueReplica(t, successorQueue, &queueReplicaResponseFault{})), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: nextDelivery, Sender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}, Config: jobrunner.JobRunnerConfig{LeaseOwner: "replacement-runner", MaxJobs: 2, LeaseDuration: 3 * time.Second, HeartbeatInterval: 150 * time.Millisecond}}
+			successor := &jobrunner.JobRunner{Queue: jobrunner.QueueClientFromGRPC(serveQueueReplica(t, successorQueue, &queueReplicaResponseFault{})), Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: nextDelivery, Sender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}, Config: jobrunner.JobRunnerConfig{LeaseOwner: "replacement-runner", MaxJobs: 2, LeaseDuration: 5 * time.Second, HeartbeatInterval: 150 * time.Millisecond}}
 			for range 2 {
-				if _, err := successor.RunOnceWithActivity(ctx); err != nil {
+				if _, err := acquireAndJoinJobRunnerActive(ctx, successor); err != nil {
 					t.Fatal(err)
 				}
 			}

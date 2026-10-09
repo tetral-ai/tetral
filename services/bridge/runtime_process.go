@@ -63,11 +63,14 @@ func (s *PostgreSQLBridgeAPIStore) ReportRuntimeProcess(ctx context.Context, req
 		return nil, bridgeContextError(ctx, err)
 	}
 	if promoted {
-		// This wake is after promotion commit. Reconciliation takes its own Session
-		// transactions in Runner; notification loss is covered by persisted census.
+		// These wakes follow the promotion commit: the Job Runner wake class lets
+		// acquisition retry work for the new process, and the runtime-process class
+		// requests a Pod-loss repair run, which takes its own Session transactions.
+		// A lost notification is covered by the repair owner's periodic cycle.
 		wakeCtx, cancel := context.WithTimeout(ctx, s.ProcessPolicy.ReportTimeout)
 		_ = s.Client.WithTx(wakeCtx, "runtimecontrol.notify_promotion", nil, func(tx *dbconnect.Tx) error {
-			_, err := tx.Exec(wakeCtx, `SELECT pg_notify($1,$2)`, queue.NotificationChannel, queue.ConsumerClassJobRunner)
+			_, err := tx.Exec(wakeCtx, `SELECT pg_notify($1,$2), pg_notify($1,$3)`,
+				queue.NotificationChannel, queue.ConsumerClassJobRunner, queue.NotificationClassRuntimeProcess)
 			return err
 		})
 		cancel()

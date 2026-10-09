@@ -204,9 +204,8 @@
     },
     "job_runner": {
       "sequences": ["session_runtime_binding_generation_seq"],
-      "functions": ["tetral_lock_runtime_process(text, text, text)", "tetral_lock_runtime_process_liveness(text, text, text)"],
+      "functions": ["tetral_lock_runtime_process(text, text, text)", "tetral_lock_runtime_process_liveness(text, text, text)", "tetral_job_runner_binding_upper()", "tetral_job_runner_binding_page(text, text, text, text, integer)"],
       "tables": {
-        "workspaces": ["SELECT"],
         "sessions": ["SELECT", "UPDATE"],
         "session_threads": ["SELECT", "UPDATE"],
         "agent_versions": ["SELECT"],

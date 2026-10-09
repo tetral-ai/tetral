@@ -167,7 +167,6 @@ jobRunner:
   leaseDurationMs: 30000
   heartbeatIntervalMs: 10000
   maxJobs: 8
-  pollIntervalMs: 1000
 
 resources:
   agentRuntime:

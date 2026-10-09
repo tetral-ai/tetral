@@ -3074,8 +3074,6 @@ spec:
               value: "10000"
             - name: TETRAL_BRIDGE_JOB_RUNNER_MAX_JOBS
               value: "8"
-            - name: TETRAL_BRIDGE_JOB_RUNNER_POLL_INTERVAL_MS
-              value: "1000"
             - name: TETRAL_KUBERNETES_NAMESPACE
               value: tetral-agent-runtime
             - name: TETRAL_AGENT_RUNTIME_LABEL_SELECTOR

@@ -540,7 +540,7 @@ func TestSubagentFirstMailPreparationExhaustionSettlesCustodyAtomically(t *testi
 	failedStore := &agentMailPreparationFailureStore{PostgreSQLRuntimeDeliveryStore: baseStore}
 	sender := &countingAgentMailSender{RuntimeCommandSender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queueStore, nil),
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: failedStore, Sender: sender},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "first_mail-preparation-failure", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
@@ -553,12 +553,12 @@ func TestSubagentFirstMailPreparationExhaustionSettlesCustodyAtomically(t *testi
 		if attempt > 0 {
 			waitForQueueJobAvailable(t, fixture.admin, fixture.jobID)
 		}
-		if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 			t.Fatalf("run first_mail preparation failure %d = active:%t err:%v", attempt+1, active, err)
 		}
 	}
 	waitForQueueJobAvailable(t, fixture.admin, fixture.jobID)
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("run first-mail finalization-only lease = active:%t err:%v", active, err)
 	}
 	var inboxStatus, queueStatus, childStatus string
@@ -605,7 +605,7 @@ func TestSubagentFirstMailPodLossBeforeCommitReturnsOriginalCustodyThenExecutesO
 	}
 	finished := make(chan runnerResult, 1)
 	go func() {
-		active, err := lostRunner.RunOnceWithActivity(context.Background())
+		active, err := acquireAndJoinJobRunnerActive(context.Background(), lostRunner)
 		finished <- runnerResult{active: active, err: err}
 	}()
 	select {
@@ -617,7 +617,7 @@ func TestSubagentFirstMailPodLossBeforeCommitReturnsOriginalCustodyThenExecutesO
 	repairStore := runtimePodLossSweepStore(t, fixture.runtimeDB, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
-	if repaired, err := repairStore.RepairLostRuntimeBindings(context.Background(), workspace.DefaultID.String()); err != nil || repaired != 1 {
+	if repaired, err := repairRuntimePodLoss(context.Background(), repairStore); err != nil || repaired != 1 {
 		t.Fatalf("repair first_mail input before CommitInputs = %d/%v", repaired, err)
 	}
 	select {
@@ -662,11 +662,15 @@ func TestSubagentFirstMailPodLossBeforeCommitReturnsOriginalCustodyThenExecutesO
 		t, fixture.runtimeDB, fixture.admin, replacementRuntime.port, fixture.sessionID, replacementPodUID,
 		nil, lostStartResponse,
 	)
-	if active, err := replacementRunner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), replacementRunner); err != nil || !active {
 		t.Fatalf("drop replacement response after Request Start = active:%t err:%v", active, err)
 	}
 	started := replacementRuntime.providerStart(t)
 	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
+	// After Request End the replacement Runtime's FinishIdle holds the Session
+	// lock until it records the Turn's output capture, which nothing here runs,
+	// so the replay is acquired only after that record.
+	waitForThreadOutputCaptureRecord(t, fixture.admin, fixture.sessionID, fixture.childID)
 	waitForQueueJobAvailable(t, fixture.admin, fixture.jobID)
 	runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, replacementRuntime.port, fixture.sessionID, replacementPodUID)
 	replayed := replacementRuntime.providerStart(t)
@@ -731,7 +735,7 @@ func TestSubagentMailProgressesDuringUnrelatedThreadInterrupt(t *testing.T) {
 		t, fixture.runtimeDB, fixture.admin, mailRuntime.port, fixture.sessionID, fixture.podUID,
 		queueWithBarrierCut, nil,
 	)
-	if active, err := deliveryRunner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), deliveryRunner); err != nil || !active {
 		t.Fatalf("deliver first_mail alongside unrelated interrupt = active:%t err:%v", active, err)
 	}
 	// Delivery/ACK does not order Request Start; hold that declaration for this custody cut.
@@ -759,6 +763,16 @@ func TestSubagentMailProgressesDuringUnrelatedThreadInterrupt(t *testing.T) {
 	started := mailRuntime.providerStart(t)
 	runSubagentOutputCaptureOnce(t, fixture.runtimeDB)
 	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
+	// FinishIdle adopts the settled capture in a transaction that holds the
+	// Session lock and leaves the mail Thread idle; the interrupt is acquired
+	// only after that adoption.
+	waitHandoffCondition(t, "mail Thread FinishIdle adoption", func() bool {
+		var adopted int
+		err := fixture.admin.QueryRowContext(context.Background(), `SELECT count(*) FROM sandbox_output_capture_operations
+			WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND state='adopted'`,
+			fixture.sessionID, fixture.childID).Scan(&adopted)
+		return err == nil && adopted == 1
+	})
 
 	interruptRuntime, interruptPaths := startInterruptRuntimeComposition(
 		t, t.TempDir(), fixture.bridgeAddress, fixture.sessionID, parentID,
@@ -774,7 +788,7 @@ func TestSubagentMailProgressesDuringUnrelatedThreadInterrupt(t *testing.T) {
 		fixture.sessionID, fixture.podUID, nil, nil,
 	)
 	go func() {
-		active, runErr := interruptRunner.RunOnceWithActivity(context.Background())
+		active, runErr := acquireAndJoinJobRunnerActive(context.Background(), interruptRunner)
 		interruptDelivery <- interruptDeliveryResult{active: active, err: runErr}
 	}()
 	runSubagentOutputCaptureOnce(t, fixture.runtimeDB)
@@ -896,7 +910,7 @@ func TestSubagentFirstMailHotAdmissionAcknowledgesBeforeRequestStart(t *testing.
 	}
 	finished := make(chan deliveryResult, 1)
 	go func() {
-		active, err := runner.RunOnceWithActivity(deliveryContext)
+		active, err := acquireAndJoinJobRunnerActive(deliveryContext, runner)
 		finished <- deliveryResult{active: active, err: err}
 	}()
 	select {
@@ -937,7 +951,7 @@ func TestSubagentFirstMailHotAdmissionAcknowledgesBeforeRequestStart(t *testing.
 	repairStore := runtimePodLossSweepStore(t, fixture.runtimeDB, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
-	if repaired, err := repairStore.RepairLostRuntimeBindings(context.Background(), workspace.DefaultID.String()); err != nil || repaired != 1 {
+	if repaired, err := repairRuntimePodLoss(context.Background(), repairStore); err != nil || repaired != 1 {
 		t.Fatalf("repair accepted first mail after Pod loss = %d/%v", repaired, err)
 	}
 	var activeJobs int
@@ -1010,7 +1024,7 @@ func TestSubagentMailFinalizerCrashUsesClampedNPlusOne(t *testing.T) {
 		RuntimePodDirectDeliverer: finalRuntimeRunner.Deliverer.(jobrunner.RuntimePodDirectDeliverer),
 		failBeforeCommit:          true,
 	}
-	if active, err := finalRuntimeRunner.RunOnceWithActivity(context.Background()); !active || err == nil {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), finalRuntimeRunner); !active || err == nil {
 		t.Fatalf("final Runtime opportunity finalizer cut = active:%t err:%v; want active/error", active, err)
 	}
 	reason, providers, raw := readAgentMailAdmission(t, runtimeProcess)
@@ -1034,7 +1048,7 @@ func TestSubagentMailFinalizerCrashUsesClampedNPlusOne(t *testing.T) {
 		RuntimePodDirectDeliverer: nPlusOneRunner.Deliverer.(jobrunner.RuntimePodDirectDeliverer),
 		failBeforeCommit:          true,
 	}
-	if active, err := nPlusOneRunner.RunOnceWithActivity(context.Background()); !active || err == nil {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), nPlusOneRunner); !active || err == nil {
 		t.Fatalf("N+1 finalizer cut = active:%t err:%v; want active/error", active, err)
 	}
 	if countedSender.agentMailCalls != 0 || observedQueue.retryCalls != 0 {
@@ -1047,7 +1061,7 @@ func TestSubagentMailFinalizerCrashUsesClampedNPlusOne(t *testing.T) {
 		t, fixture.runtimeDB, fixture.admin, runtimeProcess.port, fixture.sessionID, fixture.podUID,
 		nil, countedSender,
 	)
-	if active, err := runFinalizer.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runFinalizer); err != nil || !active {
 		t.Fatalf("replayed N+1 finalizer = active:%t err:%v", active, err)
 	}
 	if countedSender.agentMailCalls != 0 {
@@ -1126,7 +1140,7 @@ func TestSubagentFirstMailInterruptedCloseColdResumeAndLaterInputProductionCompo
 	interruptRunner := newSubagentRuntimeQueueRunner(t, fixture.runtimeDB, fixture.admin,
 		interruptRuntime.port, fixture.sessionID, fixture.podUID, nil, nil)
 	go func() {
-		active, runErr := interruptRunner.RunOnceWithActivity(context.Background())
+		active, runErr := acquireAndJoinJobRunnerActive(context.Background(), interruptRunner)
 		interruptDelivery <- interruptDeliveryResult{active: active, err: runErr}
 	}()
 	waitForCompositionFile(t, interruptPaths.operationCompleted, "interrupted first_mail Tool completion", &interruptRuntime.output)
@@ -1549,7 +1563,7 @@ func TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody(t *testing.
 		t, fixture.runtimeDB, fixture.admin, runtimeProcess.port, fixture.sessionID, fixture.podUID,
 		delayedQueue, nil,
 	)
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("first_mail delivery before close = active:%t err:%v", active, err)
 	}
 	reason, providers, raw := readAgentMailAdmission(t, runtimeProcess)
@@ -1620,13 +1634,27 @@ func TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody(t *testing.
 		t, fixture.runtimeDB, fixture.admin, interruptRuntime.port, fixture.sessionID, fixture.podUID,
 		queueWithSiblingBirth, nil,
 	)
-	if active, err := interruptRunner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), interruptRunner); err != nil || !active {
 		t.Fatalf("close child while sibling becomes eligible = active:%t err:%v", active, err)
 	}
 	if err := os.WriteFile(interruptPaths.close, []byte("close"), 0o600); err != nil {
 		t.Fatalf("release close-before-start Runtime: %v", err)
 	}
 	interruptRuntime.wait(t)
+	// The first_mail retry falls due after the interrupt, ahead of the
+	// sibling's pending mail, and a Runner holds its direct lease when close
+	// settles: close cancels that lease and clears its provenance with it.
+	if _, err := fixture.admin.ExecContext(context.Background(), `UPDATE queue_jobs
+		SET available_at=(SELECT min(available_at) FROM queue_jobs WHERE workspace_id='default' AND status='pending') - interval '1 second'
+		WHERE workspace_id='default' AND id=$1 AND status='pending'`, fixture.jobID); err != nil {
+		t.Fatalf("make first_mail retry due: %v", err)
+	}
+	directLease, err := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(fixture.runtimeDB)).LeaseJobRunnerJobs(context.Background(), queue.LeaseJobRunnerJobsRequest{
+		LeaseOwner: "close-before-start-runner", MaxJobs: 1, LeaseDuration: time.Minute,
+	})
+	if err != nil || len(directLease.Jobs) != 1 || directLease.Jobs[0].ID != fixture.jobID {
+		t.Fatalf("direct lease of the due first_mail retry = %d jobs/%v; want %s", len(directLease.Jobs), err, fixture.jobID)
+	}
 	settleChildCloseThroughProduction(t, client, parentScope, controlID, closeSourceID)
 
 	var inboxStatus, queueStatus, childStatus, siblingInbox, siblingQueue, siblingStatus string
@@ -1738,7 +1766,7 @@ func TestSubagentFirstMailLeaseTakeoverFencesStaleRunner(t *testing.T) {
 		jobID:                          fixture.jobID,
 	}
 	runner.Deliverer = jobrunner.RuntimePodDirectDeliverer{Store: takeoverStore, Sender: countedSender}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("stale runner after lease takeover = active:%t err:%v", active, err)
 	}
 	var inboxStatus, queueStatus, currentLease string
@@ -1795,7 +1823,7 @@ func TestSubagentFirstMailLeaseTakeoverAfterFenceConvergesSameIDOnce(t *testing.
 	)
 	finished := make(chan error, 1)
 	go func() {
-		_, err := runner.RunOnceWithActivity(context.Background())
+		_, err := acquireAndJoinJobRunnerActive(context.Background(), runner)
 		finished <- err
 	}()
 	select {
@@ -1908,7 +1936,7 @@ func TestLaterSubagentMailNPlusOneFailsOnlyExactChild(t *testing.T) {
 	waitForQueueJobAvailable(t, fixture.admin, jobID)
 	finalRuntimeRunner := newSubagentRuntimeQueueRunner(t, fixture.runtimeDB, fixture.admin, rejectingRuntime.port, fixture.sessionID, fixture.podUID, nil, nil)
 	finalRuntimeRunner.Deliverer = &finalizationCutDeliverer{RuntimePodDirectDeliverer: finalRuntimeRunner.Deliverer.(jobrunner.RuntimePodDirectDeliverer), failBeforeCommit: true}
-	if active, err := finalRuntimeRunner.RunOnceWithActivity(context.Background()); !active || err == nil {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), finalRuntimeRunner); !active || err == nil {
 		t.Fatalf("ordinary final Runtime opportunity cut = active:%t err:%v", active, err)
 	}
 	reason, providers, raw := readAgentMailAdmission(t, rejectingRuntime)
@@ -1919,7 +1947,7 @@ func TestLaterSubagentMailNPlusOneFailsOnlyExactChild(t *testing.T) {
 	expireAndReclaimQueueJob(t, fixture.runtimeDB, fixture.admin, jobID)
 	countedSender := &countingAgentMailSender{RuntimeCommandSender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}
 	finalizer := newSubagentRuntimeQueueRunner(t, fixture.runtimeDB, fixture.admin, rejectingRuntime.port, fixture.sessionID, fixture.podUID, nil, countedSender)
-	if active, err := finalizer.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), finalizer); err != nil || !active {
 		t.Fatalf("ordinary N+1 finalizer = active:%t err:%v", active, err)
 	}
 	var inboxStatus, queueStatus, childStatus string
@@ -2097,7 +2125,7 @@ func prepareOrdinaryAgentMailNPlusOnePending(t *testing.T, suffix string) ordina
 	finalRuntimeRunner.Deliverer = &finalizationCutDeliverer{
 		RuntimePodDirectDeliverer: finalRuntimeRunner.Deliverer.(jobrunner.RuntimePodDirectDeliverer), failBeforeCommit: true,
 	}
-	if active, err := finalRuntimeRunner.RunOnceWithActivity(context.Background()); !active || err == nil {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), finalRuntimeRunner); !active || err == nil {
 		t.Fatalf("ordinary final Runtime opportunity cut = active:%t err:%v", active, err)
 	}
 	if reason, providers, raw := readAgentMailAdmission(t, rejectingRuntime); reason != "local_session_capacity_exceeded" || providers != 0 {
@@ -2447,8 +2475,8 @@ func (s *agentMailPreparationFailureStore) PrepareRuntimeCommand(ctx context.Con
 	return s.PostgreSQLRuntimeDeliveryStore.PrepareRuntimeCommand(ctx, job)
 }
 
-func (c *birthInterruptAfterLeaseQueueClient) Lease(ctx context.Context, request *queuev1.LeaseRequest) (*queuev1.LeaseResponse, error) {
-	response, err := c.QueueClient.Lease(ctx, request)
+func (c *birthInterruptAfterLeaseQueueClient) LeaseJobRunnerJobs(ctx context.Context, request *queuev1.LeaseJobRunnerJobsRequest) (*queuev1.LeaseJobRunnerJobsResponse, error) {
+	response, err := c.QueueClient.LeaseJobRunnerJobs(ctx, request)
 	if err == nil && len(response.GetJobs()) == 1 {
 		c.once.Do(func() { c.birthErr = c.birth(ctx) })
 	}
@@ -2613,7 +2641,7 @@ func (s *countingAgentMailSender) RecoverThread(ctx context.Context, target jobr
 func runSubagentRuntimeQueueOnce(t *testing.T, runtimeDB, admin *sql.DB, port int, sessionID, podUID string) {
 	t.Helper()
 	runner := newSubagentRuntimeQueueRunner(t, runtimeDB, admin, port, sessionID, podUID, nil, nil)
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("run subagent Queue owner = active:%t err:%v", active, err)
 	}
 }
@@ -2648,7 +2676,7 @@ func newSubagentRuntimeQueueRunner(
 		sender = fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})
 	}
 	return &jobrunner.JobRunner{
-		Queue: queueClient, Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     queueClient,
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "subagent-custody-composition", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
@@ -2679,6 +2707,19 @@ func expireAndReclaimQueueJob(t *testing.T, runtimeDB, admin *sql.DB, jobID stri
 	if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{WorkspaceID: workspace.DefaultID}); err != nil || reclaimed != 1 {
 		t.Fatalf("reclaim Queue lease = %d/%v; want 1/nil", reclaimed, err)
 	}
+}
+
+// waitForThreadOutputCaptureRecord returns once the Thread's FinishIdle has
+// committed its output-capture record, the Session-locking write it makes
+// before waiting for that capture.
+func waitForThreadOutputCaptureRecord(t *testing.T, admin *sql.DB, sessionID, threadID string) {
+	t.Helper()
+	waitHandoffCondition(t, "Thread "+threadID+" FinishIdle output-capture record", func() bool {
+		var recorded bool
+		err := admin.QueryRowContext(context.Background(), `SELECT EXISTS (SELECT 1 FROM sandbox_output_capture_operations
+			WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2)`, sessionID, threadID).Scan(&recorded)
+		return err == nil && recorded
+	})
 }
 
 func waitForThreadRequestEnds(t *testing.T, admin *sql.DB, sessionID, threadID string, want int) {
@@ -2774,7 +2815,7 @@ func runQueueUntilInputSettled(t *testing.T, runtimeDB, admin *sql.DB, port int,
 			}
 		}
 		runner := newSubagentRuntimeQueueRunner(t, runtimeDB, admin, port, sessionID, podUID, nil, nil)
-		if _, err := runner.RunOnceWithActivity(context.Background()); err != nil {
+		if _, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil {
 			t.Fatalf("run Queue while waiting for Runtime input %s: %v", runtimeInputID, err)
 		}
 		time.Sleep(time.Millisecond)

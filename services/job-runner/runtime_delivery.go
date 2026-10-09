@@ -427,14 +427,6 @@ func (d RuntimePodDirectDeliverer) FinalizeMalformedRuntimeInputCustody(ctx cont
 	return finalizer.FinalizeMalformedRuntimeInputCustody(ctx, lease)
 }
 
-func (d RuntimePodDirectDeliverer) RepairLostRuntimeBindings(ctx context.Context, workspaceID string) (int, error) {
-	repairer, ok := d.Store.(RuntimePodLossRepairer)
-	if !ok || repairer == nil {
-		return 0, nil
-	}
-	return repairer.RepairLostRuntimeBindings(ctx, workspaceID)
-}
-
 func (d RuntimePodDirectDeliverer) FinalizeRuntimeDelivery(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) (RuntimeDeliveryResult, error) {
 	finalizer, ok := d.Store.(RuntimeDeliveryFinalizationStore)
 	if !ok || finalizer == nil {
@@ -1545,7 +1537,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeRuntimeRecoveryDelivery(
 				`UPDATE queue_jobs
 				    SET status='cancelled', cancelled_at=$4,
 				        lease_token=NULL, leased_by=NULL, leased_at=NULL, leased_until=NULL,
-				        updated_at=$4
+				        lease_previous_attempt_count=NULL, updated_at=$4
 				  WHERE workspace_id=$1 AND id=$2 AND lease_token=$3
 				    AND kind=$5 AND partition_key=$6 AND dedupe_key=$7 AND status='leased'`,
 				job.WorkspaceID, job.JobID, job.LeaseToken, now, job.Kind, job.PartitionKey, job.DedupeKey,
@@ -1629,6 +1621,7 @@ func settleRuntimeRecoveryExactLeaseTx(
 		`UPDATE queue_jobs
 		    SET status = 'dead_lettered', dead_lettered_at = $8,
 		        lease_token = NULL, leased_by = NULL, leased_at = NULL, leased_until = NULL,
+		        lease_previous_attempt_count = NULL,
 		        last_error_kind = $9, last_error_message = $10, updated_at = $8
 		  WHERE workspace_id = $1 AND id = $2 AND lease_token = $3
 		    AND kind = $4 AND partition_key = $5 AND dedupe_key = $6
@@ -2441,7 +2434,7 @@ func finalizeSubagentAgentMailFailureTx(
 	deadLettered, err := tx.Exec(ctx, `UPDATE queue_jobs
 		SET status='dead_lettered',dead_lettered_at=$4,last_error_kind='runtime_delivery_exhausted',
 		    last_error_message='sub-agent input exhausted before Runtime admission',
-		    lease_token=NULL,leased_by=NULL,leased_at=NULL,leased_until=NULL,updated_at=$4
+		    lease_token=NULL,leased_by=NULL,leased_at=NULL,leased_until=NULL,lease_previous_attempt_count=NULL,updated_at=$4
 		WHERE workspace_id=$1 AND id=$2 AND kind=$5 AND partition_key=$6 AND dedupe_key=$7
 		  AND status='leased' AND lease_token=$3 AND leased_until > clock_timestamp()`,
 		job.WorkspaceID, job.JobID, job.LeaseToken, now, job.Kind, job.PartitionKey, job.DedupeKey)
@@ -3749,7 +3742,7 @@ type runtimeBindingLostError struct {
 
 func (e runtimeBindingLostError) Error() string { return "runtime binding target is gone" }
 
-// ResolveRuntimeTarget shares the process-aware classifier with loss census and cleanup.
+// ResolveRuntimeTarget shares the process-aware classifier with repair discovery and cleanup.
 func (r KubernetesRuntimeTargetResolver) ResolveRuntimeTarget(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (runtimecontrol.Binding, error) {
 	if r.Snapshot == nil {
 		return runtimecontrol.Binding{}, runtimecontrol.PreparationError{Kind: "runtime_visibility_unavailable", Message: "runtime visibility snapshot is unavailable", Retryable: true}

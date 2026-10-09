@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
-	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -30,9 +29,8 @@ func TestJobRunnerAcksRuntimeInputOnlyAfterRuntimeAccepts(t *testing.T) {
 	deliverer := &recordingDeliverer{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 
 	runner := &JobRunner{
-		Queue:      queueClient,
-		Workspaces: staticWorkspaceLister{"ws_bridge"},
-		Deliverer:  deliverer,
+		Queue:     queueClient,
+		Deliverer: deliverer,
 		Config: JobRunnerConfig{
 			LeaseOwner:    "bridge",
 			MaxJobs:       1,
@@ -40,8 +38,8 @@ func TestJobRunnerAcksRuntimeInputOnlyAfterRuntimeAccepts(t *testing.T) {
 		},
 	}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if len(deliverer.jobs) != 1 {
 		t.Fatalf("delivered jobs = %d; want 1", len(deliverer.jobs))
@@ -52,8 +50,9 @@ func TestJobRunnerAcksRuntimeInputOnlyAfterRuntimeAccepts(t *testing.T) {
 	if deliverer.jobs[0].InputKind != "messages" {
 		t.Fatalf("input kind = %q; want messages", deliverer.jobs[0].InputKind)
 	}
-	if !reflect.DeepEqual(queueClient.leaseKinds, []string{"runtime_input", "runtime_recovery", "runtime_config_update", "cleanup_session", "session_delete_cleanup"}) {
-		t.Fatalf("lease kinds = %v; want Bridge runtime-facing kinds", queueClient.leaseKinds)
+	if len(queueClient.leaseRequests) != 1 || queueClient.leaseRequests[0].GetMaxJobs() != 1 ||
+		queueClient.leaseRequests[0].GetLeaseOwner() != "bridge" || queueClient.leaseRequests[0].GetLeaseDurationMs() != 1000 {
+		t.Fatalf("lease requests = %v; want one request for the single free slot", queueClient.leaseRequests)
 	}
 }
 
@@ -80,16 +79,15 @@ func TestJobRunnerHeartbeatsLongDeliveryBeforeAck(t *testing.T) {
 	}
 	deliverer := newBlockingDeliverer()
 	runner := &JobRunner{
-		Queue:      queueClient,
-		Workspaces: staticWorkspaceLister{"ws_bridge"},
-		Deliverer:  deliverer,
+		Queue:     queueClient,
+		Deliverer: deliverer,
 		Config: JobRunnerConfig{
 			LeaseDuration:     100 * time.Millisecond,
 			HeartbeatInterval: 5 * time.Millisecond,
 		},
 	}
 	done := make(chan error, 1)
-	go func() { done <- runner.RunOnce(context.Background()) }()
+	go func() { done <- acquireAndJoin(context.Background(), runner) }()
 
 	select {
 	case <-queueClient.heartbeatNotify:
@@ -98,7 +96,7 @@ func TestJobRunnerHeartbeatsLongDeliveryBeforeAck(t *testing.T) {
 	}
 	close(deliverer.release)
 	if err := <-done; err != nil {
-		t.Fatalf("RunOnce: %v", err)
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if transitions := queueClient.transitionSnapshot(); !reflect.DeepEqual(transitions, []string{"ack:qjob_1"}) {
 		t.Fatalf("queue transitions = %v; want ACK after heartbeat and delivery", transitions)
@@ -112,11 +110,11 @@ func TestJobRunnerCancelsInFlightDeliveryWhenHeartbeatLosesAuthority(t *testing.
 	}
 	deliverer := newBlockingDeliverer()
 	runner := &JobRunner{
-		Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer,
+		Queue: queueClient, Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseDuration: 100 * time.Millisecond, HeartbeatInterval: 5 * time.Millisecond},
 	}
 	done := make(chan error, 1)
-	go func() { done <- runner.RunOnce(context.Background()) }()
+	go func() { done <- acquireAndJoin(context.Background(), runner) }()
 
 	select {
 	case <-deliverer.cancelled:
@@ -124,7 +122,7 @@ func TestJobRunnerCancelsInFlightDeliveryWhenHeartbeatLosesAuthority(t *testing.
 		t.Fatal("in-flight Runtime delivery was not cancelled after heartbeat authority loss")
 	}
 	if err := <-done; err == nil || !strings.Contains(err.Error(), "queue lease lost") {
-		t.Fatalf("RunOnce after heartbeat authority loss = %v; want lease-lost error", err)
+		t.Fatalf("acquire and join after heartbeat authority loss = %v; want lease-lost error", err)
 	}
 	if transitions := queueClient.transitionSnapshot(); len(transitions) != 0 {
 		t.Fatalf("Queue transitions after heartbeat authority loss = %v; want none", transitions)
@@ -165,14 +163,14 @@ func TestPostgreSQLJobRunnerHeartbeatLossYieldsToReclaimedExactOwner(t *testing.
 	queueServer := tetralqueue.NewServer(queueStore, nil)
 	blocked := newBlockingDeliverer()
 	oldRunner := &JobRunner{
-		Queue: queueServer, Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: blocked,
+		Queue: queueServer, Deliverer: blocked,
 		Config: JobRunnerConfig{
 			LeaseOwner: "heartbeat-old-owner", MaxJobs: 1,
 			LeaseDuration: time.Minute, HeartbeatInterval: 2 * time.Second,
 		},
 	}
 	oldDone := make(chan error, 1)
-	go func() { oldDone <- oldRunner.RunOnce(context.Background()) }()
+	go func() { oldDone <- acquireAndJoin(context.Background(), oldRunner) }()
 	select {
 	case <-blocked.entered:
 	case <-time.After(5 * time.Second):
@@ -221,7 +219,7 @@ func TestPostgreSQLJobRunnerHeartbeatLossYieldsToReclaimedExactOwner(t *testing.
 	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), admin, 9090)
 	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	winner := &JobRunner{
-		Queue: queueServer, Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     queueServer,
 		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
 		Config:    JobRunnerConfig{LeaseOwner: "heartbeat-new-owner", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
@@ -259,17 +257,16 @@ func TestJobRunnerInitialLeaseLossPreventsDeliveryAndTransition(t *testing.T) {
 			}
 			deliverer := &recordingDeliverer{}
 			runner := &JobRunner{
-				Queue:      queueClient,
-				Workspaces: staticWorkspaceLister{"ws_bridge"},
-				Deliverer:  deliverer,
+				Queue:     queueClient,
+				Deliverer: deliverer,
 				Config: JobRunnerConfig{
 					LeaseDuration:     100 * time.Millisecond,
 					HeartbeatInterval: 5 * time.Millisecond,
 				},
 			}
 
-			if err := runner.RunOnce(context.Background()); err == nil || !strings.Contains(err.Error(), "queue lease lost") {
-				t.Fatalf("RunOnce err = %v; want queue lease lost", err)
+			if err := acquireAndJoin(context.Background(), runner); err == nil || !strings.Contains(err.Error(), "queue lease lost") {
+				t.Fatalf("acquire and join err = %v; want queue lease lost", err)
 			}
 			if transitions := queueClient.transitionSnapshot(); len(transitions) != 0 {
 				t.Fatalf("queue transitions after lease loss = %v; want none", transitions)
@@ -290,11 +287,11 @@ func TestJobRunnerProcessesLeasedThreadsConcurrently(t *testing.T) {
 	queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{first, second}}
 	deliverer := newConcurrentThreadDeliverer("thr_1")
 	runner := &JobRunner{
-		Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer,
+		Queue: queueClient, Deliverer: deliverer,
 		Config: JobRunnerConfig{MaxJobs: 2, LeaseDuration: time.Second, HeartbeatInterval: 100 * time.Millisecond},
 	}
 	done := make(chan error, 1)
-	go func() { done <- runner.RunOnce(context.Background()) }()
+	go func() { done <- acquireAndJoin(context.Background(), runner) }()
 
 	select {
 	case <-deliverer.blocked:
@@ -315,7 +312,7 @@ func TestJobRunnerProcessesLeasedThreadsConcurrently(t *testing.T) {
 	}
 	close(deliverer.release)
 	if err := <-done; err != nil {
-		t.Fatalf("RunOnce: %v", err)
+		t.Fatalf("acquire and join: %v", err)
 	}
 	got := queueClient.transitionSnapshot()
 	slices.Sort(got)
@@ -324,146 +321,18 @@ func TestJobRunnerProcessesLeasedThreadsConcurrently(t *testing.T) {
 	}
 }
 
-func TestJobRunnerRunsPodLossBeforeQueueAndJoinsEveryPhaseError(t *testing.T) {
-	podLossErr := errors.New("pod loss unavailable")
-	queueErr := errors.New("queue unavailable")
-	steps := []string{}
-	queueClient := &recordingQueueClient{leaseErr: queueErr, phaseSteps: &steps}
-	deliverer := &recordingDeliverer{
-		podLossRepairErr: podLossErr,
-		phaseSteps:       &steps,
-	}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
-
-	err := runner.RunOnce(context.Background())
-	for _, sentinel := range []error{podLossErr, queueErr} {
-		if !errors.Is(err, sentinel) {
-			t.Fatalf("RunOnce error %v does not retain %v", err, sentinel)
-		}
-	}
-	if want := []string{"pod-loss", "lease"}; !reflect.DeepEqual(steps, want) {
-		t.Fatalf("workspace phases = %v; want %v", steps, want)
-	}
-}
-
-func TestJobRunnerProcessesQueueAfterPodLossRepairError(t *testing.T) {
-	podLossErr := errors.New("pod loss candidate failed")
-	queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{runtimeInputQueueJob()}}
-	deliverer := &recordingDeliverer{
-		podLossRepairErr: podLossErr,
-		result:           RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted},
-	}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
-
-	err := runner.RunOnce(context.Background())
-	if !errors.Is(err, podLossErr) {
-		t.Fatalf("RunOnce error = %v; want pod-loss repair sentinel", err)
-	}
-	if len(deliverer.jobs) != 1 || !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_1"}) {
-		t.Fatalf("queue after repair error delivered=%d transitions=%v; want one delivery and ACK", len(deliverer.jobs), queueClient.transitions)
-	}
-}
-
-func TestJobRunnerFoldsPodLossRepairIntoWorkspaceActivity(t *testing.T) {
-	deliverer := &recordingDeliverer{podLossRepairCount: 1}
-	runner := &JobRunner{
-		Queue:      &recordingQueueClient{},
-		Workspaces: staticWorkspaceLister{"ws_bridge"},
-		Deliverer:  deliverer,
-	}
-
-	hadWork, err := runner.RunOnceWithActivity(context.Background())
-	if err != nil || !hadWork || deliverer.podLossRepairCalls != 1 {
-		t.Fatalf("RunOnceWithActivity = %t/%v calls=%d; want true/nil/1", hadWork, err, deliverer.podLossRepairCalls)
-	}
-}
-
-func TestJobRunnerContextCancellationStopsAfterCurrentPhase(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	steps := []string{}
-	deliverer := &recordingDeliverer{
-		phaseSteps: &steps,
-		podLossRepair: func(context.Context, string) (int, error) {
-			cancel()
-			return 0, nil
-		},
-	}
-	queueClient := &recordingQueueClient{phaseSteps: &steps}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
-
-	err := runner.RunOnce(ctx)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("RunOnce error = %v; want context cancellation", err)
-	}
-	if want := []string{"pod-loss"}; !reflect.DeepEqual(steps, want) {
-		t.Fatalf("cancelled workspace phases = %v; want %v", steps, want)
-	}
-}
-
-func TestProductionRuntimeDelivererExposesPodLossRepair(t *testing.T) {
-	store := NewJobRunnerRuntimeDeliveryStore(nil, nil, JobRunnerConfig{}, func() enginekubernetes.BindingVisibilitySnapshot {
-		return enginekubernetes.BindingVisibilitySnapshot{}
-	})
-	deliverer := RuntimePodDirectDeliverer{Store: store}
-	if _, ok := any(store).(RuntimePodLossRepairer); !ok {
-		t.Fatal("production runtime delivery store does not expose pod-loss repair")
-	}
-	if _, ok := any(deliverer).(RuntimePodLossRepairer); !ok {
-		t.Fatal("production direct deliverer does not expose pod-loss repair")
-	}
-}
-
-func TestJobRunnerDiscoversAndLeasesEveryWorkspace(t *testing.T) {
-	queueClient := &recordingQueueClient{}
-	deliverer := &recordingDeliverer{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
-	runner := &JobRunner{
-		Queue:      queueClient,
-		Workspaces: staticWorkspaceLister{"ws_alpha", "ws_beta"},
-		Deliverer:  deliverer,
-	}
-
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
-	if !reflect.DeepEqual(queueClient.leaseWorkspaceIDs, []string{"ws_alpha", "ws_beta"}) {
-		t.Fatalf("lease workspaces = %v; want every discovered workspace", queueClient.leaseWorkspaceIDs)
-	}
-}
-
-func TestJobRunnerSweepContinuesPastAFailingWorkspace(t *testing.T) {
-	queueClient := &recordingQueueClient{leaseErrWorkspace: "ws_beta"}
-	deliverer := &recordingDeliverer{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
-	runner := &JobRunner{
-		Queue:      queueClient,
-		Workspaces: staticWorkspaceLister{"ws_alpha", "ws_beta", "ws_gamma"},
-		Deliverer:  deliverer,
-	}
-
-	err := runner.RunOnce(context.Background())
-	if err == nil {
-		t.Fatal("RunOnce returned nil; the failing workspace must still be reported")
-	}
-	if !strings.Contains(err.Error(), "ws_beta") {
-		t.Fatalf("RunOnce error = %v; want the failing workspace named", err)
-	}
-	if !reflect.DeepEqual(queueClient.leaseWorkspaceIDs, []string{"ws_alpha", "ws_beta", "ws_gamma"}) {
-		t.Fatalf("lease workspaces = %v; want the sweep to reach every workspace despite the failure", queueClient.leaseWorkspaceIDs)
-	}
-}
-
 func TestJobRunnerRetriesTransportFailureWithoutAck(t *testing.T) {
 	queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{runtimeInputQueueJob()}}
 	deliverer := &recordingDeliverer{err: errors.New("pod unavailable")}
 
 	runner := &JobRunner{
-		Queue:      queueClient,
-		Workspaces: staticWorkspaceLister{"ws_bridge"},
-		Deliverer:  deliverer,
-		Config:     JobRunnerConfig{},
+		Queue:     queueClient,
+		Deliverer: deliverer,
+		Config:    JobRunnerConfig{},
 	}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if !reflect.DeepEqual(queueClient.transitions, []string{"retry:qjob_1:runtime_transport_error"}) {
 		t.Fatalf("queue transitions = %v; want retry", queueClient.transitions)
@@ -483,10 +352,10 @@ func TestJobRunnerFinalAttemptCommitsBridgeFenceBeforeQueueDeadLetter(t *testing
 		},
 		steps: &steps,
 	}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if len(deliverer.finalizations) != 1 {
 		t.Fatalf("finalizations = %#v; want one final-attempt Bridge fence", deliverer.finalizations)
@@ -515,10 +384,10 @@ func TestJobRunnerFinalAttemptTransportFailureCommitsBridgeFenceBeforeQueueDeadL
 		},
 		steps: &steps,
 	}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if len(deliverer.finalizations) != 1 ||
 		!deliverer.finalizations[0].result.Retryable ||
@@ -539,10 +408,10 @@ func TestJobRunnerFinalizationStoredStaleDispositionAcksQueue(t *testing.T) {
 		result:         RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "runtime_busy"},
 		finalizeResult: RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate},
 	}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_1"}) {
 		t.Fatalf("queue transitions = %v; want stale finalization ACK", queueClient.transitions)
@@ -562,10 +431,10 @@ func TestJobRunnerReplaysStoredFinalizationBeforeRuntimeRedelivery(t *testing.T)
 		},
 		steps: &steps,
 	}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if len(deliverer.jobs) != 0 || len(deliverer.finalizations) != 0 {
 		t.Fatalf("deliveries=%d finalizations=%d; want stored disposition replay without Runtime delivery or second finalization", len(deliverer.jobs), len(deliverer.finalizations))
@@ -603,10 +472,10 @@ func TestJobRunnerReplaysStoredFinalizationForNonFinalReadmissionBeforeRuntimeDe
 				replayResult: test.disposition,
 				steps:        &steps,
 			}
-			runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+			runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-			if err := runner.RunOnce(context.Background()); err != nil {
-				t.Fatalf("RunOnce: %v", err)
+			if err := acquireAndJoin(context.Background(), runner); err != nil {
+				t.Fatalf("acquire and join: %v", err)
 			}
 			if len(deliverer.jobs) != 0 || len(deliverer.finalizations) != 0 {
 				t.Fatalf("deliveries=%d finalizations=%d; want stored non-final disposition with zero Runtime delivery and no new fence", len(deliverer.jobs), len(deliverer.finalizations))
@@ -630,10 +499,10 @@ func TestJobRunnerReplaysStoredStaleTaskDispositionAsQueueAckWithoutRuntimeDeliv
 	job.MaxAttempts = 2
 	queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{job}}
 	deliverer := &recordingDeliverer{replayFound: true, replayResult: RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if len(deliverer.jobs) != 0 || len(deliverer.finalizations) != 0 {
 		t.Fatalf("deliveries=%d finalizations=%d; want stale ACK without Runtime delivery or mutation", len(deliverer.jobs), len(deliverer.finalizations))
@@ -652,10 +521,10 @@ func TestJobRunnerFinalizationFailureLeavesQueueLeaseUnchanged(t *testing.T) {
 		result:      RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "runtime_busy"},
 		finalizeErr: errors.New("bridge finalization unavailable"),
 	}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-	if err := runner.RunOnce(context.Background()); err == nil {
-		t.Fatal("RunOnce succeeded; want Bridge finalization error")
+	if err := acquireAndJoin(context.Background(), runner); err == nil {
+		t.Fatal("acquire and join succeeded; want Bridge finalization error")
 	}
 	if len(queueClient.transitions) != 0 {
 		t.Fatalf("queue transitions = %v; want none before Bridge ACK", queueClient.transitions)
@@ -688,11 +557,11 @@ func TestJobRunnerAgentMailNPlusOneFinalizesWithoutRuntimeOrRetry(t *testing.T) 
 			job.MaxAttempts = 2
 			queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{job}, steps: &steps}
 			deliverer := &recordingDeliverer{finalizeResult: test.finalized, finalizeErr: test.finalizeErr, steps: &steps}
-			runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+			runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-			err := runner.RunOnce(context.Background())
+			err := acquireAndJoin(context.Background(), runner)
 			if (err != nil) != test.wantErr {
-				t.Fatalf("RunOnce error = %v; want error=%t", err, test.wantErr)
+				t.Fatalf("acquire and join error = %v; want error=%t", err, test.wantErr)
 			}
 			if len(deliverer.jobs) != 0 || len(deliverer.finalizations) != 1 {
 				t.Fatalf("N+1 Runtime deliveries/finalizations = %d/%d; want 0/1", len(deliverer.jobs), len(deliverer.finalizations))
@@ -726,10 +595,10 @@ func TestJobRunnerNonFinalRetryAndAcceptedFinalDeliveryRemainUnchanged(t *testin
 			job.MaxAttempts = test.max
 			queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{job}}
 			deliverer := &recordingDeliverer{result: test.result}
-			runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+			runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-			if err := runner.RunOnce(context.Background()); err != nil {
-				t.Fatalf("RunOnce: %v", err)
+			if err := acquireAndJoin(context.Background(), runner); err != nil {
+				t.Fatalf("acquire and join: %v", err)
 			}
 			if len(deliverer.finalizations) != 0 {
 				t.Fatalf("finalizations = %#v; want none", deliverer.finalizations)
@@ -752,10 +621,10 @@ func TestJobRunnerNonRetryableRuntimeInputFinalizesBeforeQueueDeadLetter(t *test
 		finalizeResult: RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, ErrorKind: "runtime_contract_failure"},
 		steps:          &steps,
 	}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if !reflect.DeepEqual(steps, []string{"replay:qjob_1", "deliver:qjob_1", "finalize:qjob_1", "dead:qjob_1"}) {
 		t.Fatalf("steps = %v; want terminal Bridge finalization before Queue dead-letter", steps)
@@ -780,9 +649,9 @@ func TestJobRunnerSessionDeleteCleanupReleaseOutcomesTransitionQueueExactly(t *t
 				PayloadJson: `{"workspace_id":"default","session_id":"sesn_delete_outcome","delete_cleanup_id":"delcln_delete_outcome"}`,
 			}}}
 			deliverer := &recordingDeliverer{result: tc.result, err: tc.err}
-			runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer}
-			if err := runner.RunOnce(context.Background()); err != nil {
-				t.Fatalf("RunOnce: %v", err)
+			runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
+			if err := acquireAndJoin(context.Background(), runner); err != nil {
+				t.Fatalf("acquire and join: %v", err)
 			}
 			if !reflect.DeepEqual(queueClient.transitions, []string{tc.transition}) {
 				t.Fatalf("queue transitions = %v; want %q", queueClient.transitions, tc.transition)
@@ -800,10 +669,10 @@ func TestJobRunnerDeadLettersInvalidPayloadBeforeDelivery(t *testing.T) {
 		PayloadJson: `{"workspace_id":"ws_bridge","input_kind":"messages"}`,
 	}}}
 	deliverer := &recordingDeliverer{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if len(deliverer.jobs) != 0 {
 		t.Fatalf("delivered invalid jobs = %d; want 0", len(deliverer.jobs))
@@ -824,13 +693,12 @@ func TestJobRunnerReplaysBeforeInterruptDelivery(t *testing.T) {
 		steps:  &steps,
 	}
 	runner := &JobRunner{
-		Queue:      queueClient,
-		Workspaces: staticWorkspaceLister{"ws_bridge"},
-		Deliverer:  deliverer,
+		Queue:     queueClient,
+		Deliverer: deliverer,
 	}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if len(deliverer.jobs) != 1 || deliverer.jobs[0].InputKind != "interrupt_control" {
 		t.Fatalf("delivered jobs = %+v; want interrupt after replay", deliverer.jobs)
@@ -861,13 +729,12 @@ func TestJobRunnerInterruptReplaySkipsDelivery(t *testing.T) {
 		steps: &steps,
 	}
 	runner := &JobRunner{
-		Queue:      queueClient,
-		Workspaces: staticWorkspaceLister{"ws_bridge"},
-		Deliverer:  deliverer,
+		Queue:     queueClient,
+		Deliverer: deliverer,
 	}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if len(deliverer.jobs) != 0 {
 		t.Fatalf("delivered jobs = %+v; want stored finalization replay", deliverer.jobs)
@@ -888,10 +755,10 @@ func TestJobRunnerInterruptFinalAttemptTerminatesWithoutRuntimeDelivery(t *testi
 	deliverer := &recordingDeliverer{finalizeResult: RuntimeDeliveryResult{
 		Status: RuntimeDeliveryRejected, ErrorKind: "runtime_delivery_exhausted", QueueLeaseSettled: true,
 	}}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if len(deliverer.jobs) != 0 || len(deliverer.replayJobs) != 1 || len(deliverer.finalizations) != 1 {
 		t.Fatalf("interrupt deliveries/replays/finalizations = %d/%d/%d; want 0/1/1", len(deliverer.jobs), len(deliverer.replayJobs), len(deliverer.finalizations))
@@ -910,10 +777,10 @@ func TestJobRunnerLostInterruptResponseReplaysReceiptBeforeAck(t *testing.T) {
 		replayFoundAfterDelivery: true,
 		steps:                    &steps,
 	}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if !reflect.DeepEqual(steps, []string{
 		"replay:qjob_interrupt",
@@ -951,10 +818,10 @@ func TestJobRunnerHandlesRuntimeConfigAndCleanupAsSeparateQueueKinds(t *testing.
 		},
 	}}
 	deliverer := &recordingDeliverer{result: RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if got := len(deliverer.jobs); got != 3 {
 		t.Fatalf("delivered jobs = %d; want 3", got)
@@ -999,10 +866,10 @@ func TestJobRunnerDefersSDKConfigRejectionWithoutConsumingAttemptBudget(t *testi
 			ErrorMessage: "runtime rejected config",
 		},
 	}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if !reflect.DeepEqual(queueClient.transitions, []string{"defer:qjob_config_busy"}) {
 		t.Fatalf("queue transitions = %v; want non-exhausting config defer", queueClient.transitions)
@@ -1031,10 +898,10 @@ func TestJobRunnerDefersBusyMCPManifestWithoutConsumingAttemptBudget(t *testing.
 			ErrorMessage: "runtime config installation is busy",
 		},
 	}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if !reflect.DeepEqual(queueClient.transitions, []string{"defer:qjob_manifest_busy"}) {
 		t.Fatalf("queue transitions = %v; want busy MCP defer", queueClient.transitions)
@@ -1088,9 +955,9 @@ func TestJobRunnerSeparatesSDKAndMCPConfigDeliveryBudgets(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{test.job}}
-			runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: test.deliverer}
-			if err := runner.RunOnce(context.Background()); err != nil {
-				t.Fatalf("RunOnce: %v", err)
+			runner := &JobRunner{Queue: queueClient, Deliverer: test.deliverer}
+			if err := acquireAndJoin(context.Background(), runner); err != nil {
+				t.Fatalf("acquire and join: %v", err)
 			}
 			if !reflect.DeepEqual(queueClient.transitions, []string{test.transition}) {
 				t.Fatalf("queue transitions = %v; want %s", queueClient.transitions, test.transition)
@@ -1110,10 +977,10 @@ func TestJobRunnerDeadLettersStringRuntimeConfigGeneration(t *testing.T) {
 		},
 	}}
 	deliverer := &recordingDeliverer{result: RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if len(deliverer.jobs) != 0 {
 		t.Fatalf("delivered jobs = %+v; want invalid config payload dead-lettered before delivery", deliverer.jobs)
@@ -1147,10 +1014,10 @@ func TestJobRunnerDeadLettersInvalidRuntimeConfigFinalizationUnderItsLease(t *te
 			Retryable: false,
 		},
 	}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if !reflect.DeepEqual(queueClient.transitions, []string{"dead:qjob_manifest_invalid_finalization:invalid_runtime_job_payload"}) {
 		t.Fatalf("queue transitions = %v; want fenced dead-letter", queueClient.transitions)
@@ -1212,9 +1079,9 @@ func TestJobRunnerFinalManifestAttemptFinalizesBeforeQueueDeadLetter(t *testing.
 		finalizeResult: RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, ErrorKind: "runtime_delivery_exhausted"},
 		steps:          &steps,
 	}
-	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
+		t.Fatalf("acquire and join: %v", err)
 	}
 	if len(deliverer.finalizations) != 1 {
 		t.Fatalf("manifest finalizations = %#v; want one", deliverer.finalizations)
@@ -1294,13 +1161,12 @@ func TestJobRunnerMapsRuntimeRejectedResponse(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{runtimeInputQueueJob()}}
 			runner := &JobRunner{
-				Queue:      queueClient,
-				Workspaces: staticWorkspaceLister{"ws_bridge"},
-				Deliverer:  &recordingDeliverer{result: test.result},
-				Config:     JobRunnerConfig{},
+				Queue:     queueClient,
+				Deliverer: &recordingDeliverer{result: test.result},
+				Config:    JobRunnerConfig{},
 			}
-			if err := runner.RunOnce(context.Background()); err != nil {
-				t.Fatalf("RunOnce: %v", err)
+			if err := acquireAndJoin(context.Background(), runner); err != nil {
+				t.Fatalf("acquire and join: %v", err)
 			}
 			if !reflect.DeepEqual(queueClient.transitions, []string{test.transition}) {
 				t.Fatalf("queue transitions = %v; want %s", queueClient.transitions, test.transition)
@@ -1361,27 +1227,23 @@ func TestRuntimeDeliveryOperationResponseCarriesNoEchoIdentity(t *testing.T) {
 	}
 }
 
-func TestRunJobRunnerLoopLogsPollFailureWithSafeSharedFields(t *testing.T) {
+func TestRunJobRunnerLoopLogsAcquisitionFailureWithSafeSharedFields(t *testing.T) {
 	buffer := &lockedBuffer{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runner := &JobRunner{
-		Queue:      pollFailingQueueClient{err: errors.New("raw queue connection string should not appear")},
-		Workspaces: staticWorkspaceLister{"ws_bridge"},
-		Deliverer:  &recordingDeliverer{},
-		Config: JobRunnerConfig{
-			PollInterval: time.Millisecond,
-		},
+		Queue:     pollFailingQueueClient{err: errors.New("raw queue connection string should not appear")},
+		Deliverer: &recordingDeliverer{},
 	}
 	done := make(chan error, 1)
 	go func() {
 		done <- RunJobRunnerLoop(ctx, runner, slog.New(slog.NewJSONHandler(buffer, nil)), nil)
 	}()
 	deadline := time.After(time.Second)
-	for !strings.Contains(buffer.String(), `"msg":"job_runner.poll_failed"`) {
+	for !strings.Contains(buffer.String(), `"msg":"job_runner.acquisition_failed"`) {
 		select {
 		case <-deadline:
-			t.Fatalf("job runner did not emit poll failure log: %s", buffer.String())
+			t.Fatalf("job runner did not emit acquisition failure log: %s", buffer.String())
 		case <-time.After(time.Millisecond):
 		}
 	}
@@ -1396,18 +1258,18 @@ func TestRunJobRunnerLoopLogsPollFailureWithSafeSharedFields(t *testing.T) {
 	}
 	logOutput := buffer.String()
 	if strings.Contains(logOutput, "raw queue connection string") {
-		t.Fatalf("job runner log leaked raw poll error: %s", logOutput)
+		t.Fatalf("job runner log leaked raw acquisition error: %s", logOutput)
 	}
 	for _, want := range []string{
-		`"msg":"job_runner.poll_failed"`,
-		`"operation":"job_runner.poll"`,
-		`"event.kind":"poll_failed"`,
+		`"msg":"job_runner.acquisition_failed"`,
+		`"operation":"job_runner.acquisition"`,
+		`"event.kind":"acquisition_failed"`,
 		`"component":"` + ServiceNameJobRunner + `"`,
 		`"retryable":true`,
 		`"terminal":false`,
 		`"error.class":"job_runner_error"`,
-		`"error.code":"poll_failed"`,
-		`"error.message_safe":"job runner poll failed"`,
+		`"error.code":"acquisition_failed"`,
+		`"error.message_safe":"job runner queue acquisition failed"`,
 	} {
 		if !strings.Contains(logOutput, want) {
 			t.Fatalf("job runner log missing %s: %s", want, logOutput)
@@ -1441,8 +1303,8 @@ func TestRunJobRunnerLoopWakesFromCommittedPostgreSQLRuntimeInput(t *testing.T) 
 	}
 	deliverer := &wakeProofDeliverer{delivered: make(chan RuntimeJob, 1)}
 	runner := &JobRunner{
-		Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge_wake"}, Deliverer: deliverer,
-		Config: JobRunnerConfig{PollInterval: time.Hour, LeaseOwner: "bridge-wake-proof", MaxJobs: 1, LeaseDuration: time.Minute},
+		Queue: queueClient, Deliverer: deliverer,
+		Config: JobRunnerConfig{LeaseOwner: "bridge-wake-proof", MaxJobs: 1, LeaseDuration: time.Minute},
 	}
 	runnerCtx, cancelRunner := context.WithCancel(context.Background())
 	defer cancelRunner()
@@ -1470,7 +1332,7 @@ func TestRunJobRunnerLoopWakesFromCommittedPostgreSQLRuntimeInput(t *testing.T) 
 			t.Fatalf("delivered job = %+v; want committed runtime input", job)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("PostgreSQL notification did not wake Bridge before its one-hour poll")
+		t.Fatal("PostgreSQL notification did not wake the Runner before its one-hour retry hint")
 	}
 
 	cancelRunner()
@@ -1499,8 +1361,13 @@ type notifyingBridgeQueueClient struct {
 	initialLease chan struct{}
 }
 
-func (c *notifyingBridgeQueueClient) Lease(ctx context.Context, request *queuev1.LeaseRequest) (*queuev1.LeaseResponse, error) {
-	response, err := c.QueueClient.Lease(ctx, request)
+// LeaseJobRunnerJobs stretches Queue's retry hint to one hour, so only the
+// committed-work notification can wake the empty-response wait in time.
+func (c *notifyingBridgeQueueClient) LeaseJobRunnerJobs(ctx context.Context, request *queuev1.LeaseJobRunnerJobsRequest) (*queuev1.LeaseJobRunnerJobsResponse, error) {
+	response, err := c.QueueClient.LeaseJobRunnerJobs(ctx, request)
+	if response != nil {
+		response.RetryAfterMs = int32(time.Hour.Milliseconds())
+	}
 	c.once.Do(func() { close(c.initialLease) })
 	return response, err
 }
@@ -1516,62 +1383,6 @@ func (d *wakeProofDeliverer) DeliverRuntimeJob(_ context.Context, job RuntimeJob
 
 func (*wakeProofDeliverer) ReplayRuntimeDeliveryFinalization(context.Context, RuntimeJob) (RuntimeDeliveryResult, bool, error) {
 	return RuntimeDeliveryResult{}, false, nil
-}
-
-func TestRunJobRunnerLoopBacksOffAcrossConsecutiveEmptyPolls(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	runner := &JobRunner{
-		Queue:      &recordingQueueClient{},
-		Workspaces: staticWorkspaceLister{"ws_bridge"},
-		Deliverer:  &recordingDeliverer{},
-		Config: JobRunnerConfig{
-			PollInterval: time.Millisecond,
-		},
-	}
-	var delays []time.Duration
-	err := runJobRunnerLoop(ctx, runner, nil, nil, func(_ context.Context, delay time.Duration, _ queue.WakeSnapshot) error {
-		delays = append(delays, delay)
-		if len(delays) == 4 {
-			cancel()
-			return context.Canceled
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("runJobRunnerLoop: %v", err)
-	}
-	if want := []time.Duration{time.Millisecond, 2 * time.Millisecond, 4 * time.Millisecond, 8 * time.Millisecond}; !reflect.DeepEqual(delays, want) {
-		t.Fatalf("empty-poll delays = %v; want %v", delays, want)
-	}
-}
-
-func TestRunJobRunnerLoopResetsBackoffWhenPodLossRepairWasActiveBeforePollFailure(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	runner := &JobRunner{
-		Queue:      pollFailingQueueClient{err: errors.New("queue unavailable")},
-		Workspaces: staticWorkspaceLister{"ws_bridge"},
-		Deliverer:  &recordingDeliverer{podLossRepairCount: 1},
-		Config: JobRunnerConfig{
-			PollInterval: time.Millisecond,
-		},
-	}
-	var delays []time.Duration
-	err := runJobRunnerLoop(ctx, runner, nil, nil, func(_ context.Context, delay time.Duration, _ queue.WakeSnapshot) error {
-		delays = append(delays, delay)
-		if len(delays) == 3 {
-			cancel()
-			return context.Canceled
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("runJobRunnerLoop: %v", err)
-	}
-	if want := []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}; !reflect.DeepEqual(delays, want) {
-		t.Fatalf("poll delays = %v; want active repair to reset backoff to %v", delays, want)
-	}
 }
 
 func runtimeInputQueueJob() *queuev1.QueueJob {
@@ -1607,9 +1418,9 @@ func runtimeAgentMailQueueJob() *queuev1.QueueJob {
 type recordingQueueClient struct {
 	mu                 sync.Mutex
 	leased             []*queuev1.QueueJob
-	leaseKinds         []string
-	leaseWorkspaceIDs  []string
-	leaseErrWorkspace  string
+	leaseRequests      []*queuev1.LeaseJobRunnerJobsRequest
+	retryAfterMs       int32
+	releaseErr         error
 	leaseErr           error
 	transitions        []string
 	heartbeatLost      bool
@@ -1618,30 +1429,26 @@ type recordingQueueClient struct {
 	heartbeats         int
 	heartbeatNotify    chan struct{}
 	steps              *[]string
-	phaseSteps         *[]string
 }
 
-type staticWorkspaceLister []workspace.ID
-
-func (l staticWorkspaceLister) ListIDs(context.Context) ([]workspace.ID, error) {
-	return append([]workspace.ID(nil), l...), nil
-}
-
-func (c *recordingQueueClient) Lease(_ context.Context, request *queuev1.LeaseRequest) (*queuev1.LeaseResponse, error) {
+func (c *recordingQueueClient) LeaseJobRunnerJobs(_ context.Context, request *queuev1.LeaseJobRunnerJobsRequest) (*queuev1.LeaseJobRunnerJobsResponse, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.leaseKinds = append([]string(nil), request.GetKinds()...)
-	c.leaseWorkspaceIDs = append(c.leaseWorkspaceIDs, request.GetWorkspaceId())
-	if c.phaseSteps != nil {
-		*c.phaseSteps = append(*c.phaseSteps, "lease")
-	}
+	c.leaseRequests = append(c.leaseRequests, request)
 	if c.leaseErr != nil {
 		return nil, c.leaseErr
 	}
-	if c.leaseErrWorkspace != "" && request.GetWorkspaceId() == c.leaseErrWorkspace {
-		return nil, errors.New("queue unavailable for " + c.leaseErrWorkspace)
+	return &queuev1.LeaseJobRunnerJobsResponse{Jobs: c.leased, RetryAfterMs: c.retryAfterMs}, nil
+}
+
+func (c *recordingQueueClient) ReleaseUnstartedJob(_ context.Context, request *queuev1.ReleaseUnstartedJobRequest) (*queuev1.ReleaseUnstartedJobResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.transitions = append(c.transitions, "release:"+request.GetJobId())
+	if c.releaseErr != nil {
+		return nil, c.releaseErr
 	}
-	return &queuev1.LeaseResponse{Jobs: c.leased}, nil
+	return &queuev1.ReleaseUnstartedJobResponse{Updated: true}, nil
 }
 
 func (c *recordingQueueClient) Heartbeat(_ context.Context, _ *queuev1.HeartbeatRequest) (*queuev1.HeartbeatResponse, error) {
@@ -1722,15 +1529,10 @@ type recordingDeliverer struct {
 	result                   RuntimeDeliveryResult
 	err                      error
 	jobs                     []RuntimeJob
-	podLossRepairErr         error
-	podLossRepairCount       int
-	podLossRepairCalls       int
-	podLossRepair            func(context.Context, string) (int, error)
 	finalizeResult           RuntimeDeliveryResult
 	finalizeErr              error
 	finalizations            []recordedRuntimeFinalization
 	steps                    *[]string
-	phaseSteps               *[]string
 	replayResult             RuntimeDeliveryResult
 	replayFound              bool
 	replayErr                error
@@ -1813,19 +1615,6 @@ func (d *recordingDeliverer) ResolveRuntimeInputSeal(context.Context, RuntimeJob
 	return d.sealedAttempt, d.sealErr
 }
 
-func (d *recordingDeliverer) RepairLostRuntimeBindings(ctx context.Context, workspaceID string) (int, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.podLossRepairCalls++
-	if d.phaseSteps != nil {
-		*d.phaseSteps = append(*d.phaseSteps, "pod-loss")
-	}
-	if d.podLossRepair != nil {
-		return d.podLossRepair(ctx, workspaceID)
-	}
-	return d.podLossRepairCount, d.podLossRepairErr
-}
-
 func (d *recordingDeliverer) DeliverRuntimeJob(_ context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -1868,7 +1657,11 @@ type pollFailingQueueClient struct {
 	err error
 }
 
-func (c pollFailingQueueClient) Lease(context.Context, *queuev1.LeaseRequest) (*queuev1.LeaseResponse, error) {
+func (c pollFailingQueueClient) LeaseJobRunnerJobs(context.Context, *queuev1.LeaseJobRunnerJobsRequest) (*queuev1.LeaseJobRunnerJobsResponse, error) {
+	return nil, c.err
+}
+
+func (c pollFailingQueueClient) ReleaseUnstartedJob(context.Context, *queuev1.ReleaseUnstartedJobRequest) (*queuev1.ReleaseUnstartedJobResponse, error) {
 	return nil, c.err
 }
 
@@ -1915,4 +1708,16 @@ func (b *lockedBuffer) String() string {
 
 func int64String(value int64) string {
 	return fmt.Sprintf("%d", value)
+}
+
+// acquireAndJoin is one production acquisition followed by the production
+// join of the jobs it dispatched.
+func acquireAndJoin(ctx context.Context, runner *JobRunner) error {
+	_, err := acquireAndJoinActive(ctx, runner)
+	return err
+}
+
+func acquireAndJoinActive(ctx context.Context, runner *JobRunner) (bool, error) {
+	acquisition, err := runner.AcquireAndDispatch(ctx)
+	return acquisition.Dispatched > 0, errors.Join(err, runner.JoinDispatched(ctx))
 }

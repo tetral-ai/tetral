@@ -33,7 +33,7 @@ func (e runtimePodConfirmationRequired) Error() string {
 	return "fresh Runtime Pod observation required"
 }
 
-// One decision table governs ordinary delivery, cleanup and proactive census.
+// One decision table governs ordinary delivery, cleanup and repair discovery.
 // It consumes durable process facts under the owning transaction's shared lock
 // and, for a current process, the report time read under the liveness row's
 // shared lock; confirming external observations are produced before Session

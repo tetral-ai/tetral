@@ -49,8 +49,9 @@
 //     sessions agent-version trigger, the Auth key-lineage, key
 //     usage-generation and terminal-grant triggers, and SECURITY DEFINER
 //     functions with a fixed search_path owned by the migration role: the
-//     lock-only runtime process function and the Auth credential lookup,
-//     authority lock and token prune functions. It stays portable across
+//     lock-only runtime process functions, the Job Runner binding-discovery
+//     upper and page functions, and the Auth credential lookup, authority
+//     lock and token prune functions. It stays portable across
 //     self-managed PostgreSQL and managed providers.
 //     The complete database preparation command additionally requires a
 //     PostgreSQL superuser for its current role installer; managed-provider
@@ -59,6 +60,7 @@
 // UPDATE-WITH:
 //   - postgresql_schema.go (version-one table/index/policy/trigger DDL)
 //   - postgresql_runtime_schema.go (runtime process, liveness and handoff tables, lock-only functions)
+//   - postgresql_runner_discovery_schema.go (Job Runner cross-workspace binding-discovery policies and functions)
 //   - postgresql_auth_schema.go (Auth policy and token tables, lookup/lock/prune functions, key and grant triggers)
 //   - postgresql_migrator.go (version checksums, baseline steps, MigrateSchema/VerifySchema)
 //   - postgresql_migration_logging.go (safe transaction diagnostics)

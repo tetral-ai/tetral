@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -255,14 +256,14 @@ func TestPostgreSQLInterruptSettlesPreparedRejectionAndQueuedFollowers(t *testin
 			}})
 		}})
 		return &jobrunner.JobRunner{
-			Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+			Queue:     tetralqueue.NewServer(queueStore, nil),
 			Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})},
 			Config:    jobrunner.JobRunnerConfig{LeaseOwner: owner, MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 		}
 	}
 
 	rejectionID := appendMessage("interrupt-follower-rejection", "reject before stop")
-	if active, err := newRunner(fixturePort, "interrupt-follower-rejection").RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), newRunner(fixturePort, "interrupt-follower-rejection")); err != nil || !active {
 		t.Fatalf("prepare deterministic rejection follower = active:%t err:%v", active, err)
 	}
 	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()+interval '1 hour'
@@ -294,7 +295,7 @@ func TestPostgreSQLInterruptSettlesPreparedRejectionAndQueuedFollowers(t *testin
 		WHERE workspace_id='default' AND session_id=$1 AND input_kind='interrupt_control'`, sessionID).Scan(&interruptID); err != nil {
 		t.Fatalf("read follower interrupt identity: %v", err)
 	}
-	if active, err := newRunner(runtimeProcess.port, "interrupt-follower-closeout").RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), newRunner(runtimeProcess.port, "interrupt-follower-closeout")); err != nil || !active {
 		t.Fatalf("deliver follower interrupt through real Runtime = active:%t err:%v", active, err)
 	}
 	if err := os.WriteFile(paths.close, []byte("close"), 0o600); err != nil {
@@ -412,13 +413,13 @@ func TestPostgreSQLAcceptedMessageQueueResidueDoesNotFreezeInterrupt(t *testing.
 		t.Fatalf("read accepted-residue interrupt identity: %v", err)
 	}
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: direct,
+		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: direct,
 		Config: jobrunner.JobRunnerConfig{LeaseOwner: "accepted-residue-closeout", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("deliver interrupt ahead of accepted Queue residue = active:%t err:%v", active, err)
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("settle accepted Queue residue by accepted replay = active:%t err:%v", active, err)
 	}
 	var interruptInbox, interruptQueue string
@@ -442,7 +443,7 @@ func TestPostgreSQLAcceptedMessageQueueResidueDoesNotFreezeInterrupt(t *testing.
 	if _, ok := sender.requests[1].(*agentruntimev1.InterruptRequest); !ok {
 		t.Fatalf("second Runtime call = %T; want Interrupt", sender.requests[1])
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || active {
 		t.Fatalf("accepted-residue partition after replay = active:%t err:%v; want drained", active, err)
 	}
 }
@@ -512,11 +513,11 @@ func TestPostgreSQLInterruptBarrierFollowsSessionQueueOrderAcrossThreads(t *test
 		}})
 	}})
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil),
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "interrupt-queue-order", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("process first-born child interrupt = active:%t err:%v", active, err)
 	}
 	if len(sender.requests) != 1 {
@@ -540,7 +541,7 @@ func TestPostgreSQLInterruptBarrierFollowsSessionQueueOrderAcrossThreads(t *test
 	if childInbox != "committed" || childQueue != queue.StatusAcknowledged || mainInbox != "queued" || mainQueue != queue.StatusPending {
 		t.Fatalf("custody after child interrupt = child:%s/%s main:%s/%s", childInbox, childQueue, mainInbox, mainQueue)
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("process second-born main interrupt = active:%t err:%v", active, err)
 	}
 	if len(sender.requests) != 2 {
@@ -563,7 +564,7 @@ func TestPostgreSQLInterruptBarrierFollowsSessionQueueOrderAcrossThreads(t *test
 	if childInbox != "committed" || childQueue != queue.StatusAcknowledged || mainInbox != "committed" || mainQueue != queue.StatusAcknowledged {
 		t.Fatalf("terminal ordered interrupt custody = child:%s/%s main:%s/%s", childInbox, childQueue, mainInbox, mainQueue)
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || active {
 		t.Fatalf("ordered interrupt partition after closeout = active:%t err:%v; want drained", active, err)
 	}
 }
@@ -619,11 +620,11 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 		}})
 	}})
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queueStore, nil),
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "interrupt-production-composition", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("deliver initial input through Runtime gRPC = active:%t err:%v", active, err)
 	}
 	if rawAccept, err := os.ReadFile(paths.acceptResult); err == nil {
@@ -682,11 +683,11 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 	}
 	cleanupSender := &countingCleanupSender{RuntimeCommandSender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})}
 	cleanupRunner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queueStore, nil),
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: cleanupSender},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "interrupt-production-hot-cleanup", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if active, err := cleanupRunner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), cleanupRunner); err != nil || !active {
 		t.Fatalf("run cleanup against hot Thread = active:%t err:%v", active, err)
 	}
 	var cleanupQueueStatus string
@@ -730,7 +731,7 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 	}); err != nil {
 		t.Fatalf("enqueue config during hot Thread run: %v", err)
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("defer config against hot Thread = active:%t err:%v", active, err)
 	}
 	var configStatus string
@@ -788,7 +789,7 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 	}
 	delivery := make(chan deliveryResult, 1)
 	go func() {
-		active, runErr := runner.RunOnceWithActivity(context.Background())
+		active, runErr := acquireAndJoinJobRunnerActive(context.Background(), runner)
 		delivery <- deliveryResult{active: active, err: runErr}
 	}()
 	waitForCompositionFile(t, paths.operationCompleted, "interrupted durable operation completion", &runtimeProcess.output)
@@ -841,7 +842,7 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 		WHERE workspace_id='default' AND id=$1 AND status='pending'`, configJobID); err != nil {
 		t.Fatalf("make deferred config eligible after interrupt: %v", err)
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("install deferred config after interrupt = active:%t err:%v", active, err)
 	}
 	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1`, configJobID).Scan(&configStatus); err != nil || configStatus != queue.StatusAcknowledged {
@@ -853,7 +854,7 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 	if err != nil {
 		t.Fatalf("load cold Provider context after interrupt: %v", err)
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("deliver ordinary input after config install = active:%t err:%v", active, err)
 	}
 	postConfigDeadline := time.Now().Add(10 * time.Second)
@@ -1050,12 +1051,12 @@ func TestPostgreSQLRecoveredOpenRequestJoinedReplayCompletesResidentFence(t *tes
 	captureSender := &interruptRequestCaptureSender{RuntimeCommandSender: baseSender}
 	queueStore := queue.NewPostgreSQLStore(client)
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queueStore, nil),
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: captureSender},
 		Config: jobrunner.JobRunnerConfig{LeaseOwner: "interrupt-joined-replay", MaxJobs: 1,
 			LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("deliver joined replay interrupt = active:%t err:%v", active, err)
 	}
 	if captureSender.request == nil {
@@ -1073,7 +1074,7 @@ func TestPostgreSQLRecoveredOpenRequestJoinedReplayCompletesResidentFence(t *tes
 	}
 	replayDeadline := time.Now().Add(3 * time.Second)
 	for {
-		active, runErr := runner.RunOnceWithActivity(context.Background())
+		active, runErr := acquireAndJoinJobRunnerActive(context.Background(), runner)
 		if runErr != nil {
 			t.Fatalf("replay joined receipt through JobRunner: %v", runErr)
 		}
@@ -1260,7 +1261,7 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 	repairStore := runtimePodLossSweepStore(t, runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
-	if repaired, err := repairStore.RepairLostRuntimeBindings(context.Background(), workspace.DefaultID.String()); err != nil || repaired != 1 {
+	if repaired, err := repairRuntimePodLoss(context.Background(), repairStore); err != nil || repaired != 1 {
 		t.Fatalf("repair pod loss under interrupt = %d/%v", repaired, err)
 	}
 	var mainEndsAfterLoss, mainResultsAfterLoss, siblingEndsAfterLoss, oldBindings int
@@ -1321,7 +1322,7 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 		RuntimeCommandSender: recoverySender,
 	}
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queueStore, nil),
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: responseLossSender},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "interrupt-pod-loss-replacement", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
@@ -1331,7 +1332,7 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 	}
 	delivery := make(chan deliveryResult, 1)
 	go func() {
-		active, runErr := runner.RunOnceWithActivity(context.Background())
+		active, runErr := acquireAndJoinJobRunnerActive(context.Background(), runner)
 		delivery <- deliveryResult{active: active, err: runErr}
 	}()
 	var recoveryRequest *agentruntimev1.RecoverThreadRequest
@@ -1385,11 +1386,26 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 		recoveryRequest.GetBindingGeneration(),
 		recoveryRequest.GetTargetPodUid(),
 	)
-	delivery = make(chan deliveryResult, 1)
-	go func() {
-		active, runErr := runner.RunOnceWithActivity(context.Background())
-		delivery <- deliveryResult{active: active, err: runErr}
-	}()
+	// The resumed replacement Runtime's Bridge calls hold the Session lock, and
+	// Queue skips a busy Session instead of waiting for it, so the production
+	// loop delivers the interrupt and asks again after Queue's retry hint.
+	loopContext, stopLoop := context.WithCancel(context.Background())
+	loopDone := make(chan error, 1)
+	go func() { loopDone <- jobrunner.RunJobRunnerLoop(loopContext, runner, nil, queue.NewWakeSignal()) }()
+	var stopOnce sync.Once
+	var loopErr error
+	stopDelivery := func() error {
+		stopOnce.Do(func() {
+			stopLoop()
+			select {
+			case loopErr = <-loopDone:
+			case <-time.After(10 * time.Second):
+				loopErr = errors.New("job runner loop did not stop")
+			}
+		})
+		return loopErr
+	}
+	t.Cleanup(func() { _ = stopDelivery() })
 	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
 		"daytona": &bridgeMemoryProjectionProvider{},
 	})
@@ -1420,14 +1436,15 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	var delivered deliveryResult
-	select {
-	case delivered = <-delivery:
-	case <-time.After(10 * time.Second):
-		t.Fatalf("pod-loss interrupt delivery did not finish after output capture: %s", runtimeProcess.output.String())
-	}
-	if delivered.err != nil || !delivered.active {
-		t.Fatalf("deliver same interrupt after pod loss = active:%t err:%v", delivered.active, delivered.err)
+	waitHandoffCondition(t, "pod-loss interrupt delivery settled after output capture", func() bool {
+		var interruptQueue string
+		if err := admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1`, jobID).Scan(&interruptQueue); err != nil {
+			t.Fatalf("read pod-loss interrupt Queue status: %v", err)
+		}
+		return interruptQueue != queue.StatusPending && interruptQueue != queue.StatusLeased
+	})
+	if err := stopDelivery(); err != nil {
+		t.Fatalf("deliver same interrupt after pod loss through the Runner loop: %v", err)
 	}
 	if calls := responseLossSender.calls.Load(); calls != 1 {
 		t.Fatalf("replacement Runtime interrupt calls after response loss = %d; want 1", calls)
@@ -1560,7 +1577,7 @@ func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *
 	repairStore := runtimePodLossSweepStore(t, runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
-	if repaired, err := repairStore.RepairLostRuntimeBindings(context.Background(), workspace.DefaultID.String()); err != nil || repaired != 1 {
+	if repaired, err := repairRuntimePodLoss(context.Background(), repairStore); err != nil || repaired != 1 {
 		t.Fatalf("repair pod loss after interrupt closeout = %d/%v", repaired, err)
 	}
 	var inboxAfterLoss string
@@ -1609,7 +1626,7 @@ func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *
 	}
 	responseLossSender := &interruptResponseLossSender{RuntimeCommandSender: recoverySender}
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queueStore, nil),
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: responseLossSender},
 		Config: jobrunner.JobRunnerConfig{LeaseOwner: "interrupt-closeout-replay-owner", MaxJobs: 1,
 			LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
@@ -1620,7 +1637,7 @@ func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *
 	}
 	recoveryDelivery := make(chan deliveryResult, 1)
 	go func() {
-		active, runErr := runner.RunOnceWithActivity(context.Background())
+		active, runErr := acquireAndJoinJobRunnerActive(context.Background(), runner)
 		recoveryDelivery <- deliveryResult{active: active, err: runErr}
 	}()
 	var recoveryRequest *agentruntimev1.RecoverThreadRequest
@@ -1684,7 +1701,7 @@ func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *
 	if composed.ProviderInvocations != 0 || len(composed.InterruptResult) != 0 {
 		t.Fatalf("closeout recovery Runtime activity = %+v; want recovered closeout without Provider or new interrupt", composed)
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("replay interrupt receipt after recovered FinishIdle = active:%t err:%v", active, err)
 	}
 	if calls := responseLossSender.calls.Load(); calls != 0 {
@@ -1828,14 +1845,14 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleWhileQueuedMailResumesAfterCl
 	}})
 	queueStore := queue.NewPostgreSQLStore(client)
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queueStore, nil),
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "interrupt-actor-closeout", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("deliver actor interrupt through Runtime = active:%t err:%v", active, err)
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("deliver released external sibling mail through Runtime = active:%t err:%v", active, err)
 	}
 	completeInterruptCompositionOutputCapture(
@@ -1975,11 +1992,11 @@ func runPostgreSQLColdInterruptProductionCase(t *testing.T, explicitChild bool) 
 		}})
 	}})
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queueStore, nil),
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "interrupt-cold-production", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("deliver cold interrupt through Runtime = active:%t err:%v", active, err)
 	}
 	if err := os.WriteFile(paths.close, []byte("close"), 0o600); err != nil {

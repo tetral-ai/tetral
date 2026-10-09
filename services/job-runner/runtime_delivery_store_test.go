@@ -260,10 +260,11 @@ func TestRuntimeRecoveryFinalExhaustionTerminatesSessionAndPendingRecovery(t *te
 			t.Fatalf("enqueue recovery Queue job: %v", err)
 		}
 	}
-	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
-		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeRecovery}, LeaseOwner: "final-owner",
-		MaxJobs: 1, LeaseDuration: time.Minute,
+	// The Runner's direct lease: termination must also clear its provenance.
+	directLease, err := queueStore.LeaseJobRunnerJobs(context.Background(), queue.LeaseJobRunnerJobsRequest{
+		LeaseOwner: "final-owner", MaxJobs: 1, LeaseDuration: time.Minute,
 	})
+	leased := directLease.Jobs
 	if err != nil || len(leased) != 1 {
 		t.Fatalf("lease final recovery = %#v/%v", leased, err)
 	}
@@ -302,6 +303,63 @@ func TestRuntimeRecoveryFinalExhaustionTerminatesSessionAndPendingRecovery(t *te
 	}
 	if sessionStatus != "terminated" || threadStatus != "failed" || runtimeStatus != "idle" || liveRecoveryJobs != 0 || bindingCount != 0 {
 		t.Fatalf("recovery exhaustion = %s/%s/%s jobs=%d bindings=%d", sessionStatus, threadStatus, runtimeStatus, liveRecoveryJobs, bindingCount)
+	}
+}
+
+// A final recovery attempt whose Session terminated while it held the
+// Runner's direct lease cancels that lease, clearing its provenance with it.
+func TestRuntimeRecoveryFinalAttemptAfterSessionTerminationCancelsItsDirectLease(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_recovery_terminated"
+		threadID  = "thr_recovery_terminated"
+		sourceID  = "evt_recovery_terminated"
+	)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, sourceID, 1, "session.status_rescheduled", `{}`)
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	queueStore := queue.NewPostgreSQLStore(client)
+	enqueue, err := queue.NewRuntimeRecoveryEnqueueRequest(workspace.DefaultID, sessionID, threadID, sourceID, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("build recovery Queue job: %v", err)
+	}
+	if _, err := queueStore.Enqueue(context.Background(), enqueue); err != nil {
+		t.Fatalf("enqueue recovery Queue job: %v", err)
+	}
+	directLease, err := queueStore.LeaseJobRunnerJobs(context.Background(), queue.LeaseJobRunnerJobsRequest{
+		LeaseOwner: "terminated-recovery-owner", MaxJobs: 1, LeaseDuration: time.Minute,
+	})
+	leased := directLease.Jobs
+	if err != nil || len(leased) != 1 {
+		t.Fatalf("lease final recovery = %#v/%v", leased, err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE sessions SET status='terminated' WHERE workspace_id='default' AND id=$1`, sessionID); err != nil {
+		t.Fatalf("terminate Session: %v", err)
+	}
+	job := RuntimeJob{
+		JobID: leased[0].ID, LeaseToken: leased[0].LeaseToken, Kind: leased[0].Kind,
+		PartitionKey: leased[0].PartitionKey, DedupeKey: leased[0].DedupeKey,
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RecoverySourceEventID: sourceID, PayloadJSON: string(leased[0].PayloadJSON),
+		AttemptCount: int32(leased[0].MaxAttempts), MaxAttempts: int32(leased[0].MaxAttempts),
+	}
+	store := fixtureRuntimeDeliveryStore(client, admin, 9090)
+	result, err := store.FinalizeRuntimeDelivery(context.Background(), job, RuntimeDeliveryResult{
+		Status: RuntimeDeliveryRejected, Retryable: true,
+		ErrorKind: "runtime_transport_unavailable", ErrorMessage: "runtime recovery failed",
+	})
+	if err != nil || result.Status != RuntimeDeliveryDuplicate || !result.QueueLeaseSettled {
+		t.Fatalf("finalize recovery for terminated Session = %#v/%v; want a settled duplicate", result, err)
+	}
+	var status string
+	var leaseToken sql.NullString
+	if err := admin.QueryRowContext(context.Background(), `SELECT status, lease_token FROM queue_jobs
+		WHERE workspace_id='default' AND id=$1`, job.JobID).Scan(&status, &leaseToken); err != nil {
+		t.Fatalf("read recovery Queue job: %v", err)
+	}
+	if status != queue.StatusCancelled || leaseToken.Valid {
+		t.Fatalf("recovery Queue job = %s (lease token %t); want cancelled without a lease", status, leaseToken.Valid)
 	}
 }
 
@@ -373,10 +431,10 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 				ErrorKind: "runtime_transport_unavailable", ErrorMessage: "runtime recovery failed",
 			}}
 			runner := &JobRunner{
-				Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
+				Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
 				Config: JobRunnerConfig{LeaseOwner: "child-recovery-finalizer", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 			}
-			if err := runner.RunOnce(context.Background()); err != nil {
+			if err := acquireAndJoin(context.Background(), runner); err != nil {
 				t.Fatalf("run child recovery final attempt: %v", err)
 			}
 			var queueStatus, sessionStatus, childStatus, runtimeStatus string
@@ -413,7 +471,7 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 			}); err != nil || reclaimed != 0 {
 				t.Fatalf("reclaim settled child recovery = %d/%v; want zero", reclaimed, err)
 			}
-			if err := runner.RunOnce(context.Background()); err != nil {
+			if err := acquireAndJoin(context.Background(), runner); err != nil {
 				t.Fatalf("replay settled child recovery: %v", err)
 			}
 			var replayFailureEvents, replayCloseoutEvents int

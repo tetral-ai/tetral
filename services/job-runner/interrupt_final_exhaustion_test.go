@@ -273,10 +273,10 @@ func TestPostgreSQLJobRunnerFinalChildInterruptExhaustionPreservesSessionAndSibl
 	enqueueInterruptExhaustionJob(t, queueStore, sessionID, childThreadID, interruptID, "interrupt_control", interruptEvent, 3, 1, now)
 	deliverer := &postgresFinalizingDeliverer{store: fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)}
 	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
+		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseOwner: "child-interrupt-final-exhaustion", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if err := runner.RunOnce(context.Background()); err != nil {
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
 		t.Fatalf("run final child interrupt owner: %v", err)
 	}
 
@@ -337,10 +337,10 @@ func TestPostgreSQLJobRunnerMalformedInterruptAtomicallyTerminatesDurableCustody
 
 	deliverer := &postgresFinalizingDeliverer{store: fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)}
 	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
+		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseOwner: "malformed-interrupt-terminal", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if err := runner.RunOnce(context.Background()); err != nil {
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
 		t.Fatalf("run first malformed interrupt attempt: %v", err)
 	}
 	var firstSessionStatus, firstInboxStatus, firstQueueStatus string
@@ -362,7 +362,7 @@ func TestPostgreSQLJobRunnerMalformedInterruptAtomicallyTerminatesDurableCustody
 		WHERE workspace_id='default' AND dedupe_key=$1`, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID)); err != nil {
 		t.Fatalf("make final malformed interrupt attempt available: %v", err)
 	}
-	if err := runner.RunOnce(context.Background()); err != nil {
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
 		t.Fatalf("run final malformed interrupt attempt: %v", err)
 	}
 
@@ -418,12 +418,12 @@ func TestPostgreSQLJobRunnerFinalInterruptFenceRejectsPostPlanLeaseTakeover(t *t
 	}
 	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queueStore, nil),
 		Deliverer: postPlanInterruptDeliverer{direct: RuntimePodDirectDeliverer{Store: pausingStore, Sender: sender}},
 		Config:    JobRunnerConfig{LeaseOwner: "post-plan-old", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	runResult := make(chan error, 1)
-	go func() { runResult <- runner.RunOnce(context.Background()) }()
+	go func() { runResult <- acquireAndJoin(context.Background(), runner) }()
 	select {
 	case <-pausingStore.planned:
 	case <-time.After(5 * time.Second):
@@ -562,10 +562,10 @@ func TestJobRunnerFinalAttemptInvalidInterruptUsesExactTerminalOwner(t *testing.
 	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	deliverer := invalidFinalizationInterruptDeliverer{direct: RuntimePodDirectDeliverer{Store: deliveryStore}}
 	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
+		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseOwner: "invalid-final-interrupt-owner", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if err := runner.RunOnce(context.Background()); err != nil {
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
 		t.Fatalf("final-attempt invalid interrupt: %v", err)
 	}
 	var sessionStatus, interruptInbox, interruptQueue, followerInbox, followerQueue string

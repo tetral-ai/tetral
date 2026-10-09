@@ -2,15 +2,20 @@ package jobrunner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
-	"github.com/tetral-ai/tetral/internal/pollbackoff"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/workload"
 )
 
+// RunJobRunnerLoop runs the acquisition coordinator and, when configured, the
+// independent Pod-loss repair owner until ctx ends. Cancelling ctx closes
+// acquisition and stops repair; active jobs then drain within
+// Config.DrainTimeout before their work context is cancelled, and both owners
+// are joined before this returns.
 func RunJobRunnerLoop(ctx context.Context, runner *JobRunner, logger *slog.Logger, wake *queue.WakeSignal) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -20,11 +25,26 @@ func RunJobRunnerLoop(ctx context.Context, runner *JobRunner, logger *slog.Logge
 	}
 	owned := *runner
 	owned.AcquisitionContext = ctx
+	owned.wake = wake
+	owned.slots = nil
+	if owned.Logger == nil {
+		owned.Logger = logger
+	}
+	repairDone := make(chan struct{})
+	if owned.Repair != nil {
+		go func() {
+			defer close(repairDone)
+			owned.Repair.Run(ctx)
+		}()
+	} else {
+		close(repairDone)
+	}
+	defer func() { <-repairDone }()
 	workCtx, cancelWork := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelWork()
 	done := make(chan error, 1)
 	go func() {
-		done <- runJobRunnerLoop(workCtx, &owned, logger, wake, func(_ context.Context, d time.Duration, s queue.WakeSnapshot) error { return wake.Wait(ctx, d, s) })
+		done <- runJobRunnerLoop(workCtx, &owned, logger)
 	}()
 	select {
 	case err := <-done:
@@ -64,49 +84,70 @@ func RunJobRunnerLoop(ctx context.Context, runner *JobRunner, logger *slog.Logge
 	}
 }
 
-func runJobRunnerLoop(
-	ctx context.Context,
-	runner *JobRunner,
-	logger *slog.Logger,
-	wake *queue.WakeSignal,
-	wait func(context.Context, time.Duration, queue.WakeSnapshot) error,
-) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if runner == nil {
-		return nil
-	}
-	if runner.Logger == nil {
-		runner.Logger = logger
-	}
-	interval := runner.Config.PollInterval
-	if interval <= 0 {
-		interval = defaultJobRunnerPollInterval
-	}
-	backoff := pollbackoff.New(interval, 30*interval)
+// runJobRunnerLoop acquires work whenever a slot is free and nothing is in
+// flight. A response with jobs is followed at once by a request for the
+// remaining free slots; an empty response waits for Queue's retry hint, a
+// committed-work wake or a slot completion; a failed request waits the capped
+// backoff. After acquisition closes it joins every dispatched job.
+func runJobRunnerLoop(ctx context.Context, runner *JobRunner, logger *slog.Logger) error {
+	cfg := runner.effectiveConfig()
+	slots := runner.jobSlots(cfg.MaxJobs)
+	failures := 0
 	for {
-		wakeSnapshot := wake.Snapshot()
-		hadWork, err := runner.RunOnceWithActivity(ctx)
-		if err != nil && ctx.Err() == nil && logger != nil {
-			logger.Warn("job_runner.poll_failed",
-				slog.String("operation", "job_runner.poll"),
-				slog.String("event.kind", "poll_failed"),
-				slog.String("component", ServiceNameJobRunner),
-				slog.Bool("retryable", true),
-				slog.Bool("terminal", false),
-				slog.String("error.class", "job_runner_error"),
-				slog.String("error.code", "poll_failed"),
-				slog.String("error.message_safe", "job runner poll failed"),
-			)
+		free, _, _, closed := slots.snapshot()
+		if closed {
+			break
 		}
-		delay := backoff.Next(hadWork)
-		waitErr := wait(ctx, delay, wakeSnapshot)
-		if waitErr != nil {
-			if ctx.Err() != nil || (runner.AcquisitionContext != nil && runner.AcquisitionContext.Err() != nil) {
-				return nil
+		if free == 0 {
+			// No acquisition while full: only a completion or closure proceeds.
+			if !runner.waitForAcquisition(ctx, slots, 0, queue.WakeSnapshot{}) {
+				break
 			}
-			return waitErr
+			continue
+		}
+		acquisition, err := runner.AcquireAndDispatch(ctx)
+		if errors.Is(err, ErrJobRunnerAcquisitionClosed) {
+			break
+		}
+		delay := acquisition.RetryAfter
+		if err != nil {
+			if ctx.Err() != nil {
+				break
+			}
+			logJobRunnerAcquisitionFailure(logger)
+			delay = jobRunnerAcquisitionBackoff[min(failures, len(jobRunnerAcquisitionBackoff)-1)]
+			failures++
+		} else {
+			failures = 0
+			if acquisition.Dispatched > 0 {
+				continue
+			}
+			if delay <= 0 {
+				delay = jobRunnerDefaultRetryAfter
+			}
+		}
+		if !runner.waitForAcquisition(ctx, slots, delay, acquisition.wake) {
+			break
 		}
 	}
+	// Drain joins every dispatched job even after the drain deadline cancelled
+	// its work context; each failed job was already logged by its slot.
+	_ = runner.JoinDispatched(context.WithoutCancel(ctx))
+	return nil
+}
+
+func logJobRunnerAcquisitionFailure(logger *slog.Logger) {
+	if logger == nil {
+		return
+	}
+	logger.Warn("job_runner.acquisition_failed",
+		slog.String("operation", "job_runner.acquisition"),
+		slog.String("event.kind", "acquisition_failed"),
+		slog.String("component", ServiceNameJobRunner),
+		slog.Bool("retryable", true),
+		slog.Bool("terminal", false),
+		slog.String("error.class", "job_runner_error"),
+		slog.String("error.code", "acquisition_failed"),
+		slog.String("error.message_safe", "job runner queue acquisition failed"),
+	)
 }

@@ -1081,7 +1081,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) mutateLostRuntimeBinding(
 			}
 			return runtimePodLostStaleFenceError("runtime pod-loss repair binding fence is stale")
 		}
-		// The census retains only the fence identity. Once that fence wins, the
+		// Discovery retains only the fence identity. Once that fence wins, the
 		// current durable row supplies the full binding facts consumed by closeout.
 		binding = current
 		if requireActive {

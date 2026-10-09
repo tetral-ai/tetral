@@ -46,7 +46,7 @@ func TestPostgreSQLDelayedBusyCleanupReschedulesWithoutSpendingRetry(t *testing.
 	_ = queueStore
 	_ = deliveryStore
 
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("run delayed busy cleanup = active:%t err:%v", active, err)
 	}
 	var queueStatus string
@@ -72,7 +72,7 @@ func TestPostgreSQLSuccessfulCleanupCompletesHostBeforeDurableFinalization(t *te
 		t, runtimeDB, admin, process.port, sessionID, threadID, cleanupID, 2,
 	)
 
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("run successful cleanup = active:%t err:%v", active, err)
 	}
 	if _, err := os.Stat(process.effectPath); err != nil {
@@ -114,7 +114,7 @@ func TestPostgreSQLFinalAttemptCleanupResponseLossReplaysSameHostOutcome(t *test
 		Sender: lost,
 	}
 
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("run final cleanup with lost response = active:%t err:%v", active, err)
 	}
 	var status string
@@ -133,7 +133,7 @@ func TestPostgreSQLFinalAttemptCleanupResponseLossReplaysSameHostOutcome(t *test
 		t.Fatalf("make cleanup replay ready: %v", err)
 	}
 
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("replay final cleanup outcome = active:%t err:%v", active, err)
 	}
 	var bindings int
@@ -174,7 +174,7 @@ func TestPostgreSQLCleanupExhaustionReleasesMarkerAndAllowsFreshSweep(t *testing
 	}
 	runner.Deliverer = responseLoss
 
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("run first failing cleanup = active:%t err:%v", active, err)
 	}
 	if _, err := admin.ExecContext(context.Background(),
@@ -182,7 +182,7 @@ func TestPostgreSQLCleanupExhaustionReleasesMarkerAndAllowsFreshSweep(t *testing
 	); err != nil {
 		t.Fatalf("make final cleanup attempt ready: %v", err)
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err == nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err == nil || !active {
 		t.Fatalf("run final cleanup with response loss = active:%t err:%v; want committed outcome with lost response", active, err)
 	}
 	var queueStatus, errorKind, errorMessage string
@@ -241,7 +241,7 @@ func TestPostgreSQLCleanupInvalidResponseRetriesThenReleasesMarkerAtExhaustion(t
 	direct.Sender = sender
 	runner.Deliverer = direct
 
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("run non-final invalid cleanup response = active:%t err:%v", active, err)
 	}
 	var queueStatus, errorKind string
@@ -261,7 +261,7 @@ func TestPostgreSQLCleanupInvalidResponseRetriesThenReleasesMarkerAtExhaustion(t
 	); err != nil {
 		t.Fatalf("make final invalid cleanup attempt ready: %v", err)
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("run final invalid cleanup response = active:%t err:%v", active, err)
 	}
 	if err := admin.QueryRowContext(context.Background(),
@@ -311,7 +311,7 @@ func TestPostgreSQLCleanupExhaustionRollsBackQueueAndMarkerTogether(t *testing.T
 	}
 	runner.Deliverer = capture
 
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("run first rollback cleanup attempt = active:%t err:%v", active, err)
 	}
 	if _, err := admin.ExecContext(context.Background(),
@@ -335,7 +335,7 @@ func TestPostgreSQLCleanupExhaustionRollsBackQueueAndMarkerTogether(t *testing.T
 		_, _ = admin.ExecContext(context.Background(), `DROP FUNCTION IF EXISTS fail_cleanup_marker_update()`)
 	})
 
-	if active, err := runner.RunOnceWithActivity(context.Background()); err == nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err == nil || !active {
 		t.Fatalf("run cleanup with injected transaction failure = active:%t err:%v; want rollback error", active, err)
 	}
 	var queueStatus string
@@ -380,7 +380,7 @@ func TestPostgreSQLCleanupTakeoverFencesBeforeSendAndAfterHostEffect(t *testing.
 		runCtx, cancelRun := context.WithCancel(context.Background())
 		defer cancelRun()
 		done := make(chan error, 1)
-		go func() { done <- runner.RunOnce(runCtx) }()
+		go func() { done <- acquireAndJoinJobRunner(runCtx, runner) }()
 		awaitCompositionBarrier(t, barrierStore.entered, "cleanup pre-send authority barrier", cancelRun, done, &process.output)
 		newLease := reclaimCleanupLease(t, admin, queueStore, queueJobID, "cleanup-presend-winner")
 		close(barrierStore.release)
@@ -408,7 +408,7 @@ func TestPostgreSQLCleanupTakeoverFencesBeforeSendAndAfterHostEffect(t *testing.
 		runCtx, cancelRun := context.WithCancel(context.Background())
 		defer cancelRun()
 		done := make(chan error, 1)
-		go func() { done <- runner.RunOnce(runCtx) }()
+		go func() { done <- acquireAndJoinJobRunner(runCtx, runner) }()
 		awaitCompositionBarrier(t, sender.entered, "cleanup in-flight host effect barrier", cancelRun, done, &process.output)
 		newLease := reclaimCleanupLease(t, admin, queueStore, queueJobID, "cleanup-inflight-winner")
 		close(sender.release)
@@ -430,7 +430,7 @@ func TestPostgreSQLCleanupTakeoverFencesBeforeSendAndAfterHostEffect(t *testing.
 		}
 
 		winner := &jobrunner.JobRunner{
-			Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+			Queue:     tetralqueue.NewServer(queueStore, nil),
 			Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})},
 			Config:    jobrunner.JobRunnerConfig{LeaseOwner: "cleanup-inflight-winner", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 		}
@@ -619,7 +619,7 @@ func seedCleanupComposition(t *testing.T, runtimeDB, admin *sql.DB, port int, se
 	}})
 	deliveryStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC) }
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queueStore, nil),
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "cleanup-composition", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}

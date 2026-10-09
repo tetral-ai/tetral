@@ -129,6 +129,34 @@
       "command": "ALL",
       "using": "((current_setting('tetral.auth_lookup'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('auth_access_tokens'::regclass)::oid))))",
       "check": "((current_setting('tetral.auth_lookup'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('auth_access_tokens'::regclass)::oid))))"
+    },
+    {
+      "table": "session_runtime_bindings",
+      "name": "runner_discovery",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.runner_discovery'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_runtime_bindings'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "session_runtime_status",
+      "name": "runner_discovery",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.runner_discovery'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_runtime_status'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "sessions",
+      "name": "runner_discovery",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.runner_discovery'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('sessions'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "session_runtime_inbox",
+      "name": "runner_discovery",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.runner_discovery'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_runtime_inbox'::regclass)::oid))))",
+      "check": ""
     }
   ]
 }

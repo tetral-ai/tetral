@@ -14,7 +14,10 @@ contracts.
 - `roles.json` declares the exact table and sequence privileges, and the
   allowlisted SECURITY DEFINER function grants, for each serving workload. The
   allowlist admits the runtime process lock for Bridge and Job Runner, the
-  runtime process liveness lock for Job Runner only and, for Auth only,
+  runtime process liveness lock and the binding-discovery functions
+  `tetral_job_runner_binding_upper()` and
+  `tetral_job_runner_binding_page(text, text, text, text, integer)` for Job
+  Runner only and, for Auth only,
   `tetral_auth_lookup_key`, `tetral_auth_lookup_token`,
   `tetral_auth_lookup_grants`, `tetral_auth_lock_authority` and
   `tetral_auth_prune_tokens`.
@@ -175,6 +178,7 @@ These owner tests pin the serving paths repaired after role restriction:
 | bridge | Runtime context skill index | `skill_versions SELECT`; `services/bridge/bridge_api_context_test.go` checks configured version metadata |
 | api | Session deletion through shared Sandbox release | `session_runtime_tool_results SELECT/INSERT/UPDATE`, `session_background_tasks SELECT/UPDATE`; `internal/session/postgresql_store_controlplane_test.go` checks atomic release and background cancellation custody |
 | api | Child tool-confirmation admission during close | `session_bridge_operations SELECT`; `internal/sessionevent/closing_role_test.go` checks missing-grant failure, intended conflict with no receipt, and admission/replay after the source Tool Result is terminal; the event-store suite uses the API role |
+| job_runner | Pod-loss repair discovery across Workspaces | `EXECUTE` on the two binding-discovery functions only, with no `workspaces` grant and no direct cross-Workspace `SELECT`; the migration-owned functions set `tetral.runner_discovery`, and the `runner_discovery` SELECT policies on `session_runtime_bindings`, `session_runtime_status`, `sessions` and `session_runtime_inbox` also require the actual table owner, so a caller that sets the flag itself still sees only its Workspace; `services/job-runner/runtime_binding_discovery_test.go` uses the installed role for paging, argument rejection, flag spoofing, other workloads, search-path shadowing and ownership |
 | job_runner | Lost Runtime closes an open model request | `request_usage_details SELECT/INSERT` (explicit `ON CONFLICT` key target and audit append); `services/job-runner/runtime_pod_loss_role_test.go` uses the installed role for the fenced closeout, verifies one matching zero-token terminal audit, unchanged replay, and whole repair rollback when either privilege is individually revoked |
 | job_runner | Session deletion retires output-capture custody after Sandbox release | `sandbox_output_capture_operations SELECT/UPDATE/DELETE` (row lock, cleanup scheduling, terminal retirement), `sandbox_output_capture_blobs SELECT/DELETE` (scoped deletion), with no capture `INSERT`; `services/job-runner/runtime_output_capture_role_test.go` uses the installed role, preserves pending Queue work and foreign custody, and checks rollback when required grants are revoked |
 

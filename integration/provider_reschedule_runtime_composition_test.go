@@ -993,11 +993,11 @@ func TestPostgreSQLReplacementRuntimeTerminationReplaysReceiptWithoutResidency(t
 	}}
 	sender := &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queueStore, nil),
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "recovered-binding-termination", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	active, err := runner.RunOnceWithActivity(context.Background())
+	active, err := acquireAndJoinJobRunnerActive(context.Background(), runner)
 	if err != nil || !active || len(sender.requests) != 1 {
 		t.Fatalf("deliver recovered-binding wake = active:%t requests:%d err:%v", active, len(sender.requests), err)
 	}
@@ -1368,11 +1368,11 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		RuntimePodCommandClient: fixtureRuntimeCommandClient(t, providerRecoveryTokenSource{}), loseFirst: true,
 	}
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queueStore, nil),
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "provider-reschedule-recovery", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	active, err := runner.RunOnceWithActivity(context.Background())
+	active, err := acquireAndJoinJobRunnerActive(context.Background(), runner)
 	if err != nil || !active {
 		t.Fatalf("deliver provider reschedule recovery with lost response = active:%t err:%v", active, err)
 	}
@@ -1413,7 +1413,7 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		WHERE workspace_id='default' AND id=$1`, recoveryJobID); err != nil {
 		t.Fatalf("make response-lost recovery replay available: %v", err)
 	}
-	active, err = runner.RunOnceWithActivity(context.Background())
+	active, err = acquireAndJoinJobRunnerActive(context.Background(), runner)
 	if err != nil || !active {
 		t.Fatalf("replay response-lost recovery = active:%t err:%v", active, err)
 	}
@@ -1711,13 +1711,19 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 	if err != nil {
 		t.Fatalf("listen for subagent reschedule recovery: %v", err)
 	}
-	server := grpc.NewServer()
+	// The recovered Runtime's Bridge writes hold the Session lock, and Queue
+	// skips a busy Session instead of waiting for it. Each delivery below
+	// closes this gate first: it returns once the Runtime's admitted Bridge
+	// calls have returned and holds new ones until the job is dispatched.
+	bridgeGate := newBridgeAdmissionGate()
+	server := grpc.NewServer(grpc.UnaryInterceptor(bridgeGate.unary))
 	agentruntimebridge.RegisterBridgeAPI(server, store)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() {
 		server.Stop()
 		_ = listener.Close()
 	})
+	t.Cleanup(bridgeGate.open)
 	var rescheduleEventID string
 	if err := admin.QueryRowContext(context.Background(), `SELECT event_id FROM session_events
 		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
@@ -1736,14 +1742,17 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 		}})
 	}})
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queueStore, nil),
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, providerRecoveryTokenSource{})},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "subagent-reschedule-recovery", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	for delivery := 0; delivery < 2; delivery++ {
-		active, runErr := runner.RunOnceWithActivity(context.Background())
-		if runErr != nil || !active {
-			t.Fatalf("deliver queued child input and subagent reschedule recovery step %d = active:%t err:%v", delivery+1, active, runErr)
+		bridgeGate.close()
+		dispatched, runErr := acquireJobRunnerJobs(context.Background(), runner, 1)
+		bridgeGate.open()
+		runErr = errors.Join(runErr, runner.JoinDispatched(context.Background()))
+		if runErr != nil || dispatched != 1 {
+			t.Fatalf("deliver queued child input and subagent reschedule recovery step %d = dispatched:%d err:%v", delivery+1, dispatched, runErr)
 		}
 	}
 	preloaded := runtimeProcess.recoveryResult(t)

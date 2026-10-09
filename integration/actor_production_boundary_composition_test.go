@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -26,7 +27,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
-	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
@@ -285,13 +285,15 @@ func TestPostgreSQLChildControlExhaustionRejoinsParentToolResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen for child control composition: %v", err)
 	}
-	server := grpc.NewServer()
+	bridgeGate := newBridgeAdmissionGate()
+	server := grpc.NewServer(grpc.UnaryInterceptor(bridgeGate.unary))
 	agentruntimebridge.RegisterBridgeAPI(server, store)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() {
 		server.Stop()
 		_ = listener.Close()
 	})
+	t.Cleanup(bridgeGate.open)
 	input, err := json.Marshal(map[string]any{
 		"bridgeAddress": listener.Addr().String(), "workspaceId": "default", "sessionId": sessionID,
 		"sessionThreadId": parentID, "bindingId": bindingID, "bindingGeneration": 1,
@@ -343,11 +345,17 @@ func TestPostgreSQLChildControlExhaustionRejoinsParentToolResult(t *testing.T) {
 	}
 	deliverer := &postgresFinalizingDeliverer{store: fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)}
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
+		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
 		Config: jobrunner.JobRunnerConfig{LeaseOwner: "child-control-rejoin", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("run child control final owner: %v", err)
+	// The parent Tool polls AwaitChildInterrupt, whose transaction holds the
+	// Session lock, until this final delivery settles the interrupt, so the
+	// acquisition runs behind the closed Bridge gate.
+	bridgeGate.close()
+	dispatched, runErr := acquireJobRunnerJobs(context.Background(), runner, 1)
+	bridgeGate.open()
+	if runErr = errors.Join(runErr, runner.JoinDispatched(context.Background())); runErr != nil || dispatched != 1 {
+		t.Fatalf("run child control final owner = dispatched:%d err:%v", dispatched, runErr)
 	}
 	if err := command.Wait(); err != nil {
 		t.Fatalf("run child control composition: %v: %s", err, output.String())

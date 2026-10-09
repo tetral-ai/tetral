@@ -132,7 +132,7 @@ func TestPostgreSQLAttachmentPostStartPodLossColdLoadsWithoutSecondProviderInvoc
 	repairStore := runtimePodLossSweepStore(t, runtimeDB, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
-	if repaired, err := repairStore.RepairLostRuntimeBindings(context.Background(), string(workspace.DefaultID)); err != nil || repaired != 1 {
+	if repaired, err := repairRuntimePodLoss(context.Background(), repairStore); err != nil || repaired != 1 {
 		t.Fatalf("repair post-Start Runtime pod loss = %d/%v; want 1/nil", repaired, err)
 	}
 	waitForAttachmentRequestEnd(t, admin, process, sessionID, "runtime_pod_lost")
@@ -218,11 +218,11 @@ func deliverAttachmentRuntimeInput(t *testing.T, runtimeDB, admin *sql.DB, port 
 		}})
 	}})
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil),
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "attachment-runtime-composition", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("deliver attachment Runtime input = active:%t err:%v", active, err)
 	}
 }

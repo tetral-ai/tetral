@@ -2,9 +2,12 @@ package tetralqueue
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/tetral-ai/tetral/internal/workload"
 
@@ -21,6 +24,8 @@ import (
 
 type Store interface {
 	Lease(context.Context, queue.LeaseRequest) ([]*queue.Job, error)
+	LeaseJobRunnerJobs(context.Context, queue.LeaseJobRunnerJobsRequest) (queue.LeaseJobRunnerJobsResult, error)
+	ReleaseUnstartedJob(context.Context, queue.ReleaseUnstartedJobRequest) (bool, error)
 	Heartbeat(context.Context, queue.HeartbeatRequest) (queue.HeartbeatResult, error)
 	Ack(context.Context, queue.AckRequest) (bool, error)
 	Retry(context.Context, queue.RetryRequest) (bool, error)
@@ -71,13 +76,111 @@ func (s *Server) Lease(ctx context.Context, request *queuev1.LeaseRequest) (*que
 	leaseCompleted := s.nowUTC()
 	response := &queuev1.LeaseResponse{Jobs: make([]*queuev1.QueueJob, 0, len(jobs))}
 	for _, job := range jobs {
-		s.logLease(job, leaseNow, leaseStarted, leaseCompleted)
+		s.logLease("queue.lease", job, leaseNow, leaseStarted, leaseCompleted)
 		response.Jobs = append(response.Jobs, queueJobToProto(job))
 	}
 	return response, nil
 }
 
-func (s *Server) logLease(job *queue.Job, leaseNow, leaseStarted, leaseCompleted time.Time) {
+// LeaseJobRunnerJobs leases Job Runner work across workspaces. Queue owns
+// tenant selection, kind admission and the retry hint; the caller supplies
+// only capacity, its label and a lease duration in 5000..300000 ms.
+func (s *Server) LeaseJobRunnerJobs(ctx context.Context, request *queuev1.LeaseJobRunnerJobsRequest) (*queuev1.LeaseJobRunnerJobsResponse, error) {
+	if s == nil || s.store == nil {
+		return nil, status.Error(codes.FailedPrecondition, "queue store is required")
+	}
+	leaseDuration, err := queue.JobRunnerLeaseDurationFromMillis(request.GetLeaseDurationMs())
+	if err != nil {
+		return nil, mapQueueError(err)
+	}
+	leaseRequest := queue.LeaseJobRunnerJobsRequest{
+		LeaseOwner:    request.GetLeaseOwner(),
+		MaxJobs:       int(request.GetMaxJobs()),
+		LeaseDuration: leaseDuration,
+	}
+	if err := queue.ValidateLeaseJobRunnerJobsRequest(leaseRequest); err != nil {
+		return nil, mapQueueError(err)
+	}
+	leaseStarted := s.nowUTC()
+	result, err := s.store.LeaseJobRunnerJobs(ctx, leaseRequest)
+	if err != nil {
+		return nil, mapQueueError(err)
+	}
+	leaseCompleted := s.nowUTC()
+	s.logJobRunnerLeaseDiagnostics(result)
+	response := &queuev1.LeaseJobRunnerJobsResponse{
+		Jobs:         make([]*queuev1.QueueJob, 0, len(result.Jobs)),
+		RetryAfterMs: int32(result.RetryAfter.Milliseconds()),
+	}
+	for _, job := range result.Jobs {
+		s.logLease("queue.lease_job_runner_jobs", job, leaseStarted, leaseStarted, leaseCompleted)
+		response.Jobs = append(response.Jobs, queueJobToProto(job))
+	}
+	return response, nil
+}
+
+// logJobRunnerLeaseDiagnostics emits at most three bounded records per call
+// with fixed classes and counts; repeated warnings aggregate in the process
+// diagnostic limiter.
+func (s *Server) logJobRunnerLeaseDiagnostics(result queue.LeaseJobRunnerJobsResult) {
+	if s == nil || s.logger == nil {
+		return
+	}
+	for _, timeout := range []struct {
+		kind  string
+		count int
+	}{{"lock_timeout", result.LockTimeouts}, {"statement_timeout", result.StatementTimeouts}} {
+		if timeout.count == 0 {
+			continue
+		}
+		s.logger.Warn("queue.job_runner_lease.candidate_timeout",
+			slog.String("operation", "queue.lease_job_runner_jobs"),
+			slog.String("event.kind", "queue.job_runner_lease.candidate_timeout"),
+			slog.String("component", "queue"),
+			slog.String("timeout.kind", timeout.kind),
+			slog.Int("failed.count", timeout.count),
+			slog.Bool("retryable", true),
+			slog.Bool("terminal", false),
+		)
+	}
+	if result.StopFailure != nil {
+		attrs := []any{
+			slog.String("operation", "queue.lease_job_runner_jobs"),
+			slog.String("event.kind", "queue.job_runner_lease.partial_failure"),
+			slog.String("component", "queue"),
+			slog.Int("candidate.count", len(result.Jobs)),
+			slog.Bool("retryable", true),
+			slog.Bool("terminal", false),
+			slog.String("error.class", "queue_lease_error"),
+			slog.String("error.code", "job_runner_lease_stopped"),
+			slog.String("error.message_safe", "queue job runner lease stopped after committed leases"),
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(result.StopFailure, &pgErr) {
+			attrs = append(attrs, slog.String("db.sqlstate", pgErr.Code))
+		}
+		s.logger.Warn("queue.job_runner_lease.partial_failure", attrs...)
+	}
+}
+
+// ReleaseUnstartedJob returns one observed but undispatched direct Job Runner
+// lease to pending with its saved attempt count.
+func (s *Server) ReleaseUnstartedJob(ctx context.Context, request *queuev1.ReleaseUnstartedJobRequest) (*queuev1.ReleaseUnstartedJobResponse, error) {
+	if s == nil || s.store == nil {
+		return nil, status.Error(codes.FailedPrecondition, "queue store is required")
+	}
+	updated, err := s.store.ReleaseUnstartedJob(ctx, queue.ReleaseUnstartedJobRequest{
+		WorkspaceID: workspace.ID(request.GetWorkspaceId()),
+		JobID:       request.GetJobId(),
+		LeaseToken:  request.GetLeaseToken(),
+	})
+	if err != nil {
+		return nil, mapQueueError(err)
+	}
+	return &queuev1.ReleaseUnstartedJobResponse{Updated: updated}, nil
+}
+
+func (s *Server) logLease(operation string, job *queue.Job, leaseNow, leaseStarted, leaseCompleted time.Time) {
 	if s == nil || s.logger == nil || job == nil {
 		return
 	}
@@ -90,7 +193,7 @@ func (s *Server) logLease(job *queue.Job, leaseNow, leaseStarted, leaseCompleted
 		readyWait = 0
 	}
 	s.logger.Debug("queue.job.leased",
-		slog.String("operation", "queue.lease"),
+		slog.String("operation", operation),
 		slog.String("event.kind", "queue_job_leased"),
 		slog.String("workspace.id", job.WorkspaceID.String()),
 		slog.String("queue.job.id", job.ID),
@@ -165,8 +268,9 @@ func (s *Server) Retry(ctx context.Context, request *queuev1.RetryRequest) (*que
 //	leased -> pending (reclaim)   internal/queue                       status = leased AND              unchanged
 //	                              ReclaimExpiredLeases                  leased_until <= now
 //
-// A lease+defer cycle nets zero budget: leaseCandidate adds one to attempt_count and
-// Defer subtracts one. Defer never consults max_attempts, so a runtime configuration
+// A lease+defer cycle nets zero budget: a token mint (Lease or
+// LeaseJobRunnerJobs) adds one to attempt_count and Defer subtracts one; Defer
+// also clears direct-lease provenance, so a deferred token cannot be released. Defer never consults max_attempts, so a runtime configuration
 // update may wait on an active Session without approaching its retry budget; every
 // other kind is rejected. Reclaim never
 // consults max_attempts and never dead-letters on expiry alone: it returns the row to
@@ -180,7 +284,8 @@ func (s *Server) Retry(ctx context.Context, request *queuev1.RetryRequest) (*que
 // over-budget notification with DeadLetterExhaustedTx.
 //
 // UPDATE-WITH: internal/queue/postgresql_store.go (Defer, ReclaimExpiredLeases,
-// leaseCandidate); services/queue/maintenance.go (runStalledLeaseMaintenance).
+// leaseCandidate, leaseAttemptCountExpression); internal/queue/job_runner_lease.go
+// (leaseJobRunnerCandidate); services/queue/maintenance.go (runStalledLeaseMaintenance).
 func (s *Server) Defer(ctx context.Context, request *queuev1.DeferRequest) (*queuev1.TransitionResponse, error) {
 	if s == nil || s.store == nil {
 		return nil, status.Error(codes.FailedPrecondition, "queue store is required")
@@ -287,6 +392,12 @@ func mapQueueError(err error) error {
 	}
 	if queue.IsValidationError(err) {
 		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	if queue.IsPreconditionError(err) {
+		return status.Error(codes.FailedPrecondition, err.Error())
+	}
+	if errors.Is(err, queue.ErrJobRunnerSchedulerClosed) {
+		return status.Error(codes.Unavailable, "queue job runner scheduler is draining")
 	}
 	return status.Error(codes.Internal, "queue service operation failed")
 }

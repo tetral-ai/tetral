@@ -29,8 +29,6 @@ const EnvJobRunnerHeartbeatIntervalMS = "TETRAL_BRIDGE_JOB_RUNNER_HEARTBEAT_INTE
 
 const EnvJobRunnerMaxJobs = "TETRAL_BRIDGE_JOB_RUNNER_MAX_JOBS"
 
-const EnvJobRunnerPollIntervalMS = "TETRAL_BRIDGE_JOB_RUNNER_POLL_INTERVAL_MS"
-
 const EnvJobRunnerMCPConnectorGRPCAddress = "TETRAL_BRIDGE_JOB_RUNNER_MCP_CONNECTOR_GRPC_ADDR"
 
 const EnvJobRunnerGatewayTokenPath = "TETRAL_BRIDGE_JOB_RUNNER_GATEWAY_TOKEN_PATH" //nolint:gosec // Env-var name, not a token value.
@@ -48,8 +46,6 @@ const EnvRuntimePodServiceTokenPath = "TETRAL_BRIDGE_RUNTIME_POD_TOKEN_PATH" //n
 const defaultJobRunnerLeaseDuration = 30 * time.Second
 
 const defaultJobRunnerMaxJobs = 8
-
-const defaultJobRunnerPollInterval = time.Second
 
 const defaultJobRunnerHTTPAddress = ":8081"
 
@@ -74,7 +70,6 @@ type JobRunnerConfig struct {
 	LeaseDuration             time.Duration
 	HeartbeatInterval         time.Duration
 	MaxJobs                   int
-	PollInterval              time.Duration
 	DeploymentEnvironment     string
 	ServiceVersion            string
 	DatabaseURL               string
@@ -107,7 +102,6 @@ func JobRunnerConfigFromEnv(env Env) (JobRunnerConfig, error) {
 		LeaseOwner:              valueOrDefault(env.Getenv(EnvJobRunnerLeaseOwner), defaultJobRunnerLeaseOwner),
 		LeaseDuration:           defaultJobRunnerLeaseDuration,
 		MaxJobs:                 defaultJobRunnerMaxJobs,
-		PollInterval:            defaultJobRunnerPollInterval,
 		DeploymentEnvironment:   resource.DeploymentEnvironment,
 		ServiceVersion:          resource.ServiceVersion,
 		DatabaseURL:             strings.TrimSpace(env.Getenv(EnvDatabaseURL)),
@@ -155,6 +149,12 @@ func JobRunnerConfigFromEnv(env Env) (JobRunnerConfig, error) {
 			return JobRunnerConfig{}, err
 		}
 	}
+	// Queue's direct lease admits only this range; rejecting it here keeps an
+	// unsupported value from becoming a repeated RPC failure after startup.
+	if queue.ValidateJobRunnerLeaseDuration(cfg.LeaseDuration) != nil {
+		return JobRunnerConfig{}, workload.NewConfigError(fmt.Sprintf("%s must be between %d and %d", EnvJobRunnerLeaseDurationMS,
+			queue.MinJobRunnerLeaseDuration.Milliseconds(), queue.MaxJobRunnerLeaseDuration.Milliseconds()))
+	}
 	if raw := env.Getenv(EnvJobRunnerHeartbeatIntervalMS); raw != "" {
 		cfg.HeartbeatInterval, err = parsePositiveMilliseconds(raw, EnvJobRunnerHeartbeatIntervalMS)
 		if err != nil {
@@ -166,19 +166,13 @@ func JobRunnerConfigFromEnv(env Env) (JobRunnerConfig, error) {
 	if cfg.HeartbeatInterval >= cfg.LeaseDuration {
 		return JobRunnerConfig{}, workload.NewConfigError(EnvJobRunnerHeartbeatIntervalMS + " must be less than " + EnvJobRunnerLeaseDurationMS)
 	}
-	if raw := env.Getenv(EnvJobRunnerPollIntervalMS); raw != "" {
-		cfg.PollInterval, err = parsePositiveMilliseconds(raw, EnvJobRunnerPollIntervalMS)
-		if err != nil {
-			return JobRunnerConfig{}, err
-		}
-	}
 	if raw := env.Getenv(EnvJobRunnerMaxJobs); raw != "" {
 		cfg.MaxJobs, err = parsePositiveInt(raw, EnvJobRunnerMaxJobs)
 		if err != nil {
 			return JobRunnerConfig{}, err
 		}
 	}
-	if err := queue.ValidateLeaseBatchSize(cfg.MaxJobs); err != nil {
+	if err := queue.ValidateJobRunnerLeaseBatchSize(cfg.MaxJobs); err != nil {
 		return JobRunnerConfig{}, workload.NewConfigError(EnvJobRunnerMaxJobs + " " + err.Error())
 	}
 	if err := queue.ValidateLeaseOwner(cfg.LeaseOwner); err != nil {

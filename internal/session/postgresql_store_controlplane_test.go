@@ -637,10 +637,11 @@ func TestPostgreSQLSessionStoreDeleteRevokesIdleRuntimeDeliveryLease(t *testing.
 	if err != nil {
 		t.Fatalf("enqueue Runtime input: %v", err)
 	}
-	leased, err := queueStore.Lease(ctx, queue.LeaseRequest{
-		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "bridge-delete-race",
-		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
+	// The Runner's direct lease: delete must also clear its provenance.
+	result, err := queueStore.LeaseJobRunnerJobs(ctx, queue.LeaseJobRunnerJobsRequest{
+		LeaseOwner: "bridge-delete-race", MaxJobs: 1, LeaseDuration: time.Minute,
 	})
+	leased := result.Jobs
 	if err != nil || len(leased) != 1 || leased[0].ID != job.ID {
 		t.Fatalf("lease Runtime input = %+v/%v; want %s", leased, err, job.ID)
 	}
@@ -770,10 +771,11 @@ func TestPostgreSQLSessionStoreDeleteOwnsIdleCleanupLeaseAtomically(t *testing.T
 			if err != nil {
 				t.Fatalf("enqueue cleanup: %v", err)
 			}
-			leased, err := queueStore.Lease(ctx, queue.LeaseRequest{
-				WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindCleanupSession}, LeaseOwner: "cleanup-delete-" + suffix,
-				MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
+			// The Runner's direct lease: delete must also clear its provenance.
+			result, err := queueStore.LeaseJobRunnerJobs(ctx, queue.LeaseJobRunnerJobsRequest{
+				LeaseOwner: "cleanup-delete-" + suffix, MaxJobs: 1, LeaseDuration: time.Minute,
 			})
+			leased := result.Jobs
 			if err != nil || len(leased) != 1 || leased[0].ID != job.ID {
 				t.Fatalf("lease cleanup = %+v/%v; want %s", leased, err, job.ID)
 			}

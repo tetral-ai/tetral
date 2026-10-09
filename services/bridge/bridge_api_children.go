@@ -907,7 +907,7 @@ func settleChildCloseRuntimeInputsTx(
 				}
 			}
 			if _, err := tx.Exec(ctx, `UPDATE queue_jobs
-				SET status='cancelled',cancelled_at=$4,lease_token=NULL,leased_by=NULL,leased_at=NULL,leased_until=NULL,updated_at=$4
+				SET status='cancelled',cancelled_at=$4,lease_token=NULL,leased_by=NULL,leased_at=NULL,leased_until=NULL,lease_previous_attempt_count=NULL,updated_at=$4
 				WHERE workspace_id=$1 AND status IN ('pending','leased')
 				 AND dedupe_key='runtime_input:' || $1 || ':' || $2 || ':' || $3`,
 				scope.GetWorkspaceId(), scope.GetSessionId(), input.runtimeInputID, now); err != nil {

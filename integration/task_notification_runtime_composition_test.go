@@ -450,14 +450,13 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 		}})
 	}})
 	runner := &jobrunner.JobRunner{
-		Queue:      tetralqueue.NewServer(queueStore, nil),
-		Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue: tetralqueue.NewServer(queueStore, nil),
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{
 			Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{}),
 		},
 		Config: jobrunner.JobRunnerConfig{LeaseOwner: "task-notification-composition", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	active, err := runner.RunOnceWithActivity(context.Background())
+	active, err := acquireAndJoinJobRunnerActive(context.Background(), runner)
 	if err != nil || !active {
 		t.Fatalf("deliver task notification through generated Runtime gRPC = active:%t err:%v", active, err)
 	}
@@ -657,11 +656,11 @@ func TestPostgreSQLTaskNotificationWaitsBehindCommittedRequestStart(t *testing.T
 		}})
 	}})
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queueStore, nil),
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "task-request-start-race", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if active, runErr := runner.RunOnceWithActivity(context.Background()); runErr != nil || !active {
+	if active, runErr := acquireAndJoinJobRunnerActive(context.Background(), runner); runErr != nil || !active {
 		t.Fatalf("deliver initial input through JobRunner = active:%t err:%v", active, runErr)
 	}
 	select {
@@ -702,7 +701,7 @@ func TestPostgreSQLTaskNotificationWaitsBehindCommittedRequestStart(t *testing.T
 	if active, runErr := sandboxRunner.RunOnceWithActivity(context.Background()); runErr != nil || !active {
 		t.Fatalf("settle background task through producer = active:%t err:%v", active, runErr)
 	}
-	if active, runErr := runner.RunOnceWithActivity(context.Background()); runErr != nil || !active {
+	if active, runErr := acquireAndJoinJobRunnerActive(context.Background(), runner); runErr != nil || !active {
 		t.Fatalf("deliver notification while Request Start ACK is held = active:%t err:%v", active, runErr)
 	}
 	close(barrierStore.release)

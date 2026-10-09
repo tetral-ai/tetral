@@ -62,19 +62,18 @@ func TestPostgreSQLMalformedAgentMailReplacementPassesReplayAndDelivers(t *testi
 		bridge:                        bridgeStore,
 	}
 	runner := &jobrunner.JobRunner{
-		Queue:      tetralqueue.NewServer(queueStore, nil),
-		Workspaces: staticWorkspaceLister{workspace.DefaultID},
-		Deliverer:  jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
-		Config:     jobrunner.JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+		Queue:     tetralqueue.NewServer(queueStore, nil),
+		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
+		Config:    jobrunner.JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 
-	if err := runner.RunOnce(context.Background()); err != nil {
+	if err := acquireAndJoinJobRunner(context.Background(), runner); err != nil {
 		t.Fatalf("replace malformed agent-mail custody: %v", err)
 	}
 	if len(sender.requests) != 0 {
 		t.Fatalf("Runtime requests after malformed lease = %d; want zero", len(sender.requests))
 	}
-	if err := runner.RunOnce(context.Background()); err != nil {
+	if err := acquireAndJoinJobRunner(context.Background(), runner); err != nil {
 		t.Fatalf("deliver canonical agent-mail replacement: %v", err)
 	}
 	if len(sender.requests) != 1 {
@@ -341,7 +340,7 @@ func TestPostgreSQLRuntimePodLossReplacementCommitsTheSameAcceptedInputOnce(t *t
 			true, oldPod, enginekubernetes.BindingVisibilityDeleted, []enginekubernetes.BindingCandidate{replacement},
 		)
 	})
-	if repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 1 {
+	if repaired, err := repairRuntimePodLoss(context.Background(), store); err != nil || repaired != 1 {
 		t.Fatalf("repair accepted input after proven Pod loss = %d, %v; want one", repaired, err)
 	}
 	replacementLease, err := queueStore.Lease(context.Background(), queue.LeaseRequest{

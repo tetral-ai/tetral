@@ -19,15 +19,19 @@ import (
 func TestPostgreSQLRuntimePodLossPreservesActiveQueueCustody(t *testing.T) {
 	for _, test := range []struct {
 		name            string
+		inputKind       string
 		inboxStatus     string
 		leaseJob        bool
 		wantInboxStatus string
 		wantQueueStatus string
 		wantHandedOff   int
 	}{
-		{name: "accepted pending", inboxStatus: "accepted", wantInboxStatus: "queued", wantQueueStatus: queue.StatusPending, wantHandedOff: 1},
-		{name: "accepted leased", inboxStatus: "accepted", leaseJob: true, wantInboxStatus: "queued", wantQueueStatus: queue.StatusPending, wantHandedOff: 1},
-		{name: "delivering leased", inboxStatus: "delivering", leaseJob: true, wantInboxStatus: "delivering", wantQueueStatus: queue.StatusLeased},
+		{name: "accepted pending", inputKind: "messages", inboxStatus: "accepted", wantInboxStatus: "queued", wantQueueStatus: queue.StatusPending, wantHandedOff: 1},
+		{name: "accepted leased", inputKind: "messages", inboxStatus: "accepted", leaseJob: true, wantInboxStatus: "queued", wantQueueStatus: queue.StatusPending, wantHandedOff: 1},
+		{name: "delivering leased", inputKind: "messages", inboxStatus: "delivering", leaseJob: true, wantInboxStatus: "delivering", wantQueueStatus: queue.StatusLeased},
+		// A delivering interrupt is handed back with its job: the direct lease
+		// and its provenance are cleared together.
+		{name: "delivering interrupt leased", inputKind: "interrupt_control", inboxStatus: "delivering", leaseJob: true, wantInboxStatus: "queued", wantQueueStatus: queue.StatusPending, wantHandedOff: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -42,14 +46,18 @@ func TestPostgreSQLRuntimePodLossPreservesActiveQueueCustody(t *testing.T) {
 			now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_pod_loss_queue_active", 1, "user.message", `{"type":"user.message"}`)
-			sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "messages", `["evt_pod_loss_queue_active"]`, test.inboxStatus, bindingID, podUID, 1, 1)
+			eventType := "user.message"
+			if test.inputKind == "interrupt_control" {
+				eventType = "user.interrupt"
+			}
+			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_pod_loss_queue_active", 1, eventType, `{"type":"`+eventType+`"}`)
+			sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, test.inputKind, `["evt_pod_loss_queue_active"]`, test.inboxStatus, bindingID, podUID, 1, 1)
 
 			queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 			request, err := runtimecontrol.RuntimeInputEnqueueRequest("default", sessionID, runtimecontrol.AcceptedRuntimeInput{
 				SessionThreadID: threadID,
 				RuntimeInputID:  runtimeInputID,
-				InputKind:       "messages",
+				InputKind:       test.inputKind,
 				EventIDsJSON:    `["evt_pod_loss_queue_active"]`,
 				SequenceFrom:    sql.NullInt64{Int64: 1, Valid: true},
 				SequenceTo:      sql.NullInt64{Int64: 1, Valid: true},
@@ -63,10 +71,11 @@ func TestPostgreSQLRuntimePodLossPreservesActiveQueueCustody(t *testing.T) {
 			}
 			var leasedRuntimeJob RuntimeJob
 			if test.leaseJob {
-				leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
-					WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "bridge-active-custody",
-					MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
+				// The Runner's direct lease: hand-back must also clear its provenance.
+				result, err := queueStore.LeaseJobRunnerJobs(context.Background(), queue.LeaseJobRunnerJobsRequest{
+					LeaseOwner: "bridge-active-custody", MaxJobs: 1, LeaseDuration: time.Minute,
 				})
+				leased := result.Jobs
 				if err != nil || len(leased) != 1 || leased[0].ID != jobID {
 					t.Fatalf("lease original Queue job = %#v, %v; want %s", leased, err, jobID)
 				}
@@ -91,8 +100,8 @@ func TestPostgreSQLRuntimePodLossPreservesActiveQueueCustody(t *testing.T) {
 			if inboxStatus != test.wantInboxStatus || queueStatus != test.wantQueueStatus {
 				t.Fatalf("post-loss custody = inbox %q / Queue %q; want %q / %q", inboxStatus, queueStatus, test.wantInboxStatus, test.wantQueueStatus)
 			}
-			if test.inboxStatus == "accepted" && leaseTokenValid {
-				t.Fatal("reclaimed accepted input retained a stale Queue lease")
+			if test.wantQueueStatus == queue.StatusPending && leaseTokenValid {
+				t.Fatal("handed-back input retained a stale Queue lease")
 			}
 			if test.name == "accepted leased" {
 				staleAttempt := retryableExhaustionResultForBinding(bindingID, 1, podUID)
@@ -193,10 +202,10 @@ func TestPostgreSQLRuntimePodLossLeavesExhaustedInterruptForCurrentLeaseTerminal
 	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	deliverer := &postgresFinalizingDeliverer{store: deliveryStore}
 	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
+		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseOwner: "bridge-current-terminal-owner", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if err := runner.RunOnce(context.Background()); err != nil {
+	if err := acquireAndJoin(context.Background(), runner); err != nil {
 		t.Fatalf("terminalize exhausted interrupt through JobRunner: %v", err)
 	}
 	if deliverer.deliveries != 0 {

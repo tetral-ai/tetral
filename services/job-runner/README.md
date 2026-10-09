@@ -13,15 +13,17 @@ RPC acceptance, receipts and durable context reads.
 ## Process lifecycle
 
 `cmd/job-runner` owns its database pool, Queue client, Kubernetes visibility
-watches, Queue wake listener, polling workers and outbound Runtime/MCP clients.
-Startup validates configuration, schema and runtime role before opening
-listeners or business clients. Shutdown closes acquisition first.
+watches, Queue wake listener, acquisition coordinator, Pod-loss repair owner
+and outbound Runtime/MCP clients. Startup validates configuration, schema and
+runtime role before opening listeners or business clients. Shutdown closes
+acquisition first and cancels the repair owner.
 Already running jobs keep their Queue heartbeats and settlement clients through
 `TETRAL_DRAIN_TIMEOUT_MS` (30000 by default). At expiry their work contexts are
-cancelled, then workers and Queue notifications join before native channels,
-Blob/database clients and visibility watches close. A Lease response racing
-shutdown returns every observed capability through Queue Defer and starts no
-new Runtime command. `TETRAL_CANCEL_JOIN_TIMEOUT_MS` defaults to 5000; exceeding
+cancelled, then jobs, the repair owner and Queue notifications join before
+native channels, Blob/database clients and visibility watches close. A lease
+response observed after acquisition closed starts no Runtime command: each of
+its jobs returns through Queue `ReleaseUnstartedJob` (see
+[Acquisition](#acquisition)). `TETRAL_CANCEL_JOIN_TIMEOUT_MS` defaults to 5000; exceeding
 the executable exits with status 1 at the original drain-plus-join deadline,
 without closing dependencies beneath live workers. Reusable runners still join
 before resource closure. Drain plus join may not exceed 35000 ms, reserving
@@ -41,18 +43,52 @@ belongs to the Queue listener; at least one remains for business transactions.
 Queue insertion and wakeup share a transaction. The notification payload for
 Job Runner work is the transient wire value `bridge`, which Queue producers and
 this listener share through `ConsumerClassJobRunner`. Hints carry no work:
-reconnect triggers catch-up and bounded polling remains the fallback for a lost
-or coalesced hint.
+reconnect triggers catch-up, and Queue's retry hint (at most 1000 ms) bounds
+the wait after a lost or coalesced hint. The same connection maps the
+`runtime_process` payload, which Bridge sends after committing a Runtime
+process takeover, to a Pod-loss repair request; it leases no work.
 
 Configuration and wire identifiers keep their established names when process
 ownership moves: boot keys use `TETRAL_BRIDGE_JOB_RUNNER_*` names and the
 default Queue lease owner is `bridge-job-runner`. Diagnostics name the owner:
-records carry `service.name` `job-runner`, the poll and delivery-attempt events
+records carry `service.name` `job-runner`, the acquisition and delivery-attempt events
 use the `job_runner.` prefix, and transaction labels use `jobrunner.*`. Runtime
 and MCP outbound calls use projected internal gRPC audience credentials.
 Kubernetes visibility uses its separate Kubernetes API audience credential.
 Runner receives Blob credentials for Session cleanup and no Sandbox provider
 credentials.
+
+## Acquisition
+
+Queue chooses the work; the Runner supplies only capacity. The coordinator owns
+`TETRAL_BRIDGE_JOB_RUNNER_MAX_JOBS` slots (default 8, bounded by the Queue
+direct-lease transport maximum). With no request in flight it reserves every
+free slot and makes one `LeaseJobRunnerJobs` call (2000 ms deadline) carrying
+only that count, the lease owner and the lease duration; Queue selects
+workspaces and kinds as described in the
+[Queue contract](../queue/README.md#direct-job-runner-leasing). No workspace is
+listed. Each returned job starts at once in its own slot; `processRuntimeJob`
+keeps its malformed-input custody and finalization-replay gates and its initial
+synchronous Heartbeat before any Runtime delivery. A slot frees only after the
+job, its heartbeat and its final Queue transition finish, and that completion
+wakes acquisition even while other jobs still run. No request is made while
+every slot is busy, and leased work never waits in a local backlog.
+
+A response with jobs is followed immediately by a request for the remaining
+free slots. An empty response waits for Queue's `retry_after_ms`, a committed
+Job Runner notification or listener reconnect, or a slot completion, whichever
+comes first; the wake generation is captured before each request, so a
+notification during the request is not lost. A failed request backs off
+100, 200, 400, 800, then 1000 ms, and any successful response resets it. There
+is no Runner poll-interval setting.
+
+`TETRAL_BRIDGE_JOB_RUNNER_LEASE_DURATION_MS` must be between 5000 and 300000
+(default 30000), and the heartbeat interval must stay below it; startup rejects
+other values before serving. When acquisition closes while a request is in
+flight, the jobs it returns are not dispatched: each goes back through
+`ReleaseUnstartedJob` with a 1000 ms deadline, at most MaxJobs at a time, which
+restores its prior attempt count. A failed release is logged and the lease
+expires normally.
 
 ## Binding, repair and cleanup
 
@@ -91,7 +127,7 @@ current accepting process:
 A cached deletion timestamp, IP change or missing cache entry alone cannot
 prove loss. Confirming GET runs outside Session transactions with a two-second
 bound. The subsequent transaction rechecks exact binding/process and heartbeat;
-a newer report or release wins over an earlier census observation.
+a newer report or release wins over an earlier discovery-page observation.
 For a current process the final decision takes Session, binding and process
 `FOR SHARE`, then the liveness row `FOR SHARE`, and reads database time in a
 separate statement after that lock. A report holding the liveness row
@@ -154,15 +190,38 @@ interrupting.
 
 ### Repair (Job Runner, on proven-gone)
 
-Each workspace pass performs pod-loss reconciliation before Queue leasing. It
-freezes the active binding census
-in a read-only repeatable-read transaction, takes one watcher snapshot after
-the database snapshot exists, and keyset-pages binding identities in batches of
-32. The read transaction closes before any candidate mutation. Running Runtime
-status or a rescheduling Session admits proactive closeout; an idle retained
-binding remains for the next input to replace through the same Session lock and
-binding-generation/process fence. Each proposed repair confirms and rechecks the current owner outside the frozen membership snapshot. Errors are isolated across repair and Queue phases,
-with runner cancellation as the only early stop.
+One repair owner runs independently of acquisition capacity: once at
+startup, then on a 30-second deadline or a coalesced request from an observed
+Pod deletion or a `runtime_process` notification, at least one second apart
+and never two at a time. A run has a 25-second budget and holds no acquisition
+lock; shutdown cancels and joins it before database and client closure.
+
+Discovery pages raw binding membership across workspaces in
+`(workspace_id, session_id)` key order through the Job Runner-only functions
+`tetral_job_runner_binding_upper()` and `tetral_job_runner_binding_page(...)`.
+A cycle captures its upper key first. A page selects at most 128 raw bindings
+before joining runtime status, Session state, accepted Inbox and process facts,
+and reports each binding as active when its exact binding runs, its Session is
+rescheduling, or an accepted Inbox names that exact binding. The page query
+runs in a read-only repeatable-read transaction under a one-second limit, the
+watcher snapshot is taken after that query, and the transaction closes before
+any mutation. An active binding whose registered process is past startup and
+noncurrent, not visibly reusable or not accepting is nominated. Running
+Runtime status or a rescheduling Session admits proactive closeout; an idle
+retained binding remains for the next input to replace through the same
+Session lock and binding-generation/process fence.
+
+The owner keeps one page of nominated candidates and drains them before reading
+another page; a run performs at most 8 candidate mutations (3 seconds each)
+and reads at most 8 pages. The cursor moves past a page, including an
+all-inactive one, only once its candidates are owner state; a page error or an
+unready watcher keeps it. Reaching the upper key ends the cycle and the run;
+bindings created behind the cursor are reached in the next cycle. A run thus
+reads at most 1,024 raw bindings, so a lost Pod's bindings are reached within
+about ceil(bindings / 1024) runs. Each candidate converges through the locked
+mutation, which re-decides it under Session arbitration, the process lock, the
+current-liveness check, the replacement fence and a fresh confirmation lookup;
+a failed candidate is logged and reconsidered in the next cycle.
 
 Under the Session arbitration owner and binding fence, durable evidence is
 reconstructed per Thread. Threads already owned by an exact interrupt keep
@@ -465,6 +524,15 @@ before listeners and clients; Kubernetes lifecycle tests prove watch workers
 join before Stop returns. Run repository `make test-affected` for the declared
 owner closure and managed dependencies; direct database tests require an
 administrative test DSN and create restricted private clones.
+
+Acquisition and repair controls are `job_runner_slots_test.go` (slot refill,
+release after closure, retry hint and capped backoff),
+`runtime_pod_loss_repair_test.go` (startup, signal and deadline runs; bounded
+pages and mutations), `runtime_binding_discovery_test.go` (the discovery
+functions under the installed role) and the composed
+`integration/job_runner_loop_sdk_test.go`, which drives `RunJobRunnerLoop`
+over the generated Queue client with SDK-admitted work in two Workspaces, the
+notification listener and the timer paths.
 
 New process/placement/lifecycle controls include `runtime_visibility_test.go`,
 `runtime_placement_test.go`, `runtime_load_probe_test.go`,

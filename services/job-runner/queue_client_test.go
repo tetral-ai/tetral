@@ -16,7 +16,7 @@ type drainingRunnerQueue struct {
 	once                       sync.Once
 }
 
-func (q *drainingRunnerQueue) Lease(ctx context.Context, request *queuev1.LeaseRequest) (*queuev1.LeaseResponse, error) {
+func (q *drainingRunnerQueue) LeaseJobRunnerJobs(ctx context.Context, request *queuev1.LeaseJobRunnerJobsRequest) (*queuev1.LeaseJobRunnerJobsResponse, error) {
 	q.once.Do(func() { close(q.leaseEntered) })
 	if q.releaseLease != nil {
 		select {
@@ -26,7 +26,7 @@ func (q *drainingRunnerQueue) Lease(ctx context.Context, request *queuev1.LeaseR
 			<-q.releaseLease
 		}
 	}
-	return q.recordingQueueClient.Lease(ctx, request)
+	return q.recordingQueueClient.LeaseJobRunnerJobs(ctx, request)
 }
 
 type drainingRunnerDeliverer struct {
@@ -56,7 +56,7 @@ func TestJobRunnerAcquisitionAndJoinedDrain(t *testing.T) {
 			if scenario == "late lease response" {
 				q.releaseLease = make(chan struct{})
 			}
-			runner := &JobRunner{Queue: q, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: d, Config: JobRunnerConfig{LeaseDuration: time.Second, HeartbeatInterval: 20 * time.Millisecond, PollInterval: time.Millisecond, DrainTimeout: 200 * time.Millisecond, CancelJoinTimeout: time.Second}}
+			runner := &JobRunner{Queue: q, Deliverer: d, Config: JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Second, HeartbeatInterval: 20 * time.Millisecond, DrainTimeout: 200 * time.Millisecond, CancelJoinTimeout: time.Second}}
 			done := make(chan error, 1)
 			go func() { done <- RunJobRunnerLoop(ctx, runner, nil, queue.NewWakeSignal()) }()
 			await := func(ch <-chan struct{}, name string) {
@@ -93,8 +93,8 @@ func TestJobRunnerAcquisitionAndJoinedDrain(t *testing.T) {
 			}
 			q.mu.Lock()
 			defer q.mu.Unlock()
-			if len(q.leaseWorkspaceIDs) != 1 {
-				t.Fatalf("new acquisition after shutdown: %v", q.leaseWorkspaceIDs)
+			if len(q.leaseRequests) != 1 {
+				t.Fatalf("acquisitions = %d; want only the first, since the slot stayed busy or acquisition closed", len(q.leaseRequests))
 			}
 			switch scenario {
 			case "late lease response":
@@ -103,8 +103,8 @@ func TestJobRunnerAcquisitionAndJoinedDrain(t *testing.T) {
 					t.Fatal("late lease dispatched new command")
 				default:
 				}
-				if len(q.transitions) != 1 || q.transitions[0] != "defer:qjob_1" {
-					t.Fatalf("late acquired capability not returned: %v", q.transitions)
+				if len(q.transitions) != 1 || q.transitions[0] != "release:qjob_1" {
+					t.Fatalf("late acquired capability not released: %v", q.transitions)
 				}
 			case "completes with heartbeat":
 				if q.heartbeats < 2 || len(q.transitions) != 1 || q.transitions[0] != "ack:qjob_1" {

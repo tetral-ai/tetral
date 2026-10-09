@@ -788,8 +788,8 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 		"queue_jobs": {
 			"id", "workspace_id", "kind", "partition_key", "queue_partition_sequence",
 			"causal_session_id", "delivery_scope", "delivery_thread_id", "control_class", "dedupe_key",
-			"payload_version", "status", "payload_json", "priority",
-			"lease_token", "leased_by", "leased_at", "leased_until",
+			"payload_version", "status", "payload_json", "priority", "negative_priority",
+			"lease_token", "leased_by", "leased_at", "leased_until", "lease_previous_attempt_count",
 			"attempt_count", "defer_count", "max_attempts", "available_at", "created_at",
 			"updated_at", "acknowledged_at", "cancelled_at",
 			"dead_lettered_at", "last_error_kind", "last_error_message",

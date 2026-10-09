@@ -271,10 +271,10 @@ func TestPostgreSQLJobRunnerFinalInterruptExhaustionTerminatesSessionAndFollower
 	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	deliverer := &postgresFinalizingDeliverer{store: deliveryStore}
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
+		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
 		Config: jobrunner.JobRunnerConfig{LeaseOwner: "interrupt-final-exhaustion", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if err := runner.RunOnce(context.Background()); err != nil {
+	if err := acquireAndJoinJobRunner(context.Background(), runner); err != nil {
 		t.Fatalf("run final interrupt owner: %v", err)
 	}
 	if deliverer.deliveries != 0 {
@@ -342,7 +342,7 @@ func TestPostgreSQLJobRunnerFinalInterruptExhaustionTerminatesSessionAndFollower
 	if err := rows.Err(); err != nil || count != 4 {
 		t.Fatalf("terminal input rows = %d/%v; want 4", count, err)
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || active || deliverer.deliveries != 0 {
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || active || deliverer.deliveries != 0 {
 		t.Fatalf("post-terminal runner = active %t deliveries %d err %v; want inert", active, deliverer.deliveries, err)
 	}
 }

@@ -103,9 +103,8 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 	installFixtureRuntimeLoad(t, deliveryStore)
 	sender := &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}
 	runner := &jobrunner.JobRunner{
-		Queue:      tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil),
-		Workspaces: staticWorkspaceLister{workspace.DefaultID},
-		Deliverer:  jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
+		Queue:     tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil),
+		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
 		Config: jobrunner.JobRunnerConfig{
 			LeaseOwner:        "bridge-first-queued-delivery",
 			LeaseDuration:     time.Minute,
@@ -113,7 +112,7 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 			MaxJobs:           1,
 		},
 	}
-	if err := runner.RunOnce(context.Background()); err != nil {
+	if err := acquireAndJoinJobRunner(context.Background(), runner); err != nil {
 		t.Fatalf("run first queued delivery: %v", err)
 	}
 	if len(sender.requests) != 1 {
@@ -402,12 +401,12 @@ func TestPostgreSQLJobRunnerTerminalizesProducerQueuedMessageBeforeFirstClaim(t 
 	deliveryStore := fixtureRuntimeDeliveryStore(client, admin, 9090)
 	var attemptLog bytes.Buffer
 	runner := &jobrunner.JobRunner{
-		Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue:     tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil),
 		Deliverer: manifestCompositionDeliverer{direct: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}},
 		Config:    jobrunner.JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 		Logger:    slog.New(slog.NewJSONHandler(&attemptLog, nil)),
 	}
-	if err := runner.RunOnce(context.Background()); err != nil {
+	if err := acquireAndJoinJobRunner(context.Background(), runner); err != nil {
 		t.Fatalf("run producer input final attempt: %v", err)
 	}
 	var inboxStatus, queueStatus, errorKind string
