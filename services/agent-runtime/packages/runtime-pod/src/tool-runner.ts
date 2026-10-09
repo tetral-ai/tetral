@@ -124,6 +124,9 @@ import type { RuntimeSubAgentRunHost } from "./core-hosts.js";
 // delay paces only transport uncertainty; it is not an execution-attempt
 // budget and never authorizes the provider operation a second time.
 const DURABLE_TOOL_REJOIN_DELAY_MS = 300;
+// First and capped waits between polls of one pending child interrupt.
+const CHILD_INTERRUPT_PENDING_INITIAL_DELAY_MS = 300;
+const CHILD_INTERRUPT_PENDING_MAX_DELAY_MS = 1_000;
 // WEB_SEARCH_REQUESTS_MAX / WEB_FETCH_REQUESTS_MAX bound the per-call
 // server_tool_use counters accepted from a RunWebResponse usage block before that
 // block is attached to the durable web tool result (webServerToolUse below). They
@@ -1589,6 +1592,11 @@ export class RuntimePodToolRunner {
 			scope: parentScope,
 			controlOperationId,
 		};
+		// A pending interrupt arrives as DEADLINE_EXCEEDED and backs off 300, 600,
+		// then 1000 ms per poll; each newly invoked operation starts again at
+		// 300 ms. Other ambiguous transport failures replay the same awaitRequest
+		// inside replayActorTransport at their own delay without advancing it.
+		let pendingDelayMs = CHILD_INTERRUPT_PENDING_INITIAL_DELAY_MS;
 		while (true) {
 			throwIfToolRouteAborted(request.abortSignal);
 			try {
@@ -1601,6 +1609,7 @@ export class RuntimePodToolRunner {
 							metadata,
 							request.abortSignal,
 						),
+					isAmbiguousChildInterruptAwaitFailure,
 				);
 				if (!exactlyOneDefined(response.completed)) {
 					return {
@@ -1638,7 +1647,11 @@ export class RuntimePodToolRunner {
 						message: "Sub-agent interrupt completion is unavailable.",
 					};
 				}
-				await this.sleep(DURABLE_TOOL_REJOIN_DELAY_MS, request.abortSignal);
+				await this.sleep(pendingDelayMs, request.abortSignal);
+				pendingDelayMs = Math.min(
+					pendingDelayMs * 2,
+					CHILD_INTERRUPT_PENDING_MAX_DELAY_MS,
+				);
 			}
 		}
 	}
@@ -2124,6 +2137,9 @@ export class RuntimePodToolRunner {
 	private async replayActorTransport<Response>(
 		abortSignal: AbortSignal,
 		operation: () => Promise<Response>,
+		isReplayableFailure: (
+			error: unknown,
+		) => boolean = isAmbiguousActorTransportFailure,
 	): Promise<Response> {
 		for (;;) {
 			throwIfToolRouteAborted(abortSignal);
@@ -2133,7 +2149,7 @@ export class RuntimePodToolRunner {
 				if (
 					isToolRouteAborted(error) ||
 					abortSignal.aborted ||
-					!isAmbiguousActorTransportFailure(error)
+					!isReplayableFailure(error)
 				) {
 					throw error;
 				}
@@ -3105,6 +3121,16 @@ function isAmbiguousActorTransportFailure(error: unknown): boolean {
 		default:
 			return false;
 	}
+}
+
+// AwaitChildInterrupt owns DEADLINE_EXCEEDED as its pending reply, so only the
+// remaining ambiguous transport failures replay inside replayActorTransport. A
+// local deadline on that RPC is indistinguishable and takes the pending backoff.
+function isAmbiguousChildInterruptAwaitFailure(error: unknown): boolean {
+	return (
+		!isGrpcStatus(error, status.DEADLINE_EXCEEDED) &&
+		isAmbiguousActorTransportFailure(error)
+	);
 }
 
 function resultJsonToExecutionResult(

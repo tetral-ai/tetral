@@ -83,7 +83,9 @@ Two install paths, one platform version:
 - **Helm** — reproducible, versioned installs: chart values, operator-created
   Secrets and the separately installed prerequisites above make up the
   configuration. The first installation of this architecture uses a dedicated
-  empty database; there is no in-place upgrade from earlier releases. Later
+  empty database; there is no in-place database upgrade from earlier releases.
+  The [service-stack upgrade guide](docs/upgrade-service-stack.md) lists what an
+  existing installation changes and what cannot be carried over. Later
   compatible revisions follow the chart's
   [database preparation and compatible rollout](deploy/helm/tetral/README.md#database-preparation-and-compatible-rollout)
   procedure; `helm rollback` changes workloads, not database state.

@@ -493,7 +493,12 @@ Invariants a replacement must preserve:
 - `interrupt_agent` and `close_agent` first ask Bridge to freeze the durable
   target census. Each target acknowledges the internal control input before
   the parent can complete; Bridge owns terminal Tool projection and the
-  no-new-work fence. `close_agent` then closes the complete descendant subtree,
+  no-new-work fence. While any target is still pending, Bridge answers
+  `AwaitChildInterrupt` with `DEADLINE_EXCEEDED`; Runtime polls once
+  immediately, then waits 300, 600 and then 1000 ms between polls of that
+  operation, and each newly invoked operation starts again at 300 ms. Abort
+  stops polling without closing the child control operation or cancelling its
+  durable interrupt. `close_agent` then closes the complete descendant subtree,
   preserves `failed` and `terminated` outcomes, and only afterward releases
   resident hot state. `resume_agent` validates a quiescent closed checkpoint
   before reactivation; terminal rows are never installed into hot state.
