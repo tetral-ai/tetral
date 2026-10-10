@@ -2,8 +2,10 @@ package testinfra
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -252,6 +254,103 @@ func VerifyScheduledWorkflow(root string) error {
 	return nil
 }
 
+// VerifyBenchmarkWorkflow keeps CI Benchmark a read-only measurement whose two
+// sides run Pull Request Verification's Go Race evidence on their own commits.
+func VerifyBenchmarkWorkflow(root string) error {
+	document, err := parseYAMLFile(filepath.Join(root, ".github", "workflows", "ci-benchmark.yml"))
+	if err != nil {
+		return err
+	}
+	workflow := document.Content[0]
+	triggers := mappingValue(workflow, "on")
+	if triggers == nil || triggers.Kind != workflowYAMLMapping || len(triggers.Content) != 2 || mappingValue(triggers, "workflow_dispatch") == nil {
+		return fmt.Errorf("benchmark workflow must be triggered by workflow_dispatch only")
+	}
+	if !readOnlyPermissions(mappingValue(workflow, "permissions"), []string{"actions", "contents"}) {
+		return fmt.Errorf("benchmark permissions are not exactly read-only actions and contents")
+	}
+	if strings.Contains(allScalars(workflow), "secrets.") {
+		return fmt.Errorf("benchmark workflow references secrets")
+	}
+	if scalar(mappingValue(workflow, "cache-mode")) != "read" {
+		return fmt.Errorf("benchmark workflow does not restrict the Actions cache to read")
+	}
+	jobs := mappingValue(workflow, "jobs")
+	if jobs == nil || jobs.Kind != workflowYAMLMapping {
+		return fmt.Errorf("benchmark workflow has no jobs")
+	}
+	for index := 0; index+1 < len(jobs.Content); index += 2 {
+		jobID, job := jobs.Content[index].Value, jobs.Content[index+1]
+		if mappingValue(job, "permissions") != nil {
+			return fmt.Errorf("benchmark job %q overrides the workflow permissions", jobID)
+		}
+		if mode := mappingValue(job, "cache-mode"); mode != nil && scalar(mode) != "read" {
+			return fmt.Errorf("benchmark job %q has write-capable cache access", jobID)
+		}
+		if !jobChecksOutFullHistory(job) {
+			return fmt.Errorf("benchmark job %q does not check out complete history without persisted credentials", jobID)
+		}
+		for _, step := range sequenceNodes(mappingValue(job, "steps")) {
+			uses := scalar(mappingValue(step, "uses"))
+			// A local action must come from the job's own checkout: "$/" would
+			// resolve to the running commit and run side B's action for side A.
+			if uses != "" && !strings.Contains(uses, "@") && !strings.HasPrefix(uses, "./") {
+				return fmt.Errorf("benchmark job %q uses local action %q outside its checkout", jobID, uses)
+			}
+		}
+	}
+	pullRequest, err := parseYAMLFile(filepath.Join(root, ".github", "workflows", "pull-request-verification.yml"))
+	if err != nil {
+		return err
+	}
+	pullRequestRace := mappingValue(mappingValue(pullRequest.Content[0], "jobs"), "go-race")
+	wantInputs := evidenceStepInputs(pullRequestRace)
+	if wantInputs == nil {
+		return fmt.Errorf("pull request Go Race has no evidence step")
+	}
+	shards := func(job *workflowYAMLNode) []string {
+		return sequenceScalars(mappingValue(mappingValue(mappingValue(job, "strategy"), "matrix"), "shard"))
+	}
+	prefixes := map[string]bool{}
+	for _, side := range []string{"a-go-race", "b-go-race"} {
+		job := mappingValue(jobs, side)
+		inputs := evidenceStepInputs(job)
+		if inputs == nil {
+			return fmt.Errorf("benchmark job %q has no evidence step from its checkout", side)
+		}
+		prefix := inputs["artifact-prefix"]
+		if prefix == "" || prefixes[prefix] {
+			return fmt.Errorf("benchmark job %q needs its own artifact prefix", side)
+		}
+		prefixes[prefix] = true
+		delete(inputs, "artifact-prefix")
+		want := maps.Clone(wantInputs)
+		delete(want, "artifact-prefix")
+		if !maps.Equal(inputs, want) {
+			return fmt.Errorf("benchmark job %q Go evidence inputs differ from pull request Go Race", side)
+		}
+		if !slices.Equal(shards(job), shards(pullRequestRace)) {
+			return fmt.Errorf("benchmark job %q shards differ from pull request Go Race", side)
+		}
+	}
+	return nil
+}
+
+func evidenceStepInputs(job *workflowYAMLNode) map[string]string {
+	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
+		if scalar(mappingValue(step, "uses")) != "./.github/actions/run-test-evidence" {
+			continue
+		}
+		inputs := map[string]string{}
+		with := mappingValue(step, "with")
+		for index := 0; with != nil && index+1 < len(with.Content); index += 2 {
+			inputs[with.Content[index].Value] = scalar(with.Content[index+1])
+		}
+		return inputs
+	}
+	return nil
+}
+
 func jobChecksOutFullHistory(job *workflowYAMLNode) bool {
 	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
 		if scalar(mappingValue(step, "uses")) != "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10" {
@@ -328,6 +427,7 @@ func VerifyWorkflowSkeletons(root string) error {
 		"Pull Request Verification": {"pull-request-verification.yml", "pull_request", "pr-verification-"},
 		"Main Branch Verification":  {"main-branch-verification.yml", "push", "main-verification-"},
 		"Scheduled Verification":    {"scheduled-verification.yml", "schedule", "scheduled-verification-"},
+		"CI Benchmark":              {"ci-benchmark.yml", "workflow_dispatch", "ci-benchmark-"},
 	}
 	for name, item := range wanted {
 		document, err := parseYAMLFile(filepath.Join(root, ".github", "workflows", item.file))

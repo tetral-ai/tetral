@@ -142,7 +142,37 @@ func executionEnvelopeFromEnvironment() ExecutionEnvelope {
 		RunAttempt:        os.Getenv("TETRAL_CI_RUN_ATTEMPT"),
 		Job:               os.Getenv("TETRAL_CI_JOB"),
 		Producer:          os.Getenv("TETRAL_CI_PRODUCER"),
+		CPUModel:          hostCPUModel(),
+		RunnerImage:       hostedRunnerImage(os.Getenv("ImageOS"), os.Getenv("ImageVersion")),
 	}
+}
+
+// Hosted runners of one image differ in CPU model, which changes test speed
+// between jobs of the same run; benchmark comparisons report it per job.
+func hostCPUModel() string {
+	body, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		name, value, found := strings.Cut(line, ":")
+		if found && strings.TrimSpace(name) == "model name" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+// GitHub-hosted runner images export ImageOS and ImageVersion to every
+// process; other environments leave the identity empty.
+func hostedRunnerImage(imageOS, imageVersion string) string {
+	if imageVersion == "" {
+		return ""
+	}
+	if imageOS == "" {
+		return imageVersion
+	}
+	return imageOS + "/" + imageVersion
 }
 
 func executeSelection(ctx context.Context, plan Plan, selection Selection, options RunOptions, dependencies *dependencyManager) ([]StepResult, error) {
@@ -495,6 +525,8 @@ func runStep(ctx context.Context, root, group string, spec commandSpec, dependen
 	started := time.Now()
 	processErr := startManagedCommand(ctx, command)
 	step.Elapsed = time.Since(started)
+	step.StartedAt = started.UTC()
+	step.FinishedAt = step.StartedAt.Add(step.Elapsed)
 	if closeErr := file.Close(); closeErr != nil {
 		processErr = errors.Join(processErr, invalidReport("close diagnostic report: %v", closeErr))
 	}
