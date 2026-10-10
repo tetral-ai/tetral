@@ -231,7 +231,7 @@ func startContentE2EWithOptions(t *testing.T, scenario string, lost, cold bool, 
 	for _, worker := range []struct {
 		name string
 		run  func(context.Context) (bool, error)
-	}{{"activation", activate.RunOnceWithActivity}, {"materialization", materialize.RunOnceWithActivity}, {"capture", capture.RunOnceWithActivity}, {"execution", execute.RunOnceWithActivity}, {"delivery", func(ctx context.Context) (bool, error) { return acquireAndJoinJobRunnerActive(ctx, runner) }}} {
+	}{{"activation", activate.RunOnceWithActivity}, {"materialization", materialize.RunOnceWithActivity}, {"capture", capture.RunOnceWithActivity}, {"execution", execute.RunOnceWithActivity}, {"delivery", func(ctx context.Context) (bool, error) { return acquireAndJoinJobRunnerWorker(ctx, t, runner) }}} {
 		startContentWorkerContext(ctx, t, worker.run, worker.name)
 	}
 	for worker := 1; worker < overrides.ExecutionWorkers; worker++ {

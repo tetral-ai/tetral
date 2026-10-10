@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"sync"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
@@ -231,7 +234,11 @@ func (f *separatedOwners) input(t *testing.T) (jobrunner.RuntimeJob, *queue.Job)
 // ends a retained pass returns no job even when work admitted or made due after
 // that pass began is ready; the next call starts a fresh pass. Two consecutive
 // empty acquisitions therefore mean no work is dispatchable, and no fixture
-// waits between them. A fixture in which another owner can hold a candidate's
+// waits between them except for the backoff after a failed acquisition. A
+// failed acquisition does not change the count. It can start the pass that the
+// next call continues; that pass covers the work admitted and due before the
+// failed call, so it still holds the work a fixture made ready before
+// acquiring. A fixture in which another owner can hold a candidate's
 // Session lock waits for that owner before acquiring, because Queue skips a
 // busy Session instead of waiting for it. It waits until the owner's last
 // Session-locking write before the acquisition is visible: a dispatched job's
@@ -252,29 +259,88 @@ func acquireAndJoinJobRunner(ctx context.Context, runner *jobrunner.JobRunner) e
 // acquireAndJoinJobRunnerActive is acquireAndJoinJobRunner reporting whether
 // any acquisition dispatched a job.
 func acquireAndJoinJobRunnerActive(ctx context.Context, runner *jobrunner.JobRunner) (bool, error) {
-	dispatched, err := acquireAndJoinJobRunnerJobs(ctx, runner, 1)
+	dispatched, err := acquireAndJoinJobRunnerJobs(ctx, runner, 1, nil)
 	return dispatched > 0, err
 }
 
-// acquireAndJoinJobRunnerJobs performs acquireJobRunnerJobs, then joins every
-// dispatched job.
-func acquireAndJoinJobRunnerJobs(ctx context.Context, runner *jobrunner.JobRunner, want int) (int, error) {
-	dispatched, acquireErr := acquireJobRunnerJobs(ctx, runner, want)
-	return dispatched, errors.Join(acquireErr, runner.JoinDispatched(ctx))
+// acquireAndJoinJobRunnerWorker is acquireAndJoinJobRunnerActive for a
+// long-running worker. Like the production loop, it retries an Internal
+// acquisition failure until ctx ends, logging each failure to t, instead of
+// returning it after the last backoff step. It still returns any other
+// acquisition error and every job error from the join.
+func acquireAndJoinJobRunnerWorker(ctx context.Context, t *testing.T, runner *jobrunner.JobRunner) (bool, error) {
+	dispatched, err := acquireAndJoinJobRunnerJobs(ctx, runner, 1, t.Logf)
+	return dispatched > 0, err
+}
+
+// acquireAndJoinJobRunnerJobs performs acquireJobRunnerJobsRetrying, then joins
+// every dispatched job. A job error from the join is wrapped so that a log
+// tells it apart from an acquisition error.
+func acquireAndJoinJobRunnerJobs(ctx context.Context, runner *jobrunner.JobRunner, want int, retryLogf func(format string, args ...any)) (int, error) {
+	dispatched, acquireErr := acquireJobRunnerJobsRetrying(ctx, runner, want, retryLogf)
+	joinErr := runner.JoinDispatched(ctx)
+	if joinErr != nil {
+		joinErr = fmt.Errorf("join dispatched Job Runner jobs: %w", joinErr)
+	}
+	return dispatched, errors.Join(acquireErr, joinErr)
+}
+
+// jobRunnerFixtureAcquisitionBackoff is the spacing of
+// jobRunnerAcquisitionBackoff (services/job-runner), after which the production
+// loop retries every failed acquisition, repeating the 1 s step until its
+// context ends. Queue fails a direct lease call with Internal when a discovery
+// statement exceeds its 40 ms statement timeout and no lease committed.
+// acquireJobRunnerJobs retries only an Internal failure with this spacing and
+// returns it after one more failure past the 1 s step;
+// acquireAndJoinJobRunnerWorker repeats the 1 s step instead.
+var jobRunnerFixtureAcquisitionBackoff = []time.Duration{
+	100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond, time.Second,
 }
 
 // acquireJobRunnerJobs performs production acquisitions until they have
 // dispatched want jobs or two consecutive acquisitions are empty, without
 // joining, so dispatched jobs run concurrently in their slots; Queue leases at
-// most one job per workspace in one call.
+// most one job per workspace in one call. A failed acquisition dispatches
+// nothing and is not empty. One that failed with Internal is retried after
+// jobRunnerFixtureAcquisitionBackoff. Any other failure is returned at once,
+// such as a setup error, a closed acquisition, or Unavailable from a draining
+// Queue or from a lost TCP response after which a lease may have committed. A
+// returned failure is wrapped as an acquisition error, joined with ctx.Err()
+// when ctx has ended.
 func acquireJobRunnerJobs(ctx context.Context, runner *jobrunner.JobRunner, want int) (int, error) {
-	dispatched, empty := 0, 0
+	return acquireJobRunnerJobsRetrying(ctx, runner, want, nil)
+}
+
+// acquireJobRunnerJobsRetrying is acquireJobRunnerJobs. A non-nil retryLogf, a
+// long-running worker's, lifts the bound on retrying Internal failures: they
+// are retried until ctx ends, repeating the 1 s step as the production loop
+// does, and each is logged through retryLogf.
+func acquireJobRunnerJobsRetrying(ctx context.Context, runner *jobrunner.JobRunner, want int, retryLogf func(format string, args ...any)) (int, error) {
+	dispatched, empty, failures := 0, 0, 0
 	for dispatched < want && empty < jobRunnerFixtureEmptyAcquisitions {
 		acquisition, err := runner.AcquireAndDispatch(ctx)
 		dispatched += acquisition.Dispatched
 		if err != nil {
-			return dispatched, err
+			if ctx.Err() == nil && status.Code(err) == codes.Internal && (retryLogf != nil || failures < len(jobRunnerFixtureAcquisitionBackoff)) {
+				delay := jobRunnerFixtureAcquisitionBackoff[min(failures, len(jobRunnerFixtureAcquisitionBackoff)-1)]
+				if retryLogf != nil {
+					retryLogf("Job Runner acquisition failed; retrying after %s: %v", delay, err)
+				}
+				retry := time.NewTimer(delay)
+				select {
+				case <-retry.C:
+					failures++
+					continue
+				case <-ctx.Done():
+					retry.Stop()
+				}
+			}
+			if ctx.Err() != nil {
+				err = errors.Join(err, ctx.Err())
+			}
+			return dispatched, fmt.Errorf("acquire Job Runner jobs: %w", err)
 		}
+		failures = 0
 		if acquisition.Dispatched == 0 {
 			empty++
 		} else {
