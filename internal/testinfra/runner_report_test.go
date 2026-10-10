@@ -254,6 +254,42 @@ func TestEvidenceRecordsStepIntervalAndRunnerHost(t *testing.T) {
 	}
 }
 
+func TestEvidenceRecordsGoCacheRestore(t *testing.T) {
+	const key = "go-race-v1-Linux-go1.26.9-cc0123456789ab-sum-head"
+	measured := GoCacheRestore{Key: key, Elapsed: 38 * time.Second, RestoredBytes: 6_400_000_000, DiskFreeBefore: 22_000_000_000, DiskFreeAfter: 15_600_000_000}
+	for _, tc := range []struct {
+		name, key, matched, outcome, match string
+	}{
+		{name: "job without the Go build cache"},
+		{name: "no entry", key: key, outcome: "success", match: "miss"},
+		{name: "an older entry by restore key", key: key, matched: "go-race-v1-Linux-go1.26.9-cc0123456789ab-sum-base", outcome: "success", match: "prefix"},
+		{name: "the tested commit's entry", key: key, matched: strings.ToLower(key), outcome: "success", match: "exact"},
+		{name: "too little free disk to restore", key: key, outcome: "skipped", match: "skipped"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TETRAL_CI_GO_CACHE_KEY", tc.key)
+			t.Setenv("TETRAL_CI_GO_CACHE_MATCHED_KEY", tc.matched)
+			t.Setenv("TETRAL_CI_GO_CACHE_RESTORE_OUTCOME", tc.outcome)
+			t.Setenv("TETRAL_CI_GO_CACHE_RESTORE_NS", "38000000000")
+			t.Setenv("TETRAL_CI_GO_CACHE_RESTORED_BYTES", "6400000000")
+			t.Setenv("TETRAL_CI_GO_CACHE_DISK_FREE_BEFORE", "22000000000")
+			t.Setenv("TETRAL_CI_GO_CACHE_DISK_FREE_AFTER", "15600000000")
+			got := executionEnvelopeFromEnvironment().GoCache
+			if tc.key == "" {
+				if got != nil {
+					t.Fatalf("Go build cache restore = %+v; want none", got)
+				}
+				return
+			}
+			want := measured
+			want.MatchedKey, want.Match = tc.matched, tc.match
+			if got == nil || *got != want {
+				t.Fatalf("Go build cache restore = %+v; want %+v", got, want)
+			}
+		})
+	}
+}
+
 func TestProcessAndStructuredReportProduceOneDecisiveVerdict(t *testing.T) {
 	processFailure := errors.New("exit status 1")
 	testFailure := errors.New("test failed")

@@ -62,6 +62,20 @@ func RenderBenchmarkComparison(report BenchmarkComparison) string {
 		}
 	}
 
+	out.WriteString("\n### Go build cache\n\nThe evidence action's restore before the runner: exact is the tested commit's entry, prefix an older entry by restore key.\n\n")
+	out.WriteString("| Side | Shard | Match | Matched key | Restore s | Restored GB | Disk free before GB | Disk free after GB |\n|---|---:|---|---|---:|---:|---:|---:|\n")
+	for _, side := range sides {
+		for _, shard := range side.value.Shards {
+			restore := shard.GoCache
+			if restore == nil {
+				fmt.Fprintf(&out, "| %s | %d | not recorded | — | — | — | — | — |\n", side.label, shard.Index)
+				continue
+			}
+			fmt.Fprintf(&out, "| %s | %d | %s | %s | %.1f | %.2f | %.2f | %.2f |\n", side.label, shard.Index, restore.Match, benchmarkText(restore.MatchedKey),
+				benchmarkSeconds(restore.Elapsed), benchmarkGigabytes(restore.RestoredBytes), benchmarkGigabytes(restore.DiskFreeBefore), benchmarkGigabytes(restore.DiskFreeAfter))
+		}
+	}
+
 	if len(report.Replay) > 0 {
 		out.WriteString("\n### Replayed steps phase\n\nTwo workers take each shard plan's steps in plan order. A slice of a split package costs its tests plus its own shard's overhead; A's durations take units A never ran from B.\n\n")
 		out.WriteString("| Shard | A plan, A durations | B plan, A durations | A plan, B durations |\n|---:|---:|---:|---:|\n")
@@ -200,4 +214,8 @@ func benchmarkYesNo(value bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+func benchmarkGigabytes(bytes int64) float64 {
+	return float64(bytes) / 1e9
 }

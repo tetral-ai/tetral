@@ -144,7 +144,38 @@ func executionEnvelopeFromEnvironment() ExecutionEnvelope {
 		Producer:          os.Getenv("TETRAL_CI_PRODUCER"),
 		CPUModel:          hostCPUModel(),
 		RunnerImage:       hostedRunnerImage(os.Getenv("ImageOS"), os.Getenv("ImageVersion")),
+		GoCache:           goCacheRestoreFromEnvironment(),
 	}
+}
+
+// The evidence action exports its Go build cache restore when a job restores
+// that cache; other jobs record none.
+func goCacheRestoreFromEnvironment() *GoCacheRestore {
+	key := os.Getenv("TETRAL_CI_GO_CACHE_KEY")
+	if key == "" {
+		return nil
+	}
+	integer := func(name string) int64 {
+		value, _ := strconv.ParseInt(os.Getenv(name), 10, 64)
+		return value
+	}
+	restore := &GoCacheRestore{
+		Key: key, MatchedKey: os.Getenv("TETRAL_CI_GO_CACHE_MATCHED_KEY"), Match: "prefix",
+		Elapsed:        time.Duration(integer("TETRAL_CI_GO_CACHE_RESTORE_NS")),
+		RestoredBytes:  integer("TETRAL_CI_GO_CACHE_RESTORED_BYTES"),
+		DiskFreeBefore: integer("TETRAL_CI_GO_CACHE_DISK_FREE_BEFORE"),
+		DiskFreeAfter:  integer("TETRAL_CI_GO_CACHE_DISK_FREE_AFTER"),
+	}
+	switch {
+	case os.Getenv("TETRAL_CI_GO_CACHE_RESTORE_OUTCOME") == "skipped":
+		restore.Match = "skipped"
+	case restore.MatchedKey == "":
+		restore.Match = "miss"
+	case strings.EqualFold(restore.MatchedKey, key):
+		// actions/cache matches keys case-insensitively.
+		restore.Match = "exact"
+	}
+	return restore
 }
 
 // Hosted runners of one image differ in CPU model, which changes test speed

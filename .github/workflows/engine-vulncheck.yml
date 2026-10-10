@@ -37,6 +37,8 @@ on:
 permissions:
   contents: read
 
+cache-mode: read
+
 concurrency:
   group: engine-vulncheck-${{ github.ref }}
   cancel-in-progress: true

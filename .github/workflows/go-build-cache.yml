@@ -1,0 +1,79 @@
+name: Go Build Cache
+
+# The only writer of go-race-v1 entries in main's cache scope. Go Race jobs,
+# Deployment Definitions and Protocol restore them read-only through the
+# evidence action; scripts/build-go-cache.sh holds what gets compiled.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '11 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: go-build-cache-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build the Go Race cache
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    cache-mode: write
+    steps:
+      - name: Check out the exact revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Set up Go without its own cache
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.26.9'
+          cache: false
+      - name: Compute the Go build cache key
+        id: go-cache-key
+        shell: bash
+        env:
+          GO_SUM_HASH: ${{ hashFiles('go.sum', 'integration/envoy-gateway-secret-helper/go.sum') }}
+        run: |
+          set -euo pipefail
+          toolchain="go-race-v1-Linux-$(go env GOVERSION)-"
+          compiler="${toolchain}cc$(gcc --version | head -n 1 | sha256sum | cut -c 1-12)-"
+          modules="${compiler}${GO_SUM_HASH}-"
+          key="${modules}$(git rev-parse HEAD)"
+          echo "Go build cache key: $key"
+          {
+            echo "key=$key"
+            echo "modules-prefix=$modules"
+            echo "compiler-prefix=$compiler"
+            echo "toolchain-prefix=$toolchain"
+          } >> "$GITHUB_OUTPUT"
+      # A daily run finds the push run's entry and stops here; it rebuilds only
+      # after the Go or gcc version changed or the entry was evicted or expired.
+      - name: Look up the entry for this revision
+        id: lookup
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            ~/go/bin
+          key: ${{ steps.go-cache-key.outputs.key }}
+          lookup-only: true
+      - name: Build what Go Race compiles
+        if: steps.lookup.outputs.cache-hit != 'true'
+        run: ./scripts/build-go-cache.sh
+      - name: Save the entry
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            ~/go/bin
+          key: ${{ steps.go-cache-key.outputs.key }}

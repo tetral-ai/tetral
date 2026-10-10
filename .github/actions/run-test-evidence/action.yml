@@ -43,6 +43,10 @@ inputs:
     description: 'Online dependency audit policy: changed, always, or never'
     required: false
     default: changed
+  go-cache:
+    description: Restore the Go Build Cache entry, read-only, instead of setup-go's own cache
+    required: false
+    default: 'false'
 runs:
   using: composite
   steps:
@@ -50,7 +54,75 @@ runs:
       uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
       with:
         go-version: '1.26.9'
+        cache: ${{ inputs.go-cache != 'true' }}
         cache-dependency-path: go.sum
+
+    - name: Compute the Go build cache key
+      id: go-cache-key
+      if: inputs.go-cache == 'true'
+      shell: bash
+      env:
+        GO_SUM_HASH: ${{ hashFiles('go.sum', 'integration/envoy-gateway-secret-helper/go.sum') }}
+      run: |
+        set -euo pipefail
+        toolchain="go-race-v1-Linux-$(go env GOVERSION)-"
+        compiler="${toolchain}cc$(gcc --version | head -n 1 | sha256sum | cut -c 1-12)-"
+        modules="${compiler}${GO_SUM_HASH}-"
+        key="${modules}$(git rev-parse HEAD)"
+        echo "Go build cache key: $key"
+        {
+          echo "key=$key"
+          echo "modules-prefix=$modules"
+          echo "compiler-prefix=$compiler"
+          echo "toolchain-prefix=$toolchain"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Record free disk before the Go build cache restore
+      id: go-cache-before
+      if: inputs.go-cache == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "started-ns=$(date +%s%N)" >> "$GITHUB_OUTPUT"
+        echo "disk-free=$(df --output=avail -B1 "$HOME" | tail -n 1 | tr -d ' ')" >> "$GITHUB_OUTPUT"
+
+    # The newest entry for this commit, else for this go.sum, else for this
+    # compiler, else for this Go version; Go recompiles whatever is stale. The
+    # entry extracts to about 8.4 GB beside the archive, so a runner with less
+    # than 25 GB free, or whose free disk could not be measured, compiles cold
+    # instead.
+    - name: Restore the Go build cache
+      id: go-cache
+      if: inputs.go-cache == 'true' && fromJSON(steps.go-cache-before.outputs.disk-free || '0') >= 25000000000
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+          ~/go/bin
+        key: ${{ steps.go-cache-key.outputs.key }}
+        restore-keys: |
+          ${{ steps.go-cache-key.outputs.modules-prefix }}
+          ${{ steps.go-cache-key.outputs.compiler-prefix }}
+          ${{ steps.go-cache-key.outputs.toolchain-prefix }}
+
+    - name: Measure the Go build cache restore
+      id: go-cache-restored
+      if: inputs.go-cache == 'true'
+      shell: bash
+      env:
+        STARTED_NS: ${{ steps.go-cache-before.outputs.started-ns }}
+      run: |
+        set -euo pipefail
+        echo "elapsed-ns=$(( $(date +%s%N) - STARTED_NS ))" >> "$GITHUB_OUTPUT"
+        echo "disk-free=$(df --output=avail -B1 "$HOME" | tail -n 1 | tr -d ' ')" >> "$GITHUB_OUTPUT"
+        restored=0
+        for directory in "$HOME/.cache/go-build" "$HOME/go/pkg/mod" "$HOME/go/bin"; do
+          if [[ -d "$directory" ]]; then
+            restored=$(( restored + $(du -sb "$directory" | cut -f 1) ))
+          fi
+        done
+        echo "bytes=$restored" >> "$GITHUB_OUTPUT"
 
     - name: Set up Bun
       if: inputs.needs-bun == 'true'
@@ -95,6 +167,13 @@ runs:
       shell: bash
       env:
         TETRAL_CI_PRODUCER: ${{ inputs.producer }}
+        TETRAL_CI_GO_CACHE_KEY: ${{ steps.go-cache-key.outputs.key }}
+        TETRAL_CI_GO_CACHE_MATCHED_KEY: ${{ steps.go-cache.outputs.cache-matched-key }}
+        TETRAL_CI_GO_CACHE_RESTORE_OUTCOME: ${{ steps.go-cache.outcome }}
+        TETRAL_CI_GO_CACHE_RESTORE_NS: ${{ steps.go-cache-restored.outputs.elapsed-ns }}
+        TETRAL_CI_GO_CACHE_RESTORED_BYTES: ${{ steps.go-cache-restored.outputs.bytes }}
+        TETRAL_CI_GO_CACHE_DISK_FREE_BEFORE: ${{ steps.go-cache-before.outputs.disk-free }}
+        TETRAL_CI_GO_CACHE_DISK_FREE_AFTER: ${{ steps.go-cache-restored.outputs.disk-free }}
       run: |
         set -euo pipefail
         group_args=()

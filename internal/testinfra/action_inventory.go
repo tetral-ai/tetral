@@ -115,10 +115,16 @@ func collectActionReferences(node *workflowYAMLNode, result map[string]string) e
 				if len(parts) != 2 || len(parts[1]) != 40 {
 					return fmt.Errorf("action reference %q is not a full SHA", reference)
 				}
-				if prior, exists := result[parts[0]]; exists && prior != parts[1] {
-					return fmt.Errorf("action repository %q uses more than one SHA", parts[0])
+				// A sub-path action such as actions/cache/restore runs code of
+				// its owner/repo at the pinned SHA, which the inventory records.
+				repository := parts[0]
+				if segments := strings.SplitN(repository, "/", 3); len(segments) == 3 {
+					repository = segments[0] + "/" + segments[1]
 				}
-				result[parts[0]] = parts[1]
+				if prior, exists := result[repository]; exists && prior != parts[1] {
+					return fmt.Errorf("action repository %q uses more than one SHA", repository)
+				}
+				result[repository] = parts[1]
 			}
 		}
 	}
