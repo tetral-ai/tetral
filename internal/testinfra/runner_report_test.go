@@ -233,6 +233,27 @@ func TestStepWithoutStructuredArtifactUsesVisibleDiagnosticName(t *testing.T) {
 	}
 }
 
+func TestEvidenceRecordsStepIntervalAndRunnerHost(t *testing.T) {
+	before := time.Now()
+	manager := &dependencyManager{environment: os.Environ()}
+	step, err := runStep(context.Background(), t.TempDir(), "protocol", commandSpec{Arguments: []string{"go", "version"}}, manager, t.TempDir())
+	after := time.Now()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, at := range map[string]time.Time{"start": step.StartedAt, "end": step.FinishedAt} {
+		if at.Before(before) || at.After(after) {
+			t.Fatalf("step %s %s is outside the command's run [%s, %s]", name, at, before, after)
+		}
+	}
+
+	t.Setenv("ImageOS", "ubuntu24")
+	t.Setenv("ImageVersion", "20261004.327.1")
+	if image := executionEnvelopeFromEnvironment().RunnerImage; image != "ubuntu24/20261004.327.1" {
+		t.Fatalf("runner image = %q", image)
+	}
+}
+
 func TestProcessAndStructuredReportProduceOneDecisiveVerdict(t *testing.T) {
 	processFailure := errors.New("exit status 1")
 	testFailure := errors.New("test failed")

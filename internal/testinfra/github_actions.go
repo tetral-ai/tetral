@@ -29,6 +29,16 @@ func (commandGitHubClient) JSON(ctx context.Context, endpoint string, value any)
 	return nil
 }
 
+func readAttemptJobs(ctx context.Context, client githubAPIClient, repository string, runID int64, runAttempt int) ([]workflowJob, error) {
+	var jobs struct {
+		Jobs []workflowJob `json:"jobs"`
+	}
+	if err := client.JSON(ctx, fmt.Sprintf("repos/%s/actions/runs/%d/attempts/%d/jobs?per_page=100", repository, runID, runAttempt), &jobs); err != nil {
+		return nil, err
+	}
+	return jobs.Jobs, nil
+}
+
 type githubWorkflowRun struct {
 	ID           int64     `json:"id"`
 	Name         string    `json:"name"`

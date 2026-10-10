@@ -145,37 +145,70 @@ func readWorkflowHealth(ctx context.Context, client githubAPIClient, repository 
 	if err := client.JSON(ctx, fmt.Sprintf("repos/%s/actions/runs/%d/attempts/%d", repository, runID, runAttempt), &run); err != nil {
 		return workflowHealth{}, err
 	}
-	var jobs struct {
-		Jobs []workflowJob `json:"jobs"`
-	}
-	if err := client.JSON(ctx, fmt.Sprintf("repos/%s/actions/runs/%d/attempts/%d/jobs?per_page=100", repository, runID, runAttempt), &jobs); err != nil {
+	jobs, err := readAttemptJobs(ctx, client, repository, runID, runAttempt)
+	if err != nil {
 		return workflowHealth{}, err
 	}
-	return workflowHealth{CreatedAt: run.CreatedAt, StartedAt: run.RunStartedAt, Jobs: jobs.Jobs}, nil
+	return workflowHealth{CreatedAt: run.CreatedAt, StartedAt: run.RunStartedAt, Jobs: jobs}, nil
 }
 
 func collectGoTestDurations(path string, target map[string]float64) error {
-	// The path is discovered beneath the explicit artifact root.
-	//nolint:gosec
-	file, err := os.Open(path)
+	report, err := readGoTestReport(path)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = file.Close() }()
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		var event struct {
-			Action  string  `json:"Action"`
-			Package string  `json:"Package"`
-			Test    string  `json:"Test"`
-			Elapsed float64 `json:"Elapsed"`
-		}
-		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
-			return fmt.Errorf("decode Go health event: %w", err)
-		}
-		if event.Action == "pass" && event.Test != "" && !strings.Contains(event.Test, "/") {
-			target[event.Package+"/"+event.Test] += event.Elapsed
+	for _, test := range report.tests {
+		if test.passed {
+			target[test.pkg+"/"+test.name] += test.elapsed
 		}
 	}
-	return scanner.Err()
+	return nil
+}
+
+type goTestOutcome struct {
+	pkg, name string
+	elapsed   float64
+	passed    bool
+}
+
+// goTestReport is what CI evidence consumers read from one go test -json
+// report: the first test start and every top-level test's final outcome.
+type goTestReport struct {
+	firstRun time.Time
+	tests    []goTestOutcome
+}
+
+func readGoTestReport(path string) (goTestReport, error) {
+	var report goTestReport
+	// The path is discovered beneath an explicit downloaded artifact root.
+	//nolint:gosec
+	file, err := os.Open(path)
+	if err != nil {
+		return report, err
+	}
+	defer func() { _ = file.Close() }()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		var event struct {
+			Time    time.Time `json:"Time"`
+			Action  string    `json:"Action"`
+			Package string    `json:"Package"`
+			Test    string    `json:"Test"`
+			Elapsed float64   `json:"Elapsed"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			return report, fmt.Errorf("decode Go test event in %s: %w", filepath.Base(path), err)
+		}
+		if event.Test == "" {
+			continue
+		}
+		if event.Action == "run" && report.firstRun.IsZero() {
+			report.firstRun = event.Time
+		}
+		if !strings.Contains(event.Test, "/") && (event.Action == "pass" || event.Action == "fail") {
+			report.tests = append(report.tests, goTestOutcome{pkg: event.Package, name: event.Test, elapsed: event.Elapsed, passed: event.Action == "pass"})
+		}
+	}
+	return report, scanner.Err()
 }
