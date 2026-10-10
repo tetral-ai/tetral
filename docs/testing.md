@@ -185,6 +185,8 @@ The readable CI topology is:
 - **Scheduled Verification**: bounded repetitions of named concurrency owners
   each week, plus daily compatibility, repository-health, and online dependency
   audits. A later pass is recorded but never erases the first failure.
+- **CI Benchmark**: dispatched by hand to measure a speed change; see
+  [CI Benchmark](#ci-benchmark). Nothing gates on it.
 
 `internal/testinfra/go_shard_weights.json` balances the four Go Race shards.
 Each package listed there is split across shards by top-level test, weighted by
@@ -244,10 +246,115 @@ to the reviewed immutable object, advance `reviewed_at`, and run
 `TestRepositoryActionsMatchReviewedInventory`. A major moving tag alone is not
 provenance.
 
+### CI Benchmark
+
+`.github/workflows/ci-benchmark.yml` runs the four Go Race shards for a base
+commit (side A) and for the dispatched branch head (side B) in one run, then
+compares them. Each side checks out its own commit and runs that commit's
+evidence action with the inputs of Pull Request Verification's Go Race job,
+so A really runs the base's runner. The workflow only reads: its token holds
+`contents: read` and `actions: read`, it uses no secrets, and
+`cache-mode: read` stops every job from saving to the Actions cache. A
+dispatch runs the dispatched branch's copy of the workflow, so the branch must
+contain it. Dispatches on one ref queue rather than cancel each other; a run
+holds eight Go Race jobs, so dispatch one at a time.
+
+```sh
+gh workflow run ci-benchmark.yml --ref <branch> [-f base=<commit>]
+```
+
+Without `base`, side A is the merge base of the branch with `origin/main`. A
+branch stacked on another passes its base branch head, as a SHA or
+`origin/<branch>`. A dispatch on `main` without `base` is an A/A run: both
+sides test the same commit.
+
+The **Compare A and B** job writes the report to the run summary and uploads
+`compare.json` as `ci-benchmark-compare-<run>-<attempt>`. It first checks that
+every result tested its side's commit. Per side and shard it reports the time
+before the runner starts (GitHub steps, `go run` and planning), dependency
+setup, preparation (job start to the first test), each step's compile time
+before its first test, fixed preparation (time before the runner, setup and
+the shard's longest step compile), the steps phase, job time, runner CPU model
+and image, and Go Race runner-minutes. Metrics are d = A − B, so a positive d
+means B is faster. Two effects shape how to read them:
+
+- Hosted runners differ in speed, even within one run. A test's B/A ratio is
+  therefore divided by the relative speed of its two jobs: the median B/A
+  ratio of the unchanged top-level tests that passed and ran at least one
+  second in both. The report states how many tests support each factor and
+  leaves ratios unnormalized when fewer than eight do. Tests of packages whose
+  files differ between the two commits, and the tests named by
+  `--changed-tests` (full import path and test name), support no factor.
+  `changed_tests_duration` sums exactly the named tests: A's durations against
+  B's divided by their jobs' speed factor.
+- Adding, removing or re-weighting a test re-balances the shard plan, which
+  moves the slowest job by minutes regardless of the change. When A and B ran
+  different plans, the measured slowest job, steps phase and runner-minutes
+  are reported but not judged. Preparation depends on which step a plan puts
+  first, so it is only reported. `fixed_preparation` counts the shard's
+  longest compile wherever it runs, so it is nearly plan-invariant: only that
+  compile depends on which packages share a shard. The replays are
+  plan-invariant: two workers take a shard plan's steps in order. A whole
+  package costs its measured step; a slice of a split package costs its tests
+  plus the overhead (time outside its tests, mostly compile) of that package's
+  step in the same shard, or the package's mean overhead when that shard ran
+  no step of it, so a run's own plan replays to its measured steps phase.
+  `replayed_slowest_steps_phase` prices both plans with A's durations, taking
+  B's only for packages A never ran;
+  `plan_fixed_slowest_job` prices A's plan with each side's durations and adds
+  that side's mean time before the runner and setup;
+  `plan_fixed_runner_minutes` adds each side's durations replayed through A's
+  plan to the runner time outside the steps phase (before the runner, setup,
+  teardown and upload) of every job that side ran, so a side with more shards
+  pays for each.
+
+The same command compares any two downloaded Go Race evidence sets, for
+example a pull request run against a main run. A side's commit is the
+`plan.revision.head` its results record, which for a pull request run is the
+test merge commit; `--repo` must hold both commits.
+
+```sh
+go run ./internal/testinfra/cmd/tetral-ci-bench compare \
+  --a <downloaded-a> --a-sha <commit> --b <downloaded-b> --b-sha <commit>
+```
+
+A change is judged from downloaded `compare.json` files. `noise` reads those of
+A/A runs and reports s_D, the standard deviation of the paired difference, per
+metric with its sample count. It is estimated from per-shard pairs: a mean of
+four shards divides it by two, a sum multiplies it by two, and a slowest-shard
+metric uses it as is. `verdict` applies the rule for one metric and the
+expected reduction E: E ≥ 10 s_D needs one run, 3 s_D ≤ E < 10 s_D three, and
+2 s_D ≤ E < 3 s_D five. It passes when d > 0 in every run and the mean d is at
+least E/2; below 2 s_D there is no measurable change. Every verdict also
+requires B's plan-fixed runner-minutes and plan-fixed slowest job to stay
+within A + 2 s_D, and refuses plan-dependent metrics from runs whose plans
+differ.
+`replayed_slowest_steps_phase` prices both plans over the same durations, so
+A/A runs give it no s_D: its verdict always takes five runs.
+
+```sh
+go run ./internal/testinfra/cmd/tetral-ci-bench noise --output noise.json aa-1.json aa-2.json aa-3.json
+go run ./internal/testinfra/cmd/tetral-ci-bench verdict \
+  --metric fixed_preparation --effect 270 --noise noise.json run-1.json run-2.json run-3.json
+```
+
+A/A runs change no test, so the s_D of `changed_tests_duration` comes from
+`noise --changed-tests <list>` with the change's own list: it sums the listed
+tests in each A/A `compare.json` (kept 30 days). A comparison keeps a test
+under one second only when it was made with that list; rerun `compare
+--changed-tests` on the A/A run's Go Race evidence while it is kept (14 days),
+or dispatch new A/A runs.
+
+Benchmark evidence never feeds shard calibration or the CI health job.
+Calibrate `go_shard_weights.json` only from Pull Request or Main Branch
+Verification evidence; the health job reads only its own run's `scheduled-*`
+artifacts.
+
 ## Evidence and diagnosis
 
 Structured results include the exact tested revision, selection, dependency
-identity, command outcome, duration, first failure, and CI execution envelope.
+identity, command outcome, each step's start, end and duration, first failure,
+and the CI execution envelope with the runner's CPU model and image.
 Do not treat a rerun as erasing an earlier failure. Preserve the first result,
 classify apparatus failures separately from product failures, and use the
 printed focused reproduction command for diagnosis.

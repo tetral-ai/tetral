@@ -76,6 +76,8 @@ type ExecutionEnvelope struct {
 	RunAttempt        string `json:"run_attempt,omitempty"`
 	Job               string `json:"job,omitempty"`
 	Producer          string `json:"producer,omitempty"`
+	CPUModel          string `json:"cpu_model,omitempty"`
+	RunnerImage       string `json:"runner_image,omitempty"`
 }
 
 type DependencyEvidence struct {
@@ -96,6 +98,8 @@ type StepResult struct {
 	Command      []string      `json:"command"`
 	WorkingDir   string        `json:"working_dir"`
 	Status       string        `json:"status"`
+	StartedAt    time.Time     `json:"started_at,omitzero"`
+	FinishedAt   time.Time     `json:"finished_at,omitzero"`
 	Elapsed      time.Duration `json:"elapsed_ns"`
 	FirstFailure string        `json:"first_failure,omitempty"`
 	Artifact     string        `json:"artifact,omitempty"`
