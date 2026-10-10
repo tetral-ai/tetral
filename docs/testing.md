@@ -189,11 +189,12 @@ The readable CI topology is:
 `internal/testinfra/go_shard_weights.json` balances the four Go Race shards.
 Each package listed there is split across shards by top-level test, weighted by
 the test's measured duration or the package's `default_ms`; other packages stay
-whole with relative weights. In the integration entry, every top-level test
-that ran longer than about ten seconds carries its `Elapsed` duration from the
-`go test -json` evidence of all four Go Race shards of Pull Request
-Verification run 37512221678, collected on the `calibrated_at` date. Recalibrate
-from the same per-test evidence of a current run, combining every shard of a
+whole with relative weights. The bridge and integration entries were
+recalibrated on 2026-10-10 from the `go test -json` evidence of all four Go
+Race shards of runs 37512221678, 37704934200 and 38003212112: each entry
+carries the median `Elapsed` of its top-level test across those runs, and
+every bridge test longer than about ten seconds has an entry. Recalibrate
+from the same per-test evidence of current runs, combining every shard of a
 sliced package.
 
 Report-only coverage runs `go test ./...` once without Race, so the integration
