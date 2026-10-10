@@ -409,20 +409,7 @@ func waitForLockWaiters(t *testing.T, admin *sql.DB, lockerPID int, want int) {
 	for time.Now().Before(deadline) {
 		var waiters int
 		if err := admin.QueryRowContext(context.Background(),
-			`SELECT count(*)
-			   FROM pg_locks waiting_lock
-			   JOIN pg_locks granted_lock
-			     ON waiting_lock.locktype = granted_lock.locktype
-			    AND waiting_lock.relation IS NOT DISTINCT FROM granted_lock.relation
-			    AND waiting_lock.page IS NOT DISTINCT FROM granted_lock.page
-			    AND waiting_lock.tuple IS NOT DISTINCT FROM granted_lock.tuple
-			    AND waiting_lock.transactionid IS NOT DISTINCT FROM granted_lock.transactionid
-			    AND waiting_lock.classid IS NOT DISTINCT FROM granted_lock.classid
-			    AND waiting_lock.objid IS NOT DISTINCT FROM granted_lock.objid
-			    AND waiting_lock.objsubid IS NOT DISTINCT FROM granted_lock.objsubid
-			  WHERE NOT waiting_lock.granted
-			    AND granted_lock.granted
-			    AND granted_lock.pid = $1`,
+			`SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`,
 			lockerPID,
 		).Scan(&waiters); err != nil {
 			t.Fatalf("check lock waiters: %v", err)

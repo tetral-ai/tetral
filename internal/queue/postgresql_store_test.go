@@ -3346,7 +3346,7 @@ func TestEmptyCounterCleanupSerializesWithConcurrentEnqueue(t *testing.T) {
 	for {
 		var waiting bool
 		if err := admin.QueryRowContext(ctx,
-			`SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND objid = $1)`,
+			`SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND objid = $1 AND database = (SELECT oid FROM pg_database WHERE datname = current_database()))`,
 			advisoryKey,
 		).Scan(&waiting); err != nil {
 			t.Fatalf("observe counter-delete barrier: %v", err)

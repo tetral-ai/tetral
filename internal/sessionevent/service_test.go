@@ -20,6 +20,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginefiles "github.com/tetral-ai/tetral/internal/files"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -871,7 +872,7 @@ func TestAppendClientEventsBirthRemainsAtomicWhileLeaseRacesSessionOwner(t *test
 		})
 		leaseDone <- leaseResult{jobs: jobs, err: err}
 	}()
-	waitForSessionEventAdvisoryLockWaiter(t, admin)
+	waitForSessionRuntimeMutationLockWaiter(t, admin, workspace.DefaultID, sessionID)
 	if events := readSessionEventLedgerRows(t, admin, sessionID); len(events) != 1 {
 		t.Fatalf("visible Events during uncommitted birth = %#v; want only the committed seed", events)
 	}
@@ -994,18 +995,31 @@ func waitForSessionEventLockWaiterPID(t testing.TB, admin *sql.DB, blockerPID in
 	return 0
 }
 
-func waitForSessionEventAdvisoryLockWaiter(t testing.TB, admin *sql.DB) {
+// waitForSessionRuntimeMutationLockWaiter returns once a backend queues on the
+// Session arbitration lock of sessionID in this test's database. Packages
+// running in parallel share the PostgreSQL server, so the wait names this
+// database; the exact key keeps any other advisory waiter in this clone from
+// satisfying it.
+func waitForSessionRuntimeMutationLockWaiter(t testing.TB, admin *sql.DB, workspaceID workspace.ID, sessionID string) {
 	t.Helper()
+	resource, err := storage.SessionRuntimeMutationAdvisoryLockResource(string(workspaceID), sessionID)
+	if err != nil {
+		t.Fatalf("Session arbitration lock key: %v", err)
+	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		var exists bool
 		if err := admin.QueryRow(`SELECT EXISTS (
 			SELECT 1
-			  FROM pg_stat_activity
-			 WHERE wait_event_type = 'Lock'
-			   AND query LIKE '%pg_advisory_xact_lock%'
-		)`).Scan(&exists); err != nil {
-			t.Fatalf("read SessionEvent advisory lock waiter: %v", err)
+			  FROM pg_locks
+			 WHERE locktype = 'advisory'
+			   AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+			   AND classid::bigint = $1
+			   AND objid::bigint = $2
+			   AND objsubid = 2
+			   AND NOT granted
+		)`, int64(uint32(storage.SessionRuntimeMutationAdvisoryLockCategory)), int64(uint32(resource))).Scan(&exists); err != nil {
+			t.Fatalf("read Session arbitration lock waiters: %v", err)
 		}
 		if exists {
 			return

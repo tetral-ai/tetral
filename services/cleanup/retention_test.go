@@ -847,20 +847,21 @@ func watermark(t *testing.T, admin *sql.DB, sessionID, feedKey string) int64 {
 	return value
 }
 
-// waitForLockWait blocks until a backend running a statement containing
-// fragment waits on a lock. It polls the catalog, not the clock.
+// waitForLockWait blocks until a backend of this database running a statement
+// containing fragment waits on a lock. It polls the catalog, not the clock.
 func waitForLockWait(t *testing.T, admin *sql.DB, fragment string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	for {
 		var waiting bool
-		if err := admin.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%' || $1 || '%' AND pid <> pg_backend_pid())`, fragment).Scan(&waiting); err != nil {
+		if err := admin.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%' || $1 || '%' AND pid <> pg_backend_pid())`, fragment).Scan(&waiting); err != nil {
 			t.Fatalf("wait for lock wait: %v", err)
 		}
 		if waiting {
 			return
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

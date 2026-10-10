@@ -3,6 +3,12 @@
 // migration tests receive an empty database. Every clone has a unique login,
 // private CONNECT capability, bounded cleanup, and runtime/admin pools derived
 // from the same in-memory clone handle.
+//
+// Clones share one server: pg_locks and pg_stat_activity list every clone's
+// backends, and clones reuse the same relation OIDs and advisory lock keys. A
+// test that polls for a lock wait must therefore match its own database
+// (datname = current_database() or that database's oid) or start from a known
+// PID (pid = $1, or pg_blocking_pids from it).
 package storagetest
 
 import (
