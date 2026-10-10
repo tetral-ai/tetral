@@ -526,6 +526,19 @@ func TestAuthTokenPrunerAdmissionAndShutdown(t *testing.T) {
 		default:
 			t.Fatal("Close returned before maintenance joined")
 		}
+		// Go cancellation joins the client loop before pgx's asynchronous
+		// cancellation necessarily reaches PostgreSQL. Keep the table locked
+		// until both old backends are gone, so they cannot resume pruning
+		// between the retained-row check and the fresh pass below.
+		for _, pid := range []uint32{deadlinePID, maintenancePID} {
+			for pruneBackendState(ctx, t, admin, pid) != "gone" {
+				select {
+				case <-ctx.Done():
+					t.Fatalf("cancelled pruning backend pid=%d did not stop before unlock", pid)
+				case <-time.After(time.Millisecond):
+				}
+			}
+		}
 		if err := lock.Rollback(); err != nil {
 			t.Fatal(err)
 		}
