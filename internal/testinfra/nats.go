@@ -330,28 +330,23 @@ func (m *dependencyManager) startNATS(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	bindings, release, err := ReserveLoopbackPorts(4222, 8222)
+	var port string
+	err = m.publishContainer(ctx, "nats", name, image, []int{4222, 8222}, func(bindings map[int]int) []string {
+		arguments := append([]string{"run", "-d", "--name", name}, dependencyContainerLabels("nats", m.runID)...)
+		return append(arguments, "-p", "127.0.0.1:"+strconv.Itoa(bindings[4222])+":4222", "-p", "127.0.0.1:"+strconv.Itoa(bindings[8222])+":8222", "-v", directory+":/fixture:ro", image, "-c", "/fixture/nats.conf")
+	}, func(bindings map[int]int) error {
+		published, err := dockerPort(ctx, name, "4222/tcp")
+		if err != nil {
+			return err
+		}
+		if published != strconv.Itoa(bindings[4222]) {
+			return errors.New("NATS published binding differs from reserved endpoint")
+		}
+		port = published
+		return nil
+	})
 	if err != nil {
-		return err
-	}
-	defer release()
-	arguments := append([]string{"run", "-d", "--name", name}, dependencyContainerLabels("nats", m.runID)...)
-	arguments = append(arguments, "-p", "127.0.0.1:"+strconv.Itoa(bindings[4222])+":4222", "-p", "127.0.0.1:"+strconv.Itoa(bindings[8222])+":8222", "-v", directory+":/fixture:ro", image, "-c", "/fixture/nats.conf")
-	// Dispatch can succeed even if the CLI is canceled before its response.
-	// Register the reserved run-owned name before dispatch so the bounded
-	// cleanup also joins that uncertain startup outcome.
-	m.containers = append(m.containers, name)
-	m.containerDependencies = append(m.containerDependencies, "nats")
-	release()
-	if err := runQuiet(ctx, "docker", arguments...); err != nil {
 		return fmt.Errorf("start NATS dependency: %w", err)
-	}
-	port, err := dockerPort(ctx, name, "4222/tcp")
-	if err != nil {
-		return err
-	}
-	if port != strconv.Itoa(bindings[4222]) {
-		return errors.New("NATS published binding differs from reserved endpoint")
 	}
 	fixture.Container = name
 	fixture.Servers = []string{"nats://127.0.0.1:" + port}

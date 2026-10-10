@@ -6,14 +6,17 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -27,6 +30,13 @@ const (
 	forkSDKCommit         = "406e6eee5e28a2cb3e2caa4531700abb682a96e5"
 	dependencyStopTimeout = 30 * time.Second
 )
+
+// runnerPostgreSQLSettings configure the runner's disposable database. No test
+// restarts it or reads its write-ahead log, so it runs without durability and
+// the checkpoint every clone drop requests no longer waits on fsync.
+var runnerPostgreSQLSettings = []string{"max_connections=300", "fsync=off", "synchronous_commit=off", "full_page_writes=off"}
+
+var dockerPublishing sync.Mutex
 
 type dependencyManager struct {
 	environment           []string
@@ -107,113 +117,173 @@ func startDependenciesWith(ctx context.Context, dependencies, environment []stri
 
 func startDependenciesWithRoot(ctx context.Context, dependencies, environment []string, starters dependencyStarters, root string) (*dependencyManager, error) {
 	manager := &dependencyManager{environment: environment, root: root}
+	// Keycloak and egctl mostly wait, on a JVM start or on a download and a
+	// helper build, so each starts in the background on its own manager. That
+	// manager shares no state with the serial starts and is adopted only after
+	// every starter has returned.
+	backgroundStarters := map[string]func(context.Context, *dependencyManager) error{"keycloak": starters.keycloak, "egctl": starters.tool}
+	caller := ctx
+	ctx, cancel := context.WithCancel(caller)
+	defer cancel()
+	var failure error
+	var failed sync.Once
+	fail := func(err error) {
+		failed.Do(func() {
+			failure = err
+			cancel()
+		})
+	}
+	inherited := slices.Clone(environment)
+	var background []*dependencyManager
+	var starting sync.WaitGroup
 	for _, dependency := range dependencies {
-		started := time.Now()
-		evidenceStart := len(manager.evidence)
-		switch dependency {
-		case "keycloak":
-			if starters.keycloak == nil {
-				_ = manager.stopBounded()
-				return nil, fmt.Errorf("keycloak dependency starter is unavailable")
-			}
-			if err := starters.keycloak(ctx, manager); err != nil {
-				_ = manager.stopBounded()
-				return nil, err
-			}
-		case "nats":
-			if starters.nats == nil {
-				_ = manager.stopBounded()
-				return nil, fmt.Errorf("NATS dependency starter is unavailable")
-			}
-			if err := starters.nats(ctx, manager); err != nil {
-				_ = manager.stopBounded()
-				return nil, err
-			}
-		case "postgresql":
-			if dsn := os.Getenv(storagetest.EnvTestDatabaseURL); dsn == "" {
-				if err := starters.postgresql(ctx, manager); err != nil {
-					_ = manager.stopBounded()
-					return nil, err
-				}
-			} else if err := manager.recordExternalPostgreSQL(ctx, dsn); err != nil {
-				_ = manager.stopBounded()
-				return nil, err
-			}
-		case "minio":
-			if os.Getenv("TETRAL_TEST_MINIO_ENDPOINT") == "" {
-				if err := starters.minio(ctx, manager); err != nil {
-					_ = manager.stopBounded()
-					return nil, err
-				}
-			} else {
-				manager.evidence = append(manager.evidence, DependencyEvidence{Name: "minio", Source: "external", Identity: "external-minio"})
-			}
-		case "docker":
-			if err := starters.docker(ctx); err != nil {
-				_ = manager.stopBounded()
-				return nil, err
-			}
-			manager.environment = append(withoutEnvironmentVariable(manager.environment, "TETRAL_TEST_DOCKER_AVAILABLE"), "TETRAL_TEST_DOCKER_AVAILABLE=1")
-			manager.evidence = append(manager.evidence, DependencyEvidence{Name: "docker", Source: "host-daemon", Identity: "available"})
-		case "sdk":
-			if err := starters.sdk(ctx, manager); err != nil {
-				_ = manager.stopBounded()
-				return nil, err
-			}
-		case "egctl":
-			if starters.tool == nil {
-				_ = manager.stopBounded()
-				return nil, fmt.Errorf("egctl dependency starter is unavailable")
-			}
-			if err := starters.tool(ctx, manager); err != nil {
-				_ = manager.stopBounded()
-				return nil, err
-			}
-		case "envoy", "edge-envoy", "bun-image":
-			if starters.image == nil {
-				_ = manager.stopBounded()
-				return nil, fmt.Errorf("pinned image dependency starter is unavailable")
-			}
-			if err := starters.image(ctx, manager, dependency); err != nil {
-				_ = manager.stopBounded()
-				return nil, err
-			}
-		case "bun-workspaces":
-			if root == "" {
-				_ = manager.stopBounded()
-				return nil, fmt.Errorf("bun workspace dependency requires a repository root")
-			}
-			identity, err := installBunWorkspaces(ctx, root)
-			if err != nil {
-				_ = manager.stopBounded()
-				return nil, err
-			}
-			manager.evidence = append(manager.evidence, DependencyEvidence{Name: "bun-workspaces", Source: "repository-lockfiles", Identity: identity})
-		default:
-			_ = manager.stopBounded()
-			return nil, fmt.Errorf("unknown test dependency %q", dependency)
+		start, ok := backgroundStarters[dependency]
+		if !ok {
+			continue
 		}
-		for index := evidenceStart; index < len(manager.evidence); index++ {
-			if manager.evidence[index].Name == dependency {
-				manager.evidence[index].SetupElapsed = time.Since(started)
-			}
+		if start == nil {
+			fail(fmt.Errorf("%s dependency starter is unavailable", dependency))
+			break
 		}
-		if dependency == "postgresql" {
-			templateStarted := time.Now()
-			digest, err := storagetest.PrepareTemplate(ctx, manager.postgresDSN)
-			if err != nil {
-				_ = manager.stopBounded()
-				return nil, fmt.Errorf("prepare PostgreSQL test template: %w", err)
+		if err := manager.ensureRunID(); err != nil {
+			fail(err)
+			break
+		}
+		starter := &dependencyManager{environment: slices.Clone(inherited), root: root, runID: manager.runID}
+		background = append(background, starter)
+		starting.Go(func() {
+			started := time.Now()
+			if err := start(ctx, starter); err != nil {
+				fail(err)
+				return
 			}
-			for index := evidenceStart; index < len(manager.evidence); index++ {
-				if manager.evidence[index].Name == dependency {
-					manager.evidence[index].TemplateIdentity = digest
-					manager.evidence[index].TemplateSetupElapsed = time.Since(templateStarted)
-				}
+			starter.recordDependencySetup(dependency, time.Since(started))
+		})
+	}
+	for _, dependency := range dependencies {
+		if _, ok := backgroundStarters[dependency]; ok {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			fail(err)
+			break
+		}
+		if err := manager.startSerialDependency(ctx, dependency, starters); err != nil {
+			fail(err)
+			break
+		}
+	}
+	starting.Wait()
+	for _, starter := range background {
+		manager.adopt(starter, inherited)
+	}
+	if failure != nil {
+		_ = manager.stopBounded()
+		// A starter stopped by the caller reports only its own symptom.
+		if cause := context.Cause(caller); cause != nil && !errors.Is(failure, cause) {
+			failure = fmt.Errorf("%w: %v", cause, failure)
+		}
+		return nil, failure
+	}
+	return manager, nil
+}
+
+func (m *dependencyManager) startSerialDependency(ctx context.Context, dependency string, starters dependencyStarters) error {
+	started := time.Now()
+	switch dependency {
+	case "nats":
+		if starters.nats == nil {
+			return fmt.Errorf("NATS dependency starter is unavailable")
+		}
+		if err := starters.nats(ctx, m); err != nil {
+			return err
+		}
+	case "postgresql":
+		if dsn := os.Getenv(storagetest.EnvTestDatabaseURL); dsn == "" {
+			if err := starters.postgresql(ctx, m); err != nil {
+				return err
+			}
+		} else if err := m.recordExternalPostgreSQL(ctx, dsn); err != nil {
+			return err
+		}
+	case "minio":
+		if os.Getenv("TETRAL_TEST_MINIO_ENDPOINT") == "" {
+			if err := starters.minio(ctx, m); err != nil {
+				return err
+			}
+		} else {
+			m.evidence = append(m.evidence, DependencyEvidence{Name: "minio", Source: "external", Identity: "external-minio"})
+		}
+	case "docker":
+		if err := starters.docker(ctx); err != nil {
+			return err
+		}
+		m.environment = append(withoutEnvironmentVariable(m.environment, "TETRAL_TEST_DOCKER_AVAILABLE"), "TETRAL_TEST_DOCKER_AVAILABLE=1")
+		m.evidence = append(m.evidence, DependencyEvidence{Name: "docker", Source: "host-daemon", Identity: "available"})
+	case "sdk":
+		if err := starters.sdk(ctx, m); err != nil {
+			return err
+		}
+	case "envoy", "edge-envoy", "bun-image":
+		if starters.image == nil {
+			return fmt.Errorf("pinned image dependency starter is unavailable")
+		}
+		if err := starters.image(ctx, m, dependency); err != nil {
+			return err
+		}
+	case "bun-workspaces":
+		if m.root == "" {
+			return fmt.Errorf("bun workspace dependency requires a repository root")
+		}
+		identity, err := installBunWorkspaces(ctx, m.root)
+		if err != nil {
+			return err
+		}
+		m.evidence = append(m.evidence, DependencyEvidence{Name: "bun-workspaces", Source: "repository-lockfiles", Identity: identity})
+	default:
+		return fmt.Errorf("unknown test dependency %q", dependency)
+	}
+	m.recordDependencySetup(dependency, time.Since(started))
+	if dependency == "postgresql" {
+		templateStarted := time.Now()
+		digest, err := storagetest.PrepareTemplate(ctx, m.postgresDSN)
+		if err != nil {
+			return fmt.Errorf("prepare PostgreSQL test template: %w", err)
+		}
+		for index := range m.evidence {
+			if m.evidence[index].Name == dependency {
+				m.evidence[index].TemplateIdentity = digest
+				m.evidence[index].TemplateSetupElapsed = time.Since(templateStarted)
 			}
 		}
 	}
-	return manager, nil
+	return nil
+}
+
+// adopt takes over what a background starter left once it has returned: its
+// containers and directories for teardown, its evidence, and the environment
+// variables it set over the inherited ones.
+func (m *dependencyManager) adopt(starter *dependencyManager, inherited []string) {
+	m.containers = append(m.containers, starter.containers...)
+	m.containerDependencies = append(m.containerDependencies, starter.containerDependencies...)
+	m.directories = append(m.directories, starter.directories...)
+	m.directoryDependencies = append(m.directoryDependencies, starter.directoryDependencies...)
+	m.evidence = append(m.evidence, starter.evidence...)
+	for _, variable := range starter.environment {
+		if slices.Contains(inherited, variable) {
+			continue
+		}
+		name, _, _ := strings.Cut(variable, "=")
+		m.environment = append(withoutEnvironmentVariable(m.environment, name), variable)
+	}
+}
+
+func (m *dependencyManager) recordDependencySetup(name string, elapsed time.Duration) {
+	for index := range m.evidence {
+		if m.evidence[index].Name == name {
+			m.evidence[index].SetupElapsed = elapsed
+		}
+	}
 }
 
 func installBunWorkspaces(ctx context.Context, root string) (string, error) {
@@ -329,12 +399,13 @@ func (m *dependencyManager) startPostgreSQL(ctx context.Context) error {
 	arguments = append(arguments, labels...)
 	arguments = append(arguments,
 		"-p", "127.0.0.1::5432", "-e", "POSTGRES_USER=tetral", "-e", "POSTGRES_PASSWORD=tetral",
-		"-e", "POSTGRES_DB=tetral", postgresImage, "-c", "max_connections=300")
-	if err := runQuiet(ctx, "docker", arguments...); err != nil {
+		"-e", "POSTGRES_DB=tetral", postgresImage)
+	for _, setting := range runnerPostgreSQLSettings {
+		arguments = append(arguments, "-c", setting)
+	}
+	if err := m.publishContainer(ctx, "postgresql", name, postgresImage, nil, func(map[int]int) []string { return arguments }, nil); err != nil {
 		return fmt.Errorf("start PostgreSQL dependency: %w", err)
 	}
-	m.containers = append(m.containers, name)
-	m.containerDependencies = append(m.containerDependencies, "postgresql")
 	for attempt := 0; attempt < 60; attempt++ {
 		if runQuiet(ctx, "docker", "exec", name, "pg_isready", "-U", "tetral", "-d", "tetral") == nil {
 			port, err := dockerPort(ctx, name, "5432/tcp")
@@ -343,7 +414,9 @@ func (m *dependencyManager) startPostgreSQL(ctx context.Context) error {
 			}
 			dsn := "postgres://tetral:tetral@127.0.0.1:" + port + "/tetral?sslmode=disable"
 			if err := verifyPostgreSQLConnection(ctx, dsn); err != nil {
-				time.Sleep(500 * time.Millisecond)
+				if err := sleepContext(ctx, 500*time.Millisecond); err != nil {
+					return err
+				}
 				continue
 			}
 			identity, err := dockerImageDigest(ctx, postgresImage)
@@ -359,10 +432,12 @@ func (m *dependencyManager) startPostgreSQL(ctx context.Context) error {
 				storagetest.EnvTestDatabaseURL+"="+dsn,
 				storagetest.EnvTestProvenance+"="+identity,
 			)
-			m.evidence = append(m.evidence, DependencyEvidence{Name: "postgresql", Source: "runner-container", Identity: identity, Version: version, RunID: m.runID})
+			m.evidence = append(m.evidence, DependencyEvidence{Name: "postgresql", Source: "runner-container", Identity: identity, Version: version, ConfigurationIdentity: strings.Join(runnerPostgreSQLSettings, ","), RunID: m.runID})
 			return nil
 		}
-		time.Sleep(500 * time.Millisecond)
+		if err := sleepContext(ctx, 500*time.Millisecond); err != nil {
+			return err
+		}
 	}
 	return fmt.Errorf("PostgreSQL dependency did not become ready")
 }
@@ -387,11 +462,9 @@ func (m *dependencyManager) startMinIO(ctx context.Context) error {
 	arguments = append(arguments,
 		"-p", "127.0.0.1::9000", "-e", "MINIO_ROOT_USER=tetralminio", "-e", "MINIO_ROOT_PASSWORD=tetralminio123",
 		minioImage, "server", "/data", "--address", ":9000")
-	if err := runQuiet(ctx, "docker", arguments...); err != nil {
+	if err := m.publishContainer(ctx, "minio", name, minioImage, nil, func(map[int]int) []string { return arguments }, nil); err != nil {
 		return fmt.Errorf("start MinIO dependency: %w", err)
 	}
-	m.containers = append(m.containers, name)
-	m.containerDependencies = append(m.containerDependencies, "minio")
 	port, err := dockerPort(ctx, name, "9000/tcp")
 	if err != nil {
 		return err
@@ -417,9 +490,55 @@ func (m *dependencyManager) startMinIO(ctx context.Context) error {
 				return nil
 			}
 		}
-		time.Sleep(500 * time.Millisecond)
+		if err := sleepContext(ctx, 500*time.Millisecond); err != nil {
+			return err
+		}
 	}
 	return fmt.Errorf("MinIO dependency did not become ready")
+}
+
+// publishContainer starts a run-owned container of image that publishes
+// loopback ports. A reserved port is free from its release until Docker binds
+// it, and Docker picks every 127.0.0.1::port binding from the same range, so
+// each such start in this process runs from reservation to its verified
+// binding under one lock. An absent image is pulled before the lock is taken,
+// so no start waits on another's registry download. The name is registered
+// before dispatch because the daemon can create the container even when the
+// CLI is canceled first.
+func (m *dependencyManager) publishContainer(ctx context.Context, dependency, name, image string, reserve []int, arguments func(bindings map[int]int) []string, verify func(bindings map[int]int) error) error {
+	if runQuiet(ctx, "docker", "image", "inspect", image) != nil {
+		if err := runQuiet(ctx, "docker", "pull", image); err != nil {
+			return fmt.Errorf("pull %s: %w", image, err)
+		}
+	}
+	dockerPublishing.Lock()
+	defer dockerPublishing.Unlock()
+	bindings, release, err := ReserveLoopbackPorts(reserve...)
+	if err != nil {
+		return err
+	}
+	command := arguments(bindings)
+	m.containers = append(m.containers, name)
+	m.containerDependencies = append(m.containerDependencies, dependency)
+	release()
+	if err := runQuiet(ctx, "docker", command...); err != nil {
+		return err
+	}
+	if verify != nil {
+		return verify(bindings)
+	}
+	return nil
+}
+
+func sleepContext(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (m *dependencyManager) ensureRunID() error {
