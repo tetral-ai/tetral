@@ -227,6 +227,7 @@ func TestPostgreSQLBackgroundReceiptConsumersBindingRace(t *testing.T) {
 	for _, kind := range []string{"poll", "stdin", "cancel"} {
 		for _, cut := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/cut_%t", kind, cut), func(t *testing.T) {
+				t.Parallel()
 				runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 				store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 				scope, _ := seedAwaitExecutionNotificationFixture(t, store, admin, "receipt_consumer")
@@ -377,6 +378,7 @@ func receiptJoinedRPC(t *testing.T, store *PostgreSQLBridgeAPIStore, podUID stri
 func TestPostgreSQLMemoryProjectionReceiptBindingRace(t *testing.T) {
 	for _, cut := range []bool{false, true} {
 		t.Run(fmt.Sprintf("cut_%t", cut), func(t *testing.T) {
+			t.Parallel()
 			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			scope, _ := seedAwaitExecutionNotificationFixture(t, store, admin, "memory_projection_receipt")

@@ -239,30 +239,34 @@ func startContentE2EWithOptions(t *testing.T, scenario string, lost, cold bool, 
 		extra.Config.LeaseOwner = fmt.Sprintf("content-e2e-tool-%d", worker)
 		startContentWorkerContext(ctx, t, extra.RunOnceWithActivity, extra.Config.LeaseOwner)
 	}
+	// Registered last, so it runs before every other fixture cleanup: a failure
+	// records the durable state before teardown, and with the provider released
+	// the still-running Sandbox and delivery workers let the Runtime settle its
+	// turn instead of draining to its budgets.
 	t.Cleanup(func() {
-		if !t.Failed() {
-			return
-		}
-		for name, query := range map[string]string{
-			"tool_custody":      `SELECT COALESCE(jsonb_agg(jsonb_build_object('execution_state',execution_state,'tool_use_event_id',tool_use_event_id,'provider_command_reference',provider_command_reference_json,'result_json',result_json)),'[]'::jsonb)::text FROM session_runtime_tool_results WHERE session_id=$1`,
-			"sandbox_lifecycle": `SELECT COALESCE(jsonb_agg(row_to_json(facts)),'[]'::jsonb)::text FROM (SELECT kind,state,error_kind,count(*) FROM sandbox_lifecycle_operations WHERE session_id=$1 GROUP BY kind,state,error_kind) facts`,
-			"events":            `SELECT COALESCE(jsonb_agg(jsonb_build_object('type',type,'id',event_id,'payload',CASE WHEN type='session.error' THEN payload_json ELSE NULL END) ORDER BY sequence),'[]'::jsonb)::text FROM session_events WHERE session_id=$1`,
-		} {
-			var facts string
-			if err := admin.QueryRow(query, created.Session.ID).Scan(&facts); err != nil {
-				t.Logf("E2E %s observation error: %v", name, err)
-			} else {
-				t.Logf("E2E %s: %s", name, facts)
+		if t.Failed() {
+			for name, query := range map[string]string{
+				"tool_custody":      `SELECT COALESCE(jsonb_agg(jsonb_build_object('execution_state',execution_state,'tool_use_event_id',tool_use_event_id,'provider_command_reference',provider_command_reference_json,'result_json',result_json)),'[]'::jsonb)::text FROM session_runtime_tool_results WHERE session_id=$1`,
+				"sandbox_lifecycle": `SELECT COALESCE(jsonb_agg(row_to_json(facts)),'[]'::jsonb)::text FROM (SELECT kind,state,error_kind,count(*) FROM sandbox_lifecycle_operations WHERE session_id=$1 GROUP BY kind,state,error_kind) facts`,
+				"events":            `SELECT COALESCE(jsonb_agg(jsonb_build_object('type',type,'id',event_id,'payload',CASE WHEN type='session.error' THEN payload_json ELSE NULL END) ORDER BY sequence),'[]'::jsonb)::text FROM session_events WHERE session_id=$1`,
+			} {
+				var facts string
+				if err := admin.QueryRow(query, created.Session.ID).Scan(&facts); err != nil {
+					t.Logf("E2E %s observation error: %v", name, err)
+				} else {
+					t.Logf("E2E %s: %s", name, facts)
+				}
+			}
+			if overrides.Provider == nil {
+				t.Logf("E2E external command starts=%d activated=%t", provider.calls.Load(), provider.created.Load())
 			}
 		}
-		if overrides.Provider == nil {
-			t.Logf("E2E external command starts=%d activated=%t", provider.calls.Load(), provider.created.Load())
+		if overrides.StopProvider != nil {
+			overrides.StopProvider()
 		}
+		provider.finish()
+		runtime.stop(t)
 	})
-	t.Cleanup(provider.finish)
-	if overrides.StopProvider != nil {
-		t.Cleanup(overrides.StopProvider)
-	}
 	result := &contentE2E{environmentID: env.ID, approvalMode: approvalMode, db: admin, objects: objects, sdk: sdk, runtime: runtime, gateway: gateway, provider: provider, session: created.Session.ID, lost: fault, baseURL: base, apiKey: key}
 	result.recoverRuntime = func(t *testing.T) {
 		runtime.killAtContentBoundary(t)

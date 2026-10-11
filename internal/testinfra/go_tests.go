@@ -12,9 +12,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 func decodeOnePackage(body []byte, destination *listedPackage) error {
@@ -154,7 +156,40 @@ func dependenciesForCapabilities(exclusions []Exclusion) []string {
 	return dependencies
 }
 
+// goPackageListings keeps one package listing per absolute module root for the
+// life of the process. A process plans a tree it does not edit, so the listing
+// stays current; failed listings are not kept, and callers receive copies.
+var goPackageListings = struct {
+	sync.Mutex
+	byRoot map[string][]listedPackage
+}{byRoot: map[string][]listedPackage{}}
+
 func listGoPackages(root string) ([]listedPackage, error) {
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	goPackageListings.Lock()
+	defer goPackageListings.Unlock()
+	packages, ok := goPackageListings.byRoot[absolute]
+	if !ok {
+		packages, err = readGoPackages(absolute)
+		if err != nil {
+			return nil, err
+		}
+		goPackageListings.byRoot[absolute] = packages
+	}
+	copies := make([]listedPackage, len(packages))
+	for index, pkg := range packages {
+		pkg.GoFiles = slices.Clone(pkg.GoFiles)
+		pkg.TestGoFiles = slices.Clone(pkg.TestGoFiles)
+		pkg.XTestGoFiles = slices.Clone(pkg.XTestGoFiles)
+		copies[index] = pkg
+	}
+	return copies, nil
+}
+
+func readGoPackages(root string) ([]listedPackage, error) {
 	command := exec.Command("go", "list", "-json", "./...")
 	command.Dir = root
 	output, err := command.Output()

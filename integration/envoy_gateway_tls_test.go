@@ -247,7 +247,7 @@ func TestPostgreSQLEnvoyGatewayTLSLifecycle(t *testing.T) {
 				fixture.Snapshot = retired
 				startEnvoyGatewayProxy(edge.ctx, t, fixture)
 				fixture.Snapshot = original // All later generation comparisons retain the original reference graph.
-				edgeAwaitReady(edge.ctx, t, fixture.Ports.Ready)
+				edgeAwaitReady(edge.ctx, t, fixture)
 				edge.assertPublicTLSLeaf(t, publicLeaf)
 				if profile == "hardened" {
 					for _, role := range []string{"auth", "api", "event-stream", "git-proxy"} {

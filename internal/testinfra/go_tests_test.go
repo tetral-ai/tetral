@@ -225,11 +225,20 @@ func TestDeclaredGoDependenciesDriveProfileSelections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Affected expansion is a function of the package, its listing and the
+	// inventory, never of the contract, and yields one selection per package, so
+	// one expansion of the declared packages serves every contract.
+	var packages []string
 	for _, contract := range inventory.GoTests {
-		affected, err := expandAffectedGoSelection(root, []Selection{{Group: "go", Packages: []string{contract.Package}}})
-		if err != nil {
-			t.Fatal(err)
+		if !slices.Contains(packages, contract.Package) {
+			packages = append(packages, contract.Package)
 		}
+	}
+	affected, err := expandAffectedGoSelection(root, []Selection{{Group: "go", Packages: packages}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, contract := range inventory.GoTests {
 		for _, selections := range [][]Selection{full.Selections, affected} {
 			found := false
 			for _, selection := range selections {

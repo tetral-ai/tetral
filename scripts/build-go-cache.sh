@@ -32,5 +32,5 @@ go build -o /dev/null ./internal/testinfra/cmd/tetral-test
 
 # Process fixtures integration tests build (replica_web_connector_test.go,
 # transporttest/proxy.go).
-go build -o /dev/null ./services/web-connector/cmd/web-connector
+go build -race -o /dev/null ./services/web-connector/cmd/web-connector
 CGO_ENABLED=0 go build -trimpath -o /dev/null ./integration/transporttest/cmd/backend

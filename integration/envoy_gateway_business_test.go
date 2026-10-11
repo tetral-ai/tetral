@@ -152,7 +152,7 @@ func (edge *translatedPublicEdge) factory(profile string) func(*testing.T, *stor
 		}}, gitproxy.NewRepositoryPolicyAuthorizer(gitproxy.NewPostgreSQLRepositoryTokenResolver(gitDB, transporttest.Must(vault.NewEncryptor(sdkIntegrationVaultKey)))), gitproxy.HandlerOptions{PublicBaseURL: publicGit, Transport: edgeGitTransport{calls: &edge.gitCalls, expectedAuthorization: &edge.gitAuthorization, gate: &edge.gitGate}})
 		edge.startHTTP(ctx, t, fixture, profile, "git-proxy", "127.0.0.5:8080", gitHandler)
 		startEnvoyGatewayProxy(ctx, t, fixture)
-		edgeAwaitReady(ctx, t, ports.Ready)
+		edgeAwaitReady(ctx, t, fixture)
 		roots := x509.NewCertPool()
 		roots.AppendCertsFromPEM(fixture.Authority.PEM)
 		edge.client = &http.Client{Transport: &http.Transport{ForceAttemptHTTP2: true, TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {

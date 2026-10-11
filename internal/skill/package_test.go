@@ -423,16 +423,44 @@ func TestBuildNormalizedPackageRejectsSizeLimits(t *testing.T) {
 
 	t.Run("zip expanded package cap cleans staged entries", func(t *testing.T) {
 		stageDir := t.TempDir()
-		zeroBody := bytes.Repeat([]byte{0}, int(skill.MaxPackageEntryBytes))
-		entries := []zipFixtureEntry{{name: "finance/SKILL.md", body: skillMD("n", "d")}}
-		for i := 0; i < 20; i++ {
-			entries = append(entries, zipFixtureEntry{name: "finance/big-" + packageItoa(i) + ".bin", body: zeroBody})
+		// Deflate the zero entry once; every large entry reuses its header and
+		// compressed bytes under its own name.
+		template := buildZip(t, []zipFixtureEntry{
+			{name: "finance/SKILL.md", body: skillMD("n", "d")},
+			{name: "finance/big.bin", body: bytes.Repeat([]byte{0}, int(skill.MaxPackageEntryBytes))},
+		})
+		reader, err := zip.NewReader(bytes.NewReader(template), int64(len(template)))
+		if err != nil {
+			t.Fatal(err)
 		}
-		parts := stageUploadParts(t, stageDir, []uploadFile{{filename: "upload.zip", body: buildZip(t, entries)}})
+		var upload bytes.Buffer
+		zw := zip.NewWriter(&upload)
+		if err := zw.Copy(reader.File[0]); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 20; i++ {
+			header := reader.File[1].FileHeader
+			header.Name = "finance/big-" + packageItoa(i) + ".bin"
+			w, err := zw.CreateRaw(&header)
+			if err != nil {
+				t.Fatal(err)
+			}
+			compressed, err := reader.File[1].OpenRaw()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.Copy(w, compressed); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		parts := stageUploadParts(t, stageDir, []uploadFile{{filename: "upload.zip", body: upload.Bytes()}})
 		defer cleanupParts(t, parts)
 		before := listStageFiles(t, stageDir)
 
-		_, err := skill.BuildNormalizedPackage(context.Background(), parts, stageDir)
+		_, err = skill.BuildNormalizedPackage(context.Background(), parts, stageDir)
 		var tooLarge *skill.RequestTooLargeError
 		if !errors.As(err, &tooLarge) {
 			t.Fatalf("BuildNormalizedPackage error = %T %v; want RequestTooLargeError", err, err)

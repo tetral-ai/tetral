@@ -165,11 +165,20 @@ func TestProductionDiagnosticPipeBackpressureHasFixedResourcesAndBoundedClose(t 
 	case <-time.After(time.Second):
 		t.Fatal("production worker never reached pipe")
 	}
-	for n := 0; n < 1000; n++ {
+	for logged := 0; owner.Stats().Dropped == 0; logged++ {
+		if logged == 1000 {
+			t.Fatalf("queue not bounded: %+v", owner.Stats())
+		}
 		owner.Logger.Info("business.observation", attrs...)
 	}
-	if owner.Stats().Queued > 64 || owner.Stats().Dropped == 0 {
-		t.Fatalf("queue not bounded: %+v", owner.Stats())
+	// The worker is blocked on the full pipe, so a full queue's worth of further
+	// records is dropped one for one while the queue stays at capacity.
+	firstDrop := owner.Stats().Dropped
+	for n := 0; n < diagnosticQueueCapacity; n++ {
+		owner.Logger.Info("business.observation", attrs...)
+	}
+	if stats := owner.Stats(); stats.Queued != diagnosticQueueCapacity || stats.Dropped != firstDrop+diagnosticQueueCapacity {
+		t.Fatalf("queue not bounded: %+v", stats)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()

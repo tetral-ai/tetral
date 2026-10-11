@@ -17,6 +17,7 @@ import (
 	"time"
 
 	adminv3 "github.com/envoyproxy/go-control-plane/envoy/admin/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
@@ -281,6 +282,51 @@ func requireConfinedEnvoyListeners(t *testing.T, snapshot *translatedEnvoySnapsh
 	return result
 }
 
+// servedEnvoySnapshot is one generation as served to Envoy: the translated
+// resources plus an empty assignment for the official Bootstrap's ADS-fed local
+// cluster. In a cluster the controller assigns the proxy's own endpoints to it;
+// the CLI omits the assignment, and without one Envoy reports ready only after
+// its 15 s initial-fetch timeout. Empty is routing-neutral here because no
+// translated cluster uses zone-aware load balancing. Consistency and parity
+// checks stay on the translated resources: no CDS cluster references the added
+// assignment, so Snapshot.Consistent would reject the served copy.
+func servedEnvoySnapshot(t *testing.T, version string, snapshot *translatedEnvoySnapshot) *cachev3.Snapshot {
+	t.Helper()
+	manager, _ := snapshot.Bootstrap["clusterManager"].(map[string]any)
+	local, _ := manager["localClusterName"].(string)
+	static, _ := snapshot.Bootstrap["staticResources"].(map[string]any)
+	clusters, _ := static["clusters"].([]any)
+	resources := map[resourcev3.Type][]types.Resource{}
+	for kind, items := range snapshot.Resources {
+		resources[kind] = append([]types.Resource(nil), items...)
+	}
+	for _, raw := range clusters {
+		cluster, _ := raw.(map[string]any)
+		if cluster["type"] != "EDS" {
+			continue
+		}
+		eds, _ := cluster["edsClusterConfig"].(map[string]any)
+		name, _ := eds["serviceName"].(string)
+		if name == "" {
+			name, _ = cluster["name"].(string)
+		}
+		if local == "" || name != local {
+			t.Fatal("official Bootstrap declares an EDS cluster other than its local cluster")
+		}
+		for _, resource := range resources[resourcev3.EndpointType] {
+			if cachev3.GetResourceName(resource) == name {
+				t.Fatal("translation already assigns the Bootstrap's local cluster")
+			}
+		}
+		resources[resourcev3.EndpointType] = append(resources[resourcev3.EndpointType], &endpointv3.ClusterLoadAssignment{ClusterName: name})
+	}
+	served, err := cachev3.NewSnapshot(version, resources)
+	if err != nil {
+		t.Fatal("build served policy snapshot")
+	}
+	return served
+}
+
 // releasePorts, when non-nil, frees the caller's reserved host ports
 // immediately before the host-network Envoy container is dispatched.
 func serveTranslatedEnvoy(ownerCtx context.Context, t *testing.T, snapshot *translatedEnvoySnapshot, xdsListeners []net.Listener, xdsTLS *tls.Config, directory, nodeID string, releasePorts func(), drainArgs ...string) *translatedEnvoyControl {
@@ -300,7 +346,7 @@ func serveTranslatedEnvoy(ownerCtx context.Context, t *testing.T, snapshot *tran
 	if err := version.Consistent(); err != nil {
 		t.Fatal("actual translated policy references are inconsistent")
 	}
-	if err := cache.SetSnapshot(ctx, nodeID, version); err != nil {
+	if err := cache.SetSnapshot(ctx, nodeID, servedEnvoySnapshot(t, "production-egctl-policy", snapshot)); err != nil {
 		t.Fatal("publish actual translated policy snapshot")
 	}
 	trace := &envoyControlTrace{}
@@ -429,7 +475,7 @@ func (control *translatedEnvoyControl) publishType(t *testing.T, snapshot *trans
 	control.trace.mu.Lock()
 	nacks := control.trace.nacks
 	control.trace.mu.Unlock()
-	if err := control.cache.SetSnapshot(control.context, control.nodeID, version); err != nil {
+	if err := control.cache.SetSnapshot(control.context, control.nodeID, servedEnvoySnapshot(t, versionID, snapshot)); err != nil {
 		t.Fatal("publish updated official translation")
 	}
 	ctx, stop := context.WithTimeout(control.context, 5*time.Second)

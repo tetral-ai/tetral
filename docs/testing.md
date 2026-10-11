@@ -212,12 +212,15 @@ The readable CI topology is:
 `internal/testinfra/go_shard_weights.json` balances the four Go Race shards.
 Each package listed there is split across shards by top-level test, weighted by
 the test's measured duration or the package's `default_ms`; other packages stay
-whole with relative weights. In the integration entry, every top-level test
-that ran longer than about ten seconds carries its `Elapsed` duration from the
-`go test -json` evidence of all four Go Race shards of Pull Request
-Verification run 37512221678, collected on the `calibrated_at` date. Recalibrate
-from the same per-test evidence of a current run, combining every shard of a
-sliced package.
+whole with relative weights. The integration entry was calibrated from the
+`Elapsed` durations of every top-level test that ran longer than about ten
+seconds in the `go test -json` evidence of all four Go Race shards of Pull
+Request Verification run 37512221678, collected on the `calibrated_at` date. A
+change that moves a test of a sliced package by more than ten seconds sets that
+test's entry from its own Pull Request Verification run; a test whose subtests
+run in parallel reports `Elapsed` 0, so its entry is the time from its `run`
+event to its final event. Recalibrate from the same per-test evidence of a current run, combining
+every shard of a sliced package.
 
 Report-only coverage runs `go test ./...` once without Race, so the integration
 package executes every top-level test sequentially in one binary. Its Go
@@ -436,7 +439,10 @@ artifacts.
 Structured results include the exact tested revision, selection, dependency
 identity, command outcome, each step's start, end and duration, first failure,
 and the CI execution envelope with the runner's CPU model and image and the Go
-build cache restore.
+build cache restore. The isolated TLS, OIDC SDK, public streaming process and
+platform key integration roots run their body in a child of the test binary
+and log the child's combined output with every line prefixed by the seconds
+since the child started.
 Do not treat a rerun as erasing an earlier failure. Preserve the first result,
 classify apparatus failures separately from product failures, and use the
 printed focused reproduction command for diagnosis.
