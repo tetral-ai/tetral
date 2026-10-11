@@ -25,14 +25,24 @@ func TestVerificationWorkflowStructure(t *testing.T) {
 
 func TestGoWorkflowsRejectMissingTransportRenderer(t *testing.T) {
 	root := testRepositoryRoot(t)
-	for _, tc := range []struct {
-		file   string
-		verify func(string) error
-	}{
-		{"pull-request-verification.yml", VerifyPullRequestWorkflow},
-		{"main-branch-verification.yml", VerifyMainBranchWorkflow},
+	const pullRequest, main, scheduled = "pull-request-verification.yml", "main-branch-verification.yml", "scheduled-verification.yml"
+	verifiers := map[string]func(string) error{
+		pullRequest: VerifyPullRequestWorkflow,
+		main:        VerifyMainBranchWorkflow,
+		scheduled:   VerifyScheduledWorkflow,
+	}
+	shardHelm := "          shard-count: '4'\n          needs-helm: 'true'"
+	pullRequestBun := "          producer: deployment\n          artifact-prefix: pr-evidence\n          needs-bun: 'true'"
+	mainBun := "            producer: deployment\n            needs_bun: 'true'"
+	disable := func(input string) string { return strings.Replace(input, "'true'", "'false'", 1) }
+	for _, tc := range []struct{ name, file, old, new string }{
+		{"pull request Go shard without Helm", pullRequest, shardHelm, disable(shardHelm)},
+		{"main Go shard without Helm", main, shardHelm, disable(shardHelm)},
+		{"coverage with unpinned Helm", scheduled, "version: v4.2.0", "version: latest"},
+		{"pull request deployment without Bun", pullRequest, pullRequestBun, disable(pullRequestBun)},
+		{"main deployment without Bun", main, mainBun, disable(mainBun)},
 	} {
-		t.Run(tc.file, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			body, err := os.ReadFile(filepath.Join(root, ".github", "workflows", tc.file))
 			if err != nil {
 				t.Fatal(err)
@@ -42,35 +52,16 @@ func TestGoWorkflowsRejectMissingTransportRenderer(t *testing.T) {
 				t.Fatal(err)
 			}
 			writeTestFile(t, fixture, ".github/workflows/"+tc.file, string(body))
-			if err := tc.verify(fixture); err != nil {
+			if err := verifiers[tc.file](fixture); err != nil {
 				t.Fatalf("positive control: %v", err)
 			}
-			changed := strings.Replace(string(body), "          shard-count: '4'\n          needs-helm: 'true'", "          shard-count: '4'\n          needs-helm: 'false'", 1)
+			changed := strings.Replace(string(body), tc.old, tc.new, 1)
 			if changed == string(body) {
-				t.Fatal("missing Go shard renderer input")
+				t.Fatalf("%s does not contain the text this case changes", tc.file)
 			}
 			writeTestFile(t, fixture, ".github/workflows/"+tc.file, changed)
-			if err := tc.verify(fixture); err == nil {
-				t.Fatal("Go workflow accepted missing transport renderer")
-			}
-			if tc.file == "main-branch-verification.yml" {
-				changed = strings.Replace(string(body), "version: v4.2.0", "version: latest", 1)
-				writeTestFile(t, fixture, ".github/workflows/"+tc.file, changed)
-				if err := tc.verify(fixture); err == nil {
-					t.Fatal("coverage accepted an unpinned transport renderer")
-				}
-			}
-			bunInput := "          producer: deployment\n          artifact-prefix: pr-evidence\n          needs-bun: 'true'"
-			if tc.file == "main-branch-verification.yml" {
-				bunInput = "            producer: deployment\n            needs_bun: 'true'"
-			}
-			changed = strings.Replace(string(body), bunInput, strings.Replace(bunInput, "'true'", "'false'", 1), 1)
-			if changed == string(body) {
-				t.Fatal("missing deployment Bun input")
-			}
-			writeTestFile(t, fixture, ".github/workflows/"+tc.file, changed)
-			if err := tc.verify(fixture); err == nil {
-				t.Fatal("deployment workflow accepted missing configuration parser runtime")
+			if err := verifiers[tc.file](fixture); err == nil {
+				t.Fatalf("%s accepted the change", tc.file)
 			}
 		})
 	}
@@ -159,11 +150,12 @@ func TestGoBuildCacheWorkflowPolicy(t *testing.T) {
 		benchmark = "workflows/ci-benchmark.yml"
 		pull      = "workflows/pull-request-verification.yml"
 		main      = "workflows/main-branch-verification.yml"
+		scheduled = "workflows/scheduled-verification.yml"
 		vulncheck = "workflows/engine-vulncheck.yml"
 	)
 	type edit struct{ file, old, new string }
 	installBuf := "    - name: Install buf\n      if: inputs.needs-buf == 'true'\n      shell: bash\n      run: go install github.com/bufbuild/buf/cmd/buf@v1.70.0\n\n"
-	coverage := "    name: Report-only Coverage\n    runs-on: ubuntu-latest\n    timeout-minutes: 80\n    steps:\n"
+	coverage := "    timeout-minutes: 80\n    permissions:\n      contents: read\n    steps:\n"
 	cacheStep := func(uses string) string {
 		return coverage + "      - uses: " + uses + "@55cc8345863c7cc4c66a329aec7e433d2d1c52a9\n        with:\n          path: x\n          key: y\n"
 	}
@@ -199,9 +191,9 @@ func TestGoBuildCacheWorkflowPolicy(t *testing.T) {
 		{name: "pull request job override", edits: []edit{{pull, "    name: Agent Runtime\n", "    name: Agent Runtime\n    cache-mode: write\n"}}, want: "overrides the pull request cache-mode"},
 		{name: "vulnerability scan may write", edits: []edit{{vulncheck, "cache-mode: read\n", ""}}, want: "engine-vulncheck.yml runs on pull requests without cache-mode read"},
 		{name: "workflow-wide write access", edits: []edit{{main, "permissions:\n  contents: read\n", "permissions:\n  contents: read\n\ncache-mode: write\n"}}, want: "grants every job write-capable cache access"},
-		{name: "another job with write access", edits: []edit{{main, coverage, strings.Replace(coverage, "    steps:\n", "    cache-mode: write-only\n    steps:\n", 1)}}, want: "job \"coverage\" has write-capable cache access"},
-		{name: "another job saves", edits: []edit{{main, coverage, cacheStep("actions/cache/save")}}, want: "saves to the Actions cache"},
-		{name: "a job uses the saving cache action", edits: []edit{{main, coverage, cacheStep("actions/cache")}}, want: "saves in a post step"},
+		{name: "another job with write access", edits: []edit{{scheduled, coverage, strings.Replace(coverage, "    steps:\n", "    cache-mode: write-only\n    steps:\n", 1)}}, want: "job \"coverage\" has write-capable cache access"},
+		{name: "another job saves", edits: []edit{{scheduled, coverage, cacheStep("actions/cache/save")}}, want: "saves to the Actions cache"},
+		{name: "a job uses the saving cache action", edits: []edit{{scheduled, coverage, cacheStep("actions/cache")}}, want: "saves in a post step"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
