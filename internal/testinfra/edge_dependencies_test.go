@@ -1,13 +1,21 @@
 package testinfra
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"debug/buildinfo"
+	"encoding/hex"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -54,6 +62,65 @@ func TestEdgeDependenciesRemainDistinctFromMeshAndBindHelperSource(t *testing.T)
 	}
 	if _, err := helperSourceDigest(directory); err == nil {
 		t.Fatal("symlink source identity accepted")
+	}
+}
+
+func TestLockedDownloadRetriesOnlyTransientFailures(t *testing.T) {
+	archive := []byte("locked archive")
+	digest := sha256.Sum256(archive)
+	const (
+		reset    = -1 // drop the connection before any response
+		short    = -2 // close after half of the declared body
+		tampered = -3
+	)
+	for _, test := range []struct {
+		name     string
+		steps    []int
+		requests int32
+		failure  string
+	}{
+		{name: "reset then success", steps: []int{reset, http.StatusOK}, requests: 2},
+		{name: "short body then 503 then success", steps: []int{short, http.StatusServiceUnavailable, http.StatusOK}, requests: 3},
+		{name: "persistent 429", steps: []int{http.StatusTooManyRequests}, requests: 3, failure: "gave up after attempt 3 of 3: HTTP status 429"},
+		{name: "404 is final", steps: []int{http.StatusNotFound}, requests: 1, failure: "gave up after attempt 1 of 3: HTTP status 404"},
+		{name: "checksum mismatch is final", steps: []int{tampered}, requests: 1, failure: "archive checksum differs from lock"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				// The last step repeats for any attempt beyond the script.
+				switch step := test.steps[min(int(requests.Add(1)), len(test.steps))-1]; step {
+				case reset:
+					connection, _, err := w.(http.Hijacker).Hijack()
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					_ = connection.(*net.TCPConn).SetLinger(0)
+					_ = connection.Close()
+				case short:
+					w.Header().Set("Content-Length", strconv.Itoa(len(archive)))
+					_, _ = w.Write(archive[:len(archive)/2])
+				case tampered:
+					_, _ = w.Write([]byte("tampered archive"))
+				case http.StatusOK:
+					_, _ = w.Write(archive)
+				default:
+					w.WriteHeader(step)
+				}
+			}))
+			defer server.Close()
+			body, err := downloadLocked(t.Context(), server.Client(), server.URL, hex.EncodeToString(digest[:]), 1<<20, time.Millisecond)
+			if test.failure == "" && (err != nil || !bytes.Equal(body, archive)) {
+				t.Fatalf("download failed: %v", err)
+			}
+			if test.failure != "" && (err == nil || !strings.Contains(err.Error(), test.failure)) {
+				t.Fatalf("error %v, want %q", err, test.failure)
+			}
+			if got := requests.Load(); got != test.requests {
+				t.Fatalf("made %d requests, want %d", got, test.requests)
+			}
+		})
 	}
 }
 

@@ -114,26 +114,9 @@ func (m *dependencyManager) prepareEGCTL(ctx context.Context) error {
 	if tool.Version != lock.Gateway.Version || len(tool.SHA256) != 64 || !strings.HasPrefix(tool.URL, "https://github.com/envoyproxy/gateway/releases/download/v"+tool.Version+"/") {
 		return errors.New("invalid egctl source lock")
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, tool.URL, nil)
-	if err != nil {
-		return err
-	}
-	client := &http.Client{Timeout: 2 * time.Minute}
-	response, err := client.Do(request)
+	body, err := downloadLocked(ctx, &http.Client{Timeout: 2 * time.Minute}, tool.URL, tool.SHA256, 128<<20, time.Second)
 	if err != nil {
 		return fmt.Errorf("download locked egctl: %w", err)
-	}
-	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("locked egctl download status %d", response.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, 128<<20))
-	if err != nil {
-		return err
-	}
-	digest := sha256.Sum256(body)
-	if hex.EncodeToString(digest[:]) != tool.SHA256 {
-		return errors.New("egctl archive checksum differs from lock")
 	}
 	gzipReader, err := gzip.NewReader(bytes.NewReader(body))
 	if err != nil {
@@ -227,6 +210,46 @@ func (m *dependencyManager) prepareEGCTL(ctx context.Context) error {
 	m.environment = append(withoutEnvironmentVariable(m.environment, EnvTestEGCTLSecretTranslator), EnvTestEGCTLSecretTranslator+"="+helperPath)
 	m.evidence = append(m.evidence, DependencyEvidence{Name: "egctl", Source: "pinned-upstream-secret-translator", Identity: helper.Module + "@" + helper.Version + "/" + helper.Toolchain + "/source-sha256:" + sourceDigest + "/binary-sha256:" + hex.EncodeToString(helperDigest[:])})
 	return nil
+}
+
+// lockedDownloadAttempts bounds one locked download. A transport error, 5xx or
+// 429 is retried after a pause that grows by the backoff each attempt; any
+// other status, and a body that differs from the lock, fails at once.
+const lockedDownloadAttempts = 3
+
+// downloadLocked returns at most limit bytes from url once their SHA-256
+// equals the locked checksum.
+func downloadLocked(ctx context.Context, client *http.Client, url, checksum string, limit int64, backoff time.Duration) ([]byte, error) {
+	for attempt := 1; ; attempt++ {
+		body, transient, err := downloadOnce(ctx, client, url, limit)
+		if err == nil {
+			digest := sha256.Sum256(body)
+			if hex.EncodeToString(digest[:]) != checksum {
+				return nil, errors.New("archive checksum differs from lock")
+			}
+			return body, nil
+		}
+		if !transient || attempt == lockedDownloadAttempts || sleepContext(ctx, time.Duration(attempt)*backoff) != nil {
+			return nil, fmt.Errorf("gave up after attempt %d of %d: %w", attempt, lockedDownloadAttempts, err)
+		}
+	}
+}
+
+func downloadOnce(ctx context.Context, client *http.Client, url string, limit int64) (body []byte, transient bool, err error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, ctx.Err() == nil, err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		return nil, response.StatusCode >= 500 || response.StatusCode == http.StatusTooManyRequests, fmt.Errorf("HTTP status %d", response.StatusCode)
+	}
+	body, err = io.ReadAll(io.LimitReader(response.Body, limit))
+	return body, err != nil && ctx.Err() == nil, err
 }
 
 // helperSourceDigest binds the complete authored Go source and module graph.

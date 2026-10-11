@@ -117,7 +117,10 @@ generation and compatibility checks.
 The runner starts the selected dependencies before the first step and records
 each one's identity and setup time. Keycloak and egctl, which mostly wait on a
 JVM start or on a download and a helper build, start in the background while
-the others start one after another; setup ends when all are ready. The first
+the others start one after another; setup ends when all are ready. The egctl
+archive download makes up to three attempts when the connection fails or the
+server answers 5xx or 429; any other status, or an archive that differs from
+its locked checksum, fails setup at once. The first
 failure cancels every start, waits for all of them and then removes what they
 created, including a container whose dispatch was still in flight; when the
 caller stopped setup, its cancellation is reported as the cause. The runner's
