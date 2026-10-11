@@ -66,13 +66,21 @@ type translatedPublicEdge struct {
 	checkRecords, apiRecords syncBuffer
 }
 
+// callContext bounds one edge-fixture call that has no limit of its own.
+func (edge *translatedPublicEdge) callContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(edge.ctx, fixtureCallTimeout)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 func (edge *translatedPublicEdge) factory(profile string) func(*testing.T, *storagetest.WorkloadDB, blob.BlobStore, func(*internalevents.PostgreSQLReader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string, string) {
 	return func(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore, eventFactory func(*internalevents.PostgreSQLReader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string, string) {
 		t.Helper()
 		// testing.T.Context is canceled before registered cleanup runs. Keep
-		// this bounded fixture owner alive until its later-registered SDK,
-		// listeners and credentials have explicitly joined, then cancel last.
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		// this fixture owner alive until its later-registered SDK, listeners
+		// and credentials have explicitly joined, then cancel last.
+		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
 		edge.ctx = ctx
 		ports, releasePorts := reserveEnvoyGatewayFixturePorts(t)
@@ -91,7 +99,7 @@ func (edge *translatedPublicEdge) factory(profile string) func(*testing.T, *stor
 		authDB := pools.OpenWorkload(t, "auth", nil)
 		issuerVerifier := auth.NewAssertionVerifier(ctx)
 		t.Cleanup(issuerVerifier.Close)
-		authHandler := transporttest.Must(authservice.BuildRouter(ctx, authservice.RouterBuildConfig{RawDatabase: authDB, AssertionVerifier: issuerVerifier, Config: authservice.Config{BootstrapAPIKey: bootstrapKey, BootstrapWorkspaceID: workspace.DefaultID, InternalPrincipalPrivateKeyB64: private, InternalPrincipalTTL: time.Minute}}))
+		authHandler := transporttest.Must(authservice.BuildRouter(edge.callContext(t), authservice.RouterBuildConfig{RawDatabase: authDB, AssertionVerifier: issuerVerifier, Config: authservice.Config{BootstrapAPIKey: bootstrapKey, BootstrapWorkspaceID: workspace.DefaultID, InternalPrincipalPrivateKeyB64: private, InternalPrincipalTTL: time.Minute}}))
 		checkDiagnostics := workload.DefaultDiagnosticConfig()
 		checkDiagnostics.Level = slog.LevelDebug
 		checkLog := workload.NewProcessLogger(&edge.checkRecords, "auth", "test", "edge", checkDiagnostics)
@@ -377,11 +385,7 @@ func (edge *translatedPublicEdge) assertStreamingUpload(t *testing.T, f *publicP
 	// The API handler is already reading this body. Holding the suffix past
 	// the API's slow-request threshold makes its default-verbosity boundary
 	// record exist for the logging correlation assertion below.
-	select {
-	case <-time.After(httpapi.DefaultSlowRequestThreshold + 250*time.Millisecond):
-	case <-edge.ctx.Done():
-		t.Fatal("edge fixture ended while holding the upload suffix")
-	}
+	time.Sleep(httpapi.DefaultSlowRequestThreshold + 250*time.Millisecond)
 	unblock()
 	if err := <-producerJoined; err != nil {
 		t.Fatal("upload producer did not join")
@@ -405,7 +409,7 @@ func (edge *translatedPublicEdge) assertStreamingUpload(t *testing.T, f *publicP
 	if err := f.db.QueryRow(`SELECT o.sha256,o.size_bytes,o.blob_key,f.mime_type,f.filename FROM files f JOIN file_objects o ON o.workspace_id=f.workspace_id AND o.object_id=f.object_id WHERE f.workspace_id=$1 AND f.file_id=$2`, string(workspace.DefaultID), result.ID).Scan(&storedHash, &storedBytes, &objectKey, &mimeType, &filename); err != nil || storedHash != hex.EncodeToString(digest[:]) || storedBytes != int64(len(body)) || mimeType != "application/octet-stream" || filename != "edge.txt" {
 		t.Fatal("actual upload body hash/length changed")
 	}
-	object, err := edge.objects.Get(edge.ctx, objectKey)
+	object, err := edge.objects.Get(edge.callContext(t), objectKey)
 	if err != nil {
 		t.Fatal("actual committed upload object unavailable")
 	}
@@ -532,10 +536,10 @@ func (edge *translatedPublicEdge) assertGitBusiness(t *testing.T, f *publicProje
 	hash := transporttest.Must(gitticket.HashToken(token))
 	ticketID := id.New("gitt_")
 	store := gitticket.NewPostgreSQLStore(dbconnect.NewClientForTesting(f.pools.OpenWorkload(t, "sandbox", nil)))
-	if _, err := store.CreatePending(edge.ctx, workspace.DefaultID, f.session, ticketID, hash, time.Now()); err != nil {
+	if _, err := store.CreatePending(edge.callContext(t), workspace.DefaultID, f.session, ticketID, hash, time.Now()); err != nil {
 		t.Fatal("actual Git ticket preparation failed")
 	}
-	if _, err := store.ActivatePending(edge.ctx, workspace.DefaultID, f.session, ticketID, time.Now()); err != nil {
+	if _, err := store.ActivatePending(edge.callContext(t), workspace.DefaultID, f.session, ticketID, time.Now()); err != nil {
 		t.Fatal("actual Git ticket activation failed")
 	}
 	for _, test := range []struct{ method, path string }{{"GET", "/github.com/tetral-ai/public/info/refs?service=git-upload-pack"}, {"GET", "/github.com/tetral-ai/public/info/refs?service=git-receive-pack"}, {"POST", "/github.com/tetral-ai/public/git-upload-pack"}, {"POST", "/github.com/tetral-ai/public/git-receive-pack"}} {
@@ -564,12 +568,12 @@ func (edge *translatedPublicEdge) assertGitBusiness(t *testing.T, f *publicProje
 	credential := "fixture-mounted-git-credential"
 	encrypted := transporttest.Must(transporttest.Must(vault.NewEncryptor(sdkIntegrationVaultKey)).Encrypt([]byte(credential)))
 	resourceID := id.New("rsrc_")
-	transaction := transporttest.Must(f.db.BeginTx(edge.ctx, nil))
+	transaction := transporttest.Must(f.db.BeginTx(edge.callContext(t), nil))
 	defer func() { _ = transaction.Rollback() }()
-	if _, err := transaction.ExecContext(edge.ctx, `INSERT INTO session_resources(workspace_id,session_id,resource_id,type,created_at,updated_at) VALUES($1,$2,$3,'github_repository',$4,$4)`, string(workspace.DefaultID), f.session, resourceID, time.Now()); err != nil {
+	if _, err := transaction.ExecContext(edge.callContext(t), `INSERT INTO session_resources(workspace_id,session_id,resource_id,type,created_at,updated_at) VALUES($1,$2,$3,'github_repository',$4,$4)`, string(workspace.DefaultID), f.session, resourceID, time.Now()); err != nil {
 		t.Fatal("actual repository resource setup failed")
 	}
-	if _, err := transaction.ExecContext(edge.ctx, `INSERT INTO session_github_repository_resources(workspace_id,session_id,resource_id,url,mount_path,authorization_token_encrypted) VALUES($1,$2,$3,$4,$5,$6)`, string(workspace.DefaultID), f.session, resourceID, "https://github.com/tetral-ai/public.git", "/workspace/public", encrypted); err != nil {
+	if _, err := transaction.ExecContext(edge.callContext(t), `INSERT INTO session_github_repository_resources(workspace_id,session_id,resource_id,url,mount_path,authorization_token_encrypted) VALUES($1,$2,$3,$4,$5,$6)`, string(workspace.DefaultID), f.session, resourceID, "https://github.com/tetral-ai/public.git", "/workspace/public", encrypted); err != nil {
 		t.Fatal("actual repository credential setup failed")
 	}
 	if transaction.Commit() != nil {
@@ -596,10 +600,10 @@ func (edge *translatedPublicEdge) assertGitBusiness(t *testing.T, f *publicProje
 		next := transporttest.Must(gitticket.GenerateToken(rand.Reader))
 		hash := transporttest.Must(gitticket.HashToken(next))
 		ticket := id.New("gitt_")
-		if _, err := store.CreatePending(edge.ctx, workspace.DefaultID, f.session, ticket, hash, now); err != nil {
+		if _, err := store.CreatePending(edge.callContext(t), workspace.DefaultID, f.session, ticket, hash, now); err != nil {
 			t.Fatal("actual replacement Git ticket preparation failed")
 		}
-		if _, err := store.ActivatePending(edge.ctx, workspace.DefaultID, f.session, ticket, now); err != nil {
+		if _, err := store.ActivatePending(edge.callContext(t), workspace.DefaultID, f.session, ticket, now); err != nil {
 			t.Fatal("actual replacement Git ticket activation failed")
 		}
 		return next
@@ -697,7 +701,7 @@ func (edge *translatedPublicEdge) assertCachedKeycloak(t *testing.T, f *publicPr
 	} {
 		identity := "identity_envoy_" + actor.name
 		document := auth.PolicyDocument{FederationRules: []auth.FederationRule{rule}, Identities: []auth.IdentityBinding{{ID: identity, OrganizationID: rule.OrganizationID, Issuer: rule.Issuer, Subject: actor.subject, Kind: actor.kind, ServiceAccountID: actor.selector, Enabled: true}}, WorkspaceGrants: []auth.WorkspaceGrant{{ID: "grant_envoy_" + actor.name, IdentityID: identity, WorkspaceID: workspace.DefaultID, Role: auth.WorkspaceFullAccess, Enabled: true}}}
-		if _, err := auth.NewPolicyStore(f.db).Apply(edge.ctx, document); err != nil {
+		if _, err := auth.NewPolicyStore(f.db).Apply(edge.callContext(t), document); err != nil {
 			t.Fatal("actual issuer policy import failed")
 		}
 		assertion := transporttest.Must(actor.assertion(edge.ctx))
@@ -709,7 +713,7 @@ func (edge *translatedPublicEdge) assertCachedKeycloak(t *testing.T, f *publicPr
 		child := startOIDCSDKChild(edge.ctx, t, map[string]string{"identityID": identity, "baseURL": edge.baseURL, "caPath": filepath.Join(edge.fixture.Directory, "public-ca.crt"), "assertionPath": path, "ruleID": rule.ID, "organizationID": rule.OrganizationID, "workspaceID": "default", "serviceAccountID": actor.selector, "fixtureName": "oidc-sdk-" + actor.name})
 		store := oidcDecodeSDKResult(t, child.control(t, "store", nil))
 		created := oidcDecodeSDKResult(t, child.control(t, "create", map[string]any{"storeID": store.StoreID, "path": "/envoy.md", "content": "actual cached bearer"}))
-		oidcAssertMemoryActor(edge.ctx, t, f.db, created.VersionID, actor.kind, identity, false)
+		oidcAssertMemoryActor(edge.callContext(t), t, f.db, created.VersionID, actor.kind, identity, false)
 		oidcAssertWireActor(t, created.Version.CreatedBy, actor.kind, identity)
 		if edge.authExchanges.Load() != before+1 {
 			t.Fatal("real SDK issuer login did not perform exactly one actual exchange")

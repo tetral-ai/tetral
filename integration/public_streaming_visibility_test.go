@@ -157,7 +157,7 @@ func TestPostgreSQLPublicStreamingVisibility(t *testing.T) {
 		f.open(t, "authorized", []string{"agent.message"}, "")
 		r := f.start(t, "", "")
 		m := f.text(t, r, "alpha βeta omega\n", false)
-		descriptor, err := f.baseReader.ReadPreviewRequest(f.ctx, workspace.DefaultID, f.session, r.scope.SessionThreadId, r.id, r.start)
+		descriptor, err := f.baseReader.ReadPreviewRequest(f.callContext(t), workspace.DefaultID, f.session, r.scope.SessionThreadId, r.id, r.start)
 		if err != nil || !descriptor.IsPrimaryThread || descriptor.ThreadRole != "main" || descriptor.ThreadVisibility != "public" || descriptor.RequestKind != runtimecontrol.RequestKindAgentProviderRequest || descriptor.Ended {
 			t.Fatalf("actual read-only descriptor: %+v %v", descriptor, err)
 		}
@@ -178,7 +178,7 @@ func TestPostgreSQLPublicStreamingVisibility(t *testing.T) {
 				case "nonexistent":
 					frame.ModelRequestStartEventID = id.New("evt_")
 				}
-				if _, err := f.baseReader.ReadPreviewRequest(f.ctx, workspace.ID(frame.WorkspaceID), frame.SessionID, frame.ThreadID, frame.ModelRequestID, frame.ModelRequestStartEventID); err == nil {
+				if _, err := f.baseReader.ReadPreviewRequest(f.callContext(t), workspace.ID(frame.WorkspaceID), frame.SessionID, frame.ThreadID, frame.ModelRequestID, frame.ModelRequestStartEventID); err == nil {
 					t.Fatal("read-only SQL admitted wrong exact scope/correlation")
 				}
 				if variant != "wrong-workspace" && variant != "wrong-session" {
@@ -205,12 +205,12 @@ func TestPostgreSQLPublicStreamingVisibility(t *testing.T) {
 		f.waitEvent(t, "authorized", "event_delta", 1)
 		end := f.end(t, r)
 		f.waitEvent(t, "authorized", "span.model_request_end", 1)
-		descriptor, err = f.baseReader.ReadPreviewRequest(f.ctx, workspace.DefaultID, f.session, r.scope.SessionThreadId, r.id, r.start)
+		descriptor, err = f.baseReader.ReadPreviewRequest(f.callContext(t), workspace.DefaultID, f.session, r.scope.SessionThreadId, r.id, r.start)
 		if err != nil || !descriptor.Ended {
 			t.Fatal("exact SQL descriptor did not observe durable End")
 		}
 		for _, scope := range []eventstream.ReadScope{{WorkspaceID: "foreign", SessionID: f.session}, {WorkspaceID: workspace.DefaultID, SessionID: id.New("sesn_")}, {WorkspaceID: workspace.DefaultID, SessionID: f.session, ThreadID: id.New("thread_")}} {
-			if _, err = f.baseReader.ListRequestFinalMessages(f.ctx, scope, end, 0, 1); err == nil {
+			if _, err = f.baseReader.ListRequestFinalMessages(f.callContext(t), scope, end, 0, 1); err == nil {
 				t.Fatal("cross-scope End expanded")
 			}
 		}
@@ -256,7 +256,7 @@ func TestPostgreSQLPublicStreamingVisibility(t *testing.T) {
 		publicWait(t, "deletion releases preview subscription", func() bool {
 			return f.metric(t, "event_stream_preview_viewers") == 0 && f.metric(t, "event_stream_preview_subscriptions") == 0 && f.metric(t, "event_stream_preview_pending_bytes") == 0
 		})
-		if _, err := f.baseReader.CurrentStreamPosition(f.ctx, workspace.DefaultID, f.session); err == nil {
+		if _, err := f.baseReader.CurrentStreamPosition(f.callContext(t), workspace.DefaultID, f.session); err == nil {
 			t.Fatal("deleted Session remained readable")
 		}
 		publicLogAssertion(t, "actual-lifecycle-deletion-readability-and-cleanup")
@@ -298,7 +298,7 @@ func publicProjectionGatewayVisibility(t *testing.T) {
 	}
 	var primaryIDs, childIDs []string
 	for index, request := range requests {
-		token, err := f.bridge.RefreshRuntimeBindingToken(f.ctx, &bridgev1.RefreshRuntimeBindingTokenRequest{Scope: request.scope})
+		token, err := f.bridge.RefreshRuntimeBindingToken(f.callContext(t), &bridgev1.RefreshRuntimeBindingTokenRequest{Scope: request.scope})
 		if err != nil || token.GetRuntimeBindingToken() == "" {
 			t.Fatalf("actual Bridge binding refresh failed: %v", err)
 		}

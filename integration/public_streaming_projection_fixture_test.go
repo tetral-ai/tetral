@@ -116,7 +116,7 @@ func newPublicProjectionFixture(t *testing.T, options publicProjectionOptions) *
 		options.config(&h.config)
 	}
 	f := &publicProjectionFixture{publicStreamingHarness: h, pools: pools, vectors: loadPublicStreamingVectors(t)}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	f.ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer projection-runtime-token")
 	transport, err := eventstream.NewNATSPreviewTransport(ctx, eventstream.NATSConfig{Servers: broker.Servers, UserPath: broker.Subscriber.UserPath, PasswordPath: broker.Subscriber.PasswordPath, CAPath: broker.Subscriber.TLS.CAPath, CertPath: broker.Subscriber.TLS.CertPath, KeyPath: broker.Subscriber.TLS.KeyPath}, h.config, h.metrics, nil)
@@ -158,7 +158,7 @@ func newPublicProjectionFixture(t *testing.T, options publicProjectionOptions) *
 	})
 	h.contentE2E = &contentE2E{db: admin, baseURL: base, apiKey: key}
 	provisioner := startContentSDKChildContext(ctx, t, base, key, caPath)
-	env, err := environment.NewPostgreSQLEnvironmentStore(dbconnect.NewClientForTesting(pools.OpenWorkload(t, "api", nil)), environment.WithDefaultArtifactRef("artifact_projection")).Create(ctx, workspace.DefaultID, environment.CreateEnvironmentRequest{Name: "projection"})
+	env, err := environment.NewPostgreSQLEnvironmentStore(dbconnect.NewClientForTesting(pools.OpenWorkload(t, "api", nil)), environment.WithDefaultArtifactRef("artifact_projection")).Create(f.callContext(t), workspace.DefaultID, environment.CreateEnvironmentRequest{Name: "projection"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,6 +193,20 @@ func newPublicProjectionFixture(t *testing.T, options publicProjectionOptions) *
 	t.Cleanup(func() { h.client.control(t, "close", nil) })
 	f.publisher = publicProjectionPublisher(t, broker)
 	return f
+}
+
+// fixtureCallTimeout bounds each fixture call on its own: a fixture-wide
+// deadline would also spend on unrelated work before a call, such as Envoy
+// restarts.
+const fixtureCallTimeout = 30 * time.Second
+
+// callContext bounds one fixture call. It carries the Runtime credentials
+// that Bridge RPCs need; other calls ignore them.
+func (f *publicProjectionFixture) callContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(f.ctx, fixtureCallTimeout)
+	t.Cleanup(cancel)
+	return ctx
 }
 
 func publicProjectionPublisher(t *testing.T, broker testinfra.NATSFixture) *nats.Conn {
@@ -243,7 +257,7 @@ func (f *publicProjectionFixture) start(t *testing.T, thread, kind string) *publ
 	if err := f.db.QueryRow(`SELECT COALESCE(max(sequence),0) FROM session_messages WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3`, scope.WorkspaceId, scope.SessionId, scope.SessionThreadId).Scan(&boundary); err != nil {
 		t.Fatal(err)
 	}
-	response, err := f.bridge.WriteEvent(f.ctx, &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: id.New("rwrite_"), ModelRequestId: request.id, EventType: "span.model_request_start", PayloadJson: fmt.Sprintf(`{"type":"span.model_request_start","model_request_id":%q}`, request.id), ContextThroughMessageSequence: &boundary, RequestKind: kind})
+	response, err := f.bridge.WriteEvent(f.callContext(t), &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: id.New("rwrite_"), ModelRequestId: request.id, EventType: "span.model_request_start", PayloadJson: fmt.Sprintf(`{"type":"span.model_request_start","model_request_id":%q}`, request.id), ContextThroughMessageSequence: &boundary, RequestKind: kind})
 	if err != nil || response.GetCommitted() == nil {
 		t.Fatalf("actual Bridge Start: %v", err)
 	}
@@ -274,7 +288,7 @@ func (f *publicProjectionFixture) textWithID(t *testing.T, request *publicProjec
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := f.bridge.WriteEvent(f.ctx, &bridgev1.WriteEventRequest{Scope: request.scope, RuntimeWriteId: id.New("rwrite_"), ModelRequestId: request.id, EventType: "agent.message", PayloadJson: string(payload), PreallocatedEventId: &event, AssistantContextDelta: &bridgev1.RuntimeContextDelta{Parts: parts}})
+	response, err := f.bridge.WriteEvent(f.callContext(t), &bridgev1.WriteEventRequest{Scope: request.scope, RuntimeWriteId: id.New("rwrite_"), ModelRequestId: request.id, EventType: "agent.message", PayloadJson: string(payload), PreallocatedEventId: &event, AssistantContextDelta: &bridgev1.RuntimeContextDelta{Parts: parts}})
 	if err != nil || response.GetCommitted().GetEventId() != event {
 		t.Fatalf("actual Bridge complete text: %v", err)
 	}
@@ -295,7 +309,7 @@ func (f *publicProjectionFixture) thinking(t *testing.T, request *publicProjecti
 
 func (f *publicProjectionFixture) thinkingWithID(t *testing.T, request *publicProjectionRequest, event string) string {
 	t.Helper()
-	response, err := f.bridge.WriteEvent(f.ctx, &bridgev1.WriteEventRequest{Scope: request.scope, RuntimeWriteId: id.New("rwrite_"), ModelRequestId: request.id, EventType: "agent.thinking", PayloadJson: `{"type":"agent.thinking"}`, PreallocatedEventId: &event})
+	response, err := f.bridge.WriteEvent(f.callContext(t), &bridgev1.WriteEventRequest{Scope: request.scope, RuntimeWriteId: id.New("rwrite_"), ModelRequestId: request.id, EventType: "agent.thinking", PayloadJson: `{"type":"agent.thinking"}`, PreallocatedEventId: &event})
 	if err != nil || response.GetCommitted().GetEventId() != event {
 		t.Fatalf("actual Bridge thinking: %v", err)
 	}
@@ -304,7 +318,7 @@ func (f *publicProjectionFixture) thinkingWithID(t *testing.T, request *publicPr
 
 func (f *publicProjectionFixture) tool(t *testing.T, request *publicProjectionRequest, name, input string) string {
 	t.Helper()
-	response, err := f.bridge.WriteEvent(f.ctx, &bridgev1.WriteEventRequest{Scope: request.scope, RuntimeWriteId: id.New("rwrite_"), ModelRequestId: request.id, ToolDeclaration: sessionfixture.BridgeToolDeclarationWithRouteForTest(id.New("call_"), name, input, "allow")})
+	response, err := f.bridge.WriteEvent(f.callContext(t), &bridgev1.WriteEventRequest{Scope: request.scope, RuntimeWriteId: id.New("rwrite_"), ModelRequestId: request.id, ToolDeclaration: sessionfixture.BridgeToolDeclarationWithRouteForTest(id.New("call_"), name, input, "allow")})
 	if err != nil || response.GetCommitted() == nil {
 		t.Fatalf("actual Bridge tool declaration: %v", err)
 	}
@@ -319,7 +333,7 @@ func (f *publicProjectionFixture) child(t *testing.T, request *publicProjectionR
 	t.Helper()
 	task := id.New("projection-child-")
 	source := f.tool(t, request, "spawn_agent", fmt.Sprintf(`{"task_name":%q,"agent_type":"worker","fork_turns":"none","prompt":"fixed child work"}`, task))
-	response, err := f.bridge.CreateSubagentThread(f.ctx, &bridgev1.CreateSubagentThreadRequest{Scope: request.scope, SourceToolUseEventId: source, TaskName: task, AgentType: "worker", InitialPrompt: "fixed child work"})
+	response, err := f.bridge.CreateSubagentThread(f.callContext(t), &bridgev1.CreateSubagentThreadRequest{Scope: request.scope, SourceToolUseEventId: source, TaskName: task, AgentType: "worker", InitialPrompt: "fixed child work"})
 	if err != nil || response.GetCommitted().GetChildThreadId() == "" {
 		t.Fatalf("actual Bridge child lifecycle: %v", err)
 	}
@@ -328,7 +342,7 @@ func (f *publicProjectionFixture) child(t *testing.T, request *publicProjectionR
 
 func (f *publicProjectionFixture) reviewer(t *testing.T) string {
 	t.Helper()
-	response, err := f.bridge.EnsureApprovalReviewerTrunk(f.ctx, &bridgev1.EnsureApprovalReviewerTrunkRequest{Scope: f.scope, EnsureOperationId: id.New("ensure_")})
+	response, err := f.bridge.EnsureApprovalReviewerTrunk(f.callContext(t), &bridgev1.EnsureApprovalReviewerTrunkRequest{Scope: f.scope, EnsureOperationId: id.New("ensure_")})
 	if err != nil || response.GetCommitted().GetReviewerThreadId() == "" {
 		t.Fatalf("actual Bridge reviewer lifecycle: %v", err)
 	}
@@ -340,7 +354,7 @@ func (f *publicProjectionFixture) endRequest(request *publicProjectionRequest) *
 }
 func (f *publicProjectionFixture) end(t *testing.T, request *publicProjectionRequest) string {
 	t.Helper()
-	response, err := f.bridge.WriteRequestEnd(f.ctx, f.endRequest(request))
+	response, err := f.bridge.WriteRequestEnd(f.callContext(t), f.endRequest(request))
 	if err != nil || response.GetCommitted() == nil {
 		t.Fatalf("actual Bridge End: %v", err)
 	}
@@ -365,7 +379,7 @@ func (f *publicProjectionFixture) compact(t *testing.T, request *publicProjectio
 	} else if err != sql.ErrNoRows {
 		t.Fatal(err)
 	}
-	response, err := f.bridge.WriteRequestEnd(f.ctx, end)
+	response, err := f.bridge.WriteRequestEnd(f.callContext(t), end)
 	if err != nil || response.GetCommitted() == nil {
 		t.Fatalf("actual compaction End: %v", err)
 	}

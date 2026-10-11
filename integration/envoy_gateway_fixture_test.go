@@ -332,11 +332,7 @@ func servedEnvoySnapshot(t *testing.T, version string, snapshot *translatedEnvoy
 func serveTranslatedEnvoy(ownerCtx context.Context, t *testing.T, snapshot *translatedEnvoySnapshot, xdsListeners []net.Listener, xdsTLS *tls.Config, directory, nodeID string, releasePorts func(), drainArgs ...string) *translatedEnvoyControl {
 	t.Helper()
 	sockets := requireConfinedEnvoyListeners(t, snapshot)
-	deadline, ok := ownerCtx.Deadline()
-	if !ok {
-		t.Fatal("actual Envoy fixture requires a bounded test deadline")
-	}
-	ctx, cancel := context.WithDeadline(ownerCtx, deadline)
+	ctx, cancel := context.WithCancel(ownerCtx)
 	t.Cleanup(cancel)
 	cache := cachev3.NewSnapshotCache(true, cachev3.IDHash{}, nil)
 	version, err := cachev3.NewSnapshot("production-egctl-policy", snapshot.Resources)
@@ -381,7 +377,9 @@ func serveTranslatedEnvoy(ownerCtx context.Context, t *testing.T, snapshot *tran
 	if err := os.WriteFile(bootstrap, body, 0600); err != nil {
 		t.Fatal(err)
 	}
-	resources, err := testinfra.NewDockerResources(ctx, "public-edge")
+	startup, stopStartup := context.WithTimeout(ctx, fixtureCallTimeout)
+	defer stopStartup()
+	resources, err := testinfra.NewDockerResources(startup, "public-edge")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +404,7 @@ func serveTranslatedEnvoy(ownerCtx context.Context, t *testing.T, snapshot *tran
 	if releasePorts != nil {
 		releasePorts()
 	}
-	container, err := resources.Run(ctx, testinfra.ContainerSpec{HostNetwork: true, ExtraHosts: map[string]string{"envoy-gateway": "127.0.0.1"}, Image: image, User: "0", Entrypoint: "/usr/local/bin/envoy", Mounts: []testinfra.DockerMount{{Source: directory, Target: "/fixture", ReadOnly: true}, {Source: filepath.Join(directory, "sds"), Target: "/sds", ReadOnly: true}}, Command: arguments})
+	container, err := resources.Run(startup, testinfra.ContainerSpec{HostNetwork: true, ExtraHosts: map[string]string{"envoy-gateway": "127.0.0.1"}, Image: image, User: "0", Entrypoint: "/usr/local/bin/envoy", Mounts: []testinfra.DockerMount{{Source: directory, Target: "/fixture", ReadOnly: true}, {Source: filepath.Join(directory, "sds"), Target: "/sds", ReadOnly: true}}, Command: arguments})
 	if err != nil {
 		t.Fatal("actual pinned edge Envoy startup failed")
 	}

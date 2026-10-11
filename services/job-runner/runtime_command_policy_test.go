@@ -162,18 +162,22 @@ func TestRuntimeCommandPolicyAndRetainedChannel(t *testing.T) {
 	}
 	var mu sync.Mutex
 	counts := map[string]int{}
+	deadlineLimit := 25 * time.Millisecond
 	exits := make(chan struct{}, 16)
 	server := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, _ any, info *grpc.UnaryServerInfo, _ grpc.UnaryHandler) (any, error) {
 		mu.Lock()
 		counts[info.FullMethod]++
+		limit := deadlineLimit
 		mu.Unlock()
 		deadline, ok := ctx.Deadline()
-		if !ok || time.Until(deadline) > 25*time.Millisecond {
-			t.Errorf("actual RPC lost parsed attempt timer: %s", info.FullMethod)
+		if remaining := time.Until(deadline); !ok || remaining > limit {
+			t.Errorf("actual RPC lost the shorter of its parsed attempt timer and caller deadline (%s): %s has deadline=%t remaining=%s", limit, info.FullMethod, ok, remaining)
 		}
 		<-ctx.Done()
 		exits <- struct{}{}
-		return nil, status.FromContextError(ctx.Err()).Err()
+		// grpc-go ends a server stream at its deadline through two timers, so ctx.Err() may be Canceled;
+		// a fixed code keeps the client's status DeadlineExceeded whichever final status reaches it first.
+		return nil, status.Error(codes.DeadlineExceeded, "fixture observed attempt deadline")
 	}))
 	agentruntimev1.RegisterAgentRuntimePodServiceServer(server, &policyRuntimeServer{})
 	joined := make(chan struct{})
@@ -229,10 +233,13 @@ func TestRuntimeCommandPolicyAndRetainedChannel(t *testing.T) {
 			t.Fatal("RPC server context did not exit")
 		}
 	}
+	mu.Lock()
+	deadlineLimit = 5 * time.Millisecond
+	mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 	if err := calls[0](ctx); status.Code(err) != codes.DeadlineExceeded {
-		t.Fatal(err)
+		t.Fatalf("earlier caller deadline: %v", err)
 	}
 	select {
 	case <-exits:
