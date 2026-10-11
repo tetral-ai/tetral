@@ -805,6 +805,11 @@ func TestAPIKeyUsageRecorderBounds(t *testing.T) {
 		if trace.count(usageUpdatePrefix) != 1 || keyUsage(t, admin, key.ID).lastUsed.Valid {
 			t.Fatal("failed identity retried inside its five-minute suppression")
 		}
+		// The failed write closed the pool's only connection; dial now, outside
+		// the next write's 100 ms deadline.
+		if err := r.db.PingContext(ctx); err != nil {
+			t.Fatal(err)
+		}
 		clock.Advance(apiKeyUsageSuppression)
 		r.flush(ctx)
 		if !keyUsage(t, admin, key.ID).lastUsed.Valid {

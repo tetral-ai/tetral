@@ -567,6 +567,24 @@ func (f *idleFixture) countedRead(scope ReadScope, reads *viewerReads) func(cont
 	}
 }
 
+// startWithWaitingViewer opens one viewer of scope, starts the checks and
+// returns once the viewer waits after the first check. Opening it first keeps
+// its opening read at generation 0, so settling at the first check's
+// generation means the re-read that check forced has finished; the viewer
+// reads again only when a later check changes the signal.
+func (f *idleFixture) startWithWaitingViewer(t *testing.T, scope ReadScope) *idleViewer {
+	t.Helper()
+	reads := &viewerReads{}
+	viewer := f.open(t, scope, f.countedRead(scope, reads))
+	waitCondition(t, func() bool { return reads.settled(0) })
+	f.start()
+	f.waitPublished(t, scope.WorkspaceID, 1)
+	f.waitQuiet(t)
+	generation := f.generation(scope.WorkspaceID, scope.SessionID)
+	waitCondition(t, func() bool { return reads.settled(generation) })
+	return viewer
+}
+
 // Idle viewers cost no reads: after its opening read and the one re-read that
 // the registration's first check forces, neither a Session viewer nor a
 // Thread viewer of the Session reads again while further checks find it
@@ -694,10 +712,7 @@ func TestIdleViewerWakesForAChangePrunedBeforeTheCheckRan(t *testing.T) {
 	seedIdleSessions(t, f.admin, ws, 1)
 	scope := f.scope(ws, 1, "")
 	retained := seedIdleChange(t, f.admin, scope, "evt_prune_kept", 0)
-	f.start()
-	viewer := f.open(t, scope, nil)
-	f.waitPublished(t, ws, 1)
-	f.waitQuiet(t)
+	viewer := f.startWithWaitingViewer(t, scope)
 	f.trace.hold(ws)
 	f.advance()
 	waitCondition(t, func() bool { return f.trace.startedIn(ws) == 2 })
@@ -724,10 +739,7 @@ func TestIdleThreadViewerWakesWhenOnlyItsSessionIsDeleted(t *testing.T) {
 	f := newIdleFixture(t, nil)
 	ws := workspace.ID("ws_idle_parent")
 	seedIdleSessions(t, f.admin, ws, 1)
-	f.start()
-	viewer := f.open(t, f.scope(ws, 1, "child"), nil)
-	f.waitPublished(t, ws, 1)
-	f.waitQuiet(t)
+	viewer := f.startWithWaitingViewer(t, f.scope(ws, 1, "child"))
 	if _, err := f.admin.ExecContext(t.Context(), `UPDATE sessions SET lifecycle_state = 'deleted' WHERE workspace_id = $1 AND id = $2`, string(ws), idleSessionID(ws, 1)); err != nil {
 		t.Fatal(err)
 	}
