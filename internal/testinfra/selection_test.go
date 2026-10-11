@@ -1,95 +1,93 @@
 package testinfra
 
-import "testing"
+import (
+	"fmt"
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+)
 
 func TestSelectPlanReconcilesGoShardsExactlyOnce(t *testing.T) {
-	plan := Plan{Profile: ProfileFull, Selections: []Selection{
-		{Group: "go", Packages: []string{"b"}, Tests: []string{"TestB"}, Dependencies: []string{"postgresql"}},
-		{Group: "runtime"},
-		{Group: "go", Packages: []string{"a"}, Tests: []string{"TestA"}},
-	}}
-	seen := map[string]int{}
-	for index := 0; index < 2; index++ {
-		shard, err := SelectPlan(plan, []string{"go"}, index, 2)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, selection := range shard.Selections {
-			seen[selection.Packages[0]+"/"+selection.Tests[0]]++
-		}
-	}
-	if seen["a/TestA"] != 1 || seen["b/TestB"] != 1 || len(seen) != 2 {
-		t.Fatalf("shard selections = %#v; want exact single execution", seen)
-	}
-}
-
-func TestSelectPlanSlicesDominantPackagesAcrossRaceShards(t *testing.T) {
-	calibration, err := loadGoShardCalibration()
+	selections, exclusions, err := fullGoSelections(testRepositoryRoot(t), "exactly-once shard contract")
 	if err != nil {
 		t.Fatal(err)
 	}
-	bridge := "github.com/tetral-ai/tetral/services/bridge"
-	composition := "github.com/tetral-ai/tetral/integration"
-	tests := map[string]string{
-		"TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues":                 composition,
-		"TestPostgreSQLRuntimeAbortCancelsJoinedBackgroundCommand":                          bridge,
-		"TestSubagentRetainedAssistantAndTerminalToolResultColdResume":                      composition,
-		"TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody":                   composition,
-		"TestSubagentFirstMailInterruptedCloseColdResumeAndLaterInputProductionComposition": composition,
-		"TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority":                      composition,
-		"TestPostgreSQLBridgeAPIStoreRunMemoryEnforcesDurableMemoryQuotas":                  bridge,
-		"TestPostgreSQLBridgeAPIStoreRunMemorySkipsRefreshForValidationErrors":              bridge,
-		"TestPostgreSQLThreadLoopRejectsOversizedSubagentPromptBeforeBridgeMutation":        bridge,
-		"TestPostgreSQLBridgeAPIStoreRunMemoryRejectsInvalidInputs":                         bridge,
-	}
-	plan := Plan{Profile: ProfileFull}
-	for _, owner := range []string{bridge, composition} {
-		selection := Selection{Group: "go", Packages: []string{owner}}
-		for test, packageName := range tests {
-			if packageName == owner {
-				if calibration.Packages[owner].TestsMS[test] <= 0 {
-					t.Fatalf("moved case %s lost its calibrated weight under %s", test, owner)
+	plan := Plan{Profile: ProfileFull, Selections: append(selections, Selection{Group: "runtime"}), Excluded: exclusions}
+	for count := 1; count <= 6; count++ {
+		var producers []string
+		results := map[string]Result{}
+		for index := 0; index < count; index++ {
+			shard, err := SelectPlan(plan, []string{"go"}, index, count)
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := SelectPlan(plan, []string{"go"}, index, count)
+			if err != nil || !reflect.DeepEqual(shard, again) {
+				t.Fatalf("planning shard %d of %d twice gave different plans (error %v)", index, count, err)
+			}
+			packages := map[string]bool{}
+			for _, selection := range shard.Selections {
+				if selection.Group != "go" || packages[selection.Packages[0]] {
+					t.Fatalf("shard %d of %d holds %s twice or a non-Go selection", index, count, selection.Packages)
 				}
-				selection.Tests = append(selection.Tests, test)
+				packages[selection.Packages[0]] = true
 			}
+			producer := fmt.Sprintf("shard-%d", index)
+			producers = append(producers, producer)
+			results[producer] = Result{Plan: shard}
 		}
-		plan.Selections = append(plan.Selections, selection)
+		if failures := goShardPartitionFailures(producers, results); len(failures) > 0 {
+			t.Fatalf("%d shards: %v", count, failures)
+		}
 	}
-	seen := map[string]int{}
-	weights := make([]int, 4)
-	for shardIndex := 0; shardIndex < 4; shardIndex++ {
-		shard, err := SelectPlan(plan, []string{"go"}, shardIndex, 4)
-		if err != nil {
-			t.Fatal(err)
-		}
-		packages := map[string]bool{}
-		for _, selection := range shard.Selections {
-			packageName := selection.Packages[0]
-			if packages[packageName] {
-				t.Fatalf("shard %d started multiple processes for %s", shardIndex, packageName)
-			}
-			packages[packageName] = true
-			for _, test := range selection.Tests {
-				if tests[test] != packageName {
-					t.Fatalf("shard %d moved %s to wrong owner %s", shardIndex, test, packageName)
+}
+
+func TestBalanceGoSelectionsPlacesUnitsByWeight(t *testing.T) {
+	// p/s is sliceable: four 8 s tests and 2 s overhead per step. p/w runs
+	// whole in 20 s.
+	weights, err := parseGoShardWeights([]byte(`{"version": 2, "generated_at": "2026-10-11", "base": "b", "source_runs": ["1"], "cpu_models": {"Fixture CPU": {"factor": 1, "jobs": 1, "samples": 1, "shared_units": 0}}, "median_test_ms": 1,
+		"sliceable": ["p/s"], "packages": {
+			"p/s": {"elapsed_ms": 32000, "overhead_ms": 2000, "tests_ms": {"TestA": 8000, "TestB": 8000, "TestC": 8000, "TestD": 8000}},
+			"p/w": {"elapsed_ms": 20000, "overhead_ms": 0}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selections := []Selection{
+		{Group: "go", Packages: []string{"p/s"}, Tests: []string{"TestA", "TestB", "TestC", "TestD"}},
+		{Group: "go", Packages: []string{"p/w"}, Tests: []string{"TestW"}},
+	}
+	for _, test := range []struct {
+		name      string
+		shards    int
+		steps     [][]string
+		makespans []int64
+	}{
+		{
+			// p/w goes first to shard 0; each 8 s test then joins whichever
+			// shard ends earliest, paying p/s's overhead once per shard, and
+			// each shard starts its longest step first.
+			name: "two shards", shards: 2,
+			steps:     [][]string{{"p/w TestW", "p/s TestC TestD"}, {"p/s TestA TestB"}},
+			makespans: []int64{20000, 18000},
+		},
+		{name: "one shard keeps a sliceable package whole", shards: 1, steps: [][]string{{"p/s TestA TestB TestC TestD", "p/w TestW"}}, makespans: []int64{34000}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			shards := balanceGoSelections(selections, test.shards, weights)
+			for index, shard := range shards {
+				var steps []string
+				for _, selection := range shard {
+					steps = append(steps, strings.Join(append([]string{selection.Packages[0]}, selection.Tests...), " "))
 				}
-				seen[test]++
-				weights[shardIndex] += calibration.Packages[packageName].TestsMS[test]
+				if !slices.Equal(steps, test.steps[index]) {
+					t.Fatalf("shard %d steps = %q; want %q", index, steps, test.steps[index])
+				}
+				if makespan := predictGoShardMakespan(shard, weights); makespan != test.makespans[index] {
+					t.Fatalf("shard %d makespan = %d ms; want %d", index, makespan, test.makespans[index])
+				}
 			}
-		}
-	}
-	for test := range tests {
-		if seen[test] != 1 {
-			t.Fatalf("%s executed %d times", test, seen[test])
-		}
-	}
-	minWeight, maxWeight := weights[0], weights[0]
-	for _, weight := range weights[1:] {
-		minWeight = min(minWeight, weight)
-		maxWeight = max(maxWeight, weight)
-	}
-	if maxWeight > minWeight*2 {
-		t.Fatalf("calibrated shard weights are not bounded: %v", weights)
+		})
 	}
 }
 

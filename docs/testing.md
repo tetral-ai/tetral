@@ -222,25 +222,110 @@ The readable CI topology is:
 - **CI Benchmark**: dispatched by hand to measure a speed change; see
   [CI Benchmark](#ci-benchmark). Nothing gates on it.
 
-`internal/testinfra/go_shard_weights.json` balances the four Go Race shards.
-Each package listed there is split across shards by top-level test, weighted by
-the test's measured duration or the package's `default_ms`; other packages stay
-whole with relative weights. The integration entry was calibrated from the
-`Elapsed` durations of every top-level test that ran longer than about ten
-seconds in the `go test -json` evidence of all four Go Race shards of Pull
-Request Verification run 37512221678, collected on the `calibrated_at` date. A
-change that moves a test of a sliced package by more than ten seconds sets that
-test's entry from its own Pull Request Verification run; a test whose subtests
-run in parallel reports `Elapsed` 0, so its entry is the time from its `run`
-event to its final event. Recalibrate from the same per-test evidence of a current run, combining
-every shard of a sliced package.
+`internal/testinfra/go_shard_weights.json` balances the Go Race shards. It
+holds medians of Go Race evidence in milliseconds: every package's `Elapsed`
+(summed over its slices in a run) and its overhead per step (step time outside
+its units, mostly compile), and for each package listed as `sliceable` every
+top-level test's active time. A test's active time runs from its `run` event
+to its final event less the time it spent paused, so a top-level
+`t.Parallel()` test's wait is left out and a test whose subtests run in
+parallel, which reports an `Elapsed` near 0, counts their time. The file also
+names its source runs, the commit they all contain and the date. Only the
+`sliceable` list is chosen by hand; the generator keeps it as it is.
+
+GitHub assigns runner CPU models at random, and in the source runs an EPYC
+7763 ran the same tests about 1.4 times slower than an EPYC 9V45. All weights
+are on one machine scale: every sample is divided by a factor for its job's
+recorded CPU model before medians are taken. The generator fits the factors
+jointly with unit weights, alternating the two until they settle, from the
+tests of sliceable packages and the whole Elapsed of other packages that
+weigh at least a second. Within the fit a unit's weight is the geometric
+mean of its scaled samples, which stays stable with three source runs where
+a median would pin the fit to one sample; the weights written are medians. A
+unit measured on one model only is still scaled by that model's factor, which
+the units it shares with other models fix. The scale is the median source
+job, the slower of the two middle jobs when their count is even: its CPU
+model's factor is 1. The file records
+each model's factor, jobs, fit samples and shared units. Generation stops
+when a result records no CPU model or a model shares fewer than five units
+with the others, rather than guess its factor.
+
+The planner splits each sliceable package by top-level test and keeps other
+packages whole. It places these units longest first, each on the shard whose
+simulated makespan is lowest after taking it, the lowest-numbered shard on a
+tie; the simulation runs a shard's steps on its two workers and charges a
+package's overhead once per shard. The runner starts each shard's steps
+longest first, as planned. A test the file does not know costs its package's
+median test weight, a package it does not know costs its test count times the
+repository's median test weight, and names the plan no longer has are
+ignored. Planning reads no network, so
+`go run ./internal/testinfra/cmd/tetral-test --profile full --groups go --shard-index N --shard-count K`,
+where K is the number of `go_shards` in `internal/testinfra/pr_producers.json`,
+reproduces CI shard N locally.
+
+The predicted makespan is on that scale and leaves out the speed of the
+machines a run draws, so a run's slowest shard is mostly set by the slowest
+machine it drew. A job's speed is the median, over its passed units that the
+weights give at least a second, of measured time ÷ weight, pricing units as
+the weights do; a job with fewer than five such units has no speed and is
+reported unnormalized, never given a guessed one. Drift checks and CI
+Benchmark compare steps phases divided by their job's speed.
+
+To regenerate the file, download the Go Race evidence (the `*-evidence-go-*`
+artifacts) of at least three Pull Request or Main Branch Verification runs,
+fetch the commits they tested, and run:
+
+```sh
+go run ./internal/testinfra/cmd/tetral-shard-weights --base <commit> <evidence-dir>...
+```
+
+`--base` is the newest change to test durations that the weights must
+reflect. The generator uses only runs whose tested commit contains it and
+whose every shard restored the Go build cache, and refuses to write the file
+when fewer than three runs qualify. It counts only passed units and gives a
+unit a new weight only from three samples; a unit that ran with fewer keeps
+its current weight, or falls back to the median weights when it has none. It
+lists the runs it left out and both kinds of short units, and warns when a
+package that is not sliceable takes more than one worker's share of the total
+over the `go_shards` and their two workers each.
+
+The daily CI health job checks the weights against the newest verification
+runs whose base contains the weights' base commit. It downloads the Go Race
+evidence of each of the last two weeks' ten newest Pull Request and Main
+Branch Verification runs and raises a warning annotation, repeated in its
+step summary, when over at least three such runs the median speed-normalized
+slowest steps phase (each shard's steps phase divided by its job's speed) of
+the runs whose shards all passed exceeds the weights' predicted makespan for
+their plans by more than 60 s, when a unit's median, with every sample
+divided by its CPU model's factor, or by its job's speed for a model the file
+has no factor for, differs from its weight by more than 30 s, or when a
+top-level test of 10 s or more in a sliceable package, or in a package the
+file does not know, has no weight of its own. Samples with neither a factor
+nor a job speed are left out and counted by model in the summary. With fewer
+runs it reports
+insufficient data. The summary lists each run's measured slowest steps
+phase, its normalized one and its jobs' range of speeds, and compares summed
+Go test work with the weights' total: about 8 more minutes of it (one per Go
+package process, the `go_shards` times two) add a minute of solo wall time.
+For each of the two weeks it counts the Pull Request
+Verification first attempts that ended in success or failure, and from up to
+40 of them spread across the week shows the share queued, the median solo
+wall time as measured and normalized by the week's Go test work, and the
+runner-minutes. A check makes about 200 GitHub API requests. A warning calls
+for a pull request with regenerated weights; nothing rewrites the file
+automatically.
 
 Report-only coverage runs `go test ./...` once without Race, so the integration
 package executes every top-level test sequentially in one binary. Its Go
-budget is 60 minutes: more than twice that package's measured Race total of
-about 26 minutes, and longer than the other tests plus the SDK wrapper's
-24-minute context. The coverage job's 80-minute limit leaves room for
-dependency setup, compilation, and the Bun coverage commands around it.
+budget is 60 minutes: more than twice the 25 to 28 minutes that package took
+in the coverage runs of Main Branch Verification runs 38151172754 and
+38149638991, and longer than the other tests plus the SDK wrapper's 24-minute
+context. Coverage times are not part of the repository's evidence, so
+`TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests` checks the budget
+against twice the package's summed Race time in `go_shard_weights.json`, a
+lower figure that grows with the package. The coverage job's 80-minute limit
+leaves room for dependency setup, compilation, and the Bun coverage commands
+around it.
 
 Online Bun dependency audits are deliberately separated from deterministic
 security checks. Pull requests run them when a `package.json`, `bun.lock`, or
@@ -265,6 +350,19 @@ go run ./internal/testinfra/cmd/tetral-test \
 The main-branch ruleset requires the **Merge Gate** produced by Pull Request
 Verification. Individual producer jobs are evidence inputs; none can bypass or
 substitute for the reconciled verdict.
+
+Merge Gate also checks that the Go Race results partition the Go selection
+exactly once. Each records `go_selection`: a digest of the complete Go
+selection before slicing (every package with its tests and every Go exclusion
+with its disposition), its shard index and the shard count. The Gate takes the
+Go shard producers from `go_shards` in `internal/testinfra/pr_producers.json`,
+not from producer names, and fails unless their indices are exactly 0..K−1 for
+the K shards listed, no test runs in two shards, each zero-test package is in
+exactly one shard, every shard carries the same exclusions, and the union of
+the shards hashes to every recorded digest. It does not plan again; the
+planner's own reconciliation owns the selection. Main Branch Verification has
+no Merge Gate: nothing reconciles its results, and its failed jobs are the
+signal.
 
 Pull request jobs have read-only repository permission, do not receive external
 service credentials, and never execute PR code through `pull_request_target`.
@@ -369,7 +467,10 @@ restore it before main's, so use it only on a branch nothing is based on.
 
 The **Compare A and B** job writes the report to the run summary and uploads
 `compare.json` as `ci-benchmark-compare-<run>-<attempt>`. It first checks that
-every result tested its side's commit. Per side and shard it reports the time
+every result tested its side's commit. A side is complete when its results
+hold shard indices 0..K−1 for the shard count they record and every shard ran
+all its steps; results from before shard identities were recorded cannot show
+a missing last shard. Per side and shard it reports the time
 before the runner starts (GitHub steps, `go run` and planning), dependency
 setup, preparation (job start to the first test), each step's compile time
 before its first test, fixed preparation (time before the runner, setup and
@@ -395,12 +496,20 @@ them:
   longest compile wherever it runs, so it is nearly plan-invariant: only that
   compile depends on which packages share a shard. The replays are
   plan-invariant: two workers take a shard plan's steps in order. A whole
-  package costs its measured step; a slice of a split package costs its tests
-  plus the overhead (time outside its tests, mostly compile) of that package's
-  step in the same shard, or the package's mean overhead when that shard ran
-  no step of it, so a run's own plan replays to its measured steps phase.
-  `replayed_slowest_steps_phase` prices both plans with A's durations, taking
-  B's only for packages A never ran;
+  package costs its measured step; a slice of a split package costs its tests'
+  active times, as the shard weights count them, plus the overhead (step time
+  outside them, mostly compile) of that package's step in the same shard, or
+  the package's mean overhead when that shard ran no step of it, so a run's
+  own plan replays to its measured steps phase. Per-test ratios, speed factors
+  and `changed_tests_duration` compare Go's reported `Elapsed` instead.
+  `normalized_replayed_slowest_steps_phase` replays both plans over A's
+  durations, taking B's only for packages A never ran, after dividing every
+  unit by the speed of the job that measured it, so neither plan keeps the
+  machines A's jobs drew; the report lists every job's speed, computed with
+  the shard weights built into the tool, so a side from an older runner gets
+  speeds too. `replayed_slowest_steps_phase` is the same replay without that
+  division: A's plan keeps A's machine draw and B's mixes it, so it is only
+  reported;
   `plan_fixed_slowest_job` prices A's plan with each side's durations and adds
   that side's mean time before the runner and setup;
   `plan_fixed_runner_minutes` adds each side's durations replayed through A's
@@ -429,8 +538,11 @@ least E/2; below 2 s_D there is no measurable change. Every verdict also
 requires B's plan-fixed runner-minutes and plan-fixed slowest job to stay
 within A + 2 s_D, and refuses plan-dependent metrics from runs whose plans
 differ.
-`replayed_slowest_steps_phase` prices both plans over the same durations, so
-A/A runs give it no s_D: its verdict always takes five runs.
+`normalized_replayed_slowest_steps_phase` prices both plans over the same
+durations, so A/A runs give it no s_D: its verdict always takes five runs. A
+shard plan change is judged on it:
+`verdict --metric normalized_replayed_slowest_steps_phase --effect E` passes
+when d > 0 in all five runs and the mean d is at least E/2.
 
 ```sh
 go run ./internal/testinfra/cmd/tetral-ci-bench noise --output noise.json aa-1.json aa-2.json aa-3.json
@@ -445,10 +557,9 @@ under one second only when it was made with that list; rerun `compare
 --changed-tests` on the A/A run's Go Race evidence while it is kept (14 days),
 or dispatch new A/A runs.
 
-Benchmark evidence never feeds shard calibration or the CI health job.
-Calibrate `go_shard_weights.json` only from Pull Request or Main Branch
-Verification evidence; the health job reads only its own run's `scheduled-*`
-artifacts.
+Benchmark evidence never feeds the shard weights or the CI health job:
+`tetral-shard-weights` and the health job's weights check use only Pull
+Request and Main Branch Verification runs.
 
 ## Evidence and diagnosis
 
