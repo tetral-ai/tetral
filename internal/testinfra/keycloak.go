@@ -210,20 +210,13 @@ func (m *dependencyManager) startKeycloak(ctx context.Context) error {
 		return err
 	}
 	f.Container = name
-	ports, release, err := ReserveLoopbackPorts(8443)
-	if err != nil {
-		return err
-	}
-	defer release()
-	f.Endpoint = "https://127.0.0.1:" + strconv.Itoa(ports[8443])
-	arguments := append([]string{"run", "-d", "--name", name}, dependencyContainerLabels("keycloak", m.runID)...)
-	arguments = append(arguments, "-p", "127.0.0.1:"+strconv.Itoa(ports[8443])+":8443", "--env-file", filepath.Join(directory, "bootstrap.env"), "-v", tlsDirectory+":/fixture:ro", lock.Image, "start-dev", "--http-enabled=false", "--hostname="+f.Endpoint, "--https-certificate-file=/fixture/server.crt", "--https-certificate-key-file=/fixture/server.key", "--log-level=warn")
-	m.containers = append(m.containers, name)
-	m.containerDependencies = append(m.containerDependencies, "keycloak")
 	ready, cancel := context.WithTimeout(ctx, KeycloakReadinessTimeout)
 	defer cancel()
-	release()
-	if err := runQuiet(ready, "docker", arguments...); err != nil {
+	if err := m.publishContainer(ready, "keycloak", name, lock.Image, []int{8443}, func(ports map[int]int) []string {
+		f.Endpoint = "https://127.0.0.1:" + strconv.Itoa(ports[8443])
+		arguments := append([]string{"run", "-d", "--name", name}, dependencyContainerLabels("keycloak", m.runID)...)
+		return append(arguments, "-p", "127.0.0.1:"+strconv.Itoa(ports[8443])+":8443", "--env-file", filepath.Join(directory, "bootstrap.env"), "-v", tlsDirectory+":/fixture:ro", lock.Image, "start-dev", "--http-enabled=false", "--hostname="+f.Endpoint, "--https-certificate-file=/fixture/server.crt", "--https-certificate-key-file=/fixture/server.key", "--log-level=warn")
+	}, nil); err != nil {
 		return fmt.Errorf("start Keycloak dependency: %w", err)
 	}
 	client, err := f.HTTPClient()

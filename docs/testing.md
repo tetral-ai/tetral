@@ -114,6 +114,24 @@ TLS cluster project their client policy from those values. Unknown ownership
 continues to select Full. Service-owned `proto/` changes also select protocol
 generation and compatibility checks.
 
+The runner starts the selected dependencies before the first step and records
+each one's identity and setup time. Keycloak and egctl, which mostly wait on a
+JVM start or on a download and a helper build, start in the background while
+the others start one after another; setup ends when all are ready. The first
+failure cancels every start, waits for all of them and then removes what they
+created, including a container whose dispatch was still in flight; when the
+caller stopped setup, its cancellation is reported as the cause. The runner's
+containers that publish loopback ports start one at a time, from reserving a
+port until Docker has bound it, so none of them takes a port another reserved;
+their images are pulled before that, and fixtures that publish ports from test
+processes are outside this order.
+
+The runner's own PostgreSQL is disposable and runs with `fsync`,
+`synchronous_commit` and `full_page_writes` off: no test restarts it or reads
+its write-ahead log, and the checkpoint each dropped test database requests no
+longer waits for the disk. Its evidence records these settings. A database
+named by `TETRAL_TEST_DATABASE_URL` keeps its own settings.
+
 Local transport fixtures use pinned Envoy and Bun images and own their Docker
 containers and networks. PID and process-start labels protect live owners from
 orphan cleanup. Concurrent collectors join an already-started removal for at
