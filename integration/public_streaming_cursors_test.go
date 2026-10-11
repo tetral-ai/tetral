@@ -95,7 +95,7 @@ func TestPostgreSQLPublicStreamingListCursors(t *testing.T) {
 	f.end(t, rc)
 	end := f.endRequest(rp)
 	f.lostEnd.Store(true)
-	response, err := f.bridge.WriteRequestEnd(f.ctx, end)
+	response, err := f.bridge.WriteRequestEnd(f.callContext(t), end)
 	if status.Code(err) != codes.Unavailable || response != nil {
 		t.Fatalf("End response-loss boundary: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestPostgreSQLPublicStreamingListCursors(t *testing.T) {
 		t.Fatal("lost response lacked durable End proof")
 	}
 	f.waitEvent(t, "uninterrupted", "span.model_request_end", 1)
-	replayed, err := f.bridge.WriteRequestEnd(f.ctx, end)
+	replayed, err := f.bridge.WriteRequestEnd(f.callContext(t), end)
 	if err != nil || replayed.GetDuplicate().GetRequestEndEventId() != endID {
 		t.Fatalf("actual End receipt retry: %v", err)
 	}
@@ -229,14 +229,14 @@ func publicProjectionPositions(t *testing.T, f *publicProjectionFixture) map[str
 func publicProjectionForeignKey(t *testing.T, f *publicProjectionFixture) string {
 	t.Helper()
 	ws := workspace.ID(id.New("workspace_"))
-	if _, err := workspace.NewSeeder(f.db).Seed(f.ctx, ws, "foreign projection control"); err != nil {
+	if _, err := workspace.NewSeeder(f.db).Seed(f.callContext(t), ws, "foreign projection control"); err != nil {
 		t.Fatal(err)
 	}
-	key, err := authtest.SeedIndependentKey(f.ctx, f.pools.OpenWorkload(t, "auth", nil), ws, fmt.Sprintf("foreign-%s", f.session))
+	key, err := authtest.SeedIndependentKey(f.callContext(t), f.pools.OpenWorkload(t, "auth", nil), ws, fmt.Sprintf("foreign-%s", f.session))
 	if err != nil {
 		t.Fatal(err)
 	}
-	env, err := environment.NewPostgreSQLEnvironmentStore(dbconnect.NewClientForTesting(f.pools.OpenWorkload(t, "api", nil)), environment.WithDefaultArtifactRef("artifact_foreign_projection")).Create(f.ctx, ws, environment.CreateEnvironmentRequest{Name: "foreign projection"})
+	env, err := environment.NewPostgreSQLEnvironmentStore(dbconnect.NewClientForTesting(f.pools.OpenWorkload(t, "api", nil)), environment.WithDefaultArtifactRef("artifact_foreign_projection")).Create(f.callContext(t), ws, environment.CreateEnvironmentRequest{Name: "foreign projection"})
 	if err != nil {
 		t.Fatal(err)
 	}

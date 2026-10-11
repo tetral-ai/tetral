@@ -125,14 +125,10 @@ func (b *edgeTLSHTTPBackend) join(t *testing.T) {
 		return
 	}
 	b.beginDrain()
-	select {
-	case err := <-b.shutdownDone:
-		b.shutdownJoined = true
-		if err != nil {
-			t.Fatal("lifecycle backend graceful drain did not complete")
-		}
-	case <-b.context.Done():
-		t.Fatal("lifecycle backend drain exceeded fixture owner")
+	err := <-b.shutdownDone
+	b.shutdownJoined = true
+	if err != nil {
+		t.Fatal("lifecycle backend graceful drain did not complete")
 	}
 	b.shutdownCancel()
 	b.finish(t)

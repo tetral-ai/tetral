@@ -29,7 +29,7 @@ func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 				issuer := newOIDCReplicaIssuer(t)
 				identity := auth.IdentityBinding{ID: "identity_edge_authority", OrganizationID: issuer.rule.OrganizationID, Issuer: issuer.rule.Issuer, Subject: "edge-authority", Kind: auth.IdentityHuman, Enabled: true}
 				grant := auth.WorkspaceGrant{ID: "grant_edge_authority", IdentityID: identity.ID, WorkspaceID: workspace.DefaultID, Role: auth.WorkspaceFullAccess, Enabled: true}
-				if _, err := auth.NewPolicyStore(f.db).Apply(edge.ctx, auth.PolicyDocument{FederationRules: []auth.FederationRule{issuer.rule}, Identities: []auth.IdentityBinding{identity}, WorkspaceGrants: []auth.WorkspaceGrant{grant}}); err != nil {
+				if _, err := auth.NewPolicyStore(f.db).Apply(edge.callContext(t), auth.PolicyDocument{FederationRules: []auth.FederationRule{issuer.rule}, Identities: []auth.IdentityBinding{identity}, WorkspaceGrants: []auth.WorkspaceGrant{grant}}); err != nil {
 					t.Fatal("provision actual edge authority fixture")
 				}
 				exchange := transporttest.Must(json.Marshal(map[string]string{"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": issuer.assertion(t, identity.Subject), "federation_rule_id": issuer.rule.ID, "organization_id": issuer.rule.OrganizationID, "workspace_id": "default"}))
@@ -42,15 +42,15 @@ func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 					t.Fatal("actual exchange did not fetch exactly the registered real HTTPS JWKS")
 				}
 				issuerBefore := issuer.counts()
-				principal := transporttest.Must(auth.NewAuthorityResolver(f.db, workspace.DefaultID, nil).AuthenticateBearer(edge.ctx, issued.AccessToken))
+				principal := transporttest.Must(auth.NewAuthorityResolver(f.db, workspace.DefaultID, nil).AuthenticateBearer(edge.callContext(t), issued.AccessToken))
 				restricted := transporttest.Must(auth.GenerateAPIKey())
 				// Provision an old, immutable narrower issuance ceiling using the same
 				// accepted PR6 fixture boundary. Current product role remains full access;
 				// authentication and every public authorization decision use production code.
-				if _, err := f.db.ExecContext(edge.ctx, `INSERT INTO api_keys(id,workspace_id,name,key_prefix,key_digest,key_kind,authority_kind,federation_rule_id,identity_id,grant_id,rule_revision,identity_revision,grant_revision,role_version,issuance_operations,parent_credential_id,created_at) VALUES('ak_edge_restricted','default','historical restricted fixture','fixture',$1,'standard','identity_grant',$2,$3,$4,$5,$6,$7,$8,'["sessions.read"]'::jsonb,$9,clock_timestamp())`, auth.DigestAPIKey(restricted), principal.Authority.RuleID, principal.Authority.IdentityID, principal.Authority.GrantID, principal.Authority.RuleRevision, principal.Authority.IdentityRevision, principal.Authority.GrantRevision, principal.Authority.PolicyVersion, principal.Credential.ID); err != nil {
+				if _, err := f.db.ExecContext(edge.callContext(t), `INSERT INTO api_keys(id,workspace_id,name,key_prefix,key_digest,key_kind,authority_kind,federation_rule_id,identity_id,grant_id,rule_revision,identity_revision,grant_revision,role_version,issuance_operations,parent_credential_id,created_at) VALUES('ak_edge_restricted','default','historical restricted fixture','fixture',$1,'standard','identity_grant',$2,$3,$4,$5,$6,$7,$8,'["sessions.read"]'::jsonb,$9,clock_timestamp())`, auth.DigestAPIKey(restricted), principal.Authority.RuleID, principal.Authority.IdentityID, principal.Authority.GrantID, principal.Authority.RuleRevision, principal.Authority.IdentityRevision, principal.Authority.GrantRevision, principal.Authority.PolicyVersion, principal.Credential.ID); err != nil {
 					t.Fatal("provision restricted immutable derived key fixture")
 				}
-				baseline := edgeAuthorityEffects(edge.ctx, t, f.db, f.session)
+				baseline := edgeAuthorityEffects(edge.callContext(t), t, f.db, f.session)
 				for _, vector := range []struct {
 					method, path, body string
 					event              bool
@@ -75,13 +75,13 @@ func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 						t.Fatal("actual permission denial did not reach exactly its owning business receiver")
 					}
 				}
-				if edgeAuthorityEffects(edge.ctx, t, f.db, f.session) != baseline {
+				if edgeAuthorityEffects(edge.callContext(t), t, f.db, f.session) != baseline {
 					t.Fatal("authenticated denied operations changed durable business state")
 				}
-				if _, err := f.db.ExecContext(edge.ctx, `INSERT INTO workspaces(id,type,name,created_at) VALUES('edge_other','workspace','Other',clock_timestamp())`); err != nil {
+				if _, err := f.db.ExecContext(edge.callContext(t), `INSERT INTO workspaces(id,type,name,created_at) VALUES('edge_other','workspace','Other',clock_timestamp())`); err != nil {
 					t.Fatal(err)
 				}
-				other := transporttest.Must(authtest.SeedIndependentKey(edge.ctx, f.db, "edge_other", "other authority"))
+				other := transporttest.Must(authtest.SeedIndependentKey(edge.callContext(t), f.db, "edge_other", "other authority"))
 				before := edge.apiRequests.Load()
 				beforeChecks := edgeAuthCheckCount(edge.ctx, t, edge.fixture.Ports.Admin)
 				status, body = edge.authorityRequest(edge.ctx, t, "GET", "/v1/sessions/"+f.session+"?beta=true", other.APIKey, "", nil)
@@ -143,7 +143,7 @@ func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 					t.Fatal("new admission after actual revocation reached business receiver")
 				}
 				edge.assertHeldAuthority(t, f)
-				if edgeAuthorityEffects(edge.ctx, t, f.db, f.session) != baseline {
+				if edgeAuthorityEffects(edge.callContext(t), t, f.db, f.session) != baseline {
 					t.Fatal("authorization isolation, rejection or held Check controls changed durable business state")
 				}
 				t.Logf("envoy_gateway_authority_assertion=actual_receivers profile=%s permission403_noeffects=true wrongworkspace404=true bearer_precedence=true revocation401=true held_check=true passed=true", profile)
@@ -210,13 +210,13 @@ func (edge *translatedPublicEdge) assertHeldAuthority(t *testing.T, f *publicPro
 	t.Helper()
 	for _, timeout := range []bool{false, true} {
 		key := edge.authorityCreateKey(t, "held Check")
-		held := transporttest.Must(f.db.BeginTx(edge.ctx, nil))
+		held := transporttest.Must(f.db.BeginTx(edge.callContext(t), nil))
 		t.Cleanup(func() { _ = held.Rollback() })
 		var holder int
-		if held.QueryRowContext(edge.ctx, `SELECT pg_backend_pid()`).Scan(&holder) != nil {
+		if held.QueryRowContext(edge.callContext(t), `SELECT pg_backend_pid()`).Scan(&holder) != nil {
 			t.Fatal("held authority PG identity unavailable")
 		}
-		if _, err := held.ExecContext(edge.ctx, `UPDATE api_keys SET revoked_at=clock_timestamp() WHERE id=$1`, key.ID); err != nil {
+		if _, err := held.ExecContext(edge.callContext(t), `UPDATE api_keys SET revoked_at=clock_timestamp() WHERE id=$1`, key.ID); err != nil {
 			t.Fatal(err)
 		}
 		requestCtx, cancel := context.WithTimeout(edge.ctx, 8*time.Second)
@@ -306,9 +306,9 @@ func (edge *translatedPublicEdge) assertHeldAuthority(t *testing.T, f *publicPro
 		if status, _ := edge.authorityRequest(edge.ctx, t, "GET", "/v1/sessions/"+f.session+"?beta=true", control.APIKey, "", nil); status != 200 {
 			t.Fatal("usage control key was not admitted")
 		}
-		edgeAwaitAPIKeyUsage(edge.ctx, t, f.db, control.ID)
+		edgeAwaitAPIKeyUsage(edge.callContext(t), t, f.db, control.ID)
 		var lastUsed sql.NullTime
-		if f.db.QueryRowContext(edge.ctx, `SELECT last_used_at FROM api_keys WHERE id=$1`, key.ID).Scan(&lastUsed) != nil || lastUsed.Valid {
+		if f.db.QueryRowContext(edge.callContext(t), `SELECT last_used_at FROM api_keys WHERE id=$1`, key.ID).Scan(&lastUsed) != nil || lastUsed.Valid {
 			t.Fatal("failed held Check submitted usage")
 		}
 		status, _ := edge.authorityRequest(edge.ctx, t, "GET", "/v1/sessions/"+f.session+"?beta=true", key.APIKey, "", nil)
