@@ -243,8 +243,16 @@ func VerifyScheduledWorkflow(root string) error {
 	if health == nil || scalar(mappingValue(health, "if")) != manualOrDaily {
 		return fmt.Errorf("scheduled compatibility health is not limited to manual and daily runs")
 	}
-	if !jobEvidenceInputEquals(health, "dependency-audit", string(DependencyAuditAlways)) {
-		return fmt.Errorf("scheduled compatibility health does not always run the online dependency audit")
+	if !jobEvidenceInputEquals(health, "dependency-audit", string(DependencyAuditNever)) {
+		return fmt.Errorf("scheduled compatibility health runs the online dependency audit that dependency advisories owns")
+	}
+	advisories := mappingValue(jobs, "dependency-advisories")
+	if advisories == nil || scalar(mappingValue(advisories, "if")) != manualOrDaily {
+		return fmt.Errorf("scheduled dependency advisories is not limited to manual and daily runs")
+	}
+	if !jobEvidenceInputEquals(advisories, "group", "security") ||
+		!jobEvidenceInputEquals(advisories, "dependency-audit", string(DependencyAuditAlways)) {
+		return fmt.Errorf("scheduled dependency advisories does not always run the online dependency audit")
 	}
 	coverage := mappingValue(jobs, "coverage")
 	if coverage == nil || scalar(mappingValue(coverage, "if")) != manualOrDaily {

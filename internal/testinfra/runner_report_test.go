@@ -3,6 +3,7 @@ package testinfra
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -144,17 +145,17 @@ func TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests(t *testing.T) {
 
 func TestSecuritySelectionAppliesDependencyAuditPolicy(t *testing.T) {
 	tests := []struct {
-		name       string
-		mode       DependencyAuditMode
-		paths      []string
-		wantAudits int
+		name      string
+		mode      DependencyAuditMode
+		paths     []string
+		wantAudit bool
 	}{
 		{name: "changed unrelated", mode: DependencyAuditChanged, paths: []string{"services/bridge/runtime_delivery.go"}},
-		{name: "changed package manifest", mode: DependencyAuditChanged, paths: []string{"services/gateway/package.json"}, wantAudits: 2},
-		{name: "changed lockfile", mode: DependencyAuditChanged, paths: []string{"services/agent-runtime/bun.lock"}, wantAudits: 2},
-		{name: "changed audit runner", mode: DependencyAuditChanged, paths: []string{"scripts/run-bun-audit.sh"}, wantAudits: 2},
-		{name: "changed audit plumbing", mode: DependencyAuditChanged, paths: []string{"internal/testinfra/runner.go"}, wantAudits: 2},
-		{name: "always", mode: DependencyAuditAlways, wantAudits: 2},
+		{name: "changed package manifest", mode: DependencyAuditChanged, paths: []string{"services/gateway/package.json"}, wantAudit: true},
+		{name: "changed lockfile", mode: DependencyAuditChanged, paths: []string{"services/agent-runtime/bun.lock"}, wantAudit: true},
+		{name: "changed audit runner", mode: DependencyAuditChanged, paths: []string{"scripts/run-bun-audit.sh"}, wantAudit: true},
+		{name: "changed audit plumbing", mode: DependencyAuditChanged, paths: []string{"internal/testinfra/runner.go"}, wantAudit: true},
+		{name: "always", mode: DependencyAuditAlways, wantAudit: true},
 		{name: "never", mode: DependencyAuditNever, paths: []string{"services/gateway/package.json"}},
 	}
 	for _, test := range tests {
@@ -164,13 +165,13 @@ func TestSecuritySelectionAppliesDependencyAuditPolicy(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			audits := 0
+			var audits [][]string
 			staticChecks := 0
 			runtimeInstalls := 0
 			gatewayInstalls := 0
 			for _, command := range commands {
 				if len(command.Arguments) > 0 && command.Arguments[0] == "./scripts/run-bun-audit.sh" {
-					audits++
+					audits = append(audits, command.Arguments[1:])
 				}
 				if slices.Equal(command.Arguments, []string{"bun", "install", "--frozen-lockfile"}) {
 					switch command.WorkingDir {
@@ -184,14 +185,22 @@ func TestSecuritySelectionAppliesDependencyAuditPolicy(t *testing.T) {
 					staticChecks++
 				}
 			}
-			if audits != test.wantAudits {
-				t.Fatalf("online audits = %d; want %d", audits, test.wantAudits)
+			// One audit names both packages, so one package's findings cannot
+			// stop the other package's audit.
+			var wantAudits [][]string
+			wantGatewayInstalls := 0
+			if test.wantAudit {
+				wantAudits = [][]string{{"services/agent-runtime", "services/gateway"}}
+				wantGatewayInstalls = 1
+			}
+			if !slices.EqualFunc(audits, wantAudits, slices.Equal[[]string]) {
+				t.Fatalf("online audits = %v; want %v", audits, wantAudits)
 			}
 			if runtimeInstalls != 1 {
 				t.Fatalf("Runtime installs = %d; want 1 for deterministic boundary checks", runtimeInstalls)
 			}
-			if gatewayInstalls != test.wantAudits/2 {
-				t.Fatalf("Gateway installs = %d; want %d", gatewayInstalls, test.wantAudits/2)
+			if gatewayInstalls != wantGatewayInstalls {
+				t.Fatalf("Gateway installs = %d; want %d", gatewayInstalls, wantGatewayInstalls)
 			}
 			if staticChecks != 1 {
 				t.Fatalf("static security checks = %d; want 1", staticChecks)
@@ -230,6 +239,119 @@ func TestStepWithoutStructuredArtifactUsesVisibleDiagnosticName(t *testing.T) {
 	}
 	if len(entries) != 1 || strings.HasPrefix(entries[0].Name(), ".") || !strings.HasSuffix(entries[0].Name(), ".log") {
 		t.Fatalf("diagnostic files = %v; want one visible log", entries)
+	}
+}
+
+func TestFailedStepPrintsDiagnosticExcerpt(t *testing.T) {
+	goReport := strings.Join([]string{
+		`{"Action":"run","Package":"example/pkg","Test":"TestPassing"}`,
+		`{"Action":"output","Package":"example/pkg","Test":"TestPassing","Output":"    passing_test.go:3: passing noise\n"}`,
+		`{"Action":"pass","Package":"example/pkg","Test":"TestPassing"}`,
+		`{"Action":"run","Package":"example/pkg","Test":"TestBroken"}`,
+		`{"Action":"output","Package":"example/pkg","Test":"TestBroken","Output":"    broken_test.go:9: deadline: context canceled\n"}`,
+		`{"Action":"output","Package":"example/pkg","Test":"TestBroken","Output":"--- FAIL: TestBroken (0.08s)\n"}`,
+		`{"Action":"fail","Package":"example/pkg","Test":"TestBroken"}`,
+		`{"Action":"output","Package":"example/pkg","Output":"FAIL\texample/pkg\t0.1s\n"}`,
+		`{"Action":"fail","Package":"example/pkg"}`,
+	}, "\n")
+	skipReport := strings.Join([]string{
+		`{"Action":"run","Package":"example/pkg","Test":"TestNeedsFixture"}`,
+		`{"Action":"output","Package":"example/pkg","Test":"TestNeedsFixture","Output":"    fixture_test.go:3: NATS fixture is not provisioned\n"}`,
+		`{"Action":"output","Package":"example/pkg","Test":"TestNeedsFixture","Output":"--- SKIP: TestNeedsFixture (0.00s)\n"}`,
+		`{"Action":"skip","Package":"example/pkg","Test":"TestNeedsFixture"}`,
+		`{"Action":"run","Package":"example/pkg","Test":"TestPassing"}`,
+		`{"Action":"output","Package":"example/pkg","Test":"TestPassing","Output":"    passing_test.go:3: passing noise\n"}`,
+		`{"Action":"pass","Package":"example/pkg","Test":"TestPassing"}`,
+		`{"Action":"pass","Package":"example/pkg"}`,
+	}, "\n")
+	longLine := "advisory 100 " + strings.Repeat("x", 987)
+	var longLog strings.Builder
+	for line := 1; line < 100; line++ {
+		fmt.Fprintf(&longLog, "advisory %03d\n", line)
+	}
+	longLog.WriteString(longLine + "\n")
+	// printf spells the command's own summary entry, so the command line in
+	// the excerpt header does not contain it.
+	const commandWrite = "step command wrote the summary"
+	for _, tc := range []struct {
+		name, kind, diagnostic string
+		rejectSkip             bool
+		want, absent           []string
+	}{
+		{
+			name: "go test JSON", kind: "go-json", diagnostic: goReport,
+			want:   []string{"    broken_test.go:9: deadline: context canceled", "--- FAIL: TestBroken (0.08s)", "FAIL\texample/pkg\t0.1s"},
+			absent: []string{"passing noise", `"Action"`},
+		},
+		{
+			name: "rejected Go test skip", kind: "go-json", diagnostic: skipReport, rejectSkip: true,
+			want:   []string{"    fixture_test.go:3: NATS fixture is not provisioned", "--- SKIP: TestNeedsFixture (0.00s)"},
+			absent: []string{"passing noise"},
+		},
+		{
+			name: "plain log beyond the caps", diagnostic: longLog.String(),
+			want:   []string{"advisory 001", "advisory 020", "... 20 lines omitted ...", "advisory 041", longLine[:300] + " ..."},
+			absent: []string{"advisory 021", "advisory 040", longLine[:301]},
+		},
+		{
+			name: "carriage return and control characters", diagnostic: "advisory text\r::warning::forged annotation\nbell\a nul\x00 kept\ttab\n",
+			want:   []string{"::warning::forged annotation", "bell nul kept\ttab"},
+			absent: []string{"\r", "\a", "\x00"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			directory := t.TempDir()
+			fixture := filepath.Join(directory, "diagnostic")
+			writeTestFile(t, directory, "diagnostic", tc.diagnostic)
+			summary := filepath.Join(directory, "summary.md")
+			t.Setenv("GITHUB_STEP_SUMMARY", summary)
+			stdout, err := os.Create(filepath.Join(directory, "stdout"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved := os.Stdout
+			os.Stdout = stdout
+			t.Cleanup(func() { os.Stdout = saved })
+			spec := commandSpec{
+				Arguments:  []string{"sh", "-c", `cat "$0"; if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then printf 'step %s wrote the summary\n' command >> "$GITHUB_STEP_SUMMARY"; fi; exit 1`, fixture},
+				Kind:       tc.kind,
+				RejectSkip: tc.rejectSkip,
+			}
+			if tc.kind != "" {
+				spec.Artifact = "go.jsonl"
+			}
+			if _, err := runStep(context.Background(), directory, "go", spec, &dependencyManager{environment: os.Environ()}, t.TempDir()); err == nil {
+				t.Fatal("failing step passed")
+			}
+			for name, path := range map[string]string{"job log": stdout.Name(), "job summary": summary} {
+				body, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, line := range tc.want {
+					if !strings.Contains(string(body), line) {
+						t.Errorf("%s lacks %q:\n%s", name, line, body)
+					}
+				}
+				for _, line := range append(tc.absent, commandWrite) {
+					if strings.Contains(string(body), line) {
+						t.Errorf("%s contains %q:\n%s", name, line, body)
+					}
+				}
+			}
+			// The runner reads a bare carriage return as a line end, so every
+			// line after the two header lines must carry the excerpt prefix.
+			log, err := os.ReadFile(stdout.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			printed := strings.Split(strings.TrimSuffix(strings.ReplaceAll(string(log), "\r", "\n"), "\n"), "\n")
+			for _, line := range printed[min(2, len(printed)):] {
+				if !strings.HasPrefix(line, "  | ") {
+					t.Errorf("job log line %q lacks the excerpt prefix", line)
+				}
+			}
+		})
 	}
 }
 

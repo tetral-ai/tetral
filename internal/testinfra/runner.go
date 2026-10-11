@@ -435,9 +435,8 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 		}
 		if runDependencyAudit(plan, dependencyAuditMode) {
 			commands = append(commands,
-				commandSpec{Arguments: []string{"./scripts/run-bun-audit.sh", "services/agent-runtime"}},
 				commandSpec{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/gateway"},
-				commandSpec{Arguments: []string{"./scripts/run-bun-audit.sh", "services/gateway"}},
+				commandSpec{Arguments: []string{"./scripts/run-bun-audit.sh", "services/agent-runtime", "services/gateway"}},
 			)
 		}
 		if helperVulnerabilityAuditNeeded(plan, dependencyAuditMode) {
@@ -519,6 +518,9 @@ func runStep(ctx context.Context, root, group string, spec commandSpec, dependen
 	}
 	descendantRegistry := filepath.Join(outputDir, "descendants-"+sanitizeArtifact(group)+"-"+fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(spec.Arguments, "\x00"))))[:12]+".txt")
 	environment = append(withoutEnvironmentVariable(environment, descendantRegistryEnv), descendantRegistryEnv+"="+descendantRegistry)
+	// Only this runner reports into the job summary; a test that drives a
+	// failing step of its own must not add that step to the real job's summary.
+	environment = withoutEnvironmentVariable(environment, stepSummaryEnv)
 	for _, entry := range spec.Environment {
 		name, _, _ := strings.Cut(entry, "=")
 		environment = append(withoutEnvironmentVariable(environment, name), entry)
@@ -588,6 +590,7 @@ func runStep(ctx context.Context, root, group string, spec commandSpec, dependen
 		if step.FirstFailure == "" {
 			step.FirstFailure = err.Error()
 		}
+		reportFailedStep(group, spec, logPath)
 		return step, fmt.Errorf("%s evidence failed (diagnostic %s): %w", group, logPath, err)
 	}
 	return step, nil
