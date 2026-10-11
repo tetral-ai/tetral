@@ -39,9 +39,11 @@ const (
 	// binarySniffBytes is the 4096-byte prefix classified for binary content,
 	// checked only AFTER the media magic check fails. A NUL byte, over 30%
 	// non-printable bytes, or any invalid UTF-8 in that window makes the file
-	// binary_file. Invalid UTF-8 is treated as binary on purpose: a JSON string
-	// content field cannot carry arbitrary bytes, and refusing avoids a silent
-	// lossy U+FFFD substitution.
+	// binary_file. A character the window's end cuts is decoded whole from the
+	// bytes after it; one the file does not complete, or completes with invalid
+	// bytes, makes the file binary. Invalid UTF-8 is treated as binary on
+	// purpose: a JSON string content field cannot carry arbitrary bytes, and
+	// refusing avoids a silent lossy U+FFFD substitution.
 	//
 	// maxReadMediaBytes (10 MiB) caps the media envelope produced when the file
 	// magic-matches PNG/JPEG/GIF/WebP/PDF (checked before the binary sniff).
@@ -597,24 +599,28 @@ func parsePDFPageRange(value string) (int, int, *protocol.ToolError) {
 	return start, end, nil
 }
 
+// readSniffBytes reads the sniff window and up to utf8.UTFMax-1 bytes past it,
+// enough to complete a character the window's end cuts. Callers seek back
+// before reading the content.
 func readSniffBytes(file *os.File) ([]byte, error) {
-	buffer := make([]byte, binarySniffBytes)
-	n, err := file.Read(buffer)
-	if err != nil && !errors.Is(err, io.EOF) {
+	buffer := make([]byte, binarySniffBytes+utf8.UTFMax-1)
+	n, err := io.ReadFull(file, buffer)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return nil, err
 	}
 	return buffer[:n], nil
 }
 
-func sniffBinaryBytes(buffer []byte) bool {
-	if len(buffer) == 0 {
+func sniffBinaryBytes(sniffed []byte) bool {
+	window := sniffed[:min(len(sniffed), binarySniffBytes)]
+	if len(window) == 0 {
 		return false
 	}
-	if !utf8.Valid(buffer) {
+	if !windowUTF8Valid(sniffed, len(window)) {
 		return true
 	}
 	nonPrintable := 0
-	for _, b := range buffer {
+	for _, b := range window {
 		if b == 0 {
 			return true
 		}
@@ -625,7 +631,39 @@ func sniffBinaryBytes(buffer []byte) bool {
 			nonPrintable++
 		}
 	}
-	return nonPrintable*100 > len(buffer)*30
+	return nonPrintable*100 > len(window)*30
+}
+
+// windowUTF8Valid reports whether every character that starts in
+// sniffed[:window] is valid and complete. A character the window's end cuts is
+// decoded whole from the bytes after it.
+func windowUTF8Valid(sniffed []byte, window int) bool {
+	head := len(dropCutRune(sniffed[:window]))
+	if !utf8.Valid(sniffed[:head]) {
+		return false
+	}
+	if head == window {
+		return true
+	}
+	// A failed decode has size 1, which cannot end past the window; a literal
+	// U+FFFD has size 3.
+	_, size := utf8.DecodeRune(sniffed[head:])
+	return head+size > window
+}
+
+// dropCutRune removes a trailing incomplete UTF-8 sequence of at most
+// utf8.UTFMax-1 bytes. FullRune counts invalid bytes as complete, so they stay.
+func dropCutRune(buffer []byte) []byte {
+	for n := 1; n < utf8.UTFMax && n <= len(buffer); n++ {
+		tail := buffer[len(buffer)-n:]
+		if utf8.RuneStart(tail[0]) {
+			if !utf8.FullRune(tail) {
+				return buffer[:len(buffer)-n]
+			}
+			return buffer
+		}
+	}
+	return buffer
 }
 
 func sniffReadMediaMIME(header []byte) string {
