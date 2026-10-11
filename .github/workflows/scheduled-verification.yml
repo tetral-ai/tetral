@@ -81,10 +81,58 @@ jobs:
           needs-buf: 'true'
           dependency-audit: always
 
+  coverage:
+    name: Report-only Coverage
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '41 6 * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the scheduled revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.26.9'
+          cache-dependency-path: go.sum
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version-file: services/gateway/package.json
+      - name: Set up Helm for rendered transport fixtures
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.0
+      - name: Install buf
+        run: go install github.com/bufbuild/buf/cmd/buf@v1.70.0
+      - name: Prepare Go integration host
+        run: |
+          set -euo pipefail
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare -Ur -m true
+      - name: Collect ordinary coverage
+        env:
+          TETRAL_CI_PRODUCER: coverage
+        run: go run ./internal/testinfra/cmd/tetral-coverage --output .test-results/coverage
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scheduled-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .test-results/coverage
+          if-no-files-found: error
+          retention-days: 14
+
   ci-health:
     name: CI Health and Calibration
     if: always()
-    needs: [concurrency-history, compatibility-health]
+    needs: [concurrency-history, compatibility-health, coverage]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:

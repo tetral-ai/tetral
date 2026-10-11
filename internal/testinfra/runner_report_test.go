@@ -129,16 +129,16 @@ func TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests(t *testing.T) {
 	// The job must outlast the Go budget so a stuck package reports through
 	// go test's watchdog, with time left for dependency setup, compilation and
 	// the Bun coverage commands that share the job.
-	workflow, err := parseYAMLFile(filepath.Join(testRepositoryRoot(t), ".github", "workflows", "main-branch-verification.yml"))
+	workflow, err := parseYAMLFile(filepath.Join(testRepositoryRoot(t), ".github", "workflows", "scheduled-verification.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	minutes, err := strconv.Atoi(scalar(mappingValue(mappingValue(mappingValue(workflow.Content[0], "jobs"), "coverage"), "timeout-minutes")))
 	if err != nil {
-		t.Fatalf("main-branch coverage job has no numeric timeout-minutes: %v", err)
+		t.Fatalf("scheduled coverage job has no numeric timeout-minutes: %v", err)
 	}
 	if jobLimit := time.Duration(minutes) * time.Minute; jobLimit < budget+15*time.Minute {
-		t.Fatalf("main-branch coverage job limit %s leaves less than 15 minutes around the Go budget %s", jobLimit, budget)
+		t.Fatalf("scheduled coverage job limit %s leaves less than 15 minutes around the Go budget %s", jobLimit, budget)
 	}
 }
 

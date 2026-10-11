@@ -15,7 +15,7 @@ func CoveragePlan(root string) (Plan, error) {
 	return Plan{
 		Profile:      ProfileFull,
 		Revision:     inspectRevision(root, ""),
-		Selections:   []Selection{{Group: "coverage", Reason: "main-branch report-only coverage", Mode: "coverage"}},
+		Selections:   []Selection{{Group: "coverage", Reason: "scheduled report-only coverage", Mode: "coverage"}},
 		Dependencies: selectedDependencies(goSelections),
 		CreatedAt:    time.Now().UTC(),
 	}, nil

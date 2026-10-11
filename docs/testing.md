@@ -198,11 +198,13 @@ The readable CI topology is:
 - **Main Branch Verification**: the same evidence owners run independently on
   the exact merged commit. Four jobs shard Go Race; repository, static,
   Runtime, Gateway, protocol, deployment, image, and security evidence run in
-  parallel. Ordinary Go, Runtime, and Gateway coverage is a separate
-  report-only artifact.
+  parallel. A push to main does not collect coverage.
 - **Scheduled Verification**: bounded repetitions of named concurrency owners
-  each week, plus daily compatibility, repository-health, and online dependency
-  audits. A later pass is recorded but never erases the first failure.
+  each week; daily compatibility, repository-health, and online dependency
+  audits; and daily ordinary Go, Runtime, and Gateway coverage as a separate
+  report-only artifact. A manual dispatch runs all of them, and the CI health
+  job reports on each run after its other jobs finish. A later pass is
+  recorded but never erases the first failure.
 - **Go Build Cache**: after every push to main and daily, compiles what Go
   Race jobs compile and saves it as main's Go build cache entry; see
   [Go build cache](#go-build-cache).

@@ -131,6 +131,9 @@ func VerifyMainBranchWorkflow(root string) error {
 	if mappingValue(jobs, "integrated-correctness") != nil {
 		return fmt.Errorf("main verification retains the serial integrated evidence job")
 	}
+	if mappingValue(jobs, "coverage") != nil {
+		return fmt.Errorf("main verification runs report-only coverage on every push")
+	}
 	verification := mappingValue(jobs, "verification")
 	if verification == nil || scalar(mappingValue(verification, "name")) != "${{ matrix.name }}" {
 		return fmt.Errorf("main verification matrix is missing")
@@ -196,16 +199,6 @@ func VerifyMainBranchWorkflow(root string) error {
 	if !jobChecksOutFullHistory(verification) || !jobChecksOutFullHistory(race) {
 		return fmt.Errorf("main parallel verification does not check out complete repository history")
 	}
-	coverage := mappingValue(jobs, "coverage")
-	if !jobRunContainsAll(coverage,
-		"apparmor_restrict_unprivileged_userns=0",
-		"unshare -Ur -m true",
-	) {
-		return fmt.Errorf("main coverage does not prepare its Go integration host")
-	}
-	if !coveragePreparesRenderedTransport(coverage) {
-		return fmt.Errorf("main coverage does not install pinned Helm before rendered transport fixtures")
-	}
 	return nil
 }
 
@@ -245,12 +238,26 @@ func VerifyScheduledWorkflow(root string) error {
 	if setupIndex < 0 || runIndex < 0 || setupIndex >= runIndex {
 		return fmt.Errorf("scheduled concurrency history must install the pinned Bun version before running its repository runner")
 	}
+	const manualOrDaily = "github.event_name == 'workflow_dispatch' || github.event.schedule == '41 6 * * *'"
 	health := mappingValue(jobs, "compatibility-health")
-	if health == nil || scalar(mappingValue(health, "if")) != "github.event_name == 'workflow_dispatch' || github.event.schedule == '41 6 * * *'" {
+	if health == nil || scalar(mappingValue(health, "if")) != manualOrDaily {
 		return fmt.Errorf("scheduled compatibility health is not limited to manual and daily runs")
 	}
 	if !jobEvidenceInputEquals(health, "dependency-audit", string(DependencyAuditAlways)) {
 		return fmt.Errorf("scheduled compatibility health does not always run the online dependency audit")
+	}
+	coverage := mappingValue(jobs, "coverage")
+	if coverage == nil || scalar(mappingValue(coverage, "if")) != manualOrDaily {
+		return fmt.Errorf("scheduled coverage is not limited to manual and daily runs")
+	}
+	if !jobRunContainsAll(coverage,
+		"apparmor_restrict_unprivileged_userns=0",
+		"unshare -Ur -m true",
+	) {
+		return fmt.Errorf("scheduled coverage does not prepare its Go integration host")
+	}
+	if !coveragePreparesRenderedTransport(coverage) {
+		return fmt.Errorf("scheduled coverage does not install pinned Helm before rendered transport fixtures")
 	}
 	return nil
 }
