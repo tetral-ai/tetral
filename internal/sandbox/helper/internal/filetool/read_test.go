@@ -6,12 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
@@ -462,38 +466,191 @@ func TestReadHonorsLowerPayloadLimits(t *testing.T) {
 	}
 }
 
-func TestReadWindowAndEnvelopeReserveRuntimeNumberingHeadroom(t *testing.T) {
-	body := strings.Repeat(strings.Repeat("x", 149)+"\n", maxReadLines)
-	result, err := readWindow(strings.NewReader(body), 1, maxReadLines, readByteBudget, int64(len(body)))
-	if err != nil {
-		t.Fatalf("readWindow: %v", err)
-	}
-	if len(result.Content) > 200_000 {
-		t.Fatalf("raw read content bytes = %d; want at most 200000", len(result.Content))
-	}
-
+func TestReadPagesWholeLinesWithinEnvelopeCap(t *testing.T) {
 	startedAt := time.Unix(1_700_000_000, 0).UTC()
-	fitted := FitReadResultForEnvelope(result, "read", startedAt)
-	if got := readEnvelopeLen(fitted, "read", startedAt); got > 200_000 {
-		t.Fatalf("fitted read envelope bytes = %d; want at most 200000", got)
+	widestWallTimeMS := time.Duration(math.MinInt64).Milliseconds()
+	threeLinesThenEuros := strings.Repeat(strings.Repeat("x", 39)+"\n", 3) + "€€€\n"
+	var mixed, crlf, unterminated strings.Builder
+	for line := 1; line <= 20; line++ {
+		fmt.Fprintf(&mixed, "%02d €😀 \"q\" \\ \t <a&b> \u2028\n", line)
+		fmt.Fprintf(&crlf, "row-%02d\r\n", line)
+	}
+	for line := 1; line <= 10; line++ {
+		fmt.Fprintf(&unterminated, "line %02d text\n", line)
+	}
+	unterminated.WriteString("tail without newline")
+	for _, tc := range []struct {
+		name   string
+		body   string
+		offset int
+		budget int
+		// window, when set, is handed to the fit instead of readWindow's result.
+		window    *ReadResult
+		cap       int
+		wantLines int
+	}{
+		{
+			name:   "fit never skips a line the window counted without showing",
+			body:   threeLinesThenEuros,
+			window: &ReadResult{Content: threeLinesThenEuros[:120], StartLine: 1, ReturnedLines: 4, NextOffset: intPointer(5), Truncated: true},
+			cap:    400, wantLines: 2,
+		},
+		{name: "window never counts a budget-hit line it holds no byte of", body: "ab\n€€€\nlast\n", budget: 4, cap: 2_000, wantLines: 1},
+		{name: "line_truncations digit rollover stays within the cap", body: strings.Repeat(strings.Repeat("a", maxReadLineRunes+1)+"\n", 9), budget: readByteBudget, cap: 2_000, wantLines: 1},
+		{name: "wall_time_ms digit rollover stays within the cap", body: strings.Repeat("a", 1_000) + "\nb\n", budget: readByteBudget, cap: 600, wantLines: 1},
+		{name: "multibyte and escape-dense lines", body: mixed.String(), budget: readByteBudget, cap: 1_000, wantLines: 13},
+		{name: "CRLF lines from a later start line", body: crlf.String(), offset: 3, budget: readByteBudget, cap: 400, wantLines: 10},
+		{name: "empty lines", body: strings.Repeat("\n", 300), budget: readByteBudget, cap: 600, wantLines: 151},
+		{name: "last line without newline", body: unterminated.String(), budget: readByteBudget, cap: 450, wantLines: 10},
+		{name: "end-of-file window two bytes over the cap keeps a line for the next page", body: unterminated.String() + "\n", budget: readByteBudget, cap: 457, wantLines: 10},
+		{name: "window stops before a cut line once it holds a whole line", body: "ab\none-very-long\nz\n", budget: 8, cap: 2_000, wantLines: 1},
+		{name: "first line contributing no byte still advances", body: "€x\nb\n", budget: 2, cap: 2_000, wantLines: 1},
+		{name: "escape-dense line above the cap keeps its longest prefix", body: strings.Repeat(`"\`, 400) + "\nnext\n", budget: readByteBudget, cap: 600, wantLines: 1},
+		{name: "production cap with a window ending before a multibyte rune", body: strings.Repeat(strings.Repeat("€", 90)+"\n", 1_990), budget: readByteBudget, cap: maxReadEnvelopeBytes, wantLines: 734},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			offset := max(tc.offset, 1)
+			lines := strings.SplitAfter(tc.body, "\n")
+			if lines[len(lines)-1] == "" {
+				lines = lines[:len(lines)-1]
+			}
+			raw := ReadResult{}
+			if tc.window != nil {
+				raw = *tc.window
+				raw.TotalBytesFile = int64(len(tc.body))
+			} else {
+				var err error
+				raw, err = readWindow(strings.NewReader(tc.body), offset, maxReadLines, tc.budget, int64(len(tc.body)))
+				if err != nil {
+					t.Fatalf("readWindow: %v", err)
+				}
+				if len(raw.Content) > tc.budget {
+					t.Fatalf("window content = %d bytes; want <= budget %d", len(raw.Content), tc.budget)
+				}
+			}
+			envelopeLen := func(result ReadResult) int {
+				envelope, err := protocol.NewToolResultEnvelope("read", result, result.Truncated, startedAt)
+				if err != nil {
+					t.Fatalf("build envelope: %v", err)
+				}
+				envelope.Metrics = &protocol.Metrics{WallTimeMS: widestWallTimeMS}
+				encoded, err := json.Marshal(envelope)
+				if err != nil {
+					t.Fatalf("marshal envelope: %v", err)
+				}
+				return len(encoded)
+			}
+			wholeLines := func(k int) ReadResult {
+				var content strings.Builder
+				for _, line := range lines[offset-1 : offset-1+k] {
+					content.WriteString(shownLine(line))
+				}
+				page := raw
+				page.Content = content.String()
+				page.ReturnedLines = k
+				page.NextOffset = intPointer(offset + k)
+				page.TotalLines = nil
+				page.Truncated = true
+				return page
+			}
+
+			page := fitReadResult(raw, "read", startedAt, tc.cap)
+
+			if got := envelopeLen(page); got > tc.cap {
+				t.Fatalf("envelope with the widest wall_time_ms = %d bytes; want <= %d", got, tc.cap)
+			}
+			rawFits := envelopeLen(raw) <= tc.cap
+			if rawFits != reflect.DeepEqual(page, raw) {
+				t.Fatalf("window fits = %v, page = %s; want the window kept exactly when it fits", rawFits, describePage(page))
+			}
+			if !rawFits {
+				maxLines := min(strings.Count(raw.Content, "\n"), raw.ReturnedLines-1)
+				if page.LineTruncations == raw.LineTruncations {
+					k := page.ReturnedLines
+					if k < 1 || k > maxLines || !reflect.DeepEqual(page, wholeLines(k)) {
+						t.Fatalf("page = %s; want the first k whole lines, 1 <= k <= %d", describePage(page), maxLines)
+					}
+					if k < maxLines && envelopeLen(wholeLines(k+1)) <= tc.cap {
+						t.Fatalf("page holds %d lines; %d whole lines also fit", k, k+1)
+					}
+				} else {
+					if maxLines >= 1 && envelopeLen(wholeLines(1)) <= tc.cap {
+						t.Fatal("page cut a first line that fits whole")
+					}
+					if page.LineTruncations != raw.LineTruncations+1 {
+						t.Fatalf("line_truncations = %d; want %d", page.LineTruncations, raw.LineTruncations+1)
+					}
+					first, _, _ := strings.Cut(raw.Content, "\n")
+					prefix, cut := strings.CutSuffix(page.Content, lineTruncatedSuffix)
+					if !cut || !strings.HasPrefix(first, prefix) {
+						t.Fatalf("content = %q; want a prefix of the first line and %q", page.Content, lineTruncatedSuffix)
+					}
+					if prefix != first {
+						next, _ := utf8.DecodeRuneInString(first[len(prefix):])
+						longer := page
+						longer.Content = prefix + string(next) + lineTruncatedSuffix
+						if envelopeLen(longer) <= tc.cap {
+							t.Fatalf("cut first line keeps %d bytes; one more rune also fits", len(prefix))
+						}
+					}
+				}
+			}
+
+			from := page.StartLine - 1
+			whole := wholeLines(page.ReturnedLines).Content
+			switch {
+			case page.Content == whole && page.NextOffset == nil:
+				if page.TotalLines == nil || *page.TotalLines != len(lines) || from+page.ReturnedLines != len(lines) {
+					t.Fatalf("end-of-file page = %s; want every line through %d", describePage(page), len(lines))
+				}
+			case page.Content == whole:
+				if *page.NextOffset != page.StartLine+page.ReturnedLines || !page.Truncated || page.TotalLines != nil {
+					t.Fatalf("page = %s; want next_offset at the first line not shown", describePage(page))
+				}
+			default:
+				first := shownLine(lines[from])
+				prefix := strings.TrimSuffix(page.Content, lineTruncatedSuffix)
+				if page.ReturnedLines != 1 || !strings.HasPrefix(first, prefix) || page.NextOffset == nil || *page.NextOffset != page.StartLine+1 || !page.Truncated || page.TotalLines != nil {
+					t.Fatalf("page = %s; want whole lines, or one cut first line and next_offset after it", describePage(page))
+				}
+				if len(first) <= tc.budget && envelopeLen(wholeLines(1)) <= tc.cap {
+					t.Fatalf("page cut a first line of %d bytes that fits whole", len(first))
+				}
+			}
+			if page.ReturnedLines != tc.wantLines {
+				t.Fatalf("returned_lines = %d; want %d", page.ReturnedLines, tc.wantLines)
+			}
+		})
 	}
 }
 
-func TestReadEnvelopeFitsEscapeDenseContentAfterJSONEncoding(t *testing.T) {
-	startedAt := time.Unix(1_700_000_000, 0).UTC()
-	content := strings.Repeat(`"\`, 100_000)
-	result := ReadResult{Content: content, StartLine: 1, ReturnedLines: 1, Truncated: false}
-	fitted := FitReadResultForEnvelope(result, "read", startedAt)
-	encodedBytes := readEnvelopeLen(fitted, "read", startedAt)
-	if encodedBytes > maxReadEnvelopeBytes {
-		t.Fatalf("escape-dense envelope bytes = %d; want <= %d", encodedBytes, maxReadEnvelopeBytes)
+// shownLine is a source line as a window shows it, cut at maxReadLineRunes.
+func shownLine(line string) string {
+	text, newline := strings.CutSuffix(line, "\n")
+	runes := []rune(text)
+	if len(runes) <= maxReadLineRunes {
+		return line
 	}
-	if encodedBytes < maxReadEnvelopeBytes-1024 {
-		t.Fatalf("escape-dense envelope bytes = %d; want a fixture near the %d-byte producer bound", encodedBytes, maxReadEnvelopeBytes)
+	shown := string(runes[:maxReadLineRunes]) + lineTruncatedSuffix
+	if newline {
+		shown += "\n"
 	}
-	if !fitted.Truncated || !strings.Contains(fitted.Content, `"`) || !strings.Contains(fitted.Content, `\`) {
-		t.Fatalf("fitted escape-dense result lost contract shape: truncated=%v content-bytes=%d", fitted.Truncated, len(fitted.Content))
+	return shown
+}
+
+func intPointer(value int) *int {
+	return &value
+}
+
+func describePage(page ReadResult) string {
+	optional := func(value *int) string {
+		if value == nil {
+			return "null"
+		}
+		return strconv.Itoa(*value)
 	}
+	return fmt.Sprintf("{content %d bytes ending %q, returned_lines %d, next_offset %s, total_lines %s, truncated %v, line_truncations %d}",
+		len(page.Content), page.Content[max(len(page.Content)-24, 0):], page.ReturnedLines, optional(page.NextOffset), optional(page.TotalLines), page.Truncated, page.LineTruncations)
 }
 
 func TestReadWindowPropagatesUnexpectedIOError(t *testing.T) {

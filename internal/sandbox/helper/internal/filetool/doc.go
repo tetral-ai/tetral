@@ -22,6 +22,14 @@
 //     re-invoking.
 //   - Read emits the raw window bytes with no line numbering. The runtime
 //     formatter adds cat -n line-number prefixes before model delivery.
+//   - Read pages by whole lines. A page is a run of whole lines from
+//     start_line (a line cut at 2000 runes counts as whole); only a first line
+//     that alone exceeds the byte budget or the 200,000-byte envelope cap is
+//     shown cut, and that page holds only that line. next_offset is the first
+//     line not shown in full, or the line after a cut first line, so no line
+//     is skipped and every page advances by at least one line.
+//     FitReadResultForEnvelope keeps the longest such run whose envelope fits
+//     the cap with the widest metrics member the caller can add.
 //
 // UPDATE-WITH:
 //   - internal/sandbox/helper/internal/filetool/read.go
