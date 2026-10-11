@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -27,6 +28,13 @@ const (
 	// content is held to a 200,000-byte budget; and any single line longer than
 	// 2000 runes is cut with lineTruncatedSuffix, so one pathological line
 	// cannot consume the whole budget.
+	//
+	// Paging: a page is a run of whole lines from start_line (a line cut at
+	// 2000 runes counts as whole). Only a first line that alone exceeds the
+	// byte budget or the envelope cap is shown cut, and that page holds only
+	// that line. next_offset is the first line not shown in full, or the line
+	// after a cut first line, so no line is skipped and every page advances by
+	// at least one line.
 	//
 	// binarySniffBytes is the 4096-byte prefix classified for binary content,
 	// checked only AFTER the media magic check fails. A NUL byte, over 30%
@@ -259,6 +267,10 @@ func readWindow(reader io.Reader, offset int, limit int, budget int, totalBytes 
 			eofReached = true
 			break
 		}
+		if line.budgetHit && returned > 0 {
+			truncated = true
+			break
+		}
 		content = append(content, line.text...)
 		returned++
 		if line.lineTruncated {
@@ -371,87 +383,109 @@ func readLine(reader *bufio.Reader, maxRunes int, budget int) (lineWindow, error
 	}
 }
 
+// widestReadMetricsMember is the longest metrics member a read envelope can
+// carry: wall_time_ms is a time.Duration in milliseconds, at most 13 digits
+// and a sign.
+const widestReadMetricsMember = `,"metrics":{"wall_time_ms":-9223372036854}`
+
+// FitReadResultForEnvelope holds a text result to maxReadEnvelopeBytes in the
+// envelope protocol.NewToolResultEnvelope builds from it with the same tool and
+// startedAt, whenever that envelope is encoded. A result that fits is kept;
+// otherwise the page keeps its longest run of whole lines that fits, and a
+// first line that alone does not fit is cut with lineTruncatedSuffix.
 func FitReadResultForEnvelope(result ReadResult, tool string, startedAt time.Time) ReadResult {
+	return fitReadResult(result, tool, startedAt, maxReadEnvelopeBytes)
+}
+
+func fitReadResult(result ReadResult, tool string, startedAt time.Time, maxBytes int) ReadResult {
 	if result.Media != nil {
 		return result
 	}
-	if readEnvelopeLen(result, tool, startedAt) <= maxReadEnvelopeBytes {
+	// The envelope carries metrics only for a non-zero startedAt, and its
+	// wall_time_ms keeps growing until the caller encodes it, so the widest
+	// member is reserved rather than measured.
+	if !startedAt.IsZero() {
+		maxBytes -= len(widestReadMetricsMember)
+	}
+	fits := func(candidate ReadResult) bool {
+		return readEnvelopeLen(candidate, tool) <= maxBytes
+	}
+	if fits(result) {
 		return result
 	}
-	result.Truncated = true
-	for result.ReturnedLines > 1 {
-		trimmed, ok := trimLastReturnedLine(result.Content)
-		if !ok {
-			break
-		}
-		result.Content = trimmed
-		result.ReturnedLines--
-		total := result.StartLine + result.ReturnedLines
-		result.NextOffset = &total
-		result.TotalLines = nil
-		if readEnvelopeLen(result, tool, startedAt) <= maxReadEnvelopeBytes {
-			return result
+	// The envelope never shrinks as more lines are kept, so binary search finds
+	// the longest fitting run. It keeps fewer than ReturnedLines lines: a page
+	// of all the window's lines either is the window, which does not fit, or
+	// would replace its total_lines with a next_offset past the end of the file.
+	best := 0
+	low, high := 1, minInt(strings.Count(result.Content, "\n"), result.ReturnedLines-1)
+	for low <= high {
+		mid := low + (high-low)/2
+		if fits(firstLines(result, mid)) {
+			best = mid
+			low = mid + 1
+		} else {
+			high = mid - 1
 		}
 	}
-	result.Content = fitSingleLineContent(result, tool, startedAt)
+	if best > 0 {
+		return firstLines(result, best)
+	}
+	return fitFirstLine(result, fits)
+}
+
+func firstLines(result ReadResult, k int) ReadResult {
+	end := 0
+	for range k {
+		end += strings.IndexByte(result.Content[end:], '\n') + 1
+	}
+	result.Content = result.Content[:end]
+	result.ReturnedLines = k
+	next := result.StartLine + k
+	result.NextOffset = &next
+	result.TotalLines = nil
+	result.Truncated = true
+	return result
+}
+
+func fitFirstLine(result ReadResult, fits func(ReadResult) bool) ReadResult {
+	firstLine, _, _ := strings.Cut(result.Content, "\n")
+	runes := []rune(firstLine)
 	result.ReturnedLines = minInt(result.ReturnedLines, 1)
 	if result.ReturnedLines == 1 {
 		next := result.StartLine + 1
 		result.NextOffset = &next
 	}
 	result.TotalLines = nil
+	result.Truncated = true
 	result.LineTruncations++
-	return result
-}
-
-func readEnvelopeLen(result ReadResult, tool string, startedAt time.Time) int {
-	envelope, err := protocol.NewToolResultEnvelope(tool, result, result.Truncated, startedAt)
-	if err != nil {
-		return maxReadEnvelopeBytes + 1
-	}
-	encoded, err := json.Marshal(envelope)
-	if err != nil {
-		return maxReadEnvelopeBytes + 1
-	}
-	return len(encoded)
-}
-
-func trimLastReturnedLine(content string) (string, bool) {
-	if content == "" {
-		return "", false
-	}
-	candidate := strings.TrimSuffix(content, "\n")
-	index := strings.LastIndex(candidate, "\n")
-	if index < 0 {
-		return "", false
-	}
-	return candidate[:index+1], true
-}
-
-func fitSingleLineContent(result ReadResult, tool string, startedAt time.Time) string {
-	content := []rune(result.Content)
-	low, high := 0, len(content)
 	best := ""
+	low, high := 0, len(runes)
 	for low <= high {
-		mid := (low + high) / 2
-		candidate := string(content[:mid]) + lineTruncatedSuffix
+		mid := low + (high-low)/2
 		probe := result
-		probe.Content = candidate
-		probe.Truncated = true
-		probe.ReturnedLines = minInt(probe.ReturnedLines, 1)
-		probe.TotalLines = nil
-		if probe.ReturnedLines == 1 {
-			next := probe.StartLine + 1
-			probe.NextOffset = &next
-		}
-		if readEnvelopeLen(probe, tool, startedAt) <= maxReadEnvelopeBytes {
-			best = candidate
+		probe.Content = string(runes[:mid]) + lineTruncatedSuffix
+		if fits(probe) {
+			best = probe.Content
 			low = mid + 1
 		} else {
 			high = mid - 1
 		}
 	}
-	return best
+	result.Content = best
+	return result
+}
+
+func readEnvelopeLen(result ReadResult, tool string) int {
+	envelope, err := protocol.NewToolResultEnvelope(tool, result, result.Truncated, time.Time{})
+	if err != nil {
+		return math.MaxInt
+	}
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		return math.MaxInt
+	}
+	return len(encoded)
 }
 
 func readMediaResult(file *os.File, size int64, mime string, displayPath string, requestedPageRange string) (ReadResult, *protocol.ToolError) {
