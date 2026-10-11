@@ -538,6 +538,7 @@ func waitForBlockedSkillRegistryLock(t *testing.T, adminDB *sql.DB, ws workspace
 			`SELECT count(*)
 			   FROM pg_locks
 			  WHERE locktype = 'advisory'
+			    AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
 			    AND mode = 'ExclusiveLock'
 			    AND granted = false
 			    AND classid = $1::oid

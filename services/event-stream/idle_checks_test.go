@@ -889,7 +889,7 @@ func TestIdleCheckShutdownCancelsAndJoinsABlockedCheck(t *testing.T) {
 	f.advance()
 	blocked := func() bool {
 		var waiting int
-		if err := f.admin.QueryRowContext(t.Context(), `SELECT count(*) FROM pg_locks WHERE NOT granted AND relation = 'session_event_feed_retention'::regclass`).Scan(&waiting); err != nil {
+		if err := f.admin.QueryRowContext(t.Context(), `SELECT count(*) FROM pg_locks WHERE NOT granted AND relation = 'session_event_feed_retention'::regclass AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`).Scan(&waiting); err != nil {
 			t.Fatal(err)
 		}
 		return waiting == 1

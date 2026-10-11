@@ -341,19 +341,20 @@ func dbTimeExpression(t *testing.T, db *sql.DB, expression string) time.Time {
 	return value
 }
 
-// waitForStatementLockWait blocks until another backend whose current
-// statement mentions fragment waits on a lock.
+// waitForStatementLockWait blocks until another backend of this database whose
+// current statement mentions fragment waits on a lock.
 func waitForStatementLockWait(t *testing.T, admin *sql.DB, fragment string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	for {
 		var waiting bool
-		if err := admin.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%' || $1 || '%' AND pid <> pg_backend_pid())`, fragment).Scan(&waiting); err != nil {
+		if err := admin.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%' || $1 || '%' AND pid <> pg_backend_pid())`, fragment).Scan(&waiting); err != nil {
 			t.Fatalf("wait for a lock wait on %s: %v", fragment, err)
 		}
 		if waiting {
 			return
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
