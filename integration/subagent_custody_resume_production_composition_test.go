@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -1649,9 +1650,23 @@ func TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody(t *testing.
 		WHERE workspace_id='default' AND id=$1 AND status='pending'`, fixture.jobID); err != nil {
 		t.Fatalf("make first_mail retry due: %v", err)
 	}
-	directLease, err := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(fixture.runtimeDB)).LeaseJobRunnerJobs(context.Background(), queue.LeaseJobRunnerJobsRequest{
-		LeaseOwner: "close-before-start-runner", MaxJobs: 1, LeaseDuration: time.Minute,
-	})
+	// Queue may lease nothing, or fail the call with a statement or lock
+	// timeout, when PostgreSQL exceeds a statement's local budget; ask again as
+	// the Runner's loop does.
+	directStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(fixture.runtimeDB))
+	var directLease queue.LeaseJobRunnerJobsResult
+	var err error
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		directLease, err = directStore.LeaseJobRunnerJobs(context.Background(), queue.LeaseJobRunnerJobsRequest{
+			LeaseOwner: "close-before-start-runner", MaxJobs: 1, LeaseDuration: time.Minute,
+		})
+		var pgErr *pgconn.PgError
+		transient := errors.As(err, &pgErr) && (pgErr.Code == "57014" || pgErr.Code == "55P03")
+		if (err == nil && len(directLease.Jobs) > 0) || (err != nil && !transient) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(max(directLease.RetryAfter, 100*time.Millisecond))
+	}
 	if err != nil || len(directLease.Jobs) != 1 || directLease.Jobs[0].ID != fixture.jobID {
 		t.Fatalf("direct lease of the due first_mail retry = %d jobs/%v; want %s", len(directLease.Jobs), err, fixture.jobID)
 	}

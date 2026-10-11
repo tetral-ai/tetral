@@ -5,10 +5,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -638,7 +641,7 @@ func TestPostgreSQLSessionStoreDeleteRevokesIdleRuntimeDeliveryLease(t *testing.
 		t.Fatalf("enqueue Runtime input: %v", err)
 	}
 	// The Runner's direct lease: delete must also clear its provenance.
-	result, err := queueStore.LeaseJobRunnerJobs(ctx, queue.LeaseJobRunnerJobsRequest{
+	result, err := leaseJobRunnerJobsUntilLeased(ctx, queueStore, queue.LeaseJobRunnerJobsRequest{
 		LeaseOwner: "bridge-delete-race", MaxJobs: 1, LeaseDuration: time.Minute,
 	})
 	leased := result.Jobs
@@ -772,7 +775,7 @@ func TestPostgreSQLSessionStoreDeleteOwnsIdleCleanupLeaseAtomically(t *testing.T
 				t.Fatalf("enqueue cleanup: %v", err)
 			}
 			// The Runner's direct lease: delete must also clear its provenance.
-			result, err := queueStore.LeaseJobRunnerJobs(ctx, queue.LeaseJobRunnerJobsRequest{
+			result, err := leaseJobRunnerJobsUntilLeased(ctx, queueStore, queue.LeaseJobRunnerJobsRequest{
 				LeaseOwner: "cleanup-delete-" + suffix, MaxJobs: 1, LeaseDuration: time.Minute,
 			})
 			leased := result.Jobs
@@ -1571,6 +1574,36 @@ func seedThreadRuntimeInputQueueJob(t *testing.T, db *sql.DB, ws workspace.ID, s
 		now,
 	); err != nil {
 		t.Fatalf("seed runtime_input queue job: %v", err)
+	}
+}
+
+// leaseJobRunnerJobsUntilLeased repeats the Runner's direct lease, as its loop
+// does, until a call leases a job: a call may lease nothing, or fail with a
+// statement or lock timeout, when PostgreSQL exceeds a statement's local
+// budget. Any other failure returns at once.
+func leaseJobRunnerJobsUntilLeased(ctx context.Context, store *queue.PostgreSQLQueueStore, request queue.LeaseJobRunnerJobsRequest) (queue.LeaseJobRunnerJobsResult, error) {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		result, err := store.LeaseJobRunnerJobs(ctx, request)
+		if err == nil && len(result.Jobs) > 0 {
+			return result, nil
+		}
+		var pgErr *pgconn.PgError
+		if err != nil && (!errors.As(err, &pgErr) || (pgErr.Code != "57014" && pgErr.Code != "55P03")) {
+			return result, fmt.Errorf("lease Job Runner job: %w", err)
+		}
+		delay := max(result.RetryAfter, 100*time.Millisecond)
+		if time.Now().Add(delay).After(deadline) {
+			if err == nil {
+				return result, errors.New("no job leased within 10s")
+			}
+			return result, fmt.Errorf("no job leased within 10s; last lease error: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return result, ctx.Err()
+		case <-time.After(delay):
+		}
 	}
 }
 

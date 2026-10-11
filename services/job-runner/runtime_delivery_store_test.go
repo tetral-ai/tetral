@@ -261,7 +261,7 @@ func TestRuntimeRecoveryFinalExhaustionTerminatesSessionAndPendingRecovery(t *te
 		}
 	}
 	// The Runner's direct lease: termination must also clear its provenance.
-	directLease, err := queueStore.LeaseJobRunnerJobs(context.Background(), queue.LeaseJobRunnerJobsRequest{
+	directLease, err := leaseJobRunnerJobsUntilLeased(context.Background(), queueStore, queue.LeaseJobRunnerJobsRequest{
 		LeaseOwner: "final-owner", MaxJobs: 1, LeaseDuration: time.Minute,
 	})
 	leased := directLease.Jobs
@@ -326,7 +326,7 @@ func TestRuntimeRecoveryFinalAttemptAfterSessionTerminationCancelsItsDirectLease
 	if _, err := queueStore.Enqueue(context.Background(), enqueue); err != nil {
 		t.Fatalf("enqueue recovery Queue job: %v", err)
 	}
-	directLease, err := queueStore.LeaseJobRunnerJobs(context.Background(), queue.LeaseJobRunnerJobsRequest{
+	directLease, err := leaseJobRunnerJobsUntilLeased(context.Background(), queueStore, queue.LeaseJobRunnerJobsRequest{
 		LeaseOwner: "terminated-recovery-owner", MaxJobs: 1, LeaseDuration: time.Minute,
 	})
 	leased := directLease.Jobs
@@ -434,7 +434,7 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 				Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
 				Config: JobRunnerConfig{LeaseOwner: "child-recovery-finalizer", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 			}
-			if err := acquireAndJoin(context.Background(), runner); err != nil {
+			if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {
 				t.Fatalf("run child recovery final attempt: %v", err)
 			}
 			var queueStatus, sessionStatus, childStatus, runtimeStatus string
@@ -471,7 +471,7 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 			}); err != nil || reclaimed != 0 {
 				t.Fatalf("reclaim settled child recovery = %d/%v; want zero", reclaimed, err)
 			}
-			if err := acquireAndJoin(context.Background(), runner); err != nil {
+			if err := acquireAndJoinUntilAnswered(context.Background(), runner); err != nil {
 				t.Fatalf("replay settled child recovery: %v", err)
 			}
 			var replayFailureEvents, replayCloseoutEvents int

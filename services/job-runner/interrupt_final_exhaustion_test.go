@@ -276,7 +276,7 @@ func TestPostgreSQLJobRunnerFinalChildInterruptExhaustionPreservesSessionAndSibl
 		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseOwner: "child-interrupt-final-exhaustion", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if err := acquireAndJoin(context.Background(), runner); err != nil {
+	if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {
 		t.Fatalf("run final child interrupt owner: %v", err)
 	}
 
@@ -340,7 +340,7 @@ func TestPostgreSQLJobRunnerMalformedInterruptAtomicallyTerminatesDurableCustody
 		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseOwner: "malformed-interrupt-terminal", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if err := acquireAndJoin(context.Background(), runner); err != nil {
+	if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {
 		t.Fatalf("run first malformed interrupt attempt: %v", err)
 	}
 	var firstSessionStatus, firstInboxStatus, firstQueueStatus string
@@ -362,7 +362,7 @@ func TestPostgreSQLJobRunnerMalformedInterruptAtomicallyTerminatesDurableCustody
 		WHERE workspace_id='default' AND dedupe_key=$1`, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID)); err != nil {
 		t.Fatalf("make final malformed interrupt attempt available: %v", err)
 	}
-	if err := acquireAndJoin(context.Background(), runner); err != nil {
+	if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {
 		t.Fatalf("run final malformed interrupt attempt: %v", err)
 	}
 
@@ -423,7 +423,7 @@ func TestPostgreSQLJobRunnerFinalInterruptFenceRejectsPostPlanLeaseTakeover(t *t
 		Config:    JobRunnerConfig{LeaseOwner: "post-plan-old", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	runResult := make(chan error, 1)
-	go func() { runResult <- acquireAndJoin(context.Background(), runner) }()
+	go func() { runResult <- acquireAndJoinUntilDispatched(context.Background(), runner) }()
 	select {
 	case <-pausingStore.planned:
 	case <-time.After(5 * time.Second):
@@ -565,7 +565,7 @@ func TestJobRunnerFinalAttemptInvalidInterruptUsesExactTerminalOwner(t *testing.
 		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseOwner: "invalid-final-interrupt-owner", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if err := acquireAndJoin(context.Background(), runner); err != nil {
+	if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {
 		t.Fatalf("final-attempt invalid interrupt: %v", err)
 	}
 	var sessionStatus, interruptInbox, interruptQueue, followerInbox, followerQueue string
