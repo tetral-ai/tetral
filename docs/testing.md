@@ -174,8 +174,14 @@ credentials. This fixture proof supports the Auth/SDK compositions without
 claiming their business behavior or later Kubernetes issuer routing.
 
 Each invocation prints its Selection Plan and writes structured evidence below
-`.test-results/`. Native package commands remain appropriate while developing
-one owning package; the repository profiles are the pre-submission contract.
+`.test-results/`. When a step fails, the runner also prints an excerpt of that
+step's diagnostic file: its first 20 and last 60 lines, after a `go test -json`
+report is reduced to the decoded output of the tests and packages that did not
+pass (a skipped test counts as not passing where the step rejects skips).
+Under GitHub Actions the same excerpt goes to the job summary; the complete
+diagnostic stays in the evidence artifact. Native package commands remain
+appropriate while developing one owning package; the repository profiles are
+the pre-submission contract.
 
 ## Continuous integration
 
@@ -200,9 +206,11 @@ The readable CI topology is:
   Runtime, Gateway, protocol, deployment, image, and security evidence run in
   parallel. A push to main does not collect coverage.
 - **Scheduled Verification**: bounded repetitions of named concurrency owners
-  each week; daily compatibility, repository-health, and online dependency
-  audits; and daily ordinary Go, Runtime, and Gateway coverage as a separate
-  report-only artifact. A manual dispatch runs all of them, and the CI health
+  each week; daily compatibility and repository-health checks; a separate
+  daily **Dependency Advisories** job for the online dependency audits, so a
+  new advisory and a compatibility regression fail different jobs; and daily
+  ordinary Go, Runtime, and Gateway coverage as a separate report-only
+  artifact. A manual dispatch runs all of them, and the CI health
   job reports on each run after its other jobs finish. A later pass is
   recorded but never erases the first failure.
 - **Go Build Cache**: after every push to main and daily, compiles what Go
@@ -234,10 +242,13 @@ dependency setup, compilation, and the Bun coverage commands around it.
 Online Bun dependency audits are deliberately separated from deterministic
 security checks. Pull requests run them when a `package.json`, `bun.lock`, or
 the audit execution plumbing changes. The main-branch workflow does not repeat
-the same remote query after merge; the daily scheduled workflow catches
-advisories published after the dependency graph was accepted. Secret,
-redaction, import, and boundary checks remain part of normal repository
-evidence at every layer, including the dependency setup they require.
+the same remote query after merge; Scheduled Verification's daily Dependency
+Advisories job catches advisories published after the dependency graph was
+accepted. One audit covers the Runtime and Gateway packages and prints every
+package's findings before it fails, so one package's advisories cannot hide
+another's. Secret, redaction, import, and boundary checks remain part of normal
+repository evidence at every layer, including the dependency setup they
+require.
 
 To force the online audit locally, run:
 

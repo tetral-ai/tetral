@@ -79,6 +79,28 @@ jobs:
           artifact-prefix: scheduled-evidence
           needs-bun: 'true'
           needs-buf: 'true'
+          dependency-audit: never
+
+  dependency-advisories:
+    name: Dependency Advisories
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '41 6 * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the scheduled revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Audit dependencies against published advisories
+        uses: ./.github/actions/run-test-evidence
+        with:
+          group: security
+          producer: scheduled-advisories
+          artifact-prefix: scheduled-evidence
+          needs-bun: 'true'
           dependency-audit: always
 
   coverage:
@@ -132,7 +154,7 @@ jobs:
   ci-health:
     name: CI Health and Calibration
     if: always()
-    needs: [concurrency-history, compatibility-health, coverage]
+    needs: [concurrency-history, compatibility-health, dependency-advisories, coverage]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
