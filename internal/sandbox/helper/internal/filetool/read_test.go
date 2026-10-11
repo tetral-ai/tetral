@@ -101,21 +101,50 @@ func TestReadRejectsBinaryAndDirectory(t *testing.T) {
 	}
 }
 
-func TestReadRejectsMalformedUTF8AsBinary(t *testing.T) {
+func TestReadSniffsUTF8AsTextOrBinary(t *testing.T) {
+	ascii := func(n int) string {
+		return strings.Repeat("abcdefghi\n", n/10) + strings.Repeat("a", n%10)
+	}
 	fs := newReadFixture(t)
-	for _, fixture := range [][]byte{
-		{0xff, 'a'},
-		{'a', 0xc3, 0x28},
-		{0xe2, 0x82},
-	} {
-		fs.writeBytes("malformed.txt", fixture)
-		_, toolErr, err := Read(fs.payload(map[string]any{"path": "malformed.txt"}))
-		if err != nil {
-			t.Fatalf("malformed UTF-8 Read internal error = %v", err)
-		}
-		if toolErr == nil || toolErr.Kind != "binary_file" {
-			t.Fatalf("malformed UTF-8 %x error = %+v; want binary_file", fixture, toolErr)
-		}
+	cases := []struct {
+		name       string
+		body       string
+		wantBinary bool
+	}{
+		{name: "leading invalid byte", body: "\xffa", wantBinary: true},
+		{name: "invalid continuation byte", body: "a\xc3\x28", wantBinary: true},
+		{name: "short file ending in a truncated sequence", body: "\xe2\x82", wantBinary: true},
+		{name: "euro cut by the window end", body: ascii(binarySniffBytes-1) + "€\n"},
+		{name: "emoji cut by the window end", body: ascii(binarySniffBytes-3) + "😀\n"},
+		{name: "Chinese text cut by the window end", body: strings.Repeat("中文文本测试\n", 320)},
+		{name: "literal U+FFFD cut by the window end", body: ascii(binarySniffBytes-1) + "�\n"},
+		{name: "invalid byte at the end of a full window", body: ascii(binarySniffBytes-1) + "\xff" + ascii(100), wantBinary: true},
+		{name: "file ending in a truncated sequence cut by the window end", body: ascii(binarySniffBytes-1) + "\xe2\x82", wantBinary: true},
+		{name: "lead byte at the window end before an invalid byte", body: ascii(binarySniffBytes-1) + "\xe2b\n", wantBinary: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !tc.wantBinary && len(tc.body) > binarySniffBytes && utf8.RuneStart(tc.body[binarySniffBytes]) {
+				t.Fatal("fixture must cut a character at the window end")
+			}
+			fs.write("sniff.txt", tc.body)
+			result, toolErr, err := Read(fs.payload(map[string]any{"path": "sniff.txt"}))
+			if err != nil {
+				t.Fatalf("Read internal error = %v", err)
+			}
+			if tc.wantBinary {
+				if toolErr == nil || toolErr.Kind != "binary_file" {
+					t.Fatalf("Read error = %+v; want binary_file", toolErr)
+				}
+				return
+			}
+			if toolErr != nil {
+				t.Fatalf("Read error = %+v; want text", toolErr)
+			}
+			if result.Content != tc.body {
+				t.Fatalf("content differs from the file (%d bytes, want %d)", len(result.Content), len(tc.body))
+			}
+		})
 	}
 }
 
