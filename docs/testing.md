@@ -185,6 +185,9 @@ The readable CI topology is:
 - **Scheduled Verification**: bounded repetitions of named concurrency owners
   each week, plus daily compatibility, repository-health, and online dependency
   audits. A later pass is recorded but never erases the first failure.
+- **Go Build Cache**: after every push to main and daily, compiles what Go
+  Race jobs compile and saves it as main's Go build cache entry; see
+  [Go build cache](#go-build-cache).
 - **CI Benchmark**: dispatched by hand to measure a speed change; see
   [CI Benchmark](#ci-benchmark). Nothing gates on it.
 
@@ -244,7 +247,56 @@ target commit. To update one, verify the release in the upstream repository,
 record the exact tag and peeled target, update every executable `uses` reference
 to the reviewed immutable object, advance `reviewed_at`, and run
 `TestRepositoryActionsMatchReviewedInventory`. A major moving tag alone is not
-provenance.
+provenance. A sub-path action such as `actions/cache/restore` runs code of its
+repository, so it is listed under that repository (`actions/cache`) and every
+sub-path of one repository uses the same SHA.
+
+### Go build cache
+
+Go Race, Deployment Definitions and Protocol and SDK Compatibility jobs restore
+one Go build cache entry, read-only, instead of setup-go's own cache: the build
+cache, the module cache and installed tools (`~/.cache/go-build`,
+`~/go/pkg/mod`, `~/go/bin`). Its key is
+`go-race-v1-Linux-<Go version>-cc<gcc fingerprint>-<go.sum hashes>-<commit>`.
+A job restores the entry of its own commit, else the newest one for its
+`go.sum` files, else for its compiler, else for its Go version, and Go
+recompiles whatever differs. The entry extracts to about 8.4 GB, so a job with
+less than 25 GB of free disk before the restore, or whose free disk could not
+be measured, skips it and compiles cold.
+Each result records the restore: key, matched key, an exact, prefix, missed or
+skipped match, its duration and size, and free disk before and after.
+
+Only the **Go Build Cache** workflow (`.github/workflows/go-build-cache.yml`)
+writes these entries in main's scope. It runs `scripts/build-go-cache.sh`,
+which compiles every package's race test build and vet, the pinned SecretType
+helper, buf, the repository runner and two process fixtures that integration
+tests build (the web connector and the transport backend), each with the
+flags, environment and directory of the build it warms. It runs after every
+push to main, daily and on dispatch, and first looks up the entry for its
+commit: when one exists it stops, so the daily run rebuilds only after the Go
+or gcc version changed or the entry was evicted or expired (seven days
+unused). Per ref, a newer run replaces a pending one and never cancels a
+running one, so an upload always completes.
+
+Pull request workflows only read the Actions cache: Pull Request Verification
+and `engine-vulncheck.yml` declare `cache-mode: read`, which GitHub enforces
+with scoped cache tokens, and main's Go Race jobs restore with the same mode.
+`VerifyGoBuildCacheWorkflows` keeps writes explicit: only the Go Build Cache
+job and CI Benchmark's guarded `produce` job declare a write-capable
+`cache-mode` or use `actions/cache/save`, no workflow uses `actions/cache`,
+whose post step saves, and pull request workflows declare `read`. Other
+main-branch jobs keep the default write access of trusted triggers, which
+setup-go uses for its own keys.
+
+The cache is trusted because of who can write it, not because of its content.
+Only main-branch runs of trusted triggers can write main's scope, and only the
+Go Build Cache job saves `go-race-` keys there; CI Benchmark's `produce` job
+saves them only in a non-main branch's scope. The build script executes no
+repository or test binary and stores no test result. Content addressing makes
+a stale entry harmless; it does not detect a tampered one. Runner checks still
+run on a hit, but they read binaries built from cached outputs, so they are as
+strong as the writers are trusted, as with setup-go's entry. Other main jobs
+could write any key, but they run merged code, which is trusted.
 
 ### CI Benchmark
 
@@ -254,19 +306,29 @@ compares them. Each side checks out its own commit and runs that commit's
 evidence action with the inputs of Pull Request Verification's Go Race job,
 so A really runs the base's runner. The workflow only reads: its token holds
 `contents: read` and `actions: read`, it uses no secrets, and
-`cache-mode: read` stops every job from saving to the Actions cache. A
-dispatch runs the dispatched branch's copy of the workflow, so the branch must
-contain it. Dispatches on one ref queue rather than cancel each other; a run
-holds eight Go Race jobs, so dispatch one at a time.
+`cache-mode: read` stops every job but the optional `produce` job from saving
+to the Actions cache. A dispatch runs the dispatched branch's copy of the
+workflow, so the branch must contain it. Dispatches on one ref queue rather
+than cancel each other; a run holds eight Go Race jobs, so dispatch one at a
+time.
 
 ```sh
-gh workflow run ci-benchmark.yml --ref <branch> [-f base=<commit>]
+gh workflow run ci-benchmark.yml --ref <branch> [-f base=<commit>] [-f produce-cache=true]
 ```
 
 Without `base`, side A is the merge base of the branch with `origin/main`. A
 branch stacked on another passes its base branch head, as a SHA or
 `origin/<branch>`. A dispatch on `main` without `base` is an A/A run: both
 sides test the same commit.
+
+`produce-cache=true` measures a change to the Go build cache before it merges.
+On a branch other than main, the `produce` job first runs the branch's
+`scripts/build-go-cache.sh` on side A's commit and saves that entry into the
+branch's cache scope, unless one exists. Both sides start only once it has
+succeeded or was skipped, so B never measures a miss caused by a failed or
+cancelled `produce`. B then restores the entry by restore key, as a pull
+request restores main's entry. Pull requests based on that branch would also
+restore it before main's, so use it only on a branch nothing is based on.
 
 The **Compare A and B** job writes the report to the run summary and uploads
 `compare.json` as `ci-benchmark-compare-<run>-<attempt>`. It first checks that
@@ -275,8 +337,9 @@ before the runner starts (GitHub steps, `go run` and planning), dependency
 setup, preparation (job start to the first test), each step's compile time
 before its first test, fixed preparation (time before the runner, setup and
 the shard's longest step compile), the steps phase, job time, runner CPU model
-and image, and Go Race runner-minutes. Metrics are d = A − B, so a positive d
-means B is faster. Two effects shape how to read them:
+and image, the Go build cache restore, and Go Race runner-minutes. Metrics are
+d = A − B, so a positive d means B is faster. Two effects shape how to read
+them:
 
 - Hosted runners differ in speed, even within one run. A test's B/A ratio is
   therefore divided by the relative speed of its two jobs: the median B/A
@@ -354,7 +417,8 @@ artifacts.
 
 Structured results include the exact tested revision, selection, dependency
 identity, command outcome, each step's start, end and duration, first failure,
-and the CI execution envelope with the runner's CPU model and image.
+and the CI execution envelope with the runner's CPU model and image and the Go
+build cache restore.
 Do not treat a rerun as erasing an earlier failure. Preserve the first result,
 classify apparatus failures separately from product failures, and use the
 printed focused reproduction command for diagnosis.

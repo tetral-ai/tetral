@@ -9,6 +9,8 @@ permissions:
   contents: read
   pull-requests: read
 
+cache-mode: read
+
 concurrency:
   group: pr-verification-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
   cancel-in-progress: true
@@ -88,6 +90,7 @@ jobs:
           needs-bun: 'true'
           needs-buf: 'true'
           needs-go-test-host: 'true'
+          go-cache: 'true'
 
   agent-runtime:
     name: Agent Runtime
@@ -143,6 +146,7 @@ jobs:
           artifact-prefix: pr-evidence
           needs-bun: 'true'
           needs-buf: 'true'
+          go-cache: 'true'
 
   deployment-definitions:
     name: Deployment Definitions
@@ -162,6 +166,7 @@ jobs:
           artifact-prefix: pr-evidence
           needs-bun: 'true'
           needs-helm: 'true'
+          go-cache: 'true'
 
   sandbox-image:
     name: Sandbox Image

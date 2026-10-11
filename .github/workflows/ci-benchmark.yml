@@ -7,6 +7,11 @@ on:
         description: Commit for side A (a SHA or origin/<branch>); empty selects the merge base of the dispatched ref with origin/main
         required: false
         default: ''
+      produce-cache:
+        description: Build side A's Go build cache entry into this branch's cache scope first, as the Go Build Cache workflow does on main
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   actions: read
@@ -58,9 +63,78 @@ jobs:
           echo "head=$head" >> "$GITHUB_OUTPUT"
           echo "A = $base, B = $head"
 
+  # The one benchmark job that writes the Actions cache. It runs the
+  # dispatched revision's build script on side A's commit and saves into this
+  # branch's scope, so B restores it by restore key as a pull request restores
+  # main's entry. Never on main, whose scope only the Go Build Cache writes.
+  produce:
+    name: Produce the Go build cache for A
+    if: ${{ inputs.produce-cache && github.ref != 'refs/heads/main' }}
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    cache-mode: write
+    steps:
+      - name: Check out the base revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ needs.resolve.outputs.base }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Go without its own cache
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.26.9'
+          cache: false
+      - name: Compute the Go build cache key
+        id: go-cache-key
+        shell: bash
+        env:
+          GO_SUM_HASH: ${{ hashFiles('go.sum', 'integration/envoy-gateway-secret-helper/go.sum') }}
+        run: |
+          set -euo pipefail
+          toolchain="go-race-v1-Linux-$(go env GOVERSION)-"
+          compiler="${toolchain}cc$(gcc --version | head -n 1 | sha256sum | cut -c 1-12)-"
+          modules="${compiler}${GO_SUM_HASH}-"
+          key="${modules}$(git rev-parse HEAD)"
+          echo "Go build cache key: $key"
+          {
+            echo "key=$key"
+            echo "modules-prefix=$modules"
+            echo "compiler-prefix=$compiler"
+            echo "toolchain-prefix=$toolchain"
+          } >> "$GITHUB_OUTPUT"
+      - name: Look up the entry for the base revision
+        id: lookup
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            ~/go/bin
+          key: ${{ steps.go-cache-key.outputs.key }}
+          lookup-only: true
+      - name: Build what Go Race compiles with the dispatched revision's script
+        if: steps.lookup.outputs.cache-hit != 'true'
+        env:
+          HEAD_SHA: ${{ needs.resolve.outputs.head }}
+        run: |
+          git show "${HEAD_SHA}:scripts/build-go-cache.sh" > "$RUNNER_TEMP/build-go-cache.sh"
+          bash "$RUNNER_TEMP/build-go-cache.sh"
+      - name: Save the entry
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            ~/go/bin
+          key: ${{ steps.go-cache-key.outputs.key }}
+
   a-go-race:
     name: A Go Race (shard ${{ matrix.shard }})
-    needs: resolve
+    needs: [resolve, produce]
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.produce.result) }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
@@ -88,10 +162,12 @@ jobs:
           needs-bun: 'true'
           needs-buf: 'true'
           needs-go-test-host: 'true'
+          go-cache: 'true'
 
   b-go-race:
     name: B Go Race (shard ${{ matrix.shard }})
-    needs: resolve
+    needs: [resolve, produce]
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.produce.result) }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
@@ -119,6 +195,7 @@ jobs:
           needs-bun: 'true'
           needs-buf: 'true'
           needs-go-test-host: 'true'
+          go-cache: 'true'
 
   compare:
     name: Compare A and B

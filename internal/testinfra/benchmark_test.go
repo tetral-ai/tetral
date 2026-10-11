@@ -27,8 +27,9 @@ type benchmarkFixtureStep struct {
 type benchmarkFixtureSide struct {
 	sha, runID, attempt string
 	// legacy results come from a runner without step timestamps or host fields.
-	legacy bool
-	shards [][]benchmarkFixtureStep
+	legacy  bool
+	goCache *GoCacheRestore
+	shards  [][]benchmarkFixtureStep
 }
 
 var benchmarkFixtureJobStart = time.Date(2026, 10, 10, 6, 0, 0, 0, time.UTC)
@@ -65,6 +66,7 @@ func writeBenchmarkSide(t *testing.T, side benchmarkFixtureSide) string {
 		if !side.legacy {
 			result.Execution.CPUModel, result.Execution.RunnerImage = "Fixture CPU", "ubuntu24/1"
 		}
+		result.Execution.GoCache = side.goCache
 		clock := started.Add(result.Setup)
 		for position, step := range steps {
 			selection := Selection{Group: "go", Packages: []string{step.pkg}, Mode: "race"}
@@ -447,6 +449,31 @@ func TestCompareBenchmarkEvidence(t *testing.T) {
 				got := []float64{*report.Replay[1].APlanBDurations, *report.Replay[0].BPlanADurations, *report.Replay[2].BPlanADurations}
 				if !slices.Equal(got, []float64{20 + 7, 2 + 5, 51 + 7}) {
 					t.Fatalf("A plan shard 1 over B, B plan shards 0 and 2 over A = %v; want 27, 7, 58", got)
+				}
+			},
+		},
+		{
+			name: "the Go build cache restore is reported per shard where results record it",
+			a:    speedSide(shaA, 2, 8),
+			b: func() benchmarkFixtureSide {
+				side := speedSide(shaA, 2, 8)
+				side.goCache = &GoCacheRestore{Key: "go-race-v1-b", MatchedKey: "go-race-v1-a", Match: "prefix", Elapsed: 41 * time.Second, RestoredBytes: 6e9, DiskFreeBefore: 20e9, DiskFreeAfter: 14e9}
+				return side
+			}(),
+			check: func(t *testing.T, report BenchmarkComparison, err error) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := GoCacheRestore{Key: "go-race-v1-b", MatchedKey: "go-race-v1-a", Match: "prefix", Elapsed: 41 * time.Second, RestoredBytes: 6e9, DiskFreeBefore: 20e9, DiskFreeAfter: 14e9}
+				if got := report.B.Shards[0].GoCache; got == nil || *got != want {
+					t.Fatalf("side B shard 0 Go build cache = %+v; want %+v", got, want)
+				}
+				if report.A.Shards[0].GoCache != nil {
+					t.Fatalf("side A shard 0 Go build cache = %+v; its results record none", report.A.Shards[0].GoCache)
+				}
+				missing := strings.Join(report.Missing, "\n")
+				if !strings.Contains(missing, "side A results record no Go build cache restore") || strings.Contains(missing, "side B results record no Go build cache") {
+					t.Fatalf("missing notes %v; want only side A's Go build cache restore named", report.Missing)
 				}
 			},
 		},

@@ -65,19 +65,34 @@ type Result struct {
 // result. GitHub check identities are joined from the API by the shadow
 // collector because they are not exposed to the running job environment.
 type ExecutionEnvelope struct {
-	Repository        string `json:"repository,omitempty"`
-	EventHeadSHA      string `json:"event_head_sha,omitempty"`
-	EventBaseSHA      string `json:"event_base_sha,omitempty"`
-	TestMergeSHA      string `json:"test_merge_sha,omitempty"`
-	RequiredCheckSHA  string `json:"required_check_sha,omitempty"`
-	WorkflowSourceSHA string `json:"workflow_source_sha,omitempty"`
-	Workflow          string `json:"workflow,omitempty"`
-	RunID             string `json:"run_id,omitempty"`
-	RunAttempt        string `json:"run_attempt,omitempty"`
-	Job               string `json:"job,omitempty"`
-	Producer          string `json:"producer,omitempty"`
-	CPUModel          string `json:"cpu_model,omitempty"`
-	RunnerImage       string `json:"runner_image,omitempty"`
+	Repository        string          `json:"repository,omitempty"`
+	EventHeadSHA      string          `json:"event_head_sha,omitempty"`
+	EventBaseSHA      string          `json:"event_base_sha,omitempty"`
+	TestMergeSHA      string          `json:"test_merge_sha,omitempty"`
+	RequiredCheckSHA  string          `json:"required_check_sha,omitempty"`
+	WorkflowSourceSHA string          `json:"workflow_source_sha,omitempty"`
+	Workflow          string          `json:"workflow,omitempty"`
+	RunID             string          `json:"run_id,omitempty"`
+	RunAttempt        string          `json:"run_attempt,omitempty"`
+	Job               string          `json:"job,omitempty"`
+	Producer          string          `json:"producer,omitempty"`
+	CPUModel          string          `json:"cpu_model,omitempty"`
+	RunnerImage       string          `json:"runner_image,omitempty"`
+	GoCache           *GoCacheRestore `json:"go_cache,omitempty"`
+}
+
+// GoCacheRestore records how the evidence action restored the Go build cache
+// before the runner started. Match is exact when the entry was built for the
+// tested commit, prefix when an older entry was restored, skipped when the
+// runner had too little free disk to restore it, and miss otherwise.
+type GoCacheRestore struct {
+	Key            string        `json:"key"`
+	MatchedKey     string        `json:"matched_key,omitempty"`
+	Match          string        `json:"match"`
+	Elapsed        time.Duration `json:"elapsed_ns"`
+	RestoredBytes  int64         `json:"restored_bytes"`
+	DiskFreeBefore int64         `json:"disk_free_before_bytes"`
+	DiskFreeAfter  int64         `json:"disk_free_after_bytes"`
 }
 
 type DependencyEvidence struct {

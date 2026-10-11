@@ -111,6 +111,7 @@ jobs:
     name: Go Race (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    cache-mode: read
     strategy:
       fail-fast: false
       matrix:
@@ -134,6 +135,7 @@ jobs:
           needs-buf: 'true'
           needs-go-test-host: 'true'
           dependency-audit: never
+          go-cache: 'true'
 
   coverage:
     name: Report-only Coverage

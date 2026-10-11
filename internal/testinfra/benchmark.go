@@ -94,6 +94,7 @@ type BenchmarkShard struct {
 	StepsPlanned     int             `json:"steps_planned"`
 	CPUModel         string          `json:"cpu_model,omitempty"`
 	RunnerImage      string          `json:"runner_image,omitempty"`
+	GoCache          *GoCacheRestore `json:"go_cache,omitempty"`
 	BeforeRunner     *float64        `json:"before_runner_s,omitempty"`
 	Setup            float64         `json:"setup_s"`
 	Preparation      *float64        `json:"preparation_s,omitempty"`
@@ -485,11 +486,14 @@ func (evidence *benchmarkEvidence) report(notes *benchmarkNotes) BenchmarkSide {
 		report := BenchmarkShard{
 			Index: index, RunAttempt: result.Execution.RunAttempt, Status: result.Status,
 			StepsRun: len(shard.steps), StepsPlanned: len(shard.plan),
-			CPUModel: result.Execution.CPUModel, RunnerImage: result.Execution.RunnerImage,
+			CPUModel: result.Execution.CPUModel, RunnerImage: result.Execution.RunnerImage, GoCache: result.Execution.GoCache,
 			Setup: benchmarkSeconds(result.Setup), StepsPhase: shard.stepsPhase(),
 		}
 		if report.CPUModel == "" || report.RunnerImage == "" {
 			notes.miss("side %s results do not record the runner CPU model or image", evidence.label)
+		}
+		if report.GoCache == nil {
+			notes.miss("side %s results record no Go build cache restore", evidence.label)
 		}
 		if job := shard.job; job != nil {
 			if !result.StartedAt.IsZero() {

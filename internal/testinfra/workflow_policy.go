@@ -2,6 +2,7 @@ package testinfra
 
 import (
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -254,8 +255,18 @@ func VerifyScheduledWorkflow(root string) error {
 	return nil
 }
 
+const (
+	// CI Benchmark's produce job writes side A's Go build cache entry into the
+	// dispatched branch's scope, never into main's.
+	benchmarkProduceGuard = "${{ inputs.produce-cache && github.ref != 'refs/heads/main' }}"
+	// Both sides start together once produce succeeded or was skipped; after a
+	// failed or cancelled produce, B would measure a cache miss.
+	benchmarkSideGuard = "${{ !cancelled() && needs.resolve.result == 'success' && contains(fromJSON('[\"success\",\"skipped\"]'), needs.produce.result) }}"
+)
+
 // VerifyBenchmarkWorkflow keeps CI Benchmark a read-only measurement whose two
 // sides run Pull Request Verification's Go Race evidence on their own commits.
+// Its only cache writer is the guarded produce job.
 func VerifyBenchmarkWorkflow(root string) error {
 	document, err := parseYAMLFile(filepath.Join(root, ".github", "workflows", "ci-benchmark.yml"))
 	if err != nil {
@@ -284,7 +295,11 @@ func VerifyBenchmarkWorkflow(root string) error {
 		if mappingValue(job, "permissions") != nil {
 			return fmt.Errorf("benchmark job %q overrides the workflow permissions", jobID)
 		}
-		if mode := mappingValue(job, "cache-mode"); mode != nil && scalar(mode) != "read" {
+		if jobID == "produce" {
+			if scalar(mappingValue(job, "if")) != benchmarkProduceGuard || scalar(mappingValue(job, "cache-mode")) != "write" {
+				return fmt.Errorf("benchmark produce job must write the cache only when produce-cache is set off main")
+			}
+		} else if mode := mappingValue(job, "cache-mode"); mode != nil && scalar(mode) != "read" {
 			return fmt.Errorf("benchmark job %q has write-capable cache access", jobID)
 		}
 		if !jobChecksOutFullHistory(job) {
@@ -298,6 +313,10 @@ func VerifyBenchmarkWorkflow(root string) error {
 				return fmt.Errorf("benchmark job %q uses local action %q outside its checkout", jobID, uses)
 			}
 		}
+	}
+	produceInput := mappingValue(mappingValue(mappingValue(triggers, "workflow_dispatch"), "inputs"), "produce-cache")
+	if mappingValue(jobs, "produce") == nil || scalar(mappingValue(produceInput, "type")) != "boolean" || scalar(mappingValue(produceInput, "default")) != "false" {
+		return fmt.Errorf("benchmark workflow must produce the cache only on an explicit produce-cache input")
 	}
 	pullRequest, err := parseYAMLFile(filepath.Join(root, ".github", "workflows", "pull-request-verification.yml"))
 	if err != nil {
@@ -314,6 +333,9 @@ func VerifyBenchmarkWorkflow(root string) error {
 	prefixes := map[string]bool{}
 	for _, side := range []string{"a-go-race", "b-go-race"} {
 		job := mappingValue(jobs, side)
+		if !slices.Equal(sequenceScalars(mappingValue(job, "needs")), []string{"resolve", "produce"}) || scalar(mappingValue(job, "if")) != benchmarkSideGuard {
+			return fmt.Errorf("benchmark job %q does not wait for produce", side)
+		}
 		inputs := evidenceStepInputs(job)
 		if inputs == nil {
 			return fmt.Errorf("benchmark job %q has no evidence step from its checkout", side)
@@ -331,6 +353,277 @@ func VerifyBenchmarkWorkflow(root string) error {
 		}
 		if !slices.Equal(shards(job), shards(pullRequestRace)) {
 			return fmt.Errorf("benchmark job %q shards differ from pull request Go Race", side)
+		}
+	}
+	return nil
+}
+
+const (
+	goBuildCacheKey         = "${{ steps.go-cache-key.outputs.key }}"
+	goBuildCacheRestoreKeys = "${{ steps.go-cache-key.outputs.modules-prefix }}\n${{ steps.go-cache-key.outputs.compiler-prefix }}\n${{ steps.go-cache-key.outputs.toolchain-prefix }}\n"
+	goBuildCacheMiss        = "steps.lookup.outputs.cache-hit != 'true'"
+	goBuildCacheInput       = "inputs.go-cache == 'true'"
+	// The restore is skipped on a runner with less than 25 GB free disk, or
+	// when the measurement failed.
+	goBuildCacheRestoreGuard = goBuildCacheInput + " && fromJSON(steps.go-cache-before.outputs.disk-free || '0') >= 25000000000"
+)
+
+// goBuildCacheWriter names a job allowed to save to the Actions cache, the
+// commit it checks out (empty: the triggering one) and the exact step that
+// runs the repository's build script in it.
+type goBuildCacheWriter struct {
+	file, job string
+	ref       string
+	build     string
+	buildEnv  map[string]string
+}
+
+// VerifyGoBuildCacheWorkflows keeps the Go build cache main-owned. Only the Go
+// Build Cache job on main and CI Benchmark's guarded produce job save it, each
+// from the repository's build script after a lookup of the exact key; every
+// consumer restores the same paths under the same key read-only; pull request
+// workflows only read the Actions cache; and no other job can write it.
+func VerifyGoBuildCacheWorkflows(root string) error {
+	workflows := filepath.Join(root, ".github", "workflows")
+	action, err := parseYAMLFile(filepath.Join(root, ".github", "actions", "run-test-evidence", "action.yml"))
+	if err != nil {
+		return err
+	}
+	consumerSteps := sequenceNodes(mappingValue(mappingValue(action.Content[0], "runs"), "steps"))
+	keyStep := stepWithID(consumerSteps, "go-cache-key")
+	restoreIndex := slices.IndexFunc(consumerSteps, func(step *workflowYAMLNode) bool {
+		return strings.HasPrefix(scalar(mappingValue(step, "uses")), "actions/cache/restore@")
+	})
+	if keyStep == nil || restoreIndex < 0 {
+		return fmt.Errorf("evidence action does not restore the Go build cache")
+	}
+	restore := consumerSteps[restoreIndex]
+	restoreInputs := mappingValue(restore, "with")
+	paths := scalar(mappingValue(restoreInputs, "path"))
+	if scalar(mappingValue(keyStep, "if")) != goBuildCacheInput || scalar(mappingValue(restore, "if")) != goBuildCacheRestoreGuard {
+		return fmt.Errorf("evidence action restores the Go build cache without its go-cache input and free-disk guard")
+	}
+	if scalar(mappingValue(restoreInputs, "key")) != goBuildCacheKey || scalar(mappingValue(restoreInputs, "restore-keys")) != goBuildCacheRestoreKeys {
+		return fmt.Errorf("evidence action does not fall back from the commit's key to its go.sum, compiler and Go version prefixes in order")
+	}
+	for index, step := range consumerSteps {
+		uses := scalar(mappingValue(step, "uses"))
+		if strings.HasPrefix(uses, "actions/setup-go@") && scalar(mappingValue(mappingValue(step, "with"), "cache")) != "${{ inputs.go-cache != 'true' }}" {
+			return fmt.Errorf("evidence action keeps setup-go's own cache beside the Go build cache")
+		}
+		if scalar(mappingValue(step, "name")) == "Install buf" && index < restoreIndex {
+			return fmt.Errorf("evidence action installs buf before restoring the Go build cache")
+		}
+	}
+
+	writers := []goBuildCacheWriter{
+		{file: "go-build-cache.yml", job: "build", build: "./scripts/build-go-cache.sh"},
+		{
+			file: "ci-benchmark.yml", job: "produce", ref: "${{ needs.resolve.outputs.base }}",
+			build:    "git show \"${HEAD_SHA}:scripts/build-go-cache.sh\" > \"$RUNNER_TEMP/build-go-cache.sh\"\nbash \"$RUNNER_TEMP/build-go-cache.sh\"\n",
+			buildEnv: map[string]string{"HEAD_SHA": "${{ needs.resolve.outputs.head }}"},
+		},
+	}
+	for _, writer := range writers {
+		document, err := parseYAMLFile(filepath.Join(workflows, writer.file))
+		if err != nil {
+			return err
+		}
+		job := mappingValue(mappingValue(document.Content[0], "jobs"), writer.job)
+		if writer.file == "go-build-cache.yml" {
+			if err := verifyGoBuildCacheProducer(document.Content[0], job); err != nil {
+				return err
+			}
+		}
+		if err := verifyGoBuildCacheWriterSteps(job, writer, keyStep, paths); err != nil {
+			return fmt.Errorf("%s: %w", writer.file, err)
+		}
+	}
+
+	consumers := []struct {
+		file, job string
+		readOnly  bool
+	}{
+		{file: "pull-request-verification.yml", job: "go-race"},
+		{file: "pull-request-verification.yml", job: "deployment-definitions"},
+		{file: "pull-request-verification.yml", job: "protocol-sdk"},
+		{file: "main-branch-verification.yml", job: "go-race", readOnly: true},
+	}
+	for _, consumer := range consumers {
+		document, err := parseYAMLFile(filepath.Join(workflows, consumer.file))
+		if err != nil {
+			return err
+		}
+		job := mappingValue(mappingValue(document.Content[0], "jobs"), consumer.job)
+		if !jobEvidenceInputEquals(job, "go-cache", "true") {
+			return fmt.Errorf("%s job %q does not restore the Go build cache", consumer.file, consumer.job)
+		}
+		if consumer.readOnly && scalar(mappingValue(job, "cache-mode")) != "read" {
+			return fmt.Errorf("%s job %q restores the Go build cache with write access", consumer.file, consumer.job)
+		}
+	}
+	return verifyActionsCacheWriters(root, writers)
+}
+
+func verifyGoBuildCacheProducer(workflow, job *workflowYAMLNode) error {
+	triggers := mappingValue(workflow, "on")
+	push := mappingValue(triggers, "push")
+	if triggers == nil || triggers.Kind != workflowYAMLMapping || len(triggers.Content) != 6 ||
+		push == nil || len(push.Content) != 2 || !slices.Equal(sequenceScalars(mappingValue(push, "branches")), []string{"main"}) ||
+		len(sequenceNodes(mappingValue(triggers, "schedule"))) != 1 || mappingValue(triggers, "workflow_dispatch") == nil {
+		return fmt.Errorf("go build cache producer must run on pushes to main, a daily schedule and dispatch only")
+	}
+	if !readOnlyPermissions(mappingValue(workflow, "permissions"), []string{"contents"}) || mappingValue(job, "permissions") != nil {
+		return fmt.Errorf("go build cache producer permissions are not exactly read-only contents")
+	}
+	concurrency := mappingValue(workflow, "concurrency")
+	if scalar(mappingValue(concurrency, "group")) != "go-build-cache-${{ github.ref }}" || scalar(mappingValue(concurrency, "cancel-in-progress")) != "false" {
+		return fmt.Errorf("go build cache producer runs must queue per ref without cancelling an upload")
+	}
+	if scalar(mappingValue(job, "if")) != "github.ref == 'refs/heads/main'" {
+		return fmt.Errorf("go build cache producer job is not limited to main")
+	}
+	if scalar(mappingValue(job, "cache-mode")) != "write" {
+		return fmt.Errorf("go build cache producer job does not hold cache-mode write")
+	}
+	return nil
+}
+
+// verifyGoBuildCacheWriterSteps requires exactly: checkout of the writer's
+// commit without persisted credentials, setup-go without its own cache, the
+// consumers' key step, a lookup of the exact key, then the build and the save
+// only on a miss.
+func verifyGoBuildCacheWriterSteps(job *workflowYAMLNode, writer goBuildCacheWriter, keyStep *workflowYAMLNode, paths string) error {
+	steps := sequenceNodes(mappingValue(job, "steps"))
+	if len(steps) != 6 {
+		return fmt.Errorf("cache writer must run exactly checkout, setup-go, the key, the lookup, the build and the save")
+	}
+	checkout, setup, key, lookup, build, save := steps[0], steps[1], steps[2], steps[3], steps[4], steps[5]
+	lookupInputs, saveInputs := mappingValue(lookup, "with"), mappingValue(save, "with")
+	// Entries match on a hash of the path list as written, so any difference
+	// from the consumers' list makes every restore miss.
+	if scalar(mappingValue(lookupInputs, "path")) != paths || scalar(mappingValue(saveInputs, "path")) != paths {
+		return fmt.Errorf("cache writer paths differ from the evidence action's restore paths")
+	}
+	checkoutInputs := mappingValue(checkout, "with")
+	if !strings.HasPrefix(scalar(mappingValue(checkout, "uses")), "actions/checkout@") ||
+		scalar(mappingValue(checkoutInputs, "ref")) != writer.ref || scalar(mappingValue(checkoutInputs, "persist-credentials")) != "false" {
+		return fmt.Errorf("cache writer does not check out its own build commit without persisted credentials")
+	}
+	if !strings.HasPrefix(scalar(mappingValue(setup, "uses")), "actions/setup-go@") || scalar(mappingValue(mappingValue(setup, "with"), "cache")) != "false" {
+		return fmt.Errorf("cache writer keeps setup-go's own cache")
+	}
+	if scalar(mappingValue(key, "id")) != "go-cache-key" || goBuildCacheKeyStepText(key) != goBuildCacheKeyStepText(keyStep) {
+		return fmt.Errorf("cache writer key step differs from the evidence action's")
+	}
+	if scalar(mappingValue(lookup, "id")) != "lookup" || !strings.HasPrefix(scalar(mappingValue(lookup, "uses")), "actions/cache/restore@") ||
+		scalar(mappingValue(lookupInputs, "lookup-only")) != "true" || scalar(mappingValue(lookupInputs, "key")) != goBuildCacheKey ||
+		mappingValue(lookupInputs, "restore-keys") != nil {
+		return fmt.Errorf("cache writer does not look up exactly its own key without downloading")
+	}
+	buildEnvironment := map[string]string{}
+	environment := mappingValue(build, "env")
+	for index := 0; environment != nil && index+1 < len(environment.Content); index += 2 {
+		buildEnvironment[environment.Content[index].Value] = scalar(environment.Content[index+1])
+	}
+	if scalar(mappingValue(build, "run")) != writer.build || scalar(mappingValue(build, "if")) != goBuildCacheMiss || !maps.Equal(buildEnvironment, writer.buildEnv) {
+		return fmt.Errorf("cache writer does not build exactly with the repository's build script on a miss")
+	}
+	if !strings.HasPrefix(scalar(mappingValue(save, "uses")), "actions/cache/save@") || scalar(mappingValue(save, "if")) != goBuildCacheMiss ||
+		scalar(mappingValue(saveInputs, "key")) != goBuildCacheKey {
+		return fmt.Errorf("cache writer does not save under its own key on a miss")
+	}
+	return nil
+}
+
+// Steps compute the same key when they run the same program over the same
+// inputs; their conditions and names may differ.
+func goBuildCacheKeyStepText(step *workflowYAMLNode) string {
+	environment := mappingValue(step, "env")
+	var variables []string
+	for index := 0; environment != nil && index+1 < len(environment.Content); index += 2 {
+		variables = append(variables, environment.Content[index].Value+"="+scalar(environment.Content[index+1]))
+	}
+	return scalar(mappingValue(step, "shell")) + "\x00" + strings.Join(variables, "\x00") + "\x00" + scalar(mappingValue(step, "run"))
+}
+
+// verifyActionsCacheWriters scans every workflow and composite action: only
+// the listed writer jobs may save to the Actions cache or hold write-capable
+// cache access, nothing uses actions/cache (whose post step saves), and every
+// workflow a pull request triggers reads the cache only.
+func verifyActionsCacheWriters(root string, writers []goBuildCacheWriter) error {
+	writeCapable := func(mode *workflowYAMLNode) bool {
+		return mode != nil && scalar(mode) != "read" && scalar(mode) != "none"
+	}
+	checkSteps := func(source string, steps []*workflowYAMLNode, writer bool) error {
+		for _, step := range steps {
+			uses := scalar(mappingValue(step, "uses"))
+			if strings.HasPrefix(uses, "actions/cache@") {
+				return fmt.Errorf("%s uses actions/cache, which saves in a post step; restore with actions/cache/restore", source)
+			}
+			if strings.HasPrefix(uses, "actions/cache/save@") && !writer {
+				return fmt.Errorf("%s saves to the Actions cache", source)
+			}
+		}
+		return nil
+	}
+	for _, directory := range []string{filepath.Join(root, ".github", "workflows"), filepath.Join(root, ".github", "actions")} {
+		err := filepath.WalkDir(directory, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if entry.IsDir() || (filepath.Ext(path) != ".yml" && filepath.Ext(path) != ".yaml") {
+				return nil
+			}
+			document, err := parseYAMLFile(path)
+			if err != nil {
+				return err
+			}
+			file, top := entry.Name(), document.Content[0]
+			if err := checkSteps(file, sequenceNodes(mappingValue(mappingValue(top, "runs"), "steps")), false); err != nil {
+				return err
+			}
+			mode := mappingValue(top, "cache-mode")
+			if writeCapable(mode) {
+				return fmt.Errorf("%s grants every job write-capable cache access", file)
+			}
+			triggers, pullRequest := mappingValue(top, "on"), false
+			for _, event := range []string{"pull_request", "pull_request_target"} {
+				pullRequest = pullRequest || mappingValue(triggers, event) != nil || scalar(triggers) == event || slices.Contains(sequenceScalars(triggers), event)
+			}
+			if pullRequest && scalar(mode) != "read" {
+				return fmt.Errorf("%s runs on pull requests without cache-mode read", file)
+			}
+			jobs := mappingValue(top, "jobs")
+			for index := 0; jobs != nil && index+1 < len(jobs.Content); index += 2 {
+				jobID, job := jobs.Content[index].Value, jobs.Content[index+1]
+				writer := slices.ContainsFunc(writers, func(writer goBuildCacheWriter) bool {
+					return writer.file == file && writer.job == jobID
+				})
+				jobMode := mappingValue(job, "cache-mode")
+				if pullRequest && jobMode != nil {
+					return fmt.Errorf("%s job %q overrides the pull request cache-mode", file, jobID)
+				}
+				if writeCapable(jobMode) && !writer {
+					return fmt.Errorf("%s job %q has write-capable cache access", file, jobID)
+				}
+				if err := checkSteps(fmt.Sprintf("%s job %q", file, jobID), sequenceNodes(mappingValue(job, "steps")), writer); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func stepWithID(steps []*workflowYAMLNode, id string) *workflowYAMLNode {
+	for _, step := range steps {
+		if scalar(mappingValue(step, "id")) == id {
+			return step
 		}
 	}
 	return nil
@@ -428,6 +721,7 @@ func VerifyWorkflowSkeletons(root string) error {
 		"Main Branch Verification":  {"main-branch-verification.yml", "push", "main-verification-"},
 		"Scheduled Verification":    {"scheduled-verification.yml", "schedule", "scheduled-verification-"},
 		"CI Benchmark":              {"ci-benchmark.yml", "workflow_dispatch", "ci-benchmark-"},
+		"Go Build Cache":            {"go-build-cache.yml", "push", "go-build-cache-"},
 	}
 	for name, item := range wanted {
 		document, err := parseYAMLFile(filepath.Join(root, ".github", "workflows", item.file))
