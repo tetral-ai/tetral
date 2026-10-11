@@ -54,9 +54,11 @@ func TestPostgreSQLPlatformKeyCLINativeClose(t *testing.T) {
 	defer cancel()
 	command := exec.CommandContext(ctx, executable, "-test.run=^TestPostgreSQLPlatformKeyCLINativeClose$", "-test.v", "-test.timeout=90s")
 	command.Env = append(os.Environ(), platformKeyCloseChild+"="+t.Name(), "TETRAL_PLATFORM_KEY_CLOSE_POSTGRES_URL="+postgres.URL)
-	output, err := command.CombinedOutput()
+	output := newElapsedLineWriter()
+	command.Stdout, command.Stderr = output, output
+	err = command.Run()
 	t.Logf("isolated native platform key output:\n%s", output)
-	if err != nil || !strings.Contains(string(output), "platform_key_native_close_assertion=serial-native-write-close-and-peer-cleanup") {
+	if err != nil || !strings.Contains(output.String(), "platform_key_native_close_assertion=serial-native-write-close-and-peer-cleanup") {
 		t.Fatal("actual isolated platform key CLI proof failed")
 	}
 }

@@ -1,7 +1,9 @@
 package integration
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
@@ -84,7 +86,46 @@ func runIsolatedTLSProcess(parent context.Context, t *testing.T, root, selector 
 	//nolint:gosec // Current test executable and a fixed owning selector.
 	command := exec.CommandContext(ctx, executable, "-test.run="+selector, "-test.v", "-test.timeout="+(budget-isolatedTLSReportMargin).String())
 	command.Env = append(os.Environ(), envIsolatedTLSRoot+"="+root, envIsolatedTLSPGCerts+"="+postgres.Directory, envIsolatedTLSPGURL+"="+postgres.URL)
-	output, err := command.CombinedOutput()
+	output := newElapsedLineWriter()
+	command.Stdout, command.Stderr = output, output
+	err = command.Run()
 	t.Logf("isolated TLS root %s (%s) output:\n%s", root, selector, output)
-	return string(output), err
+	return output.String(), err
+}
+
+// elapsedLineWriter collects an isolated child's combined output and starts
+// every line with the time since the child started, so the parent's evidence
+// shows where the child spent its time. Assign one value to both Stdout and
+// Stderr, as CombinedOutput does: os/exec then copies one pipe from one
+// goroutine, so a prefix never lands inside a line, and Run returns only after
+// the last write.
+type elapsedLineWriter struct {
+	started time.Time
+	output  bytes.Buffer
+	midLine bool
+}
+
+func newElapsedLineWriter() *elapsedLineWriter {
+	return &elapsedLineWriter{started: time.Now()}
+}
+
+func (w *elapsedLineWriter) Write(data []byte) (int, error) {
+	written := len(data)
+	for len(data) > 0 {
+		if !w.midLine {
+			fmt.Fprintf(&w.output, "[%8.3fs] ", time.Since(w.started).Seconds())
+		}
+		line := data
+		if end := bytes.IndexByte(data, '\n'); end >= 0 {
+			line = data[:end+1]
+		}
+		w.output.Write(line)
+		w.midLine = line[len(line)-1] != '\n'
+		data = data[len(line):]
+	}
+	return written, nil
+}
+
+func (w *elapsedLineWriter) String() string {
+	return w.output.String()
 }

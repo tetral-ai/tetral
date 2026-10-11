@@ -141,6 +141,9 @@ func TestQueueJobInsertDetectorRejectsCaseWhitespaceAndLiteralSplits(t *testing.
 		"package sample\nfunc insert() { const verb = \"INSERT INTO \"; const table = \"queue_jobs\"; _ = verb + table + \" (id) VALUES ('x')\" }\nfunc mask() { const table = \"other\"; _ = table }\n",
 		"package sample\nvar query = `INSERT INTO \"queue_jobs\" (id) VALUES ('x')`\n",
 		"package sample\nvar query = `INSERT INTO public.queue_jobs (id) VALUES ('x')`\n",
+		"package sample\nimport \"fmt\"\nfunc insert(columns string) string { return fmt.Sprintf(\"INSERT INTO queue_jobs (%s) VALUES ('x')\", columns) }\n",
+		"package sample\nfunc insert(columns string) string { return \"INSERT INTO queue_jobs \" + columns }\n",
+		"package sample\nvar query = \"INSERT INTO queue_job\u017f\" + \"_archive\"\n",
 	} {
 		matched, err := goSourceContainsQueueJobInsert("fixture.go", []byte(source))
 		if err != nil {
@@ -160,6 +163,10 @@ func goSourceContainsQueueJobInsert(filename string, source []byte) (bool, error
 		return false, err
 	}
 	pattern := regexp.MustCompile(queueJobInsertPattern)
+	// A constant string's subexpressions evaluate to substrings of its value, so
+	// none can match once the table name is absent. The pre-filter folds case
+	// exactly as the pattern does.
+	table := regexp.MustCompile(`(?i)queue_jobs`)
 	found := false
 	ast.Inspect(file, func(node ast.Node) bool {
 		if found {
@@ -174,7 +181,7 @@ func goSourceContainsQueueJobInsert(filename string, source []byte) (bool, error
 			found = true
 			return false
 		}
-		return true
+		return !ok || table.MatchString(value)
 	})
 	return found, nil
 }

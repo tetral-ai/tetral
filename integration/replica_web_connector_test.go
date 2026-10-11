@@ -44,8 +44,9 @@ func (replicaWebIdentity) Authenticate(context.Context, string) (grpcauth.Identi
 }
 
 func TestReplicaWebSharedStore(t *testing.T) {
-	t.Run("drain-completes", func(t *testing.T) { testReplicaWebCommandDrain(t, false) })
-	t.Run("drain-cancels", func(t *testing.T) { testReplicaWebCommandDrain(t, true) })
+	binary := buildReplicaWebCommand(t)
+	t.Run("drain-completes", func(t *testing.T) { testReplicaWebCommandDrain(t, binary, false) })
+	t.Run("drain-cancels", func(t *testing.T) { testReplicaWebCommandDrain(t, binary, true) })
 	t.Run("three_instances", func(t *testing.T) {
 		stores, objects, receipts := replicaWebObservedStores(t)
 		var calls atomic.Int64
@@ -307,10 +308,30 @@ func serveReplicaWeb(t *testing.T, service *web.Service, metrics *web.Metrics) g
 	return gatewayv1.NewProviderGatewayServiceClient(conn)
 }
 
-func testReplicaWebCommandDrain(t *testing.T, force bool) {
+// buildReplicaWebCommand builds the actual Web command once, under the
+// enclosing test deadline and with the race detector like the other process
+// fixtures, so a race in the child fails the owning test.
+func buildReplicaWebCommand(t *testing.T) string {
+	t.Helper()
+	ctx := t.Context()
+	if deadline, ok := t.Deadline(); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
+	binary := filepath.Join(t.TempDir(), "web-connector")
+	build := exec.CommandContext(ctx, "go", "build", "-race", "-o", binary, "./services/web-connector/cmd/web-connector")
+	build.Dir = ".."
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build Web command: %v %s", err, output)
+	}
+	return binary
+}
+
+func testReplicaWebCommandDrain(t *testing.T, binary string, force bool) {
 	_, blobCfg := replicaMinIOStoresWithConfig(t)
-	// Compilation/setup uses the enclosing test deadline; the real child owns
-	// the separate non-Runtime process profile: 2s drain, 3s join, 15s watchdog.
+	// Setup uses the enclosing test deadline; the real child owns the separate
+	// non-Runtime process profile: 2s drain, 3s join, 15s watchdog.
 	prepareCtx := t.Context()
 	if deadline, ok := t.Deadline(); ok {
 		var cancelPrepare context.CancelFunc
@@ -318,12 +339,6 @@ func testReplicaWebCommandDrain(t *testing.T, force bool) {
 		defer cancelPrepare()
 	}
 	dir := t.TempDir()
-	binary := filepath.Join(dir, "web-connector")
-	build := exec.CommandContext(prepareCtx, "go", "build", "-o", binary, "./services/web-connector/cmd/web-connector")
-	build.Dir = ".."
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build Web command: %v %s", err, output)
-	}
 	started, backendJoined, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var releaseOnce sync.Once
 	releaseBackend := func() { releaseOnce.Do(func() { close(release) }) }

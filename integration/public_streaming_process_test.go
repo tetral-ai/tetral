@@ -264,14 +264,16 @@ func publicIsolatedProcessCase(t *testing.T, body func(*testing.T)) {
 	defer cancel()
 	command := exec.CommandContext(ctx, executable, "-test.run=^"+t.Name()+"$", "-test.v") //nolint:gosec // Current immutable test executable and fixed root test.
 	command.Env = append(os.Environ(), "TETRAL_PREVIEW_PROCESS_CASE="+t.Name(), "TETRAL_PREVIEW_PROCESS_PG_CERTS="+postgres.Directory, "TETRAL_PREVIEW_PROCESS_PG_URL="+postgres.URL)
-	output, err := command.CombinedOutput()
+	output := newElapsedLineWriter()
+	command.Stdout, command.Stderr = output, output
+	err = command.Run()
 	// Actual child assertions, test names and failures remain in the parent raw
 	// Go evidence; credentials exist only in the child's private environment.
 	t.Logf("isolated public process case output:\n%s", output)
 	if err != nil {
 		t.Fatalf("actual public process composition failed: %v", err)
 	}
-	if !strings.Contains(string(output), "--- PASS: "+t.Name()) || !strings.Contains(string(output), "public_streaming_sdk_assertion=") {
+	if !strings.Contains(output.String(), "--- PASS: "+t.Name()) || !strings.Contains(output.String(), "public_streaming_sdk_assertion=") {
 		t.Fatal("isolated composition lacks executed named assertions")
 	}
 }

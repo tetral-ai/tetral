@@ -28,6 +28,31 @@ func TestEdgeChangesSelectEnvoyGatewayCompositions(t *testing.T) {
 	if len(roots) == 0 {
 		t.Fatal("inventory declares no Envoy Gateway integration roots")
 	}
+	// Expansion depends on the package, not on the change that selected it, so
+	// every edge input that selects integration gets this expansion.
+	expanded, err := expandAffectedGoSelection(root, []Selection{{Group: "go", Packages: []string{integrationPackage}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	for _, selection := range expanded {
+		for name, dependencies := range roots {
+			if !slices.Contains(selection.Tests, name) {
+				continue
+			}
+			found[name] = true
+			for _, dependency := range dependencies {
+				if !slices.Contains(selection.Dependencies, dependency) {
+					t.Errorf("integration selected %s without its %s dependency", name, dependency)
+				}
+			}
+		}
+	}
+	for name := range roots {
+		if !found[name] {
+			t.Errorf("integration omitted Envoy Gateway composition %s", name)
+		}
+	}
 	for _, changed := range []string{
 		"services/auth/ext_authz.go",
 		"deploy/envoy-gateway/gateway-class.yaml",
@@ -44,31 +69,10 @@ func TestEdgeChangesSelectEnvoyGatewayCompositions(t *testing.T) {
 			if revision.FullFallbackCause != "" {
 				t.Fatalf("known edge input fell back to Full: %s", revision.FullFallbackCause)
 			}
-			expanded, err := expandAffectedGoSelection(root, selected)
-			if err != nil {
-				t.Fatal(err)
-			}
-			found := map[string]bool{}
-			for _, selection := range expanded {
-				if !slices.Contains(selection.Packages, integrationPackage) {
-					continue
-				}
-				for name, dependencies := range roots {
-					if !slices.Contains(selection.Tests, name) {
-						continue
-					}
-					found[name] = true
-					for _, dependency := range dependencies {
-						if !slices.Contains(selection.Dependencies, dependency) {
-							t.Errorf("%s selected %s without its %s dependency", changed, name, dependency)
-						}
-					}
-				}
-			}
-			for name := range roots {
-				if !found[name] {
-					t.Errorf("%s omitted Envoy Gateway composition %s", changed, name)
-				}
+			if !slices.ContainsFunc(selected, func(selection Selection) bool {
+				return selection.Group == "go" && slices.Contains(selection.Packages, integrationPackage)
+			}) {
+				t.Errorf("%s did not select the integration Go package", changed)
 			}
 		})
 	}

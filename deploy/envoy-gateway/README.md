@@ -89,10 +89,15 @@ controllers, stores, applications or provider-owned CRDs.
 
 Local owning tests render these production resources, supply every referenced
 Service/EndpointSlice/Secret explicitly, run the matching `egctl` and serve its
-exact xDS snapshot to the pinned Envoy process. Translation status, policy match
-counts and Envoy acceptance are separate assertions. Local TLS and protocol
-traffic establishes consumer behavior; controller reconciliation, Kubernetes
-Secret propagation and load-balancer behavior require installation evidence.
+exact xDS snapshot to the pinned Envoy process. They add only an empty endpoint
+assignment for the Bootstrap's local cluster, so Envoy reports ready once every
+resource is delivered rather than after its initial-fetch timeout. In a cluster
+the controller serves that assignment with the proxy's own endpoints and the
+CLI omits it; the empty one routes the same because no translated cluster uses
+zone-aware load balancing. Translation status, policy match counts and Envoy
+acceptance are separate assertions. Local TLS and protocol traffic establishes
+consumer behavior; controller reconciliation, Kubernetes Secret propagation and
+load-balancer behavior require installation evidence.
 
 For native TLS rotation, first project an old-plus-new CA bundle, then issue and
 activate new leaves. Probe fresh connections from the edge to Auth Check and

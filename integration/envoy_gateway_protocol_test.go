@@ -78,7 +78,7 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 				startEdgeHTTPBackend(ctx, t, fixture, profile, "event-stream", "127.0.0.4:8080", receiver("event", &eventRequests))
 				startEdgeHTTPBackend(ctx, t, fixture, profile, "git-proxy", "127.0.0.5:8080", receiver("git", &gitRequests))
 				startEnvoyGatewayProxy(ctx, t, fixture)
-				edgeAwaitReady(ctx, t, ports.Ready)
+				edgeAwaitReady(ctx, t, fixture)
 				roots := x509.NewCertPool()
 				roots.AppendCertsFromPEM(fixture.Authority.PEM)
 				client := &http.Client{Transport: &http.Transport{ForceAttemptHTTP2: true, TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -401,7 +401,11 @@ func startEdgeHTTPBackend(ctx context.Context, t *testing.T, fixture *envoyGatew
 		}
 	})
 }
-func edgeAwaitReady(ctx context.Context, t *testing.T, port int) {
+
+// edgeAwaitReady waits for the started Envoy to report ready and then requires
+// that readiness came from delivery: an initial-fetch timeout means Envoy gave
+// up waiting for a resource the harness never served.
+func edgeAwaitReady(ctx context.Context, t *testing.T, fixture *envoyGatewayTranslation) {
 	t.Helper()
 	client := &http.Client{Timeout: time.Second}
 	lastStatus := 0
@@ -409,14 +413,14 @@ func edgeAwaitReady(ctx context.Context, t *testing.T, port int) {
 	ready, stop := context.WithTimeout(ctx, 20*time.Second)
 	defer stop()
 	for {
-		r := transporttest.Must(http.NewRequestWithContext(ready, "GET", fmt.Sprintf("http://127.0.0.1:%d/ready", port), nil))
+		r := transporttest.Must(http.NewRequestWithContext(ready, "GET", fmt.Sprintf("http://127.0.0.1:%d/ready", fixture.Ports.Ready), nil))
 		response, err := client.Do(r)
 		if err == nil {
 			_ = response.Body.Close()
 			requests++
 			lastStatus = response.StatusCode
-			if response.StatusCode == 200 {
-				return
+			if lastStatus == 200 {
+				break
 			}
 		}
 		select {
@@ -424,6 +428,28 @@ func edgeAwaitReady(ctx context.Context, t *testing.T, port int) {
 			t.Fatalf("actual Envoy did not acknowledge ready policy by its deadline: responses=%d last_status=%d", requests, lastStatus)
 		case <-time.After(20 * time.Millisecond):
 		}
+	}
+	var timeouts struct {
+		Stats []struct {
+			Name  string `json:"name"`
+			Value int    `json:"value"`
+		} `json:"stats"`
+	}
+	if json.Unmarshal(edgeTLSAdmin(ctx, t, fixture.Control.sockets["admin"], "GET", "stats?filter=init_fetch_timeout&format=json"), &timeouts) != nil {
+		t.Fatal("decode actual Envoy initial-fetch timeout statistics")
+	}
+	counted := 0
+	for _, stat := range timeouts.Stats {
+		if !strings.HasSuffix(stat.Name, ".init_fetch_timeout") {
+			continue
+		}
+		counted++
+		if stat.Value != 0 {
+			t.Fatalf("actual Envoy became ready through an initial-fetch timeout: %s=%d", stat.Name, stat.Value)
+		}
+	}
+	if counted == 0 {
+		t.Fatal("actual Envoy reported no initial-fetch timeout statistics")
 	}
 }
 func edgeRawTLSRequest(ctx context.Context, t *testing.T, port int, roots *x509.CertPool, method, host, path, headers string) *http.Response {
