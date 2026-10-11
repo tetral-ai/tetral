@@ -26,6 +26,17 @@ type Plan struct {
 	Excluded     []Exclusion `json:"excluded,omitempty"`
 	Dependencies []string    `json:"dependencies"`
 	CreatedAt    time.Time   `json:"created_at"`
+	// GoSelection is set when the plan executes one shard of a Go selection.
+	GoSelection *GoShardIdentity `json:"go_selection,omitempty"`
+}
+
+// GoShardIdentity names the shard a plan executes and the complete Go
+// selection it was cut from: Digest is goSelectionDigest of that selection
+// before slicing, so the shards of one run can be checked to partition it.
+type GoShardIdentity struct {
+	Digest     string `json:"digest"`
+	ShardIndex int    `json:"shard_index"`
+	ShardCount int    `json:"shard_count"`
 }
 
 type Exclusion struct {

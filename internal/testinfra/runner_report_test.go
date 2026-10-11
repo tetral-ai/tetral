@@ -96,8 +96,10 @@ func TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests(t *testing.T) {
 
 	// Without an explicit budget go test stops every package binary after ten
 	// minutes. Coverage runs the integration package as one sequential binary,
-	// so its budget must leave twofold headroom over that package's calibrated
-	// top-level test durations, which sum to less than its measured total.
+	// so its budget must leave twofold headroom over that package's run time.
+	// Coverage times are not in the repository, so this checks the package's
+	// summed Race time from the shard weights: lower than a coverage run, and
+	// growing with the package.
 	var budget time.Duration
 	for _, argument := range commands[2].Arguments {
 		value, ok := strings.CutPrefix(argument, "-timeout=")
@@ -115,16 +117,13 @@ func TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests(t *testing.T) {
 	if budget == 0 {
 		t.Fatalf("coverage Go command %v has no whole-package budget", commands[2].Arguments)
 	}
-	calibration, err := loadGoShardCalibration()
+	weights, err := loadGoShardWeights()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var measured time.Duration
-	for _, weight := range calibration.Packages["github.com/tetral-ai/tetral/integration"].TestsMS {
-		measured += time.Duration(weight) * time.Millisecond
-	}
+	measured := time.Duration(weights.Packages["github.com/tetral-ai/tetral/integration"].ElapsedMS) * time.Millisecond
 	if measured == 0 || budget < 2*measured {
-		t.Fatalf("coverage Go budget %s does not leave twofold headroom over the calibrated sequential integration time %s", budget, measured)
+		t.Fatalf("coverage Go budget %s does not leave twofold headroom over the integration package's Race time %s", budget, measured)
 	}
 
 	// The job must outlast the Go budget so a stuck package reports through

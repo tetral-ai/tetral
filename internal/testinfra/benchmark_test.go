@@ -16,6 +16,9 @@ type benchmarkFixtureTest struct {
 	name    string
 	seconds float64
 	failed  bool
+	// parallelParent reports Elapsed 0, as a test whose subtests run in
+	// parallel does, while it runs seconds from its run to its final event.
+	parallelParent bool
 }
 
 type benchmarkFixtureStep struct {
@@ -29,7 +32,9 @@ type benchmarkFixtureSide struct {
 	// legacy results come from a runner without step timestamps or host fields.
 	legacy  bool
 	goCache *GoCacheRestore
-	shards  [][]benchmarkFixtureStep
+	// shardCount, when set, is the shard count every result's identity records.
+	shardCount int
+	shards     [][]benchmarkFixtureStep
 }
 
 var benchmarkFixtureJobStart = time.Date(2026, 10, 10, 6, 0, 0, 0, time.UTC)
@@ -67,6 +72,9 @@ func writeBenchmarkSide(t *testing.T, side benchmarkFixtureSide) string {
 			result.Execution.CPUModel, result.Execution.RunnerImage = "Fixture CPU", "ubuntu24/1"
 		}
 		result.Execution.GoCache = side.goCache
+		if side.shardCount > 0 {
+			result.Plan.GoSelection = &GoShardIdentity{Digest: "fixture", ShardIndex: index, ShardCount: side.shardCount}
+		}
 		clock := started.Add(result.Setup)
 		for position, step := range steps {
 			selection := Selection{Group: "go", Packages: []string{step.pkg}, Mode: "race"}
@@ -80,8 +88,20 @@ func writeBenchmarkSide(t *testing.T, side benchmarkFixtureSide) string {
 				if test.failed {
 					action = "fail"
 				}
-				events = append(events, benchmarkFixtureEvent(t, eventClock, action, step.pkg, test.name, test.seconds))
+				reported := test.seconds
+				if test.parallelParent {
+					reported = 0
+				}
+				events = append(events, benchmarkFixtureEvent(t, eventClock, action, step.pkg, test.name, reported))
 			}
+			packageAction, packageElapsed := "pass", 0.0
+			for _, test := range step.tests {
+				packageElapsed += test.seconds
+				if test.failed {
+					packageAction = "fail"
+				}
+			}
+			events = append(events, benchmarkFixtureEvent(t, eventClock, packageAction, step.pkg, "", packageElapsed))
 			artifact := fmt.Sprintf("step-%d.jsonl", position)
 			writeTestFile(t, directory, artifact, strings.Join(events, "\n")+"\n")
 			report := StepResult{Group: "go", Command: []string{"go", "test", "-json", step.pkg}, Status: "pass", Elapsed: benchmarkFixtureSeconds(step.elapsed), Artifact: artifact}
@@ -169,6 +189,29 @@ func TestCompareBenchmarkEvidence(t *testing.T) {
 	}
 	moduleRoot := t.TempDir()
 	writeTestFile(t, moduleRoot, "go.mod", "module example.test/m\n\ngo 1.26\n")
+	// Shard weights for the job speed rows: a1-a5 and b1-b5 weigh 10 s,
+	// x and y 20 s.
+	weightsJSON := `{"version": 2, "generated_at": "2026-10-11", "base": "b", "source_runs": ["1"], "cpu_models": {"Fixture CPU": {"factor": 1, "jobs": 1, "samples": 1, "shared_units": 0}}, "median_test_ms": 1, "sliceable": [], "packages": {`
+	for _, name := range []string{"a1", "a2", "a3", "a4", "a5", "b1", "b2", "b3", "b4", "b5"} {
+		weightsJSON += `"example.test/m/p/` + name + `": {"elapsed_ms": 10000, "overhead_ms": 0}, `
+	}
+	weightsJSON += `"example.test/m/p/x": {"elapsed_ms": 20000, "overhead_ms": 0}, "example.test/m/p/y": {"elapsed_ms": 20000, "overhead_ms": 0}}}`
+	weights, err := parseGoShardWeights([]byte(weightsJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// units lists whole packages measured at speed times their weight.
+	units := func(speed float64, names ...string) []benchmarkFixtureStep {
+		var steps []benchmarkFixtureStep
+		for _, name := range names {
+			weight := 10.0
+			if name == "x" || name == "y" {
+				weight = 20
+			}
+			steps = append(steps, whole(name, weight*speed))
+		}
+		return steps
+	}
 
 	tests := []struct {
 		name    string
@@ -334,6 +377,11 @@ func TestCompareBenchmarkEvidence(t *testing.T) {
 				if metric := benchmarkComparisonMetric(report, "replayed_slowest_steps_phase"); metric == nil || metric.D != 2 {
 					t.Fatalf("replayed slowest steps phase = %+v; want d = 2 s", metric)
 				}
+				// The shard weights know none of these packages, so no job
+				// has a speed and nothing is normalized.
+				if metric := benchmarkComparisonMetric(report, benchmarkNormalizedReplayMetric); metric != nil || !slices.ContainsFunc(report.Missing, func(note string) bool { return strings.Contains(note, "need every job's speed") }) {
+					t.Fatalf("normalized replay = %+v, missing = %v; want none for jobs without a speed", metric, report.Missing)
+				}
 				if metric := benchmarkComparisonMetric(report, "slowest_steps_phase"); metric == nil || !metric.PlanDependent {
 					t.Fatalf("slowest steps phase = %+v; want it marked plan-dependent", metric)
 				}
@@ -428,6 +476,26 @@ func TestCompareBenchmarkEvidence(t *testing.T) {
 			},
 		},
 		{
+			name: "a parent of parallel subtests costs its active time on the shard B moves it to",
+			a: benchmarkFixtureSide{sha: shaA, runID: "7", attempt: "1", shards: [][]benchmarkFixtureStep{
+				{{pkg: "example.test/m/p/sliced", tests: []benchmarkFixtureTest{{name: "TestParent", seconds: 10, parallelParent: true}, {name: "TestOne", seconds: 5}}, elapsed: 17}},
+				{{pkg: "example.test/m/p/sliced", tests: []benchmarkFixtureTest{{name: "TestTwo", seconds: 5}}, elapsed: 7}},
+			}},
+			b: benchmarkFixtureSide{sha: shaA, runID: "8", attempt: "1", shards: [][]benchmarkFixtureStep{
+				{{pkg: "example.test/m/p/sliced", tests: []benchmarkFixtureTest{{name: "TestOne", seconds: 5}}, elapsed: 7}},
+				{{pkg: "example.test/m/p/sliced", tests: []benchmarkFixtureTest{{name: "TestParent", seconds: 10, parallelParent: true}, {name: "TestTwo", seconds: 5}}, elapsed: 17}},
+			}},
+			check: func(t *testing.T, report BenchmarkComparison, err error) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Each A step spends 2 s outside its tests' active time.
+				if got := []float64{*report.Replay[0].BPlanADurations, *report.Replay[1].BPlanADurations}; !slices.Equal(got, []float64{7, 17}) {
+					t.Fatalf("B's plan replays over A's durations at %v; want [7 17]", got)
+				}
+			},
+		},
+		{
 			name: "a shard that ran no step of a package uses that side's package mean",
 			a: benchmarkFixtureSide{sha: shaA, runID: "7", attempt: "1", shards: [][]benchmarkFixtureStep{
 				{{pkg: "example.test/m/p/sliced", tests: []benchmarkFixtureTest{{name: "TestOne", seconds: 5}}, elapsed: 7}},
@@ -502,6 +570,38 @@ func TestCompareBenchmarkEvidence(t *testing.T) {
 			},
 		},
 		{
+			name: "a side missing its last recorded shard is incomplete",
+			a:    func() benchmarkFixtureSide { side := speedSide(shaA, 2, 8); side.shardCount = 2; return side }(),
+			b:    func() benchmarkFixtureSide { side := speedSide(shaA, 2, 8); side.shardCount = 1; return side }(),
+			check: func(t *testing.T, report BenchmarkComparison, err error) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if report.A.Complete || !report.B.Complete || report.Replay != nil {
+					t.Fatalf("A complete = %v, B complete = %v, replay = %v; want only B complete and no replay", report.A.Complete, report.B.Complete, report.Replay)
+				}
+			},
+		},
+		{
+			// A's shard 0 ran on a machine twice as slow as shard 1. B swaps
+			// x and y, which weigh the same; unnormalized, B's plan would
+			// replay 20 s faster only because x leaves the slow machine.
+			name: "normalized replays keep no machine draw",
+			a:    benchmarkFixtureSide{sha: shaA, runID: "7", attempt: "1", shards: [][]benchmarkFixtureStep{units(2, "x", "a1", "a2", "a3", "a4", "a5"), units(1, "y", "b1", "b2", "b3", "b4", "b5")}},
+			b:    benchmarkFixtureSide{sha: shaA, runID: "8", attempt: "1", shards: [][]benchmarkFixtureStep{units(1, "y", "a1", "a2", "a3", "a4", "a5"), units(1, "x", "b1", "b2", "b3", "b4", "b5")}},
+			check: func(t *testing.T, report BenchmarkComparison, err error) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if speeds := []*float64{report.A.Shards[0].JobSpeed, report.A.Shards[1].JobSpeed}; speeds[0] == nil || speeds[1] == nil || *speeds[0] != 2 || *speeds[1] != 1 {
+					t.Fatalf("A job speeds = %v; want 2 and 1", speeds)
+				}
+				if metric := benchmarkComparisonMetric(report, benchmarkNormalizedReplayMetric); metric == nil || metric.A != 40 || metric.B < metric.A {
+					t.Fatalf("normalized replay = %+v; want A at 40 s and B no lower", metric)
+				}
+			},
+		},
+		{
 			name: "other producers in the download are ignored",
 			a:    speedSide(shaA, 2, 8), b: speedSide(shaA, 2, 8),
 			options: func(options *BenchmarkCompareOptions) {
@@ -552,7 +652,7 @@ func TestCompareBenchmarkEvidence(t *testing.T) {
 			if tc.options != nil {
 				tc.options(&options)
 			}
-			report, err := compareBenchmarkEvidence(context.Background(), options, client)
+			report, err := compareBenchmarkEvidence(context.Background(), options, client, weights)
 			tc.check(t, report, err)
 		})
 	}
@@ -591,7 +691,7 @@ func TestCompareBenchmarkEvidenceMarksTestsOfChangedPackages(t *testing.T) {
 		B:              BenchmarkSideOptions{Directory: writeBenchmarkSide(t, side(head)), SHA: head},
 		RepositoryRoot: root,
 		ChangedTests:   []string{"example.test/m/p/changed.TestChanged00"},
-	}, benchmarkFixtureGitHub{})
+	}, benchmarkFixtureGitHub{}, goShardWeights{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -624,7 +724,7 @@ func TestBenchmarkNoiseFromAAComparisons(t *testing.T) {
 			scale           float64
 		}{
 			{"setup", benchmarkAggregateMean, 1}, {"go_race_runner_minutes", benchmarkAggregateSum, 1}, {"slowest_job", benchmarkAggregateMax, 1},
-			{"fixed_preparation", benchmarkAggregateMean, 0}, {"replayed_slowest_steps_phase", benchmarkAggregateMax, 0},
+			{"fixed_preparation", benchmarkAggregateMean, 0}, {benchmarkNormalizedReplayMetric, benchmarkAggregateMax, 0},
 		} {
 			item := BenchmarkMetric{Name: metric.name, Unit: "s", Aggregate: metric.aggregate}
 			for shard, difference := range differences {
@@ -652,7 +752,7 @@ func TestBenchmarkNoiseFromAAComparisons(t *testing.T) {
 			t.Fatalf("%s noise = %+v; want s_D %v from %d samples", name, metric, want.sd, want.samples)
 		}
 	}
-	for name, note := range map[string]string{"fixed_preparation": "is the same", "replayed_slowest_steps_phase": "over 5 runs"} {
+	for name, note := range map[string]string{"fixed_preparation": "is the same", benchmarkNormalizedReplayMetric: "over 5 runs"} {
 		if benchmarkNoiseMetric(noise, name) != nil || !slices.ContainsFunc(noise.Notes, func(text string) bool { return strings.HasPrefix(text, name) && strings.Contains(text, note) }) {
 			t.Fatalf("%s got s_D %+v (notes %v); want none, with a note saying %q", name, benchmarkNoiseMetric(noise, name), noise.Notes, note)
 		}
@@ -676,7 +776,7 @@ func TestBenchmarkVerdictRule(t *testing.T) {
 				{Name: "slowest_job", Unit: "s", Aggregate: benchmarkAggregateMax, PlanDependent: true, A: 1200, B: 1200 - d, D: d},
 				{Name: "plan_fixed_runner_minutes", Unit: "min", Aggregate: benchmarkAggregateSum, A: 70, B: 70},
 				{Name: "plan_fixed_slowest_job", Unit: "s", Aggregate: benchmarkAggregateMax, A: 1300, B: 1300},
-				{Name: "replayed_slowest_steps_phase", Unit: "s", Aggregate: benchmarkAggregateMax, A: 900, B: 900 - d, D: d},
+				{Name: benchmarkNormalizedReplayMetric, Unit: "s", Aggregate: benchmarkAggregateMax, A: 900, B: 900 - d, D: d},
 				{Name: "go_race_runner_minutes", Unit: "min", Aggregate: benchmarkAggregateSum, PlanDependent: true, A: 70, B: 70},
 			},
 		}
@@ -730,8 +830,8 @@ func TestBenchmarkVerdictRule(t *testing.T) {
 			name: "incomplete run", metric: "fixed_preparation", effect: 200, comparisons: runs(100), wantStatus: BenchmarkVerdictFail, wantRequired: 1,
 			mutate: func(comparisons []BenchmarkComparison) { comparisons[0].B.Complete = false },
 		},
-		{name: "the replayed metric needs five runs without an s_D", metric: "replayed_slowest_steps_phase", effect: 60, comparisons: runs(60), wantStatus: BenchmarkVerdictInsufficientRuns, wantRequired: 5},
-		{name: "five improving replays at E/2 pass", metric: "replayed_slowest_steps_phase", effect: 60, comparisons: runs(40, 20, 30, 30, 30), wantStatus: BenchmarkVerdictPass, wantRequired: 5},
+		{name: "the replayed metric needs five runs without an s_D", metric: benchmarkNormalizedReplayMetric, effect: 60, comparisons: runs(60), wantStatus: BenchmarkVerdictInsufficientRuns, wantRequired: 5},
+		{name: "five improving replays at E/2 pass", metric: benchmarkNormalizedReplayMetric, effect: 60, comparisons: runs(40, 20, 30, 30, 30), wantStatus: BenchmarkVerdictPass, wantRequired: 5},
 		{name: "a comparison without the changed-test metric is an error", metric: benchmarkChangedTestsMetric, effect: 60, sd: benchmarkPointer(5), comparisons: runs(60), wantErr: "--changed-tests"},
 	}
 	for _, tc := range tests {

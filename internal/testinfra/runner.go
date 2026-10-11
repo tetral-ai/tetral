@@ -323,12 +323,14 @@ func goPackageTimeout(packages []string) string {
 
 // Report-only coverage runs every Go package once without Race, so the
 // integration package executes all of its top-level tests sequentially in one
-// binary instead of in duration-balanced Race slices. Those slices measured
-// about 26 minutes in total (docs/testing.md names the source run). The budget
-// is more than twice that total, and it exceeds the remaining tests plus the
-// SDK wrapper's 24-minute context, so the wrapper reports its own deadline
-// before the package watchdog fires. The scheduled coverage job limit holds
-// this budget plus dependency setup, compilation and the Bun coverage commands.
+// binary instead of in duration-balanced Race slices. The budget is more than
+// twice that package's coverage run time (docs/testing.md names the runs) and
+// longer than the remaining tests plus the SDK wrapper's 24-minute context, so
+// the wrapper reports its own deadline before the package watchdog fires.
+// TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests checks it against
+// the package's Race total in go_shard_weights.json. The scheduled coverage
+// job limit holds this budget plus dependency setup, compilation and the Bun
+// coverage commands.
 const coverageGoTestTimeout = "-timeout=60m"
 
 func commandsForSelection(plan Plan, selection Selection, root, outputDir string, dependencyAuditMode DependencyAuditMode) ([]commandSpec, error) {

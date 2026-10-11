@@ -6,15 +6,16 @@ import (
 )
 
 var benchmarkMetricTitles = map[string]string{
-	"setup":                        "Dependency setup (mean of shards)",
-	"fixed_preparation":            "Fixed preparation: before runner + setup + longest step compile (mean of shards)",
-	"slowest_steps_phase":          "Slowest steps phase",
-	"slowest_job":                  "Slowest job",
-	"go_race_runner_minutes":       "Go Race runner-minutes, measured",
-	"plan_fixed_runner_minutes":    "Plan-fixed Go Race runner-minutes: A's plan over each side's durations",
-	"replayed_slowest_steps_phase": "Replayed slowest steps phase: each plan over A's durations",
-	"plan_fixed_slowest_job":       "Plan-fixed slowest job: A's plan over each side's durations",
-	benchmarkChangedTestsMetric:    "Changed tests, summed (B speed-normalized)",
+	"setup":                         "Dependency setup (mean of shards)",
+	"fixed_preparation":             "Fixed preparation: before runner + setup + longest step compile (mean of shards)",
+	"slowest_steps_phase":           "Slowest steps phase",
+	"slowest_job":                   "Slowest job",
+	"go_race_runner_minutes":        "Go Race runner-minutes, measured",
+	"plan_fixed_runner_minutes":     "Plan-fixed Go Race runner-minutes: A's plan over each side's durations",
+	"replayed_slowest_steps_phase":  "Replayed slowest steps phase, unnormalized: each plan over A's durations (reported)",
+	benchmarkNormalizedReplayMetric: "Replayed slowest steps phase: each plan over A's durations divided by their job's speed",
+	"plan_fixed_slowest_job":        "Plan-fixed slowest job: A's plan over each side's durations",
+	benchmarkChangedTestsMetric:     "Changed tests, summed (B speed-normalized)",
 }
 
 // RenderBenchmarkComparison writes the comparison as a Markdown step summary.
@@ -77,10 +78,17 @@ func RenderBenchmarkComparison(report BenchmarkComparison) string {
 	}
 
 	if len(report.Replay) > 0 {
-		out.WriteString("\n### Replayed steps phase\n\nTwo workers take each shard plan's steps in plan order. A slice of a split package costs its tests plus its own shard's overhead; A's durations take units A never ran from B.\n\n")
-		out.WriteString("| Shard | A plan, A durations | B plan, A durations | A plan, B durations |\n|---:|---:|---:|---:|\n")
+		out.WriteString("\n### Replayed steps phase\n\nTwo workers take each shard plan's steps in plan order. A slice of a split package costs its tests plus its own shard's overhead; A's durations take units A never ran from B. Normalized replays divide every unit by the speed of the job that measured it.\n\n")
+		out.WriteString("| Shard | A job speed | A plan, A durations | B plan, A durations | A plan, B durations | A plan, normalized | B plan, normalized |\n|---:|---:|---:|---:|---:|---:|---:|\n")
 		for _, replay := range report.Replay {
-			fmt.Fprintf(&out, "| %d | %s | %s | %s |\n", replay.Shard, benchmarkValue(replay.APlanADurations), benchmarkValue(replay.BPlanADurations), benchmarkValue(replay.APlanBDurations))
+			speed := "—"
+			for _, shard := range report.A.Shards {
+				if shard.Index == replay.Shard {
+					speed = fmt.Sprintf("%s (%d units)", benchmarkRatio(shard.JobSpeed), shard.JobSpeedUnits)
+				}
+			}
+			fmt.Fprintf(&out, "| %d | %s | %s | %s | %s | %s | %s |\n", replay.Shard, speed, benchmarkValue(replay.APlanADurations), benchmarkValue(replay.BPlanADurations), benchmarkValue(replay.APlanBDurations),
+				benchmarkValue(replay.APlanANormalized), benchmarkValue(replay.BPlanANormalized))
 		}
 	}
 

@@ -35,8 +35,9 @@ var benchmarkGuardMetrics = []string{"plan_fixed_runner_minutes", "plan_fixed_sl
 
 // benchmarkFixedRuns holds metrics that are deterministic within a run: both
 // plans are replayed over the same durations, so A/A runs give them no s_D
-// and a fixed number of runs judges them.
-var benchmarkFixedRuns = map[string]int{"replayed_slowest_steps_phase": 5}
+// and a fixed number of runs judges them. The unnormalized replay keeps the
+// machines A's jobs drew in A's plan only, so it is reported, not judged.
+var benchmarkFixedRuns = map[string]int{benchmarkNormalizedReplayMetric: 5}
 
 const (
 	BenchmarkVerdictPass             = "pass"

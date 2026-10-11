@@ -32,9 +32,13 @@ type CIHealthReport struct {
 	ShardCalibratedAt   string             `json:"go_shard_calibrated_at"`
 	HistoricalOwners    []string           `json:"historical_concurrency_owners"`
 	ApparatusNotes      []string           `json:"apparatus_notes,omitempty"`
+	GoRace              *GoRaceHealth      `json:"go_race,omitempty"`
 }
 
-func BuildCIHealthReport(ctx context.Context, artifactsRoot, repository string, runID int64, runAttempt int) (CIHealthReport, error) {
+// BuildCIHealthReport summarizes the current run's artifacts. With a
+// goRaceDirectory it also downloads recent Go Race evidence there and checks
+// the shard weights against it.
+func BuildCIHealthReport(ctx context.Context, artifactsRoot, goRaceDirectory, repository string, runID int64, runAttempt int) (CIHealthReport, error) {
 	report := CIHealthReport{
 		Repository: repository, RunID: runID, RunAttempt: runAttempt, CollectedAt: time.Now().UTC(),
 		JobConclusions: map[string]int{}, EvidenceStatuses: map[string]int{}, StepDurations: map[string]int64{},
@@ -45,11 +49,11 @@ func BuildCIHealthReport(ctx context.Context, artifactsRoot, repository string, 
 		return report, err
 	}
 	report.ActionReviewedAt = inventory.ReviewedAt
-	calibration, err := loadGoShardCalibration()
+	weights, err := loadGoShardWeights()
 	if err != nil {
 		return report, err
 	}
-	report.ShardCalibratedAt = calibration.CalibratedAt
+	report.ShardCalibratedAt = weights.GeneratedAt
 	var owners scheduledOwnerInventory
 	if err := json.Unmarshal(scheduledOwnersJSON, &owners); err != nil {
 		return report, err
@@ -78,23 +82,7 @@ func BuildCIHealthReport(ctx context.Context, artifactsRoot, repository string, 
 			if err := json.Unmarshal(body, &result); err != nil {
 				return fmt.Errorf("decode health result: %w", err)
 			}
-			identity := result.Execution.RunID + "/" + result.Execution.RunAttempt + "/" + result.Execution.Producer
-			if seen[identity] {
-				report.DuplicateExecutions = append(report.DuplicateExecutions, identity)
-			}
-			seen[identity] = true
-			if result.Execution.RunAttempt != "" && result.Execution.RunAttempt != "1" {
-				report.RerunEvidence++
-			}
-			report.EvidenceStatuses[result.Status]++
-			report.DependencySetup += result.Setup
-			for _, step := range result.Steps {
-				key := step.Group + ":" + strings.Join(step.Command, " ")
-				report.StepDurations[key] += int64(step.Elapsed)
-				if strings.HasPrefix(result.Execution.Producer, "go-") {
-					report.GoShardMinutes[result.Execution.Producer] += step.Elapsed.Minutes()
-				}
-			}
+			collectResultHealth(&report, result, seen)
 		default:
 			if strings.HasSuffix(entry.Name(), ".jsonl") {
 				if err := collectGoTestDurations(path, report.TestDurations); err != nil {
@@ -117,7 +105,37 @@ func BuildCIHealthReport(ctx context.Context, artifactsRoot, repository string, 
 		collectCompletedJobHealth(&report, live.Jobs)
 	}
 	sort.Strings(report.DuplicateExecutions)
+	if goRaceDirectory != "" {
+		producers, err := LoadPRProducers()
+		if err != nil {
+			return report, err
+		}
+		goRace := collectGoRaceHealth(ctx, commandGitHubClient{}, repository, goRaceDirectory, report.CollectedAt, weights, len(producers.GoShards)*goRaceWorkers)
+		report.GoRace = &goRace
+	}
 	return report, nil
+}
+
+// collectResultHealth adds one downloaded result to the report. Only results
+// that record a Go shard identity count as Go shards.
+func collectResultHealth(report *CIHealthReport, result Result, seen map[string]bool) {
+	identity := result.Execution.RunID + "/" + result.Execution.RunAttempt + "/" + result.Execution.Producer
+	if seen[identity] {
+		report.DuplicateExecutions = append(report.DuplicateExecutions, identity)
+	}
+	seen[identity] = true
+	if result.Execution.RunAttempt != "" && result.Execution.RunAttempt != "1" {
+		report.RerunEvidence++
+	}
+	report.EvidenceStatuses[result.Status]++
+	report.DependencySetup += result.Setup
+	for _, step := range result.Steps {
+		key := step.Group + ":" + strings.Join(step.Command, " ")
+		report.StepDurations[key] += int64(step.Elapsed)
+		if result.Plan.GoSelection != nil {
+			report.GoShardMinutes[result.Execution.Producer] += step.Elapsed.Minutes()
+		}
+	}
 }
 
 func collectCompletedJobHealth(report *CIHealthReport, jobs []workflowJob) {
@@ -168,14 +186,22 @@ func collectGoTestDurations(path string, target map[string]float64) error {
 type goTestOutcome struct {
 	pkg, name string
 	elapsed   float64
-	passed    bool
+	// active is the time from the test's run event to its final event minus
+	// the time it spent paused: a top-level t.Parallel test waits paused for
+	// its turn, and a test whose subtests run in parallel can report an
+	// Elapsed near zero.
+	active float64
+	passed bool
 }
 
 // goTestReport is what CI evidence consumers read from one go test -json
-// report: the first test start and every top-level test's final outcome.
+// report: the first test start, every top-level test's final outcome and the
+// package's own final event.
 type goTestReport struct {
-	firstRun time.Time
-	tests    []goTestOutcome
+	firstRun       time.Time
+	tests          []goTestOutcome
+	packageAction  string
+	packageElapsed float64
 }
 
 func readGoTestReport(path string) (goTestReport, error) {
@@ -187,6 +213,9 @@ func readGoTestReport(path string) (goTestReport, error) {
 		return report, err
 	}
 	defer func() { _ = file.Close() }()
+	started := map[string]time.Time{}
+	pausedAt := map[string]time.Time{}
+	paused := map[string]time.Duration{}
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
@@ -201,13 +230,33 @@ func readGoTestReport(path string) (goTestReport, error) {
 			return report, fmt.Errorf("decode Go test event in %s: %w", filepath.Base(path), err)
 		}
 		if event.Test == "" {
+			if event.Action == "pass" || event.Action == "fail" || event.Action == "skip" {
+				report.packageAction, report.packageElapsed = event.Action, event.Elapsed
+			}
 			continue
 		}
 		if event.Action == "run" && report.firstRun.IsZero() {
 			report.firstRun = event.Time
 		}
-		if !strings.Contains(event.Test, "/") && (event.Action == "pass" || event.Action == "fail") {
-			report.tests = append(report.tests, goTestOutcome{pkg: event.Package, name: event.Test, elapsed: event.Elapsed, passed: event.Action == "pass"})
+		if strings.Contains(event.Test, "/") {
+			continue
+		}
+		switch event.Action {
+		case "run":
+			started[event.Test] = event.Time
+		case "pause":
+			pausedAt[event.Test] = event.Time
+		case "cont":
+			if at, ok := pausedAt[event.Test]; ok {
+				paused[event.Test] += event.Time.Sub(at)
+				delete(pausedAt, event.Test)
+			}
+		case "pass", "fail":
+			outcome := goTestOutcome{pkg: event.Package, name: event.Test, elapsed: event.Elapsed, passed: event.Action == "pass"}
+			if at, ok := started[event.Test]; ok {
+				outcome.active = max(0, (event.Time.Sub(at) - paused[event.Test]).Seconds())
+			}
+			report.tests = append(report.tests, outcome)
 		}
 	}
 	return report, scanner.Err()

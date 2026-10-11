@@ -98,16 +98,19 @@ func VerifyPullRequestWorkflow(root string) error {
 		scalar(mappingValue(gateEnvironment, "TETRAL_CI_NEEDS")) != "${{ toJSON(needs) }}" {
 		return fmt.Errorf("merge Gate is missing live read-only reconciliation inputs")
 	}
-	producers, err := workflowEvidenceProducers(jobs)
+	producers, goShards, err := workflowEvidenceProducers(jobs)
 	if err != nil {
 		return err
 	}
-	expectedProducers, err := LoadPRProducers()
+	inventory, err := LoadPRProducers()
 	if err != nil {
 		return err
 	}
-	if !sameStrings(producers, expectedProducers) {
+	if !sameStrings(producers, inventory.Producers) {
 		return fmt.Errorf("workflow producers do not match the PR producer inventory")
+	}
+	if !sameStrings(goShards, inventory.GoShards) {
+		return fmt.Errorf("go Race producers do not match the PR inventory's Go shards")
 	}
 	return nil
 }
@@ -754,8 +757,8 @@ func VerifyWorkflowSkeletons(root string) error {
 	return nil
 }
 
-func workflowEvidenceProducers(jobs *workflowYAMLNode) ([]string, error) {
-	var producers []string
+func workflowEvidenceProducers(jobs *workflowYAMLNode) ([]string, []string, error) {
+	var producers, goShards []string
 	for index := 0; index+1 < len(jobs.Content); index += 2 {
 		jobID, job := jobs.Content[index].Value, jobs.Content[index+1]
 		if jobID == "merge-gate" {
@@ -770,24 +773,25 @@ func workflowEvidenceProducers(jobs *workflowYAMLNode) ([]string, error) {
 			found = scalar(mappingValue(mappingValue(step, "with"), "producer"))
 		}
 		if found == "" {
-			return nil, fmt.Errorf("evidence job %q has no repository runner producer", jobID)
+			return nil, nil, fmt.Errorf("evidence job %q has no repository runner producer", jobID)
 		}
 		if jobID == "go-race" {
 			shards := sequenceScalars(mappingValue(mappingValue(mappingValue(job, "strategy"), "matrix"), "shard"))
 			if !sameStrings(shards, []string{"0", "1", "2", "3"}) || found != "go-${{ matrix.shard }}" {
-				return nil, fmt.Errorf("go Race does not own the exact four shards")
+				return nil, nil, fmt.Errorf("go Race does not own the exact four shards")
 			}
 			if !jobEvidenceInputEquals(job, "shard-count", fmt.Sprintf("%d", len(shards))) {
-				return nil, fmt.Errorf("go Race shard count does not match its matrix cardinality")
+				return nil, nil, fmt.Errorf("go Race shard count does not match its matrix cardinality")
 			}
 			for _, shard := range shards {
-				producers = append(producers, "go-"+shard)
+				goShards = append(goShards, "go-"+shard)
 			}
+			producers = append(producers, goShards...)
 			continue
 		}
 		producers = append(producers, found)
 	}
-	return producers, nil
+	return producers, goShards, nil
 }
 
 func parseYAMLFile(path string) (*workflowYAMLNode, error) {

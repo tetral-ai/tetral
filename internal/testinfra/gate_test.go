@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -25,14 +26,16 @@ func TestVerifyMergeGateAcceptsLatestEvidenceAcrossRerunAttempts(t *testing.T) {
 	want.RunAttempt = "2"
 	root := t.TempDir()
 
-	carried := gateFixtureResult(want, "repository")
-	carried.Execution.RunAttempt = "1"
-	writeGateFixture(t, root, carried)
-
-	failed := gateFixtureResult(want, "go-0")
-	failed.Execution.RunAttempt = "1"
-	failed.Status = "fail"
-	writeGateFixture(t, root, failed)
+	// go-0 failed in attempt 1 and passed in attempt 2; the others, go-1
+	// among them, are carried over from attempt 1.
+	for _, producer := range want.Producers {
+		carried := gateFixtureResult(want, producer)
+		carried.Execution.RunAttempt = "1"
+		if producer == "go-0" {
+			carried.Status = "fail"
+		}
+		writeGateFixture(t, root, carried)
+	}
 	writeGateFixture(t, root, gateFixtureResult(want, "go-0"))
 
 	verdict, err := VerifyMergeGate(root, want)
@@ -135,22 +138,119 @@ func TestVerifyMergeGateRejectsMissingMalformedDuplicateAndUnexpectedArtifacts(t
 	})
 }
 
+func TestVerifyMergeGateChecksGoShardPartition(t *testing.T) {
+	selection := func(name string, tests ...string) Selection {
+		return Selection{Group: "go", Packages: []string{name}, Tests: tests}
+	}
+	tests := []struct {
+		name        string
+		expectation func(*GateExpectation)
+		mutate      func(map[string]*Result)
+		// want is part of the failure the row must raise; empty means pass.
+		want string
+	}{
+		{name: "the shards of one run beside go-static"},
+		{name: "a test in no shard", want: "union of the shards does not match", mutate: func(results map[string]*Result) {
+			results["go-1"].Plan.Selections = []Selection{selection("p/b", "TestB")}
+		}},
+		{name: "a test in two shards", want: "p/a TestA1 runs in both go-0 and go-1", mutate: func(results map[string]*Result) {
+			results["go-1"].Plan.Selections[0] = selection("p/a", "TestA1", "TestA2")
+		}},
+		{name: "a missing zero-test package", want: "union of the shards does not match", mutate: func(results map[string]*Result) {
+			results["go-0"].Plan.Selections = results["go-0"].Plan.Selections[:1]
+		}},
+		{name: "a duplicated zero-test package", want: "zero-test package p/zero is selected 2 times", mutate: func(results map[string]*Result) {
+			results["go-1"].Plan.Selections = append(results["go-1"].Plan.Selections, selection("p/zero"))
+		}},
+		{name: "a Go selection without exactly one package", want: "go-1 holds a Go selection with 2 packages", mutate: func(results map[string]*Result) {
+			results["go-1"].Plan.Selections = append(results["go-1"].Plan.Selections, Selection{Group: "go", Packages: []string{"p/x", "p/y"}})
+		}},
+		{name: "a duplicate shard index", want: "go-0 and go-1 both ran shard 0", mutate: func(results map[string]*Result) { results["go-1"].Plan.GoSelection.ShardIndex = 0 }},
+		{name: "a shard index outside the count", want: "go-1 has shard index 2 outside 0..1", mutate: func(results map[string]*Result) { results["go-1"].Plan.GoSelection.ShardIndex = 2 }},
+		{name: "a shard count other than the Go shard list's", want: "go-0 is shard 0 of 3; want 2 shards", mutate: func(results map[string]*Result) {
+			results["go-0"].Plan.GoSelection.ShardCount, results["go-1"].Plan.GoSelection.ShardCount = 3, 3
+		}},
+		{name: "a digest mismatch", want: "does not match the Go selection go-0 recorded", mutate: func(results map[string]*Result) {
+			results["go-0"].Plan.GoSelection.Digest = strings.Repeat("0", 64)
+		}},
+		{name: "different exclusions", want: "go-1 carries different Go exclusions than go-0", mutate: func(results map[string]*Result) { results["go-1"].Plan.Excluded = nil }},
+		{name: "a shard without an identity", want: "go-1 records no Go shard identity", mutate: func(results map[string]*Result) { results["go-1"].Plan.GoSelection = nil }},
+		{name: "an expectation without Go shards", want: "gate has no Go shards", expectation: func(want *GateExpectation) { want.GoShards = nil }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			want := gateFixtureExpectation()
+			results := map[string]*Result{}
+			for _, producer := range want.Producers {
+				result := gateFixtureResult(want, producer)
+				results[producer] = &result
+			}
+			if test.expectation != nil {
+				test.expectation(&want)
+			}
+			if test.mutate != nil {
+				test.mutate(results)
+			}
+			root := t.TempDir()
+			for _, producer := range want.Producers {
+				writeGateFixture(t, root, *results[producer])
+			}
+			verdict, err := VerifyMergeGate(root, want)
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("verdict = %#v error = %v", verdict, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(strings.Join(verdict.Failures, "\n"), test.want) {
+				t.Fatalf("verdict = %#v error = %v; want a failure naming %q", verdict, err, test.want)
+			}
+		})
+	}
+}
+
 func gateFixtureExpectation() GateExpectation {
 	return GateExpectation{
 		Repository: "tetral-ai/tetral", EventHeadSHA: strings.Repeat("a", 40), EventBaseSHA: strings.Repeat("b", 40),
 		TestMergeSHA: strings.Repeat("c", 40), RequiredCheckSHA: strings.Repeat("d", 40), WorkflowSourceSHA: strings.Repeat("e", 40),
-		Workflow: "Pull Request Verification", RunID: "123", RunAttempt: "1", Producers: []string{"repository", "go-0"},
-		ProducerJobs: map[string]string{"repository": "repository-integrity", "go-0": "go-race"},
+		Workflow: "Pull Request Verification", RunID: "123", RunAttempt: "1", Producers: []string{"repository", "go-static", "go-0", "go-1"},
+		ProducerJobs: map[string]string{"repository": "repository-integrity", "go-static": "go-static-analysis", "go-0": "go-race", "go-1": "go-race"},
+		GoShards:     []string{"go-0", "go-1"},
 	}
 }
 
+// The fixture's Go selection is split into two shards: p/a by test, p/b and
+// the zero-test package p/zero whole, and both carry the same exclusion.
+var (
+	gateFixtureGoSelection = []Selection{
+		{Group: "go", Packages: []string{"p/a"}, Tests: []string{"TestA1", "TestA2"}},
+		{Group: "go", Packages: []string{"p/b"}, Tests: []string{"TestB"}},
+		{Group: "go", Packages: []string{"p/zero"}},
+	}
+	gateFixtureGoExclusions = []Exclusion{{Group: "go", Package: "p/a", Runnable: "TestRoot", Disposition: "delegated", Reason: "fixture"}}
+	gateFixtureGoShards     = map[string][]Selection{
+		"go-0": {{Group: "go", Packages: []string{"p/a"}, Tests: []string{"TestA1"}}, {Group: "go", Packages: []string{"p/zero"}}},
+		"go-1": {{Group: "go", Packages: []string{"p/a"}, Tests: []string{"TestA2"}}, {Group: "go", Packages: []string{"p/b"}, Tests: []string{"TestB"}}},
+	}
+)
+
 func gateFixtureResult(want GateExpectation, producer string) Result {
-	return Result{
+	result := Result{
 		Status: "pass", Plan: Plan{Revision: Revision{Head: want.TestMergeSHA}},
 		Execution: ExecutionEnvelope{Repository: want.Repository, EventHeadSHA: want.EventHeadSHA, EventBaseSHA: want.EventBaseSHA,
 			TestMergeSHA: want.TestMergeSHA, RequiredCheckSHA: want.RequiredCheckSHA, WorkflowSourceSHA: want.WorkflowSourceSHA,
 			Workflow: want.Workflow, RunID: want.RunID, RunAttempt: want.RunAttempt, Job: want.ProducerJobs[producer], Producer: producer},
 	}
+	if shard, ok := gateFixtureGoShards[producer]; ok {
+		digest, err := goSelectionDigest(gateFixtureGoSelection, gateFixtureGoExclusions)
+		if err != nil {
+			panic(err)
+		}
+		result.Plan.Selections = slices.Clone(shard)
+		result.Plan.Excluded = slices.Clone(gateFixtureGoExclusions)
+		result.Plan.GoSelection = &GoShardIdentity{Digest: digest, ShardIndex: slices.Index(want.GoShards, producer), ShardCount: len(want.GoShards)}
+	}
+	return result
 }
 
 func writeGateFixture(t *testing.T, root string, result Result) {

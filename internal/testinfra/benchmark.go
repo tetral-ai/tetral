@@ -2,9 +2,7 @@ package testinfra
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io/fs"
 	"maps"
 	"math"
 	"os"
@@ -23,9 +21,6 @@ const DefaultBenchmarkJobName = "Go Race (shard %d)"
 
 const (
 	benchmarkReportVersion = 1
-	// The evidence action runs the repository runner with two Go package
-	// workers; replays schedule a shard's steps the same way.
-	benchmarkReplayWorkers = 2
 	// Relative job speed comes from shared unchanged top-level tests that ran
 	// at least this long on both sides; shorter tests mostly measure fixed
 	// per-test costs rather than the job's speed.
@@ -101,9 +96,13 @@ type BenchmarkShard struct {
 	FixedPreparation *float64        `json:"fixed_preparation_s,omitempty"`
 	RunnerFixed      *float64        `json:"runner_fixed_s,omitempty"`
 	StepsPhase       *float64        `json:"steps_phase_s,omitempty"`
-	Job              *float64        `json:"job_s,omitempty"`
-	RunnerMinutes    *float64        `json:"runner_minutes,omitempty"`
-	Steps            []BenchmarkStep `json:"steps,omitempty"`
+	// JobSpeed is the job's median measured ÷ weight over JobSpeedUnits units
+	// of the shard weights; nil when it had too few units.
+	JobSpeed      *float64        `json:"job_speed,omitempty"`
+	JobSpeedUnits int             `json:"job_speed_units"`
+	Job           *float64        `json:"job_s,omitempty"`
+	RunnerMinutes *float64        `json:"runner_minutes,omitempty"`
+	Steps         []BenchmarkStep `json:"steps,omitempty"`
 }
 
 type BenchmarkStep struct {
@@ -144,12 +143,16 @@ type BenchmarkTest struct {
 
 // BenchmarkReplayShard holds steps phases replayed through one shard's plan:
 // the runner's two workers take its steps in plan order, each step costing
-// its measured duration. A's durations fill units A never ran from B's.
+// its measured duration. A's durations fill units A never ran from B's. The
+// normalized replays first divide every unit by the job speed of the job
+// that measured it, so neither plan keeps the machines A's jobs drew.
 type BenchmarkReplayShard struct {
-	Shard           int      `json:"shard"`
-	APlanADurations *float64 `json:"a_plan_a_durations_s,omitempty"`
-	BPlanADurations *float64 `json:"b_plan_a_durations_s,omitempty"`
-	APlanBDurations *float64 `json:"a_plan_b_durations_s,omitempty"`
+	Shard            int      `json:"shard"`
+	APlanADurations  *float64 `json:"a_plan_a_durations_s,omitempty"`
+	BPlanADurations  *float64 `json:"b_plan_a_durations_s,omitempty"`
+	APlanBDurations  *float64 `json:"a_plan_b_durations_s,omitempty"`
+	APlanANormalized *float64 `json:"a_plan_a_normalized_s,omitempty"`
+	BPlanANormalized *float64 `json:"b_plan_a_normalized_s,omitempty"`
 }
 
 // BenchmarkMetric is one compared quantity. D = A − B, so a positive D means
@@ -178,6 +181,9 @@ const (
 	benchmarkAggregateTotal = "total"
 
 	benchmarkChangedTestsMetric = "changed_tests_duration"
+	// benchmarkNormalizedReplayMetric judges a change to the shard plan: both
+	// plans replayed over A's speed-normalized durations.
+	benchmarkNormalizedReplayMetric = "normalized_replayed_slowest_steps_phase"
 )
 
 type benchmarkTestKey struct{ Package, Test string }
@@ -189,10 +195,11 @@ type benchmarkTestRun struct {
 }
 
 type benchmarkStepEvidence struct {
-	selection   Selection
-	result      StepResult
-	report      goTestReport
-	testSeconds float64
+	selection Selection
+	result    StepResult
+	report    goTestReport
+	// activeSeconds sums the step's top-level tests' active times.
+	activeSeconds float64
 }
 
 type benchmarkShardEvidence struct {
@@ -207,7 +214,7 @@ type benchmarkShardEvidence struct {
 type benchmarkEvidence struct {
 	label  string
 	sha    string
-	runID  string
+	run    *goRaceRun
 	shards map[int]*benchmarkShardEvidence
 	tests  map[benchmarkTestKey]benchmarkTestRun
 }
@@ -226,11 +233,17 @@ func (notes *benchmarkNotes) warn(format string, arguments ...any) {
 
 // CompareBenchmarkEvidence compares two Go Race evidence sets: the A and B
 // sides of one CI Benchmark run, or two downloaded verification runs.
+// Job speeds come from the shard weights built into this tool, so a side
+// produced by an older runner is measured against the same weights.
 func CompareBenchmarkEvidence(ctx context.Context, options BenchmarkCompareOptions) (BenchmarkComparison, error) {
-	return compareBenchmarkEvidence(ctx, options, commandGitHubClient{})
+	weights, err := loadGoShardWeights()
+	if err != nil {
+		return BenchmarkComparison{}, err
+	}
+	return compareBenchmarkEvidence(ctx, options, commandGitHubClient{}, weights)
 }
 
-func compareBenchmarkEvidence(ctx context.Context, options BenchmarkCompareOptions, client githubAPIClient) (BenchmarkComparison, error) {
+func compareBenchmarkEvidence(ctx context.Context, options BenchmarkCompareOptions, client githubAPIClient, weights goShardWeights) (BenchmarkComparison, error) {
 	notes := &benchmarkNotes{}
 	a, err := loadBenchmarkEvidence("A", options.A)
 	if err != nil {
@@ -267,8 +280,8 @@ func compareBenchmarkEvidence(ctx context.Context, options BenchmarkCompareOptio
 		report.ChangedPackages = []string{}
 	}
 	report.ChangedTests = slices.Sorted(maps.Keys(listed))
-	report.A = a.report(notes)
-	report.B = b.report(notes)
+	report.A = a.report(notes, weights)
+	report.B = b.report(notes, weights)
 	report.PlansIdentical, report.DifferentShards = benchmarkPlansIdentical(a, b)
 	if !report.PlansIdentical {
 		notes.warn("shard plans differ (shards %v), so measured per-shard and slowest-job times are reported but not judged", report.DifferentShards)
@@ -276,7 +289,12 @@ func compareBenchmarkEvidence(ctx context.Context, options BenchmarkCompareOptio
 	compareBenchmarkTests(&report, a, b, listed, changedPackages, notes)
 	if report.A.Complete && report.B.Complete {
 		sliced := benchmarkSlicedPackages(a, b)
-		report.Replay = replayBenchmarkPlans(a, b, a.durations(sliced), b.durations(sliced))
+		report.Replay = replayBenchmarkPlans(a, b, a.durations(sliced, nil), b.durations(sliced, nil))
+		aSpeeds, aOK := benchmarkJobSpeeds("A", report.A, notes)
+		bSpeeds, bOK := benchmarkJobSpeeds("B", report.B, notes)
+		if aOK && bOK {
+			replayBenchmarkNormalized(report.Replay, a, b, a.durations(sliced, aSpeeds), b.durations(sliced, bSpeeds))
+		}
 	} else {
 		notes.miss("plan replays need complete evidence on both sides")
 	}
@@ -291,65 +309,33 @@ func loadBenchmarkEvidence(label string, options BenchmarkSideOptions) (*benchma
 	if options.Directory == "" || options.SHA == "" {
 		return nil, fmt.Errorf("side %s needs an evidence directory and the commit it tested", label)
 	}
-	evidence := &benchmarkEvidence{label: label, sha: options.SHA, shards: map[int]*benchmarkShardEvidence{}, tests: map[benchmarkTestKey]benchmarkTestRun{}}
-	attempts := map[int]uint64{}
-	err := filepath.WalkDir(options.Directory, func(file string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() || entry.Name() != "result.json" {
-			return nil
-		}
-		// Results are discovered beneath the caller's downloaded evidence root.
-		//nolint:gosec
-		body, err := os.ReadFile(file)
-		if err != nil {
-			return err
-		}
-		var result Result
-		if err := json.Unmarshal(body, &result); err != nil {
-			return fmt.Errorf("side %s: malformed result %s: %w", label, file, err)
-		}
-		index, ok := goRaceShardIndex(result.Execution.Producer)
-		if !ok {
-			return nil
-		}
-		if result.Plan.Revision.Head != options.SHA {
-			return fmt.Errorf("side %s shard %d tested %s; want %s", label, index, result.Plan.Revision.Head, options.SHA)
-		}
-		if evidence.runID == "" {
-			evidence.runID = result.Execution.RunID
-		} else if result.Execution.RunID != evidence.runID {
-			return fmt.Errorf("side %s holds results of runs %s and %s", label, evidence.runID, result.Execution.RunID)
-		}
-		// A rerun of failed jobs leaves the earlier attempts' results beside
-		// the new ones; the latest attempt of each shard is the evidence.
-		attempt, _ := strconv.ParseUint(result.Execution.RunAttempt, 10, 32)
-		if previous, exists := attempts[index]; exists {
-			if previous == attempt {
-				return fmt.Errorf("side %s holds two results for shard %d attempt %d", label, index, attempt)
-			}
-			if previous > attempt {
-				return nil
-			}
-		}
-		shard, err := loadBenchmarkShard(filepath.Dir(file), result)
-		if err != nil {
-			return fmt.Errorf("side %s shard %d: %w", label, index, err)
-		}
-		attempts[index] = attempt
-		evidence.shards[index] = shard
-		return nil
-	})
+	runs, err := loadGoRaceRuns(options.Directory)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("side %s: %w", label, err)
 	}
-	if len(evidence.shards) == 0 {
+	if len(runs) == 0 {
 		return nil, fmt.Errorf("side %s: no Go Race results under %s", label, options.Directory)
 	}
+	if len(runs) > 1 {
+		ids := slices.Sorted(maps.Keys(runs))
+		return nil, fmt.Errorf("side %s holds results of runs %s and %s", label, ids[0], ids[1])
+	}
+	var run *goRaceRun
+	for _, item := range runs {
+		run = item
+	}
+	evidence := &benchmarkEvidence{label: label, sha: options.SHA, run: run, shards: run.shards, tests: map[benchmarkTestKey]benchmarkTestRun{}}
 	for _, index := range evidence.shardIndexes() {
-		for _, step := range evidence.shards[index].steps {
+		shard := evidence.shards[index]
+		if head := shard.result.Plan.Revision.Head; head != options.SHA {
+			return nil, fmt.Errorf("side %s shard %d tested %s; want %s", label, index, head, options.SHA)
+		}
+		for _, step := range shard.steps {
 			for _, test := range step.report.tests {
+				// Per-test comparisons keep Go's Elapsed: they set one test
+				// against itself, and speed factors take only tests of at
+				// least a second, so noise measured from earlier comparisons
+				// stays comparable.
 				evidence.tests[benchmarkTestKey{Package: test.pkg, Test: test.name}] = benchmarkTestRun{shard: index, seconds: test.elapsed, passed: test.passed}
 			}
 		}
@@ -361,19 +347,6 @@ func (evidence *benchmarkEvidence) ran(name string) bool {
 	separator := strings.LastIndex(name, ".")
 	_, ran := evidence.tests[benchmarkTestKey{Package: name[:separator], Test: name[separator+1:]}]
 	return ran
-}
-
-// Go Race shards are the producers go-0 … go-(K-1); go-static is not one.
-func goRaceShardIndex(producer string) (int, bool) {
-	digits, ok := strings.CutPrefix(producer, "go-")
-	if !ok {
-		return 0, false
-	}
-	index, err := strconv.Atoi(digits)
-	if err != nil || index < 0 || strconv.Itoa(index) != digits {
-		return 0, false
-	}
-	return index, true
 }
 
 func loadBenchmarkShard(directory string, result Result) (*benchmarkShardEvidence, error) {
@@ -409,7 +382,7 @@ func loadBenchmarkShard(directory string, result Result) (*benchmarkShardEvidenc
 			evidence.report = report
 		}
 		for _, test := range evidence.report.tests {
-			evidence.testSeconds += test.elapsed
+			evidence.activeSeconds += test.active
 		}
 		if first := evidence.report.firstRun; !first.IsZero() && (shard.firstRun.IsZero() || first.Before(shard.firstRun)) {
 			shard.firstRun = first
@@ -420,16 +393,7 @@ func loadBenchmarkShard(directory string, result Result) (*benchmarkShardEvidenc
 }
 
 func (evidence *benchmarkEvidence) shardIndexes() []int {
-	return slices.Sorted(maps.Keys(evidence.shards))
-}
-
-func (evidence *benchmarkEvidence) complete() bool {
-	for position, index := range evidence.shardIndexes() {
-		if index != position || !evidence.shards[index].complete {
-			return false
-		}
-	}
-	return true
+	return evidence.run.shardIndexes()
 }
 
 func attachBenchmarkJobs(ctx context.Context, client githubAPIClient, evidence *benchmarkEvidence, template string, notes *benchmarkNotes) {
@@ -475,8 +439,9 @@ func attachBenchmarkJobs(ctx context.Context, client githubAPIClient, evidence *
 	}
 }
 
-func (evidence *benchmarkEvidence) report(notes *benchmarkNotes) BenchmarkSide {
-	side := BenchmarkSide{SHA: evidence.sha, RunID: evidence.runID, Complete: evidence.complete()}
+func (evidence *benchmarkEvidence) report(notes *benchmarkNotes, weights goShardWeights) BenchmarkSide {
+	side := BenchmarkSide{SHA: evidence.sha, RunID: evidence.run.runID, Complete: evidence.run.complete()}
+	split := evidence.run.splitPackages()
 	if !side.Complete {
 		notes.warn("side %s is incomplete: a shard is missing or did not run all its planned steps", evidence.label)
 	}
@@ -488,6 +453,12 @@ func (evidence *benchmarkEvidence) report(notes *benchmarkNotes) BenchmarkSide {
 			StepsRun: len(shard.steps), StepsPlanned: len(shard.plan),
 			CPUModel: result.Execution.CPUModel, RunnerImage: result.Execution.RunnerImage, GoCache: result.Execution.GoCache,
 			Setup: benchmarkSeconds(result.Setup), StepsPhase: shard.stepsPhase(),
+		}
+		if speed, units, ok := goRaceJobSpeed(shard, split, weights); ok {
+			report.JobSpeed = benchmarkPointer(roundBenchmark(speed, 10000))
+			report.JobSpeedUnits = units
+		} else {
+			report.JobSpeedUnits = units
 		}
 		if report.CPUModel == "" || report.RunnerImage == "" {
 			notes.miss("side %s results do not record the runner CPU model or image", evidence.label)
@@ -587,12 +558,13 @@ func benchmarkSelectionIdentity(selection Selection) string {
 	return selection.Packages[0] + "\x00" + strings.Join(tests, "\x00")
 }
 
-// benchmarkDurations prices a Go selection from one side's measurements. A
-// whole package measured with the same tests costs that step's elapsed time.
-// Any other selection, including every slice of a package a plan splits
-// across shards, costs its tests' durations plus the overhead (time outside
-// top-level tests, mostly compile) of that package's step in the same shard,
-// or the package's mean overhead when that shard ran no step of it.
+// benchmarkDurations prices a Go selection from one side's measurements, as
+// the shard weights do. A whole package measured with the same tests costs
+// that step's elapsed time. Any other selection, including every slice of a
+// package a plan splits across shards, costs its tests' active times plus the
+// overhead (step time outside them, mostly compile) of that package's step in
+// the same shard, or the package's mean overhead when that shard ran no step
+// of it.
 type benchmarkDurations struct {
 	steps    map[string]float64
 	tests    map[benchmarkTestKey]float64
@@ -605,20 +577,26 @@ type benchmarkShardPackage struct {
 	name  string
 }
 
-func (evidence *benchmarkEvidence) durations(sliced map[string]bool) benchmarkDurations {
+// durations collects the side's unit prices. With speeds, every unit is
+// divided by the speed of the job (shard) that measured it.
+func (evidence *benchmarkEvidence) durations(sliced map[string]bool, speeds map[int]float64) benchmarkDurations {
 	durations := benchmarkDurations{steps: map[string]float64{}, tests: map[benchmarkTestKey]float64{}, overhead: map[benchmarkShardPackage]float64{}, mean: map[string]float64{}}
 	overheads := map[string][]float64{}
 	for index, shard := range evidence.shards {
+		divisor := 1.0
+		if speeds != nil {
+			divisor = speeds[index]
+		}
 		for _, step := range shard.steps {
 			name := step.selection.Packages[0]
-			elapsed := step.result.Elapsed.Seconds()
+			elapsed := step.result.Elapsed.Seconds() / divisor
 			if !sliced[name] {
 				durations.steps[benchmarkSelectionIdentity(step.selection)] = elapsed
 			}
 			for _, test := range step.report.tests {
-				durations.tests[benchmarkTestKey{Package: test.pkg, Test: test.name}] = test.elapsed
+				durations.tests[benchmarkTestKey{Package: test.pkg, Test: test.name}] = test.active / divisor
 			}
-			overhead := max(0, elapsed-step.testSeconds)
+			overhead := max(0, elapsed-step.activeSeconds/divisor)
 			durations.overhead[benchmarkShardPackage{shard: index, name: name}] = overhead
 			overheads[name] = append(overheads[name], overhead)
 		}
@@ -634,17 +612,7 @@ func (evidence *benchmarkEvidence) durations(sliced map[string]bool) benchmarkDu
 func benchmarkSlicedPackages(sides ...*benchmarkEvidence) map[string]bool {
 	sliced := map[string]bool{}
 	for _, side := range sides {
-		selections := map[string]int{}
-		for _, shard := range side.shards {
-			for _, selection := range shard.plan {
-				selections[selection.Packages[0]]++
-			}
-		}
-		for name, count := range selections {
-			if count > 1 {
-				sliced[name] = true
-			}
-		}
+		maps.Copy(sliced, side.run.splitPackages())
 	}
 	return sliced
 }
@@ -681,7 +649,7 @@ func (durations benchmarkDurations) selection(shard int, selection Selection) fl
 }
 
 func replayBenchmarkSelections(shard int, plan []Selection, durations benchmarkDurations) float64 {
-	workers := make([]float64, benchmarkReplayWorkers)
+	workers := make([]float64, goRaceWorkers)
 	for _, selection := range plan {
 		next := 0
 		for index := 1; index < len(workers); index++ {
@@ -692,6 +660,40 @@ func replayBenchmarkSelections(shard int, plan []Selection, durations benchmarkD
 		workers[next] += durations.selection(shard, selection)
 	}
 	return roundBenchmark(slices.Max(workers), 1000)
+}
+
+// benchmarkJobSpeeds returns every job's speed of a side, or false with a
+// note when a job has none: a normalized replay never guesses one.
+func benchmarkJobSpeeds(label string, side BenchmarkSide, notes *benchmarkNotes) (map[int]float64, bool) {
+	speeds := map[int]float64{}
+	var missing []int
+	for _, shard := range side.Shards {
+		if shard.JobSpeed == nil {
+			missing = append(missing, shard.Index)
+			continue
+		}
+		speeds[shard.Index] = *shard.JobSpeed
+	}
+	if len(missing) > 0 {
+		notes.miss("normalized replays need every job's speed: side %s shards %v have fewer than %d units the shard weights give at least %d ms", label, missing, goRaceJobSpeedMinimumUnits, goRaceJobSpeedFloorMS)
+		return nil, false
+	}
+	return speeds, true
+}
+
+// replayBenchmarkNormalized adds both plans' replays over A's durations
+// after dividing each unit by its job's speed.
+func replayBenchmarkNormalized(replays []BenchmarkReplayShard, a, b *benchmarkEvidence, aDurations, bDurations benchmarkDurations) {
+	aFirst := aDurations.withFallback(bDurations)
+	for position := range replays {
+		index := replays[position].Shard
+		if shard := a.shards[index]; shard != nil {
+			replays[position].APlanANormalized = benchmarkPointer(replayBenchmarkSelections(index, shard.plan, aFirst))
+		}
+		if shard := b.shards[index]; shard != nil {
+			replays[position].BPlanANormalized = benchmarkPointer(replayBenchmarkSelections(index, shard.plan, aFirst))
+		}
+	}
 }
 
 func replayBenchmarkPlans(a, b *benchmarkEvidence, aDurations, bDurations benchmarkDurations) []BenchmarkReplayShard {
@@ -795,6 +797,12 @@ func benchmarkMetrics(report BenchmarkComparison, listed map[string]bool, notes 
 		}
 		aPlanA := replayed(func(replay BenchmarkReplayShard) *float64 { return replay.APlanADurations })
 		metrics = append(metrics, benchmarkReplayMetric("replayed_slowest_steps_phase", aPlanA, replayed(func(replay BenchmarkReplayShard) *float64 { return replay.BPlanADurations }), nil, nil))
+		aNormalized := replayed(func(replay BenchmarkReplayShard) *float64 { return replay.APlanANormalized })
+		if bNormalized := replayed(func(replay BenchmarkReplayShard) *float64 { return replay.BPlanANormalized }); len(aNormalized) > 0 && len(bNormalized) > 0 {
+			metrics = append(metrics, benchmarkReplayMetric(benchmarkNormalizedReplayMetric, aNormalized, bNormalized, nil, nil))
+		} else {
+			notes.miss("metric %s is missing because a job has no speed", benchmarkNormalizedReplayMetric)
+		}
 		aFixed, aOK := benchmarkFixedTime(report.A.Shards)
 		bFixed, bOK := benchmarkFixedTime(report.B.Shards)
 		aPlanB := replayed(func(replay BenchmarkReplayShard) *float64 { return replay.APlanBDurations })

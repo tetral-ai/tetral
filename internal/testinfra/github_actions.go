@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -29,6 +31,18 @@ func (commandGitHubClient) JSON(ctx context.Context, endpoint string, value any)
 	return nil
 }
 
+// DownloadRunArtifacts saves a run's artifacts whose names match pattern
+// beneath directory, one directory per artifact.
+func (commandGitHubClient) DownloadRunArtifacts(ctx context.Context, repository string, runID int64, pattern, directory string) error {
+	// Arguments are assembled by the read-only CI health collector.
+	//nolint:gosec
+	output, err := exec.CommandContext(ctx, "gh", "run", "download", strconv.FormatInt(runID, 10), "-R", repository, "-p", pattern, "-D", directory).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("download artifacts of run %d: %w: %s", runID, err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
 func readAttemptJobs(ctx context.Context, client githubAPIClient, repository string, runID int64, runAttempt int) ([]workflowJob, error) {
 	var jobs struct {
 		Jobs []workflowJob `json:"jobs"`
@@ -45,6 +59,7 @@ type githubWorkflowRun struct {
 	Path         string    `json:"path"`
 	HeadSHA      string    `json:"head_sha"`
 	RunAttempt   int       `json:"run_attempt"`
+	Conclusion   string    `json:"conclusion"`
 	CheckSuiteID int64     `json:"check_suite_id"`
 	CreatedAt    time.Time `json:"created_at"`
 	RunStartedAt time.Time `json:"run_started_at"`
@@ -56,6 +71,7 @@ type workflowJob struct {
 	Name        string            `json:"name"`
 	Status      string            `json:"status"`
 	Conclusion  string            `json:"conclusion"`
+	CreatedAt   time.Time         `json:"created_at"`
 	StartedAt   time.Time         `json:"started_at"`
 	CompletedAt time.Time         `json:"completed_at"`
 	Steps       []workflowJobStep `json:"steps"`
