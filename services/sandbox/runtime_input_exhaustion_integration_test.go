@@ -3,8 +3,13 @@ package tetralsandbox
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -91,9 +96,9 @@ func TestPostgreSQLTaskNotificationProducerAndJobRunnerTerminalizeQueuedInbox(t 
 		Deliverer: runtimeInputExhaustionDeliverer{direct: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}},
 		Config:    jobrunner.JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	// One production acquisition dispatches the final attempt; the production
-	// join waits for it.
-	acquisition, err := runner.AcquireAndDispatch(context.Background())
+	// Production acquisition dispatches the final attempt; the production join
+	// waits for it.
+	acquisition, err := acquireUntilDispatched(context.Background(), runner)
 	if err != nil || acquisition.Dispatched != 1 {
 		t.Fatalf("acquire final task-notification attempt = %+v/%v; want one dispatched job", acquisition, err)
 	}
@@ -127,5 +132,34 @@ func TestPostgreSQLTaskNotificationProducerAndJobRunnerTerminalizeQueuedInbox(t 
 	}
 	if pending != 0 {
 		t.Fatalf("live task-notification custody after exhaustion = %d; want zero", pending)
+	}
+}
+
+// acquireUntilDispatched repeats the production acquisition, as the Job Runner
+// loop does, until one dispatches a job: Queue may lease nothing, or fail the
+// call with Internal, when PostgreSQL exceeds a statement's local budget. Any
+// other failure returns at once.
+func acquireUntilDispatched(ctx context.Context, runner *jobrunner.JobRunner) (jobrunner.JobRunnerAcquisition, error) {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		acquisition, err := runner.AcquireAndDispatch(ctx)
+		if err == nil && acquisition.Dispatched > 0 {
+			return acquisition, nil
+		}
+		if err != nil && status.Code(err) != codes.Internal {
+			return acquisition, fmt.Errorf("acquire Job Runner job: %w", err)
+		}
+		delay := max(acquisition.RetryAfter, 100*time.Millisecond)
+		if time.Now().Add(delay).After(deadline) {
+			if err == nil {
+				return acquisition, errors.New("no job dispatched within 10s")
+			}
+			return acquisition, fmt.Errorf("no job dispatched within 10s; last lease error: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return acquisition, ctx.Err()
+		case <-time.After(delay):
+		}
 	}
 }

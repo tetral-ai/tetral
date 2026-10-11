@@ -72,7 +72,7 @@ func TestPostgreSQLJobRunnerMalformedNonInterruptKeepsCanonicalReplacementOwner(
 		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseOwner: "malformed-message-replacement", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if err := acquireAndJoin(context.Background(), runner); err != nil {
+	if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {
 		t.Fatalf("run malformed non-interrupt owner: %v", err)
 	}
 	var sessionStatus, inboxStatus, oldQueueStatus string
@@ -221,7 +221,7 @@ func TestPostgreSQLJobRunnerExhaustionCrashWindowsConvergeAcrossDatabases(t *tes
 				queueServer := tetralqueue.NewServer(queueStore, nil)
 				runner := &JobRunner{Queue: queueServer, Deliverer: deliverer}
 
-				if err := acquireAndJoin(context.Background(), runner); err != nil {
+				if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {
 					t.Fatalf("acquire and join after Bridge crash boundary: %v", err)
 				}
 				if deliverer.deliveries != 0 {
@@ -244,7 +244,7 @@ func TestPostgreSQLJobRunnerExhaustionCrashWindowsConvergeAcrossDatabases(t *tes
 		queueClient := &deadLetterResponseLossQueueClient{QueueClient: tetralqueue.NewServer(queueStore, nil)}
 		runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
-		if err := acquireAndJoin(context.Background(), runner); err == nil || !errors.Is(err, errSyntheticQueueResponseLoss) {
+		if err := acquireAndJoinUntilDispatched(context.Background(), runner); err == nil || !errors.Is(err, errSyntheticQueueResponseLoss) {
 			t.Fatalf("acquire and join error = %v; want synthetic post-commit response loss", err)
 		}
 		if deliverer.deliveries != 1 {
@@ -253,7 +253,7 @@ func TestPostgreSQLJobRunnerExhaustionCrashWindowsConvergeAcrossDatabases(t *tes
 		job.JobID = queueClient.deadLetteredJobID
 		job.MaxAttempts = 1
 		assertCrossDatabaseExhaustionConverged(t, bridgeAdmin, queueAdmin, bridgeStore, job, "dead_lettered")
-		if err := acquireAndJoin(context.Background(), runner); err != nil {
+		if err := acquireAndJoinUntilAnswered(context.Background(), runner); err != nil {
 			t.Fatalf("acquire and join after terminal Queue row: %v", err)
 		}
 		if deliverer.deliveries != 1 {
@@ -397,7 +397,7 @@ func TestPostgreSQLJobRunnerInvalidRuntimeCustodyDeadLettersQueueWithoutBridgeMu
 				Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
 				Config: JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 			}
-			if err := acquireAndJoin(context.Background(), runner); err != nil {
+			if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {
 				t.Fatalf("run invalid custody job: %v", err)
 			}
 			var queueStatus, errorKind string

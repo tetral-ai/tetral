@@ -295,7 +295,13 @@ func TestJobRunnerLeaseAlternatesPerProcessAndReplicasShareExactCustody(t *testi
 		}
 		first <- result
 	}()
-	<-paused
+	select {
+	case <-paused:
+	case result := <-first:
+		t.Fatalf("replica one returned %v before its exact lease", result.Jobs)
+	case <-time.After(10 * time.Second):
+		t.Fatal("replica one did not reach its exact lease within 10s")
+	}
 	second := leaseJobRunner(t, replicaTwo, 1)
 	close(release)
 	firstResult := <-first
@@ -463,9 +469,19 @@ func TestJobRunnerExactLeaseMatchesWorkspaceLeaseEligibility(t *testing.T) {
 			}
 
 			directID := build("d")
-			job, outcome, err := store.leaseJobRunnerCandidate(context.Background(), ws.String(),
-				jobRunnerCandidate{key: jobRunnerKey{id: directID}, kind: tc.kind, causalSessionID: "sesn_matrix_d"},
-				LeaseJobRunnerJobsRequest{LeaseOwner: "matrix-direct", MaxJobs: 1, LeaseDuration: time.Minute})
+			// A candidate transaction over its local statement or lock budget
+			// rolls back; ask again, as the next call would, for the decision.
+			var job *Job
+			var outcome jobRunnerLeaseOutcome
+			for deadline := time.Now().Add(10 * time.Second); ; {
+				job, outcome, err = store.leaseJobRunnerCandidate(context.Background(), ws.String(),
+					jobRunnerCandidate{key: jobRunnerKey{id: directID}, kind: tc.kind, causalSessionID: "sesn_matrix_d"},
+					LeaseJobRunnerJobsRequest{LeaseOwner: "matrix-direct", MaxJobs: 1, LeaseDuration: time.Minute})
+				if err != nil || (outcome != jobRunnerLeaseStatementTimeout && outcome != jobRunnerLeaseLockTimeout) || time.Now().After(deadline) {
+					break
+				}
+				time.Sleep(jobRunnerActiveRetryAfter)
+			}
 			if err != nil || (outcome != jobRunnerLeaseCommitted && outcome != jobRunnerLeaseIneligible) {
 				t.Fatalf("direct exact lease outcome=%v err=%v; want a committed or ineligible decision", outcome, err)
 			}
@@ -627,7 +643,13 @@ func TestJobRunnerLeaseSkipsBusyTenantWithoutWaiting(t *testing.T) {
 		}
 		holder <- result
 	}()
-	<-paused
+	select {
+	case <-paused:
+	case result := <-holder:
+		t.Fatalf("holder call returned %v before its exact lease", result.Jobs)
+	case <-time.After(10 * time.Second):
+		t.Fatal("holder call did not reach its exact lease within 10s")
+	}
 	windowsBefore := tracer.count("LIMIT $7")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -770,7 +792,13 @@ func TestJobRunnerSchedulerQuiesceJoinsCallsAndWorker(t *testing.T) {
 		}
 		admitted <- result
 	}()
-	<-paused
+	select {
+	case <-paused:
+	case result := <-admitted:
+		t.Fatalf("admitted call returned %v before its second exact lease", result.Jobs)
+	case <-time.After(10 * time.Second):
+		t.Fatal("admitted call did not reach its second exact lease within 10s")
+	}
 	go func() {
 		store.QuiesceJobRunnerScheduler()
 		record("quiesce returned")
@@ -847,11 +875,8 @@ func TestReleaseUnstartedJobRestoresSavedAttemptForEveryRunnerKind(t *testing.T)
 	<-ready
 
 	var leased []*Job
-	for call := 0; call < 3 && len(leased) < 6; call++ {
-		leased = append(leased, leaseJobRunner(t, store, 6).Jobs...)
-	}
-	if len(leased) != 6 {
-		t.Fatalf("direct leases = %d; want all six fixtures", len(leased))
+	for len(leased) < 6 {
+		leased = append(leased, leaseJobRunnerUntilLeased(t, store, 6).Jobs...)
 	}
 	var dbBefore time.Time
 	if err := admin.QueryRow(`SELECT clock_timestamp()`).Scan(&dbBefore); err != nil {
@@ -898,7 +923,7 @@ func TestReleaseUnstartedJobComparesExpiryWithTimeAfterRowLock(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	insertJobRunnerRows(t, admin, jobRunnerRow{ID: "qjob_release_wait", Workspace: "ws_jr_release_wait", Kind: KindRuntimeInput, Session: "sesn_release_wait", Thread: "thrd_wait", Sequence: 1, AvailableAt: time.Now().UTC().Add(-time.Hour)})
-	job := leaseJobRunner(t, store, 1).Jobs[0]
+	job := leaseJobRunnerUntilLeased(t, store, 1).Jobs[0]
 	blocker, err := admin.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -940,7 +965,7 @@ func TestReleaseUnstartedJobRefundsNeitherDeferredNorWorkspaceLeaseTokens(t *tes
 	ws := workspace.ID("ws_jr_release_defer")
 	payload := `{"workspace_id":"ws_jr_release_defer","session_id":"sesn_release_defer","config_generation":4}`
 	mustEnqueue(t, store, EnqueueRequest{ID: "qjob_release_defer", WorkspaceID: ws, Kind: KindRuntimeConfigUpdate, PartitionKey: FormatSessionPartitionKey(ws, "sesn_release_defer"), DedupeKey: FormatRuntimeConfigUpdateDedupeKey(ws, "sesn_release_defer", "4"), PayloadJSON: []byte(payload), Now: time.Now().UTC().Add(-time.Hour)})
-	direct := leaseJobRunner(t, store, 1).Jobs[0]
+	direct := leaseJobRunnerUntilLeased(t, store, 1).Jobs[0]
 	if deferred, err := store.Defer(ctx, DeferRequest{WorkspaceID: ws, JobID: direct.ID, LeaseToken: direct.LeaseToken}); err != nil || !deferred {
 		t.Fatalf("Defer = %v/%v", deferred, err)
 	}
@@ -1048,7 +1073,7 @@ func TestDirectLeaseProvenanceIsClearedByEveryQueueTransitionOutOfLeased(t *test
 				request.PayloadJSON = []byte(`{"workspace_id":"default","session_id":"sesn_transition","cleanup_job_id":"cln_transition"}`)
 			}
 			mustEnqueue(t, store, request)
-			jobs := leaseJobRunner(t, store, 1).Jobs
+			jobs := leaseJobRunnerUntilLeased(t, store, 1).Jobs
 			if len(jobs) != 1 {
 				t.Fatalf("direct lease = %v", jobs)
 			}
@@ -1083,6 +1108,29 @@ func leaseJobRunner(t *testing.T, store *PostgreSQLQueueStore, maxJobs int) Leas
 		t.Fatalf("LeaseJobRunnerJobs: %v", err)
 	}
 	return result
+}
+
+// leaseJobRunnerUntilLeased repeats leaseJobRunner, as the Runner's loop does,
+// until a call leases a job, for a test whose subject is not the lease itself:
+// a call may lease nothing, or fail with a statement or lock timeout, when
+// PostgreSQL exceeds a statement's local budget. Any other failure is fatal.
+func leaseJobRunnerUntilLeased(t *testing.T, store *PostgreSQLQueueStore, maxJobs int) LeaseJobRunnerJobsResult {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		result, err := store.LeaseJobRunnerJobs(context.Background(), LeaseJobRunnerJobsRequest{LeaseOwner: "job-runner-test", MaxJobs: maxJobs, LeaseDuration: time.Minute})
+		if err == nil && len(result.Jobs) > 0 {
+			return result
+		}
+		if state := jobRunnerSQLState(err); err != nil && state != "57014" && state != "55P03" {
+			t.Fatalf("LeaseJobRunnerJobs: %v", err)
+		}
+		delay := max(result.RetryAfter, 100*time.Millisecond)
+		if time.Now().Add(delay).After(deadline) {
+			t.Fatalf("no job leased within 10s; last error: %v", err)
+		}
+		time.Sleep(delay)
+	}
 }
 
 func assertJobIDs(t *testing.T, jobs []*Job, want ...string) {

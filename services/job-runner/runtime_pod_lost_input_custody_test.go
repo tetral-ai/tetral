@@ -72,7 +72,7 @@ func TestPostgreSQLRuntimePodLossPreservesActiveQueueCustody(t *testing.T) {
 			var leasedRuntimeJob RuntimeJob
 			if test.leaseJob {
 				// The Runner's direct lease: hand-back must also clear its provenance.
-				result, err := queueStore.LeaseJobRunnerJobs(context.Background(), queue.LeaseJobRunnerJobsRequest{
+				result, err := leaseJobRunnerJobsUntilLeased(context.Background(), queueStore, queue.LeaseJobRunnerJobsRequest{
 					LeaseOwner: "bridge-active-custody", MaxJobs: 1, LeaseDuration: time.Minute,
 				})
 				leased := result.Jobs
@@ -205,7 +205,7 @@ func TestPostgreSQLRuntimePodLossLeavesExhaustedInterruptForCurrentLeaseTerminal
 		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseOwner: "bridge-current-terminal-owner", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if err := acquireAndJoin(context.Background(), runner); err != nil {
+	if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {
 		t.Fatalf("terminalize exhausted interrupt through JobRunner: %v", err)
 	}
 	if deliverer.deliveries != 0 {
