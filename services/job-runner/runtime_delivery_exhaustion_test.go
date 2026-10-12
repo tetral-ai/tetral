@@ -253,7 +253,7 @@ func TestPostgreSQLJobRunnerExhaustionCrashWindowsConvergeAcrossDatabases(t *tes
 		job.JobID = queueClient.deadLetteredJobID
 		job.MaxAttempts = 1
 		assertCrossDatabaseExhaustionConverged(t, bridgeAdmin, queueAdmin, bridgeStore, job, "dead_lettered")
-		if err := acquireAndJoinUntilAnswered(context.Background(), runner); err != nil {
+		if err := acquireAndJoin(context.Background(), runner); err != nil {
 			t.Fatalf("acquire and join after terminal Queue row: %v", err)
 		}
 		if deliverer.deliveries != 1 {

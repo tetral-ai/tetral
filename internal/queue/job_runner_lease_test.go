@@ -322,72 +322,148 @@ func TestJobRunnerLeaseAlternatesPerProcessAndReplicasShareExactCustody(t *testi
 	}
 }
 
-// Trace: a failure after one committed lease returns that lease with the
-// active hint; a failure before any commit is the call's error. A lease whose
-// response is lost is rediscovered only after the existing reclaim.
+// Trace: a failure that is not a local timeout, in a lease or in discovery,
+// stops the call. After one committed lease it returns that lease with the
+// active hint; before any commit it is the call's error. A lease whose response
+// is lost is rediscovered only after the existing reclaim.
 func TestJobRunnerLeaseFailureAfterCommitReturnsCommittedTokens(t *testing.T) {
-	store, admin, _ := newJobRunnerTestStore(t, nil)
-	due := time.Now().UTC().Add(-time.Hour)
-	insertJobRunnerRows(t, admin,
-		jobRunnerRow{ID: "qjob_fault_first", Workspace: "ws_jr_fault_a", Kind: KindRuntimeInput, Session: "sesn_fault_a", Thread: "thrd_fault", Sequence: 1, AvailableAt: due},
-		jobRunnerRow{ID: "qjob_fault_marker", Workspace: "ws_jr_fault_b", Kind: KindRuntimeInput, Session: "sesn_fault_b", Thread: "thrd_fault", Sequence: 1, AvailableAt: due},
-	)
-	if _, err := admin.Exec(`CREATE FUNCTION queue_test_fail_marker_lease() RETURNS trigger LANGUAGE plpgsql AS $$
-		BEGIN RAISE EXCEPTION 'fixture connection failure' USING ERRCODE = '08006'; END $$;
-		CREATE TRIGGER queue_test_fail_marker_lease BEFORE UPDATE ON queue_jobs
-		FOR EACH ROW WHEN (OLD.id = 'qjob_fault_marker' AND NEW.status = 'leased')
-		EXECUTE FUNCTION queue_test_fail_marker_lease()`); err != nil {
-		t.Fatal(err)
-	}
-	partial := leaseJobRunner(t, store, 2)
-	assertJobIDs(t, partial.Jobs, "qjob_fault_first")
-	var pgErr *pgconn.PgError
-	if partial.RetryAfter != jobRunnerActiveRetryAfter || !errors.As(partial.StopFailure, &pgErr) || pgErr.Code != "08006" {
-		t.Fatalf("partial result hint=%s failure=%v; want committed token, 100 ms and the stopping failure", partial.RetryAfter, partial.StopFailure)
-	}
-	if _, err := store.LeaseJobRunnerJobs(context.Background(), LeaseJobRunnerJobsRequest{LeaseOwner: "fault", MaxJobs: 2, LeaseDuration: time.Minute}); !errors.As(err, &pgErr) {
-		t.Fatalf("failure before any commit = %v; want the call error", err)
-	}
-	if _, err := admin.Exec(`DROP TRIGGER queue_test_fail_marker_lease ON queue_jobs`); err != nil {
-		t.Fatal(err)
-	}
-
-	lost := leaseJobRunner(t, store, 1)
-	assertJobIDs(t, lost.Jobs, "qjob_fault_marker")
-	if again := leaseJobRunner(t, store, 1); len(again.Jobs) != 0 {
-		t.Fatalf("live lease with a lost response was rediscovered: %v", again.Jobs)
-	}
-	expireQueueJobLease(t, admin, "ws_jr_fault_b", "qjob_fault_marker")
-	if reclaimed, err := store.ReclaimExpiredLeases(context.Background(), ReclaimExpiredLeasesRequest{}); err != nil || reclaimed != 1 {
-		t.Fatalf("reclaim = %d/%v; want the expired lease", reclaimed, err)
-	}
-	recovered := leaseJobRunner(t, store, 1)
-	if len(recovered.Jobs) != 1 || recovered.Jobs[0].LeaseToken == lost.Jobs[0].LeaseToken {
-		t.Fatalf("reclaimed job lease = %v; want a fresh token", recovered.Jobs)
-	}
-}
-
-// A candidate transaction over its statement or lock limit rolls back with no
-// mutation; the call counts the timeout, leases the next tenant's job, and a
-// later call leases the skipped one.
-func TestJobRunnerLeaseCandidateTimeoutSkipsOnlyThatCandidate(t *testing.T) {
 	for _, tc := range []struct {
-		name                    string
-		wait                    string
-		wantStatement, wantLock int
+		name, code string
+		// fail makes the marker tenant's turn fail and returns the repair.
+		fail func(t *testing.T, store *PostgreSQLQueueStore, admin *sql.DB) func()
 	}{
-		{name: "statement", wait: "PERFORM pg_sleep(30);", wantStatement: 1},
-		{name: "lock", wait: "PERFORM pg_advisory_xact_lock(7340);", wantLock: 1},
+		{name: "lease update", code: "08006", fail: func(t *testing.T, _ *PostgreSQLQueueStore, admin *sql.DB) func() {
+			if _, err := admin.Exec(`CREATE FUNCTION queue_test_fail_marker_lease() RETURNS trigger LANGUAGE plpgsql AS $$
+				BEGIN RAISE EXCEPTION 'fixture connection failure' USING ERRCODE = '08006'; END $$;
+				CREATE TRIGGER queue_test_fail_marker_lease BEFORE UPDATE ON queue_jobs
+				FOR EACH ROW WHEN (OLD.id = 'qjob_fault_marker' AND NEW.status = 'leased')
+				EXECUTE FUNCTION queue_test_fail_marker_lease()`); err != nil {
+				t.Fatal(err)
+			}
+			return func() {
+				if _, err := admin.Exec(`DROP TRIGGER queue_test_fail_marker_lease ON queue_jobs`); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
+		{name: "pass start", code: "42703", fail: func(t *testing.T, store *PostgreSQLQueueStore, admin *sql.DB) func() {
+			renamed := false
+			store.jobRunner.afterTenantSeek = func(tenant string) {
+				if tenant == "ws_jr_fault_b" && !renamed {
+					if _, err := admin.Exec(`ALTER TABLE queue_jobs RENAME COLUMN negative_priority TO fault_negative_priority`); err != nil {
+						t.Fatal(err)
+					}
+					renamed = true
+				}
+			}
+			return func() {
+				store.jobRunner.afterTenantSeek = nil
+				if _, err := admin.Exec(`ALTER TABLE queue_jobs RENAME COLUMN fault_negative_priority TO negative_priority`); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, admin, _ := newJobRunnerTestStore(t, nil)
+			due := time.Now().UTC().Add(-time.Hour)
+			insertJobRunnerRows(t, admin,
+				jobRunnerRow{ID: "qjob_fault_first", Workspace: "ws_jr_fault_a", Kind: KindRuntimeInput, Session: "sesn_fault_a", Thread: "thrd_fault", Sequence: 1, AvailableAt: due},
+				jobRunnerRow{ID: "qjob_fault_marker", Workspace: "ws_jr_fault_b", Kind: KindRuntimeInput, Session: "sesn_fault_b", Thread: "thrd_fault", Sequence: 1, AvailableAt: due},
+			)
+			repair := tc.fail(t, store, admin)
+			partial := leaseJobRunner(t, store, 2)
+			assertJobIDs(t, partial.Jobs, "qjob_fault_first")
+			var pgErr *pgconn.PgError
+			if partial.RetryAfter != jobRunnerActiveRetryAfter || !errors.As(partial.StopFailure, &pgErr) || pgErr.Code != tc.code || partial.DiscoveryTimeoutOperation != "" {
+				t.Fatalf("partial result hint=%s failure=%v discovery timeout=%q; want committed token, 100 ms, the stopping %s failure and no timeout", partial.RetryAfter, partial.StopFailure, partial.DiscoveryTimeoutOperation, tc.code)
+			}
+			if _, err := store.LeaseJobRunnerJobs(context.Background(), LeaseJobRunnerJobsRequest{LeaseOwner: "fault", MaxJobs: 2, LeaseDuration: time.Minute}); !errors.As(err, &pgErr) || pgErr.Code != tc.code {
+				t.Fatalf("failure before any commit = %v; want the %s call error", err, tc.code)
+			}
+			repair()
+
+			lost := leaseJobRunner(t, store, 1)
+			assertJobIDs(t, lost.Jobs, "qjob_fault_marker")
+			if again := leaseJobRunner(t, store, 1); len(again.Jobs) != 0 {
+				t.Fatalf("live lease with a lost response was rediscovered: %v", again.Jobs)
+			}
+			expireQueueJobLease(t, admin, "ws_jr_fault_b", "qjob_fault_marker")
+			if reclaimed, err := store.ReclaimExpiredLeases(context.Background(), ReclaimExpiredLeasesRequest{}); err != nil || reclaimed != 1 {
+				t.Fatalf("reclaim = %d/%v; want the expired lease", reclaimed, err)
+			}
+			recovered := leaseJobRunner(t, store, 1)
+			if len(recovered.Jobs) != 1 || recovered.Jobs[0].LeaseToken == lost.Jobs[0].LeaseToken {
+				t.Fatalf("reclaimed job lease = %v; want a fresh token", recovered.Jobs)
+			}
+		})
+	}
+}
+
+// A statement or lock wait over its local limit never fails the call. A
+// candidate transaction over its limit rolls back with no mutation and the call
+// moves on; a discovery statement over its limit ends the call, which issues no
+// further Queue statement. Either way the call returns what it committed with
+// the active hint and reports the timeout, the other rows are unchanged, and a
+// later call leases them. An unfinished discovery keeps the active hint even in
+// a process that an earlier fruitless rotation made idle.
+func TestJobRunnerLeaseLocalTimeoutDoesNotFailTheCall(t *testing.T) {
+	const jobA, jobB = "qjob_timeout_a", "qjob_timeout_b"
+	slowLeaseOfA := func(wait string) func(*testing.T, *sql.DB, *PostgreSQLQueueStore, func()) {
+		return func(t *testing.T, admin *sql.DB, _ *PostgreSQLQueueStore, _ func()) {
+			if _, err := admin.Exec(`CREATE FUNCTION queue_test_slow_lease() RETURNS trigger LANGUAGE plpgsql AS $$
+				BEGIN ` + wait + ` RETURN NEW; END $$;
+				CREATE TRIGGER queue_test_slow_lease BEFORE UPDATE ON queue_jobs
+				FOR EACH ROW WHEN (OLD.id = '` + jobA + `' AND NEW.status = 'leased')
+				EXECUTE FUNCTION queue_test_slow_lease()`); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		// hold arranges the wait; lockQueueJobs takes an ACCESS EXCLUSIVE lock on
+		// queue_jobs, behind which a discovery read waits out its statement limit.
+		hold                             func(t *testing.T, admin *sql.DB, store *PostgreSQLQueueStore, lockQueueJobs func())
+		want, later                      []string
+		wantStatement, wantLock          int
+		wantDiscovery, wantDiscoveryKind string
+	}{
+		{name: "candidate statement", hold: slowLeaseOfA("PERFORM pg_sleep(30);"), want: []string{jobB}, later: []string{jobA}, wantStatement: 1},
+		{name: "candidate lock", hold: slowLeaseOfA("PERFORM pg_advisory_xact_lock(7340);"), want: []string{jobB}, later: []string{jobA}, wantLock: 1},
+		{
+			name: "tenant seek in an idle process",
+			hold: func(_ *testing.T, _ *sql.DB, store *PostgreSQLQueueStore, lockQueueJobs func()) {
+				store.jobRunner.mu.Lock()
+				store.jobRunner.idle = true
+				store.jobRunner.mu.Unlock()
+				lockQueueJobs()
+			},
+			later: []string{jobA, jobB}, wantDiscovery: "queue.job_runner_tenant_seek", wantDiscoveryKind: "statement_timeout",
+		},
+		{
+			name: "pass start after a commit",
+			hold: func(_ *testing.T, _ *sql.DB, store *PostgreSQLQueueStore, lockQueueJobs func()) {
+				store.jobRunner.afterTenantSeek = func(tenant string) {
+					if tenant == "ws_jr_timeout_b" {
+						lockQueueJobs()
+					}
+				}
+			},
+			want: []string{jobA}, later: []string{jobB}, wantDiscovery: "queue.job_runner_pass_start", wantDiscoveryKind: "statement_timeout",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			trace := &jobRunnerTrace{}
+			store, admin, _ := newJobRunnerTestStore(t, trace)
 			store.jobRunner.statementTimeout = 500 * time.Millisecond
 			store.jobRunner.lockTimeout = 100 * time.Millisecond
 			due := time.Now().UTC().Add(-time.Hour)
 			insertJobRunnerRows(t, admin,
-				jobRunnerRow{ID: "qjob_timeout_a", Workspace: "ws_jr_timeout_a", Kind: KindRuntimeInput, Session: "sesn_timeout_a", Thread: "thrd_timeout", Sequence: 1, AvailableAt: due},
-				jobRunnerRow{ID: "qjob_timeout_b", Workspace: "ws_jr_timeout_b", Kind: KindRuntimeInput, Session: "sesn_timeout_b", Thread: "thrd_timeout", Sequence: 1, AvailableAt: due},
+				jobRunnerRow{ID: jobA, Workspace: "ws_jr_timeout_a", Kind: KindRuntimeInput, Session: "sesn_timeout_a", Thread: "thrd_timeout", Sequence: 1, AvailableAt: due},
+				jobRunnerRow{ID: jobB, Workspace: "ws_jr_timeout_b", Kind: KindRuntimeInput, Session: "sesn_timeout_b", Thread: "thrd_timeout", Sequence: 1, AvailableAt: due},
 			)
+			before := queueJobFacts(t, admin)
 			holder, err := admin.BeginTx(context.Background(), nil)
 			if err != nil {
 				t.Fatal(err)
@@ -396,28 +472,40 @@ func TestJobRunnerLeaseCandidateTimeoutSkipsOnlyThatCandidate(t *testing.T) {
 			if _, err := holder.Exec(`SELECT pg_advisory_xact_lock(7340)`); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := admin.Exec(`CREATE FUNCTION queue_test_slow_lease() RETURNS trigger LANGUAGE plpgsql AS $$
-				BEGIN ` + tc.wait + ` RETURN NEW; END $$;
-				CREATE TRIGGER queue_test_slow_lease BEFORE UPDATE ON queue_jobs
-				FOR EACH ROW WHEN (OLD.id = 'qjob_timeout_a' AND NEW.status = 'leased')
-				EXECUTE FUNCTION queue_test_slow_lease()`); err != nil {
-				t.Fatal(err)
-			}
-			before := queueJobFacts(t, admin)["qjob_timeout_a"]
+			lockedAt := -1
+			tc.hold(t, admin, store, func() {
+				if _, err := holder.Exec(`LOCK TABLE queue_jobs IN ACCESS EXCLUSIVE MODE`); err != nil {
+					t.Fatal(err)
+				}
+				lockedAt = trace.count("queue_jobs")
+			})
 
 			result := leaseJobRunner(t, store, 2)
-			assertJobIDs(t, result.Jobs, "qjob_timeout_b")
+			assertJobIDs(t, result.Jobs, tc.want...)
 			if result.StatementTimeouts != tc.wantStatement || result.LockTimeouts != tc.wantLock || result.RetryAfter != jobRunnerActiveRetryAfter {
 				t.Fatalf("timeouts statement=%d lock=%d hint=%s; want %d, %d and the active hint", result.StatementTimeouts, result.LockTimeouts, result.RetryAfter, tc.wantStatement, tc.wantLock)
 			}
-			if after := queueJobFacts(t, admin)["qjob_timeout_a"]; after != before {
-				t.Fatalf("timed-out candidate changed: %+v; want %+v", after, before)
+			if result.DiscoveryTimeoutOperation != tc.wantDiscovery || result.DiscoveryTimeoutKind != tc.wantDiscoveryKind || result.StopFailure != nil {
+				t.Fatalf("discovery timeout %q/%q, stop failure %v; want %q/%q and none", result.DiscoveryTimeoutOperation, result.DiscoveryTimeoutKind, result.StopFailure, tc.wantDiscovery, tc.wantDiscoveryKind)
+			}
+			if issued := trace.count("queue_jobs") - lockedAt; tc.wantDiscovery != "" && issued != 1 {
+				t.Fatalf("call issued %d Queue statements after the lock; want only the one that timed out", issued)
 			}
 
-			if _, err := admin.Exec(`DROP TRIGGER queue_test_slow_lease ON queue_jobs`); err != nil {
+			store.jobRunner.afterTenantSeek = nil
+			if err := holder.Rollback(); err != nil {
 				t.Fatal(err)
 			}
-			assertJobIDs(t, leaseJobRunner(t, store, 2).Jobs, "qjob_timeout_a")
+			if _, err := admin.Exec(`DROP TRIGGER IF EXISTS queue_test_slow_lease ON queue_jobs`); err != nil {
+				t.Fatal(err)
+			}
+			after := queueJobFacts(t, admin)
+			for _, id := range tc.later {
+				if after[id] != before[id] {
+					t.Fatalf("%s changed: %+v; want %+v", id, after[id], before[id])
+				}
+			}
+			assertJobIDs(t, leaseJobRunner(t, store, 2).Jobs, tc.later...)
 		})
 	}
 }

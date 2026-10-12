@@ -123,8 +123,8 @@ const (
 	// local limits, shortened by the remaining call budget.
 	jobRunnerStatementTimeout = 40 * time.Millisecond
 	jobRunnerLockTimeout      = 10 * time.Millisecond
-	// Retry hints: the active value after a budget or contention stop, and
-	// the clamp for the next future job otherwise.
+	// Retry hints: the active value after a discovery timeout or a budget or
+	// contention stop, and the clamp for the next future job otherwise.
 	jobRunnerActiveRetryAfter = 100 * time.Millisecond
 	jobRunnerIdleRetryAfter   = 1000 * time.Millisecond
 	// The scheduler's single cleanup worker probes at most this many pass
@@ -404,11 +404,14 @@ type LeaseJobRunnerJobsResult struct {
 	Jobs       []*Job
 	RetryAfter time.Duration
 	// Bounded diagnostics for the serving boundary: candidates skipped on a
-	// local lock or statement timeout, and the failure that stopped a call
-	// after Jobs had already committed.
-	LockTimeouts      int
-	StatementTimeouts int
-	StopFailure       error
+	// local lock or statement timeout, the discovery operation whose local
+	// timeout ended the call with that timeout's kind, and the failure that
+	// stopped a call after Jobs had already committed.
+	LockTimeouts              int
+	StatementTimeouts         int
+	DiscoveryTimeoutOperation string
+	DiscoveryTimeoutKind      string
+	StopFailure               error
 }
 
 // ReleaseUnstartedJobRequest names one direct Job Runner lease whose job the

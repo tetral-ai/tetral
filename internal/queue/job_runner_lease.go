@@ -277,6 +277,7 @@ type jobRunnerCall struct {
 	contended         bool
 	lockTimeouts      int
 	statementTimeouts int
+	discoveryTimeout  *jobRunnerDiscoveryTimeout
 }
 
 func (s *jobRunnerScheduler) lease(ctx context.Context, request LeaseJobRunnerJobsRequest) (LeaseJobRunnerJobsResult, error) {
@@ -309,6 +310,11 @@ func (s *jobRunnerScheduler) lease(ctx context.Context, request LeaseJobRunnerJo
 				call.budgetStopped = true
 				break
 			}
+			// A discovery statement over its local limit, like a candidate's,
+			// signals load rather than failure: the call ends with what it committed.
+			if errors.As(err, &call.discoveryTimeout) {
+				break
+			}
 			failure = err
 			break
 		}
@@ -320,6 +326,9 @@ func (s *jobRunnerScheduler) lease(ctx context.Context, request LeaseJobRunnerJo
 		Jobs:              call.jobs,
 		LockTimeouts:      call.lockTimeouts,
 		StatementTimeouts: call.statementTimeouts,
+	}
+	if timeout := call.discoveryTimeout; timeout != nil {
+		result.DiscoveryTimeoutOperation, result.DiscoveryTimeoutKind = timeout.operation, timeout.kind
 	}
 	if failure != nil {
 		// A later failure never hides earlier commits: the caller receives
@@ -335,13 +344,18 @@ func (s *jobRunnerScheduler) lease(ctx context.Context, request LeaseJobRunnerJo
 	return result, nil
 }
 
-// retryAfter is the active hint after a budget or contention stop while the
-// process is not idle. Otherwise the caller waits until the next future Job
-// Runner job, clamped to 100..1000 ms, or 1000 ms when none exists or the call
-// budget is already spent. A call that ends a retained pass at its upper key
-// has completed discovery, so a job admitted after that pass began waits up to
-// this hint for the next call's fresh pass.
+// retryAfter is the active hint after a discovery timeout, or after a budget or
+// contention stop while the process is not idle. Otherwise the caller waits
+// until the next future Job Runner job, clamped to 100..1000 ms, or 1000 ms when
+// none exists or the call budget is already spent. A call that ends a retained
+// pass at its upper key has completed discovery, so a job admitted after that
+// pass began waits up to this hint for the next call's fresh pass.
 func (s *jobRunnerScheduler) retryAfter(ctx context.Context, call *jobRunnerCall) time.Duration {
+	// Idleness is established only by a finished rotation; a discovery that
+	// timed out cannot show that nothing is leasable.
+	if call.discoveryTimeout != nil {
+		return jobRunnerActiveRetryAfter
+	}
 	s.mu.Lock()
 	idle := s.idle
 	s.mu.Unlock()
@@ -585,6 +599,31 @@ const (
 // another unit of database work; it is a budget stop, not a failure.
 var errJobRunnerBudgetSpent = errors.New("queue: job runner call budget spent")
 
+// jobRunnerDiscoveryTimeout is a discovery statement that exceeded its local
+// statement or lock limit.
+type jobRunnerDiscoveryTimeout struct {
+	operation, kind string
+	err             error
+}
+
+func (e *jobRunnerDiscoveryTimeout) Error() string { return e.err.Error() }
+func (e *jobRunnerDiscoveryTimeout) Unwrap() error { return e.err }
+
+// jobRunnerTimeoutKind names a local lock or statement timeout, or returns ""
+// for any other error.
+func jobRunnerTimeoutKind(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "55P03":
+			return "lock_timeout"
+		case "57014":
+			return "statement_timeout"
+		}
+	}
+	return ""
+}
+
 // jobRunnerTimeouts returns the local statement and lock limits for the next
 // unit of database work, shortened by the remaining call budget. It reports
 // false when the budget no longer permits beginning work.
@@ -605,7 +644,7 @@ func (s *PostgreSQLQueueStore) withJobRunnerDiscoveryTx(ctx context.Context, ope
 	if !ok {
 		return errJobRunnerBudgetSpent
 	}
-	return s.client.WithTx(ctx, operation, &sql.TxOptions{ReadOnly: true}, func(tx *dbconnect.Tx) error {
+	err := s.client.WithTx(ctx, operation, &sql.TxOptions{ReadOnly: true}, func(tx *dbconnect.Tx) error {
 		if _, err := tx.Exec(ctx,
 			`SELECT set_config('tetral.queue_maintenance', 'true', true), set_config('statement_timeout', $1, true)`,
 			statementTimeout,
@@ -614,6 +653,10 @@ func (s *PostgreSQLQueueStore) withJobRunnerDiscoveryTx(ctx context.Context, ope
 		}
 		return fn(tx)
 	})
+	if kind := jobRunnerTimeoutKind(err); kind != "" {
+		return &jobRunnerDiscoveryTimeout{operation: operation, kind: kind, err: err}
+	}
+	return err
 }
 
 // jobRunnerSeekTenant returns the next workspace after last that holds pending
@@ -842,14 +885,11 @@ func (s *PostgreSQLQueueStore) leaseJobRunnerCandidate(ctx context.Context, tena
 		if ctx.Err() != nil {
 			return nil, jobRunnerLeaseIneligible, ctx.Err()
 		}
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) {
-			switch pgErr.Code {
-			case "55P03":
-				return nil, jobRunnerLeaseLockTimeout, nil
-			case "57014":
-				return nil, jobRunnerLeaseStatementTimeout, nil
-			}
+		switch jobRunnerTimeoutKind(err) {
+		case "lock_timeout":
+			return nil, jobRunnerLeaseLockTimeout, nil
+		case "statement_timeout":
+			return nil, jobRunnerLeaseStatementTimeout, nil
 		}
 		return nil, jobRunnerLeaseIneligible, err
 	}
