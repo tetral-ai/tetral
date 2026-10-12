@@ -1,13 +1,19 @@
 package storage_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -376,9 +382,62 @@ func TestMigrateSchemaCancellationRollsBackStampAndReleasesLock(t *testing.T) {
 	if _, err := db.Exec(`DROP EVENT TRIGGER block_initialization`); err != nil {
 		t.Fatal(err)
 	}
+
+	// Canceled between the stamp INSERT and COMMIT: MigrateSchema itself rolls
+	// back and releases the lock on its own connection before returning.
+	config, err := pgx.ParseConfig(storagetest.AdminDatabaseURL(t, db))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stampCtx, cancelStamp := context.WithCancel(ctx)
+	defer cancelStamp()
+	stampDB := sql.OpenDB(cancelAfterExecConnector{Connector: stdlib.GetConnector(*config), prefix: "INSERT INTO tetral_schema_migrations", cancel: cancelStamp})
+	defer func() { _ = stampDB.Close() }()
+	var logs bytes.Buffer
+	err = storage.MigrateSchema(storage.WithMigrationLogger(stampCtx, slog.New(slog.NewJSONHandler(&logs, nil))), stampDB)
+	assertSchemaErrorKind(t, err, storage.SchemaErrorCanceled)
+	var lockFree bool
+	if err := db.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1)`, storage.PostgreSQLSchemaAdvisoryLockID).Scan(&lockFree); err != nil {
+		t.Fatal(err)
+	}
+	if records := migrationLogRecords(t, &logs); !lockFree || len(records) != 2 || records[1]["schema.step"] != "commit" || records[1]["transaction.outcome"] != "rolled_back" {
+		t.Fatalf("canceled before COMMIT: lock free = %t, records = %#v", lockFree, records)
+	}
+	assertTableExists(t, db, "tetral_schema_migrations", false)
+
 	if err := storage.MigrateSchema(ctx, db); err != nil {
 		t.Fatalf("retry after cancellation/lock release: %v", err)
 	}
+}
+
+// cancelAfterExecConnector cancels once a statement starting with prefix has
+// executed, so the cancellation lands between statements.
+type cancelAfterExecConnector struct {
+	driver.Connector
+	prefix string
+	cancel context.CancelFunc
+}
+
+func (c cancelAfterExecConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	conn, err := c.Connector.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return cancelAfterExecConn{Conn: conn.(*stdlib.Conn), prefix: c.prefix, cancel: c.cancel}, nil
+}
+
+type cancelAfterExecConn struct {
+	*stdlib.Conn
+	prefix string
+	cancel context.CancelFunc
+}
+
+func (c cancelAfterExecConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	result, err := c.Conn.ExecContext(ctx, query, args)
+	if err == nil && strings.HasPrefix(query, c.prefix) {
+		c.cancel()
+	}
+	return result, err
 }
 
 func TestMigrateSchemaConcurrentReplicasSerialize(t *testing.T) {

@@ -195,7 +195,10 @@ func MigrateSchema(ctx context.Context, db *sql.DB) (result error) {
 // applyPostgreSQLMigration keeps rollback and its observed outcome inside the
 // transaction's lifetime, before the caller emits its failure record.
 func applyPostgreSQLMigration(ctx context.Context, conn *sql.Conn, migration postgresqlMigration, createHistory bool, diagnostics *migrationDiagnostics) error {
-	tx, err := conn.BeginTx(ctx, nil)
+	// Detached from ctx: on cancellation database/sql would roll back and close
+	// conn from its own goroutine while MigrateSchema unlocks on it. COMMIT and
+	// ROLLBACK therefore ignore ctx; the check before COMMIT replaces Commit's.
+	tx, err := conn.BeginTx(context.WithoutCancel(ctx), nil)
 	if err != nil {
 		return newSchemaMigrationError(SchemaErrorApply, migration.version, err)
 	}
@@ -233,6 +236,9 @@ func applyPostgreSQLMigration(ctx context.Context, conn *sql.Conn, migration pos
 		return newSchemaMigrationError(SchemaErrorApply, migration.version, err)
 	}
 	diagnostics.step = "commit"
+	if err := ctx.Err(); err != nil {
+		return newSchemaMigrationError(SchemaErrorApply, migration.version, err)
+	}
 	commitAttempted = true
 	if err := tx.Commit(); err != nil {
 		return newSchemaMigrationError(SchemaErrorApply, migration.version, err)
