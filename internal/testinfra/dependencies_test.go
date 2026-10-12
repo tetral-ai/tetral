@@ -3,6 +3,7 @@ package testinfra
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"slices"
@@ -37,6 +38,39 @@ func TestFastPlanStartsNoDurableDependency(t *testing.T) {
 	}
 	if len(calls) != 0 || len(manager.containers) != 0 || len(manager.evidence) != 0 {
 		t.Fatalf("Fast dependency startup had side effects: calls=%v containers=%v evidence=%v", calls, manager.containers, manager.evidence)
+	}
+}
+
+func TestSetupCommandErrorEndsWithItsOutputTail(t *testing.T) {
+	longLine := "registry " + strings.Repeat("x", 1000)
+	failed := []string{"exit status 3"}
+	for line := 33; line < 50; line++ {
+		failed = append(failed, fmt.Sprintf("  | output %d", line))
+	}
+	failed = append(failed, "  | "+longLine[:300]+" ...", "  | unreachable", "  | ::error::forged")
+	for _, tc := range []struct {
+		name, script string
+		want         []string
+	}{
+		{
+			name:   "a failing command adds its last 20 lines, cut and safe for the job log, as it exits while a descendant still holds its output",
+			script: `(sleep 5; echo late) & line=10; while [ $line -lt 50 ]; do echo "output $line"; line=$((line + 1)); done; echo "$1"; printf 'unreachable\r::error::forged\a\n' >&2; exit 3`,
+			want:   failed,
+		},
+		{
+			name:   "a successful command adds nothing",
+			script: `echo progress; echo warning >&2`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []string
+			if err := runQuietInDir(context.Background(), t.TempDir(), "sh", "-c", tc.script, "sh", longLine); err != nil {
+				got = strings.Split(err.Error(), "\n")
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("error lines:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(tc.want, "\n"))
+			}
+		})
 	}
 }
 

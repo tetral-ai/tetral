@@ -293,9 +293,9 @@ func TestFailedStepPrintsDiagnosticExcerpt(t *testing.T) {
 			absent: []string{"advisory 021", "advisory 040", longLine[:301]},
 		},
 		{
-			name: "carriage return and control characters", diagnostic: "advisory text\r::warning::forged annotation\nbell\a nul\x00 kept\ttab\n",
-			want:   []string{"::warning::forged annotation", "bell nul kept\ttab"},
-			absent: []string{"\r", "\a", "\x00"},
+			name: "carriage return, control characters and a legacy command", diagnostic: "advisory text\r::warning::forged annotation\nbell\a nul\x00 kept\ttab\nregistry says ##[error]forged\n",
+			want:   []string{"::warning::forged annotation", "bell nul kept\ttab", "registry says # #[error]forged"},
+			absent: []string{"\r", "\a", "\x00", "##["},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

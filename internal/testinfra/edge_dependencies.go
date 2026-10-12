@@ -181,8 +181,8 @@ func (m *dependencyManager) prepareEGCTL(ctx context.Context) error {
 	command := exec.CommandContext(ctx, "go", "build", "-mod=readonly", "-p", "2", "-o", helperPath, ".")
 	command.Dir = helperDirectory
 	command.Env = append(withoutEnvironmentVariable(m.environment, "GOTOOLCHAIN"), "GOTOOLCHAIN="+helper.Toolchain)
-	if err := command.Run(); err != nil {
-		return errors.New("pinned upstream SecretType helper build failed")
+	if err := runWithOutputTail(command); err != nil {
+		return fmt.Errorf("pinned upstream SecretType helper build failed: %w", err)
 	}
 	afterDigest, err := helperSourceDigest(helperDirectory)
 	if err != nil || sourceDigest != afterDigest {
