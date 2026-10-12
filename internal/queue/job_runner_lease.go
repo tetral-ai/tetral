@@ -140,6 +140,9 @@ type jobRunnerPass struct {
 // preference and progress, never Queue jobs or leases.
 type jobRunnerScheduler struct {
 	store *PostgreSQLQueueStore
+	// Production uses the Queue constants; in-package tests widen these so a
+	// slow test database cannot change a scheduling trace.
+	callBudget, statementTimeout, lockTimeout time.Duration
 
 	mu            sync.Mutex
 	lastWorkspace string
@@ -172,7 +175,15 @@ type jobRunnerScheduler struct {
 func newJobRunnerScheduler(store *PostgreSQLQueueStore) *jobRunnerScheduler {
 	// #nosec G118 -- the scheduler retains cancel; quiesce cancels admitted calls and the worker, then joins them.
 	ctx, cancel := context.WithCancel(context.Background())
-	return &jobRunnerScheduler{store: store, passes: map[string]*jobRunnerPass{}, ctx: ctx, cancel: cancel}
+	return &jobRunnerScheduler{
+		store:            store,
+		callBudget:       jobRunnerCallBudget,
+		statementTimeout: jobRunnerStatementTimeout,
+		lockTimeout:      jobRunnerLockTimeout,
+		passes:           map[string]*jobRunnerPass{},
+		ctx:              ctx,
+		cancel:           cancel,
+	}
 }
 
 // LeaseJobRunnerJobs leases up to MaxJobs Runner jobs across workspaces. A
@@ -273,7 +284,7 @@ func (s *jobRunnerScheduler) lease(ctx context.Context, request LeaseJobRunnerJo
 		return LeaseJobRunnerJobsResult{}, ErrJobRunnerSchedulerClosed
 	}
 	defer s.calls.Done()
-	callCtx, cancel := context.WithTimeout(ctx, jobRunnerCallBudget)
+	callCtx, cancel := context.WithTimeout(ctx, s.callBudget)
 	defer cancel()
 	stopOnQuiesce := context.AfterFunc(s.ctx, cancel)
 	defer stopOnQuiesce()
@@ -577,8 +588,8 @@ var errJobRunnerBudgetSpent = errors.New("queue: job runner call budget spent")
 // jobRunnerTimeouts returns the local statement and lock limits for the next
 // unit of database work, shortened by the remaining call budget. It reports
 // false when the budget no longer permits beginning work.
-func jobRunnerTimeouts(ctx context.Context, statementLimit time.Duration) (string, string, bool) {
-	statement, lock := statementLimit, min(jobRunnerLockTimeout, statementLimit)
+func jobRunnerTimeouts(ctx context.Context, statementLimit, lockLimit time.Duration) (string, string, bool) {
+	statement, lock := statementLimit, min(lockLimit, statementLimit)
 	if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline).Truncate(time.Millisecond)
 		if remaining < time.Millisecond {
@@ -590,7 +601,7 @@ func jobRunnerTimeouts(ctx context.Context, statementLimit time.Duration) (strin
 }
 
 func (s *PostgreSQLQueueStore) withJobRunnerDiscoveryTx(ctx context.Context, operation string, statementLimit time.Duration, fn func(*dbconnect.Tx) error) error {
-	statementTimeout, _, ok := jobRunnerTimeouts(ctx, statementLimit)
+	statementTimeout, _, ok := jobRunnerTimeouts(ctx, statementLimit, s.jobRunner.lockTimeout)
 	if !ok {
 		return errJobRunnerBudgetSpent
 	}
@@ -611,7 +622,7 @@ func (s *PostgreSQLQueueStore) withJobRunnerDiscoveryTx(ctx context.Context, ope
 func (s *PostgreSQLQueueStore) jobRunnerSeekTenant(ctx context.Context, last string) (string, bool, error) {
 	var tenant string
 	wrapped := false
-	err := s.withJobRunnerDiscoveryTx(ctx, "queue.job_runner_tenant_seek", jobRunnerStatementTimeout, func(tx *dbconnect.Tx) error {
+	err := s.withJobRunnerDiscoveryTx(ctx, "queue.job_runner_tenant_seek", s.jobRunner.statementTimeout, func(tx *dbconnect.Tx) error {
 		tenant, wrapped = "", false
 		if last != "" {
 			err := tx.QueryRow(ctx, jobRunnerNextTenantSQL, last).Scan(&tenant)
@@ -640,7 +651,7 @@ func (s *PostgreSQLQueueStore) jobRunnerStartPass(ctx context.Context, tenant st
 	var upper jobRunnerKey
 	var passNow time.Time
 	found := false
-	err := s.withJobRunnerDiscoveryTx(ctx, "queue.job_runner_pass_start", jobRunnerStatementTimeout, func(tx *dbconnect.Tx) error {
+	err := s.withJobRunnerDiscoveryTx(ctx, "queue.job_runner_pass_start", s.jobRunner.statementTimeout, func(tx *dbconnect.Tx) error {
 		err := tx.QueryRow(ctx, jobRunnerPassUpperSQL, tenant).Scan(
 			&upper.negativePriority, &upper.availableAt, &upper.partitionKey, &upper.partitionSequence, &upper.id, &passNow,
 		)
@@ -669,7 +680,7 @@ func (s *PostgreSQLQueueStore) jobRunnerWindow(ctx context.Context, tenant strin
 		args = append(args, pass.after.negativePriority, pass.after.availableAt, pass.after.partitionKey, pass.after.partitionSequence, pass.after.id)
 	}
 	var window []jobRunnerCandidate
-	err := s.withJobRunnerDiscoveryTx(ctx, "queue.job_runner_window", jobRunnerStatementTimeout, func(tx *dbconnect.Tx) error {
+	err := s.withJobRunnerDiscoveryTx(ctx, "queue.job_runner_window", s.jobRunner.statementTimeout, func(tx *dbconnect.Tx) error {
 		window = window[:0]
 		rows, err := tx.Query(ctx, jobRunnerWindowSQL(pass.hasAfter), args...)
 		if err != nil {
@@ -700,7 +711,7 @@ func (s *PostgreSQLQueueStore) jobRunnerWindow(ctx context.Context, tenant strin
 func (s *PostgreSQLQueueStore) jobRunnerNextFutureJob(ctx context.Context) (time.Time, time.Time, bool, error) {
 	var availableAt, now time.Time
 	found := false
-	err := s.withJobRunnerDiscoveryTx(ctx, "queue.job_runner_future_hint", jobRunnerStatementTimeout, func(tx *dbconnect.Tx) error {
+	err := s.withJobRunnerDiscoveryTx(ctx, "queue.job_runner_future_hint", s.jobRunner.statementTimeout, func(tx *dbconnect.Tx) error {
 		err := tx.QueryRow(ctx, jobRunnerNextFutureSQL).Scan(&availableAt, &now)
 		if dbconnect.IsNoRows(err) {
 			return nil
@@ -752,7 +763,7 @@ func (s *PostgreSQLQueueStore) jobRunnerAbsentTenants(ctx context.Context, tenan
 // local timeout leaves no mutation and lets the caller advance; any other
 // failure stops the call.
 func (s *PostgreSQLQueueStore) leaseJobRunnerCandidate(ctx context.Context, tenant string, candidate jobRunnerCandidate, request LeaseJobRunnerJobsRequest) (*Job, jobRunnerLeaseOutcome, error) {
-	statementTimeout, lockTimeout, ok := jobRunnerTimeouts(ctx, jobRunnerStatementTimeout)
+	statementTimeout, lockTimeout, ok := jobRunnerTimeouts(ctx, s.jobRunner.statementTimeout, s.jobRunner.lockTimeout)
 	if !ok {
 		return nil, jobRunnerLeaseIneligible, errJobRunnerBudgetSpent
 	}
