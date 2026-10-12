@@ -171,10 +171,33 @@ func benchmarkFixtureJobs(t *testing.T, side benchmarkFixtureSide, template stri
 
 func TestCompareBenchmarkEvidence(t *testing.T) {
 	const (
-		shaA, shaB = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-		fast       = "example.test/m/p/fast"
-		changed    = "example.test/m/p/changed"
+		shaB    = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		fast    = "example.test/m/p/fast"
+		changed = "example.test/m/p/changed"
 	)
+	moduleRoot := t.TempDir()
+	runGit(t, moduleRoot, "init", "-q")
+	runGit(t, moduleRoot, "config", "user.name", "Test")
+	runGit(t, moduleRoot, "config", "user.email", "test@example.invalid")
+	writeTestFile(t, moduleRoot, "go.mod", "module example.test/m\n\ngo 1.26\n")
+	// commit returns a commit whose PR producer inventory lists goShards Go
+	// shards, or that has no inventory when goShards is 0.
+	commit := func(goShards int) string {
+		if goShards > 0 {
+			shards, err := json.Marshal(goShardProducers(goShards))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(moduleRoot, "internal", "testinfra"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, moduleRoot, "internal/testinfra/pr_producers.json", `{"version": 1, "go_shards": `+string(shards)+`}`)
+		}
+		runGit(t, moduleRoot, "add", ".")
+		runGit(t, moduleRoot, "commit", "-qm", fmt.Sprintf("%d Go shards", goShards))
+		return runGit(t, moduleRoot, "rev-parse", "HEAD")
+	}
+	shaA, shaFour, shaFive, shaSix := commit(0), commit(4), commit(5), commit(6)
 	speedSide := func(sha string, testSeconds float64, speedTests int) benchmarkFixtureSide {
 		return benchmarkFixtureSide{sha: sha, runID: "7", attempt: "1", shards: [][]benchmarkFixtureStep{{
 			{pkg: fast, tests: benchmarkFixtureTests("TestFast", speedTests, testSeconds), elapsed: float64(speedTests)*testSeconds + 3, compile: 2},
@@ -187,12 +210,14 @@ func TestCompareBenchmarkEvidence(t *testing.T) {
 	bigSlice := func(test string) benchmarkFixtureStep {
 		return benchmarkFixtureStep{pkg: "example.test/m/p/big", tests: []benchmarkFixtureTest{{name: test, seconds: 21}}, elapsed: 72, compile: 51}
 	}
-	moduleRoot := t.TempDir()
-	writeTestFile(t, moduleRoot, "go.mod", "module example.test/m\n\ngo 1.26\n")
-	// Shard weights for the job speed rows: a1-a5 and b1-b5 weigh 10 s,
-	// x and y 20 s.
+	// Shard weights for the job speed rows: a1-a5, b1-b5 and u00-u24 weigh
+	// 10 s, x and y 20 s.
 	weightsJSON := `{"version": 2, "generated_at": "2026-10-11", "base": "b", "source_runs": ["1"], "cpu_models": {"Fixture CPU": {"factor": 1, "jobs": 1, "samples": 1, "shared_units": 0}}, "median_test_ms": 1, "sliceable": [], "packages": {`
-	for _, name := range []string{"a1", "a2", "a3", "a4", "a5", "b1", "b2", "b3", "b4", "b5"} {
+	tenSeconds := []string{"a1", "a2", "a3", "a4", "a5", "b1", "b2", "b3", "b4", "b5"}
+	for index := range 25 {
+		tenSeconds = append(tenSeconds, fmt.Sprintf("u%02d", index))
+	}
+	for _, name := range tenSeconds {
 		weightsJSON += `"example.test/m/p/` + name + `": {"elapsed_ms": 10000, "overhead_ms": 0}, `
 	}
 	weightsJSON += `"example.test/m/p/x": {"elapsed_ms": 20000, "overhead_ms": 0}, "example.test/m/p/y": {"elapsed_ms": 20000, "overhead_ms": 0}}}`
@@ -211,6 +236,20 @@ func TestCompareBenchmarkEvidence(t *testing.T) {
 			steps = append(steps, whole(name, weight*speed))
 		}
 		return steps
+	}
+	// spread runs u00-u24 at the weights' speed over shards of the given sizes.
+	spread := func(sha, runID string, sizes ...int) benchmarkFixtureSide {
+		side := benchmarkFixtureSide{sha: sha, runID: runID, attempt: "1", shardCount: len(sizes)}
+		next := 0
+		for _, size := range sizes {
+			var names []string
+			for range size {
+				names = append(names, fmt.Sprintf("u%02d", next))
+				next++
+			}
+			side.shards = append(side.shards, units(1, names...))
+		}
+		return side
 	}
 
 	tests := []struct {
@@ -577,8 +616,56 @@ func TestCompareBenchmarkEvidence(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if report.A.Complete || !report.B.Complete || report.Replay != nil {
-					t.Fatalf("A complete = %v, B complete = %v, replay = %v; want only B complete and no replay", report.A.Complete, report.B.Complete, report.Replay)
+				if report.A.Complete || !report.B.Complete || report.Replay != nil || report.B.ShardCount != 1 {
+					t.Fatalf("A complete = %v, B complete = %v at %d shards, replay = %v; want only B complete at its recorded 1 shard and no replay", report.A.Complete, report.B.Complete, report.B.ShardCount, report.Replay)
+				}
+			},
+		},
+		{
+			// A's plan replays to 40 s (seven 10 s units on shard 0), B's to
+			// 30 s.
+			name: "sides with different shard counts are compared over both plans",
+			a:    spread(shaFour, "7", 7, 6, 6, 6),
+			b:    spread(shaFive, "8", 5, 5, 5, 5, 5),
+			check: func(t *testing.T, report BenchmarkComparison, err error) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !report.A.Complete || !report.B.Complete || report.A.ShardCount != 4 || report.B.ShardCount != 5 {
+					t.Fatalf("A complete = %v at %d shards, B complete = %v at %d; want both complete at 4 and 5", report.A.Complete, report.A.ShardCount, report.B.Complete, report.B.ShardCount)
+				}
+				if len(report.Replay) != 5 || report.Replay[4].BPlanANormalized == nil || *report.Replay[4].BPlanANormalized != 30 || report.Replay[4].APlanANormalized != nil {
+					t.Fatalf("replay = %+v; want B's fifth shard replayed over A's durations at 30 s", report.Replay)
+				}
+				if metric := benchmarkComparisonMetric(report, benchmarkNormalizedReplayMetric); metric == nil || metric.A != 40 || metric.B != 30 {
+					t.Fatalf("normalized replay = %+v; want A 40 s, B 30 s", metric)
+				}
+			},
+		},
+		{
+			// --repo inside the repository reads the commit's go_shards too.
+			name:    "a side whose results record another shard count than its commit lists is incomplete",
+			a:       spread(shaSix, "7", 5, 5, 5, 5, 5),
+			b:       spread(shaSix, "8", 5, 5, 5, 5, 5),
+			options: func(options *BenchmarkCompareOptions) { options.RepositoryRoot = filepath.Join(moduleRoot, "internal") },
+			check: func(t *testing.T, report BenchmarkComparison, err error) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if report.B.Complete || report.B.ShardCount != 6 || report.Replay != nil {
+					t.Fatalf("B complete = %v at %d shards, replay = %v; want B incomplete at its commit's 6 and no replay", report.B.Complete, report.B.ShardCount, report.Replay)
+				}
+				if !slices.Contains(report.Warnings, "side B is incomplete: its results record 5 Go shards, but its commit lists 6 in go_shards") {
+					t.Fatalf("warnings %v do not name both shard counts", report.Warnings)
+				}
+			},
+		},
+		{
+			name: "a commit the repository does not hold is rejected",
+			a:    speedSide(shaB, 2, 8), b: speedSide(shaB, 2, 8),
+			check: func(t *testing.T, _ BenchmarkComparison, err error) {
+				if err == nil || !strings.Contains(err.Error(), "side A: read the Go shards of "+shaB) {
+					t.Fatalf("error = %v; want the unreadable commit rejected", err)
 				}
 			},
 		},
@@ -854,4 +941,12 @@ func TestBenchmarkVerdictRule(t *testing.T) {
 			}
 		})
 	}
+}
+
+func goShardProducers(count int) []string {
+	producers := make([]string, count)
+	for index := range producers {
+		producers[index] = fmt.Sprintf("go-%d", index)
+	}
+	return producers
 }

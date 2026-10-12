@@ -32,7 +32,6 @@ jobs:
   repository-sandbox-security-runtime:
     name: Repository, Sandbox Image, Security and Runtime
     runs-on: ubuntu-latest
-    # The steps' limits plus checkout, so a hanging group never cancels the job.
     timeout-minutes: 85
     steps:
       - name: Check out the exact test revision
@@ -40,9 +39,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      # Each group's run stops at time-limit-minutes and still uploads its
-      # result; the step limit above it is a backstop. Later steps run even when
-      # an earlier group failed, and reuse the Go cache the first step restored.
       - name: Verify repository integrity
         timeout-minutes: 13
         uses: ./.github/actions/run-test-evidence
@@ -111,7 +107,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4]
     steps:
       - name: Check out the exact test revision
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
@@ -125,7 +121,7 @@ jobs:
           producer: go-${{ matrix.shard }}
           artifact-prefix: pr-evidence
           shard-index: ${{ matrix.shard }}
-          shard-count: '4'
+          shard-count: '5'
           needs-helm: 'true'
           needs-bun: 'true'
           needs-buf: 'true'
@@ -153,7 +149,6 @@ jobs:
   deployment-protocol:
     name: Deployment and Protocol
     runs-on: ubuntu-latest
-    # The steps' limits plus checkout, so a hanging group never cancels the job.
     timeout-minutes: 44
     steps:
       - name: Check out the exact test revision
@@ -161,10 +156,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      # Each group's run stops at time-limit-minutes and still uploads its
-      # result; the step limit above it is a backstop. The protocol step runs
-      # even when deployment failed, and uses the Go build cache the first step
-      # restored.
       - name: Verify Kubernetes and Helm definitions
         timeout-minutes: 18
         uses: ./.github/actions/run-test-evidence

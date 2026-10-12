@@ -34,7 +34,7 @@ func main() {
 		EventBaseSHA: os.Getenv("TETRAL_CI_EVENT_BASE_SHA"), TestMergeSHA: os.Getenv("TETRAL_CI_TEST_MERGE_SHA"),
 		RequiredCheckSHA: os.Getenv("TETRAL_CI_REQUIRED_CHECK_SHA"), WorkflowSourceSHA: os.Getenv("TETRAL_CI_WORKFLOW_SOURCE_SHA"),
 		Workflow: os.Getenv("TETRAL_CI_WORKFLOW"), RunID: os.Getenv("TETRAL_CI_RUN_ID"), RunAttempt: os.Getenv("TETRAL_CI_RUN_ATTEMPT"),
-		Producers: expectedProducers, ProducerJobs: testinfra.PRProducerJobs(), GoShards: inventory.GoShards,
+		Producers: expectedProducers, ProducerJobs: testinfra.PRProducerJobs(inventory), GoShards: inventory.GoShards,
 	}
 	if err := testinfra.VerifyUpstreamNeeds(os.Getenv("TETRAL_CI_NEEDS"), testinfra.PRUpstreamJobs()); err != nil {
 		fmt.Fprintln(os.Stderr, err)

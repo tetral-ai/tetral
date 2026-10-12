@@ -1,9 +1,6 @@
 name: Go Build Cache
 
-# The only writer of go-race-v1 entries in main's cache scope. Go Race jobs and
-# Pull Request Verification's Deployment and Protocol job restore them read-only
-# through the evidence action; scripts/build-go-cache.sh holds what gets
-# compiled.
+# The only writer of go-race-v1 entries in main's cache scope.
 
 on:
   push:

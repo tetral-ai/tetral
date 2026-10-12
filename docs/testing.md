@@ -199,20 +199,21 @@ keep their existing default and can set `--workers` explicitly.
 The readable CI topology is:
 
 - **Pull Request Verification**: read-only, hermetic PR evidence split by
-  ownership. Four duration-balanced jobs cover every Go package under Race;
-  Go static analysis and the Gateway have a job each. The shorter groups share
-  two jobs, one evidence step and producer per group: repository, Sandbox
-  image, security and Runtime in one, deployment and protocol in the other. A
-  group's run stops at its own time limit with a failed result, and every step
-  runs even after an earlier group in its job failed, so each group that
-  reaches its run uploads its own result. Re-running a failed shared job
+  ownership. Duration-balanced jobs, one per `go_shards` entry of
+  `internal/testinfra/pr_producers.json` (five), cover every Go package under
+  Race; Go static analysis and the Gateway have a job each. The shorter groups
+  share two jobs, one evidence step and producer per group: repository,
+  Sandbox image, security and Runtime in one, deployment and protocol in the
+  other. A group's run stops at its own time limit with a failed result, and
+  every step runs even after an earlier group in its job failed, so each group
+  that reaches its run uploads its own result. Re-running a failed shared job
   reruns all of its groups. **Merge Gate** reconciles exactly one result from
   every required producer for the same PR event, tested integration commit,
   workflow source and run, taking each producer's result from the latest
   attempt that has one, and accepts each only from the job that runs that
   producer.
 - **Main Branch Verification**: the same evidence owners run independently on
-  the exact merged commit. Four jobs shard Go Race; repository, static,
+  the exact merged commit. Go Race runs the same shards; repository, static,
   Runtime, Gateway, protocol, deployment, image, and security evidence run in
   parallel. A push to main does not collect coverage.
 - **Scheduled Verification**: bounded repetitions of named concurrency owners
@@ -312,7 +313,7 @@ nor a job speed are left out and counted by model in the summary. With fewer
 runs it reports
 insufficient data. The summary lists each run's measured slowest steps
 phase, its normalized one and its jobs' range of speeds, and compares summed
-Go test work with the weights' total: about 8 more minutes of it (one per Go
+Go test work with the weights' total: about 10 more minutes of it (one per Go
 package process, the `go_shards` times two) add a minute of solo wall time.
 For each of the two weeks it counts the Pull Request
 Verification first attempts that ended in success or failure, and from up to
@@ -449,17 +450,19 @@ could write any key, but they run merged code, which is trusted.
 
 ### CI Benchmark
 
-`.github/workflows/ci-benchmark.yml` runs the four Go Race shards for a base
-commit (side A) and for the dispatched branch head (side B) in one run, then
-compares them. Each side checks out its own commit and runs that commit's
-evidence action with the inputs of Pull Request Verification's Go Race job,
-so A really runs the base's runner. The workflow only reads: its token holds
-`contents: read` and `actions: read`, it uses no secrets, and
-`cache-mode: read` stops every job but the optional `produce` job from saving
-to the Actions cache. A dispatch runs the dispatched branch's copy of the
-workflow, so the branch must contain it. Dispatches on one ref queue rather
-than cancel each other; a run holds eight Go Race jobs, so dispatch one at a
-time.
+`.github/workflows/ci-benchmark.yml` runs Go Race for a base commit (side A)
+and for the dispatched branch head (side B) in one run, then compares them.
+Each side checks out its own commit and runs that commit's evidence action
+with the inputs of Pull Request Verification's Go Race job, so A really runs
+the base's runner. Each side runs as many shards as its own commit's
+`go_shards` lists, so a change of shard count is measured against the old
+count; the run fails before any Go Race job when a side's commit lists none.
+The workflow only reads: its token holds `contents: read` and `actions: read`,
+it uses no secrets, and `cache-mode: read` stops every job but the optional
+`produce` job from saving to the Actions cache. A dispatch runs the dispatched
+branch's copy of the workflow, so the branch must contain it. Dispatches on
+one ref queue rather than cancel each other; a run holds both sides' Go Race
+jobs (ten at five shards each), so dispatch one at a time.
 
 ```sh
 gh workflow run ci-benchmark.yml --ref <branch> [-f base=<commit>] [-f produce-cache=true]
@@ -482,16 +485,20 @@ restore it before main's, so use it only on a branch nothing is based on.
 The **Compare A and B** job writes the report to the run summary and uploads
 `compare.json` as `ci-benchmark-compare-<run>-<attempt>`. It first checks that
 every result tested its side's commit. A side is complete when its results
-hold shard indices 0..K−1 for the shard count they record and every shard ran
-all its steps; results from before shard identities were recorded cannot show
-a missing last shard. Per side and shard it reports the time
-before the runner starts (GitHub steps, `go run` and planning), dependency
-setup, preparation (job start to the first test), each step's compile time
-before its first test, fixed preparation (time before the runner, setup and
-the shard's longest step compile), the steps phase, job time, runner CPU model
-and image, the Go build cache restore, and Go Race runner-minutes. Metrics are
-d = A − B, so a positive d means B is faster. Two effects shape how to read
-them:
+record the shard count K that `go_shards` lists at its commit, hold shard
+indices 0..K−1 and every shard ran all its steps. K is read from the commit,
+not from the workflow, so a wrong count given to a side's jobs leaves it
+incomplete with a warning naming both counts; `compare.json` and the summary
+report each side's K as `shard_count`. For a commit without `go_shards`, K is
+the count its results record; results from before shard identities were
+recorded cannot show a missing last shard. Per side and shard it reports the
+time before the runner starts (GitHub steps, `go run` and planning),
+dependency setup, preparation (job start to the first test), each step's
+compile time before its first test, fixed preparation (time before the runner,
+setup and the shard's longest step compile), the steps phase, job time, runner
+CPU model and image, the Go build cache restore, and Go Race runner-minutes.
+Metrics are d = A − B, so a positive d means B is faster. Two effects shape
+how to read them:
 
 - Hosted runners differ in speed, even within one run. A test's B/A ratio is
   therefore divided by the relative speed of its two jobs: the median B/A
@@ -529,7 +536,8 @@ them:
   `plan_fixed_runner_minutes` adds each side's durations replayed through A's
   plan to the runner time outside the steps phase (before the runner, setup,
   teardown and upload) of every job that side ran, so a side with more shards
-  pays for each.
+  pays for each extra job; the package overhead its own plan repeats on those
+  shards is left out.
 
 The same command compares any two downloaded Go Race evidence sets, for
 example a pull request run against a main run. A side's commit is the
@@ -544,7 +552,7 @@ go run ./internal/testinfra/cmd/tetral-ci-bench compare \
 A change is judged from downloaded `compare.json` files. `noise` reads those of
 A/A runs and reports s_D, the standard deviation of the paired difference, per
 metric with its sample count. It is estimated from per-shard pairs: a mean of
-four shards divides it by two, a sum multiplies it by two, and a slowest-shard
+K shards divides it by √K, a sum multiplies it by √K, and a slowest-shard
 metric uses it as is. `verdict` applies the rule for one metric and the
 expected reduction E: E ≥ 10 s_D needs one run, 3 s_D ≤ E < 10 s_D three, and
 2 s_D ≤ E < 3 s_D five. It passes when d > 0 in every run and the mean d is at
@@ -554,7 +562,7 @@ within A + 2 s_D, and refuses plan-dependent metrics from runs whose plans
 differ.
 `normalized_replayed_slowest_steps_phase` prices both plans over the same
 durations, so A/A runs give it no s_D: its verdict always takes five runs. A
-shard plan change is judged on it:
+shard plan change, including a change of shard count, is judged on it:
 `verdict --metric normalized_replayed_slowest_steps_phase --effect E` passes
 when d > 0 in all five runs and the mean d is at least E/2.
 

@@ -41,6 +41,10 @@ jobs:
     outputs:
       base: ${{ steps.commits.outputs.base }}
       head: ${{ steps.commits.outputs.head }}
+      a-shards: ${{ steps.shards.outputs.a-shards }}
+      a-shard-count: ${{ steps.shards.outputs.a-shard-count }}
+      b-shards: ${{ steps.shards.outputs.b-shards }}
+      b-shard-count: ${{ steps.shards.outputs.b-shard-count }}
     steps:
       - name: Check out the dispatched revision
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
@@ -62,6 +66,26 @@ jobs:
           echo "base=$base" >> "$GITHUB_OUTPUT"
           echo "head=$head" >> "$GITHUB_OUTPUT"
           echo "A = $base, B = $head"
+      - name: Read each side's Go shards from its own commit
+        id: shards
+        env:
+          A_SHA: ${{ steps.commits.outputs.base }}
+          B_SHA: ${{ steps.commits.outputs.head }}
+        run: |
+          set -euo pipefail
+          for side in a b; do
+            sha="$A_SHA"
+            if [[ "$side" == b ]]; then
+              sha="$B_SHA"
+            fi
+            if ! count="$(git show "${sha}:internal/testinfra/pr_producers.json" | jq -e '.go_shards | arrays | length | select(. > 0)')"; then
+              echo "::error::$sha lists no go_shards in internal/testinfra/pr_producers.json"
+              exit 1
+            fi
+            echo "${side}-shard-count=$count" >> "$GITHUB_OUTPUT"
+            echo "${side}-shards=$(jq -cn --argjson count "$count" '[range($count)]')" >> "$GITHUB_OUTPUT"
+            echo "Side ${side^^} runs $count Go Race shards"
+          done
 
   # The one benchmark job that writes the Actions cache. It runs the
   # dispatched revision's build script on side A's commit and saves into this
@@ -140,7 +164,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: ${{ fromJSON(needs.resolve.outputs.a-shards) }}
     env:
       TETRAL_CI_TEST_MERGE_SHA: ${{ needs.resolve.outputs.base }}
     steps:
@@ -157,7 +181,7 @@ jobs:
           producer: go-${{ matrix.shard }}
           artifact-prefix: bench-a
           shard-index: ${{ matrix.shard }}
-          shard-count: '4'
+          shard-count: ${{ needs.resolve.outputs.a-shard-count }}
           needs-helm: 'true'
           needs-bun: 'true'
           needs-buf: 'true'
@@ -173,7 +197,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: ${{ fromJSON(needs.resolve.outputs.b-shards) }}
     env:
       TETRAL_CI_TEST_MERGE_SHA: ${{ needs.resolve.outputs.head }}
     steps:
@@ -190,7 +214,7 @@ jobs:
           producer: go-${{ matrix.shard }}
           artifact-prefix: bench-b
           shard-index: ${{ matrix.shard }}
-          shard-count: '4'
+          shard-count: ${{ needs.resolve.outputs.b-shard-count }}
           needs-helm: 'true'
           needs-bun: 'true'
           needs-buf: 'true'

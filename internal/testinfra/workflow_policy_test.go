@@ -3,6 +3,7 @@ package testinfra
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -26,13 +27,28 @@ func TestVerificationWorkflowStructure(t *testing.T) {
 func TestVerificationWorkflowPolicy(t *testing.T) {
 	root := testRepositoryRoot(t)
 	const pullRequest, main, scheduled = "pull-request-verification.yml", "main-branch-verification.yml", "scheduled-verification.yml"
-	verifiers := map[string]func(string) error{
-		pullRequest: VerifyPullRequestWorkflow,
-		main:        VerifyMainBranchWorkflow,
-		scheduled:   VerifyScheduledWorkflow,
+	verifiers := map[string]func(string, PRProducerInventory) error{
+		pullRequest: verifyPullRequestWorkflow,
+		main:        verifyMainBranchWorkflow,
+		scheduled:   func(root string, _ PRProducerInventory) error { return VerifyScheduledWorkflow(root) },
+	}
+	committed, err := LoadPRProducers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	withGoShards := func(count int) PRProducerInventory {
+		inventory := PRProducerInventory{GoShards: goShardProducers(count)}
+		for _, producer := range committed.Producers {
+			if !slices.Contains(committed.GoShards, producer) {
+				inventory.Producers = append(inventory.Producers, producer)
+			}
+		}
+		inventory.Producers = append(inventory.Producers, inventory.GoShards...)
+		return inventory
 	}
 	type edit struct{ old, new string }
-	shardHelm := "          shard-count: '4'\n          needs-helm: 'true'"
+	shardHelm := "          shard-count: '5'\n          needs-helm: 'true'"
+	sixShards := []edit{{"        shard: [0, 1, 2, 3, 4]\n", "        shard: [0, 1, 2, 3, 4, 5]\n"}, {"          shard-count: '5'\n", "          shard-count: '6'\n"}}
 	pullRequestBun := "          producer: deployment\n          artifact-prefix: pr-evidence\n          needs-bun: 'true'"
 	mainBun := "            producer: deployment\n            needs_bun: 'true'"
 	disable := func(input string) string { return strings.Replace(input, "'true'", "'false'", 1) }
@@ -41,22 +57,30 @@ func TestVerificationWorkflowPolicy(t *testing.T) {
 		name, file string
 		edits      []edit
 		want       string
+		// goShards, when set, replaces the inventory's go_shards with that
+		// many shards for the edited workflow; an empty want accepts it.
+		goShards int
 	}{
-		{"pull request Go shard without Helm", pullRequest, []edit{{shardHelm, disable(shardHelm)}}, "go Race does not prepare its integration host"},
-		{"main Go shard without Helm", main, []edit{{shardHelm, disable(shardHelm)}}, "main Go Race does not own four complete integration-ready shards"},
-		{"coverage with unpinned Helm", scheduled, []edit{{"version: v4.2.0", "version: latest"}}, "does not install pinned Helm"},
-		{"pull request deployment without Bun", pullRequest, []edit{{pullRequestBun, disable(pullRequestBun)}}, "deployment verification does not install Bun"},
-		{"main deployment without Bun", main, []edit{{mainBun, disable(mainBun)}}, `main verification group "deployment"`},
-		{"later security step without the changed-graph audit", pullRequest, []edit{{"          dependency-audit: changed\n", "          dependency-audit: never\n"}}, "does not audit changed dependency graphs"},
-		{"later evidence step skipped after an earlier group fails", pullRequest, []edit{{"      - name: Verify dependencies and redaction boundaries\n        if: ${{ !cancelled() }}\n", "      - name: Verify dependencies and redaction boundaries\n"}}, `evidence step "Verify dependencies and redaction boundaries" must run with if: ${{ !cancelled() }}`},
-		{"shared job's evidence step without its run limit", pullRequest, []edit{{"          needs-bun: 'true'\n          time-limit-minutes: 20\n          go-cache: none\n\n  go-static-analysis:", "          needs-bun: 'true'\n          go-cache: none\n\n  go-static-analysis:"}}, `evidence step "Verify the Runtime service" must set time-limit-minutes and a timeout-minutes at least 3 minutes above it`},
-		{"shared job limit below its steps' limits", pullRequest, []edit{{"    timeout-minutes: 44\n", "    timeout-minutes: 41\n"}}, `job "deployment-protocol" timeout-minutes must be at least its evidence steps' 41 plus 3 minutes`},
-		{"group removed from its job", pullRequest, []edit{{sandboxStep, ""}}, "workflow producers do not match the PR producer inventory"},
+		{"pull request Go shard without Helm", pullRequest, []edit{{shardHelm, disable(shardHelm)}}, "go Race does not prepare its integration host", 0},
+		{"main Go shard without Helm", main, []edit{{shardHelm, disable(shardHelm)}}, "main Go Race does not own the 5 complete integration-ready shards go_shards lists", 0},
+		{"pull request Go Race follows six go_shards", pullRequest, sixShards, "", 6},
+		{"main Go Race follows six go_shards", main, sixShards, "", 6},
+		{"pull request Go shard count differs from its matrix size", pullRequest, []edit{{"          shard-count: '5'\n", "          shard-count: '4'\n"}}, "go Race shard count does not match its matrix cardinality", 0},
+		{"main Go Race runs fewer shards than go_shards", main, []edit{{"        shard: [0, 1, 2, 3, 4]\n", "        shard: [0, 1, 2, 3]\n"}}, "main Go Race does not own the 5 complete", 0},
+		{"main Go shard count is not go_shards'", main, []edit{{"          shard-count: '5'\n", "          shard-count: '4'\n"}}, "main Go Race does not own the 5 complete", 0},
+		{"coverage with unpinned Helm", scheduled, []edit{{"version: v4.2.0", "version: latest"}}, "does not install pinned Helm", 0},
+		{"pull request deployment without Bun", pullRequest, []edit{{pullRequestBun, disable(pullRequestBun)}}, "deployment verification does not install Bun", 0},
+		{"main deployment without Bun", main, []edit{{mainBun, disable(mainBun)}}, `main verification group "deployment"`, 0},
+		{"later security step without the changed-graph audit", pullRequest, []edit{{"          dependency-audit: changed\n", "          dependency-audit: never\n"}}, "does not audit changed dependency graphs", 0},
+		{"later evidence step skipped after an earlier group fails", pullRequest, []edit{{"      - name: Verify dependencies and redaction boundaries\n        if: ${{ !cancelled() }}\n", "      - name: Verify dependencies and redaction boundaries\n"}}, `evidence step "Verify dependencies and redaction boundaries" must run with if: ${{ !cancelled() }}`, 0},
+		{"shared job's evidence step without its run limit", pullRequest, []edit{{"          needs-bun: 'true'\n          time-limit-minutes: 20\n          go-cache: none\n\n  go-static-analysis:", "          needs-bun: 'true'\n          go-cache: none\n\n  go-static-analysis:"}}, `evidence step "Verify the Runtime service" must set time-limit-minutes and a timeout-minutes at least 3 minutes above it`, 0},
+		{"shared job limit below its steps' limits", pullRequest, []edit{{"    timeout-minutes: 44\n", "    timeout-minutes: 41\n"}}, `job "deployment-protocol" timeout-minutes must be at least its evidence steps' 41 plus 3 minutes`, 0},
+		{"group removed from its job", pullRequest, []edit{{sandboxStep, ""}}, "workflow producers do not match the PR producer inventory", 0},
 		{"producers swapped between jobs", pullRequest, []edit{
 			{"          group: security\n          producer: security\n", "          group: security\n          producer: gateway\n"},
 			{"          group: gateway\n          producer: gateway\n", "          group: gateway\n          producer: security\n"},
-		}, `producer "gateway" runs in job "repository-sandbox-security-runtime", but Merge Gate expects its result from job "provider-gateway"`},
-		{"Merge Gate does not wait for a job", pullRequest, []edit{{"      - deployment-protocol\n", ""}}, "merge Gate dependency set is incomplete"},
+		}, `producer "gateway" runs in job "repository-sandbox-security-runtime", but Merge Gate expects its result from job "provider-gateway"`, 0},
+		{"Merge Gate does not wait for a job", pullRequest, []edit{{"      - deployment-protocol\n", ""}}, "merge Gate dependency set is incomplete", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body, err := os.ReadFile(filepath.Join(root, ".github", "workflows", tc.file))
@@ -68,7 +92,7 @@ func TestVerificationWorkflowPolicy(t *testing.T) {
 				t.Fatal(err)
 			}
 			writeTestFile(t, fixture, ".github/workflows/"+tc.file, string(body))
-			if err := verifiers[tc.file](fixture); err != nil {
+			if err := verifiers[tc.file](fixture, committed); err != nil {
 				t.Fatalf("positive control: %v", err)
 			}
 			changed := string(body)
@@ -80,7 +104,15 @@ func TestVerificationWorkflowPolicy(t *testing.T) {
 				changed = next
 			}
 			writeTestFile(t, fixture, ".github/workflows/"+tc.file, changed)
-			if err := verifiers[tc.file](fixture); err == nil || !strings.Contains(err.Error(), tc.want) {
+			inventory := committed
+			if tc.goShards > 0 {
+				inventory = withGoShards(tc.goShards)
+			}
+			err = verifiers[tc.file](fixture, inventory)
+			if tc.want == "" && err != nil {
+				t.Fatalf("%s rejected with %d go_shards: %v", tc.file, tc.goShards, err)
+			}
+			if tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
 				t.Fatalf("%s policy error = %v; want %q", tc.file, err, tc.want)
 			}
 		})
@@ -110,7 +142,7 @@ func TestBenchmarkWorkflowPolicy(t *testing.T) {
 	}
 	const benchmark, pullRequest = "ci-benchmark.yml", "pull-request-verification.yml"
 	sideA := "          ref: ${{ needs.resolve.outputs.base }}\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Verify all Go packages under Race\n        uses: ./.github/actions/run-test-evidence\n"
-	sideBInputs := "          artifact-prefix: bench-b\n          shard-index: ${{ matrix.shard }}\n          shard-count: '4'\n          needs-helm: 'true'\n          needs-bun: 'true'\n          needs-buf: 'true'\n"
+	sideBInputs := "          artifact-prefix: bench-b\n          shard-index: ${{ matrix.shard }}\n          shard-count: ${{ needs.resolve.outputs.b-shard-count }}\n          needs-helm: 'true'\n          needs-bun: 'true'\n          needs-buf: 'true'\n"
 	tests := []struct {
 		name, file, old, new, want string
 	}{
@@ -128,7 +160,12 @@ func TestBenchmarkWorkflowPolicy(t *testing.T) {
 		{name: "drifted Go input", file: benchmark, old: sideBInputs, new: strings.Replace(sideBInputs, "needs-buf: 'true'", "needs-buf: 'false'", 1), want: "inputs differ"},
 		{name: "pull request input the benchmark lacks", file: pullRequest, old: "          go-cache: 'true'\n\n  provider-gateway:", new: "          go-cache: 'true'\n          dependency-audit: never\n\n  provider-gateway:", want: "inputs differ"},
 		{name: "shared artifact prefix", file: benchmark, old: "artifact-prefix: bench-b", new: "artifact-prefix: bench-a", want: "own artifact prefix"},
-		{name: "fewer shards", file: benchmark, old: "        shard: [0, 1, 2, 3]\n    env:\n      TETRAL_CI_TEST_MERGE_SHA: ${{ needs.resolve.outputs.head }}\n", new: "        shard: [0, 1, 2]\n    env:\n      TETRAL_CI_TEST_MERGE_SHA: ${{ needs.resolve.outputs.head }}\n", want: "shards differ"},
+		{name: "a side's matrix is not its commit's", file: benchmark, old: "shard: ${{ fromJSON(needs.resolve.outputs.b-shards) }}", new: "shard: [0, 1, 2, 3]", want: `"b-go-race" does not run the Go shards its commit lists`},
+		{name: "a side's count is not its commit's", file: benchmark, old: sideBInputs, new: strings.Replace(sideBInputs, "${{ needs.resolve.outputs.b-shard-count }}", "'4'", 1), want: `"b-go-race" does not pass the Go shard count its commit lists`},
+		{name: "a side's shard list taken from the other side", file: benchmark, old: "      a-shards: ${{ steps.shards.outputs.a-shards }}\n", new: "      a-shards: ${{ steps.shards.outputs.b-shards }}\n", want: `resolve job output "a-shards" does not come from its go_shards step`},
+		{name: "a side's shards read from the other side's commit", file: benchmark, old: "          A_SHA: ${{ steps.commits.outputs.base }}\n", new: "          A_SHA: ${{ steps.commits.outputs.head }}\n", want: "does not read each side's go_shards from its own commit"},
+		{name: "side B's shards read from the base commit", file: benchmark, old: "          B_SHA: ${{ steps.commits.outputs.head }}\n", new: "          B_SHA: ${{ steps.commits.outputs.base }}\n", want: "does not read each side's go_shards from its own commit"},
+		{name: "go_shards read from the dispatched checkout", file: benchmark, old: `git show "${sha}:internal/testinfra/pr_producers.json"`, new: `cat internal/testinfra/pr_producers.json`, want: "does not read each side's go_shards from its own commit"},
 		{name: "cache producer on main", file: benchmark, old: "if: ${{ inputs.produce-cache && github.ref != 'refs/heads/main' }}", new: "if: ${{ inputs.produce-cache }}", want: "only when produce-cache is set off main"},
 		{name: "cache produced by default", file: benchmark, old: "        type: boolean\n        required: false\n        default: false\n", new: "        type: boolean\n        required: false\n        default: true\n", want: "explicit produce-cache input"},
 		{name: "side that a skipped produce skips", file: benchmark, old: "    name: B Go Race (shard ${{ matrix.shard }})\n    needs: [resolve, produce]\n    if: ${{ !cancelled() && ", new: "    name: B Go Race (shard ${{ matrix.shard }})\n    needs: [resolve, produce]\n    if: ${{ ", want: "does not wait for produce"},
