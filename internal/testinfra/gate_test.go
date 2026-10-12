@@ -214,7 +214,7 @@ func gateFixtureExpectation() GateExpectation {
 		Repository: "tetral-ai/tetral", EventHeadSHA: strings.Repeat("a", 40), EventBaseSHA: strings.Repeat("b", 40),
 		TestMergeSHA: strings.Repeat("c", 40), RequiredCheckSHA: strings.Repeat("d", 40), WorkflowSourceSHA: strings.Repeat("e", 40),
 		Workflow: "Pull Request Verification", RunID: "123", RunAttempt: "1", Producers: []string{"repository", "go-static", "go-0", "go-1"},
-		ProducerJobs: map[string]string{"repository": "repository-integrity", "go-static": "go-static-analysis", "go-0": "go-race", "go-1": "go-race"},
+		ProducerJobs: map[string]string{"repository": "repository-sandbox-security-runtime", "go-static": "go-static-analysis", "go-0": "go-race", "go-1": "go-race"},
 		GoShards:     []string{"go-0", "go-1"},
 	}
 }

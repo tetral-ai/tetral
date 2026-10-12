@@ -23,7 +23,7 @@ func TestVerificationWorkflowStructure(t *testing.T) {
 	}
 }
 
-func TestGoWorkflowsRejectMissingTransportRenderer(t *testing.T) {
+func TestVerificationWorkflowPolicy(t *testing.T) {
 	root := testRepositoryRoot(t)
 	const pullRequest, main, scheduled = "pull-request-verification.yml", "main-branch-verification.yml", "scheduled-verification.yml"
 	verifiers := map[string]func(string) error{
@@ -31,16 +31,32 @@ func TestGoWorkflowsRejectMissingTransportRenderer(t *testing.T) {
 		main:        VerifyMainBranchWorkflow,
 		scheduled:   VerifyScheduledWorkflow,
 	}
+	type edit struct{ old, new string }
 	shardHelm := "          shard-count: '4'\n          needs-helm: 'true'"
 	pullRequestBun := "          producer: deployment\n          artifact-prefix: pr-evidence\n          needs-bun: 'true'"
 	mainBun := "            producer: deployment\n            needs_bun: 'true'"
 	disable := func(input string) string { return strings.Replace(input, "'true'", "'false'", 1) }
-	for _, tc := range []struct{ name, file, old, new string }{
-		{"pull request Go shard without Helm", pullRequest, shardHelm, disable(shardHelm)},
-		{"main Go shard without Helm", main, shardHelm, disable(shardHelm)},
-		{"coverage with unpinned Helm", scheduled, "version: v4.2.0", "version: latest"},
-		{"pull request deployment without Bun", pullRequest, pullRequestBun, disable(pullRequestBun)},
-		{"main deployment without Bun", main, mainBun, disable(mainBun)},
+	sandboxStep := "      - name: Verify the local Sandbox image\n        if: ${{ !cancelled() }}\n        timeout-minutes: 23\n        uses: ./.github/actions/run-test-evidence\n        with:\n          group: sandbox-image\n          producer: sandbox-image\n          artifact-prefix: pr-evidence\n          time-limit-minutes: 20\n          go-cache: none\n"
+	for _, tc := range []struct {
+		name, file string
+		edits      []edit
+		want       string
+	}{
+		{"pull request Go shard without Helm", pullRequest, []edit{{shardHelm, disable(shardHelm)}}, "go Race does not prepare its integration host"},
+		{"main Go shard without Helm", main, []edit{{shardHelm, disable(shardHelm)}}, "main Go Race does not own four complete integration-ready shards"},
+		{"coverage with unpinned Helm", scheduled, []edit{{"version: v4.2.0", "version: latest"}}, "does not install pinned Helm"},
+		{"pull request deployment without Bun", pullRequest, []edit{{pullRequestBun, disable(pullRequestBun)}}, "deployment verification does not install Bun"},
+		{"main deployment without Bun", main, []edit{{mainBun, disable(mainBun)}}, `main verification group "deployment"`},
+		{"later security step without the changed-graph audit", pullRequest, []edit{{"          dependency-audit: changed\n", "          dependency-audit: never\n"}}, "does not audit changed dependency graphs"},
+		{"later evidence step skipped after an earlier group fails", pullRequest, []edit{{"      - name: Verify dependencies and redaction boundaries\n        if: ${{ !cancelled() }}\n", "      - name: Verify dependencies and redaction boundaries\n"}}, `evidence step "Verify dependencies and redaction boundaries" must run with if: ${{ !cancelled() }}`},
+		{"shared job's evidence step without its run limit", pullRequest, []edit{{"          needs-bun: 'true'\n          time-limit-minutes: 20\n          go-cache: none\n\n  go-static-analysis:", "          needs-bun: 'true'\n          go-cache: none\n\n  go-static-analysis:"}}, `evidence step "Verify the Runtime service" must set time-limit-minutes and a timeout-minutes at least 3 minutes above it`},
+		{"shared job limit below its steps' limits", pullRequest, []edit{{"    timeout-minutes: 44\n", "    timeout-minutes: 41\n"}}, `job "deployment-protocol" timeout-minutes must be at least its evidence steps' 41 plus 3 minutes`},
+		{"group removed from its job", pullRequest, []edit{{sandboxStep, ""}}, "workflow producers do not match the PR producer inventory"},
+		{"producers swapped between jobs", pullRequest, []edit{
+			{"          group: security\n          producer: security\n", "          group: security\n          producer: gateway\n"},
+			{"          group: gateway\n          producer: gateway\n", "          group: gateway\n          producer: security\n"},
+		}, `producer "gateway" runs in job "repository-sandbox-security-runtime", but Merge Gate expects its result from job "provider-gateway"`},
+		{"Merge Gate does not wait for a job", pullRequest, []edit{{"      - deployment-protocol\n", ""}}, "merge Gate dependency set is incomplete"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body, err := os.ReadFile(filepath.Join(root, ".github", "workflows", tc.file))
@@ -55,13 +71,17 @@ func TestGoWorkflowsRejectMissingTransportRenderer(t *testing.T) {
 			if err := verifiers[tc.file](fixture); err != nil {
 				t.Fatalf("positive control: %v", err)
 			}
-			changed := strings.Replace(string(body), tc.old, tc.new, 1)
-			if changed == string(body) {
-				t.Fatalf("%s does not contain the text this case changes", tc.file)
+			changed := string(body)
+			for _, change := range tc.edits {
+				next := strings.Replace(changed, change.old, change.new, 1)
+				if next == changed {
+					t.Fatalf("%s does not contain the text this case changes", tc.file)
+				}
+				changed = next
 			}
 			writeTestFile(t, fixture, ".github/workflows/"+tc.file, changed)
-			if err := verifiers[tc.file](fixture); err == nil {
-				t.Fatalf("%s accepted the change", tc.file)
+			if err := verifiers[tc.file](fixture); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("%s policy error = %v; want %q", tc.file, err, tc.want)
 			}
 		})
 	}
@@ -106,7 +126,7 @@ func TestBenchmarkWorkflowPolicy(t *testing.T) {
 		{name: "persisted credentials", file: benchmark, old: sideA, new: strings.Replace(sideA, "persist-credentials: false", "persist-credentials: true", 1), want: "complete history"},
 		{name: "running-commit action", file: benchmark, old: sideA, new: strings.Replace(sideA, "uses: ./", "uses: $/", 1), want: "outside its checkout"},
 		{name: "drifted Go input", file: benchmark, old: sideBInputs, new: strings.Replace(sideBInputs, "needs-buf: 'true'", "needs-buf: 'false'", 1), want: "inputs differ"},
-		{name: "pull request input the benchmark lacks", file: pullRequest, old: "          go-cache: 'true'\n\n  agent-runtime:", new: "          go-cache: 'true'\n          dependency-audit: never\n\n  agent-runtime:", want: "inputs differ"},
+		{name: "pull request input the benchmark lacks", file: pullRequest, old: "          go-cache: 'true'\n\n  provider-gateway:", new: "          go-cache: 'true'\n          dependency-audit: never\n\n  provider-gateway:", want: "inputs differ"},
 		{name: "shared artifact prefix", file: benchmark, old: "artifact-prefix: bench-b", new: "artifact-prefix: bench-a", want: "own artifact prefix"},
 		{name: "fewer shards", file: benchmark, old: "        shard: [0, 1, 2, 3]\n    env:\n      TETRAL_CI_TEST_MERGE_SHA: ${{ needs.resolve.outputs.head }}\n", new: "        shard: [0, 1, 2]\n    env:\n      TETRAL_CI_TEST_MERGE_SHA: ${{ needs.resolve.outputs.head }}\n", want: "shards differ"},
 		{name: "cache producer on main", file: benchmark, old: "if: ${{ inputs.produce-cache && github.ref != 'refs/heads/main' }}", new: "if: ${{ inputs.produce-cache }}", want: "only when produce-cache is set off main"},
@@ -183,12 +203,14 @@ func TestGoBuildCacheWorkflowPolicy(t *testing.T) {
 		{name: "consumer paths differ", edits: []edit{{action, "          ~/.cache/go-build\n          ~/go/pkg/mod\n", "          ~/go/pkg/mod\n          ~/.cache/go-build\n"}}, want: "paths differ"},
 		{name: "consumer restore keys out of order", edits: []edit{{action, "-key.outputs.modules-prefix }}\n          ${{ steps.go-cache-key.outputs.compiler-prefix }}", "-key.outputs.compiler-prefix }}\n          ${{ steps.go-cache-key.outputs.modules-prefix }}"}}, want: "in order"},
 		{name: "consumer restores whatever the free disk", edits: []edit{{action, "      if: inputs.go-cache == 'true' && fromJSON(steps.go-cache-before.outputs.disk-free || '0') >= 25000000000\n", "      if: inputs.go-cache == 'true'\n"}}, want: "free-disk guard"},
-		{name: "consumer keeps setup-go's cache", edits: []edit{{action, "        cache: ${{ inputs.go-cache != 'true' }}\n", ""}}, want: "beside the Go build cache"},
+		{name: "consumer keeps setup-go's cache", edits: []edit{{action, "        cache: ${{ inputs.go-cache == 'false' }}\n", ""}}, want: "beside the Go build cache"},
 		{name: "consumer restores after buf is installed", edits: []edit{{action, installBuf, ""}, {action, "    - name: Compute the Go build cache key\n", installBuf + "    - name: Compute the Go build cache key\n"}}, want: "installs buf before"},
-		{name: "pull request Go Race without the cache", edits: []edit{{pull, "          go-cache: 'true'\n\n  agent-runtime:", "\n  agent-runtime:"}}, want: "job \"go-race\" does not restore the Go build cache"},
+		{name: "pull request Go Race without the cache", edits: []edit{{pull, "          go-cache: 'true'\n\n  provider-gateway:", "\n  provider-gateway:"}}, want: "job \"go-race\" does not restore the Go build cache"},
+		{name: "second Go build cache restore in one job", edits: []edit{{pull, "          go-cache: none\n\n  merge-gate:", "          go-cache: 'true'\n\n  merge-gate:"}}, want: "job \"deployment-protocol\" restores a Go cache again in evidence step \"Verify protocol and SDK contracts\""},
+		{name: "later evidence step restores setup-go's cache", edits: []edit{{pull, "          go-cache: none\n\n  go-static-analysis:", "\n  go-static-analysis:"}}, want: "job \"repository-sandbox-security-runtime\" restores a Go cache again in evidence step \"Verify the Runtime service\""},
 		{name: "main Go Race restores with write access", edits: []edit{{main, "    timeout-minutes: 35\n    cache-mode: read\n", "    timeout-minutes: 35\n"}}, want: "with write access"},
 		{name: "pull request workflow may write", edits: []edit{{pull, "cache-mode: read\n", ""}}, want: "pull-request-verification.yml runs on pull requests without cache-mode read"},
-		{name: "pull request job override", edits: []edit{{pull, "    name: Agent Runtime\n", "    name: Agent Runtime\n    cache-mode: write\n"}}, want: "overrides the pull request cache-mode"},
+		{name: "pull request job override", edits: []edit{{pull, "    name: Provider Gateway\n", "    name: Provider Gateway\n    cache-mode: write\n"}}, want: "overrides the pull request cache-mode"},
 		{name: "vulnerability scan may write", edits: []edit{{vulncheck, "cache-mode: read\n", ""}}, want: "engine-vulncheck.yml runs on pull requests without cache-mode read"},
 		{name: "workflow-wide write access", edits: []edit{{main, "permissions:\n  contents: read\n", "permissions:\n  contents: read\n\ncache-mode: write\n"}}, want: "grants every job write-capable cache access"},
 		{name: "another job with write access", edits: []edit{{scheduled, coverage, strings.Replace(coverage, "    steps:\n", "    cache-mode: write-only\n    steps:\n", 1)}}, want: "job \"coverage\" has write-capable cache access"},

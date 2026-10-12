@@ -8,23 +8,33 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
 var pullRequestJobs = map[string]string{
-	"repository-integrity":   "Repository Integrity",
-	"go-static-analysis":     "Go Static Analysis",
-	"go-race":                "Go Race (shard ${{ matrix.shard }})",
-	"agent-runtime":          "Agent Runtime",
-	"provider-gateway":       "Provider Gateway",
-	"protocol-sdk":           "Protocol and SDK Compatibility",
-	"deployment-definitions": "Deployment Definitions",
-	"sandbox-image":          "Sandbox Image",
-	"dependency-security":    "Dependency Security",
-	"merge-gate":             "Merge Gate",
+	"repository-sandbox-security-runtime": "Repository, Sandbox Image, Security and Runtime",
+	"go-static-analysis":                  "Go Static Analysis",
+	"go-race":                             "Go Race (shard ${{ matrix.shard }})",
+	"provider-gateway":                    "Provider Gateway",
+	"deployment-protocol":                 "Deployment and Protocol",
+	"merge-gate":                          "Merge Gate",
 }
 
-const pinnedSetupBunAction = "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
+const (
+	pinnedSetupBunAction = "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
+	evidenceAction       = "./.github/actions/run-test-evidence"
+	// A job's evidence steps after its first run although an earlier group
+	// failed, so a failing group does not stop the groups after it.
+	followOnEvidenceCondition = "${{ !cancelled() }}"
+	// In a job with several evidence steps, a step's timeout-minutes leaves
+	// this much beyond its time-limit-minutes for the setup before the run, the
+	// one-minute interrupt grace and the upload.
+	evidenceStepBackstopMinutes = 3
+	// Such a job's timeout-minutes leaves this much beyond its steps' limits
+	// for checkout and the post steps.
+	sharedJobOverheadMinutes = 3
+)
 
 func VerifyPullRequestWorkflow(root string) error {
 	document, err := parseYAMLFile(filepath.Join(root, ".github", "workflows", "pull-request-verification.yml"))
@@ -76,10 +86,14 @@ func VerifyPullRequestWorkflow(root string) error {
 	if !goRacePreparesIntegrationHost(mappingValue(jobs, "go-race")) {
 		return fmt.Errorf("go Race does not prepare its integration host")
 	}
-	if !jobEvidenceInputEquals(mappingValue(jobs, "deployment-definitions"), "needs-bun", "true") {
+	evidence, err := readPullRequestEvidence(jobs)
+	if err != nil {
+		return err
+	}
+	if !evidence.groupInputEquals("deployment", "needs-bun", "true") {
 		return fmt.Errorf("deployment verification does not install Bun for the owning configuration parsers")
 	}
-	if !jobEvidenceInputEquals(mappingValue(jobs, "dependency-security"), "dependency-audit", string(DependencyAuditChanged)) {
+	if !evidence.groupInputEquals("security", "dependency-audit", string(DependencyAuditChanged)) {
 		return fmt.Errorf("pull request dependency security does not audit changed dependency graphs")
 	}
 	gate := mappingValue(jobs, "merge-gate")
@@ -89,8 +103,7 @@ func VerifyPullRequestWorkflow(root string) error {
 	if !mergeGateDownloadsAllRunAttempts(gate) {
 		return fmt.Errorf("merge Gate does not reconcile evidence across rerun attempts")
 	}
-	expectedNeeds := []string{"repository-integrity", "go-static-analysis", "go-race", "agent-runtime", "provider-gateway", "protocol-sdk", "deployment-definitions", "sandbox-image", "dependency-security"}
-	if !sameStrings(sequenceScalars(mappingValue(gate, "needs")), expectedNeeds) {
+	if !sameStrings(sequenceScalars(mappingValue(gate, "needs")), PRUpstreamJobs()) {
 		return fmt.Errorf("merge Gate dependency set is incomplete")
 	}
 	gateEnvironment := mappingValue(gate, "env")
@@ -98,18 +111,14 @@ func VerifyPullRequestWorkflow(root string) error {
 		scalar(mappingValue(gateEnvironment, "TETRAL_CI_NEEDS")) != "${{ toJSON(needs) }}" {
 		return fmt.Errorf("merge Gate is missing live read-only reconciliation inputs")
 	}
-	producers, goShards, err := workflowEvidenceProducers(jobs)
-	if err != nil {
-		return err
-	}
 	inventory, err := LoadPRProducers()
 	if err != nil {
 		return err
 	}
-	if !sameStrings(producers, inventory.Producers) {
+	if !sameStrings(evidence.producers, inventory.Producers) {
 		return fmt.Errorf("workflow producers do not match the PR producer inventory")
 	}
-	if !sameStrings(goShards, inventory.GoShards) {
+	if !sameStrings(evidence.goShards, inventory.GoShards) {
 		return fmt.Errorf("go Race producers do not match the PR inventory's Go shards")
 	}
 	return nil
@@ -399,7 +408,8 @@ type goBuildCacheWriter struct {
 // VerifyGoBuildCacheWorkflows keeps the Go build cache main-owned. Only the Go
 // Build Cache job on main and CI Benchmark's guarded produce job save it, each
 // from the repository's build script after a lookup of the exact key; every
-// consumer restores the same paths under the same key read-only; pull request
+// consumer restores the same paths under the same key read-only; a pull
+// request job restores a Go cache in its first evidence step only; pull request
 // workflows only read the Actions cache; and no other job can write it.
 func VerifyGoBuildCacheWorkflows(root string) error {
 	workflows := filepath.Join(root, ".github", "workflows")
@@ -426,7 +436,7 @@ func VerifyGoBuildCacheWorkflows(root string) error {
 	}
 	for index, step := range consumerSteps {
 		uses := scalar(mappingValue(step, "uses"))
-		if strings.HasPrefix(uses, "actions/setup-go@") && scalar(mappingValue(mappingValue(step, "with"), "cache")) != "${{ inputs.go-cache != 'true' }}" {
+		if strings.HasPrefix(uses, "actions/setup-go@") && scalar(mappingValue(mappingValue(step, "with"), "cache")) != "${{ inputs.go-cache == 'false' }}" {
 			return fmt.Errorf("evidence action keeps setup-go's own cache beside the Go build cache")
 		}
 		if scalar(mappingValue(step, "name")) == "Install buf" && index < restoreIndex {
@@ -463,8 +473,7 @@ func VerifyGoBuildCacheWorkflows(root string) error {
 		readOnly  bool
 	}{
 		{file: "pull-request-verification.yml", job: "go-race"},
-		{file: "pull-request-verification.yml", job: "deployment-definitions"},
-		{file: "pull-request-verification.yml", job: "protocol-sdk"},
+		{file: "pull-request-verification.yml", job: "deployment-protocol"},
 		{file: "main-branch-verification.yml", job: "go-race", readOnly: true},
 	}
 	for _, consumer := range consumers {
@@ -478,6 +487,22 @@ func VerifyGoBuildCacheWorkflows(root string) error {
 		}
 		if consumer.readOnly && scalar(mappingValue(job, "cache-mode")) != "read" {
 			return fmt.Errorf("%s job %q restores the Go build cache with write access", consumer.file, consumer.job)
+		}
+	}
+	// A job's later evidence steps use the Go caches its first step restored. A
+	// second restore downloads the archive again and fails to extract over the
+	// read-only module cache.
+	pullRequest, err := parseYAMLFile(filepath.Join(workflows, "pull-request-verification.yml"))
+	if err != nil {
+		return err
+	}
+	jobs := mappingValue(pullRequest.Content[0], "jobs")
+	for index := 0; jobs != nil && index+1 < len(jobs.Content); index += 2 {
+		jobID, steps := jobs.Content[index].Value, evidenceSteps(jobs.Content[index+1])
+		for position := 1; position < len(steps); position++ {
+			if scalar(mappingValue(mappingValue(steps[position], "with"), "go-cache")) != "none" {
+				return fmt.Errorf("pull-request-verification.yml job %q restores a Go cache again in evidence step %q; want go-cache: none", jobID, scalar(mappingValue(steps[position], "name")))
+			}
 		}
 	}
 	return verifyActionsCacheWriters(root, writers)
@@ -647,19 +672,34 @@ func stepWithID(steps []*workflowYAMLNode, id string) *workflowYAMLNode {
 	return nil
 }
 
-func evidenceStepInputs(job *workflowYAMLNode) map[string]string {
+// evidenceSteps returns a job's steps that run the repository's evidence
+// action, in order.
+func evidenceSteps(job *workflowYAMLNode) []*workflowYAMLNode {
+	var steps []*workflowYAMLNode
 	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
-		if scalar(mappingValue(step, "uses")) != "./.github/actions/run-test-evidence" {
-			continue
+		if scalar(mappingValue(step, "uses")) == evidenceAction {
+			steps = append(steps, step)
 		}
-		inputs := map[string]string{}
-		with := mappingValue(step, "with")
-		for index := 0; with != nil && index+1 < len(with.Content); index += 2 {
-			inputs[with.Content[index].Value] = scalar(with.Content[index+1])
-		}
-		return inputs
 	}
-	return nil
+	return steps
+}
+
+func stepInputs(step *workflowYAMLNode) map[string]string {
+	inputs := map[string]string{}
+	with := mappingValue(step, "with")
+	for index := 0; with != nil && index+1 < len(with.Content); index += 2 {
+		inputs[with.Content[index].Value] = scalar(with.Content[index+1])
+	}
+	return inputs
+}
+
+// evidenceStepInputs returns the inputs of a job's first evidence step.
+func evidenceStepInputs(job *workflowYAMLNode) map[string]string {
+	steps := evidenceSteps(job)
+	if len(steps) == 0 {
+		return nil
+	}
+	return stepInputs(steps[0])
 }
 
 func jobChecksOutFullHistory(job *workflowYAMLNode) bool {
@@ -707,14 +747,10 @@ func jobRunContainsAll(job *workflowYAMLNode, fragments ...string) bool {
 	return false
 }
 
+// jobEvidenceInputEquals reads the job's first evidence step only.
 func jobEvidenceInputEquals(job *workflowYAMLNode, name, value string) bool {
-	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
-		if scalar(mappingValue(step, "uses")) != "./.github/actions/run-test-evidence" {
-			continue
-		}
-		return scalar(mappingValue(mappingValue(step, "with"), name)) == value
-	}
-	return false
+	inputs := evidenceStepInputs(job)
+	return inputs != nil && inputs[name] == value
 }
 
 func readOnlyPermissions(permissions *workflowYAMLNode, names []string) bool {
@@ -757,41 +793,97 @@ func VerifyWorkflowSkeletons(root string) error {
 	return nil
 }
 
-func workflowEvidenceProducers(jobs *workflowYAMLNode) ([]string, []string, error) {
-	var producers, goShards []string
+// pullRequestEvidence is what the pull request jobs' evidence steps declare:
+// every producer, the Go shard producers, and each group's step inputs.
+type pullRequestEvidence struct {
+	producers, goShards []string
+	groups              map[string][]map[string]string
+}
+
+// readPullRequestEvidence reads every evidence step of every job; a job may run
+// several groups, one step each. Each producer must run in the job Merge Gate
+// expects its result from (PRProducerJobs).
+func readPullRequestEvidence(jobs *workflowYAMLNode) (pullRequestEvidence, error) {
+	evidence := pullRequestEvidence{groups: map[string][]map[string]string{}}
+	producerJobs := PRProducerJobs()
 	for index := 0; index+1 < len(jobs.Content); index += 2 {
 		jobID, job := jobs.Content[index].Value, jobs.Content[index+1]
 		if jobID == "merge-gate" {
 			continue
 		}
-		steps := mappingValue(job, "steps")
-		found := ""
-		for _, step := range sequenceNodes(steps) {
-			if scalar(mappingValue(step, "uses")) != "./.github/actions/run-test-evidence" {
-				continue
-			}
-			found = scalar(mappingValue(mappingValue(step, "with"), "producer"))
+		steps := evidenceSteps(job)
+		if len(steps) == 0 {
+			return pullRequestEvidence{}, fmt.Errorf("evidence job %q has no repository runner producer", jobID)
 		}
-		if found == "" {
-			return nil, nil, fmt.Errorf("evidence job %q has no repository runner producer", jobID)
+		if len(steps) > 1 {
+			if err := verifySharedJobLimits(jobID, job, steps); err != nil {
+				return pullRequestEvidence{}, err
+			}
 		}
-		if jobID == "go-race" {
-			shards := sequenceScalars(mappingValue(mappingValue(mappingValue(job, "strategy"), "matrix"), "shard"))
-			if !sameStrings(shards, []string{"0", "1", "2", "3"}) || found != "go-${{ matrix.shard }}" {
-				return nil, nil, fmt.Errorf("go Race does not own the exact four shards")
+		for position, step := range steps {
+			if position > 0 && scalar(mappingValue(step, "if")) != followOnEvidenceCondition {
+				return pullRequestEvidence{}, fmt.Errorf("pull request job %q evidence step %q must run with if: %s", jobID, scalar(mappingValue(step, "name")), followOnEvidenceCondition)
 			}
-			if !jobEvidenceInputEquals(job, "shard-count", fmt.Sprintf("%d", len(shards))) {
-				return nil, nil, fmt.Errorf("go Race shard count does not match its matrix cardinality")
+			inputs := stepInputs(step)
+			if inputs["producer"] == "" {
+				return pullRequestEvidence{}, fmt.Errorf("evidence job %q has no repository runner producer", jobID)
 			}
-			for _, shard := range shards {
-				goShards = append(goShards, "go-"+shard)
+			evidence.groups[inputs["group"]] = append(evidence.groups[inputs["group"]], inputs)
+			producers := []string{inputs["producer"]}
+			if jobID == "go-race" {
+				shards := sequenceScalars(mappingValue(mappingValue(mappingValue(job, "strategy"), "matrix"), "shard"))
+				if !sameStrings(shards, []string{"0", "1", "2", "3"}) || inputs["producer"] != "go-${{ matrix.shard }}" {
+					return pullRequestEvidence{}, fmt.Errorf("go Race does not own the exact four shards")
+				}
+				if inputs["shard-count"] != fmt.Sprintf("%d", len(shards)) {
+					return pullRequestEvidence{}, fmt.Errorf("go Race shard count does not match its matrix cardinality")
+				}
+				producers = nil
+				for _, shard := range shards {
+					producers = append(producers, "go-"+shard)
+				}
+				evidence.goShards = append(evidence.goShards, producers...)
 			}
-			producers = append(producers, goShards...)
-			continue
+			for _, producer := range producers {
+				if producerJobs[producer] != jobID {
+					return pullRequestEvidence{}, fmt.Errorf("producer %q runs in job %q, but Merge Gate expects its result from job %q", producer, jobID, producerJobs[producer])
+				}
+			}
+			evidence.producers = append(evidence.producers, producers...)
 		}
-		producers = append(producers, found)
 	}
-	return producers, goShards, nil
+	return evidence, nil
+}
+
+// verifySharedJobLimits keeps a hanging group from cancelling a job that runs
+// several groups: each run stops at its time-limit-minutes and still uploads
+// its result, and the step and job limits are backstops above it. A step or
+// job timeout would instead skip the upload or the later groups.
+func verifySharedJobLimits(jobID string, job *workflowYAMLNode, steps []*workflowYAMLNode) error {
+	sum := 0
+	for _, step := range steps {
+		run, runErr := strconv.Atoi(scalar(mappingValue(mappingValue(step, "with"), "time-limit-minutes")))
+		limit, limitErr := strconv.Atoi(scalar(mappingValue(step, "timeout-minutes")))
+		if runErr != nil || limitErr != nil || run <= 0 || limit < run+evidenceStepBackstopMinutes {
+			return fmt.Errorf("pull request job %q evidence step %q must set time-limit-minutes and a timeout-minutes at least %d minutes above it", jobID, scalar(mappingValue(step, "name")), evidenceStepBackstopMinutes)
+		}
+		sum += limit
+	}
+	if limit, err := strconv.Atoi(scalar(mappingValue(job, "timeout-minutes"))); err != nil || limit < sum+sharedJobOverheadMinutes {
+		return fmt.Errorf("pull request job %q timeout-minutes must be at least its evidence steps' %d plus %d minutes", jobID, sum, sharedJobOverheadMinutes)
+	}
+	return nil
+}
+
+// groupInputEquals reports whether the group runs in at least one evidence step
+// and every such step passes the input value.
+func (evidence pullRequestEvidence) groupInputEquals(group, name, value string) bool {
+	for _, inputs := range evidence.groups[group] {
+		if inputs[name] != value {
+			return false
+		}
+	}
+	return len(evidence.groups[group]) > 0
 }
 
 func parseYAMLFile(path string) (*workflowYAMLNode, error) {

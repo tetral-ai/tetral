@@ -200,10 +200,17 @@ The readable CI topology is:
 
 - **Pull Request Verification**: read-only, hermetic PR evidence split by
   ownership. Four duration-balanced jobs cover every Go package under Race;
-  TypeScript, protocol, deployment, image, security, and repository evidence
-  have separate owners. **Merge Gate** reconciles exactly one result from every
-  required producer for the same PR event, tested integration commit, workflow
-  source, run, and attempt.
+  Go static analysis and the Gateway have a job each. The shorter groups share
+  two jobs, one evidence step and producer per group: repository, Sandbox
+  image, security and Runtime in one, deployment and protocol in the other. A
+  group's run stops at its own time limit with a failed result, and every step
+  runs even after an earlier group in its job failed, so each group that
+  reaches its run uploads its own result. Re-running a failed shared job
+  reruns all of its groups. **Merge Gate** reconciles exactly one result from
+  every required producer for the same PR event, tested integration commit,
+  workflow source and run, taking each producer's result from the latest
+  attempt that has one, and accepts each only from the job that runs that
+  producer.
 - **Main Branch Verification**: the same evidence owners run independently on
   the exact merged commit. Four jobs shard Go Race; repository, static,
   Runtime, Gateway, protocol, deployment, image, and security evidence run in
@@ -388,18 +395,25 @@ sub-path of one repository uses the same SHA.
 
 ### Go build cache
 
-Go Race, Deployment Definitions and Protocol and SDK Compatibility jobs restore
-one Go build cache entry, read-only, instead of setup-go's own cache: the build
-cache, the module cache and installed tools (`~/.cache/go-build`,
-`~/go/pkg/mod`, `~/go/bin`). Its key is
+Go Race jobs and the Deployment and Protocol job restore one Go build cache
+entry, read-only, instead of setup-go's own cache: the build cache, the module
+cache and installed tools (`~/.cache/go-build`, `~/go/pkg/mod`, `~/go/bin`).
+Its key is
 `go-race-v1-Linux-<Go version>-cc<gcc fingerprint>-<go.sum hashes>-<commit>`.
 A job restores the entry of its own commit, else the newest one for its
 `go.sum` files, else for its compiler, else for its Go version, and Go
 recompiles whatever differs. The entry extracts to about 8.4 GB, so a job with
 less than 25 GB of free disk before the restore, or whose free disk could not
 be measured, skips it and compiles cold.
-Each result records the restore: key, matched key, an exact, prefix, missed or
-skipped match, its duration and size, and free disk before and after.
+The result of the step that restores it records the restore: key, matched key,
+an exact, prefix, missed or skipped match, its duration and size, and free disk
+before and after.
+
+A job that runs several evidence groups restores a Go cache, either this entry
+or setup-go's own, in its first evidence step only. Its later steps pass
+`go-cache: none` and use what is already on disk: a second restore would
+download the archive again and cannot extract over the read-only module cache.
+`VerifyGoBuildCacheWorkflows` checks this for Pull Request Verification.
 
 Only the **Go Build Cache** workflow (`.github/workflows/go-build-cache.yml`)
 writes these entries in main's scope. It runs `scripts/build-go-cache.sh`,

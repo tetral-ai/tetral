@@ -44,17 +44,37 @@ inputs:
     required: false
     default: changed
   go-cache:
-    description: Restore the Go Build Cache entry, read-only, instead of setup-go's own cache
+    description: Which Go cache to restore. true restores the Go Build Cache entry, read-only, false setup-go's own cache, and none neither, for evidence steps after a job's first
     required: false
     default: 'false'
+  time-limit-minutes:
+    description: Minutes the evidence run may take before it is interrupted, records its result and fails; empty for no limit of its own
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
+    - name: Check the evidence inputs
+      shell: bash
+      env:
+        GO_CACHE: ${{ inputs.go-cache }}
+        TIME_LIMIT_MINUTES: ${{ inputs.time-limit-minutes }}
+      run: |
+        set -euo pipefail
+        if [[ ! "$GO_CACHE" =~ ^(true|false|none)$ ]]; then
+          echo "go-cache must be true, false or none, not '$GO_CACHE'" >&2
+          exit 1
+        fi
+        if [[ -n "$TIME_LIMIT_MINUTES" && ! "$TIME_LIMIT_MINUTES" =~ ^[1-9][0-9]*$ ]]; then
+          echo "time-limit-minutes must be a whole number of minutes, not '$TIME_LIMIT_MINUTES'" >&2
+          exit 1
+        fi
+
     - name: Set up Go
       uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
       with:
         go-version: '1.26.9'
-        cache: ${{ inputs.go-cache != 'true' }}
+        cache: ${{ inputs.go-cache == 'false' }}
         cache-dependency-path: go.sum
 
     - name: Compute the Go build cache key
@@ -174,13 +194,21 @@ runs:
         TETRAL_CI_GO_CACHE_RESTORED_BYTES: ${{ steps.go-cache-restored.outputs.bytes }}
         TETRAL_CI_GO_CACHE_DISK_FREE_BEFORE: ${{ steps.go-cache-before.outputs.disk-free }}
         TETRAL_CI_GO_CACHE_DISK_FREE_AFTER: ${{ steps.go-cache-restored.outputs.disk-free }}
+        TIME_LIMIT_MINUTES: ${{ inputs.time-limit-minutes }}
       run: |
         set -euo pipefail
         group_args=()
         if [[ '${{ inputs.group }}' != 'all' ]]; then
           group_args=(--groups '${{ inputs.group }}')
         fi
-        go run ./internal/testinfra/cmd/tetral-test \
+        # At the limit tetral-test gets SIGINT, stops its command, writes its
+        # result and exits, so the upload below still runs; a step
+        # timeout-minutes would cancel the upload too.
+        limit=()
+        if [[ -n "$TIME_LIMIT_MINUTES" ]]; then
+          limit=(timeout --verbose --signal=INT --kill-after=1m "${TIME_LIMIT_MINUTES}m")
+        fi
+        "${limit[@]}" go run ./internal/testinfra/cmd/tetral-test \
           --profile full \
           --workers 2 \
           --dependency-audit '${{ inputs.dependency-audit }}' \

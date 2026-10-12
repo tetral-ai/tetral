@@ -45,11 +45,15 @@ func LoadPRProducers() (PRProducerInventory, error) {
 	return PRProducerInventory{Producers: slices.Clone(document.Producers), GoShards: slices.Clone(document.GoShards)}, nil
 }
 
+// PRProducerJobs maps each producer to the Pull Request Verification job that
+// runs its evidence step; Merge Gate rejects a result from any other job, and
+// VerifyPullRequestWorkflow checks the map against the workflow.
 func PRProducerJobs() map[string]string {
 	return map[string]string{
-		"repository": "repository-integrity", "go-static": "go-static-analysis",
+		"repository": "repository-sandbox-security-runtime", "sandbox-image": "repository-sandbox-security-runtime",
+		"security": "repository-sandbox-security-runtime", "runtime": "repository-sandbox-security-runtime",
+		"go-static": "go-static-analysis", "gateway": "provider-gateway",
 		"go-0": "go-race", "go-1": "go-race", "go-2": "go-race", "go-3": "go-race",
-		"runtime": "agent-runtime", "gateway": "provider-gateway", "protocol": "protocol-sdk",
-		"deployment": "deployment-definitions", "sandbox-image": "sandbox-image", "security": "dependency-security",
+		"deployment": "deployment-protocol", "protocol": "deployment-protocol",
 	}
 }

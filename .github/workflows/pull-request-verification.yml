@@ -29,22 +29,62 @@ env:
   TETRAL_CI_PULL_REQUEST: ${{ github.event.pull_request.number }}
 
 jobs:
-  repository-integrity:
-    name: Repository Integrity
+  repository-sandbox-security-runtime:
+    name: Repository, Sandbox Image, Security and Runtime
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The steps' limits plus checkout, so a hanging group never cancels the job.
+    timeout-minutes: 85
     steps:
       - name: Check out the exact test revision
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           fetch-depth: 0
           persist-credentials: false
+      # Each group's run stops at time-limit-minutes and still uploads its
+      # result; the step limit above it is a backstop. Later steps run even when
+      # an earlier group failed, and reuse the Go cache the first step restored.
       - name: Verify repository integrity
+        timeout-minutes: 13
         uses: ./.github/actions/run-test-evidence
         with:
           group: repository
           producer: repository
           artifact-prefix: pr-evidence
+          time-limit-minutes: 10
+      # Before any Bun install, so the image build context holds no node_modules.
+      - name: Verify the local Sandbox image
+        if: ${{ !cancelled() }}
+        timeout-minutes: 23
+        uses: ./.github/actions/run-test-evidence
+        with:
+          group: sandbox-image
+          producer: sandbox-image
+          artifact-prefix: pr-evidence
+          time-limit-minutes: 20
+          go-cache: none
+      - name: Verify dependencies and redaction boundaries
+        if: ${{ !cancelled() }}
+        timeout-minutes: 23
+        uses: ./.github/actions/run-test-evidence
+        with:
+          group: security
+          producer: security
+          artifact-prefix: pr-evidence
+          needs-bun: 'true'
+          dependency-audit: changed
+          time-limit-minutes: 20
+          go-cache: none
+      - name: Verify the Runtime service
+        if: ${{ !cancelled() }}
+        timeout-minutes: 23
+        uses: ./.github/actions/run-test-evidence
+        with:
+          group: runtime
+          producer: runtime
+          artifact-prefix: pr-evidence
+          needs-bun: 'true'
+          time-limit-minutes: 20
+          go-cache: none
 
   go-static-analysis:
     name: Go Static Analysis
@@ -92,24 +132,6 @@ jobs:
           needs-go-test-host: 'true'
           go-cache: 'true'
 
-  agent-runtime:
-    name: Agent Runtime
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Check out the exact test revision
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Verify the Runtime service
-        uses: ./.github/actions/run-test-evidence
-        with:
-          group: runtime
-          producer: runtime
-          artifact-prefix: pr-evidence
-          needs-bun: 'true'
-
   provider-gateway:
     name: Provider Gateway
     runs-on: ubuntu-latest
@@ -128,37 +150,23 @@ jobs:
           artifact-prefix: pr-evidence
           needs-bun: 'true'
 
-  protocol-sdk:
-    name: Protocol and SDK Compatibility
+  deployment-protocol:
+    name: Deployment and Protocol
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The steps' limits plus checkout, so a hanging group never cancels the job.
+    timeout-minutes: 44
     steps:
       - name: Check out the exact test revision
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify protocol and SDK contracts
-        uses: ./.github/actions/run-test-evidence
-        with:
-          group: protocol
-          producer: protocol
-          artifact-prefix: pr-evidence
-          needs-bun: 'true'
-          needs-buf: 'true'
-          go-cache: 'true'
-
-  deployment-definitions:
-    name: Deployment Definitions
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Check out the exact test revision
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          fetch-depth: 0
-          persist-credentials: false
+      # Each group's run stops at time-limit-minutes and still uploads its
+      # result; the step limit above it is a backstop. The protocol step runs
+      # even when deployment failed, and uses the Go build cache the first step
+      # restored.
       - name: Verify Kubernetes and Helm definitions
+        timeout-minutes: 18
         uses: ./.github/actions/run-test-evidence
         with:
           group: deployment
@@ -166,57 +174,30 @@ jobs:
           artifact-prefix: pr-evidence
           needs-bun: 'true'
           needs-helm: 'true'
+          time-limit-minutes: 15
           go-cache: 'true'
-
-  sandbox-image:
-    name: Sandbox Image
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Check out the exact test revision
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Verify the local Sandbox image
+      - name: Verify protocol and SDK contracts
+        if: ${{ !cancelled() }}
+        timeout-minutes: 23
         uses: ./.github/actions/run-test-evidence
         with:
-          group: sandbox-image
-          producer: sandbox-image
-          artifact-prefix: pr-evidence
-
-  dependency-security:
-    name: Dependency Security
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Check out the exact test revision
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Verify dependencies and redaction boundaries
-        uses: ./.github/actions/run-test-evidence
-        with:
-          group: security
-          producer: security
+          group: protocol
+          producer: protocol
           artifact-prefix: pr-evidence
           needs-bun: 'true'
-          dependency-audit: changed
+          needs-buf: 'true'
+          time-limit-minutes: 20
+          go-cache: none
 
   merge-gate:
     name: Merge Gate
     if: always()
     needs:
-      - repository-integrity
+      - repository-sandbox-security-runtime
       - go-static-analysis
       - go-race
-      - agent-runtime
       - provider-gateway
-      - protocol-sdk
-      - deployment-definitions
-      - sandbox-image
-      - dependency-security
+      - deployment-protocol
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:

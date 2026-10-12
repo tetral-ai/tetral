@@ -148,8 +148,8 @@ func executionEnvelopeFromEnvironment() ExecutionEnvelope {
 	}
 }
 
-// The evidence action exports its Go build cache restore when a job restores
-// that cache; other jobs record none.
+// The evidence action exports its Go build cache restore when its step restores
+// that cache; other steps record none.
 func goCacheRestoreFromEnvironment() *GoCacheRestore {
 	key := os.Getenv("TETRAL_CI_GO_CACHE_KEY")
 	if key == "" {

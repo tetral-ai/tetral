@@ -41,10 +41,7 @@ func VerifyUpstreamNeeds(body string, expectedJobs []string) error {
 }
 
 func PRUpstreamJobs() []string {
-	return []string{
-		"repository-integrity", "go-static-analysis", "go-race", "agent-runtime", "provider-gateway",
-		"protocol-sdk", "deployment-definitions", "sandbox-image", "dependency-security",
-	}
+	return []string{"repository-sandbox-security-runtime", "go-static-analysis", "go-race", "provider-gateway", "deployment-protocol"}
 }
 
 func ReadLiveGateFacts(ctx context.Context, repository string, pullRequest int, runID int64, runAttempt int) (GateLiveFacts, error) {
