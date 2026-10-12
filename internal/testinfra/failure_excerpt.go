@@ -26,6 +26,11 @@ const (
 	stepSummaryEnv   = "GITHUB_STEP_SUMMARY"
 )
 
+const (
+	commandTailLines = 20
+	commandTailBytes = 4 << 10
+)
+
 var (
 	// Go packages fail concurrently; each excerpt is written whole.
 	excerptOutput sync.Mutex
@@ -73,9 +78,38 @@ func diagnosticExcerpt(path string, goJSON, rejectSkip bool) []string {
 	if goJSON {
 		body = goTestOutputNotPassed(body, rejectSkip)
 	}
-	// The Actions runner also ends a line at a bare carriage return, so each one
-	// becomes a line break that gets the excerpt prefix and cannot start a
-	// workflow command; other control characters are dropped.
+	lines := logSafeLines(body)
+	if omitted := len(lines) - excerptHeadLines - excerptTailLines; omitted > 0 {
+		lines = slices.Concat(lines[:excerptHeadLines], []string{fmt.Sprintf("... %d lines omitted ...", omitted)}, lines[len(lines)-excerptTailLines:])
+	}
+	return lines
+}
+
+func commandOutputTail(output *os.File) string {
+	info, err := output.Stat()
+	if err != nil {
+		return ""
+	}
+	start := max(0, info.Size()-commandTailBytes)
+	tail := make([]byte, info.Size()-start)
+	read, _ := output.ReadAt(tail, start)
+	lines := logSafeLines(tail[:read])
+	if start > 0 && len(lines) > 1 {
+		// The read can begin inside the first line.
+		lines = lines[1:]
+	}
+	lines = lines[max(0, len(lines)-commandTailLines):]
+	if len(lines) == 0 {
+		return ""
+	}
+	return "\n  | " + strings.Join(lines, "\n  | ")
+}
+
+// The Actions runner also ends a line at a bare carriage return, so each one
+// becomes a line break that gets the excerpt prefix and no line starts a `::`
+// workflow command. The runner reads a legacy `##[` command anywhere in a
+// line, so that sequence is broken up. Other control characters are dropped.
+func logSafeLines(body []byte) []string {
 	text := strings.ReplaceAll(terminalStyle.ReplaceAllString(string(body), ""), "\r\n", "\n")
 	text = strings.Map(func(r rune) rune {
 		switch {
@@ -88,14 +122,12 @@ func diagnosticExcerpt(path string, goJSON, rejectSkip bool) []string {
 		}
 		return r
 	}, text)
+	text = strings.ReplaceAll(text, "##[", "# #[")
 	text = strings.TrimRight(text, " \t\n")
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
 	lines := strings.Split(text, "\n")
-	if omitted := len(lines) - excerptHeadLines - excerptTailLines; omitted > 0 {
-		lines = slices.Concat(lines[:excerptHeadLines], []string{fmt.Sprintf("... %d lines omitted ...", omitted)}, lines[len(lines)-excerptTailLines:])
-	}
 	for index, line := range lines {
 		lines[index] = truncateExcerptLine(line)
 	}

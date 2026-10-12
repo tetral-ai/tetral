@@ -700,10 +700,7 @@ func dockerPort(ctx context.Context, container, target string) (string, error) {
 }
 
 func runQuiet(ctx context.Context, name string, arguments ...string) error {
-	// Callers select executables and arguments from the runner's closed dependency inventory.
-	//nolint:gosec
-	command := exec.CommandContext(ctx, name, arguments...)
-	return command.Run()
+	return runQuietInDir(ctx, "", name, arguments...)
 }
 
 func runQuietInDir(ctx context.Context, directory, name string, arguments ...string) error {
@@ -711,7 +708,27 @@ func runQuietInDir(ctx context.Context, directory, name string, arguments ...str
 	//nolint:gosec
 	command := exec.CommandContext(ctx, name, arguments...)
 	command.Dir = directory
-	return command.Run()
+	return runWithOutputTail(command)
+}
+
+// runWithOutputTail discards a command's output unless the command fails; then
+// its error ends with the output's last lines. The output goes to a file, not a
+// pipe, so Wait still returns when the command exits while a descendant, such
+// as the node process that bun x starts, holds the output open.
+func runWithOutputTail(command *exec.Cmd) error {
+	output, err := os.CreateTemp("", "tetral-command-output-")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = output.Close()
+		_ = os.Remove(output.Name())
+	}()
+	command.Stdout, command.Stderr = output, output
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("%w%s", err, commandOutputTail(output))
+	}
+	return nil
 }
 
 func dependencyContainerName(kind string) (string, error) {

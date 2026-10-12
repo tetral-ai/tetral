@@ -182,9 +182,13 @@ step's diagnostic file: its first 20 and last 60 lines, after a `go test -json`
 report is reduced to the decoded output of the tests and packages that did not
 pass (a skipped test counts as not passing where the step rejects skips).
 Under GitHub Actions the same excerpt goes to the job summary; the complete
-diagnostic stays in the evidence artifact. Native package commands remain
-appropriate while developing one owning package; the repository profiles are
-the pre-submission contract.
+diagnostic stays in the evidence artifact. These dependency setup commands end
+the setup error the runner prints with up to the last 20 lines of their output
+when they fail: the Git commands that fetch the pinned SDK, the SDK's Yarn
+install, the Bun workspace installs, the Docker check, image pulls, container
+starts and removals, and the egctl SecretType helper build. Native package
+commands remain appropriate while developing one owning package; the repository
+profiles are the pre-submission contract.
 
 ## Continuous integration
 
