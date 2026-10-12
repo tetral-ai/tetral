@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -319,6 +320,34 @@ func TestQueueJobRunnerLeaseValidationAndOutcomeMapping(t *testing.T) {
 		if store.releaseRequest != (queue.ReleaseUnstartedJobRequest{WorkspaceID: "ws_release", JobID: "qjob_release", LeaseToken: "qlt_release"}) {
 			t.Fatalf("release request = %+v", store.releaseRequest)
 		}
+	}
+}
+
+// A discovery statement's timeout ends the store call without an error; Queue
+// warns once with fixed fields naming the statement and the limit it reached.
+func TestQueueJobRunnerLeaseDiscoveryTimeoutWarnsWithFixedFields(t *testing.T) {
+	var logs bytes.Buffer
+	store := &recordingStore{jobRunnerResult: queue.LeaseJobRunnerJobsResult{
+		RetryAfter:                100 * time.Millisecond,
+		DiscoveryTimeoutOperation: "queue.job_runner_window",
+		DiscoveryTimeoutKind:      "statement_timeout",
+	}}
+	server := NewServer(store, slog.New(slog.NewJSONHandler(&logs, nil)))
+	if _, err := server.LeaseJobRunnerJobs(context.Background(), &queuev1.LeaseJobRunnerJobsRequest{MaxJobs: 8, LeaseOwner: "job-runner", LeaseDurationMs: 30000}); err != nil {
+		t.Fatalf("LeaseJobRunnerJobs: %v", err)
+	}
+	records := decodeJSONLogRecords(t, logs.Bytes())
+	for _, record := range records {
+		delete(record, "time")
+	}
+	want := []map[string]any{{
+		"level": "WARN", "msg": "queue.job_runner_lease.discovery_timeout",
+		"operation": "queue.lease_job_runner_jobs", "event.kind": "queue.job_runner_lease.discovery_timeout",
+		"component": "queue", "phase": "queue.job_runner_window", "timeout.kind": "statement_timeout",
+		"retryable": true, "terminal": false,
+	}}
+	if !reflect.DeepEqual(records, want) {
+		t.Fatalf("diagnostics = %v; want %v", records, want)
 	}
 }
 

@@ -471,7 +471,7 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 			}); err != nil || reclaimed != 0 {
 				t.Fatalf("reclaim settled child recovery = %d/%v; want zero", reclaimed, err)
 			}
-			if err := acquireAndJoinUntilAnswered(context.Background(), runner); err != nil {
+			if err := acquireAndJoin(context.Background(), runner); err != nil {
 				t.Fatalf("replay settled child recovery: %v", err)
 			}
 			var replayFailureEvents, replayCloseoutEvents int

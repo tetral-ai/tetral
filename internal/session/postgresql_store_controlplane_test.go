@@ -11,8 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
-
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/session"
@@ -1578,26 +1576,21 @@ func seedThreadRuntimeInputQueueJob(t *testing.T, db *sql.DB, ws workspace.ID, s
 }
 
 // leaseJobRunnerJobsUntilLeased repeats the Runner's direct lease, as its loop
-// does, until a call leases a job: a call may lease nothing, or fail with a
-// statement or lock timeout, when PostgreSQL exceeds a statement's local
-// budget. Any other failure returns at once.
+// does, until a call leases a job: a call may lease nothing when PostgreSQL
+// exceeds a statement's local budget. A failure returns at once.
 func leaseJobRunnerJobsUntilLeased(ctx context.Context, store *queue.PostgreSQLQueueStore, request queue.LeaseJobRunnerJobsRequest) (queue.LeaseJobRunnerJobsResult, error) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		result, err := store.LeaseJobRunnerJobs(ctx, request)
-		if err == nil && len(result.Jobs) > 0 {
-			return result, nil
-		}
-		var pgErr *pgconn.PgError
-		if err != nil && (!errors.As(err, &pgErr) || (pgErr.Code != "57014" && pgErr.Code != "55P03")) {
+		if err != nil {
 			return result, fmt.Errorf("lease Job Runner job: %w", err)
+		}
+		if len(result.Jobs) > 0 {
+			return result, nil
 		}
 		delay := max(result.RetryAfter, 100*time.Millisecond)
 		if time.Now().Add(delay).After(deadline) {
-			if err == nil {
-				return result, errors.New("no job leased within 10s")
-			}
-			return result, fmt.Errorf("no job leased within 10s; last lease error: %w", err)
+			return result, errors.New("no job leased within 10s")
 		}
 		select {
 		case <-ctx.Done():

@@ -143,6 +143,17 @@ func (s *Server) logJobRunnerLeaseDiagnostics(result queue.LeaseJobRunnerJobsRes
 			slog.Bool("terminal", false),
 		)
 	}
+	if result.DiscoveryTimeoutOperation != "" {
+		s.logger.Warn("queue.job_runner_lease.discovery_timeout",
+			slog.String("operation", "queue.lease_job_runner_jobs"),
+			slog.String("event.kind", "queue.job_runner_lease.discovery_timeout"),
+			slog.String("component", "queue"),
+			slog.String("phase", result.DiscoveryTimeoutOperation),
+			slog.String("timeout.kind", result.DiscoveryTimeoutKind),
+			slog.Bool("retryable", true),
+			slog.Bool("terminal", false),
+		)
+	}
 	if result.StopFailure != nil {
 		attrs := []any{
 			slog.String("operation", "queue.lease_job_runner_jobs"),

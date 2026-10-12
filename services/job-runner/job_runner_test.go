@@ -13,10 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
@@ -1727,68 +1723,47 @@ func acquireAndJoinActive(ctx context.Context, runner *JobRunner) (bool, error) 
 }
 
 // acquireAndJoinUntilDispatched repeats acquireAndJoin, as the production loop
-// acquires, until an acquisition dispatches a job. Queue may lease nothing, or
-// fail the call with Internal, when PostgreSQL exceeds a statement's local
-// budget; an empty acquisition waits Queue's retry hint and an Internal failure
-// 100 ms, for up to 10 s. Any other failure returns at once.
+// acquires, until an acquisition dispatches a job. Queue may lease nothing when
+// PostgreSQL exceeds a statement's local budget; an empty acquisition waits
+// Queue's retry hint, for up to 10 s. A failure returns at once.
 func acquireAndJoinUntilDispatched(ctx context.Context, runner *JobRunner) error {
-	return acquireAndJoinRetrying(ctx, runner, true)
-}
-
-// acquireAndJoinUntilAnswered is acquireAndJoin for a call that must change
-// nothing: it repeats only an Internal lease failure and accepts Queue's first
-// answer, empty or not.
-func acquireAndJoinUntilAnswered(ctx context.Context, runner *JobRunner) error {
-	return acquireAndJoinRetrying(ctx, runner, false)
-}
-
-func acquireAndJoinRetrying(ctx context.Context, runner *JobRunner, untilDispatched bool) error {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		acquisition, err := runner.AcquireAndDispatch(ctx)
-		if err == nil && (acquisition.Dispatched > 0 || !untilDispatched) {
-			return runner.JoinDispatched(ctx)
-		}
-		if err != nil && status.Code(err) != codes.Internal {
+		if err != nil {
 			return fmt.Errorf("acquire Job Runner job: %w", err)
 		}
-		gaveUp := "no job dispatched"
-		if !untilDispatched {
-			gaveUp = "no lease call succeeded"
+		if acquisition.Dispatched > 0 {
+			return runner.JoinDispatched(ctx)
 		}
-		if err := waitToLeaseAgain(ctx, deadline, acquisition.RetryAfter, err, gaveUp); err != nil {
+		if err := waitToLeaseAgain(ctx, deadline, acquisition.RetryAfter, "no job dispatched"); err != nil {
 			return err
 		}
 	}
 }
 
 // leaseJobRunnerJobsUntilLeased repeats the Runner's direct lease the same way
-// until a call leases a job; the store reports the transient failure as its
-// PostgreSQL statement or lock timeout.
+// until a call leases a job.
 func leaseJobRunnerJobsUntilLeased(ctx context.Context, store *queue.PostgreSQLQueueStore, request queue.LeaseJobRunnerJobsRequest) (queue.LeaseJobRunnerJobsResult, error) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		result, err := store.LeaseJobRunnerJobs(ctx, request)
-		if err == nil && len(result.Jobs) > 0 {
-			return result, nil
-		}
-		var pgErr *pgconn.PgError
-		if err != nil && (!errors.As(err, &pgErr) || (pgErr.Code != "57014" && pgErr.Code != "55P03")) {
+		if err != nil {
 			return result, fmt.Errorf("lease Job Runner job: %w", err)
 		}
-		if err := waitToLeaseAgain(ctx, deadline, result.RetryAfter, err, "no job leased"); err != nil {
+		if len(result.Jobs) > 0 {
+			return result, nil
+		}
+		if err := waitToLeaseAgain(ctx, deadline, result.RetryAfter, "no job leased"); err != nil {
 			return result, err
 		}
 	}
 }
 
-func waitToLeaseAgain(ctx context.Context, deadline time.Time, retryAfter time.Duration, leaseErr error, gaveUp string) error {
+func waitToLeaseAgain(ctx context.Context, deadline time.Time, retryAfter time.Duration, gaveUp string) error {
 	delay := max(retryAfter, 100*time.Millisecond)
 	if time.Now().Add(delay).After(deadline) {
-		if leaseErr == nil {
-			return fmt.Errorf("%s within 10s", gaveUp)
-		}
-		return fmt.Errorf("%s within 10s; last lease error: %w", gaveUp, leaseErr)
+		return fmt.Errorf("%s within 10s", gaveUp)
 	}
 	select {
 	case <-ctx.Done():

@@ -113,7 +113,10 @@ when none follows, the first workspace; there is no workspace-table listing,
 fetches a raw window of at most 32 rows of its current pass in K order,
 before any time, lifecycle or barrier evaluation. Discovery reads only
 `queue_jobs`, in read-only transactions with the `tetral.queue_maintenance`
-setting, each statement under a 40 ms statement timeout.
+setting, each statement under a 40 ms statement timeout, which also bounds a
+lock wait. A tenant-seek, pass-start or window statement over its limit ends
+the call without failing it: the call returns the jobs it already committed,
+possibly none, with a 100 ms hint.
 
 **Exact lease.** Each examined candidate gets a fresh workspace transaction
 with a 40 ms statement and 10 ms lock timeout: `pg_try_advisory_xact_lock` on
@@ -121,10 +124,11 @@ the candidate Session's arbitration key, then `FOR UPDATE SKIP LOCKED` on the
 exact row, then one token-mint `UPDATE` that rechecks the shared eligibility
 (the same predicate `Lease` uses, evaluated at `clock_timestamp()`). A busy
 Session owner, a locked or missing row, an ineligible candidate or a local
-timeout leaves no mutation and moves on. Any other database failure stops the
-call: committed jobs are still returned, with a 100 ms hint; with none
-committed, the call fails. Eligibility counts blockers of every kind, whether
-or not this method returns that kind, and payload JSON is never authority.
+timeout leaves no mutation and moves on. Any other database failure, in
+discovery or in a lease, stops the call: committed jobs are still returned,
+with a 100 ms hint; with none committed, the call fails. Eligibility counts
+blockers of every kind, whether or not this method returns that kind, and
+payload JSON is never authority.
 
 **Fairness and progress.** The scheduler keeps per process a shared cursor and
 generation; a turn commits its tenant proposal only if the generation is
@@ -142,16 +146,21 @@ winner. With T tenants holding only blocked or future Runner work, a newly
 ready job is reached within about ⌈T ÷ 16⌉ calls. Pass state is memory only
 and proportional to visited unfinished tenant passes; it has no LRU eviction.
 
-**Retry hint.** `retry_after_ms` is 100 ms when a budget or lock contention
-stopped the call and the process is not idle. The process becomes idle when
-its cursor wraps without any lease committed since the previous wrap, and any
-committed lease clears that. Otherwise the hint is the time until the next
-future Runner job clamped to 100–1000 ms, or 1000 ms when none exists. A job
-admitted after its tenant's current pass began is outside that pass. A call
-woken by that job's notification which completes discovery by ending the pass
-at its stored upper key returns no job and this future-clamped or 1000 ms hint;
-the next call starts a fresh pass and leases the job, so it waits up to about
-one hint.
+**Retry hint.** `retry_after_ms` is 100 ms after a tenant-seek, pass-start or
+window timeout, idle or not: discovery did not finish, so Queue cannot claim it
+found nothing. It is also 100 ms when the call met its budget, contention or a
+candidate's local timeout and the process is not idle. The process becomes idle
+when its cursor wraps without any lease committed since the previous wrap, and
+any committed lease clears that; only a finished rotation establishes it.
+Otherwise the hint is the time until the next future Runner job clamped to
+100–1000 ms, or 1000 ms when none exists. That query runs only after a call
+that ended without a budget or contention stop, or in an idle process; if it
+fails or times out, the hint is 1000 ms with no warning, because only the time
+of the next future job is unknown. A job admitted after its tenant's current
+pass began is outside that pass. A call woken by that job's notification which
+completes discovery by ending the pass at its stored upper key returns no job
+and this future-clamped or 1000 ms hint; the next call starts a fresh pass and
+leases the job, so it waits up to about one hint.
 
 **Release.** The direct lease records the prior attempt count in the private
 `queue_jobs.lease_previous_attempt_count`. A CHECK allows a value only on a
@@ -332,9 +341,10 @@ Each successful lease logs `duration.ms` for the database Lease call and
 `queue.ready_wait.ms` for time elapsed since that job's `available_at`; retry
 backoff before `available_at` is deliberately excluded. A direct Job Runner
 call additionally warns, with fixed fields only, when candidates were skipped
-on a local lock or statement timeout (`timeout.kind`, `failed.count`) or when a
-failure stopped the call after earlier leases committed (`db.sqlstate` when
-available). PostgreSQL LISTEN
+on a local lock or statement timeout (`timeout.kind`, `failed.count`), when a
+discovery statement's local timeout ended the call (`phase` names the
+statement, `timeout.kind`), or when a failure stopped the call after earlier
+leases committed (`db.sqlstate` when available). PostgreSQL LISTEN
 disconnects log only fixed authentication, permission, endpoint/transport,
 timeout, or unknown categories. Raw database errors, DSNs, queries, and
 credentials are never included, and polling remains the reconnect fallback.
@@ -515,8 +525,8 @@ the next holder re-leases under a new token.
 |---|---|
 | `internal/queue/queue_test.go` | admission validation: per-kind canonical shape, references-only payload bounds, event-reference limits, lease batch-capacity arithmetic |
 | `internal/queue/postgresql_store_test.go` | the store's durable behavior against PostgreSQL: Thread/Session lease compatibility, same-Thread interrupt precedence, partition exclusion, ack/retry/defer/dead-letter fencing, both cancellation boundaries, over-budget conditional dead-lettering, Sandbox terminal retention and empty-counter cleanup, backoff full-jitter, unset-`max_attempts` projection, cross-workspace maintenance, metrics summary |
-| `internal/queue/job_runner_lease_test.go` | direct Job Runner leasing under the real Queue role: future-tenant yield and window resumption, examined-prefix advancement under the transaction budget, per-call visited tenants with interleaved calls, per-process alternation and replica custody, committed tokens after a later failure, a candidate over its statement or lock limit skipped unchanged and counted, the eligibility matrix against `Lease`, discovery query plans on the Runner indexes, idle-aware retry hints, busy-tenant skipping, bounded pass cleanup, quiesce, exact release refunds, post-lock expiry, and provenance cleared by every transition; the scheduling traces run with widened time limits, so database speed cannot change them |
-| `services/queue/server_test.go` | the gRPC surface over the generated client: lease + fenced transitions, maximum legal batch within the message fuse for both lease methods, the field census matching lease arithmetic, validation → `InvalidArgument`, release `FailedPrecondition` and draining-scheduler `Unavailable` mapping |
+| `internal/queue/job_runner_lease_test.go` | direct Job Runner leasing under the real Queue role: future-tenant yield and window resumption, examined-prefix advancement under the transaction budget, per-call visited tenants with interleaved calls, per-process alternation and replica custody, committed tokens after a later lease or discovery failure, a local timeout never failing the call (a candidate over its statement or lock limit skipped unchanged and counted; a tenant-seek or pass-start statement over its limit ending the call with its committed jobs, the timed-out statement reported and the 100 ms hint even in an idle process), the eligibility matrix against `Lease`, discovery query plans on the Runner indexes, idle-aware retry hints, busy-tenant skipping, bounded pass cleanup, quiesce, exact release refunds, post-lock expiry, and provenance cleared by every transition; the scheduling traces run with widened time limits, so database speed cannot change them |
+| `services/queue/server_test.go` | the gRPC surface over the generated client: lease + fenced transitions, maximum legal batch within the message fuse for both lease methods, the field census matching lease arithmetic, validation → `InvalidArgument`, release `FailedPrecondition` and draining-scheduler `Unavailable` mapping, the discovery-timeout warning's fixed fields |
 | `services/queue/config_test.go` | `ConfigFromEnv` pins the retry policy and rejects invalid values |
 | `services/queue/maintenance_test.go` | each maintenance tick runs reclaim, bounded Sandbox terminal retention, bounded empty-counter cleanup, then Job Runner terminal retention under its own 2 s deadline at the tick time; the budget counter grows by one per pass with any exhausted state; integrity counts and failures are logged with fixed fields |
 | `internal/queue/job_runner_retention_test.go` | with the installed Queue role: each Runner kind and terminal state expires exactly at its age and survives a microsecond younger, Sandbox and Environment kinds, nonterminal rows and partition counters are untouched, `NULL` terminal timestamps are retained and counted, 256 rows per state per pass with exactly 256 eligible rows not exhausted and 257 exhausted once, the cutoff capped at the database clock minus each state's age, a state error leaves later states running, argument validation, other-workload execution, spoofed flags, search-path shadowing and a non-owner definer are denied, and each state's partial index serves its locked page and its `LIMIT 1` probe |
