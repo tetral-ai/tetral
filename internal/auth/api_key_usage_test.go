@@ -203,13 +203,23 @@ const usageUpdatePrefix = "UPDATE public.api_keys"
 func usageCounters(r *APIKeyUsageRecorder) map[string]uint64 {
 	return map[string]uint64{
 		"capacity": r.droppedCapacity.Load(), "contended": r.droppedContended.Load(), "closed": r.droppedClosed.Load(),
-		"deadline": r.droppedDeadline.Load(), "database": r.droppedDatabase.Load(), "updated": r.updated.Load(),
+		"deadline": r.droppedDeadline.Load(), "database": r.droppedDatabase.Load(), "unconfirmed": r.droppedUnconfirmed.Load(),
+		"updated": r.updated.Load(),
 	}
+}
+
+func usageMatched(r *APIKeyUsageRecorder) uint64 {
+	return r.updated.Load() + r.droppedUnconfirmed.Load()
 }
 
 func requireUsageCounters(t *testing.T, r *APIKeyUsageRecorder, want map[string]uint64) {
 	t.Helper()
 	got := usageCounters(r)
+	if _, ok := want["matched"]; ok {
+		got["matched"] = usageMatched(r)
+		delete(got, "updated")
+		delete(got, "unconfirmed")
+	}
 	for name, value := range got {
 		if value != want[name] {
 			t.Fatalf("usage counters=%v want=%v", got, want)
@@ -313,7 +323,8 @@ func TestAPIKeyUsageWorkerAndAdmissionContention(t *testing.T) {
 		}
 		update := newSQLPause(usageUpdatePrefix, true, false)
 		pool := storagetest.OpenRuntimeRoleDBWithTracer(t, store.db, newSQLTrace(t, update))
-		r, _ := testUsageRecorder(pool, nil)
+		var logs bytes.Buffer
+		r, _ := testUsageRecorder(pool, slog.New(slog.NewJSONHandler(&logs, nil)))
 		if _, err := NewAuthorityResolver(pool, workspace.DefaultID, r).AuthenticateKey(ctx, key.APIKey); err != nil {
 			t.Fatal(err)
 		}
@@ -353,7 +364,10 @@ func TestAPIKeyUsageWorkerAndAdmissionContention(t *testing.T) {
 		if keyUsage(t, admin, key.ID).lastUsed.Valid {
 			t.Fatal("cancelled worker transaction committed usage")
 		}
-		requireUsageCounters(t, r, map[string]uint64{"database": 1})
+		requireUsageCounters(t, r, map[string]uint64{"unconfirmed": 1})
+		if strings.Count(logs.String(), `"failed.count":1`) != 1 {
+			t.Fatalf("failure warning=%s", logs.String())
+		}
 	})
 	t.Run("SaturatedPoolAcquisitionTimesOut", func(t *testing.T) {
 		admin, _, store, _ := authorityFixture(t)
@@ -438,6 +452,11 @@ func TestAPIKeyUsageWorkerAndAdmissionContention(t *testing.T) {
 		pauseBatch.Store(true)
 		ticks <- time.Now()
 		batch := <-paused
+		// The first tick has returned; it warns only for an unconfirmed write.
+		if strings.Count(logs.String(), `"failed.count":1`) != int(r.droppedUnconfirmed.Load()) {
+			t.Fatalf("first tick warning=%s counters=%v", logs.String(), usageCounters(r))
+		}
+		logs.Reset()
 		if _, err := resolver.AuthenticateKey(ctx, third.APIKey); err != nil {
 			t.Fatal(err)
 		}
@@ -458,7 +477,7 @@ func TestAPIKeyUsageWorkerAndAdmissionContention(t *testing.T) {
 		}
 		r.submit(apiKeyUsageObservation{identity: usageIdentity(workspace.DefaultID, second.ID, second.APIKey, 1), observedAt: time.Now()})
 		r.Close()
-		requireUsageCounters(t, r, map[string]uint64{"closed": 1, "updated": 1})
+		requireUsageCounters(t, r, map[string]uint64{"closed": 1, "matched": 1})
 		if logs.Len() != 0 {
 			t.Fatal("shutdown cancellation produced a usage warning")
 		}
@@ -510,8 +529,8 @@ func TestAPIKeyUsageSamplesByDatabaseObservationAcrossRecorders(t *testing.T) {
 	if got := sample(second, reverse, 5*time.Minute-time.Millisecond); !got.Equal(base.Add(5 * time.Minute)) {
 		t.Fatalf("earlier observation moved last_used_at backward to %s", got)
 	}
-	if first.updated.Load() != 3 || second.updated.Load() != 0 {
-		t.Fatalf("updated rows first=%d second=%d", first.updated.Load(), second.updated.Load())
+	if usageMatched(first) != 3 || usageMatched(second) != 0 {
+		t.Fatalf("matched rows first=%v second=%v", usageCounters(first), usageCounters(second))
 	}
 }
 
@@ -580,8 +599,8 @@ func TestAPIKeyUsageGenerationFencesCredentialInstances(t *testing.T) {
 	clock.Advance(apiKeyUsageSuppression)
 	r.flush(ctx)
 	requireRow(5, false)
-	if r.updated.Load() != 1 {
-		t.Fatalf("stale generations updated rows: %d", r.updated.Load())
+	if usageMatched(r) != 1 {
+		t.Fatalf("stale generations matched rows: %v", usageCounters(r))
 	}
 	admit()
 	r.flush(ctx)
@@ -602,7 +621,7 @@ func TestAPIKeyUsageGenerationFencesCredentialInstances(t *testing.T) {
 		r.submit(apiKeyUsageObservation{identity: identity, observedAt: later})
 	}
 	r.flush(ctx)
-	if row := requireRow(5, true); !row.lastUsed.Time.Equal(current.lastUsed.Time) || r.updated.Load() != 2 {
+	if row := requireRow(5, true); !row.lastUsed.Time.Equal(current.lastUsed.Time) || usageMatched(r) != 2 {
 		t.Fatal("a sample for another workspace, digest, key or generation updated the row")
 	}
 
