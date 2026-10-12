@@ -22,21 +22,22 @@ var pullRequestJobs = map[string]string{
 }
 
 const (
-	pinnedSetupBunAction = "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
-	evidenceAction       = "./.github/actions/run-test-evidence"
-	// A job's evidence steps after its first run although an earlier group
-	// failed, so a failing group does not stop the groups after it.
-	followOnEvidenceCondition = "${{ !cancelled() }}"
-	// In a job with several evidence steps, a step's timeout-minutes leaves
-	// this much beyond its time-limit-minutes for the setup before the run, the
-	// one-minute interrupt grace and the upload.
-	evidenceStepBackstopMinutes = 3
-	// Such a job's timeout-minutes leaves this much beyond its steps' limits
-	// for checkout and the post steps.
-	sharedJobOverheadMinutes = 3
+	pinnedSetupBunAction        = "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
+	evidenceAction              = "./.github/actions/run-test-evidence"
+	followOnEvidenceCondition   = "${{ !cancelled() }}"
+	evidenceStepBackstopMinutes = 3 // setup before the run, the 1 min kill-after and the upload
+	sharedJobOverheadMinutes    = 3
 )
 
 func VerifyPullRequestWorkflow(root string) error {
+	inventory, err := LoadPRProducers()
+	if err != nil {
+		return err
+	}
+	return verifyPullRequestWorkflow(root, inventory)
+}
+
+func verifyPullRequestWorkflow(root string, inventory PRProducerInventory) error {
 	document, err := parseYAMLFile(filepath.Join(root, ".github", "workflows", "pull-request-verification.yml"))
 	if err != nil {
 		return err
@@ -86,7 +87,7 @@ func VerifyPullRequestWorkflow(root string) error {
 	if !goRacePreparesIntegrationHost(mappingValue(jobs, "go-race")) {
 		return fmt.Errorf("go Race does not prepare its integration host")
 	}
-	evidence, err := readPullRequestEvidence(jobs)
+	evidence, err := readPullRequestEvidence(jobs, inventory)
 	if err != nil {
 		return err
 	}
@@ -111,10 +112,6 @@ func VerifyPullRequestWorkflow(root string) error {
 		scalar(mappingValue(gateEnvironment, "TETRAL_CI_NEEDS")) != "${{ toJSON(needs) }}" {
 		return fmt.Errorf("merge Gate is missing live read-only reconciliation inputs")
 	}
-	inventory, err := LoadPRProducers()
-	if err != nil {
-		return err
-	}
 	if !sameStrings(evidence.producers, inventory.Producers) {
 		return fmt.Errorf("workflow producers do not match the PR producer inventory")
 	}
@@ -135,6 +132,14 @@ func mergeGateDownloadsAllRunAttempts(job *workflowYAMLNode) bool {
 }
 
 func VerifyMainBranchWorkflow(root string) error {
+	inventory, err := LoadPRProducers()
+	if err != nil {
+		return err
+	}
+	return verifyMainBranchWorkflow(root, inventory)
+}
+
+func verifyMainBranchWorkflow(root string, inventory PRProducerInventory) error {
 	document, err := parseYAMLFile(filepath.Join(root, ".github", "workflows", "main-branch-verification.yml"))
 	if err != nil {
 		return err
@@ -199,11 +204,11 @@ func VerifyMainBranchWorkflow(root string) error {
 	}
 	race := mappingValue(jobs, "go-race")
 	shards := sequenceScalars(mappingValue(mappingValue(mappingValue(race, "strategy"), "matrix"), "shard"))
-	if !sameStrings(shards, []string{"0", "1", "2", "3"}) ||
+	if !sameStrings(shards, goShardMatrix(inventory)) ||
 		!jobEvidenceInputEquals(race, "producer", "go-${{ matrix.shard }}") ||
-		!jobEvidenceInputEquals(race, "shard-count", "4") ||
+		!jobEvidenceInputEquals(race, "shard-count", strconv.Itoa(len(inventory.GoShards))) ||
 		!goRacePreparesIntegrationHost(race) {
-		return fmt.Errorf("main Go Race does not own four complete integration-ready shards")
+		return fmt.Errorf("main Go Race does not own the %d complete integration-ready shards go_shards lists", len(inventory.GoShards))
 	}
 	if !jobEvidenceInputEquals(race, "dependency-audit", string(DependencyAuditNever)) {
 		return fmt.Errorf("main Go Race repeats the online dependency audit")
@@ -288,12 +293,28 @@ const (
 	benchmarkProduceGuard = "${{ inputs.produce-cache && github.ref != 'refs/heads/main' }}"
 	// Both sides start together once produce succeeded or was skipped; after a
 	// failed or cancelled produce, B would measure a cache miss.
-	benchmarkSideGuard = "${{ !cancelled() && needs.resolve.result == 'success' && contains(fromJSON('[\"success\",\"skipped\"]'), needs.produce.result) }}"
+	benchmarkSideGuard      = "${{ !cancelled() && needs.resolve.result == 'success' && contains(fromJSON('[\"success\",\"skipped\"]'), needs.produce.result) }}"
+	benchmarkGoShardsScript = `set -euo pipefail
+for side in a b; do
+  sha="$A_SHA"
+  if [[ "$side" == b ]]; then
+    sha="$B_SHA"
+  fi
+  if ! count="$(git show "${sha}:internal/testinfra/pr_producers.json" | jq -e '.go_shards | arrays | length | select(. > 0)')"; then
+    echo "::error::$sha lists no go_shards in internal/testinfra/pr_producers.json"
+    exit 1
+  fi
+  echo "${side}-shard-count=$count" >> "$GITHUB_OUTPUT"
+  echo "${side}-shards=$(jq -cn --argjson count "$count" '[range($count)]')" >> "$GITHUB_OUTPUT"
+  echo "Side ${side^^} runs $count Go Race shards"
+done
+`
 )
 
 // VerifyBenchmarkWorkflow keeps CI Benchmark a read-only measurement whose two
-// sides run Pull Request Verification's Go Race evidence on their own commits.
-// Its only cache writer is the guarded produce job.
+// sides run Pull Request Verification's Go Race evidence on their own commits,
+// each with its commit's go_shards. Its only cache writer is the guarded
+// produce job.
 func VerifyBenchmarkWorkflow(root string) error {
 	document, err := parseYAMLFile(filepath.Join(root, ".github", "workflows", "ci-benchmark.yml"))
 	if err != nil {
@@ -354,32 +375,48 @@ func VerifyBenchmarkWorkflow(root string) error {
 	if wantInputs == nil {
 		return fmt.Errorf("pull request Go Race has no evidence step")
 	}
-	shards := func(job *workflowYAMLNode) []string {
-		return sequenceScalars(mappingValue(mappingValue(mappingValue(job, "strategy"), "matrix"), "shard"))
+	resolve := mappingValue(jobs, "resolve")
+	shardStep := stepWithID(sequenceNodes(mappingValue(resolve, "steps")), "shards")
+	shardEnvironment := mappingValue(shardStep, "env")
+	if scalar(mappingValue(shardStep, "run")) != benchmarkGoShardsScript ||
+		scalar(mappingValue(shardEnvironment, "A_SHA")) != "${{ steps.commits.outputs.base }}" ||
+		scalar(mappingValue(shardEnvironment, "B_SHA")) != "${{ steps.commits.outputs.head }}" {
+		return fmt.Errorf("benchmark resolve job does not read each side's go_shards from its own commit")
 	}
 	prefixes := map[string]bool{}
-	for _, side := range []string{"a-go-race", "b-go-race"} {
-		job := mappingValue(jobs, side)
+	for _, side := range []string{"a", "b"} {
+		jobID := side + "-go-race"
+		job := mappingValue(jobs, jobID)
 		if !slices.Equal(sequenceScalars(mappingValue(job, "needs")), []string{"resolve", "produce"}) || scalar(mappingValue(job, "if")) != benchmarkSideGuard {
-			return fmt.Errorf("benchmark job %q does not wait for produce", side)
+			return fmt.Errorf("benchmark job %q does not wait for produce", jobID)
 		}
 		inputs := evidenceStepInputs(job)
 		if inputs == nil {
-			return fmt.Errorf("benchmark job %q has no evidence step from its checkout", side)
+			return fmt.Errorf("benchmark job %q has no evidence step from its checkout", jobID)
 		}
 		prefix := inputs["artifact-prefix"]
 		if prefix == "" || prefixes[prefix] {
-			return fmt.Errorf("benchmark job %q needs its own artifact prefix", side)
+			return fmt.Errorf("benchmark job %q needs its own artifact prefix", jobID)
 		}
 		prefixes[prefix] = true
-		delete(inputs, "artifact-prefix")
-		want := maps.Clone(wantInputs)
-		delete(want, "artifact-prefix")
-		if !maps.Equal(inputs, want) {
-			return fmt.Errorf("benchmark job %q Go evidence inputs differ from pull request Go Race", side)
+		for _, output := range []string{side + "-shards", side + "-shard-count"} {
+			if scalar(mappingValue(mappingValue(resolve, "outputs"), output)) != "${{ steps.shards.outputs."+output+" }}" {
+				return fmt.Errorf("benchmark resolve job output %q does not come from its go_shards step", output)
+			}
 		}
-		if !slices.Equal(shards(job), shards(pullRequestRace)) {
-			return fmt.Errorf("benchmark job %q shards differ from pull request Go Race", side)
+		if scalar(mappingValue(mappingValue(mappingValue(job, "strategy"), "matrix"), "shard")) != "${{ fromJSON(needs.resolve.outputs."+side+"-shards) }}" {
+			return fmt.Errorf("benchmark job %q does not run the Go shards its commit lists", jobID)
+		}
+		if inputs["shard-count"] != "${{ needs.resolve.outputs."+side+"-shard-count }}" {
+			return fmt.Errorf("benchmark job %q does not pass the Go shard count its commit lists", jobID)
+		}
+		want := maps.Clone(wantInputs)
+		for _, name := range []string{"artifact-prefix", "shard-count"} {
+			delete(inputs, name)
+			delete(want, name)
+		}
+		if !maps.Equal(inputs, want) {
+			return fmt.Errorf("benchmark job %q Go evidence inputs differ from pull request Go Race", jobID)
 		}
 	}
 	return nil
@@ -489,9 +526,8 @@ func VerifyGoBuildCacheWorkflows(root string) error {
 			return fmt.Errorf("%s job %q restores the Go build cache with write access", consumer.file, consumer.job)
 		}
 	}
-	// A job's later evidence steps use the Go caches its first step restored. A
-	// second restore downloads the archive again and fails to extract over the
-	// read-only module cache.
+	// A second restore in one job fails to extract over the read-only module
+	// cache the first one left.
 	pullRequest, err := parseYAMLFile(filepath.Join(workflows, "pull-request-verification.yml"))
 	if err != nil {
 		return err
@@ -672,8 +708,6 @@ func stepWithID(steps []*workflowYAMLNode, id string) *workflowYAMLNode {
 	return nil
 }
 
-// evidenceSteps returns a job's steps that run the repository's evidence
-// action, in order.
 func evidenceSteps(job *workflowYAMLNode) []*workflowYAMLNode {
 	var steps []*workflowYAMLNode
 	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
@@ -693,7 +727,7 @@ func stepInputs(step *workflowYAMLNode) map[string]string {
 	return inputs
 }
 
-// evidenceStepInputs returns the inputs of a job's first evidence step.
+// evidenceStepInputs reads the job's first evidence step only.
 func evidenceStepInputs(job *workflowYAMLNode) map[string]string {
 	steps := evidenceSteps(job)
 	if len(steps) == 0 {
@@ -711,6 +745,14 @@ func jobChecksOutFullHistory(job *workflowYAMLNode) bool {
 		return scalar(mappingValue(inputs, "fetch-depth")) == "0" && scalar(mappingValue(inputs, "persist-credentials")) == "false"
 	}
 	return false
+}
+
+func goShardMatrix(inventory PRProducerInventory) []string {
+	matrix := make([]string, len(inventory.GoShards))
+	for index := range matrix {
+		matrix[index] = strconv.Itoa(index)
+	}
+	return matrix
 }
 
 func goRacePreparesIntegrationHost(job *workflowYAMLNode) bool {
@@ -747,7 +789,6 @@ func jobRunContainsAll(job *workflowYAMLNode, fragments ...string) bool {
 	return false
 }
 
-// jobEvidenceInputEquals reads the job's first evidence step only.
 func jobEvidenceInputEquals(job *workflowYAMLNode, name, value string) bool {
 	inputs := evidenceStepInputs(job)
 	return inputs != nil && inputs[name] == value
@@ -793,19 +834,14 @@ func VerifyWorkflowSkeletons(root string) error {
 	return nil
 }
 
-// pullRequestEvidence is what the pull request jobs' evidence steps declare:
-// every producer, the Go shard producers, and each group's step inputs.
 type pullRequestEvidence struct {
 	producers, goShards []string
 	groups              map[string][]map[string]string
 }
 
-// readPullRequestEvidence reads every evidence step of every job; a job may run
-// several groups, one step each. Each producer must run in the job Merge Gate
-// expects its result from (PRProducerJobs).
-func readPullRequestEvidence(jobs *workflowYAMLNode) (pullRequestEvidence, error) {
+func readPullRequestEvidence(jobs *workflowYAMLNode, inventory PRProducerInventory) (pullRequestEvidence, error) {
 	evidence := pullRequestEvidence{groups: map[string][]map[string]string{}}
-	producerJobs := PRProducerJobs()
+	producerJobs := PRProducerJobs(inventory)
 	for index := 0; index+1 < len(jobs.Content); index += 2 {
 		jobID, job := jobs.Content[index].Value, jobs.Content[index+1]
 		if jobID == "merge-gate" {
@@ -832,10 +868,10 @@ func readPullRequestEvidence(jobs *workflowYAMLNode) (pullRequestEvidence, error
 			producers := []string{inputs["producer"]}
 			if jobID == "go-race" {
 				shards := sequenceScalars(mappingValue(mappingValue(mappingValue(job, "strategy"), "matrix"), "shard"))
-				if !sameStrings(shards, []string{"0", "1", "2", "3"}) || inputs["producer"] != "go-${{ matrix.shard }}" {
-					return pullRequestEvidence{}, fmt.Errorf("go Race does not own the exact four shards")
+				if !sameStrings(shards, goShardMatrix(inventory)) || inputs["producer"] != "go-${{ matrix.shard }}" {
+					return pullRequestEvidence{}, fmt.Errorf("go Race does not own the %d shards go_shards lists", len(inventory.GoShards))
 				}
-				if inputs["shard-count"] != fmt.Sprintf("%d", len(shards)) {
+				if inputs["shard-count"] != strconv.Itoa(len(shards)) {
 					return pullRequestEvidence{}, fmt.Errorf("go Race shard count does not match its matrix cardinality")
 				}
 				producers = nil
@@ -855,10 +891,8 @@ func readPullRequestEvidence(jobs *workflowYAMLNode) (pullRequestEvidence, error
 	return evidence, nil
 }
 
-// verifySharedJobLimits keeps a hanging group from cancelling a job that runs
-// several groups: each run stops at its time-limit-minutes and still uploads
-// its result, and the step and job limits are backstops above it. A step or
-// job timeout would instead skip the upload or the later groups.
+// A hanging group's run stops at time-limit-minutes and still uploads its
+// result; the step and job timeouts are only backstops above it.
 func verifySharedJobLimits(jobID string, job *workflowYAMLNode, steps []*workflowYAMLNode) error {
 	sum := 0
 	for _, step := range steps {
@@ -875,8 +909,7 @@ func verifySharedJobLimits(jobID string, job *workflowYAMLNode, steps []*workflo
 	return nil
 }
 
-// groupInputEquals reports whether the group runs in at least one evidence step
-// and every such step passes the input value.
+// groupInputEquals is false when no evidence step runs the group.
 func (evidence pullRequestEvidence) groupInputEquals(group, name, value string) bool {
 	for _, inputs := range evidence.groups[group] {
 		if inputs[name] != value {

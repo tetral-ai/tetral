@@ -261,7 +261,7 @@ func TestDeclaredGoDependenciesDriveProfileSelections(t *testing.T) {
 
 // Every inventory-declared Go test with dependencies needs real infrastructure.
 // Fast must exclude it and record each declared dependency as a capability,
-// and the four Full Go race shards together must run it exactly once with its
+// and the Full Go race shards together must run it exactly once with its
 // dependencies on both its selection and its shard.
 func TestDeclaredGoTestsLeaveFastAndRunOnceAcrossRaceShards(t *testing.T) {
 	root := repositoryRootForTest(t)
@@ -319,9 +319,13 @@ func TestDeclaredGoTestsLeaveFastAndRunOnceAcrossRaceShards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	producers, err := LoadPRProducers()
+	if err != nil {
+		t.Fatal(err)
+	}
 	counts := map[string]int{}
-	for index := 0; index < 4; index++ {
-		shard, err := SelectPlan(Plan{Profile: ProfileFull, Selections: full}, []string{"go"}, index, 4)
+	for index := range producers.GoShards {
+		shard, err := SelectPlan(Plan{Profile: ProfileFull, Selections: full}, []string{"go"}, index, len(producers.GoShards))
 		if err != nil {
 			t.Fatal(err)
 		}

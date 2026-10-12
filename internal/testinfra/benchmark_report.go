@@ -26,9 +26,13 @@ func RenderBenchmarkComparison(report BenchmarkComparison) string {
 		value BenchmarkSide
 	}{{"A", report.A}, {"B", report.B}}
 	out.WriteString("## CI Benchmark comparison\n\n")
-	out.WriteString("| Side | Commit | Run | Shards | Complete |\n|---|---|---|---|---|\n")
+	out.WriteString("| Side | Commit | Run | Shard count | Shard results | Complete |\n|---|---|---|---:|---:|---|\n")
 	for _, side := range sides {
-		fmt.Fprintf(&out, "| %s | `%s` | %s | %d | %s |\n", side.label, side.value.SHA, side.value.RunID, len(side.value.Shards), benchmarkYesNo(side.value.Complete))
+		count := "—"
+		if side.value.ShardCount > 0 {
+			count = fmt.Sprint(side.value.ShardCount)
+		}
+		fmt.Fprintf(&out, "| %s | `%s` | %s | %s | %d | %s |\n", side.label, side.value.SHA, side.value.RunID, count, len(side.value.Shards), benchmarkYesNo(side.value.Complete))
 	}
 	plans := "identical"
 	if !report.PlansIdentical {

@@ -2,6 +2,7 @@ package testinfra
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"math"
@@ -68,6 +69,9 @@ type BenchmarkComparison struct {
 type BenchmarkSide struct {
 	SHA   string `json:"sha"`
 	RunID string `json:"run_id,omitempty"`
+	// ShardCount is K: the length of go_shards at the side's commit or, for a
+	// commit that lists none, the count its results record (0 for none).
+	ShardCount int `json:"shard_count"`
 	// Complete is true when shards 0..K-1 are all present and each ran every
 	// planned step.
 	Complete bool             `json:"complete"`
@@ -212,11 +216,12 @@ type benchmarkShardEvidence struct {
 }
 
 type benchmarkEvidence struct {
-	label  string
-	sha    string
-	run    *goRaceRun
-	shards map[int]*benchmarkShardEvidence
-	tests  map[benchmarkTestKey]benchmarkTestRun
+	label           string
+	sha             string
+	committedShards int
+	run             *goRaceRun
+	shards          map[int]*benchmarkShardEvidence
+	tests           map[benchmarkTestKey]benchmarkTestRun
 }
 
 type benchmarkNotes struct {
@@ -267,6 +272,11 @@ func compareBenchmarkEvidence(ctx context.Context, options BenchmarkCompareOptio
 	changedPackages, err := benchmarkChangedPackages(options.RepositoryRoot, a, b)
 	if err != nil {
 		return BenchmarkComparison{}, err
+	}
+	for _, side := range []*benchmarkEvidence{a, b} {
+		if side.committedShards, err = benchmarkCommittedShardCount(options.RepositoryRoot, side.sha); err != nil {
+			return BenchmarkComparison{}, fmt.Errorf("side %s: %w", side.label, err)
+		}
 	}
 	if options.GitHubJobs {
 		attachBenchmarkJobs(ctx, client, a, options.A.JobName, notes)
@@ -440,10 +450,14 @@ func attachBenchmarkJobs(ctx context.Context, client githubAPIClient, evidence *
 }
 
 func (evidence *benchmarkEvidence) report(notes *benchmarkNotes, weights goShardWeights) BenchmarkSide {
-	side := BenchmarkSide{SHA: evidence.sha, RunID: evidence.run.runID, Complete: evidence.run.complete()}
+	side := BenchmarkSide{SHA: evidence.sha, RunID: evidence.run.runID, ShardCount: evidence.run.shardCount, Complete: evidence.run.complete()}
 	split := evidence.run.splitPackages()
 	if !side.Complete {
 		notes.warn("side %s is incomplete: a shard is missing or did not run all its planned steps", evidence.label)
+	}
+	if committed := evidence.committedShards; committed > 0 && committed != evidence.run.shardCount {
+		side.ShardCount, side.Complete = committed, false
+		notes.warn("side %s is incomplete: its results record %d Go shards, but its commit lists %d in go_shards", evidence.label, evidence.run.shardCount, committed)
 	}
 	for _, index := range evidence.shardIndexes() {
 		shard := evidence.shards[index]
@@ -1033,6 +1047,30 @@ func benchmarkChangedPackages(root string, a, b *benchmarkEvidence) (map[string]
 		}
 	}
 	return changed, nil
+}
+
+// benchmarkCommittedShardCount reads go_shards from the commit itself, not the
+// workflow; 0 when the commit lists none.
+func benchmarkCommittedShardCount(root, sha string) (int, error) {
+	const inventory = "internal/testinfra/pr_producers.json"
+	listed, err := gitOutput(root, "ls-tree", "--full-tree", "--name-only", sha, "--", inventory)
+	if err != nil {
+		return 0, fmt.Errorf("read the Go shards of %s: %w", sha, err)
+	}
+	if listed == "" {
+		return 0, nil
+	}
+	body, err := gitBytes(root, "show", sha+":"+inventory)
+	if err != nil {
+		return 0, fmt.Errorf("read the Go shards of %s: %w", sha, err)
+	}
+	var document struct {
+		GoShards []string `json:"go_shards"`
+	}
+	if err := json.Unmarshal(body, &document); err != nil {
+		return 0, fmt.Errorf("decode %s at %s: %w", inventory, sha, err)
+	}
+	return len(document.GoShards), nil
 }
 
 func parseBenchmarkChangedTests(entries []string) (map[string]bool, error) {
