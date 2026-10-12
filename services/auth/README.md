@@ -285,10 +285,17 @@ There are no token, identity or workspace metric labels. Healthy ticks are
 quiet; degradation/recovery diagnostics are bounded and contain safe tuples.
 The usage worker exports
 `tetral_auth_api_key_usage_submissions_dropped_total{reason="capacity"|"contended"|"closed"}`,
-`tetral_auth_api_key_usage_samples_dropped_total{reason="deadline"|"database"}`
+`tetral_auth_api_key_usage_samples_dropped_total{reason="deadline"|"database"|"unconfirmed"}`
 and `tetral_auth_api_key_usage_rows_updated_total`, with no key, workspace or
-credential labels. A tick with failed writes logs one warning with a fixed
-message and the aggregate failed count; shutdown cancellation logs nothing.
+credential labels. A selected sample is dropped as `deadline` when the tick
+deadline passes before its write starts, and as `database` when its write fails
+without its update having matched the row, so nothing was written. It is
+dropped as `unconfirmed` when its write fails after the update matched the row,
+normally because the 100 ms deadline passed while committing; the commit can
+still apply, so the row may hold the sample. `rows_updated_total` counts only
+updates this process saw committed. A tick with failed writes logs one warning
+with a fixed message and the aggregate count of `database` and `unconfirmed`
+drops; shutdown cancellation logs nothing.
 All listeners bind and native credential material validates before readiness.
 A listener failure cancels its siblings and clears readiness. The separate gRPC
 health service reports `envoy.service.auth.v3.Authorization`; the process probes

@@ -185,7 +185,7 @@ func TestOIDCReplicaAuthority(t *testing.T) {
 		for _, process := range processes {
 			oidcAssertActualMaintenanceExport(ctx, t, process)
 		}
-		t.Log("oidc_replica_assertion=maintenance_export replicas=2 families=9 samples=14 public_metrics=404; export observation only")
+		t.Log("oidc_replica_assertion=maintenance_export replicas=2 families=9 samples=15 public_metrics=404; export observation only")
 		assertion := issuer.assertion(t, identity.Subject)
 		frozen := oidcReplicaExchange(ctx, t, processes[0], issuer.rule, assertion)
 		initial := issuer.counts()
@@ -290,7 +290,7 @@ func oidcAssertActualMaintenanceExport(ctx context.Context, t *testing.T, proces
 		"tetral_auth_token_prune_last_success_timestamp_seconds": nil,
 		"tetral_auth_token_prune_healthy":                        nil,
 		"tetral_auth_api_key_usage_submissions_dropped_total":    {`reason="capacity"`, `reason="contended"`, `reason="closed"`},
-		"tetral_auth_api_key_usage_samples_dropped_total":        {`reason="deadline"`, `reason="database"`},
+		"tetral_auth_api_key_usage_samples_dropped_total":        {`reason="deadline"`, `reason="database"`, `reason="unconfirmed"`},
 		"tetral_auth_api_key_usage_rows_updated_total":           nil,
 	}
 	expected := map[string]bool{}

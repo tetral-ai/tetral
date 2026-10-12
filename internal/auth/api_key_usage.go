@@ -79,9 +79,9 @@ type APIKeyUsageRecorder struct {
 	cancel   context.CancelFunc
 	done     chan struct{}
 
-	droppedCapacity, droppedContended, droppedClosed atomic.Uint64
-	droppedDeadline, droppedDatabase                 atomic.Uint64
-	updated                                          atomic.Uint64
+	droppedCapacity, droppedContended, droppedClosed     atomic.Uint64
+	droppedDeadline, droppedDatabase, droppedUnconfirmed atomic.Uint64
+	updated                                              atomic.Uint64
 
 	// In-package tests replace these before Start. now is the local monotonic
 	// scheduling clock; it never supplies a stored usage time.
@@ -246,8 +246,9 @@ func (r *APIKeyUsageRecorder) takeDue() []apiKeyUsageWork {
 }
 
 // flush writes one batch within a one-second total deadline. Work not started
-// by the deadline is dropped as "deadline"; an attempted write that fails is
-// dropped as "database". Lifecycle cancellation abandons the batch silently.
+// by the deadline is dropped as "deadline". An attempted write that fails is
+// dropped as "database", or as "unconfirmed" if its update matched, because its
+// commit can still apply. Lifecycle cancellation abandons the batch silently.
 func (r *APIKeyUsageRecorder) flush(ctx context.Context) {
 	work := r.takeDue()
 	if len(work) == 0 {
@@ -273,7 +274,11 @@ func (r *APIKeyUsageRecorder) flush(ctx context.Context) {
 				return
 			}
 			failed++
-			r.droppedDatabase.Add(1)
+			if written {
+				r.droppedUnconfirmed.Add(1)
+			} else {
+				r.droppedDatabase.Add(1)
+			}
 			continue
 		}
 		if written {
@@ -287,7 +292,8 @@ func (r *APIKeyUsageRecorder) flush(ctx context.Context) {
 
 // write is one transaction under the sample's trusted workspace. Its
 // deadline covers pool acquisition, workspace setting, the update, commit and
-// rollback.
+// rollback. It reports whether the update matched the row even when the
+// commit then fails.
 func (r *APIKeyUsageRecorder) write(ctx context.Context, item apiKeyUsageWork) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, apiKeyUsageTransactionDeadline)
 	defer cancel()
@@ -310,7 +316,7 @@ func (r *APIKeyUsageRecorder) Collector() workload.MetricsCollector {
 		if r == nil {
 			return nil, nil
 		}
-		const submissions, samples = "API-key usage submissions dropped before reaching the worker.", "API-key usage samples the worker selected but did not write."
+		const submissions, samples = "API-key usage submissions dropped before reaching the worker.", "API-key usage samples the worker selected but did not confirm as written."
 		reason := func(value string) []workload.MetricLabel {
 			return []workload.MetricLabel{{Name: "reason", Value: value}}
 		}
@@ -320,7 +326,8 @@ func (r *APIKeyUsageRecorder) Collector() workload.MetricsCollector {
 			{Name: "tetral_auth_api_key_usage_submissions_dropped_total", Help: submissions, Type: "counter", Labels: reason("closed"), Value: float64(r.droppedClosed.Load())},
 			{Name: "tetral_auth_api_key_usage_samples_dropped_total", Help: samples, Type: "counter", Labels: reason("deadline"), Value: float64(r.droppedDeadline.Load())},
 			{Name: "tetral_auth_api_key_usage_samples_dropped_total", Help: samples, Type: "counter", Labels: reason("database"), Value: float64(r.droppedDatabase.Load())},
-			{Name: "tetral_auth_api_key_usage_rows_updated_total", Help: "API-key rows whose last_used_at this process updated.", Type: "counter", Value: float64(r.updated.Load())},
+			{Name: "tetral_auth_api_key_usage_samples_dropped_total", Help: samples, Type: "counter", Labels: reason("unconfirmed"), Value: float64(r.droppedUnconfirmed.Load())},
+			{Name: "tetral_auth_api_key_usage_rows_updated_total", Help: "API-key rows whose last_used_at update this process saw committed.", Type: "counter", Value: float64(r.updated.Load())},
 		}, nil
 	}
 }
