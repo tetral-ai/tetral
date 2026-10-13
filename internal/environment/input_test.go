@@ -61,6 +61,7 @@ func TestDecodeCreateEnvironmentRequestRejectsUnknownAndInvalidShape(t *testing.
 		{"package manager non array", `{"name":"env","config":{"packages":{"pip":"pandas"}}}`},
 		{"package entry non string", `{"name":"env","config":{"packages":{"pip":[1]}}}`},
 		{"package entry null", `{"name":"env","config":{"packages":{"pip":[null]}}}`},
+		{"name over 256 code points", `{"name":"` + strings.Repeat("é", 257) + `"}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -217,8 +218,9 @@ func TestEnvironmentPatchMaterializePreservesAndReplacesFields(t *testing.T) {
 		UpdatedAt: createdAt,
 	}
 
+	maxName := strings.Repeat("界", 256)
 	patch, err := DecodeUpdateEnvironmentRequest([]byte(`{
-		"name":"updated",
+		"name":"` + maxName + `",
 		"config":{"networking":{"type":"cidr_allow_list","network_allow_list":"10.0.0.0/8"}},
 		"metadata":{"new":"value","delete_null":null,"delete_empty":""}
 	}`))
@@ -229,8 +231,8 @@ func TestEnvironmentPatchMaterializePreservesAndReplacesFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
-	if materialized.Name != "updated" {
-		t.Errorf("Name = %q; want updated", materialized.Name)
+	if materialized.Name != maxName {
+		t.Errorf("Name = %q; want the 256-code-point name", materialized.Name)
 	}
 	if materialized.Description != "existing" {
 		t.Errorf("Description = %q; want existing", materialized.Description)
@@ -308,6 +310,7 @@ func TestDecodeUpdateEnvironmentRequestRejectsInvalidPatch(t *testing.T) {
 		{"top level number", `1`},
 		{"top level boolean", `true`},
 		{"version rejected", `{"version":1}`},
+		{"name over 256 code points", `{"name":"` + strings.Repeat("é", 257) + `"}`},
 		{"unknown top level", `{"unknown":true}`},
 		{"metadata top null", `{"metadata":null}`},
 		{"metadata object", `{"metadata":{"k":{"nested":"v"}}}`},

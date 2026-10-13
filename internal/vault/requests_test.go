@@ -173,11 +173,12 @@ func TestCredentialCreateDecodersCoverAuthVariants(t *testing.T) {
 		t.Fatalf("refresh auth secret not decoded: %+v", oauth.Auth.Refresh.TokenEndpointAuth)
 	}
 
-	staticBearer, err := DecodeCreateCredentialRequest([]byte(`{"auth":{"type":"static_bearer","mcp_server_url":"https://Bearer.Example.COM/mcp","token":"bearer-secret"}}`))
+	maxPath := "/mcp/" + strings.Repeat("p", 2017) // the canonical URL is exactly 2048 bytes
+	staticBearer, err := DecodeCreateCredentialRequest([]byte(`{"auth":{"type":"static_bearer","mcp_server_url":"https://Bearer.Example.COM` + maxPath + `","token":"bearer-secret"}}`))
 	if err != nil {
 		t.Fatalf("Decode static_bearer: %v", err)
 	}
-	if staticBearer.Auth.MCPServerURL != "https://bearer.example.com/mcp" || staticBearer.Auth.Token != "bearer-secret" {
+	if staticBearer.Auth.MCPServerURL != "https://bearer.example.com"+maxPath || staticBearer.Auth.Token != "bearer-secret" {
 		t.Fatalf("static bearer auth = %+v", staticBearer.Auth)
 	}
 
@@ -452,6 +453,8 @@ func TestCredentialCreateDecoderRejectsStrictAndSecretBearingInvalidInputsSafely
 		{"unsafe mcp url", `{"auth":{"type":"static_bearer","mcp_server_url":"https://user:` + secret + `@localhost/mcp","token":"` + secret + `"}}`, "auth.mcp_server_url"},
 		{"unsafe token endpoint", `{"auth":{"type":"mcp_oauth","mcp_server_url":"https://example.com/mcp","access_token":"` + secret + `","refresh":{"refresh_token":"` + secret + `","client_id":"client","token_endpoint":"https://user:` + secret + `@localhost/token","token_endpoint_auth":{"type":"none"}}}}`, "auth.refresh.token_endpoint"},
 		{"malformed mcp dns host", `{"auth":{"type":"static_bearer","mcp_server_url":"https://example..com/mcp","token":"` + secret + `"}}`, "auth.mcp_server_url"},
+		{"mcp url over 2048 bytes", `{"auth":{"type":"static_bearer","mcp_server_url":"https://example.com/` + strings.Repeat("p", 2029) + `","token":"` + secret + `"}}`, "auth.mcp_server_url must be at most 2048 bytes"},
+		{"token endpoint over 2048 bytes", `{"auth":{"type":"mcp_oauth","mcp_server_url":"https://example.com/mcp","access_token":"` + secret + `","refresh":{"refresh_token":"` + secret + `","client_id":"client","token_endpoint":"https://example.com/` + strings.Repeat("t", 2029) + `","token_endpoint_auth":{"type":"none"}}}}`, "auth.refresh.token_endpoint must be at most 2048 bytes"},
 		{"trailing", `{"auth":{"type":"static_bearer","mcp_server_url":"https://example.com/mcp","token":"` + secret + `"}} []`, "exactly one"},
 		{"unsupported auth type", `{"auth":{"type":"password","token":"` + secret + `"}}`, "auth.type"},
 	}

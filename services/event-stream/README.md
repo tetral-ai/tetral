@@ -380,8 +380,8 @@ ReadSessionSignals(ctx, ws, sessionIDs) ([]SessionSignal, error)
 package parses query parameters: `limit` (default 20, hard cap
 `maxListLimit` = 100 — a larger or non-positive `limit` is `400`), `page`,
 `order` (`asc`/`desc`), a `types` event-type filter, and
-`created_at[gt|gte|lt|lte]` admission-time bounds; `beta=true` is required and
-any unknown parameter is `400`.
+`created_at[gt|gte|lt|lte]` admission-time bounds (RFC3339, UTC year 1–9999);
+`beta=true` is required and any unknown parameter or malformed value is `400`.
 
 - **Invariants a replacement must preserve**: page over `session_events`, never
   the change log; order and page the session list by `insert_stream_position`

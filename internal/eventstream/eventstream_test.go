@@ -265,10 +265,16 @@ func TestEventStreamSessionListDecodesSDKFiltersAndRejectsUnknownParameters(t *t
 		t.Fatalf("decoded thread list filters = %+v", reader.listOptions)
 	}
 
-	recorder = httptest.NewRecorder()
-	router.ServeHTTP(recorder, signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true&unknown=1"))
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("unknown param status = %d; want 400 body=%s", recorder.Code, recorder.Body.String())
+	for _, test := range []struct{ query, message string }{
+		{query: "unknown=1", message: "unknown query parameter"},
+		{query: "created_at[gte]=not-a-time", message: "created_at[gte] must be an RFC3339 timestamp with a UTC year of 1-9999"},
+		{query: "created_at[lt]=0001-01-01T00:00:00%2B01:00", message: "created_at[lt] must be an RFC3339 timestamp with a UTC year of 1-9999"},
+	} {
+		recorder = httptest.NewRecorder()
+		router.ServeHTTP(recorder, signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true&"+test.query))
+		if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), test.message) {
+			t.Fatalf("%s status = %d body=%s; want 400 %q", test.query, recorder.Code, recorder.Body.String(), test.message)
+		}
 	}
 }
 

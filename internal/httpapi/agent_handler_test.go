@@ -1300,12 +1300,12 @@ func TestGetAgentVersionAndVersionListPagination(t *testing.T) {
 	if snapshot["version"].(float64) != 1 || snapshot["system"] != "v1" {
 		t.Fatalf("version=1 snapshot = %+v; want v1", snapshot)
 	}
-	for _, path := range []string{"/v1/agents/" + agentID + "?version=0", "/v1/agents/" + agentID + "?version=abc", "/v1/agents/" + agentID + "?version=999", "/v1/agents/" + agentID + "?version=1&version=2", "/v1/agents/" + agentID + "?unknown=x"} {
+	for _, path := range []string{"/v1/agents/" + agentID + "?version=0", "/v1/agents/" + agentID + "?version=abc", "/v1/agents/" + agentID + "?version=999", "/v1/agents/" + agentID + "?version=2147483648", "/v1/agents/" + agentID + "?version=1&version=2", "/v1/agents/" + agentID + "?unknown=x"} {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		setAuthHeader(req)
 		router.ServeHTTP(rec, req)
-		if rec.Code < 400 {
+		if rec.Code < 400 || rec.Code >= 500 {
 			t.Fatalf("%s: expected error, got %d: %s", path, rec.Code, rec.Body.String())
 		}
 	}
