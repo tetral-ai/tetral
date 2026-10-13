@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -23,10 +24,11 @@ func TestPostgreSQLCompletionMailPersistsDeclaredEnvelopeVerbatim(t *testing.T) 
 	seedBridgeAPIChildFinishIdleFailureFixture(t, admin, suffix)
 	store := completionMailTestStore(t, runtime)
 	request := bridgeAPIChildFinishIdleFailureRequest(suffix)
+	// Model text is stored verbatim, U+0000 included.
 	wantEnvelope := completionMailEnvelope(
 		"main",
 		"task_"+completionTestChildID(suffix),
-		"the loop authored this body\nverbatim",
+		"the loop authored this body\x00\nverbatim",
 	)
 	request.CompletionMailText = bridgeString(wantEnvelope)
 
@@ -52,6 +54,52 @@ func TestPostgreSQLCompletionMailPersistsDeclaredEnvelopeVerbatim(t *testing.T) 
 	}
 	if inboxCount != 1 || queuedInboxCount != 1 {
 		t.Fatalf("completion mail Inbox rows = %d queued = %d; want exactly one queued row", inboxCount, queuedInboxCount)
+	}
+	// The parent reads, admits and cold-loads the same bytes.
+	mainScope := sessionfixture.BridgeAPIScope(completionTestSessionID(suffix), "thr_bridge_child_finish_idle_main_"+suffix,
+		"bind_bridge_child_finish_idle_"+suffix, 1, "pod_uid_child_finish_idle_"+suffix)
+	read, err := store.ReadAgentMail(context.Background(), &bridgev1.ReadAgentMailRequest{Scope: mainScope, SourceThreadId: completionTestChildID(suffix)})
+	if err != nil || read.GetFound().GetContent() != wantEnvelope {
+		t.Fatalf("parent ReadAgentMail = %#v/%v; want the envelope verbatim", read, err)
+	}
+	deliveryID := read.GetFound().GetDeliveryId()
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := dbconnect.NewClientForTesting(runtime).WithWorkspaceTx(context.Background(), "default", "test.admit_completion_mail", func(tx *dbconnect.Tx) error {
+			envelope, err := runtimecontrol.LoadStoredAgentMailEnvelopeByDeliveryTx(context.Background(), tx, "default", completionTestSessionID(suffix), deliveryID)
+			if err != nil {
+				return err
+			}
+			if envelope.Content != wantEnvelope {
+				t.Errorf("stored envelope content = %q; want %q", envelope.Content, wantEnvelope)
+			}
+			binding, err := runtimecontrol.ReadRuntimeBindingForDeliveryTx(context.Background(), tx, "default", completionTestSessionID(suffix))
+			if err != nil {
+				return err
+			}
+			_, err = runtimecontrol.AdmitAgentMailDeliveryTx(context.Background(), tx, mainScope, envelope, binding, store.now())
+			return err
+		}); err != nil {
+			t.Fatalf("admit completion mail to the parent, attempt %d: %v", attempt, err)
+		}
+	}
+	var identities string
+	if err := admin.QueryRowContext(context.Background(), `SELECT string_agg(concat_ws(' ', type, session_thread_id,
+		agent_mail_delivery_id, agent_mail_source_thread_id, agent_mail_target_thread_id, agent_mail_source_tool_use_event_id), '|' ORDER BY type DESC)
+		FROM session_events WHERE workspace_id='default' AND session_id=$1
+		AND type IN ('agent.thread_message_sent', 'agent.thread_message_received')`, completionTestSessionID(suffix)).Scan(&identities); err != nil {
+		t.Fatalf("read agent mail identity columns: %v", err)
+	}
+	identity := deliveryID + " " + completionTestChildID(suffix) + " " + mainScope.GetSessionThreadId() + " sevt_bridge_child_spawn_" + suffix
+	if want := "agent.thread_message_sent " + completionTestChildID(suffix) + " " + identity +
+		"|agent.thread_message_received " + mainScope.GetSessionThreadId() + " " + identity; identities != want {
+		t.Fatalf("agent mail identity columns = %q; want %q", identities, want)
+	}
+	store.RuntimeBindingTokenHMACKey = []byte("completion-mail-verbatim-test-key")
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: mainScope})
+	var mainContext bridgeLoadContextPayload
+	if err != nil || json.Unmarshal([]byte(loaded.GetContextJson()), &mainContext) != nil ||
+		len(mainContext.PendingAgentMail) != 1 || mainContext.PendingAgentMail[0].Content != wantEnvelope {
+		t.Fatalf("parent cold load pending mail = %#v/%v; want the envelope verbatim", mainContext.PendingAgentMail, err)
 	}
 }
 

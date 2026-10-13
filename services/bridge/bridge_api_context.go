@@ -658,14 +658,13 @@ func loadThreadPendingAgentMailTx(
 	scope *bridgev1.RuntimeScope,
 ) ([]bridgeLoadContextAgentMail, error) {
 	rows, err := tx.Query(ctx,
-		`SELECT sent.payload_json::jsonb ->> 'delivery_id',
-		        (sent.payload_json::jsonb -> 'message')::text
+		`SELECT sent.agent_mail_delivery_id, sent.payload_json
 		   FROM session_events sent
 			   JOIN session_threads source
 			     ON source.workspace_id = sent.workspace_id
 			    AND source.session_id = sent.session_id
 			    AND source.id = sent.session_thread_id
-			    AND source.id = sent.payload_json::jsonb ->> 'source_thread_id'
+			    AND source.id = sent.agent_mail_source_thread_id
 			   JOIN session_threads target
 			     ON target.workspace_id = sent.workspace_id
 			    AND target.session_id = sent.session_id
@@ -674,14 +673,13 @@ func loadThreadPendingAgentMailTx(
 			     ON inbox.workspace_id = sent.workspace_id
 			    AND inbox.session_id = sent.session_id
 			    AND inbox.session_thread_id = $3
-			    AND inbox.runtime_input_id =
-			        'agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id')
+			    AND inbox.runtime_input_id = 'agent_mail:' || sent.agent_mail_delivery_id
 			    AND inbox.input_kind = 'agent_mail'
 			    AND inbox.status IN ('delivering', 'accepted')
 			  WHERE sent.workspace_id = $1
 			    AND sent.session_id = $2
 			    AND sent.type = 'agent.thread_message_sent'
-			    AND sent.payload_json::jsonb ->> 'target_thread_id' = $3
+			    AND sent.agent_mail_target_thread_id = $3
 			    AND (
 			        (source.role = 'subagent' AND source.parent_thread_id = target.id)
 			        OR (target.role = 'subagent' AND target.parent_thread_id = source.id)
@@ -693,8 +691,7 @@ func loadThreadPendingAgentMailTx(
 		           AND received.session_id = sent.session_id
 		           AND received.session_thread_id = $3
 		           AND received.type = 'agent.thread_message_received'
-		           AND received.payload_json::jsonb ->> 'delivery_id' =
-		               sent.payload_json::jsonb ->> 'delivery_id'
+		           AND received.agent_mail_delivery_id = sent.agent_mail_delivery_id
 		           AND received.processed_at IS NOT NULL
 		    )
 		  ORDER BY sent.sequence ASC, sent.event_id ASC
@@ -710,14 +707,15 @@ func loadThreadPendingAgentMailTx(
 	pending := make([]bridgeLoadContextAgentMail, 0)
 	for rows.Next() {
 		var mail bridgeLoadContextAgentMail
-		var storedMessageJSON string
-		if err := rows.Scan(&mail.DeliveryID, &storedMessageJSON); err != nil {
+		var storedPayloadJSON string
+		if err := rows.Scan(&mail.DeliveryID, &storedPayloadJSON); err != nil {
 			return nil, err
 		}
-		if mail.DeliveryID == "" || storedMessageJSON == "" {
-			return nil, status.Error(codes.FailedPrecondition, "pending agent mail is malformed")
+		storedMessageJSON, err := runtimecontrol.AgentMailMessageFromEventPayload(storedPayloadJSON)
+		if err != nil {
+			return nil, err
 		}
-		publicMessage, err := runtimecontrol.ValidatedPublicInterAgentMessageJSON(json.RawMessage(storedMessageJSON))
+		publicMessage, err := runtimecontrol.ValidatedPublicInterAgentMessageJSON(storedMessageJSON)
 		if err != nil {
 			return nil, err
 		}

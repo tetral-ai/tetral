@@ -980,7 +980,7 @@ func runtimePodLostInterruptedThenLostTx(
 		     ON inbox.workspace_id = received.workspace_id
 		    AND inbox.session_id = received.session_id
 		    AND inbox.session_thread_id = received.session_thread_id
-		    AND inbox.runtime_input_id = 'agent_mail:' || (received.payload_json::jsonb ->> 'delivery_id')
+		    AND inbox.runtime_input_id = 'agent_mail:' || received.agent_mail_delivery_id
 		    AND inbox.input_kind = 'agent_mail'
 		    AND inbox.status IN ('queued', 'delivering', 'accepted', 'committed')
 		    AND inbox.event_ids_json::jsonb = jsonb_build_array(received.event_id)
@@ -1415,15 +1415,15 @@ func runtimePodLostAgentMailInboxCurrentTx(
 	var sourceThreadID, sourceToolUseEventID string
 	err = tx.QueryRow(ctx,
 		`SELECT sequence,
-		        payload_json::jsonb ->> 'source_thread_id',
-		        payload_json::jsonb ->> 'source_tool_use_event_id'
+		        agent_mail_source_thread_id,
+		        agent_mail_source_tool_use_event_id
 		   FROM session_events
 		  WHERE workspace_id = $1
 		    AND session_id = $2
 		    AND session_thread_id = $3
 		    AND event_id = $4
 		    AND type = 'agent.thread_message_received'
-		    AND payload_json::jsonb ->> 'delivery_id' = $5
+		    AND agent_mail_delivery_id = $5
 		  FOR UPDATE`,
 		workspaceID,
 		sessionID,
@@ -1455,16 +1455,16 @@ func runtimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, w
 		        tool_use.payload_json,
 		        COALESCE(tool_use.payload_json::jsonb ->> 'name', ''),
 		        COALESCE(sent.event_id, ''),
-		        COALESCE(sent.payload_json::jsonb ->> 'delivery_id', '')
+		        COALESCE(sent.agent_mail_delivery_id, '')
 		   FROM session_events tool_use
 		   LEFT JOIN LATERAL (
-		       SELECT candidate.event_id, candidate.payload_json
+		       SELECT candidate.event_id, candidate.agent_mail_delivery_id
 		         FROM session_events candidate
 		        WHERE candidate.workspace_id = tool_use.workspace_id
 		          AND candidate.session_id = tool_use.session_id
 		          AND candidate.session_thread_id = tool_use.session_thread_id
 		          AND candidate.type = 'agent.thread_message_sent'
-		          AND candidate.payload_json::jsonb ->> 'source_tool_use_event_id' = tool_use.event_id
+		          AND candidate.agent_mail_source_tool_use_event_id = tool_use.event_id
 		        ORDER BY candidate.sequence ASC, candidate.event_id ASC
 		        LIMIT 1
 		   ) sent ON TRUE

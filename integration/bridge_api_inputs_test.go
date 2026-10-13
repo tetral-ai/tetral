@@ -146,7 +146,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 		    AND session_id = 'sesn_bridge_inter_agent'
 		    AND session_thread_id = 'thr_bridge_inter_agent_child'
 		    AND type = 'agent.thread_message_received'
-		    AND payload_json::jsonb ->> 'delivery_id' = $1`, deliveryID).Scan(&receivedEventID, &receivedVisibility, &receivedSessionVisible, &receivedPayloadJSON); err != nil {
+		    AND agent_mail_delivery_id = $1`, deliveryID).Scan(&receivedEventID, &receivedVisibility, &receivedSessionVisible, &receivedPayloadJSON); err != nil {
 		t.Fatalf("read received event: %v", err)
 	}
 	if receivedVisibility != "public" || !receivedSessionVisible ||
@@ -166,7 +166,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 		    AND session_id = 'sesn_bridge_inter_agent'
 		    AND session_thread_id = 'thr_bridge_inter_agent_parent'
 		    AND type = 'agent.thread_message_sent'
-		    AND payload_json::jsonb ->> 'delivery_id' = $1`, deliveryID).Scan(&sentPayloadJSON); err != nil {
+		    AND agent_mail_delivery_id = $1`, deliveryID).Scan(&sentPayloadJSON); err != nil {
 		t.Fatalf("read sent event: %v", err)
 	}
 	if sessionfixture.JSONPathString(t, sentPayloadJSON, "target_thread_id") != childThreadID ||

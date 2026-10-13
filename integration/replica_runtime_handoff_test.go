@@ -1255,7 +1255,7 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 		// Drive that existing input through the real Runner before the wake;
 		// Queue's same-thread ordering must not be bypassed by the fixture.
 		var originalInput, originalEvents, beforeStatus, receivedID, wakeID string
-		if err := admin.QueryRow(`SELECT i.runtime_input_id,i.event_ids_json,i.status,e.event_id,h.queue_job_id FROM session_runtime_inbox i JOIN session_events e ON e.session_id=i.session_id AND e.session_thread_id=i.session_thread_id AND e.type='agent.thread_message_received' AND e.payload_json::jsonb->>'delivery_id'=$2 JOIN session_runtime_handoff_threads h ON h.session_id=i.session_id AND h.session_thread_id=i.session_thread_id WHERE i.session_id=$1 AND i.runtime_input_id=$3`, session, deliveryID, "agent_mail:"+deliveryID).Scan(&originalInput, &originalEvents, &beforeStatus, &receivedID, &wakeID); err != nil {
+		if err := admin.QueryRow(`SELECT i.runtime_input_id,i.event_ids_json,i.status,e.event_id,h.queue_job_id FROM session_runtime_inbox i JOIN session_events e ON e.session_id=i.session_id AND e.session_thread_id=i.session_thread_id AND e.type='agent.thread_message_received' AND e.agent_mail_delivery_id=$2 JOIN session_runtime_handoff_threads h ON h.session_id=i.session_id AND h.session_thread_id=i.session_thread_id WHERE i.session_id=$1 AND i.runtime_input_id=$3`, session, deliveryID, "agent_mail:"+deliveryID).Scan(&originalInput, &originalEvents, &beforeStatus, &receivedID, &wakeID); err != nil {
 			t.Fatal(err)
 		}
 		expectedBefore := "queued"
@@ -1271,7 +1271,7 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 		waitHandoffCondition(t, "original child continuation on replacement", func() bool { return next.calls(session) == expectedCalls })
 		var afterEvents, afterStatus, wakeStatus string
 		var receivedCount, sourceCount int
-		if err := admin.QueryRow(`SELECT i.event_ids_json,i.status,j.status,(SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id=$2 AND type='agent.thread_message_received' AND payload_json::jsonb->>'delivery_id'=$3),(SELECT count(*) FROM session_events WHERE session_id=$1 AND event_id=$4 AND payload_json::jsonb->>'delivery_id'=$3) FROM session_runtime_inbox i JOIN queue_jobs j ON j.id=$5 WHERE i.session_id=$1 AND i.runtime_input_id=$6`, session, child, deliveryID, receivedID, wakeID, originalInput).Scan(&afterEvents, &afterStatus, &wakeStatus, &receivedCount, &sourceCount); err != nil {
+		if err := admin.QueryRow(`SELECT i.event_ids_json,i.status,j.status,(SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id=$2 AND type='agent.thread_message_received' AND agent_mail_delivery_id=$3),(SELECT count(*) FROM session_events WHERE session_id=$1 AND event_id=$4 AND agent_mail_delivery_id=$3) FROM session_runtime_inbox i JOIN queue_jobs j ON j.id=$5 WHERE i.session_id=$1 AND i.runtime_input_id=$6`, session, child, deliveryID, receivedID, wakeID, originalInput).Scan(&afterEvents, &afterStatus, &wakeStatus, &receivedCount, &sourceCount); err != nil {
 			t.Fatal(err)
 		}
 		t.Logf("original child mail input=%s source=%s events=%s inbox=%s->%s handoffWake=%s/%s receivedEvents=%d", originalInput, receivedID, originalEvents, beforeStatus, afterStatus, wakeID, wakeStatus, receivedCount)

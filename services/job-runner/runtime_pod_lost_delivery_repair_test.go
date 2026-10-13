@@ -101,14 +101,14 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 				`SELECT count(*) FROM session_events
 				  WHERE workspace_id = 'default' AND session_id = $1
 				    AND type = 'agent.thread_message_sent'
-				    AND payload_json::jsonb ->> 'delivery_id' = $2`, fixture.sessionID, fixture.deliveryID).Scan(&sentCount); err != nil {
+				    AND agent_mail_delivery_id = $2`, fixture.sessionID, fixture.deliveryID).Scan(&sentCount); err != nil {
 				t.Fatalf("count sent events: %v", err)
 			}
 			if err := admin.QueryRowContext(context.Background(),
 				`SELECT count(*) FROM session_events
 				  WHERE workspace_id = 'default' AND session_id = $1
 				    AND type = 'agent.thread_message_received'
-				    AND payload_json::jsonb ->> 'delivery_id' = $2`, fixture.sessionID, fixture.deliveryID).Scan(&receivedCount); err != nil {
+				    AND agent_mail_delivery_id = $2`, fixture.sessionID, fixture.deliveryID).Scan(&receivedCount); err != nil {
 				t.Fatalf("count received events: %v", err)
 			}
 			if err := admin.QueryRowContext(context.Background(),
@@ -290,7 +290,8 @@ func seedRuntimePodLostDeliveryFixture(
 	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, db, "default", fixture.sessionID, fixture.parentThreadID, fixture.toolUseEventID)
 	sequence++
 	if withSent {
-		messageJSON := sessionfixture.BridgePublicMessageJSONForTest(t, "hello worker")
+		// Mail text keeps U+0000; repair must never cast a mail payload to JSONB.
+		messageJSON := sessionfixture.BridgePublicMessageJSONForTest(t, "hello\x00worker")
 		sentPayload := sessionfixture.BridgeInterAgentSentEventJSON(t, fixture.deliveryID, fixture.parentThreadID, fixture.childThreadID, "worker", fixture.toolUseEventID, messageJSON)
 		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_sent_"+fixture.toolUseEventID, sequence, "agent.thread_message_sent", sentPayload, "public", true)
 		sessionfixture.SeedAgentMailCustody(t, db, fixture.sessionID, fixture.childThreadID, fixture.deliveryID, fixture.now)
@@ -476,15 +477,19 @@ func seedRuntimePodLostDeliveryEvent(t *testing.T, db *sql.DB, fixture runtimePo
 		projectionJSON = `{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}`
 	}
 	relation := sessionfixture.ToolEventRelationForTest(t, db, "default", eventID, eventType, payloadJSON)
+	mail := sessionfixture.AgentMailRelationForTest(t, eventType, threadID, payloadJSON)
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, model_request_id, projection_json,
-			model_tool_call_id, tool_use_event_id, created_at, updated_at
-		) VALUES ('default', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+			model_tool_call_id, tool_use_event_id,
+			agent_mail_delivery_id, agent_mail_source_thread_id, agent_mail_target_thread_id, agent_mail_source_tool_use_event_id,
+			created_at, updated_at
+		) VALUES ('default', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
 			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		fixture.sessionID, threadID, eventID, sequence, eventType, payloadJSON, visibility, sessionVisible, fixture.modelRequestID, projectionJSON,
-		relation.ModelToolCallID, relation.ToolUseEventID); err != nil {
+		relation.ModelToolCallID, relation.ToolUseEventID,
+		mail.DeliveryID, mail.SourceThreadID, mail.TargetThreadID, mail.SourceToolUseEventID); err != nil {
 		t.Fatalf("seed %s event %s: %v", eventType, eventID, err)
 	}
 }

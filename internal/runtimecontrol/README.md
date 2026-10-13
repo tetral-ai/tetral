@@ -56,6 +56,15 @@ call ID is `AlreadyExists`, a global event ID collision is a non-disclosing
 `AlreadyExists`, and a second result for one Tool Use is an internal invariant
 error that rolls the whole transaction back without retry.
 
+Completion mail and delivery admission
+(`AppendDeclaredCompletionMailForSourceTx`, `AdmitAgentMailDeliveryTx`) pass
+the envelope identity to `sessioneventwrite` as `AgentMail`, which stores it
+in the `agent_mail_*` columns. Envelope lookup, received-event lookup and
+agent-mail finalization filter on those columns and never cast a mail payload
+to JSONB, because mail text may hold U+0000;
+`AgentMailMessageFromEventPayload` decodes a stored message in Go for readers
+that need it.
+
 Assistant context of a model request is a parts-mode message: a small header
 in `session_messages` and immutable `session_message_parts` rows.
 `LockAssistantMessageHeaderTx` locks the header without reading content, and

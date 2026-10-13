@@ -22,7 +22,7 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 25, "wait_agent", "idle", false, false, false, false, true)
 	const completionDeliveryID = "delivery_pod_loss_wait_completion"
 	seedRuntimePodLostDeliveryEvent(t, admin, fixture, fixture.childThreadID, "evt_pod_loss_wait_opener", 1,
-		"agent.thread_message_received", `{"type":"agent.thread_message_received"}`, "public", true)
+		"agent.thread_message_received", `{"type":"agent.thread_message_received","delivery_id":"delivery_evt_pod_loss_wait_opener","source_thread_id":"`+fixture.parentThreadID+`","source_tool_use_event_id":"sevt_evt_pod_loss_wait_opener"}`, "public", true)
 	messageJSON := sessionfixture.BridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "worker", "current completion"))
 	sentPayload := sessionfixture.BridgeInterAgentSentEventJSON(
 		t,
@@ -91,7 +91,7 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 	}
 
 	seedRuntimePodLostDeliveryEvent(t, admin, fixture, fixture.childThreadID, "evt_pod_loss_wait_newer_opener", 3,
-		"agent.thread_message_received", `{"type":"agent.thread_message_received"}`, "public", true)
+		"agent.thread_message_received", `{"type":"agent.thread_message_received","delivery_id":"delivery_evt_pod_loss_wait_newer_opener","source_thread_id":"`+fixture.parentThreadID+`","source_tool_use_event_id":"sevt_evt_pod_loss_wait_newer_opener"}`, "public", true)
 	superseded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
 		Scope: scope,
 	})
@@ -110,7 +110,7 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 		`SELECT count(*) FROM session_events
 		  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
 		    AND type='agent.thread_message_received'
-		    AND payload_json::jsonb ->> 'delivery_id'=$3`,
+		    AND agent_mail_delivery_id=$3`,
 		fixture.sessionID,
 		fixture.parentThreadID,
 		completionDeliveryID,
@@ -161,7 +161,7 @@ func TestPostgreSQLRuntimePodLossDeliveryChildCloseSerializesBeforeRedrive(t *te
 		`SELECT count(*) FROM session_events
 		  WHERE workspace_id = 'default' AND session_id = $1
 		    AND type = 'agent.thread_message_received'
-		    AND payload_json::jsonb ->> 'delivery_id' = $2`, fixture.sessionID, fixture.deliveryID).Scan(&receivedCount); err != nil {
+		    AND agent_mail_delivery_id = $2`, fixture.sessionID, fixture.deliveryID).Scan(&receivedCount); err != nil {
 		t.Fatalf("count close-raced receipts: %v", err)
 	}
 	if err := admin.QueryRowContext(context.Background(),
@@ -294,15 +294,19 @@ func seedRuntimePodLostDeliveryEvent(t *testing.T, db *sql.DB, fixture runtimePo
 		projectionJSON = `{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}`
 	}
 	relation := sessionfixture.ToolEventRelationForTest(t, db, "default", eventID, eventType, payloadJSON)
+	mail := sessionfixture.AgentMailRelationForTest(t, eventType, threadID, payloadJSON)
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, model_request_id, projection_json,
-			model_tool_call_id, tool_use_event_id, created_at, updated_at
-		) VALUES ('default', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+			model_tool_call_id, tool_use_event_id,
+			agent_mail_delivery_id, agent_mail_source_thread_id, agent_mail_target_thread_id, agent_mail_source_tool_use_event_id,
+			created_at, updated_at
+		) VALUES ('default', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
 			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		fixture.sessionID, threadID, eventID, sequence, eventType, payloadJSON, visibility, sessionVisible, fixture.modelRequestID, projectionJSON,
-		relation.ModelToolCallID, relation.ToolUseEventID); err != nil {
+		relation.ModelToolCallID, relation.ToolUseEventID,
+		mail.DeliveryID, mail.SourceThreadID, mail.TargetThreadID, mail.SourceToolUseEventID); err != nil {
 		t.Fatalf("seed %s event %s: %v", eventType, eventID, err)
 	}
 }

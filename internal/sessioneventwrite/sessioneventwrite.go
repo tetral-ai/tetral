@@ -21,10 +21,10 @@ const reserveStreamPositionSQL = `SELECT nextval(pg_get_serial_sequence('public.
 
 // InitialEvent is one complete Session event as first written. Empty values
 // of the nullable scalar columns (SessionThreadID, RuntimeWriteID,
-// ModelRequestID, ModelToolCallID, ToolUseEventID) store NULL; an empty
-// ProjectionJSON stores the column default '{}'. CreatedAt is also the
-// event's updated_at and its change's changed_at. A nil ProcessedAt leaves an
-// admitted input unprocessed.
+// ModelRequestID, ModelToolCallID, ToolUseEventID and the AgentMail fields)
+// store NULL; an empty ProjectionJSON stores the column default '{}'.
+// CreatedAt is also the event's updated_at and its change's changed_at. A nil
+// ProcessedAt leaves an admitted input unprocessed.
 type InitialEvent struct {
 	WorkspaceID     string
 	SessionID       string
@@ -40,8 +40,18 @@ type InitialEvent struct {
 	ModelRequestID  string
 	ModelToolCallID string
 	ToolUseEventID  string
+	AgentMail       AgentMail
 	CreatedAt       time.Time
 	ProcessedAt     *time.Time
+}
+
+// AgentMail is the envelope identity an agent mail event stores in scalar
+// columns beside its payload; other events leave it empty.
+type AgentMail struct {
+	DeliveryID           string
+	SourceThreadID       string
+	TargetThreadID       string
+	SourceToolUseEventID string
 }
 
 // InsertInitialTx reserves one feed position, inserts the complete event as
@@ -67,16 +77,19 @@ func InsertInitialTx(ctx context.Context, tx *dbconnect.Tx, event InitialEvent) 
 			workspace_id, session_id, session_thread_id, event_id, sequence, revision, type, payload_json,
 			visibility, session_visible, latest_stream_position, insert_stream_position,
 			runtime_write_id, model_request_id, projection_json, model_tool_call_id, tool_use_event_id,
+			agent_mail_delivery_id, agent_mail_source_thread_id, agent_mail_target_thread_id, agent_mail_source_tool_use_event_id,
 			created_at, updated_at, processed_at
 		) VALUES (
 			$1, $2, NULLIF($3, ''), $4, $5, 1, $6, $7,
 			$8, $9, $10, $10,
 			NULLIF($11, ''), NULLIF($12, ''), $13, NULLIF($14, ''), NULLIF($15, ''),
-			$16, $16, $17
+			NULLIF($16, ''), NULLIF($17, ''), NULLIF($18, ''), NULLIF($19, ''),
+			$20, $20, $21
 		)`,
 		event.WorkspaceID, event.SessionID, event.SessionThreadID, event.EventID, event.Sequence, event.Type, event.PayloadJSON,
 		event.Visibility, event.SessionVisible, position,
 		event.RuntimeWriteID, event.ModelRequestID, projectionJSON, event.ModelToolCallID, event.ToolUseEventID,
+		event.AgentMail.DeliveryID, event.AgentMail.SourceThreadID, event.AgentMail.TargetThreadID, event.AgentMail.SourceToolUseEventID,
 		event.CreatedAt, processedAt,
 	); err != nil {
 		return 0, err

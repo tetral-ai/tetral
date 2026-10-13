@@ -419,6 +419,14 @@ changes provider-context eligibility while retaining the original audit events.
   nothing. The CHECK exists because other readers still cast Tool Use payloads
   and projections to JSONB; assistant text, reasoning and Tool Results carry
   no such requirement.
+- **Agent mail identity.** `agent.thread_message_sent` and
+  `agent.thread_message_received` carry the mail text verbatim; a completion
+  mail is the sub-agent's final answer, which may contain U+0000. Each writer
+  stores the envelope identity (delivery, source and target Thread, source
+  Tool Use) in the `agent_mail_*` columns with the values it puts in the
+  payload, and every mail lookup, join and index uses those columns; a reader
+  that needs the message decodes the payload in Go and never casts it to JSON
+  or JSONB.
 - **Event feed.** Every feed-producing writer inserts its event through
   `sessioneventwrite.InsertInitialTx` after taking its existing Session
   mutation serialization: one reserved value of the change identity, one
@@ -457,9 +465,10 @@ changes provider-context eligibility while retaining the original audit events.
   fatal conflict; no double-count on replay; per-request stable-reasoning
   byte/part budgets roll back the enclosing transaction when validation fails.
 - **Conformance.** `bridge_api_events_test.go`; `tool_relation_test.go` drives
-  every Bridge Tool event writer, the relation constraints, Tool Use
-  storability, call-ID identity across compaction, text-only compaction and
-  the Sandbox entrypoints' shared result checks under the real Bridge role.
+  every Bridge Tool event writer, the relation and agent mail constraints,
+  Tool Use storability, call-ID identity across compaction, text-only
+  compaction and the Sandbox entrypoints' shared result checks under the real
+  Bridge role.
   `feed_position_test.go` pauses a writer holding the Session fence and proves
   a concurrent production write on another Thread commits at a later position,
   a rolled-back reservation leaves a gap, and other Sessions proceed.
@@ -756,7 +765,7 @@ handoff, Bridge recovery and worker drain compose the actual owning services.
 | `bridge_api_mcp_test.go`, `mcp_manifest_continuity_test.go`, `mcp_collision_split_test.go` | MCP claim/commit idempotency, reservation fencing, capture-before-deliver, generation-ordered supersession, collision split |
 | `bridge_api_attachments_test.go`, `bridge_api_file_attachments_test.go`, `attachment_transport_test.go`, `scoped_transport_capacity_test.go` | Read-only Gateway resolvers, scope validation, offset-addressed file chunk reads, helper-transport capacity scoping |
 | `closeout_sentinel_test.go` | `scope_superseded` stale mapping and precise `closeout_unrepairable` status typing |
-| `completion_mail_test.go`, `integration/completion_mail_delivery_test.go` | Child completion-return discriminator and atomic envelope-plus-wake write |
+| `completion_mail_test.go`, `integration/completion_mail_delivery_test.go` | Child completion-return discriminator, atomic envelope-plus-wake write, and a final answer holding U+0000 read, admitted and cold-loaded verbatim by the parent |
 | `config_test.go`, `cmd/bridge-api/main_test.go` | Startup config validation and production dependency assembly |
 
 If a PR changes an RPC's idempotency identity, the binding fence, the shared durable control

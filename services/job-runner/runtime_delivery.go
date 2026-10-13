@@ -2471,7 +2471,7 @@ func settleAgentMailDeliveryExhaustionTx(
 		    AND session_id = $2
 		    AND session_thread_id = $3
 		    AND type = 'agent.thread_message_received'
-		    AND payload_json::jsonb ->> 'delivery_id' = $4`,
+		    AND agent_mail_delivery_id = $4`,
 		job.WorkspaceID,
 		job.SessionID,
 		job.SessionThreadID,

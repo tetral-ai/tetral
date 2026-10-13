@@ -503,7 +503,7 @@ func TestSubagentFirstMailExhaustionFailsOnlyExactChild(t *testing.T) {
 		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_start'),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4
-		  AND type='agent.thread_message_sent' AND payload_json::jsonb ->> 'target_thread_id'=$5)`,
+		  AND type='agent.thread_message_sent' AND agent_mail_target_thread_id=$5)`,
 		runtimeInputID, jobID, sessionID, childID, parentID).Scan(
 		&inboxStatus, &queueStatus, &attempts, &childStatus, &parentStatus, &messages, &starts, &parentNotifications,
 	); err != nil {
@@ -1601,9 +1601,9 @@ func TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody(t *testing.
 	var lateSent, lateReceived, lateInbox, lateQueue, lateReceipt int
 	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1
-		 AND payload_json::jsonb->>'delivery_id'=$2 AND type='agent.thread_message_sent'),
+		 AND agent_mail_delivery_id=$2 AND type='agent.thread_message_sent'),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1
-		 AND payload_json::jsonb->>'delivery_id'=$2 AND type='agent.thread_message_received'),
+		 AND agent_mail_delivery_id=$2 AND type='agent.thread_message_received'),
 		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3),
 		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$4),
 		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1
@@ -1971,7 +1971,7 @@ func TestLaterSubagentMailNPlusOneFailsOnlyExactChild(t *testing.T) {
 		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$3 AND id=$4),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_start'),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4
-		  AND type='agent.thread_message_sent' AND payload_json::jsonb ->> 'target_thread_id'=$5)`,
+		  AND type='agent.thread_message_sent' AND agent_mail_target_thread_id=$5)`,
 		runtimeInputID, jobID, fixture.sessionID, fixture.childID, parentID).Scan(&inboxStatus, &queueStatus, &attempts, &childStatus, &starts, &parentNotifications); err != nil {
 		t.Fatalf("read ordinary N+1 settlement: %v", err)
 	}
@@ -2188,7 +2188,7 @@ func readOrdinaryAgentMailFinalizationState(t *testing.T, admin *sql.DB, job job
 		(SELECT COALESCE(last_error_kind,'') FROM queue_jobs WHERE workspace_id='default' AND id=$5),
 		(SELECT updated_at::text FROM queue_jobs WHERE workspace_id='default' AND id=$5),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$3
-		  AND type='agent.thread_message_sent' AND payload_json::jsonb ->> 'target_thread_id'=$6),
+		  AND type='agent.thread_message_sent' AND agent_mail_target_thread_id=$6),
 		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$3)`,
 		job.SessionID, job.RuntimeInputID, job.SessionThreadID, runtimecontrol.StableRuntimeID("agent_mail_received_event", job.WorkspaceID, job.SessionID, job.SessionThreadID, strings.TrimPrefix(job.RuntimeInputID, "agent_mail:")),
 		job.JobID, parentID).Scan(

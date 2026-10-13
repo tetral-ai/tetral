@@ -556,7 +556,7 @@ func TestPostgreSQLBridgeAPIStoreCompletionCommitReplayProjectsOnce(t *testing.T
 			(SELECT count(*) FROM session_events
 			  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
 			    AND type='agent.thread_message_received'
-			    AND payload_json::jsonb ->> 'delivery_id'=$3),
+			    AND agent_mail_delivery_id=$3),
 			(SELECT count(*) FROM session_messages
 			  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
 			    AND kind='user' AND data_json LIKE '%Message Type: FINAL_ANSWER%')`,
@@ -633,7 +633,7 @@ func TestPostgreSQLBridgeAPIStoreConcurrentCompletionCommitCreatesOneReceipt(t *
 			(SELECT count(*) FROM session_events
 			  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
 			    AND type='agent.thread_message_received'
-			    AND payload_json::jsonb ->> 'delivery_id'=$3),
+			    AND agent_mail_delivery_id=$3),
 			(SELECT count(*) FROM session_messages
 			  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
 			    AND kind='user' AND data_json LIKE '%Message Type: FINAL_ANSWER%')`,
@@ -659,7 +659,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsCompletionMailOnMainExactly
 	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, childID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_completion_main", 1, "pod_uid_completion_main")
 
-	messageJSON := sessionfixture.BridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "task_"+childID, "done"))
+	messageJSON := sessionfixture.BridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "task_"+childID, "do\x00ne"))
 	request := bridgeAgentMailCommitRequestForTest(
 		t,
 		admin,
@@ -688,7 +688,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsCompletionMailOnMainExactly
 		`SELECT count(*) FROM session_events
 		  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
 		    AND type='agent.thread_message_received'
-		    AND payload_json::jsonb ->> 'delivery_id'='delivery_bridge_completion_main'`,
+		    AND agent_mail_delivery_id='delivery_bridge_completion_main'`,
 		sessionID, mainThreadID).Scan(&receivedCount); err != nil {
 		t.Fatalf("count main completion receipts: %v", err)
 	}
@@ -719,6 +719,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsCompletionMailOnMainExactly
 	}
 	if err := json.Unmarshal([]byte(projectedDataJSON), &projected); err != nil || len(projected.Parts) != 1 ||
 		projected.Parts[0].Type != "text" || !strings.Contains(projected.Parts[0].Text, "Message Type: FINAL_ANSWER") ||
+		!strings.HasSuffix(projected.Parts[0].Text, "do\x00ne") ||
 		strings.Contains(projectedDataJSON, `"role"`) || strings.Contains(projectedDataJSON, `"origin"`) {
 		t.Fatalf("main completion context = %s; want one narrow text part", projectedDataJSON)
 	}

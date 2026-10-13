@@ -70,7 +70,7 @@ func TestPostgreSQLRuntimePodLossInterruptFenceMatrix(t *testing.T) {
 				if state == "committed_inter_agent_above" || state == "orphan_inter_agent_above" {
 					deliveryID := "delivery_inter_agent_above_" + suffix
 					receivedEventID := "sevt_inter_agent_above_" + suffix
-					seedBridgeAPIEvent(t, admin, "default", sessionID, targetThreadID, receivedEventID, 3, "agent.thread_message_received", `{"delivery_id":"`+deliveryID+`"}`)
+					seedBridgeAPIEvent(t, admin, "default", sessionID, targetThreadID, receivedEventID, 3, "agent.thread_message_received", `{"delivery_id":"`+deliveryID+`","source_thread_id":"thrd_pod_loss_interrupt_source_`+suffix+`","source_tool_use_event_id":"sevt_pod_loss_interrupt_source_`+suffix+`","message":{"content":[{"type":"text","text":"mail\u0000text"}]}}`)
 					if state == "committed_inter_agent_above" {
 						sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, targetThreadID, "agent_mail:"+deliveryID, "agent_mail", `[`+fmt.Sprintf("%q", receivedEventID)+`]`, "committed", bindingID, binding.PodUID, 3, 3)
 					}
