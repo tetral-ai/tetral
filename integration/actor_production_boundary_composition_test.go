@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -306,7 +305,7 @@ func TestPostgreSQLChildControlExhaustionRejoinsParentToolResult(t *testing.T) {
 	if err := os.WriteFile(inputPath, input, 0o600); err != nil {
 		t.Fatalf("write child control composition: %v", err)
 	}
-	var output bytes.Buffer
+	var output syncBuffer
 	command := exec.Command("bun", "packages/runtime-pod/test/fixtures/child-control-exhaustion-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
 	command.Dir = "../services/agent-runtime"
 	command.Stdout = &output
