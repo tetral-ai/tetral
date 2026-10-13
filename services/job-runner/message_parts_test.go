@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -88,7 +89,9 @@ func readRetainedParts(t *testing.T, admin *sql.DB, messageID string) (int64, in
 // and the Assistant message lacks, in event order, selecting candidates by
 // scalar identity and continuing across bounded pages. It never reads, decodes
 // or rewrites an existing part, leaves the admitted reasoning counters alone,
-// keeps numeric input tokens, and a repeated repair writes nothing.
+// keeps numeric input tokens, stores a completed result in the {text} shape
+// the LoadContext row decoder accepts, and a repeated repair writes nothing.
+// A part the context validator rejects fails the repair and writes nothing.
 func TestPostgreSQLPodLossRetainAppendsOnlyMissingToolFacts(t *testing.T) {
 	ctx := context.Background()
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -134,25 +137,28 @@ func TestPostgreSQLPodLossRetainAppendsOnlyMissingToolFacts(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed immutable Tool events: %v", err)
 	}
-	// Answered Tool Uses between call B's result and the synthetic repair
-	// make the repair call the last missing fact of the first page and its
-	// result the first fact of the second page.
-	want := []string{"tool_call:call_retain_b", "tool_result:call_retain_c", "tool_result:call_retain_b"}
-	for pair := range pagedPairs {
-		callID := fmt.Sprintf("call_retain_page_%03d", pair)
-		useEventID := fmt.Sprintf("evt_retain_page_%03d", pair)
+	seedToolPair := func(modelRequestID, callID, useEventID string, sequence int64, resultProjection string) {
+		t.Helper()
 		if _, err := admin.ExecContext(ctx, `INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			model_request_id, model_tool_call_id, tool_use_event_id, projection_json, created_at, updated_at
 		) VALUES
 		('default',$1,$2,$3,$4,'agent.tool_use','{"type":"agent.tool_use","name":"Read","input":{}}',$5,$6,NULL,$7,now(),now()),
 		('default',$1,$2,$8,$9,'agent.tool_result',$10,$5,NULL,$3,$11,now(),now())`,
-			sessionID, threadID, useEventID, int64(8+2*pair), request, callID, use(callID, `{}`),
-			useEventID+"_result", int64(9+2*pair), `{"type":"agent.tool_result","tool_use_id":"`+useEventID+`"}`,
-			errorResult(callID, "page failed"),
+			sessionID, threadID, useEventID, sequence, modelRequestID, callID, use(callID, `{}`),
+			useEventID+"_result", sequence+1, `{"type":"agent.tool_result","tool_use_id":"`+useEventID+`"}`,
+			resultProjection,
 		); err != nil {
-			t.Fatalf("seed paged Tool pair %d: %v", pair, err)
+			t.Fatalf("seed Tool pair %s: %v", callID, err)
 		}
+	}
+	// Answered Tool Uses between call B's result and the synthetic repair
+	// make the repair call the last missing fact of the first page and its
+	// result the first fact of the second page.
+	want := []string{"tool_call:call_retain_b", "tool_result:call_retain_c", "tool_result:call_retain_b"}
+	for pair := range pagedPairs {
+		callID := fmt.Sprintf("call_retain_page_%03d", pair)
+		seedToolPair(request, callID, fmt.Sprintf("evt_retain_page_%03d", pair), int64(8+2*pair), errorResult(callID, "page failed"))
 		want = append(want, "tool_call:"+callID, "tool_result:"+callID)
 	}
 	want = append(want, "tool_call:call_retain_repair", "tool_result:call_retain_repair")
@@ -167,12 +173,15 @@ func TestPostgreSQLPodLossRetainAppendsOnlyMissingToolFacts(t *testing.T) {
 		`{"type":"tool_call","modelToolCallId":"call_retain_c","toolName":"Read","canonicalInput":{"path":"c"}}`,
 	}
 	sessionfixture.SeedAssistantMessagePartsForTest(t, admin, "default", sessionID, threadID, messageID, 1, nil, request, existing...)
-	retain := func(modelRequestID string) {
-		t.Helper()
-		if err := runner.WithWorkspaceTx(ctx, "default", "test.retain_parts", func(tx *dbconnect.Tx) error {
+	repair := func(modelRequestID string) error {
+		return runner.WithWorkspaceTx(ctx, "default", "test.retain_parts", func(tx *dbconnect.Tx) error {
 			return retainRuntimePodLostToolPairsTx(ctx, tx, "default", sessionID,
 				runtimecontrol.OpenRequestStart{SessionThreadID: threadID, ModelRequestID: modelRequestID}, time.Now().UTC())
-		}); err != nil {
+		})
+	}
+	retain := func(modelRequestID string) {
+		t.Helper()
+		if err := repair(modelRequestID); err != nil {
 			t.Fatalf("retain %s: %v", modelRequestID, err)
 		}
 	}
@@ -210,12 +219,22 @@ func TestPostgreSQLPodLossRetainAppendsOnlyMissingToolFacts(t *testing.T) {
 			t.Fatalf("repaired call lost numeric token %s: %s", token, parts[len(existing)].dataJSON)
 		}
 	}
-	var content string
-	if err := admin.QueryRowContext(ctx, `SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m WHERE workspace_id='default' AND message_id=$1`, messageID).Scan(&content); err != nil {
+	var content sql.NullString
+	if err := admin.QueryRowContext(ctx, `SELECT `+runtimecontrol.StoredMessageContentSQL+` FROM session_messages m `+
+		runtimecontrol.StoredMessagePartsJoinSQL+` WHERE m.workspace_id='default' AND m.message_id=$1`, messageID).Scan(&content); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runtimecontrol.DecodeStoredRuntimeContextParts(content); status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("context read of the repaired {text,truncated} completion = %v; want the existing FailedPrecondition", err)
+	raw, err := runtimecontrol.StoredMessageContentJSON(content)
+	if err != nil {
+		t.Fatalf("LoadContext row read of the repaired message: %v", err)
+	}
+	if decoded, err := runtimecontrol.DecodeStoredRuntimeContextParts(raw); err != nil || int64(len(decoded)) != wantNext {
+		t.Fatalf("LoadContext decode of the repaired message = %d parts/%v; want %d accepted parts", len(decoded), err, wantNext)
+	}
+	// Repair stores exactly what normal settlement stores for this completion.
+	const completedB = `{"modelToolCallId":"call_retain_b","result":{"output":{"text":"b done"},"type":"completed"},"type":"tool_result"}`
+	if got := parts[len(existing)+2].dataJSON; got != completedB {
+		t.Fatalf("repaired completed result = %s; want %s", got, completedB)
 	}
 
 	retain(request)
@@ -231,5 +250,19 @@ func TestPostgreSQLPodLossRetainAppendsOnlyMissingToolFacts(t *testing.T) {
 	var absent int
 	if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM session_messages WHERE workspace_id='default' AND model_request_id='mreq_retain_absent'`).Scan(&absent); err != nil || absent != 0 {
 		t.Fatalf("repair without an Assistant message created %d messages/%v", absent, err)
+	}
+
+	// A parseable error projection whose message the validator refuses.
+	const rejectedRequest, rejectedMessage = "mreq_retain_rejected", "msg_retain_rejected"
+	seedToolPair(rejectedRequest, "call_retain_rejected", "evt_retain_rejected", repairSequence+1,
+		errorResult("call_retain_rejected", "fetch https://example.test/x failed"))
+	sessionfixture.SeedAssistantMessagePartsForTest(t, admin, "default", sessionID, threadID, rejectedMessage, 2, nil, rejectedRequest,
+		`{"type":"tool_call","modelToolCallId":"call_retain_rejected","toolName":"Read","canonicalInput":{}}`)
+	rejectedNext, _, _, rejectedParts := readRetainedParts(t, admin, rejectedMessage)
+	if err := repair(rejectedRequest); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("repair of a projection the context reader rejects = %v; want FailedPrecondition", err)
+	}
+	if next, _, _, parts := readRetainedParts(t, admin, rejectedMessage); next != rejectedNext || !slices.Equal(parts, rejectedParts) {
+		t.Fatalf("failed repair changed the message: next %d -> %d, parts %v -> %v", rejectedNext, next, rejectedParts, parts)
 	}
 }

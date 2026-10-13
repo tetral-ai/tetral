@@ -201,9 +201,10 @@ const runtimePodLostRetainPageSize = 128
 // Tool Use it references, and a synthetic invalid-tool repair yields its call
 // then its result. Each candidate is anti-joined on the message's part
 // identity index, and only the selected missing facts are projected from
-// their events. Existing parts are never read, validated or rewritten; the
-// next context read validates them. Events authorize the additions; parts are
-// never settlement authority.
+// their events; each projected part must pass the stored-context validator
+// before it is appended. Existing parts are never read, validated or
+// rewritten; the next context read validates them. Events authorize the
+// additions; parts are never settlement authority.
 func retainRuntimePodLostToolPairsTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -239,6 +240,9 @@ func retainRuntimePodLostToolPairsTx(
 			}
 			if part["modelToolCallId"] != candidate.modelToolCallID {
 				return status.Error(codes.FailedPrecondition, "durable Tool projection identity is inconsistent")
+			}
+			if runtimecontrol.ValidateStoredRuntimeContextPart(part) != nil {
+				return status.Error(codes.FailedPrecondition, "durable Tool projection is malformed")
 			}
 			parts = append(parts, runtimecontrol.AssistantPart{Value: part})
 		}
@@ -382,7 +386,8 @@ func runtimeToolResultPartFromProjection(projectionJSON string) (map[string]any,
 		if projection.Output == nil {
 			return nil, status.Error(codes.FailedPrecondition, "durable Tool completion projection is malformed")
 		}
-		result["output"] = map[string]any{"text": projection.Output.Text, "truncated": projection.Output.Truncated}
+		// Truncation evidence stays on the event; stored context output is {text}.
+		result["output"] = map[string]any{"text": projection.Output.Text}
 	case "error":
 		if projection.Error == nil {
 			return nil, status.Error(codes.FailedPrecondition, "durable Tool error projection is malformed")
