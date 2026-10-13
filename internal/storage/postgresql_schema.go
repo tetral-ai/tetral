@@ -335,10 +335,19 @@ const (
 	// most one result of either kind per Tool Use. Tool Use rows alone must stay
 	// JSONB-storable, because readers still cast their payload and projection.
 	//
+	// agent_mail_delivery_id, agent_mail_source_thread_id,
+	// agent_mail_target_thread_id and agent_mail_source_tool_use_event_id are the
+	// envelope identity of agent.thread_message_sent and
+	// agent.thread_message_received rows. The writer stores the values it puts
+	// in the payload; a received row's target is its own Thread. Mail carries
+	// model text verbatim, including escaped U+0000, so no index or reader may
+	// cast a mail payload to JSON or JSONB: every mail lookup and join uses
+	// these columns, and session_events_agent_mail_shape checks their presence.
+	//
 	// UPDATE-WITH: internal/sessioneventwrite and its event append/delivery
 	// callers; internal/eventstream list/cursor reader;
 	// internal/runtimecontrol, services/bridge and services/job-runner Tool
-	// relation writers and readers.
+	// relation and agent mail writers and readers.
 	createPostgreSQLSessionEventsTable = `CREATE TABLE IF NOT EXISTS session_events (
 		workspace_id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
@@ -357,6 +366,10 @@ const (
 		projection_json TEXT NOT NULL DEFAULT '{}',
 		model_tool_call_id TEXT,
 		tool_use_event_id TEXT,
+		agent_mail_delivery_id TEXT,
+		agent_mail_source_thread_id TEXT,
+		agent_mail_target_thread_id TEXT,
+		agent_mail_source_tool_use_event_id TEXT,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		processed_at TIMESTAMPTZ,
@@ -395,7 +408,20 @@ const (
 			FALSE)),
 		CONSTRAINT session_events_tool_use_jsonb_storable CHECK (CASE WHEN type IN ('agent.tool_use','agent.mcp_tool_use')
 			THEN payload_json::jsonb IS NOT NULL AND projection_json::jsonb IS NOT NULL
-			ELSE TRUE END)
+			ELSE TRUE END),
+		CONSTRAINT session_events_agent_mail_shape CHECK (COALESCE(
+			(type IN ('agent.thread_message_sent', 'agent.thread_message_received')
+				AND session_thread_id IS NOT NULL
+				AND agent_mail_delivery_id <> ''
+				AND agent_mail_source_thread_id <> ''
+				AND agent_mail_target_thread_id <> ''
+				AND agent_mail_source_tool_use_event_id <> '')
+			OR (type NOT IN ('agent.thread_message_sent', 'agent.thread_message_received')
+				AND agent_mail_delivery_id IS NULL
+				AND agent_mail_source_thread_id IS NULL
+				AND agent_mail_target_thread_id IS NULL
+				AND agent_mail_source_tool_use_event_id IS NULL),
+			FALSE))
 	)`
 
 	createPostgreSQLSessionEventStreamChangesTable = `CREATE TABLE IF NOT EXISTS session_event_stream_changes (
@@ -1874,7 +1900,7 @@ END $$`
 	createPostgreSQLSessionEventsPendingMediaIndex          = `CREATE INDEX IF NOT EXISTS session_events_pending_media_lookup ON session_events(workspace_id, session_id, session_thread_id, sequence, event_id) WHERE type = 'user.message' AND payload_json::jsonb @? '$.content[*] ? (@.type == "image" || @.type == "document")'`
 	createPostgreSQLSessionFileAttachmentPendingIndex       = `CREATE INDEX IF NOT EXISTS session_file_attachment_consumptions_pending_lookup ON session_file_attachment_consumptions(workspace_id, session_id, session_thread_id, source_event_id, file_id)`
 	createPostgreSQLSessionRuntimeInboxAttachmentIndex      = `CREATE INDEX IF NOT EXISTS session_runtime_inbox_attachment_authority_lookup ON session_runtime_inbox(workspace_id, session_id, session_thread_id, runtime_input_id) INCLUDE (input_kind, status)`
-	createPostgreSQLSessionEventsAgentMailDeliveryIndex     = `CREATE INDEX IF NOT EXISTS idx_session_events_agent_mail_delivery ON session_events(workspace_id, session_id, ((payload_json::jsonb ->> 'delivery_id'))) WHERE type IN ('agent.thread_message_sent', 'agent.thread_message_received')`
+	createPostgreSQLSessionEventsAgentMailDeliveryIndex     = `CREATE INDEX IF NOT EXISTS idx_session_events_agent_mail_delivery ON session_events(workspace_id, session_id, agent_mail_delivery_id) WHERE agent_mail_delivery_id IS NOT NULL`
 	createPostgreSQLPendingToolUsesStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_pending_tool_uses_status ON session_pending_tool_uses(workspace_id, session_id, session_thread_id, status)`
 	createPostgreSQLBackgroundTasksStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_background_tasks_status ON session_background_tasks(workspace_id, session_id, status, updated_at)`
 	createPostgreSQLSessionMCPManifestsGenerationIndex      = `CREATE INDEX IF NOT EXISTS idx_session_mcp_manifests_session_generation ON session_mcp_manifests(workspace_id, session_id, manifest_generation)`

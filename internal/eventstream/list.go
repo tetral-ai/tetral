@@ -328,17 +328,25 @@ func createdAtQueryValue(values map[string][]string, key string) (string, error)
 	if err != nil || !ok {
 		return "", err
 	}
-	return normalizeCreatedAtFilter(raw)
+	normalized, err := normalizeCreatedAtFilter(raw)
+	if err != nil {
+		return "", &httpapi.ValidationError{Message: key + " must be an RFC3339 timestamp with a UTC year of 1-9999"}
+	}
+	return normalized, nil
 }
 
 const sessionEventCreatedAtFormat = "2006-01-02T15:04:05.000000000Z"
 
+// normalizeCreatedAtFilter returns the UTC text PostgreSQL parses. PostgreSQL
+// rejects year 0 and the format has four-digit years, so the UTC year must be
+// 1-9999.
 func normalizeCreatedAtFilter(raw string) (string, error) {
 	parsed, err := time.Parse(time.RFC3339Nano, raw)
-	if err != nil {
+	utc := parsed.UTC()
+	if err != nil || utc.Year() < 1 || utc.Year() > 9999 {
 		return "", &httpapi.ValidationError{Message: "invalid created_at filter"}
 	}
-	return parsed.UTC().Format(sessionEventCreatedAtFormat), nil
+	return utc.Format(sessionEventCreatedAtFormat), nil
 }
 
 func singleQueryValue(values map[string][]string, key string) (string, bool, error) {

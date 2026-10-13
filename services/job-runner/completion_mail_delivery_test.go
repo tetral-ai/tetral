@@ -174,7 +174,7 @@ func TestPostgreSQLCompletionMailFinalizationRechecksTerminalRecipientFences(t *
 			deliveryID := "delivery_completion_mail_finalize_stale_" + suffix
 			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, childID)
-			messageJSON := sessionfixture.BridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "task_"+childID, "completion"))
+			messageJSON := sessionfixture.BridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "task_"+childID, "comp\x00letion"))
 			seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_completion_mail_finalize_stale_sent_"+suffix, 1,
 				"agent.thread_message_sent",
 				sessionfixture.BridgeInterAgentSentEventJSON(t, deliveryID, childID, threadID, "", "sevt_completion_mail_finalize_stale_"+suffix, messageJSON))

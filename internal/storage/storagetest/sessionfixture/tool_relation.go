@@ -199,3 +199,42 @@ func RequireToolRelationFactsForTest(t testing.TB, db *sql.DB, workspaceID strin
 	}
 	return facts
 }
+
+// AgentMailRelation holds the envelope identity columns that the production
+// writer of an agent mail event stores with it.
+type AgentMailRelation struct {
+	DeliveryID           sql.NullString
+	SourceThreadID       sql.NullString
+	TargetThreadID       sql.NullString
+	SourceToolUseEventID sql.NullString
+}
+
+// AgentMailRelationForTest returns the envelope identity columns for a fixture
+// that inserts an agent mail event directly. They are read from its payload,
+// except that a received event's target is the event's own Thread; a key the
+// payload lacks stores NULL. Other event types carry none.
+func AgentMailRelationForTest(t testing.TB, eventType string, threadID string, payloadJSON string) AgentMailRelation {
+	t.Helper()
+	if eventType != "agent.thread_message_sent" && eventType != "agent.thread_message_received" {
+		return AgentMailRelation{}
+	}
+	var payload struct {
+		DeliveryID           string `json:"delivery_id"`
+		SourceThreadID       string `json:"source_thread_id"`
+		TargetThreadID       string `json:"target_thread_id"`
+		SourceToolUseEventID string `json:"source_tool_use_event_id"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		t.Fatalf("decode seeded agent mail payload: %v", err)
+	}
+	if eventType == "agent.thread_message_received" {
+		payload.TargetThreadID = threadID
+	}
+	valid := func(value string) sql.NullString { return sql.NullString{String: value, Valid: value != ""} }
+	return AgentMailRelation{
+		DeliveryID:           valid(payload.DeliveryID),
+		SourceThreadID:       valid(payload.SourceThreadID),
+		TargetThreadID:       valid(payload.TargetThreadID),
+		SourceToolUseEventID: valid(payload.SourceToolUseEventID),
+	}
+}

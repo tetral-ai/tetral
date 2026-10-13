@@ -389,6 +389,7 @@ func TestPostgreSQLToolRelationConstraintsRejectMalformedRows(t *testing.T) {
 		{"message with reference", f.scope.SessionThreadId, "agent.message", `{}`, "request", nil, toolUse, "23514", "session_events_tool_relation_shape"},
 		{"empty call ID", f.scope.SessionThreadId, "agent.tool_use", `{}`, "request", "", nil, "23514", "session_events_tool_relation_shape"},
 		{"unstorable Tool Use", f.scope.SessionThreadId, "agent.tool_use", `{"input":"a\u0000b"}`, "request", "call_constraint_nul", nil, "22P05", ""},
+		{"agent mail without envelope identity", f.scope.SessionThreadId, "agent.thread_message_sent", `{"delivery_id":"delivery_constraint"}`, nil, nil, nil, "23514", "session_events_agent_mail_shape"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := insert(tc.thread, "evt_constraint_"+strings.ReplaceAll(tc.name, " ", "_"), tc.eventType, tc.payload, tc.request, tc.call, tc.use)

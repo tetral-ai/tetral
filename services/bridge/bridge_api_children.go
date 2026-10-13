@@ -540,10 +540,9 @@ func (s *PostgreSQLBridgeAPIStore) ReadAgentMail(ctx context.Context, request *b
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		var deliveryID, storedMessageJSON string
+		var deliveryID, storedPayloadJSON string
 		err := tx.QueryRow(ctx,
-			`SELECT sent.payload_json::jsonb ->> 'delivery_id',
-			        (sent.payload_json::jsonb -> 'message')::text
+			`SELECT sent.agent_mail_delivery_id, sent.payload_json
 			   FROM session_events sent
 			   JOIN session_threads source
 			     ON source.workspace_id=sent.workspace_id
@@ -555,13 +554,13 @@ func (s *PostgreSQLBridgeAPIStore) ReadAgentMail(ctx context.Context, request *b
 			    AND sent.session_id=$2
 			    AND sent.session_thread_id=$4
 			    AND sent.type='agent.thread_message_sent'
-			    AND sent.payload_json::jsonb ->> 'source_thread_id'=$4
-			    AND sent.payload_json::jsonb ->> 'target_thread_id'=$3
+			    AND sent.agent_mail_source_thread_id=$4
+			    AND sent.agent_mail_target_thread_id=$3
 			  ORDER BY sent.sequence DESC, sent.event_id DESC
 			  LIMIT 1`,
 			request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
 			request.GetScope().GetSessionThreadId(), request.GetSourceThreadId(),
-		).Scan(&deliveryID, &storedMessageJSON)
+		).Scan(&deliveryID, &storedPayloadJSON)
 		if dbconnect.IsNoRows(err) {
 			response.Outcome = &bridgev1.ReadAgentMailResponse_Empty{Empty: &bridgev1.ReadAgentMailEmpty{}}
 			return nil
@@ -569,10 +568,11 @@ func (s *PostgreSQLBridgeAPIStore) ReadAgentMail(ctx context.Context, request *b
 		if err != nil {
 			return err
 		}
-		if deliveryID == "" || storedMessageJSON == "" {
-			return status.Error(codes.FailedPrecondition, "agent mail envelope is malformed")
+		storedMessageJSON, err := runtimecontrol.AgentMailMessageFromEventPayload(storedPayloadJSON)
+		if err != nil {
+			return err
 		}
-		messageJSON, err := runtimecontrol.ValidatedPublicInterAgentMessageJSON(json.RawMessage(storedMessageJSON))
+		messageJSON, err := runtimecontrol.ValidatedPublicInterAgentMessageJSON(storedMessageJSON)
 		if err != nil {
 			return err
 		}

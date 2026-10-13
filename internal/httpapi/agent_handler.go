@@ -303,11 +303,12 @@ func parseAgentGetVersion(r *http.Request) (int, bool, error) {
 	if !ok {
 		return 0, false, nil
 	}
-	version, err := strconv.Atoi(rawValues[0])
+	// agent_versions.version is a PostgreSQL integer.
+	version, err := strconv.ParseInt(rawValues[0], 10, 32)
 	if err != nil || version <= 0 {
-		return 0, false, &agent.ValidationError{Message: "version must be a positive integer"}
+		return 0, false, &agent.ValidationError{Message: "version must be an integer from 1 to 2147483647"}
 	}
-	return version, true, nil
+	return int(version), true, nil
 }
 
 func parseAgentListOptions(r *http.Request) (agent.ListOptions, error) {

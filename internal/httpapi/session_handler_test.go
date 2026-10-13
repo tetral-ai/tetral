@@ -425,6 +425,7 @@ func TestListSessionsRejectsMalformedQueryParameters(t *testing.T) {
 		"/v1/sessions?include_archived=1",
 		"/v1/sessions?beta=false",
 		"/v1/sessions?agent_version=1",
+		"/v1/sessions?agent_id=agent_test&agent_version=2147483648",
 		"/v1/sessions?limit=",
 		"/v1/sessions?limit=abc",
 		"/v1/sessions?limit=0",
@@ -568,6 +569,11 @@ func TestCreateSessionRejectsNullAndNonStringFieldsBeforeService(t *testing.T) {
 		{
 			name: "agent version zero",
 			body: `{"agent":{"id":"agent_test","version":0},"environment_id":"env_test","vault_ids":[]}`,
+		},
+		{
+			name: "agent version beyond PostgreSQL integer",
+			body: `{"agent":{"id":"agent_test","version":2147483648},"environment_id":"env_test","vault_ids":[]}`,
+			want: "agent.version must be an integer from 1 to 2147483647",
 		},
 		{
 			name: "agent type null",

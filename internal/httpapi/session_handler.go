@@ -981,17 +981,20 @@ func parseOptionalPositiveSessionInt(raw json.RawMessage, field string) (*int, e
 	if len(raw) == 0 {
 		return nil, nil
 	}
+	invalid := &ValidationError{Message: field + " must be an integer from 1 to 2147483647"}
 	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil, &ValidationError{Message: field + " must be a positive integer"}
+		return nil, invalid
 	}
-	var value int
+	// agent_versions.version is a PostgreSQL integer.
+	var value int32
 	if err := json.Unmarshal(raw, &value); err != nil {
-		return nil, &ValidationError{Message: field + " must be a positive integer"}
+		return nil, invalid
 	}
 	if value <= 0 {
-		return nil, &ValidationError{Message: field + " must be a positive integer"}
+		return nil, invalid
 	}
-	return &value, nil
+	version := int(value)
+	return &version, nil
 }
 
 func parseSessionListOptions(r *http.Request) (session.ListOptions, error) {
@@ -1079,11 +1082,12 @@ func parseSessionListOptions(r *http.Request) (session.ListOptions, error) {
 		if options.AgentID == "" {
 			return session.ListOptions{}, &ValidationError{Message: "agent_version requires agent_id"}
 		}
-		value, err := strconv.Atoi(rawValues[0])
+		// sessions.agent_version is a PostgreSQL integer.
+		value, err := strconv.ParseInt(rawValues[0], 10, 32)
 		if err != nil || value <= 0 {
-			return session.ListOptions{}, &ValidationError{Message: "agent_version is invalid"}
+			return session.ListOptions{}, &ValidationError{Message: "agent_version must be an integer from 1 to 2147483647"}
 		}
-		options.AgentVersion = value
+		options.AgentVersion = int(value)
 	}
 	for key, target := range map[string]**time.Time{
 		"created_at[gt]":  &options.CreatedAtGT,

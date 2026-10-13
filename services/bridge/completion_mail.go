@@ -84,6 +84,10 @@ func appendSubagentMailEnvelopeTx(
 		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
 		EventID: eventID, Sequence: sequence, Type: "agent.thread_message_sent",
 		PayloadJSON: eventPayloadJSON, ProjectionJSON: eventPayloadJSON, Visibility: "public", SessionVisible: true,
+		AgentMail: sessioneventwrite.AgentMail{
+			DeliveryID: deliveryID, SourceThreadID: scope.GetSessionThreadId(),
+			TargetThreadID: targetThreadID, SourceToolUseEventID: sourceToolUseEventID,
+		},
 		RuntimeWriteID: deliveryID, CreatedAt: now, ProcessedAt: &now,
 	}); err != nil {
 		return runtimecontrol.StoredAgentMailEnvelope{}, err
@@ -152,6 +156,10 @@ func appendDeclaredSubagentInitialEnvelopeTx(
 		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
 		EventID: eventID, Sequence: sequence, Type: "agent.thread_message_sent",
 		PayloadJSON: eventPayloadJSON, ProjectionJSON: eventPayloadJSON, Visibility: "public", SessionVisible: true,
+		AgentMail: sessioneventwrite.AgentMail{
+			DeliveryID: deliveryID, SourceThreadID: scope.GetSessionThreadId(),
+			TargetThreadID: targetThreadID, SourceToolUseEventID: sourceToolUseEventID,
+		},
 		RuntimeWriteID: deliveryID, CreatedAt: now, ProcessedAt: &now,
 	}); err != nil {
 		return runtimecontrol.StoredAgentMailEnvelope{}, err
@@ -208,6 +216,10 @@ func appendDeclaredSubagentReceivedEventTx(
 		WorkspaceID: targetScope.GetWorkspaceId(), SessionID: targetScope.GetSessionId(), SessionThreadID: targetScope.GetSessionThreadId(),
 		EventID: eventID, Sequence: sequence, Type: "agent.thread_message_received",
 		PayloadJSON: eventPayloadJSON, ProjectionJSON: eventPayloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+		AgentMail: sessioneventwrite.AgentMail{
+			DeliveryID: envelope.DeliveryID, SourceThreadID: envelope.SourceThreadID,
+			TargetThreadID: targetScope.GetSessionThreadId(), SourceToolUseEventID: envelope.SourceToolUseEventID,
+		},
 		CreatedAt: now,
 	}); err != nil {
 		return "", err

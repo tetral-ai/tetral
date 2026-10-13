@@ -15,6 +15,7 @@ const (
 	maxMetadataPairs           = 16
 	maxMetadataKeyCodePoints   = 64
 	maxMetadataValueCodePoints = 512
+	maxEndpointURLBytes        = 2048
 )
 
 var allowedVaultCreateFields = map[string]struct{}{
@@ -830,6 +831,11 @@ func decodeCanonicalEndpoint(field string, raw json.RawMessage) (string, error) 
 	canonical, err := endpointurl.CanonicalizePublicURL(value, field)
 	if err != nil {
 		return "", &ValidationError{Message: err.Error()}
+	}
+	// The cap keeps mcp_server_url within its unique btree index entry limit
+	// (2704 bytes); every credential URL shares the one rule.
+	if len(canonical) > maxEndpointURLBytes {
+		return "", &ValidationError{Message: fmt.Sprintf("%s must be at most %d bytes", field, maxEndpointURLBytes)}
 	}
 	return canonical, nil
 }

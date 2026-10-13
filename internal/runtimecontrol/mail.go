@@ -216,6 +216,19 @@ type admittedAgentMailDelivery struct {
 	ReceivedSequence int64
 }
 
+// AgentMailMessageFromEventPayload returns the public message of a stored
+// agent mail event payload. It decodes the TEXT payload in Go because a
+// PostgreSQL JSON read fails on a payload that holds escaped U+0000.
+func AgentMailMessageFromEventPayload(payloadJSON string) (json.RawMessage, error) {
+	var payload struct {
+		Message json.RawMessage `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || len(payload.Message) == 0 {
+		return nil, status.Error(codes.FailedPrecondition, "agent mail envelope is malformed")
+	}
+	return payload.Message, nil
+}
+
 func PublicAgentMailMessageJSON(content string) (string, error) {
 	return MarshalJSON(map[string]any{
 		"content": []map[string]string{{"type": "text", "text": content}},
@@ -272,7 +285,7 @@ func LoadStoredAgentMailEnvelopeByDeliveryTx(
 		  WHERE workspace_id = $1
 		    AND session_id = $2
 		    AND type = 'agent.thread_message_sent'
-		    AND payload_json::jsonb ->> 'delivery_id' = $3
+		    AND agent_mail_delivery_id = $3
 		  ORDER BY sequence ASC, event_id ASC
 		  LIMIT 2
 		  FOR UPDATE`,
@@ -448,7 +461,7 @@ func AdmitAgentMailDeliveryTx(
 		    AND session_id = $2
 		    AND session_thread_id = $3
 		    AND type = 'agent.thread_message_received'
-		    AND payload_json::jsonb ->> 'delivery_id' = $4
+		    AND agent_mail_delivery_id = $4
 		  ORDER BY sequence ASC, event_id ASC
 		  LIMIT 1
 		  FOR UPDATE`,
@@ -477,6 +490,10 @@ func AdmitAgentMailDeliveryTx(
 			WorkspaceID: targetScope.GetWorkspaceId(), SessionID: targetScope.GetSessionId(), SessionThreadID: targetScope.GetSessionThreadId(),
 			EventID: receivedEventID, Sequence: receivedSequence, Type: "agent.thread_message_received",
 			PayloadJSON: eventPayloadJSON, ProjectionJSON: eventPayloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+			AgentMail: sessioneventwrite.AgentMail{
+				DeliveryID: envelope.DeliveryID, SourceThreadID: envelope.SourceThreadID,
+				TargetThreadID: targetScope.GetSessionThreadId(), SourceToolUseEventID: envelope.SourceToolUseEventID,
+			},
 			CreatedAt: now,
 		}); err != nil {
 			return admittedAgentMailDelivery{}, err
@@ -631,6 +648,10 @@ func AppendDeclaredCompletionMailForSourceTx(
 		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
 		EventID: eventID, Sequence: sequence, Type: "agent.thread_message_sent",
 		PayloadJSON: eventPayloadJSON, ProjectionJSON: eventPayloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+		AgentMail: sessioneventwrite.AgentMail{
+			DeliveryID: deliveryID, SourceThreadID: scope.GetSessionThreadId(),
+			TargetThreadID: parentThreadID, SourceToolUseEventID: sourceToolUseEventID,
+		},
 		RuntimeWriteID: sourceID, CreatedAt: now, ProcessedAt: &now,
 	}); err != nil {
 		return "", err

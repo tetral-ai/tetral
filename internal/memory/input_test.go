@@ -119,7 +119,7 @@ func TestDecodeCreateMemoryRequestRejectsNullContentAndAcceptsEmptyContent(t *te
 }
 
 func TestDecodeListStoresOptionsLimitValidation(t *testing.T) {
-	for _, raw := range []string{"limit=0", "limit=-1", "limit=abc"} {
+	for _, raw := range []string{"limit=0", "limit=-1", "limit=abc", "created_at%5Blte%5D=9999-12-31T23%3A00%3A00-01%3A00"} {
 		values, err := url.ParseQuery(raw)
 		if err != nil {
 			t.Fatalf("ParseQuery: %v", err)
@@ -128,7 +128,7 @@ func TestDecodeListStoresOptionsLimitValidation(t *testing.T) {
 			t.Fatalf("DecodeListStoresOptions(%s) succeeded; want error", raw)
 		}
 	}
-	values, err := url.ParseQuery("limit=101&include_archived=true&created_at%5Bgte%5D=2026-01-01T00%3A00%3A00Z")
+	values, err := url.ParseQuery("limit=101&include_archived=true&created_at%5Bgte%5D=2026-01-01T20%3A00%3A00%2B20%3A00")
 	if err != nil {
 		t.Fatalf("ParseQuery valid: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestDecodeListStoresOptionsLimitValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeListStoresOptions valid: %v", err)
 	}
-	if options.Limit != 101 || !options.LimitSet || !options.IncludeArchived || options.CreatedAtGTE == "" {
+	if options.Limit != 101 || !options.LimitSet || !options.IncludeArchived || options.CreatedAtGTE != "2026-01-01T00:00:00Z" {
 		t.Fatalf("options = %+v", options)
 	}
 }

@@ -163,7 +163,7 @@ func TestMigrateSchemaCreatesStableReasoningMessageAssociation(t *testing.T) {
 }
 
 func TestPostgreSQLSchemaVersionOneChecksumIsGolden(t *testing.T) {
-	const want = "f600e78f7be8b4262b8317603fc4a3eb4b0fba3ab3602bf0d6575115514c54e0"
+	const want = "4b21c6a1a4ca78f98919f4839a403be1dbc23110c7ef6084eadbc57eb76d83cf"
 	if storage.PostgreSQLSchemaVersionOneChecksum != want {
 		t.Fatalf("PostgreSQLSchemaVersionOneChecksum = %q, want %q", storage.PostgreSQLSchemaVersionOneChecksum, want)
 	}
@@ -559,17 +559,10 @@ func TestMigrateSchemaCreatesAgentMailDeliveryIndex(t *testing.T) {
 	).Scan(&definition); err != nil {
 		t.Fatalf("read agent mail delivery index: %v", err)
 	}
-	for _, want := range []string{
-		"workspace_id",
-		"session_id",
-		"payload_json",
-		"delivery_id",
-		"agent.thread_message_sent",
-		"agent.thread_message_received",
-	} {
-		if !strings.Contains(definition, want) {
-			t.Fatalf("agent mail delivery index = %q; want %q", definition, want)
-		}
+	if !strings.Contains(definition, "(workspace_id, session_id, agent_mail_delivery_id)") ||
+		!strings.Contains(definition, "WHERE (agent_mail_delivery_id IS NOT NULL)") ||
+		strings.Contains(definition, "payload_json") {
+		t.Fatalf("agent mail delivery index = %q; want the scalar delivery column and no payload read", definition)
 	}
 }
 

@@ -426,13 +426,17 @@ func seedRuntimeInboxBirthForJob(t *testing.T, db *sql.DB, job jobrunner.Runtime
 func seedBridgeAPIEvent(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, eventID string, sequence int64, eventType string, payloadJSON string) {
 	t.Helper()
 	relation := sessionfixture.ToolEventRelationForTest(t, db, workspaceID, eventID, eventType, payloadJSON)
+	mail := sessionfixture.AgentMailRelationForTest(t, eventType, threadID, payloadJSON)
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type,
-			payload_json, model_request_id, model_tool_call_id, tool_use_event_id, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+			payload_json, model_request_id, model_tool_call_id, tool_use_event_id,
+			agent_mail_delivery_id, agent_mail_source_thread_id, agent_mail_target_thread_id, agent_mail_source_tool_use_event_id,
+			created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		workspaceID, sessionID, threadID, eventID, sequence, eventType, payloadJSON,
-		relation.ModelRequestID, relation.ModelToolCallID, relation.ToolUseEventID); err != nil {
+		relation.ModelRequestID, relation.ModelToolCallID, relation.ToolUseEventID,
+		mail.DeliveryID, mail.SourceThreadID, mail.TargetThreadID, mail.SourceToolUseEventID); err != nil {
 		t.Fatalf("seed bridge api event: %v", err)
 	}
 }

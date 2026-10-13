@@ -37,6 +37,7 @@ package memory
 import (
 	"net/url"
 	"strconv"
+	"time"
 )
 
 func DecodeListStoresOptions(values url.Values) (ListStoresOptions, error) {
@@ -53,8 +54,13 @@ func DecodeListStoresOptions(values url.Values) (ListStoresOptions, error) {
 		options.LimitSet = true
 	}
 	options.Page = values.Get("page")
-	options.CreatedAtGTE = values.Get("created_at[gte]")
-	options.CreatedAtLTE = values.Get("created_at[lte]")
+	var err error
+	if options.CreatedAtGTE, err = decodeCreatedAtFilter(values, "created_at[gte]"); err != nil {
+		return ListStoresOptions{}, err
+	}
+	if options.CreatedAtLTE, err = decodeCreatedAtFilter(values, "created_at[lte]"); err != nil {
+		return ListStoresOptions{}, err
+	}
 	if rawArchived := values.Get("include_archived"); rawArchived != "" {
 		includeArchived, err := strconv.ParseBool(rawArchived)
 		if err != nil {
@@ -117,10 +123,31 @@ func DecodeListMemoryVersionsOptions(values url.Values) (ListMemoryVersionsOptio
 	options.Operation = values.Get("operation")
 	options.SessionID = values.Get("session_id")
 	options.APIKeyID = values.Get("api_key_id")
-	options.CreatedAtGTE = values.Get("created_at[gte]")
-	options.CreatedAtLTE = values.Get("created_at[lte]")
+	var err error
+	if options.CreatedAtGTE, err = decodeCreatedAtFilter(values, "created_at[gte]"); err != nil {
+		return ListMemoryVersionsOptions{}, err
+	}
+	if options.CreatedAtLTE, err = decodeCreatedAtFilter(values, "created_at[lte]"); err != nil {
+		return ListMemoryVersionsOptions{}, err
+	}
 	options.View = values.Get("view")
 	return options, nil
+}
+
+// decodeCreatedAtFilter returns the filter as the UTC RFC3339 text PostgreSQL
+// parses. PostgreSQL rejects year 0 and RFC3339 has four-digit years, so the
+// UTC year must be 1-9999.
+func decodeCreatedAtFilter(values url.Values, key string) (string, error) {
+	raw := values.Get(key)
+	if raw == "" {
+		return "", nil
+	}
+	parsed, err := time.Parse(time.RFC3339, raw)
+	utc := parsed.UTC()
+	if err != nil || utc.Year() < 1 || utc.Year() > 9999 {
+		return "", &ValidationError{Message: key + " must be an RFC3339 timestamp with a UTC year of 1-9999"}
+	}
+	return utc.Format(time.RFC3339Nano), nil
 }
 
 func singleQueryValue(values url.Values, key string) (string, bool) {

@@ -9,9 +9,10 @@ import (
 )
 
 const (
-	maxMetadataPairs           = 16
-	maxMetadataKeyCodePoints   = 64
-	maxMetadataValueCodePoints = 512
+	maxEnvironmentNameCodePoints = 256
+	maxMetadataPairs             = 16
+	maxMetadataKeyCodePoints     = 64
+	maxMetadataValueCodePoints   = 512
 )
 
 var allowedCreateFields = map[string]struct{}{
@@ -66,7 +67,7 @@ func DecodeCreateEnvironmentRequest(body []byte) (CreateEnvironmentRequest, erro
 
 	request := CreateEnvironmentRequest{}
 	if value, ok := raw["name"]; ok {
-		name, err := decodeNullableEnvironmentString("name", value)
+		name, err := decodeEnvironmentName(value)
 		if err != nil {
 			return CreateEnvironmentRequest{}, err
 		}
@@ -111,7 +112,7 @@ func DecodeUpdateEnvironmentRequest(body []byte) (EnvironmentPatch, error) {
 		}
 		switch key {
 		case "name":
-			if _, err := decodeNullableEnvironmentString("name", value); err != nil {
+			if _, err := decodeEnvironmentName(value); err != nil {
 				return EnvironmentPatch{}, err
 			}
 		case "description":
@@ -156,7 +157,7 @@ func (p EnvironmentPatch) Materialize(current Environment) (Environment, error) 
 	out.Metadata = normalizeMetadata(current.Metadata)
 
 	if value, ok := p.raw["name"]; ok {
-		name, err := decodeNullableEnvironmentString("name", value)
+		name, err := decodeEnvironmentName(value)
 		if err != nil {
 			return Environment{}, err
 		}
@@ -281,6 +282,19 @@ func decodeRequiredString(field string, raw json.RawMessage) (string, error) {
 		return "", &ValidationError{Message: field + " must be a string"}
 	}
 	return value, nil
+}
+
+// decodeEnvironmentName applies the Agent name cap, which also keeps every
+// (workspace_id, name) entry within PostgreSQL's 2704-byte btree limit.
+func decodeEnvironmentName(raw json.RawMessage) (string, error) {
+	name, err := decodeNullableEnvironmentString("name", raw)
+	if err != nil {
+		return "", err
+	}
+	if count := utf8.RuneCountInString(name); count > maxEnvironmentNameCodePoints {
+		return "", &ValidationError{Message: fmt.Sprintf("name must be at most %d Unicode code points (got %d)", maxEnvironmentNameCodePoints, count)}
+	}
+	return name, nil
 }
 
 func decodeNullableEnvironmentString(field string, raw json.RawMessage) (string, error) {

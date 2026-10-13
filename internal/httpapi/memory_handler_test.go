@@ -205,6 +205,10 @@ func TestMemoryHTTPStrictValidation(t *testing.T) {
 		{"oversized body", http.MethodPost, "/v1/memory_stores/" + store.ID + "/memories", `{"path":"/too-large.md","content":"` + strings.Repeat("x", 102401) + `"}`},
 		{"content with U+0000", http.MethodPost, "/v1/memory_stores/" + store.ID + "/memories", `{"path":"/nul.md","content":"a\u0000b"}`},
 		{"memory_id with U+0000", http.MethodGet, "/v1/memory_stores/" + store.ID + "/memory_versions?memory_id=mem%00", ""},
+		{"store created_at[gte] not a time", http.MethodGet, "/v1/memory_stores?created_at%5Bgte%5D=not-a-time", ""},
+		{"store created_at[lte] date only", http.MethodGet, "/v1/memory_stores?created_at%5Blte%5D=2026-01-01", ""},
+		{"version created_at[gte] year 0000", http.MethodGet, "/v1/memory_stores/" + store.ID + "/memory_versions?created_at%5Bgte%5D=0000-01-01T00%3A00%3A00Z", ""},
+		{"version created_at[lte] not a time", http.MethodGet, "/v1/memory_stores/" + store.ID + "/memory_versions?created_at%5Blte%5D=not-a-time", ""},
 	}
 
 	for _, tc := range cases {

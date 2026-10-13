@@ -552,13 +552,11 @@ func buildRuntimeInboxContextDraftsTx(
 			if eventType != "agent.thread_message_received" {
 				return nil, status.Error(codes.FailedPrecondition, "agent mail source is invalid")
 			}
-			var envelope struct {
-				Message json.RawMessage `json:"message"`
+			storedMessage, err := runtimecontrol.AgentMailMessageFromEventPayload(payloadJSON)
+			if err != nil {
+				return nil, err
 			}
-			if err := json.Unmarshal([]byte(payloadJSON), &envelope); err != nil || len(envelope.Message) == 0 {
-				return nil, status.Error(codes.FailedPrecondition, "agent mail source is malformed")
-			}
-			publicMessage, err := runtimecontrol.ValidatedPublicInterAgentMessageJSON(envelope.Message)
+			publicMessage, err := runtimecontrol.ValidatedPublicInterAgentMessageJSON(storedMessage)
 			if err != nil {
 				return nil, err
 			}

@@ -140,11 +140,10 @@ func validateAgentMailFinalizationIdentityTx(ctx context.Context, tx *dbconnect.
 	}
 	var sequence int64
 	var sourceThreadID, sourceToolUseEventID string
-	err = tx.QueryRow(ctx, `SELECT sequence, payload_json::jsonb ->> 'source_thread_id',
-		payload_json::jsonb ->> 'source_tool_use_event_id'
+	err = tx.QueryRow(ctx, `SELECT sequence, agent_mail_source_thread_id, agent_mail_source_tool_use_event_id
 		FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
 		AND event_id=$4 AND type='agent.thread_message_received'
-		AND payload_json::jsonb ->> 'delivery_id'=$5 FOR UPDATE`,
+		AND agent_mail_delivery_id=$5 FOR UPDATE`,
 		job.WorkspaceID, job.SessionID, job.SessionThreadID, receivedEventID, deliveryID,
 	).Scan(&sequence, &sourceThreadID, &sourceToolUseEventID)
 	if dbconnect.IsNoRows(err) || (err == nil && (sequence != inbox.SequenceFrom.Int64 || sourceThreadID != envelope.SourceThreadID || sourceToolUseEventID != envelope.SourceToolUseEventID)) {
@@ -175,7 +174,7 @@ func committedAgentMailSourceEventTx(
 		 AND message.source_event_id=event.event_id
 		WHERE event.workspace_id=$1 AND event.session_id=$2 AND event.session_thread_id=$3
 		  AND event.event_id=$4 AND event.type='agent.thread_message_received'
-		  AND event.payload_json::jsonb ->> 'delivery_id'=$5
+		  AND event.agent_mail_delivery_id=$5
 		FOR UPDATE OF event, message`,
 		job.WorkspaceID, job.SessionID, job.SessionThreadID, sourceEventID, deliveryID,
 	).Scan(&eventSequence, &messageSequence)
