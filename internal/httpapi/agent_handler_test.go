@@ -819,6 +819,7 @@ func TestCreateAgentRejectsUnsupportedHTTPFields(t *testing.T) {
 		{"effort", `{"name":"x","model":"anthropic/claude-opus-4-8","effort":"high"}`, "effort"},
 		{"reasoning effort", `{"name":"x","model":"anthropic/claude-opus-4-8","reasoning_effort":"high"}`, "reasoning_effort"},
 		{"callable agents", `{"name":"x","model":"anthropic/claude-opus-4-8","callable_agents":[]}`, "callable_agents"},
+		{"name with U+0000", `{"name":"a\u0000b","model":"anthropic/claude-opus-4-8"}`, "must not contain U+0000"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
 import { BridgeAPIEventWriter } from "../../src/bridge-client.js";
-import { DefaultBridgeMethodPolicies } from "../../src/bridge-policy.js";
 import type { SessionEventEnvelope } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 
 const input = JSON.parse(await readFile(process.argv[2]!, "utf8")) as {
@@ -13,7 +12,6 @@ const input = JSON.parse(await readFile(process.argv[2]!, "utf8")) as {
   expectedCanonicalBytes: number;
   expectedSHA256: string;
   eventId: string;
-  writeEventTimeoutMs?: number;
 };
 const text = "x".repeat(input.textLength);
 const canonical = JSON.stringify(text);
@@ -25,14 +23,6 @@ if (bytes !== input.expectedCanonicalBytes || digest !== input.expectedSHA256) {
 const writer = new BridgeAPIEventWriter({
   address: input.address,
   tokenPath: "fixture-token-unused",
-  // The Go race conformance test supplies an instrumentation allowance. Omitting
-  // it exercises the production deadline; transport and persistence stay real.
-  ...(input.writeEventTimeoutMs === undefined ? {} : {
-    methodPolicies: {
-      ...DefaultBridgeMethodPolicies,
-      writeEvent: { kind: "fixed" as const, timeoutMs: input.writeEventTimeoutMs },
-    },
-  }),
   metadataFactory: async () => {
     const metadata = new Metadata();
     metadata.set("authorization", "Bearer content-runtime");

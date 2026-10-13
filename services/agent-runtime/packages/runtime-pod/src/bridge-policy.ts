@@ -5,9 +5,24 @@ import { SessionEventWriterRetryPolicy } from "@tetral/agent-runtime-core/src/co
 export type BridgeMethod = keyof typeof AgentRuntimeBridgeServiceService;
 export type BridgeDeadlinePolicy =
   | { readonly kind: "fixed"; readonly timeoutMs: number }
+  | {
+      readonly kind: "size_scaled";
+      readonly timeoutMs: number;
+      readonly perMiBMs: number;
+      readonly maxTimeoutMs: number;
+    }
   | { readonly kind: "remaining_provider_budget" };
 
 const fixed = (timeoutMs: number): BridgeDeadlinePolicy => ({ kind: "fixed", timeoutMs });
+
+/**
+ * Bridge work for one WriteEvent grows with its encoded size (up to 64 MiB). The slope allows
+ * 0.5 MiB/s below the cap; at the cap the largest legal request (about 32 MiB) needs about
+ * 1.1 MiB/s. The cap equals the 30 s context read and stays under the Bridge drain.
+ */
+export const WriteEventPerMiBTimeoutMs = 2_000;
+export const WriteEventMaxTimeoutMs = 30_000;
+const MiB = 1024 * 1024;
 
 /** Every new protobuf method must choose its own policy before this module compiles. */
 export const DefaultBridgeMethodPolicies = {
@@ -15,7 +30,12 @@ export const DefaultBridgeMethodPolicies = {
   refreshRuntimeBindingToken: fixed(SessionEventWriterRetryPolicy.timeoutPerAttemptMs),
   commitInputs: fixed(SessionEventWriterRetryPolicy.timeoutPerAttemptMs),
   commitTaskNotificationResult: fixed(SessionEventWriterRetryPolicy.timeoutPerAttemptMs),
-  writeEvent: fixed(SessionEventWriterRetryPolicy.timeoutPerAttemptMs),
+  writeEvent: {
+    kind: "size_scaled",
+    timeoutMs: SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
+    perMiBMs: WriteEventPerMiBTimeoutMs,
+    maxTimeoutMs: WriteEventMaxTimeoutMs,
+  },
   settleToolResult: fixed(SessionEventWriterRetryPolicy.timeoutPerAttemptMs),
   writeRequestEnd: fixed(SessionEventWriterRetryPolicy.timeoutPerAttemptMs),
   finishIdle: fixed(35_000),
@@ -65,7 +85,10 @@ export const bridgeMethodEnvKeys = Object.keys(DefaultBridgeMethodPolicies).map(
   bridgeMethodEnvKey(method as BridgeMethod),
 );
 
-/** Parse once at the process config boundary; remaining-provider methods cannot reset that budget. */
+/**
+ * Parse once at the process config boundary; remaining-provider methods cannot reset that budget.
+ * A size-scaled override replaces only the base timeout.
+ */
 export function parseBridgeMethodPolicies(
   env: Readonly<Record<string, string | undefined>>,
 ): BridgeMethodPolicies | undefined {
@@ -77,12 +100,18 @@ export function parseBridgeMethodPolicies(
       policies[method] = policy;
       continue;
     }
-    if (policy.kind !== "fixed" || !/^[1-9][0-9]*$/.test(value)) return undefined;
+    if (policy.kind === "remaining_provider_budget" || !/^[1-9][0-9]*$/.test(value)) return undefined;
     const timeoutMs = Number(value);
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs > 2_147_483_647) return undefined;
-    policies[method] = { kind: "fixed", timeoutMs };
+    policies[method] = { ...policy, timeoutMs };
   }
   return Object.freeze(policies) as BridgeMethodPolicies;
+}
+
+/** The longest attempt a policy allows; remaining-provider methods have none of their own. */
+export function bridgeMethodMaxAttemptMs(policy: BridgeDeadlinePolicy): number {
+  if (policy.kind === "remaining_provider_budget") return 0;
+  return policy.kind === "fixed" ? policy.timeoutMs : Math.max(policy.timeoutMs, policy.maxTimeoutMs);
 }
 
 /** Clips a method deadline to the caller's shared phase budget without extending either clock. */
@@ -91,6 +120,7 @@ export function bridgeMethodDeadline(
   method: BridgeMethod,
   now: number,
   remainingDeadline?: number,
+  requestBytes?: number,
 ): number {
   const policy = policies[method];
   if (policy.kind === "remaining_provider_budget") {
@@ -99,5 +129,15 @@ export function bridgeMethodDeadline(
     }
     return remainingDeadline;
   }
-  return Math.min(now + policy.timeoutMs, remainingDeadline ?? Number.POSITIVE_INFINITY);
+  let timeoutMs = policy.timeoutMs;
+  if (policy.kind === "size_scaled") {
+    if (requestBytes === undefined || !Number.isFinite(requestBytes) || requestBytes < 0) {
+      throw new Error("Bridge size-scaled call requires its encoded request size");
+    }
+    timeoutMs = Math.min(
+      bridgeMethodMaxAttemptMs(policy),
+      policy.timeoutMs + Math.ceil((policy.perMiBMs * requestBytes) / MiB),
+    );
+  }
+  return Math.min(now + timeoutMs, remainingDeadline ?? Number.POSITIVE_INFINITY);
 }

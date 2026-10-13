@@ -91,14 +91,14 @@ func TestCreateForPrincipalReturnsRawKeyOnceAndStoresMetadataOnly(t *testing.T) 
 	}
 }
 
-func TestCreateForPrincipalRejectsEmptyName(t *testing.T) {
+func TestCreateForPrincipalRejectsInvalidName(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	store := auth.NewAPIKeyStore(db)
 	issuer := bootstrapPrincipal(t, db, store)
-	for _, name := range []string{"", "   ", "\t\n"} {
+	for _, name := range []string{"", "   ", "\t\n", "a\x00b"} {
 		_, err := store.CreateForPrincipal(context.Background(), issuer, name)
 		if err == nil {
-			t.Errorf("CreateForPrincipal accepted blank name %q", name)
+			t.Errorf("CreateForPrincipal accepted invalid name %q", name)
 			continue
 		}
 		var validation *auth.ValidationError

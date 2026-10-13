@@ -121,9 +121,14 @@ func TestMemoryVersionListFiltersOrderViewAndToken(t *testing.T) {
 			_, err := service.ListMemoryVersions(ctx, workspace.DefaultID, store.ID, memory.ListMemoryVersionsOptions{Limit: 1, LimitSet: true, MemoryID: first.ID, View: memory.ViewFull, Page: *pageOne.NextPage})
 			return err
 		},
+		"forged id with U+0000": func() error {
+			_, err := service.ListMemoryVersions(ctx, workspace.DefaultID, store.ID, memory.ListMemoryVersionsOptions{Limit: 1, LimitSet: true, MemoryID: first.ID, Page: forgedPageToken(t, *pageOne.NextPage, "id", "memver_a\x00b")})
+			return err
+		},
 	} {
-		if err := call(); err == nil {
-			t.Fatalf("%s token replay succeeded; want validation error", label)
+		var validation *memory.ValidationError
+		if err := call(); !errors.As(err, &validation) {
+			t.Fatalf("%s token replay error = %v; want validation error", label, err)
 		}
 	}
 }

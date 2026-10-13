@@ -440,6 +440,9 @@ func readMemoryBody(w http.ResponseWriter, r *http.Request, capBytes int64) ([]b
 		}
 		return nil, err
 	}
+	if err := rejectUnstorableJSONText(body); err != nil {
+		return nil, err
+	}
 	return body, nil
 }
 

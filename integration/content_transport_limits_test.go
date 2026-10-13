@@ -142,10 +142,6 @@ func TestContentTransportLimits(t *testing.T) {
 			before := contentTransportDurableCounts(t, admin, session)
 			eventID := fmt.Sprintf("evt_%032x", i+1)
 			input := map[string]any{"address": server.Address, "scope": map[string]any{"workspaceId": "default", "sessionId": session, "sessionThreadId": thread, "bindingId": binding, "bindingGeneration": 1, "targetPodUid": "content-pod", "runtimeProcessId": "process_content-pod"}, "textLength": vector.length, "expectedCanonicalBytes": vector.canonical, "expectedSHA256": vector.digest, "eventId": eventID}
-			// This tests size and durable bytes, not latency. Race instrumentation of
-			// maximum-sized JSON needs an explicit test-only deadline allowance; the
-			// production WriteEvent policy remains unchanged.
-			input["writeEventTimeoutMs"] = 15_000
 			raw, err := json.Marshal(input)
 			if err != nil {
 				t.Fatal(err)

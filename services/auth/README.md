@@ -53,8 +53,13 @@ API-key management verifies the signed principal against the actual method and
 path before installing trusted principal/workspace context and invoking the
 registered-operation wrapper. Body and path fields never supply workspace
 authority. Delete resolves its key under the signed workspace before disclosure
-or mutation. The exchange route is a direct Auth HTTP surface; deployment-owned
-edge routing is a separate contract.
+or mutation. A key `name` holds 1 to 256 Unicode code points after trimming and
+must not contain U+0000, because Engine stores it in PostgreSQL, which cannot
+store U+0000; the registered-operation wrapper likewise rejects a path or query
+that contains U+0000 or is not valid UTF-8. Both return `400
+invalid_request_error` (a path that is not valid UTF-8 normally fails the
+signed principal's path match first, with `401`). The exchange route is a direct Auth HTTP surface;
+deployment-owned edge routing is a separate contract.
 
 The API-key metadata DTO is `{ id, type: "api_key", workspace_id, name,
 key_prefix, key_kind: "bootstrap"|"standard", created_at, last_used_at?,

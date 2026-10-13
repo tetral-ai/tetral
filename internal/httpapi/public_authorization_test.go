@@ -454,6 +454,44 @@ func TestPublicAuthorizationPreservesIngressValidationBeforeLookup(t *testing.T)
 	}
 }
 
+func TestPublicOperationRejectsUnstorableRequestTarget(t *testing.T) {
+	full := identityAdmissionFixture(auth.IdentityHuman)
+	restricted := identityAdmissionFixture(auth.IdentityHuman)
+	restricted.Authority.Operations = []auth.Operation{auth.OperationModelsList}
+	for _, test := range []struct {
+		name        string
+		target      string
+		principal   auth.Principal
+		wantStatus  int
+		wantMessage string
+	}{
+		{"path with U+0000", "/v1/sessions/sesn%00x", full, http.StatusBadRequest, "request path must be valid UTF-8 without U+0000"},
+		{"query value with U+0000", "/v1/sessions/sesn_ok?agent_id=agent%00", full, http.StatusBadRequest, "query parameter agent_id must be valid UTF-8 without U+0000"},
+		{"query value invalid UTF-8", "/v1/sessions/sesn_ok?agent_id=%FF", full, http.StatusBadRequest, "query parameter agent_id must be valid UTF-8 without U+0000"},
+		{"query name with U+0000", "/v1/sessions/sesn_ok?agent%00id=x", full, http.StatusBadRequest, "query parameter names must be valid UTF-8 without U+0000"},
+		{"denied operation answers first", "/v1/sessions/sesn%00x", restricted, http.StatusForbidden, "permission denied"},
+		{"ordinary request reaches handler", "/v1/sessions/sesn_ok?beta=true&agent_id=agent_ok", full, http.StatusNoContent, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reached := false
+			handler := httpapi.DeclarePublicOperation(http.MethodGet, "/v1/sessions/{session_id}", func(w http.ResponseWriter, _ *http.Request) {
+				reached = true
+				w.WriteHeader(http.StatusNoContent)
+			})
+			request := httptest.NewRequest(http.MethodGet, test.target, nil)
+			request = request.WithContext(auth.WithPrincipal(request.Context(), test.principal))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.wantStatus || !strings.Contains(response.Body.String(), test.wantMessage) {
+				t.Fatalf("status=%d body=%s; want %d with %q", response.Code, response.Body.String(), test.wantStatus, test.wantMessage)
+			}
+			if reached != (test.wantStatus == http.StatusNoContent) {
+				t.Fatalf("handler reached=%t for status %d", reached, response.Code)
+			}
+		})
+	}
+}
+
 // sessionGateOwner logs every Session owner call in order, so the registered
 // gate's lookup is distinguishable from the handler's later business call.
 type sessionGateOwner struct {

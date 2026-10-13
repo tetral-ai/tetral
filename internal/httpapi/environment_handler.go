@@ -198,6 +198,9 @@ func readEnvironmentBody(w http.ResponseWriter, r *http.Request) ([]byte, error)
 		}
 		return nil, err
 	}
+	if err := rejectUnstorableJSONText(body); err != nil {
+		return nil, err
+	}
 	return body, nil
 }
 

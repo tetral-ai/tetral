@@ -24,16 +24,32 @@ test("Bridge deadline policy and proxy projection cover the exact descriptor", (
     const policy = DefaultBridgeMethodPolicies[method];
     expect(entry.path).toBe(AgentRuntimeBridgeServiceService[method].path);
     expect(entry.kind).toBe(policy.kind);
-    expect(entry.timeoutMs).toBe(policy.kind === "fixed" ? policy.timeoutMs : null);
+    expect(entry.timeoutMs).toBe(policy.kind === "remaining_provider_budget" ? null : policy.timeoutMs);
   }
   expect(
     parseBridgeMethodPolicies({ TETRAL_BRIDGE_WRITE_EVENT_TIMEOUT_MS: "7000" })?.writeEvent,
-  ).toEqual({ kind: "fixed", timeoutMs: 7000 });
+  ).toEqual({ kind: "size_scaled", timeoutMs: 7000, perMiBMs: 2000, maxTimeoutMs: 30000 });
   expect(parseBridgeMethodPolicies({ TETRAL_BRIDGE_WRITE_EVENT_TIMEOUT_MS: "07" })).toBeUndefined();
   expect(
     parseBridgeMethodPolicies({ TETRAL_BRIDGE_READ_FILE_ATTACHMENT_CHUNK_TIMEOUT_MS: "7000" }),
   ).toBeUndefined();
   expect(bridgeMethodDeadline(DefaultBridgeMethodPolicies, "finishIdle", 1000, 2000)).toBe(2000);
+  // WriteEvent: base + ceil(2 s per encoded MiB), capped at 30 s; the cap never lowers a larger base.
+  const MiB = 1024 * 1024;
+  const raisedBase = parseBridgeMethodPolicies({ TETRAL_BRIDGE_WRITE_EVENT_TIMEOUT_MS: "45000" })!;
+  for (const [policies, requestBytes, remainingDeadline, deadline] of [
+    [DefaultBridgeMethodPolicies, 0, undefined, 4000],
+    [DefaultBridgeMethodPolicies, MiB, undefined, 6000],
+    [DefaultBridgeMethodPolicies, 13.5 * MiB, undefined, 31000],
+    [DefaultBridgeMethodPolicies, 64 * MiB, undefined, 31000],
+    [DefaultBridgeMethodPolicies, MiB, 2500, 2500],
+    [raisedBase, 64 * MiB, undefined, 46000],
+  ] as const) {
+    expect(bridgeMethodDeadline(policies, "writeEvent", 1000, remainingDeadline, requestBytes)).toBe(deadline);
+  }
+  expect(() => bridgeMethodDeadline(DefaultBridgeMethodPolicies, "writeEvent", 1000, 2500)).toThrow(
+    "Bridge size-scaled call requires its encoded request size",
+  );
 });
 
 test("configured unary deadline cancels the real Bridge handler and joins its client", async () => {

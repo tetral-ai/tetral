@@ -46,14 +46,21 @@ try {
     let outcome = "success";
     try {
       const schema = (
-        BridgeProtocol as unknown as Record<string, { fromJSON(value: unknown): unknown }>
+        BridgeProtocol as unknown as Record<
+          string,
+          { fromJSON(value: unknown): unknown; encode(message: unknown): { finish(): Uint8Array } }
+        >
       )[action.method[0]!.toUpperCase() + action.method.slice(1) + "Request"];
       if (schema === undefined) throw new Error("unknown request descriptor");
+      const request = schema.fromJSON(action.request);
       const response = await owners[action.replica]!.call(
         action.method as keyof typeof policies,
-        schema.fromJSON(action.request),
+        request,
         metadata,
-        { deadline: Date.now() + (action.timeoutMs ?? 5000) },
+        {
+          deadline: Date.now() + (action.timeoutMs ?? 5000),
+          requestBytes: schema.encode(request).finish().byteLength,
+        },
       );
       if (action.error !== undefined) throw new Error(`Expected grpc status ${action.error}`);
       results[action.name] = response;

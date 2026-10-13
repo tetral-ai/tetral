@@ -64,6 +64,7 @@ import {
 	BridgeAPIEventWriter,
 	BridgeAPIInternalToolRepairCommitter,
 } from "./bridge-client.js";
+import { bridgeMethodMaxAttemptMs } from "./bridge-policy.js";
 import type { RuntimePodConfig, RuntimePodModelRef } from "./config.js";
 import { loadRuntimePodConfigFromProcessEnv, parseModelRef } from "./config.js";
 import type { RuntimeCoreHosts } from "./core-hosts.js";
@@ -382,8 +383,8 @@ export async function buildRuntimePodCommandDependencies(input: {
 				runtimeProviderStreamObserver(input.logger),
 			),
 			storeOperationTimeoutMs: Math.max(
-				...Object.values(input.config.bridgeMethodPolicies).map((policy) =>
-					policy.kind === "fixed" ? policy.timeoutMs : 0,
+				...Object.values(input.config.bridgeMethodPolicies).map(
+					bridgeMethodMaxAttemptMs,
 				),
 			),
 			phaseDeadline: () => phaseDeadline,

@@ -3,6 +3,9 @@ package memory
 import (
 	"encoding/base64"
 	"encoding/json"
+	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -51,10 +54,21 @@ func decodeStorePageToken(raw string, ws workspace.ID, options ListStoresOptions
 		token.CreatedAtGTE != options.CreatedAtGTE ||
 		token.CreatedAtLTE != options.CreatedAtLTE ||
 		token.LastCreatedAt == "" ||
-		token.LastID == "" {
+		token.LastID == "" ||
+		!validPageTokenPosition(token.LastCreatedAt, token.LastID) {
 		return storePageToken{}, &ValidationError{Message: "invalid page token"}
 	}
 	return token, nil
+}
+
+// validPageTokenPosition accepts only a position the encoder can write: a
+// canonical UTC RFC3339 time from year 1 on and an ID without U+0000. Store
+// and version tokens are not signed and their position reaches PostgreSQL,
+// which rejects other times and any text containing U+0000.
+func validPageTokenPosition(createdAt, id string) bool {
+	parsed, err := time.Parse(time.RFC3339, createdAt)
+	return err == nil && parsed.Year() >= 1 && parsed.UTC().Format(time.RFC3339) == createdAt &&
+		utf8.ValidString(id) && strings.IndexByte(id, 0) < 0
 }
 
 type memoryPageToken struct {
@@ -163,7 +177,8 @@ func decodeVersionPageToken(raw string, ws workspace.ID, storeID string, options
 		token.CreatedAtLTE != options.CreatedAtLTE ||
 		token.View != options.View ||
 		token.LastCreatedAt == "" ||
-		token.LastID == "" {
+		token.LastID == "" ||
+		!validPageTokenPosition(token.LastCreatedAt, token.LastID) {
 		return versionPageToken{}, &ValidationError{Message: "invalid page token"}
 	}
 	return token, nil

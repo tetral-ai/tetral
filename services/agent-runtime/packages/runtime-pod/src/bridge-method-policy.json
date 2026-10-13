@@ -27,7 +27,7 @@
     "method": "WriteEvent",
     "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/WriteEvent",
     "timeoutMs": 3000,
-    "kind": "fixed"
+    "kind": "size_scaled"
   },
   {
     "method": "SettleToolResult",
