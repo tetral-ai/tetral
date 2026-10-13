@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -466,7 +465,7 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 
 type providerFailureRuntimeProcess struct {
 	command         *exec.Cmd
-	output          bytes.Buffer
+	output          syncBuffer
 	port            int
 	statePath       string
 	closePath       string
@@ -799,7 +798,7 @@ type providerRescheduleRecoveryComposition struct {
 
 type providerRecoveryProcess struct {
 	command           *exec.Cmd
-	output            bytes.Buffer
+	output            syncBuffer
 	port              int
 	resultPath        string
 	providerStatePath string

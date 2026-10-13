@@ -2,7 +2,6 @@ package integration
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -917,7 +916,7 @@ type oauthInitialManifestConnector struct {
 	command  *exec.Cmd
 	scanner  *bufio.Scanner
 	stdin    io.WriteCloser
-	stderr   bytes.Buffer
+	stderr   syncBuffer
 	finished bool
 }
 
@@ -1045,7 +1044,7 @@ type initialManifestFailureConnector struct {
 	command  *exec.Cmd
 	scanner  *bufio.Scanner
 	stdin    io.WriteCloser
-	stderr   bytes.Buffer
+	stderr   syncBuffer
 	finished bool
 }
 

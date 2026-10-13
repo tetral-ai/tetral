@@ -192,7 +192,7 @@ func newMCPDurableCompositionWithOptions(t *testing.T, options map[string]any) *
 	if err != nil {
 		t.Fatal(err)
 	}
-	var stderr bytes.Buffer
+	var stderr lockedBuffer
 	command.Stderr = &stderr
 	if err := command.Start(); err != nil {
 		t.Fatal(err)

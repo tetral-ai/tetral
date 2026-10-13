@@ -119,7 +119,7 @@ func startBunRuntimePodHarness(ctx context.Context, t *testing.T) string {
 	if err != nil {
 		t.Fatalf("stdout pipe: %v", err)
 	}
-	var stderr bytes.Buffer
+	var stderr syncBuffer
 	command.Stderr = &stderr
 	if err := command.Start(); err != nil {
 		t.Fatalf("start Bun harness: %v", err)
