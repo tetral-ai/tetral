@@ -11,8 +11,8 @@ import {
 function bridgePolicyEvidence() {
   const methods = Object.keys(DefaultBridgeMethodPolicies) as BridgeMethod[];
   const remaining = methods.filter((method) => DefaultBridgeMethodPolicies[method].kind === "remaining_provider_budget");
-  const fixedKey = bridgeMethodEnvKey("writeEvent");
-  const accepts = (value: string) => parseBridgeMethodPolicies({ [fixedKey]: value })?.writeEvent;
+  const fixedKey = bridgeMethodEnvKey("commitInputs");
+  const accepts = (value: string) => parseBridgeMethodPolicies({ [fixedKey]: value })?.commitInputs;
   let missingProviderDeadlineRejected = false;
   try { bridgeMethodDeadline(DefaultBridgeMethodPolicies, "readFileAttachmentChunk", 1000); }
   catch { missingProviderDeadlineRejected = true; }
@@ -20,7 +20,8 @@ function bridgePolicyEvidence() {
     defaults: Object.fromEntries(methods.map((method) => {
       const policy = DefaultBridgeMethodPolicies[method];
       return [method, { kind: policy.kind, environment_key: bridgeMethodEnvKey(method),
-        ...(policy.kind === "fixed" ? { timeout_ms: policy.timeoutMs } : {}) }];
+        ...(policy.kind === "remaining_provider_budget" ? {} : { timeout_ms: policy.timeoutMs }),
+        ...(policy.kind === "size_scaled" ? { per_mib_ms: policy.perMiBMs, max_timeout_ms: policy.maxTimeoutMs } : {}) }];
     })),
     environmentKeys: bridgeMethodEnvKeys,
     defaultPolicies: parseBridgeMethodPolicies({}),

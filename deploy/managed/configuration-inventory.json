@@ -773,9 +773,11 @@
           "timeout_ms": 3000
         },
         "writeEvent": {
-          "kind": "fixed",
+          "kind": "size_scaled",
           "environment_key": "TETRAL_BRIDGE_WRITE_EVENT_TIMEOUT_MS",
-          "timeout_ms": 3000
+          "timeout_ms": 3000,
+          "per_mib_ms": 2000,
+          "max_timeout_ms": 30000
         },
         "settleToolResult": {
           "kind": "fixed",
@@ -950,12 +952,13 @@
           "timeout_ms": 5000
         }
       },
-      "units": "Milliseconds per RPC attempt; remaining Provider deadlines are absolute milliseconds supplied by the caller.",
-      "unset_zero": "Only undefined selects each method default. Fixed overrides require canonical positive decimal safe integers <=2147483647; empty, zero, leading zero, fractional, signed and oversized values reject. Every supplied override for a remaining_provider_budget method rejects.",
-      "constraints": "Exactly 37 fixed and 3 remaining_provider_budget methods. registerRuntimeProcess/reportRuntimeProcess use the Runtime alias keys. Short-write defaults import SessionEventWriterRetryPolicy.timeoutPerAttemptMs (3000); its separate 3 attempts and 100/300 ms backoffs retain their existing retry authority. Method policies authorize no retries. Fixed deadlines clip to a shorter caller phase/Provider deadline; remaining-provider methods require a finite caller deadline and cannot reset it. Runtime startup also requires report timeout<report interval<process freshness.",
+      "units": "Milliseconds per RPC attempt; per_mib_ms is milliseconds added per MiB of encoded request; remaining Provider deadlines are absolute milliseconds supplied by the caller.",
+      "unset_zero": "Only undefined selects each method default. Fixed and size_scaled base overrides require canonical positive decimal safe integers <=2147483647; empty, zero, leading zero, fractional, signed and oversized values reject. Every supplied override for a remaining_provider_budget method rejects.",
+      "constraints": "Exactly 36 fixed, 1 size_scaled (writeEvent) and 3 remaining_provider_budget methods. registerRuntimeProcess/reportRuntimeProcess use the Runtime alias keys. Short-write defaults import SessionEventWriterRetryPolicy.timeoutPerAttemptMs (3000); its separate 3 attempts and 100/300 ms backoffs retain their existing retry authority. A writeEvent attempt gets min(max(max_timeout_ms, base), base + ceil(per_mib_ms x encoded request bytes / 1 MiB)) and requires the encoded size; TETRAL_BRIDGE_WRITE_EVENT_TIMEOUT_MS overrides only the base, while the slope and cap are code constants. Method policies authorize no retries. Fixed and size_scaled deadlines clip to a shorter caller phase/Provider deadline; remaining-provider methods require a finite caller deadline and cannot reset it. Runtime startup also requires report timeout<report interval<process freshness.",
       "projection": "Runtime startup parses these supported application env overrides. No dedicated Helm per-method override knobs: service/raw/Helm Runtime defaults retain the owner policies. The checked bridge-method-policy.json mirror enumerates RPC routes; internal-routing.yaml disables proxy timeout and retries for every Bridge method, so the proxy cannot shorten application overrides. Existing transport tests check the descriptor mirror and proxy disposition; configuration_projection_test.go checks this complete catalog against actual owner exports/key derivation.",
       "proofs": [
         "services/agent-runtime/packages/runtime-pod/test/unit/bridge-policy.test.ts",
+        "services/agent-runtime/packages/runtime-pod/test/unit/bridge-client.test.ts",
         "services/agent-runtime/packages/runtime-pod/test/unit/lifecycle.test.ts",
         "deploy/helm/transport_test.go",
         "deploy/helm/configuration_projection_test.go",

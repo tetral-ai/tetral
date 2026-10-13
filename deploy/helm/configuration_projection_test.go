@@ -323,6 +323,8 @@ type bridgeMethodInventoryPolicy struct {
 	Kind           string `json:"kind"`
 	EnvironmentKey string `json:"environment_key"`
 	TimeoutMS      int    `json:"timeout_ms,omitempty"`
+	PerMiBMS       int    `json:"per_mib_ms,omitempty"`
+	MaxTimeoutMS   int    `json:"max_timeout_ms,omitempty"`
 }
 
 type bridgeParsedPolicy struct {
@@ -419,11 +421,13 @@ func checkBridgePolicyEvidence(t *testing.T, evidence bridgePolicyEvidence) {
 
 func checkBridgePolicyBoundaries(t *testing.T, evidence bridgePolicyEvidence) {
 	t.Helper()
-	fixed, remaining := 0, 0
+	fixed, scaled, remaining := 0, 0, 0
 	for method, policy := range evidence.Defaults {
 		switch policy.Kind {
 		case "fixed":
 			fixed++
+		case "size_scaled":
+			scaled++
 		case "remaining_provider_budget":
 			remaining++
 		default:
@@ -434,7 +438,7 @@ func checkBridgePolicyBoundaries(t *testing.T, evidence bridgePolicyEvidence) {
 			t.Fatalf("%s parsed default differs from its owner", method)
 		}
 	}
-	if fixed != 37 || remaining != 3 || len(evidence.DefaultPolicies) != 40 {
+	if fixed != 36 || scaled != 1 || remaining != 3 || len(evidence.DefaultPolicies) != 40 {
 		t.Fatal("Bridge policy semantic coverage differs")
 	}
 	if evidence.Defaults["registerRuntimeProcess"].EnvironmentKey != "TETRAL_RUNTIME_REGISTER_TIMEOUT_MS" || evidence.Defaults["reportRuntimeProcess"].EnvironmentKey != "TETRAL_RUNTIME_REPORT_TIMEOUT_MS" {

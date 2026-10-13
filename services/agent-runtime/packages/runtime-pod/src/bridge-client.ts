@@ -1274,10 +1274,9 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 									})),
 							},
 			};
-			if (
-				WriteEventRequestMessage.encode(request).finish().byteLength >
-				MaxBridgeDurableContextGrpcMessageBytes
-			) {
+			const requestBytes =
+				WriteEventRequestMessage.encode(request).finish().byteLength;
+			if (requestBytes > MaxBridgeDurableContextGrpcMessageBytes) {
 				return eventWriterOperationSchemaFailure(
 					envelope.sessionId,
 					envelope.writeId,
@@ -1286,7 +1285,12 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 			const metadata = await this.metadataFactory({
 				tokenPath: this.options.tokenPath,
 			});
-			const response = await writeEvent(this.client, request, metadata);
+			const response = await writeEvent(
+				this.client,
+				request,
+				metadata,
+				requestBytes,
+			);
 			if (
 				!exactlyOneDefined(
 					response.committed,
@@ -2006,8 +2010,11 @@ function writeEvent(
 	client: AgentRuntimeBridgeServiceClient,
 	request: WriteEventRequest,
 	metadata: Metadata,
+	requestBytes: number,
 ): Promise<WriteEventResponse> {
-	return bridgeUnaryCall(client, "writeEvent", request, metadata);
+	return bridgeUnaryCall(client, "writeEvent", request, metadata, {
+		requestBytes,
+	});
 }
 
 function settleToolResult(

@@ -32,6 +32,8 @@ export class BridgeUnaryCalls {
     async call<Response>(method: BridgeMethod, request: unknown, metadata: Metadata, options: {
         readonly signal?: AbortSignal;
         readonly deadline?: number;
+        /** Encoded request size; required by size-scaled method policies. */
+        readonly requestBytes?: number;
     } = {}): Promise<Response> {
         if (this.stopping)
             throw new Error("Bridge client is closing");
@@ -42,7 +44,7 @@ export class BridgeUnaryCalls {
         const now = Date.now();
         const finalAttemptDeadline = this.drainPhase !== undefined && now >= this.drainPhase.currentStepDeadline
             ? now + this.drainPhase.settlementAttemptTimeoutMs : Infinity;
-        const deadline = Math.min(bridgeMethodDeadline(this.policies, method, now, remaining), finalAttemptDeadline);
+        const deadline = Math.min(bridgeMethodDeadline(this.policies, method, now, remaining, options.requestBytes), finalAttemptDeadline);
         if (deadline <= Date.now()) {
             // Expired shared authority must not dispatch a fresh business RPC.
             throw Object.assign(new Error("Bridge method deadline exceeded"), {
@@ -174,6 +176,7 @@ export function ownBridgeClient(client: AgentRuntimeBridgeServiceClient, policie
 export function bridgeUnaryCall<Response>(client: AgentRuntimeBridgeServiceClient, method: BridgeMethod, request: unknown, metadata: Metadata, options?: {
     readonly signal?: AbortSignal;
     readonly deadline?: number;
+    readonly requestBytes?: number;
 }): Promise<Response> {
     return ownBridgeClient(client).call<Response>(method, request, metadata, options);
 }

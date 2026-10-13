@@ -580,7 +580,14 @@ freshness. Session capacity defaults to 256 and concurrent tools to eight.
 The exhaustive method policy in `runtime-pod/src/bridge-policy.ts` owns actual
 unary deadlines: reads 30 seconds, durable waits 35 seconds, ordinary writes
 three seconds, registration/release five seconds, and reports one second.
-Each fixed method accepts its `TETRAL_BRIDGE_<METHOD>_TIMEOUT_MS` override.
+`WriteEvent` alone scales with its encoded request: three seconds plus two
+seconds per MiB, at most 30 seconds, or the configured base if that is larger.
+Small events keep about three seconds; the largest legal `agent.message` (about
+32 MiB encoded) gets the 30-second cap. A timed-out attempt rolls back on the
+Bridge, so a retry cannot finish a write that its deadline was too short for.
+Each fixed method and `WriteEvent` accept their
+`TETRAL_BRIDGE_<METHOD>_TIMEOUT_MS` override; for `WriteEvent` it replaces the
+three-second base.
 Attachment reads consume the provider request's remaining absolute deadline.
 Parent cancellation and shutdown deadlines can shorten every budget. Named
 receipt recovery repeats only the unchanged operation; generic unknown-outcome
@@ -682,7 +689,8 @@ bun run test:integration   # runtime-pod/test/integration against fakes and gRPC
 | `runtime-pod/test/unit/auth.test.ts` | TokenReview identity and the closed command set |
 | `runtime-pod/test/unit/gateway-client.test.ts` | the Gateway provider-stream client |
 | `runtime-pod/test/unit/tool-runner.test.ts` | route dispatch across sandbox / gateway / bridge / subagent |
-| `runtime-pod/test/unit/bridge-client.test.ts`, `core-writer-policy.test.ts` | Bridge clients/input committers, parsed method policy through actual Core assembly, bounded attempts and independent failed-run observation |
+| `runtime-pod/test/unit/bridge-client.test.ts`, `bridge-policy.test.ts`, `core-writer-policy.test.ts` | Bridge clients/input committers, the exhaustive method policy and the encoded size behind each `WriteEvent` deadline, parsed method policy through actual Core assembly, bounded attempts and independent failed-run observation |
+| `integration/content_transport_limits_test.go` (repository root) | the largest legal `agent.message` commits through the actual Runtime writer, 64 MiB gRPC channel and PostgreSQL Bridge store under the production `WriteEvent` deadline |
 | `integration/mcp_runtime_manifest_delivery_test.go` (repository root) | actual SDK notification → Bridge manifest generation → Queue lease → Job Runner → Runtime catalog application, busy rejection and same-job retry, duplicate/stale commands, next Core provider request, and replacement Bridge cold load after both Connector owners close |
 | `integration/replica_runtime_handoff_test.go` (repository root) | real-process checkpoint, reviewer and fault continuation, exact durable custody/context, binding races and joined exit |
 | `runtime-pod/test/integration/app.test.ts`, `gateway-capacity.test.ts` | full process wiring plus maximum-context projection, protobuf, real gRPC, and provider-lowering capacity proof |

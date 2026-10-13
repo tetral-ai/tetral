@@ -23,6 +23,7 @@ import type {
 	WriteEventRequest,
 	WriteRequestEndRequest,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
+import { WriteEventRequest as WriteEventRequestMessage } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import {
 	BridgeAPIApprovalReviewerThreadCreator,
 	BridgeAPIContextLoader,
@@ -783,17 +784,18 @@ describe("Bridge operation-specific Runtime adapters", () => {
 			},
 		};
 		const writer = new BridgeAPIEventWriter(options(bridge));
+		const text = "x".repeat(1024 * 1024);
 		const envelope: SessionEventEnvelope = {
 			...eventScope("write_1"),
 			modelRequestId: "mrq_1",
 			preallocatedEventId: "evt_00000000000000000000000000000001",
 			event: {
 				type: "agent.message",
-				content: [{ type: "text", text: "hello" }],
+				content: [{ type: "text", text }],
 			},
 			assistantContextAppend: {
 				parts: [
-					{ type: "text", text: "hello", truncated: false },
+					{ type: "text", text, truncated: false },
 					{
 						type: "reasoning",
 						text: "think",
@@ -817,15 +819,25 @@ describe("Bridge operation-specific Runtime adapters", () => {
 			},
 		};
 
+		const before = Date.now();
 		await expect(writer.append(envelope)).resolves.toEqual({
 			ok: true,
 			type: "committed",
 			eventId: "evt_00000000000000000000000000000001",
 			assistant: { messageSequence: 4, createdToolUseEventIds: ["evt_00000000000000000000000000000001"] },
 		});
+		const after = Date.now();
+		// The attempt deadline grows 2 s per encoded MiB over the 3 s base.
+		const encodedBytes = WriteEventRequestMessage.encode(
+			bridge.writeEventRequests[0]!,
+		).finish().byteLength;
+		const scaledMs = 3000 + Math.ceil((2000 * encodedBytes) / (1024 * 1024));
+		expect(encodedBytes).toBeGreaterThan(2 * 1024 * 1024);
+		expect(bridge.writeEventDeadlines[0]).toBeGreaterThanOrEqual(before + scaledMs);
+		expect(bridge.writeEventDeadlines[0]).toBeLessThanOrEqual(after + scaledMs);
 		expect(bridge.writeEventRequests[0]?.assistantContextDelta).toEqual({
 			parts: [
-				{ text: { text: "hello" } },
+				{ text: { text } },
 				{
 					reasoning: {
 						text: "think",
@@ -842,6 +854,18 @@ describe("Bridge operation-specific Runtime adapters", () => {
 			],
 		});
 		expect(bridge.writeEventRequests[0]?.preallocatedEventId).toBe(envelope.preallocatedEventId);
+
+		bridge.writeEventResponse = {
+			committed: { eventId: "evt_status", eventSequence: 9, createdToolUseEventIds: [] },
+		};
+		const statusBefore = Date.now();
+		await expect(
+			writer.append({ ...eventScope("write_status"), event: { type: "session.status_running" } }),
+		).resolves.toMatchObject({ ok: true, eventId: "evt_status" });
+		const statusAfter = Date.now();
+		// A small event keeps the base; its few hundred bytes round up to one millisecond.
+		expect(bridge.writeEventDeadlines[1]).toBeGreaterThanOrEqual(statusBefore + 3000);
+		expect(bridge.writeEventDeadlines[1]).toBeLessThanOrEqual(statusAfter + 3001);
 	});
 
 	test("accepts only matching preallocated text and thinking receipt identities", async () => {
@@ -1272,6 +1296,7 @@ class TypedBridge {
 	readonly commitInputsFailures: Array<Error & { readonly code?: number }> = [];
 	readonly taskNotificationRequests: CommitTaskNotificationResultRequest[] = [];
 	readonly writeEventRequests: WriteEventRequest[] = [];
+	readonly writeEventDeadlines: Array<CallOptions["deadline"]> = [];
 	readonly toolSettlementRequests: SettleToolResultRequest[] = [];
 	readonly writeRequestEndRequests: WriteRequestEndRequest[] = [];
 	readonly finishIdleRequests: FinishIdleRequest[] = [];
@@ -1418,10 +1443,11 @@ class TypedBridge {
 			writeEvent: (
 				request: WriteEventRequest,
 				_metadata: Metadata,
-				_options: CallOptions,
+				options: CallOptions,
 				callback: Callback,
 			) => {
 				this.writeEventRequests.push(request);
+				this.writeEventDeadlines.push(options.deadline);
 				callback(null, this.writeEventResponse);
 				return grpcCall();
 			},
