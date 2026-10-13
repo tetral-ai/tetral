@@ -203,6 +203,8 @@ func TestMemoryHTTPStrictValidation(t *testing.T) {
 		{"body actor", http.MethodPost, "/v1/memory_stores/" + store.ID + "/memories", `{"path":"/actor.md","content":"x","created_by":{"type":"api_actor","api_key_id":"ak_fake"}}`},
 		{"body hash", http.MethodPost, "/v1/memory_stores/" + store.ID + "/memories/" + created.ID, `{"content":"two","content_sha256":"fake"}`},
 		{"oversized body", http.MethodPost, "/v1/memory_stores/" + store.ID + "/memories", `{"path":"/too-large.md","content":"` + strings.Repeat("x", 102401) + `"}`},
+		{"content with U+0000", http.MethodPost, "/v1/memory_stores/" + store.ID + "/memories", `{"path":"/nul.md","content":"a\u0000b"}`},
+		{"memory_id with U+0000", http.MethodGet, "/v1/memory_stores/" + store.ID + "/memory_versions?memory_id=mem%00", ""},
 	}
 
 	for _, tc := range cases {

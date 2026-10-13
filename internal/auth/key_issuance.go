@@ -38,6 +38,9 @@ func (s *APIKeyStore) CreateForPrincipal(ctx context.Context, p Principal, name 
 	if trimmed == "" || runeCount(trimmed) > keyMetadataNameMaxRunes {
 		return nil, &ValidationError{Message: fmt.Sprintf("name must contain 1 to %d Unicode code points", keyMetadataNameMaxRunes)}
 	}
+	if strings.IndexByte(trimmed, 0) >= 0 {
+		return nil, &ValidationError{Message: "name must not contain U+0000"}
+	}
 	if p.Authority.Kind == AuthorityIndependentKey && !sameOperations(p.Authority.Operations, RegisteredOperations()) {
 		return nil, &PermissionError{}
 	}

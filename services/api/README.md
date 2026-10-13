@@ -124,6 +124,7 @@ unauthenticated.
 | --- | --- | --- |
 | Principal | Verify the `auth` signed principal's signature, audience, expiry, method, and path. The token is at most 32 KiB of strict JSON, issued no more than five seconds ahead of the receiver clock, with a lifetime of at most five minutes. Workspace authority comes from `Principal.workspace_id` only. | `401 authentication_error` |
 | Operation | Every registered business route, including authenticated stubs, declares a semantic action from `internal/auth`. The common Authorizer checks the verified principal's explicit operation ceiling against its typed workspace before any resource lookup. | `403 permission_error` |
+| Request text | Public request text must not contain U+0000, because Engine stores text in PostgreSQL, which cannot store it. After the Operation step, `httpapi.PublicOperationHandler` rejects a decoded path, query parameter name or query value that contains U+0000 or is not valid UTF-8, on every business route of api, auth's `/v1/api_keys` and event-stream (a path that is not valid UTF-8 normally fails the Principal step's path match first, with 401). Each JSON body reader rejects U+0000 in any string or object key. Both checks run before any lookup or write, so a rejected request stores nothing and writes no idempotency receipt. API key `name` and SKILL.md `description` are checked by their owners. Memory store and memory version page tokens are not signed, so their decoder also rejects a position the encoder never writes: an ID with U+0000, or a time that is not a canonical UTC RFC3339 time from year 1 on. File upload content and skill package file bodies may contain U+0000. The official API does not document how it handles U+0000. | `400 invalid_request_error` |
 | Selector binding | Client-supplied `workspace_id`, `session_id`, `vault_id`, etc. are selectors, never authority. Every query binds `Principal.workspace_id` plus the route selector. | — |
 | Cross-workspace / missing | Never falls back to another workspace, default resource, or default credential. | `404 not_found_error`, or `403 permission_error` where an authenticated-but-forbidden action exists |
 | Beta marker | Every `client.beta.*` route requires `beta=true`; omitted, repeated, or altered is rejected. `/v1/models` accepts the marker optionally. | `400 invalid_request_error` |
@@ -400,7 +401,9 @@ closing `---` delimiters reaches the YAML parser, capped at 32 KiB
 (`MaxFrontmatterBytes`); it decodes strictly into exactly two fields — `name`
 (≤ 64 runes, `MaxNameRunes`) and `description` (≤ 1024 runes,
 `MaxDescriptionRunes`). Anchors, aliases, explicit tags, merge keys, extra keys,
-non-scalar values, and multi-document streams are rejected. The
+non-scalar values, and multi-document streams are rejected. A `description`
+containing U+0000, which a YAML `\0` escape can produce, is rejected with `400`
+because Engine stores it in PostgreSQL, which cannot store U+0000. The
 `gopkg.in/yaml.v3` parser is confined to this package
 (`internal/skill/dependency_test.go`).
 

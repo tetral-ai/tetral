@@ -370,6 +370,9 @@ func readVaultRequestBody(w http.ResponseWriter, r *http.Request) ([]byte, error
 		}
 		return nil, &ValidationError{Message: "invalid request body"}
 	}
+	if err := rejectUnstorableJSONText(body); err != nil {
+		return nil, err
+	}
 	return body, nil
 }
 

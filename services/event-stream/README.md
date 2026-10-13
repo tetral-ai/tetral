@@ -437,6 +437,10 @@ and SSE registration declares its semantic action in the shared operation
 registry. The common Authorizer checks the principal's typed workspace and
 operation ceiling before any reader access, so a denied action returns
 `403 permission_error` independently of whether a selected resource exists.
+The same wrapper then rejects a decoded path, query parameter name or query
+value that contains U+0000 or is not valid UTF-8 with `400
+invalid_request_error`, before any reader access, because Engine stores
+request text in PostgreSQL, which cannot store U+0000.
 Allowed reads then verify session/thread visibility and the actual parent
 relation through the tenant-safe reader and authorize those trusted facts
 before returning data, joining a preview subscription or writing SSE headers.

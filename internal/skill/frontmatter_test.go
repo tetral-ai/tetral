@@ -330,6 +330,16 @@ func TestParseFrontmatterRejectsOverlongDescription(t *testing.T) {
 	}
 }
 
+func TestParseFrontmatterRejectsNULDescription(t *testing.T) {
+	// A double-quoted YAML scalar decodes the escape \0 to U+0000.
+	body := []byte("---\nname: ok\ndescription: \"a\\0b\"\n---\n")
+	_, err := skill.ParseFrontmatter(body)
+	var validation *skill.ValidationError
+	if !errors.As(err, &validation) || !strings.Contains(validation.Message, "must not contain U+0000") {
+		t.Fatalf("ParseFrontmatter error = %v; want ValidationError rejecting U+0000", err)
+	}
+}
+
 func TestParseFrontmatterErrorDoesNotEchoFrontmatter(t *testing.T) {
 	// Use a recognizable sentinel inside an invalid frontmatter and
 	// assert it does not appear in the returned error.

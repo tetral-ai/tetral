@@ -39,6 +39,10 @@ func (h *PublicOperationHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, err)
 		return
 	}
+	if err := rejectUnstorableRequestTarget(r); err != nil {
+		writeError(w, r, err)
+		return
+	}
 	h.next(w, r.WithContext(ctx))
 }
 

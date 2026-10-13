@@ -172,20 +172,21 @@ func TestCreateEnvironmentValid(t *testing.T) {
 
 func TestCreateEnvironmentRejectsUnknownAndOldShapeFields(t *testing.T) {
 	router := newEnvironmentTestRouter(t)
-	for _, body := range []string{
-		`{"name":"production","version":1}`,
-		`{"name":"production","config":{"packages":[{"manager":"pip","packages":["pandas"]}]}}`,
-		`{"name":"production","config":{"networking":{"type":"limited","allowed_hosts":["api.example.com"]}}}`,
-		`{"name":"production","config":{"networking":{"type":"unrestricted","allowed_hosts":["https://api.example.com"]}}}`,
+	for _, tc := range []struct{ body, want string }{
+		{body: `{"name":"production","version":1}`},
+		{body: `{"name":"production","config":{"packages":[{"manager":"pip","packages":["pandas"]}]}}`},
+		{body: `{"name":"production","config":{"networking":{"type":"limited","allowed_hosts":["api.example.com"]}}}`},
+		{body: `{"name":"production","config":{"networking":{"type":"unrestricted","allowed_hosts":["https://api.example.com"]}}}`},
+		{body: `{"name":"a\u0000b","config":{"networking":{"type":"unrestricted"}}}`, want: "request body must not contain U+0000"},
 	} {
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPost, "/v1/environments", strings.NewReader(body))
+		request := httptest.NewRequest(http.MethodPost, "/v1/environments", strings.NewReader(tc.body))
 		request.Header.Set("Content-Type", "application/json")
 		setAuthHeader(request)
 		router.ServeHTTP(recorder, request)
 
-		if recorder.Code != http.StatusBadRequest {
-			t.Fatalf("body %s: expected 400, got %d: %s", body, recorder.Code, recorder.Body.String())
+		if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), tc.want) {
+			t.Fatalf("body %s: expected 400 with %q, got %d: %s", tc.body, tc.want, recorder.Code, recorder.Body.String())
 		}
 	}
 }

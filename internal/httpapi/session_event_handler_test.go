@@ -375,6 +375,7 @@ func TestSessionEventIngressStrictBodyRejectsBeforeService(t *testing.T) {
 		{name: "content not array", body: `{"events":[{"type":"user.message","content":"hello"}]}`},
 		{name: "content missing text", body: `{"events":[{"type":"user.message","content":[{"type":"text"}]}]}`},
 		{name: "content non string text", body: `{"events":[{"type":"user.message","content":[{"type":"text","text":123}]}]}`},
+		{name: "text with U+0000", body: `{"events":[{"type":"user.message","content":[{"type":"text","text":"a\u0000b"}]}]}`, want: "request body must not contain U+0000"},
 		{name: "unknown content field", body: `{"events":[{"type":"user.message","content":[{"type":"text","text":"hello","file_id":"file_abc"}]}]}`},
 		{name: "file block rejected", body: `{"events":[{"type":"user.message","content":[{"type":"file","file_id":"file_abc"}]}]}`},
 		{name: "image block rejected", body: `{"events":[{"type":"user.message","content":[{"type":"image","url":"https://example.test/image.png"}]}]}`},

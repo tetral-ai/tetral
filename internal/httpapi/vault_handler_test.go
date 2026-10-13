@@ -486,10 +486,12 @@ func TestVaultCreateUpdateStrictBodyAndRequestTooLarge(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
+		want string
 	}{
 		{name: "unknown", body: `{"display_name":"x","name":"old"}`},
 		{name: "server managed", body: `{"display_name":"x","id":"vlt_user"}`},
 		{name: "trailing", body: `{"display_name":"x"}{"display_name":"y"}`},
+		{name: "display_name with U+0000", body: `{"display_name":"a\u0000b"}`, want: "request body must not contain U+0000"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -498,8 +500,8 @@ func TestVaultCreateUpdateStrictBodyAndRequestTooLarge(t *testing.T) {
 			request.Header.Set("Content-Type", "application/json")
 			setAuthHeader(request)
 			router.ServeHTTP(recorder, request)
-			if recorder.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d body=%s; want 400", recorder.Code, recorder.Body.String())
+			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), tc.want) {
+				t.Fatalf("status = %d body=%s; want 400 with %q", recorder.Code, recorder.Body.String(), tc.want)
 			}
 		})
 	}

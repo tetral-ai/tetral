@@ -543,6 +543,7 @@ func TestCreateSessionRejectsNullAndNonStringFieldsBeforeService(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
+		want string
 	}{
 		{
 			name: "metadata null",
@@ -580,6 +581,11 @@ func TestCreateSessionRejectsNullAndNonStringFieldsBeforeService(t *testing.T) {
 			name: "github url null",
 			body: `{"agent":"agent_test","environment_id":"env_test","vault_ids":[],"resources":[{"type":"github_repository","url":null}]}`,
 		},
+		{
+			name: "title with U+0000",
+			body: `{"agent":"agent_test","environment_id":"env_test","vault_ids":[],"title":"a\u0000b"}`,
+			want: "request body must not contain U+0000",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -596,6 +602,9 @@ func TestCreateSessionRejectsNullAndNonStringFieldsBeforeService(t *testing.T) {
 				t.Fatalf("status = %d; want 400 body=%s", recorder.Code, recorder.Body.String())
 			}
 			assertErrorType(t, recorder, "invalid_request_error")
+			if !strings.Contains(recorder.Body.String(), tc.want) {
+				t.Fatalf("body = %s; want message %q", recorder.Body.String(), tc.want)
+			}
 			if service.calls != 0 {
 				t.Fatalf("Create calls = %d; want 0", service.calls)
 			}

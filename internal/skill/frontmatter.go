@@ -247,6 +247,9 @@ func validateFrontmatterRules(fm *Frontmatter) error {
 	if containsXMLTag(fm.Description) {
 		return &ValidationError{Message: "SKILL.md frontmatter `description` must not contain XML tags"}
 	}
+	if strings.IndexByte(fm.Description, 0) >= 0 {
+		return &ValidationError{Message: "SKILL.md frontmatter `description` must not contain U+0000"}
+	}
 	return nil
 }
 

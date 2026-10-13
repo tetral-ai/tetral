@@ -149,6 +149,9 @@ func (h *SessionEventHandler) readStrictSessionEventBody(w http.ResponseWriter, 
 		}
 		return nil, err
 	}
+	if err := rejectUnstorableJSONText(body); err != nil {
+		return nil, err
+	}
 	return body, nil
 }
 

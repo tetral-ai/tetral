@@ -3,6 +3,8 @@ package memory_test
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -501,14 +503,40 @@ func TestStoreListFiltersLimitsAndPageTokenBinding(t *testing.T) {
 		{Limit: 1, IncludeArchived: false, Page: *pageOne.NextPage},
 		{Limit: 1, IncludeArchived: true, CreatedAtGTE: "2026-01-02T00:00:00Z", Page: *pageOne.NextPage},
 		{Limit: 1, IncludeArchived: true, CreatedAtLTE: "2026-01-01T00:00:00Z", Page: *pageOne.NextPage},
+		// The token is not signed: a client can forge its position, which
+		// would otherwise reach PostgreSQL.
+		{Limit: 1, IncludeArchived: true, Page: forgedPageToken(t, *pageOne.NextPage, "id", "memstore_a\x00b")},
+		{Limit: 1, IncludeArchived: true, Page: forgedPageToken(t, *pageOne.NextPage, "c", "not-a-time")},
+		{Limit: 1, IncludeArchived: true, Page: forgedPageToken(t, *pageOne.NextPage, "c", "2026-01-01T00:00:00+20:00")},
+		{Limit: 1, IncludeArchived: true, Page: forgedPageToken(t, *pageOne.NextPage, "c", "0000-01-01T00:00:00Z")},
 	} {
-		if _, err := service.ListStores(ctx, workspace.DefaultID, tc); err == nil {
-			t.Fatalf("ListStores accepted page token with changed filters: %+v", tc)
+		var validation *memory.ValidationError
+		if _, err := service.ListStores(ctx, workspace.DefaultID, tc); !errors.As(err, &validation) {
+			t.Fatalf("ListStores error = %v for page token %+v; want ValidationError", err, tc)
 		}
 	}
 	if _, err := service.ListStores(ctx, "workspace_b", memory.ListStoresOptions{Limit: 1, IncludeArchived: true, Page: *pageOne.NextPage}); err == nil {
 		t.Fatal("workspace_b accepted default workspace page token")
 	}
+}
+
+// forgedPageToken re-encodes a memory page token with one field replaced.
+func forgedPageToken(t *testing.T, token, field string, value any) string {
+	t.Helper()
+	payload, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		t.Fatalf("decode page token: %v", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatalf("unmarshal page token: %v", err)
+	}
+	fields[field] = value
+	forged, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshal page token: %v", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(forged)
 }
 
 func installPostCommitResponseRaceGate(t *testing.T, admin *sql.DB, tableName string, resourceName string) func() {
