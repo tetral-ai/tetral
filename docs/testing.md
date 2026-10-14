@@ -43,14 +43,11 @@ installation can update ignored files such as `node_modules` even while Git
 reports a clean working tree. These installed files remain after verification;
 the runner removes only temporary checkouts it created itself.
 
-SDK pin changes also require the SDK's standalone source compatibility profile;
-the repository's protocol checks validate types and proof registration but do
-not execute that profile. From a clean SDK checkout at the runner's pinned
-commit, install frozen dependencies with lifecycle scripts disabled, run
-`bash ./scripts/build`, then run
-`TETRAL_ENGINE_ROOT=/absolute/path/to/engine bun run test:compatibility:static`.
-These source proofs complement the local SDK integration suites; they do not
-establish runtime or database interoperability by themselves.
+SDK support-scope registry rows do not all represent executable proofs. Only
+integration rows require a runner binding. Documentation and Engine-native
+behavior rows are not counted as SDK passes or skips. SDK CI owns ordinary
+public type checks; Engine CI retains real JSON-to-SDK projection checks and
+its native API and persistence tests.
 
 The registered SDK Session preview and typed OIDC Memory proofs run through
 `TestForkSDKIntegrationCompatibilityProofs` in the existing Go evidence owner. Its
