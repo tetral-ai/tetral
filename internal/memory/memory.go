@@ -143,7 +143,16 @@ type Actor struct {
 	APIKeyID  string `json:"api_key_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
 	UserID    string `json:"user_id,omitempty"`
-	ServiceID string `json:"service_id,omitempty"`
+	ServiceID string `json:"service_account_id,omitempty"`
+}
+
+// MarshalJSON translates the public actor name without changing persisted actor types.
+func (value Actor) MarshalJSON() ([]byte, error) {
+	type wireActor Actor
+	if value.Type == ActorService {
+		value.Type = "service_account_actor"
+	}
+	return json.Marshal(wireActor(value))
 }
 
 type CreateMemoryRequest struct {

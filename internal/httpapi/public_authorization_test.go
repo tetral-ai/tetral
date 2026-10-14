@@ -173,13 +173,23 @@ func TestPostgreSQLPublicMemoryTypedActors(t *testing.T) {
 			updated := decodeHTTPResult[memory.Memory](t, call(http.MethodPost, base+"/memories/"+created.ID+"?beta=true&view=full", `{"content":"after"}`))
 			decodeHTTPResult[memory.Memory](t, call(http.MethodGet, base+"/memories/"+created.ID+"?beta=true", ""))
 			decodeHTTPResult[memory.MemoryListResult](t, call(http.MethodGet, base+"/memories?beta=true", ""))
-			first := decodeHTTPResult[memory.MemoryVersion](t, call(http.MethodGet, base+"/memory_versions/"+created.MemoryVersionID+"?beta=true", ""))
-			if first.CreatedBy != actor.want {
-				t.Fatalf("created actor=%+v want=%+v", first.CreatedBy, actor.want)
+			versionResponse := call(http.MethodGet, base+"/memory_versions/"+created.MemoryVersionID+"?beta=true", "")
+			if actor.name == "service" {
+				if !strings.Contains(versionResponse.Body.String(), `"created_by":{"type":"service_account_actor","service_account_id":"identity_service"}`) {
+					t.Fatalf("public service actor = %s", versionResponse.Body.String())
+				}
+			}
+			wireWant := actor.want
+			if wireWant.Type == memory.ActorService {
+				wireWant.Type = "service_account_actor"
+			}
+			first := decodeHTTPResult[memory.MemoryVersion](t, versionResponse)
+			if first.CreatedBy != wireWant {
+				t.Fatalf("created actor=%+v want=%+v", first.CreatedBy, wireWant)
 			}
 			redacted := decodeHTTPResult[memory.MemoryVersion](t, call(http.MethodPost, base+"/memory_versions/"+created.MemoryVersionID+"/redact?beta=true", ""))
-			if redacted.RedactedBy == nil || *redacted.RedactedBy != actor.want {
-				t.Fatalf("redacted actor=%+v want=%+v", redacted.RedactedBy, actor.want)
+			if redacted.RedactedBy == nil || *redacted.RedactedBy != wireWant {
+				t.Fatalf("redacted actor=%+v want=%+v", redacted.RedactedBy, wireWant)
 			}
 			decodeHTTPResult[memory.DeleteMemoryResult](t, call(http.MethodDelete, base+"/memories/"+created.ID+"?beta=true", ""))
 			versions := decodeHTTPResult[memory.MemoryVersionListResult](t, call(http.MethodGet, base+"/memory_versions?beta=true", ""))
@@ -187,8 +197,8 @@ func TestPostgreSQLPublicMemoryTypedActors(t *testing.T) {
 				t.Fatalf("versions=%d want 3", len(versions.Data))
 			}
 			for _, version := range versions.Data {
-				if version.CreatedBy != actor.want {
-					t.Fatalf("persisted actor=%+v want=%+v", version.CreatedBy, actor.want)
+				if version.CreatedBy != wireWant {
+					t.Fatalf("persisted actor=%+v want=%+v", version.CreatedBy, wireWant)
 				}
 			}
 			var createdType string

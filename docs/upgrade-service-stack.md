@@ -90,6 +90,7 @@ requests and responses change as follows:
 | Workspace header | `anthropic-workspace-id` was ignored | When supplied, exactly one nonempty value must match the authenticated workspace; mismatches, empty and repeated values return `403 permission_error` and record an authorization denial | Omit the header or send the token's workspace once; it cannot select a different workspace |
 | MCP OAuth refresh validation | Successful refreshes, and connection errors after a failed body read, included a status-only HTTP response object | `refresh.http_response` is `null` unless refresh status is `failed`; a failed refresh reports the status code and truncation flag with empty `body` and `content_type` | Handle explicit `null` for successful refreshes and connection errors |
 | Models | No lifecycle, retirement or line fields | List and retrieve include `lifecycle: "active"`, `deprecated_at: null`, `retires_at: null`, and `line` (`opus`, `fable`, or `null`) | Treat lifecycle as Engine availability, not the provider's retirement schedule |
+| Memory service attribution | Memory history service actors were `service_actor` with `service_id` | `service_account_actor` with `service_account_id`; the value is still the stable Engine identity ID, and stored actor types and authentication are unchanged | Switch to the SDK's `service_account_actor` discriminator and `service_account_id` field |
 
 The workspace-header check covers API, Auth API-key and Event Stream public
 business routes. OAuth token issuance, health endpoints, Bridge, git-proxy and

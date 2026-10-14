@@ -431,12 +431,13 @@ content), and `memory_versions` (immutable content, reached from
 Memory version actors describe the credential that performed each write and
 redaction. Independent and identity-derived API keys use `api_actor` with the
 actual `api_key_id`; direct human tokens use `user_actor` with `user_id`; direct
-service tokens use `service_actor` with `service_id`. Human/service IDs are stable
-Engine identity IDs. Runtime writes retain `session_actor` with `session_id`.
+service tokens use `service_account_actor` with `service_account_id`. Human/service IDs are stable
+Engine identity IDs, not Anthropic `svac_` IDs; PostgreSQL still stores the
+`service_actor` type. Runtime writes retain `session_actor` with `session_id`.
 Exactly one actor ID is valid for its discriminator in both the model and
 PostgreSQL constraints. Reads require a verified authorized identity and do
 not require an API-key ID. The SDK version pinned by this repository types all
-four actor variants, including `service_actor`; see
+four actor variants, including `service_account_actor`; see
 [authentication](../../docs/authentication.md#verification) for the typed SDK
 verification.
 

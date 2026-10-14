@@ -240,7 +240,7 @@ func oidcAssertWireActor(t *testing.T, actor memory.Actor, kind, id string) {
 	t.Helper()
 	expected := memory.Actor{Type: "user_actor", UserID: id}
 	if kind == auth.IdentityService {
-		expected = memory.Actor{Type: "service_actor", ServiceID: id}
+		expected = memory.Actor{Type: "service_account_actor", ServiceID: id}
 	}
 	if actor != expected {
 		t.Fatal("wire actor differs from stable Engine identity or carries a fictional credential")
