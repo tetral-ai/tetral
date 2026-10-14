@@ -3,10 +3,12 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"unicode"
@@ -112,26 +114,24 @@ func (h *FileHandler) parseUploadMultipart(w http.ResponseWriter, r *http.Reques
 		}
 		if part.FormName() != "file" {
 			cleanupOnError()
-			return nil, &files.ValidationError{Message: "request contains an unexpected form part"}
+			return nil, &files.ValidationError{Message: fmt.Sprintf("unsupported form field %q", part.FormName())}
 		}
-		filename, ok := uploadMultipartFilename(part)
-		if !ok {
-			cleanupOnError()
-			return nil, &files.ValidationError{Message: "file form field must be a file part"}
-		}
+		filename, _ := uploadMultipartFilename(part)
 		if staged != nil {
 			cleanupOnError()
 			return nil, &files.ValidationError{Message: "request contains multiple file form fields"}
-		}
-		if err := validateUploadFilename(filename); err != nil {
-			cleanupOnError()
-			return nil, err
 		}
 		mimeType, err := normalizeUploadedMIMEType(part.Header.Get("Content-Type"))
 		if err != nil {
 			cleanupOnError()
 			return nil, err
 		}
+		filename, err = normalizeUploadFilename(filename, mimeType)
+		if err != nil {
+			cleanupOnError()
+			return nil, err
+		}
+
 		staged, err = files.StageUpload(maxBytesMappingReader{reader: part}, h.stageDir, filename, mimeType, files.UploadLimits{MaxFileBytes: h.limits.MaxFileBytes})
 		if err != nil {
 			cleanupOnError()
@@ -165,25 +165,36 @@ func (r maxBytesMappingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func validateUploadFilename(filename string) error {
-	if filename == "" {
-		return &files.ValidationError{Message: "filename is required"}
+// Extension defaults are stable across hosts and deployments.
+var uploadFilenameExtensions = map[string]string{
+	"text/plain": ".txt", "text/csv": ".csv", "text/html": ".html", "text/markdown": ".md",
+	"application/json": ".json", "application/pdf": ".pdf", "application/xml": ".xml",
+	"application/zip": ".zip", "application/gzip": ".gz",
+	"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp", "image/svg+xml": ".svg",
+}
+
+// normalizeUploadFilename keeps only the last path segment of the supplied
+// name; a name without one becomes "unnamed" plus the known extension.
+func normalizeUploadFilename(raw, mimeType string) (string, error) {
+	if !utf8.ValidString(raw) {
+		return "", &files.ValidationError{Message: "filename must be valid UTF-8"}
 	}
-	if !utf8.ValidString(filename) {
-		return &files.ValidationError{Message: "filename must be valid UTF-8"}
-	}
-	if len(filename) > 1024 {
-		return &files.ValidationError{Message: "filename exceeds 1024 bytes"}
-	}
-	if utf8.RuneCountInString(filename) > 255 {
-		return &files.ValidationError{Message: "filename exceeds 255 characters"}
-	}
-	for _, r := range filename {
+	for _, r := range raw {
 		if unicode.IsControl(r) {
-			return &files.ValidationError{Message: "filename contains a control character"}
+			return "", &files.ValidationError{Message: "filename contains a control character"}
 		}
 	}
-	return nil
+	filename := path.Base(strings.ReplaceAll(raw, "\\", "/"))
+	if filename == "." || filename == ".." || filename == "/" {
+		filename = "unnamed" + uploadFilenameExtensions[mimeType]
+	}
+	if len(filename) > 1024 {
+		return "", &files.ValidationError{Message: "filename exceeds 1024 bytes"}
+	}
+	if utf8.RuneCountInString(filename) > 255 {
+		return "", &files.ValidationError{Message: "filename exceeds 255 characters"}
+	}
+	return filename, nil
 }
 
 func normalizeUploadedMIMEType(raw string) (string, error) {
@@ -221,7 +232,7 @@ func (h *FileHandler) listFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func parseFileListOptions(r *http.Request) (files.ListOptions, error) {
-	query, err := requireBetaQuery(r, "limit", "after_id", "before_id", "scope_id")
+	query, err := requireBetaQuery(r, "limit", "page", "scope_id")
 	if err != nil {
 		return files.ListOptions{}, err
 	}
@@ -236,17 +247,9 @@ func parseFileListOptions(r *http.Request) (files.ListOptions, error) {
 		}
 		limit = parsed
 	}
-	afterID := query.Get("after_id")
-	if afterID != "" {
-		if err := validateFileID(afterID); err != nil {
-			return files.ListOptions{}, &files.ValidationError{Message: "invalid after_id cursor"}
-		}
-	}
-	beforeID := query.Get("before_id")
-	if beforeID != "" {
-		if err := validateFileID(beforeID); err != nil {
-			return files.ListOptions{}, &files.ValidationError{Message: "invalid before_id cursor"}
-		}
+	page := query.Get("page")
+	if values, ok := query["page"]; ok && (len(values) != 1 || page == "") {
+		return files.ListOptions{}, &files.ValidationError{Message: "invalid page token"}
 	}
 	scopeID := ""
 	if values, ok := query["scope_id"]; ok {
@@ -255,7 +258,7 @@ func parseFileListOptions(r *http.Request) (files.ListOptions, error) {
 		}
 		scopeID = values[0]
 	}
-	return files.ListOptions{Limit: limit, AfterID: afterID, BeforeID: beforeID, ScopeID: scopeID}, nil
+	return files.ListOptions{Limit: limit, Page: page, ScopeID: scopeID}, nil
 }
 
 func validFileScopeID(scopeID string) bool {

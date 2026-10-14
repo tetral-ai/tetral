@@ -2,6 +2,7 @@ package files
 
 import (
 	"context"
+	"crypto/rand"
 
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -20,11 +21,28 @@ type StoreBackend interface {
 }
 
 type Service struct {
-	backend StoreBackend
+	backend         StoreBackend
+	pageTokenSecret []byte
 }
 
-func NewService(backend StoreBackend) *Service {
-	return &Service{backend: backend}
+type ServiceOption func(*Service)
+
+func WithPageTokenSecret(secret []byte) ServiceOption {
+	return func(s *Service) { s.pageTokenSecret = append([]byte(nil), secret...) }
+}
+
+func NewService(backend StoreBackend, options ...ServiceOption) *Service {
+	s := &Service{backend: backend}
+	for _, option := range options {
+		option(s)
+	}
+	if len(s.pageTokenSecret) == 0 {
+		s.pageTokenSecret = make([]byte, 32)
+		if _, err := rand.Read(s.pageTokenSecret); err != nil {
+			panic("files: page token entropy unavailable")
+		}
+	}
+	return s
 }
 
 func (s *Service) CreateUploadedFile(ctx context.Context, ws workspace.ID, staged *StagedUpload) (*FileMetadata, error) {
@@ -32,7 +50,26 @@ func (s *Service) CreateUploadedFile(ctx context.Context, ws workspace.ID, stage
 }
 
 func (s *Service) ListFiles(ctx context.Context, ws workspace.ID, options ListOptions) (ListResult, error) {
-	return s.backend.ListFiles(ctx, ws, options)
+	if options.Page != "" {
+		sequence, err := s.decodePageToken(options.Page, ws, options.ScopeID)
+		if err != nil {
+			return ListResult{}, err
+		}
+		options.cursorSequence = sequence
+	}
+	result, err := s.backend.ListFiles(ctx, ws, options)
+	if err != nil {
+		return ListResult{}, err
+	}
+	result.NextPage = nil
+	if result.HasMore && len(result.Data) > 0 {
+		token, err := s.encodePageToken(ws, options.ScopeID, result.Data[len(result.Data)-1].storageSequence)
+		if err != nil {
+			return ListResult{}, err
+		}
+		result.NextPage = &token
+	}
+	return result, nil
 }
 
 func (s *Service) GetFile(ctx context.Context, ws workspace.ID, fileID string) (*FileMetadata, error) {

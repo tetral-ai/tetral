@@ -8,10 +8,7 @@ import (
 	"io"
 	"os"
 	"sort"
-	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -597,29 +594,17 @@ func (s *PostgreSQLFileStore) ListFiles(ctx context.Context, ws workspace.ID, op
 	if limit == 0 {
 		limit = 20
 	}
-	if limit < 0 {
+	if limit < 1 || limit > 1000 {
 		return ListResult{}, &ValidationError{Message: "file list limit is invalid"}
 	}
 	var result ListResult
 	err := s.client.WithWorkspaceTx(ctx, string(ws), "files.transaction", func(tx *dbconnect.Tx) error {
 		filesTx := runtimeTransaction{tx: tx}
-		afterSeq, hasAfter, err := s.resolveListCursor(ctx, filesTx, ws, options.AfterID, options.ScopeID)
+		items, hasMore, err := s.queryList(ctx, filesTx, ws, options.ScopeID, options.cursorSequence, limit)
 		if err != nil {
 			return err
 		}
-		beforeSeq, hasBefore, err := s.resolveListCursor(ctx, filesTx, ws, options.BeforeID, options.ScopeID)
-		if err != nil {
-			return err
-		}
-		if hasAfter && hasBefore && afterSeq >= beforeSeq {
-			result = emptyListResult()
-			return nil
-		}
-		items, hasMore, err := s.queryList(ctx, filesTx, ws, options.ScopeID, afterSeq, hasAfter, beforeSeq, hasBefore, limit)
-		if err != nil {
-			return err
-		}
-		result = listResultFromItems(items, hasMore)
+		result = ListResult{Data: items, HasMore: hasMore}
 		return nil
 	})
 	if err != nil {
@@ -878,47 +863,9 @@ func (s *PostgreSQLFileStore) TombstoneSessionFileIdentity(ctx context.Context, 
 	return err
 }
 
-func emptyListResult() ListResult {
-	return ListResult{Data: []*FileMetadata{}, HasMore: false}
-}
-
-func listResultFromItems(items []*FileMetadata, hasMore bool) ListResult {
-	result := ListResult{Data: items, HasMore: hasMore}
-	if len(items) > 0 {
-		firstID := items[0].ID
-		lastID := items[len(items)-1].ID
-		result.FirstID = &firstID
-		result.LastID = &lastID
-	}
-	return result
-}
-
-func (s *PostgreSQLFileStore) resolveListCursor(ctx context.Context, tx Transaction, ws workspace.ID, cursor string, scopeID string) (int64, bool, error) {
-	if cursor == "" {
-		return 0, false, nil
-	}
-	if !validFileID(cursor) {
-		return 0, false, &ValidationError{Message: "invalid file cursor"}
-	}
-	query := `SELECT f.storage_sequence FROM files f WHERE f.workspace_id = $1 AND f.file_id = $2 AND f.deleted_at IS NULL AND ` + visibleFileScopePredicate("f")
-	args := []any{string(ws), cursor}
-	if scopeID != "" {
-		query += ` AND scope_type = 'session' AND scope_id = $3`
-		args = append(args, scopeID)
-	}
-	var seq int64
-	if err := tx.QueryRow(ctx, query, args...).Scan(&seq); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, false, &ValidationError{Message: "invalid file cursor"}
-		}
-		return 0, false, err
-	}
-	return seq, true, nil
-}
-
 //nolint:gosec // SQL fragments are fixed by option presence; every value remains a bind parameter.
-func (s *PostgreSQLFileStore) queryList(ctx context.Context, tx Transaction, ws workspace.ID, scopeID string, afterSeq int64, hasAfter bool, beforeSeq int64, hasBefore bool, limit int) ([]*FileMetadata, bool, error) {
-	query := `SELECT f.file_id, f.filename, f.mime_type, o.size_bytes, f.created_at, f.downloadable, f.scope_type, f.scope_id
+func (s *PostgreSQLFileStore) queryList(ctx context.Context, tx Transaction, ws workspace.ID, scopeID string, afterSeq int64, limit int) ([]*FileMetadata, bool, error) {
+	query := `SELECT f.file_id, f.filename, f.mime_type, o.size_bytes, f.created_at, f.downloadable, f.scope_type, f.scope_id, f.storage_sequence
 	    FROM files f
 	    JOIN file_objects o ON o.workspace_id = f.workspace_id AND o.object_id = f.object_id
 	   WHERE f.workspace_id = $1 AND f.deleted_at IS NULL AND ` + visibleFileScopePredicate("f")
@@ -927,14 +874,11 @@ func (s *PostgreSQLFileStore) queryList(ctx context.Context, tx Transaction, ws 
 		args = append(args, scopeID)
 		query += fmt.Sprintf(" AND f.scope_type = 'session' AND f.scope_id = $%d", len(args))
 	}
-	if hasAfter {
+	if afterSeq > 0 {
 		args = append(args, afterSeq)
 		query += fmt.Sprintf(" AND f.storage_sequence > $%d", len(args))
 	}
-	if hasBefore {
-		args = append(args, beforeSeq)
-		query += fmt.Sprintf(" AND f.storage_sequence < $%d", len(args))
-	}
+
 	args = append(args, limit+1)
 	query += fmt.Sprintf(" ORDER BY f.storage_sequence ASC LIMIT $%d", len(args))
 
@@ -1040,6 +984,7 @@ func scanFileMetadata(scanner fileMetadataScanner) (*FileMetadata, error) {
 		&metadata.Downloadable,
 		&scopeType,
 		&scopeID,
+		&metadata.storageSequence,
 	); err != nil {
 		return nil, err
 	}
@@ -1111,18 +1056,6 @@ func finishFileMetadata(metadata *FileMetadata, createdAt time.Time, scopeType s
 		metadata.Scope = &FileScope{Type: scopeType.String, ID: scopeID.String}
 	}
 	return nil
-}
-
-func validFileID(fileID string) bool {
-	if fileID == "" || len(fileID) > 256 || !strings.HasPrefix(fileID, IDPrefix) || !utf8.ValidString(fileID) {
-		return false
-	}
-	for _, r := range fileID {
-		if unicode.IsControl(r) {
-			return false
-		}
-	}
-	return true
 }
 
 func (s *PostgreSQLFileStore) assertFileIdentityQuota(ctx context.Context, tx Transaction, ws workspace.ID) error {

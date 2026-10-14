@@ -321,7 +321,7 @@ func BuildRouter(ctx context.Context, cfg RouterConfig) (handler http.Handler, r
 	} else if skillHandler != nil {
 		routerOpts = append(routerOpts, httpapi.WithSkillHandler(skillHandler))
 	}
-	fileHandler, _, err := buildFileHandler(cfg.DataDir, fileStore)
+	fileHandler, _, err := buildFileHandler(cfg.DataDir, fileStore, eventPageTokenSecret)
 	if err != nil {
 		return nil, fmt.Errorf("files: %w", err)
 	}
@@ -442,7 +442,7 @@ func buildSkillHandler(ctx context.Context, runtimeClient *dbconnect.Client, dat
 	return httpapi.NewSkillHandler(skillService, stageDir), nil
 }
 
-func buildFileHandler(dataDir string, fileStore *files.PostgreSQLFileStore) (*httpapi.FileHandler, *files.Service, error) {
+func buildFileHandler(dataDir string, fileStore *files.PostgreSQLFileStore, pageTokenSecret []byte) (*httpapi.FileHandler, *files.Service, error) {
 	if fileStore == nil {
 		return nil, nil, nil
 	}
@@ -450,7 +450,7 @@ func buildFileHandler(dataDir string, fileStore *files.PostgreSQLFileStore) (*ht
 	if err != nil {
 		return nil, nil, fmt.Errorf("upload stage directory: %w", err)
 	}
-	fileService := files.NewService(fileStore)
+	fileService := files.NewService(fileStore, files.WithPageTokenSecret(pageTokenSecret))
 	return httpapi.NewFileHandler(fileService, stageDir, httpapi.FileHandlerLimits{}), fileService, nil
 }
 
