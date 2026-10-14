@@ -30,7 +30,7 @@ The runner prepares disposable PostgreSQL and a clean, pinned SDK checkout,
 checking Bun and Node and installing the SDK's frozen pnpm dependencies. The Go
 test then starts local Engine Auth and API services, issues a test API key, and launches
 the SDK suite against that local address. Its child-process execution flag is
-only an SDK launch contract, not a CI selection rule. Jest's structured report
+only an SDK launch contract, not a CI selection rule. Vitest's structured JSON report
 must contain executed, passing assertions with no skipped or failed cases.
 This proves API authentication and database write/read behavior; it does not
 start a Sandbox or execute Git. Dependency setup failures and unexpected skips

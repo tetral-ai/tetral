@@ -206,6 +206,9 @@ requests remain unsupported.
 
 ### Thread lifecycle
 
+Public Session Thread objects include `workflow_run_id: null`; Engine does not
+execute workflow runs.
+
 Public thread APIs operate on threads with `visibility = public`; internal
 approval-reviewer threads are never returned. Thread status is one of `running`,
 `idle`, `rescheduling`, `terminated`.
