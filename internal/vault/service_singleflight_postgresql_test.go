@@ -34,8 +34,6 @@ func (v *rotatingValidationIssuer) Validate(ctx context.Context, input MCPOAuthV
 		Status:          "valid",
 		ValidatedAt:     v.now,
 		HasRefreshToken: hasMCPRefreshToken(input.Auth),
-		Refresh:         &CredentialValidationCheck{Status: "succeeded"},
-		MCPProbe:        &CredentialValidationCheck{Status: "succeeded", Method: "initialize"},
 	}
 	if !mcpOAuthRefreshDue(input.Auth.ExpiresAt, v.now) {
 		return MCPOAuthValidationResult{Validation: validation}, nil
@@ -56,6 +54,7 @@ func (v *rotatingValidationIssuer) Validate(ctx context.Context, input MCPOAuthV
 		validation.Refresh = &CredentialValidationCheck{Status: "failed", ErrorKind: "refresh_http_error"}
 		return MCPOAuthValidationResult{Validation: validation}, nil
 	}
+	validation.Refresh = &CredentialValidationCheck{Status: "succeeded"}
 	refreshed := input.Auth
 	refreshed.AccessToken = "winner-access-token"
 	refreshed.ExpiresAt = v.now.Add(time.Hour).Format(time.RFC3339Nano)

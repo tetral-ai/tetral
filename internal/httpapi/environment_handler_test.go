@@ -388,7 +388,6 @@ func TestListEnvironmentsRejectsLegacyAndMalformedQueryParams(t *testing.T) {
 		"/v1/environments?limit=1;page=abc",
 		"/v1/environments?include_archived=",
 		"/v1/environments?include_archived=1",
-		"/v1/environments?page=",
 		"/v1/environments?page=not-a-token",
 	} {
 		recorder := httptest.NewRecorder()

@@ -121,11 +121,16 @@ func projectPublicPayload(eventType string, fields map[string]json.RawMessage) (
 	case eventTypeAgentThreadMessageReceived:
 		return projectThreadMessage(fields, "source_thread_id", "source_task_name", "from_session_thread_id", "from_agent_name")
 	case eventTypeSessionStatusIdle:
-		return retainFields(fields, "stop_reason"), nil
+		projected := retainFields(fields, "stop_reason")
+		projected["stop_details"] = json.RawMessage("null")
+		return projected, nil
 	case eventTypeSessionError:
 		return retainFields(fields, "error"), nil
-	case eventTypeSessionThreadCreated,
-		eventTypeSessionThreadStatusRunning,
+	case eventTypeSessionThreadCreated:
+		projected := projectThreadStatus(fields, false)
+		projected["workflow_run_id"] = json.RawMessage("null")
+		return projected, nil
+	case eventTypeSessionThreadStatusRunning,
 		eventTypeSessionThreadStatusRescheduled,
 		eventTypeSessionThreadStatusTerminated:
 		return projectThreadStatus(fields, false), nil
@@ -182,6 +187,7 @@ func projectThreadStatus(fields map[string]json.RawMessage, includeStopReason bo
 		projected["agent_name"] = taskName
 	}
 	if includeStopReason {
+		projected["stop_details"] = json.RawMessage("null")
 		if stopReason, ok := fields["stop_reason"]; ok {
 			projected["stop_reason"] = stopReason
 		}

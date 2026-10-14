@@ -134,11 +134,9 @@ func TestFilesServiceDelegatesCreateUploadedFile(t *testing.T) {
 func TestFilesServiceDelegatesListFiles(t *testing.T) {
 	ctx := context.WithValue(context.Background(), testContextKey{}, "list")
 	ws := workspace.ID("ws_files_service")
-	firstID := "file_first"
-	lastID := "file_last"
 	wantItem := &files.FileMetadata{ID: "file_list", Type: "file"}
-	want := files.ListResult{Data: []*files.FileMetadata{wantItem}, FirstID: &firstID, LastID: &lastID, HasMore: true}
-	options := files.ListOptions{Limit: 7, AfterID: "file_after", BeforeID: "file_before", ScopeID: "sesn_scope"}
+	want := files.ListResult{Data: []*files.FileMetadata{wantItem}}
+	options := files.ListOptions{Limit: 7, ScopeID: "sesn_scope"}
 	backend := &recordingFilesBackend{listResult: want}
 	service := files.NewService(backend)
 
@@ -146,7 +144,7 @@ func TestFilesServiceDelegatesListFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListFiles error = %v", err)
 	}
-	if len(got.Data) != 1 || got.Data[0] != wantItem || got.FirstID != &firstID || got.LastID != &lastID || !got.HasMore {
+	if len(got.Data) != 1 || got.Data[0] != wantItem || got.NextPage != nil {
 		t.Fatalf("ListFiles result = %+v; want pass-through %+v", got, want)
 	}
 	assertFilesBackendCall(ctx, t, backend, "ListFiles", ws)

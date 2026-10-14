@@ -378,7 +378,8 @@ ReadSessionSignals(ctx, ws, sessionIDs) ([]SessionSignal, error)
 
 `ListSessionEvents` / `ListThreadEvents` back the list endpoints. The same
 package parses query parameters: `limit` (default 20, hard cap
-`maxListLimit` = 100 — a larger or non-positive `limit` is `400`), `page`,
+`maxListLimit` = 100 — a larger or non-positive `limit` is `400`), `page` (an
+empty `page` is the SDK's null cursor and asks for the first page),
 `order` (`asc`/`desc`), a `types` event-type filter, and
 `created_at[gt|gte|lt|lte]` admission-time bounds (RFC3339, UTC year 1–9999);
 `beta=true` is required and any unknown parameter or malformed value is `400`.
@@ -437,6 +438,9 @@ and SSE registration declares its semantic action in the shared operation
 registry. The common Authorizer checks the principal's typed workspace and
 operation ceiling before any reader access, so a denied action returns
 `403 permission_error` independently of whether a selected resource exists.
+A supplied `anthropic-workspace-id` header must carry exactly one nonempty
+value equal to the principal's workspace; otherwise the same wrapper returns
+`403 permission_error` and records one authorization denial.
 The same wrapper then rejects a decoded path, query parameter name or query
 value that contains U+0000 or is not valid UTF-8 with `400
 invalid_request_error`, before any reader access, because Engine stores

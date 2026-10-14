@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -602,6 +603,7 @@ func TestGetProjectsPublicSessionUsageDTO(t *testing.T) {
 	body := string(encoded)
 	for _, want := range []string{
 		`"outcome_evaluations":[]`,
+		`"budget":null`,
 		`"usage":{"input_tokens":11`,
 		`"output_tokens":7`,
 		`"cache_creation":{"ephemeral_1h_input_tokens":2,"ephemeral_5m_input_tokens":0}`,
@@ -735,6 +737,9 @@ func TestThreadResponseStatsAreNullThisStage(t *testing.T) {
 	}
 	if !bytes.Contains(body, []byte(`"stats":null`)) {
 		t.Fatalf("thread response = %s; want stats:null", body)
+	}
+	if !bytes.Contains(body, []byte(`"workflow_run_id":null`)) {
+		t.Fatalf("thread response = %s; want workflow_run_id:null", body)
 	}
 }
 
@@ -4172,4 +4177,50 @@ func (s *recordingSessionStore) LookupResourceDeletion(ctx context.Context, ws w
 		}
 	}
 	return "", &NotFoundError{Message: "session resource not found"}
+}
+
+func TestCreateRejectsDeletedSkillReferencesWithoutPersisting(t *testing.T) {
+	env, service, skills, parent, configured := newSessionSkillProofEnv(t)
+	ctx := context.Background()
+	request := CreateRequest{Agent: AgentReference{ID: configured.ID}, EnvironmentID: "env_test"}
+	cfg := configured.AgentConfig
+	cfg.Skills = agent.RawArray{json.RawMessage(fmt.Sprintf(`{"type":"custom","skill_id":%q,"version":%q}`, parent.ID, parent.LatestVersionID))}
+	agents := service.agents.(*agent.Service)
+	pinned, err := agents.Update(ctx, workspace.DefaultID, configured.ID, agent.UpdateAgentRequest{Version: configured.Version, AgentConfig: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Agent.Version = &pinned.Version
+	if _, err := service.Create(ctx, workspace.DefaultID, request); err != nil {
+		t.Fatalf("active concrete baseline: %v", err)
+	}
+	uploadSessionProofSkill(t, skills, parent.ID, "second")
+	if err := skills.DeleteVersion(ctx, workspace.DefaultID, parent.ID, parent.LatestVersionID); err != nil {
+		t.Fatal(err)
+	}
+	before := sessionRowCount(t, env.admin, `SELECT count(*) FROM sessions`)
+	for _, tc := range []struct {
+		name   string
+		mutate func()
+	}{
+		{"deleted concrete version", func() {}},
+		{"deleted skill", func() {
+			if err := skills.DeleteSkill(ctx, workspace.DefaultID, parent.ID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.mutate()
+			request.Agent.Version = &pinned.Version
+			_, err := service.Create(ctx, workspace.DefaultID, request)
+			var invalid *ValidationError
+			if !errors.As(err, &invalid) || !strings.Contains(invalid.Message, "skill") {
+				t.Fatalf("rejected create = %T %v", err, err)
+			}
+			if after := sessionRowCount(t, env.admin, `SELECT count(*) FROM sessions`); after != before {
+				t.Fatalf("rejected admission changed Session count: %d -> %d", before, after)
+			}
+		})
+	}
 }

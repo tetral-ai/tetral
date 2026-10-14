@@ -160,7 +160,7 @@ func TestSessionEventIngressProjectsAllPublicChildEventVariants(t *testing.T) {
 			id:        "sevt_http_child_created",
 			eventType: "session.thread_created",
 			payload:   `{"session_thread_id":"sthr_created_distinct","parent_thread_id":"sthr_parent_distinct","role":"subagent","visibility":"public","task_name":"callable_created","agent_type":"worker"}`,
-			want:      map[string]any{"session_thread_id": "sthr_created_distinct", "agent_name": "callable_created"},
+			want:      map[string]any{"session_thread_id": "sthr_created_distinct", "agent_name": "callable_created", "workflow_run_id": nil},
 		},
 		{
 			id:        "sevt_http_child_running",
@@ -172,7 +172,7 @@ func TestSessionEventIngressProjectsAllPublicChildEventVariants(t *testing.T) {
 			id:        "sevt_http_child_idle",
 			eventType: "session.thread_status_idle",
 			payload:   `{"session_thread_id":"sthr_idle_distinct","task_name":"callable_idle","agent_type":"research","stop_reason":{"type":"requires_action","event_ids":["sevt_wait_second","sevt_wait_first"]}}`,
-			want:      map[string]any{"session_thread_id": "sthr_idle_distinct", "agent_name": "callable_idle", "stop_reason": map[string]any{"type": "requires_action", "event_ids": []any{"sevt_wait_second", "sevt_wait_first"}}},
+			want:      map[string]any{"session_thread_id": "sthr_idle_distinct", "agent_name": "callable_idle", "stop_details": nil, "stop_reason": map[string]any{"type": "requires_action", "event_ids": []any{"sevt_wait_second", "sevt_wait_first"}}},
 		},
 		{
 			id:        "sevt_http_child_rescheduled",

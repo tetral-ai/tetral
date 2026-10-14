@@ -229,9 +229,6 @@ func parseEnvironmentListOptions(r *http.Request) (environment.ListOptions, erro
 	}
 	if rawValues, ok := values["page"]; ok {
 		options.Page = rawValues[0]
-		if options.Page == "" {
-			return environment.ListOptions{}, &environment.ValidationError{Message: "page must be a non-empty token"}
-		}
 	}
 	if rawValues, ok := values["include_archived"]; ok {
 		raw := rawValues[0]
@@ -266,7 +263,7 @@ func parseStrictEnvironmentQuery(r *http.Request, allowed []string) (url.Values,
 		if len(rawValues) != 1 {
 			return nil, &environment.ValidationError{Message: "duplicate query parameter " + key}
 		}
-		if rawValues[0] == "" {
+		if rawValues[0] == "" && !emptyQueryValueAllowed(key) {
 			return nil, &environment.ValidationError{Message: "empty query parameter " + key}
 		}
 		if _, ok := allowedSet[key]; !ok {

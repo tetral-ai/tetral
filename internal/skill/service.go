@@ -12,7 +12,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-const maxDisplayTitleRunes = 1024
+const maxDisplayNameRunes = 255
 
 // StagedUploadPart is the service input representation of one staged
 // multipart files[] part used during package validation and normalized
@@ -28,9 +28,9 @@ type StagedUploadPart struct {
 // CreateSkillInput carries service-layer inputs for creating a parent
 // Skill plus its initial immutable version.
 type CreateSkillInput struct {
-	DisplayTitle *string
-	Files        []StagedUploadPart
-	Package      *StagedPackage
+	DisplayName *string
+	Files       []StagedUploadPart
+	Package     *StagedPackage
 }
 
 // CreateVersionInput carries service-layer inputs for uploading a new
@@ -69,6 +69,7 @@ type SkillBackend interface {
 	ListVersions(context.Context, workspace.ID, string, ListVersionsOptions) (SkillVersionListResult, error)
 	DeleteVersion(context.Context, workspace.ID, string, string) error
 	ValidateAgentSkillReferences(context.Context, agent.Transaction, string, []agent.SkillReference) error
+	ResolveSkillReferences(context.Context, agent.Transaction, string, []agent.SkillReference) ([]agent.SkillReference, error)
 }
 
 // Service owns Skills control-plane behavior above storage and below HTTP:
@@ -113,7 +114,7 @@ func NewService(backend SkillBackend, options ...ServiceOption) *Service {
 // uploaded files[] package, and delegates only the normalized package
 // to the backend.
 func (s *Service) CreateSkill(ctx context.Context, ws workspace.ID, input CreateSkillInput) (*Skill, error) {
-	if err := validateDisplayTitle(input.DisplayTitle); err != nil {
+	if err := validateDisplayName(input.DisplayName); err != nil {
 		return nil, err
 	}
 	pkg, err := BuildNormalizedPackage(ctx, input.Files, s.packageStageDir)
@@ -123,6 +124,9 @@ func (s *Service) CreateSkill(ctx context.Context, ws workspace.ID, input Create
 	defer func() { _ = pkg.Cleanup() }()
 	input.Files = nil
 	input.Package = pkg
+	if input.DisplayName == nil {
+		input.DisplayName = &pkg.Name
+	}
 	result, err := s.backend.CreateSkill(ctx, ws, input)
 	return result, safePublicError(err)
 }
@@ -224,22 +228,24 @@ func (s *Service) ValidateAgentSkillReferences(ctx context.Context, tx agent.Tra
 	return safePublicError(s.backend.ValidateAgentSkillReferences(ctx, tx, workspaceID, refs))
 }
 
-func validateDisplayTitle(title *string) error {
+func (s *Service) ResolveSkillReferences(ctx context.Context, tx agent.Transaction, workspaceID string, refs []agent.SkillReference) ([]agent.SkillReference, error) {
+	resolved, err := s.backend.ResolveSkillReferences(ctx, tx, workspaceID, refs)
+	return resolved, safePublicError(err)
+}
+
+func validateDisplayName(title *string) error {
 	if title == nil {
 		return nil
 	}
 	if !utf8.ValidString(*title) {
-		return &ValidationError{Message: "display_title must be valid UTF-8"}
+		return &ValidationError{Message: "display_name must be valid UTF-8"}
 	}
-	if utf8.RuneCountInString(*title) > maxDisplayTitleRunes {
-		return &ValidationError{Message: "display_title must be at most 1024 characters"}
+	if utf8.RuneCountInString(*title) > maxDisplayNameRunes {
+		return &ValidationError{Message: "display_name must be at most 255 characters"}
 	}
 	for _, r := range *title {
-		if r == '\t' || r == '\n' || r == '\r' {
-			continue
-		}
-		if unicode.IsControl(r) {
-			return &ValidationError{Message: "display_title must not contain control characters"}
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+			return &ValidationError{Message: "display_name must not contain control characters"}
 		}
 	}
 	return nil

@@ -198,7 +198,7 @@ func publicChildOutletFixtures() []publicChildOutletFixture {
 		},
 		{
 			event: eventstream.Event{ID: "sevt_child_created", Type: "session.thread_created", SessionID: "sesn_internal", ThreadID: "sthr_created_distinct", ProcessedAt: &processedAt, Payload: json.RawMessage(`{"session_thread_id":"sthr_created_distinct","parent_thread_id":"sthr_parent_distinct","role":"subagent","visibility":"public","task_name":"callable_created","agent_type":"worker"}`)},
-			want:  map[string]any{"session_thread_id": "sthr_created_distinct", "agent_name": "callable_created"},
+			want:  map[string]any{"session_thread_id": "sthr_created_distinct", "agent_name": "callable_created", "workflow_run_id": nil},
 		},
 		{
 			event: eventstream.Event{ID: "sevt_child_running", Type: "session.thread_status_running", SessionID: "sesn_internal", ThreadID: "sthr_running_distinct", ProcessedAt: &processedAt, Payload: json.RawMessage(`{"session_thread_id":"sthr_running_distinct","task_name":"callable_running","agent_type":"general"}`)},
@@ -206,7 +206,7 @@ func publicChildOutletFixtures() []publicChildOutletFixture {
 		},
 		{
 			event: eventstream.Event{ID: "sevt_child_idle", Type: "session.thread_status_idle", SessionID: "sesn_internal", ThreadID: "sthr_idle_distinct", ProcessedAt: &processedAt, Payload: json.RawMessage(`{"session_thread_id":"sthr_idle_distinct","task_name":"callable_idle","agent_type":"research","stop_reason":{"type":"requires_action","event_ids":["sevt_wait_second","sevt_wait_first"]}}`)},
-			want:  map[string]any{"session_thread_id": "sthr_idle_distinct", "agent_name": "callable_idle", "stop_reason": map[string]any{"type": "requires_action", "event_ids": []any{"sevt_wait_second", "sevt_wait_first"}}},
+			want:  map[string]any{"session_thread_id": "sthr_idle_distinct", "agent_name": "callable_idle", "stop_details": nil, "stop_reason": map[string]any{"type": "requires_action", "event_ids": []any{"sevt_wait_second", "sevt_wait_first"}}},
 		},
 		{
 			event: eventstream.Event{ID: "sevt_child_rescheduled", Type: "session.thread_status_rescheduled", SessionID: "sesn_internal", ThreadID: "sthr_rescheduled_distinct", ProcessedAt: &processedAt, Payload: json.RawMessage(`{"session_thread_id":"sthr_rescheduled_distinct","task_name":"callable_rescheduled","agent_type":"worker"}`)},
@@ -241,7 +241,7 @@ func TestEventStreamSessionListDecodesSDKFiltersAndRejectsUnknownParameters(t *t
 	signer, verifier := testInternalPrincipalPair(t)
 	reader := &recordingReader{}
 	router := listRouter(reader, verifier, nil)
-	request := signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true&types[]=user.message&types[]=agent.message&created_at[gt]=2026-01-01T00:00:00Z&created_at[lte]=2026-01-02T00:00:00Z")
+	request := signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true&page=&types[]=user.message&types[]=agent.message&created_at[gt]=2026-01-01T00:00:00Z&created_at[lte]=2026-01-02T00:00:00Z")
 	recorder := httptest.NewRecorder()
 
 	router.ServeHTTP(recorder, request)
@@ -255,7 +255,7 @@ func TestEventStreamSessionListDecodesSDKFiltersAndRejectsUnknownParameters(t *t
 		t.Fatalf("decoded list filters = %+v", reader.listOptions)
 	}
 
-	request = signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/threads/thr_child/events?beta=true&types[]=user.message&created_at[gte]=2026-01-01T00:00:00Z")
+	request = signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/threads/thr_child/events?beta=true&page=&types[]=user.message&created_at[gte]=2026-01-01T00:00:00Z")
 	recorder = httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -267,6 +267,7 @@ func TestEventStreamSessionListDecodesSDKFiltersAndRejectsUnknownParameters(t *t
 
 	for _, test := range []struct{ query, message string }{
 		{query: "unknown=1", message: "unknown query parameter"},
+		{query: "page=&page=", message: "invalid query parameter"},
 		{query: "created_at[gte]=not-a-time", message: "created_at[gte] must be an RFC3339 timestamp with a UTC year of 1-9999"},
 		{query: "created_at[lt]=0001-01-01T00:00:00%2B01:00", message: "created_at[lt] must be an RFC3339 timestamp with a UTC year of 1-9999"},
 	} {

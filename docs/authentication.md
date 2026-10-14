@@ -115,7 +115,7 @@ Memory history records the actor that made each direct write or redaction:
 |---|---|
 | Independent or identity-derived API key | `{"type":"api_actor","api_key_id":"<actual key ID>"}` |
 | Direct human bearer | `{"type":"user_actor","user_id":"<stable Engine identity ID>"}` |
-| Direct service bearer | `{"type":"service_actor","service_id":"<stable Engine identity ID>"}` |
+| Direct service bearer | `{"type":"service_account_actor","service_account_id":"<stable Engine identity ID>"}` |
 | Session runtime write | Existing `session_actor` attribution |
 
 A service identity retains its service actor. Its Engine identity ID, external
@@ -144,7 +144,7 @@ provider. It checks cached bearer reuse, the ordered 401/exchange/retry path,
 and durable effects.
 The pinned SDK includes the service actor union and its test-only helpers await
 actual typed Memory retrieve/redact responses. Human `user_id` and service
-`service_id` must match the applied stable Engine identity ID; independent wire
+`service_account_id` must match the applied stable Engine identity ID; independent wire
 and database assertions verify the same attribution. The registered SDK
 integration wrapper executes this complete root alongside the Session preview
 proof while the native dependencies remain alive.

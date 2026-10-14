@@ -59,31 +59,31 @@ func TestCreateSkillStoresParentVersionAndNormalizedZipBlob(t *testing.T) {
 	blobStore, stageDir, store, db := newSkillStoreBackendEnv(t)
 	title := "Financial Analysis"
 	store.SetClock(fixedClock("2026-04-07T14:00:00Z"))
-	store.SetVersionStrategy(func(time.Time) string { return "1759178010641129" })
+	store.SetVersionStrategy(func(time.Time) string { return "skver_fixture" })
 	pkg := normalizedPackage(t, stageDir, []uploadFile{
 		{filename: "finance/SKILL.md", body: skillMD("financial-analysis", "Analyze financial data.")},
 		{filename: "finance/data.csv", body: []byte("a,b\n1,2\n")},
 	})
 	defer func() { _ = pkg.Cleanup() }()
 
-	created, err := store.CreateSkill(context.Background(), workspace.DefaultID, skill.CreateSkillInput{DisplayTitle: &title, Package: pkg})
+	created, err := store.CreateSkill(context.Background(), workspace.DefaultID, skill.CreateSkillInput{DisplayName: &title, Package: pkg})
 	if err != nil {
 		t.Fatalf("CreateSkill: %v", err)
 	}
 	if !strings.HasPrefix(created.ID, skill.IDPrefix) {
 		t.Fatalf("skill id = %q; want %q prefix", created.ID, skill.IDPrefix)
 	}
-	if created.Type != "skill" || created.Source != "custom" {
+	if created.Type != "skill" || created.Source.Type != "custom" {
 		t.Fatalf("parent type/source = %q/%q", created.Type, created.Source)
 	}
-	if created.DisplayTitle == nil || *created.DisplayTitle != title {
-		t.Fatalf("display_title = %v; want %q", created.DisplayTitle, title)
+	if created.DisplayName != title {
+		t.Fatalf("display_name = %v; want %q", created.DisplayName, title)
 	}
-	if created.LatestVersion == nil || *created.LatestVersion != "1759178010641129" {
-		t.Fatalf("latest_version = %v", created.LatestVersion)
+	if created.LatestVersionID != "skver_fixture" {
+		t.Fatalf("latest_version = %v", created.LatestVersionID)
 	}
 
-	version, err := store.GetVersion(context.Background(), workspace.DefaultID, created.ID, "1759178010641129")
+	version, err := store.GetVersion(context.Background(), workspace.DefaultID, created.ID, "skver_fixture")
 	if err != nil {
 		t.Fatalf("GetVersion: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestCreateSkillStoresParentVersionAndNormalizedZipBlob(t *testing.T) {
 	assertStoredBlobMetadata(t, db, created.ID, version.Version, expectedKey, int64(len(raw)), hex.EncodeToString(sum[:]))
 }
 
-func TestCreateSkillWithoutDisplayTitleStoresNullAndDuplicateNamesAreAllowed(t *testing.T) {
+func TestCreateSkillWithoutDisplayNameDefaultsNameAndDuplicateNamesAreAllowed(t *testing.T) {
 	_, stageDir, store, _ := newSkillStoreBackendEnv(t)
 	store.SetVersionStrategy(sequenceVersions("1001", "1002"))
 	firstPackage := normalizedPackage(t, stageDir, []uploadFile{{filename: "one/SKILL.md", body: skillMD("shared-name", "one")}})
@@ -120,39 +120,42 @@ func TestCreateSkillWithoutDisplayTitleStoresNullAndDuplicateNamesAreAllowed(t *
 	if err != nil {
 		t.Fatalf("CreateSkill second with same frontmatter name: %v", err)
 	}
-	if first.DisplayTitle != nil {
-		t.Fatalf("first display_title = %v; want nil", first.DisplayTitle)
+	if first.DisplayName != "shared-name" {
+		t.Fatalf("first display_name = %v; want shared-name", first.DisplayName)
 	}
 	if first.ID == second.ID {
 		t.Fatalf("duplicate name created same parent id %q", first.ID)
 	}
 }
 
-func TestCreateVersionAllowsDifferentMetadataAndAdvancesLatestVersion(t *testing.T) {
+func TestCreateVersionRejectsChangedNameAndAdvancesLatestVersion(t *testing.T) {
 	_, stageDir, store, _ := newSkillStoreBackendEnv(t)
-	store.SetVersionStrategy(sequenceVersions("2001", "2002"))
-	firstPackage := normalizedPackage(t, stageDir, []uploadFile{{filename: "alpha/SKILL.md", body: skillMD("alpha-name", "first")}})
-	defer func() { _ = firstPackage.Cleanup() }()
-	parent, err := store.CreateSkill(context.Background(), workspace.DefaultID, skill.CreateSkillInput{Package: firstPackage})
+	first := normalizedPackage(t, stageDir, []uploadFile{{filename: "alpha/SKILL.md", body: skillMD("alpha-name", "first")}})
+	defer func() { _ = first.Cleanup() }()
+	parent, err := store.CreateSkill(context.Background(), workspace.DefaultID, skill.CreateSkillInput{Package: first})
 	if err != nil {
-		t.Fatalf("CreateSkill: %v", err)
+		t.Fatal(err)
 	}
-	secondPackage := normalizedPackage(t, stageDir, []uploadFile{{filename: "beta/SKILL.md", body: skillMD("beta-name", "second")}})
-	defer func() { _ = secondPackage.Cleanup() }()
-
-	version, err := store.CreateVersion(context.Background(), workspace.DefaultID, parent.ID, skill.CreateVersionInput{Package: secondPackage})
+	valid := normalizedPackage(t, stageDir, []uploadFile{{filename: "beta/SKILL.md", body: skillMD("alpha-name", "second")}})
+	defer func() { _ = valid.Cleanup() }()
+	version, err := store.CreateVersion(context.Background(), workspace.DefaultID, parent.ID, skill.CreateVersionInput{Package: valid})
 	if err != nil {
-		t.Fatalf("CreateVersion: %v", err)
-	}
-	if version.Name != "beta-name" || version.Description != "second" || version.Directory != "beta" || version.Version != "2002" {
-		t.Fatalf("CreateVersion metadata = %+v", version)
+		t.Fatal(err)
 	}
 	got, err := store.GetSkill(context.Background(), workspace.DefaultID, parent.ID)
-	if err != nil {
-		t.Fatalf("GetSkill: %v", err)
+	if err != nil || got.LatestVersionID != version.ID || version.Version != version.ID {
+		t.Fatalf("new version = %+v, parent=%+v, err=%v", version, got, err)
 	}
-	if got.LatestVersion == nil || *got.LatestVersion != "2002" {
-		t.Fatalf("latest_version = %v; want 2002", got.LatestVersion)
+	invalid := normalizedPackage(t, stageDir, []uploadFile{{filename: "beta/SKILL.md", body: skillMD("beta-name", "second")}})
+	defer func() { _ = invalid.Cleanup() }()
+	_, err = store.CreateVersion(context.Background(), workspace.DefaultID, parent.ID, skill.CreateVersionInput{Package: invalid})
+	var validation *skill.ValidationError
+	if !errors.As(err, &validation) || !strings.Contains(validation.Message, "name") {
+		t.Fatalf("changed name = %T %v", err, err)
+	}
+	got, err = store.GetSkill(context.Background(), workspace.DefaultID, parent.ID)
+	if err != nil || got.LatestVersionID != version.ID {
+		t.Fatalf("rejected version changed latest: %+v, %v", got, err)
 	}
 }
 
@@ -179,8 +182,8 @@ func TestCreateVersionRetriesDuplicateVersionThroughRuntimeClientSavepoint(t *te
 	if err != nil {
 		t.Fatalf("GetSkill after retry: %v", err)
 	}
-	if got.LatestVersion == nil || *got.LatestVersion != "retry_ok" {
-		t.Fatalf("latest_version after retry = %v; want retry_ok", got.LatestVersion)
+	if got.LatestVersionID != "retry_ok" {
+		t.Fatalf("latest_version after retry = %v; want retry_ok", got.LatestVersionID)
 	}
 	var versionCount int
 	if err := storage.WithWorkspaceTx(context.Background(), db, string(workspace.DefaultID), func(tx *sql.Tx) error {
@@ -198,7 +201,7 @@ func TestCreateVersionRetriesDuplicateVersionThroughRuntimeClientSavepoint(t *te
 	}
 }
 
-func TestDeleteSemanticsKeepParentActiveUntilVersionsAreGone(t *testing.T) {
+func TestDeleteSemanticsPreserveLastVersionAndDeleteWholeSkill(t *testing.T) {
 	_, stageDir, store, _ := newSkillStoreBackendEnv(t)
 	store.SetVersionStrategy(sequenceVersions("3001", "3002", "3003"))
 	parentPackage := normalizedPackage(t, stageDir, []uploadFile{{filename: "pkg/SKILL.md", body: skillMD("pkg", "v1")}})
@@ -220,11 +223,6 @@ func TestDeleteSemanticsKeepParentActiveUntilVersionsAreGone(t *testing.T) {
 		t.Fatalf("CreateVersion v3: %v", err)
 	}
 
-	err = store.DeleteSkill(context.Background(), workspace.DefaultID, parent.ID)
-	var validation *skill.ValidationError
-	if !errors.As(err, &validation) {
-		t.Fatalf("DeleteSkill with active versions error = %T %v; want ValidationError", err, err)
-	}
 	if err := store.DeleteVersion(context.Background(), workspace.DefaultID, parent.ID, v2.Version); err != nil {
 		t.Fatalf("DeleteVersion non-latest: %v", err)
 	}
@@ -232,8 +230,8 @@ func TestDeleteSemanticsKeepParentActiveUntilVersionsAreGone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSkill after non-latest delete: %v", err)
 	}
-	if got.LatestVersion == nil || *got.LatestVersion != v3.Version {
-		t.Fatalf("latest after non-latest delete = %v; want %s", got.LatestVersion, v3.Version)
+	if got.LatestVersionID != v3.Version {
+		t.Fatalf("latest after non-latest delete = %v; want %s", got.LatestVersionID, v3.Version)
 	}
 	if err := store.DeleteVersion(context.Background(), workspace.DefaultID, parent.ID, v3.Version); err != nil {
 		t.Fatalf("DeleteVersion latest: %v", err)
@@ -242,46 +240,25 @@ func TestDeleteSemanticsKeepParentActiveUntilVersionsAreGone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSkill after latest delete: %v", err)
 	}
-	initialVersion := *parent.LatestVersion
-	if got.LatestVersion == nil || *got.LatestVersion != initialVersion {
-		t.Fatalf("latest after latest delete = %v; want initial %s", got.LatestVersion, initialVersion)
+	initialVersion := parent.LatestVersionID
+	if got.LatestVersionID != initialVersion {
+		t.Fatalf("latest after latest delete = %v; want initial %s", got.LatestVersionID, initialVersion)
 	}
-	if err := store.DeleteVersion(context.Background(), workspace.DefaultID, parent.ID, initialVersion); err != nil {
-		t.Fatalf("DeleteVersion last: %v", err)
+	err = store.DeleteVersion(context.Background(), workspace.DefaultID, parent.ID, initialVersion)
+	var invalid *skill.ValidationError
+	if !errors.As(err, &invalid) || !strings.Contains(invalid.Message, "last version") {
+		t.Fatalf("delete final version = %T %v", err, err)
 	}
-	got, err = store.GetSkill(context.Background(), workspace.DefaultID, parent.ID)
-	if err != nil {
-		t.Fatalf("parent should remain active with no versions: %v", err)
-	}
-	if got.LatestVersion != nil {
-		t.Fatalf("latest_version after deleting last version = %v; want nil", got.LatestVersion)
+	if _, err := store.GetVersion(context.Background(), workspace.DefaultID, parent.ID, initialVersion); err != nil {
+		t.Fatalf("rejected delete changed version: %v", err)
 	}
 	if err := store.DeleteSkill(context.Background(), workspace.DefaultID, parent.ID); err != nil {
-		t.Fatalf("DeleteSkill after zero active versions: %v", err)
+		t.Fatal(err)
 	}
-}
-
-func TestListSkillsReturnsParentWithNullLatestVersion(t *testing.T) {
-	_, stageDir, store, _ := newSkillStoreBackendEnv(t)
-	store.SetVersionStrategy(func(time.Time) string { return "null_latest" })
-	pkg := normalizedPackage(t, stageDir, []uploadFile{{filename: "nil-latest/SKILL.md", body: skillMD("nil-latest", "latest")}})
-	defer func() { _ = pkg.Cleanup() }()
-	parent, err := store.CreateSkill(context.Background(), workspace.DefaultID, skill.CreateSkillInput{Package: pkg})
-	if err != nil {
-		t.Fatalf("CreateSkill: %v", err)
-	}
-	if err := store.DeleteVersion(context.Background(), workspace.DefaultID, parent.ID, *parent.LatestVersion); err != nil {
-		t.Fatalf("DeleteVersion last: %v", err)
-	}
-	result, err := store.ListSkills(context.Background(), workspace.DefaultID, skill.ListSkillsOptions{Limit: 20})
-	if err != nil {
-		t.Fatalf("ListSkills: %v", err)
-	}
-	if len(result.Data) != 1 {
-		t.Fatalf("ListSkills length = %d; want 1", len(result.Data))
-	}
-	if result.Data[0].ID != parent.ID || result.Data[0].LatestVersion != nil {
-		t.Fatalf("listed parent = %+v; want same parent with nil latest_version", result.Data[0])
+	for _, version := range []string{initialVersion, v2.Version, v3.Version} {
+		if _, err := store.GetVersion(context.Background(), workspace.DefaultID, parent.ID, version); !errors.As(err, new(*skill.NotFoundError)) {
+			t.Fatalf("deleted version %s = %v", version, err)
+		}
 	}
 }
 
@@ -330,7 +307,7 @@ func TestListSkillsAndVersionsUseScopedSignedPageTokens(t *testing.T) {
 	}
 	var versionedSkillID string
 	for _, name := range []string{"one", "two", "three"} {
-		files := stageUploadParts(t, stageDir, []uploadFile{{filename: name + "/SKILL.md", body: skillMD(name, name)}})
+		files := stageUploadParts(t, stageDir, []uploadFile{{filename: name + "/SKILL.md", body: skillMD("one", name)}})
 		defer cleanupParts(t, files)
 		created, err := service.CreateSkill(context.Background(), workspace.DefaultID, skill.CreateSkillInput{Files: files})
 		if err != nil {
@@ -356,12 +333,6 @@ func TestListSkillsAndVersionsUseScopedSignedPageTokens(t *testing.T) {
 		t.Fatalf("second page = %+v", second)
 	}
 	skillCursor := first.Data[1]
-	if skillCursor.LatestVersion == nil {
-		t.Fatalf("cursor skill latest_version is nil")
-	}
-	if err := backend.DeleteVersion(context.Background(), workspace.DefaultID, skillCursor.ID, *skillCursor.LatestVersion); err != nil {
-		t.Fatalf("DeleteVersion cursor skill: %v", err)
-	}
 	if err := backend.DeleteSkill(context.Background(), workspace.DefaultID, skillCursor.ID); err != nil {
 		t.Fatalf("DeleteSkill cursor skill: %v", err)
 	}
@@ -383,7 +354,7 @@ func TestListSkillsAndVersionsUseScopedSignedPageTokens(t *testing.T) {
 	assertSkillsInvalidPageToken(workspace.DefaultID, skill.ListSkillsOptions{Limit: 2, Source: "custom", Page: tampered})
 
 	for _, name := range []string{"one-v2", "one-v3"} {
-		files := stageUploadParts(t, stageDir, []uploadFile{{filename: name + "/SKILL.md", body: skillMD(name, name)}})
+		files := stageUploadParts(t, stageDir, []uploadFile{{filename: name + "/SKILL.md", body: skillMD("one", name)}})
 		defer cleanupParts(t, files)
 		if _, err := service.CreateVersion(context.Background(), workspace.DefaultID, versionedSkillID, skill.CreateVersionInput{Files: files}); err != nil {
 			t.Fatalf("CreateVersion %s: %v", name, err)
@@ -475,7 +446,7 @@ func TestRetainedBytesGuardrailCountsSoftDeletedVersionsBeforeBlobPut(t *testing
 	if err != nil {
 		t.Fatalf("CreateSkill seed: %v", err)
 	}
-	if err := updateVersionForRetainedBytes(t, db, workspace.DefaultID, parent.ID, *parent.LatestVersion, skill.MaxRetainedCompressedBytesPerWorkspace, true); err != nil {
+	if err := updateVersionForRetainedBytes(t, db, workspace.DefaultID, parent.ID, parent.LatestVersionID, skill.MaxRetainedCompressedBytesPerWorkspace, true); err != nil {
 		t.Fatalf("update retained bytes fixture: %v", err)
 	}
 	putCalls := int32(0)
@@ -544,7 +515,7 @@ func TestConcurrentCreateVersionGuardrailSerializesUnderAdvisoryLock(t *testing.
 		wg.Add(1)
 		go func(index int) {
 			defer wg.Done()
-			pkg := normalizedPackage(t, stageDir, []uploadFile{{filename: fmt.Sprintf("v-%d/SKILL.md", index), body: skillMD(fmt.Sprintf("v-%d", index), "x")}})
+			pkg := normalizedPackage(t, stageDir, []uploadFile{{filename: fmt.Sprintf("v-%d/SKILL.md", index), body: skillMD("parent", "x")}})
 			defer func() { _ = pkg.Cleanup() }()
 			_, errs[index] = store.CreateVersion(context.Background(), workspace.DefaultID, parent.ID, skill.CreateVersionInput{Package: pkg})
 		}(i)
@@ -590,7 +561,7 @@ func TestPackagePutFailureRollsBackSQLAndCleansMaybeCreatedBlob(t *testing.T) {
 	}
 }
 
-func TestCreateVersionDuplicateBlobKeyRollsBackSQLAndKeepsLatestVersion(t *testing.T) {
+func TestCreateVersionDuplicateBlobKeyRollsBackSQLAndKeepsLatestVersionID(t *testing.T) {
 	blobStore, stageDir, store, db := newSkillStoreBackendEnv(t)
 	store.SetVersionStrategy(sequenceVersions("initial", "duplicate_blob"))
 	initial := normalizedPackage(t, stageDir, []uploadFile{{filename: "dup/SKILL.md", body: skillMD("dup", "initial")}})
@@ -615,8 +586,8 @@ func TestCreateVersionDuplicateBlobKeyRollsBackSQLAndKeepsLatestVersion(t *testi
 	if err != nil {
 		t.Fatalf("GetSkill after duplicate blob: %v", err)
 	}
-	if got.LatestVersion == nil || *got.LatestVersion != "initial" {
-		t.Fatalf("latest_version after duplicate blob = %v; want initial", got.LatestVersion)
+	if got.LatestVersionID != "initial" {
+		t.Fatalf("latest_version after duplicate blob = %v; want initial", got.LatestVersionID)
 	}
 	assertVersionMissing(t, db, workspace.DefaultID, parent.ID, "duplicate_blob")
 	if deletes := blobStore.Deletes(); len(deletes) != 0 {
@@ -794,7 +765,7 @@ func seedSkillRows(t *testing.T, db *sql.DB, ws workspace.ID, count int) {
 			skillID := fmt.Sprintf("skill_seed_%d", i)
 			if _, err := tx.ExecContext(context.Background(),
 				`INSERT INTO skills (workspace_id, skill_id, display_title, latest_version, created_at, updated_at)
-				 VALUES ($1, $2, NULL, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+				 VALUES ($1, $2, NULL, 'skver_seed', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 				string(ws), skillID); err != nil {
 				return fmt.Errorf("seed skill row %d: %w", i, err)
 			}

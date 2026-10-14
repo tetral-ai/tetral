@@ -338,8 +338,8 @@ func uploadTetralAPISkill(t *testing.T, router http.Handler) string {
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-	if err := writer.WriteField("display_title", "Wired Skill"); err != nil {
-		t.Fatalf("write skill display_title: %v", err)
+	if err := writer.WriteField("display_name", "Wired Skill"); err != nil {
+		t.Fatalf("write skill display_name: %v", err)
 	}
 	part, err := writer.CreateFormFile("files[]", "wired-skill/SKILL.md")
 	if err != nil {
@@ -361,15 +361,17 @@ func uploadTetralAPISkill(t *testing.T, router http.Handler) string {
 		t.Fatalf("POST /v1/skills status = %d body=%s", recorder.Code, recorder.Body.String())
 	}
 	var response struct {
-		ID           string  `json:"id"`
-		Type         string  `json:"type"`
-		Source       string  `json:"source"`
-		DisplayTitle *string `json:"display_title"`
+		ID     string `json:"id"`
+		Type   string `json:"type"`
+		Source struct {
+			Type string `json:"type"`
+		} `json:"source"`
+		DisplayName *string `json:"display_name"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode skill response: %v body=%s", err, recorder.Body.String())
 	}
-	if response.ID == "" || response.Type != "skill" || response.Source != "custom" || response.DisplayTitle == nil || *response.DisplayTitle != "Wired Skill" {
+	if response.ID == "" || response.Type != "skill" || response.Source.Type != "custom" || response.DisplayName == nil || *response.DisplayName != "Wired Skill" {
 		t.Fatalf("skill response = %+v", response)
 	}
 	return response.ID

@@ -52,7 +52,9 @@ format, see [authentication](../../docs/authentication.md).
 API-key management verifies the signed principal against the actual method and
 path before installing trusted principal/workspace context and invoking the
 registered-operation wrapper. Body and path fields never supply workspace
-authority. Delete resolves its key under the signed workspace before disclosure
+authority. A supplied `anthropic-workspace-id` header must carry exactly one
+nonempty value equal to the principal's workspace; otherwise the wrapper
+returns `403 permission_error` and records one authorization denial. Delete resolves its key under the signed workspace before disclosure
 or mutation. A key `name` holds 1 to 256 Unicode code points after trimming and
 must not contain U+0000, because Engine stores it in PostgreSQL, which cannot
 store U+0000; the registered-operation wrapper likewise rejects a path or query

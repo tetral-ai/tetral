@@ -25,6 +25,8 @@ type FileMetadata struct {
 	CreatedAt    time.Time  `json:"created_at"`
 	Downloadable bool       `json:"downloadable"`
 	Scope        *FileScope `json:"scope,omitempty"`
+
+	storageSequence int64
 }
 
 // FileScope is present on future session-scoped file identities.
@@ -41,18 +43,17 @@ type DeleteResponse struct {
 
 // ListOptions carries Files cursor/filter inputs.
 type ListOptions struct {
-	Limit    int
-	AfterID  string
-	BeforeID string
-	ScopeID  string
+	Limit          int
+	Page           string
+	cursorSequence int64
+	ScopeID        string
 }
 
 // ListResult is the Files-specific list envelope.
 type ListResult struct {
-	Data    []*FileMetadata `json:"data"`
-	FirstID *string         `json:"first_id"`
-	LastID  *string         `json:"last_id"`
-	HasMore bool            `json:"has_more"`
+	Data     []*FileMetadata `json:"data"`
+	NextPage *string         `json:"next_page"`
+	HasMore  bool            `json:"-"`
 }
 
 // ContentStream is the public downloadable content stream.

@@ -207,7 +207,7 @@ func TestFileUploadStoresBytesAndCleansStage(t *testing.T) {
 	assertStageDirEmpty(t, env.stageDir)
 }
 
-func TestFileUploadPreservesRawFilenameAsMetadataOnly(t *testing.T) {
+func TestFileUploadStoresNormalizedFilenameAsMetadataOnly(t *testing.T) {
 	env := newFileHandlerEnv(t, httpapi.FileHandlerLimits{})
 	router := env.router(t)
 	payload := []byte("csv")
@@ -226,12 +226,12 @@ func TestFileUploadPreservesRawFilenameAsMetadataOnly(t *testing.T) {
 		t.Fatalf("status = %d; want 200 body=%q", rec.Code, rec.Body.String())
 	}
 	got := decodeFileMetadata(t, rec)
-	if got.Filename != filename {
-		t.Fatalf("returned filename = %q; want raw multipart filename %q", got.Filename, filename)
+	if got.Filename != "data.csv" {
+		t.Fatalf("returned filename = %q; want basename of %q", got.Filename, filename)
 	}
 	row := loadHTTPFileRow(t, env.admin, workspace.DefaultID, got.ID)
-	if row.filename != filename {
-		t.Fatalf("stored filename = %q; want raw multipart filename %q", row.filename, filename)
+	if row.filename != "data.csv" {
+		t.Fatalf("stored filename = %q; want basename of %q", row.filename, filename)
 	}
 	if row.blobKey != "files/"+string(workspace.DefaultID)+"/"+row.objectID {
 		t.Fatalf("blob key = %q; want files/<workspace>/<object_id>", row.blobKey)
@@ -245,6 +245,30 @@ func TestFileUploadPreservesRawFilenameAsMetadataOnly(t *testing.T) {
 		t.Fatalf("blob key %q was not written", row.blobKey)
 	}
 	assertStageDirEmpty(t, env.stageDir)
+	for _, tc := range []struct {
+		name string
+		part fileUploadPart
+		want string
+	}{
+		{"missing filename", fileUploadPart{name: "file", body: payload, contentDispValue: `form-data; name="file"`, contentType: "text/plain", contentTypeSet: true}, "unnamed.txt"},
+		{"empty filename", fileUploadPart{name: "file", body: payload, fileNameSet: true, contentType: "image/png", contentTypeSet: true}, "unnamed.png"},
+		{"unknown MIME", fileUploadPart{name: "file", body: payload, fileNameSet: true, contentType: "application/x-unlisted", contentTypeSet: true}, "unnamed"},
+		{"no last path segment", fileUploadPart{name: "file", fileName: "dir/..", body: payload, contentType: "text/plain", contentTypeSet: true}, "unnamed.txt"},
+		{"long directory before a short name", fileUploadPart{name: "file", fileName: strings.Repeat("d", 300) + "/a.txt", body: payload, contentType: "text/plain", contentTypeSet: true}, "a.txt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, contentType := buildFileMultipartBody(t, []fileUploadPart{tc.part})
+			rec := performFileUpload(t, router, contentType, body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, %s", rec.Code, rec.Body.String())
+			}
+			got := decodeFileMetadata(t, rec)
+			row := loadHTTPFileRow(t, env.admin, workspace.DefaultID, got.ID)
+			if got.Filename != tc.want || row.filename != tc.want {
+				t.Fatalf("filename = %q stored %q; want %q", got.Filename, row.filename, tc.want)
+			}
+		})
+	}
 }
 
 func assertUploadMetadataJSONShape(t *testing.T, rec *httptest.ResponseRecorder, fileID string, sizeBytes int64) {
@@ -348,14 +372,13 @@ func TestFileUploadRejectsMalformedPartsWithoutBlobWrites(t *testing.T) {
 		parts       []fileUploadPart
 		contentType string
 		body        io.Reader
+		wantMessage string
 	}{
 		{name: "missing file part", parts: nil},
 		{name: "duplicate file part", parts: []fileUploadPart{{name: "file", body: []byte("a")}, {name: "file", body: []byte("b")}}},
-		{name: "text file field", parts: []fileUploadPart{{name: "file", shape: "text", body: []byte("not a file")}}},
 		{name: "unexpected purpose field", parts: []fileUploadPart{{name: "purpose", shape: "text", body: []byte("assistants")}, {name: "file", body: []byte("a")}}},
 		{name: "unexpected extra file", parts: []fileUploadPart{{name: "file", body: []byte("a")}, {name: "extra", body: []byte("b")}}},
-		{name: "missing filename", parts: []fileUploadPart{{name: "file", body: []byte("a"), contentDispValue: `form-data; name="file"`}}},
-		{name: "empty filename", parts: []fileUploadPart{{name: "file", body: []byte("a"), fileNameSet: true}}},
+		{name: "expires_in_seconds", parts: []fileUploadPart{{name: "file", fileName: "valid.txt", body: []byte("a")}, {name: "expires_in_seconds", shape: "text", body: []byte("3600")}}, wantMessage: "expires_in_seconds"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -372,6 +395,9 @@ func TestFileUploadRejectsMalformedPartsWithoutBlobWrites(t *testing.T) {
 			rec := performFileUpload(t, router, contentType, body)
 
 			assertFileError(t, rec, http.StatusBadRequest, "invalid_request_error")
+			if !strings.Contains(rec.Body.String(), tt.wantMessage) {
+				t.Fatalf("rejection = %s; want reason naming %q", rec.Body.String(), tt.wantMessage)
+			}
 			if env.blob.Len() != 0 {
 				t.Fatalf("blob store was written for rejected upload")
 			}
@@ -554,7 +580,7 @@ func (s *recordingFileService) CreateUploadedFile(_ context.Context, _ workspace
 }
 
 func TestFileUploadParsesRawContentDispositionFilename(t *testing.T) {
-	t.Run("path fragments are staged as metadata", func(t *testing.T) {
+	t.Run("Windows path basename is staged as metadata", func(t *testing.T) {
 		store := &recordingFileService{}
 		stageDir, err := files.NewStageDir(t.TempDir())
 		if err != nil {
@@ -562,7 +588,7 @@ func TestFileUploadParsesRawContentDispositionFilename(t *testing.T) {
 		}
 		handler := httpapi.NewFileHandler(store, stageDir, httpapi.FileHandlerLimits{})
 		router := newFileRouter(handler)
-		filename := "../tenant/data.csv"
+		filename := `..\\tenant\\data.csv`
 		body, contentType := buildFileMultipartBody(t, []fileUploadPart{{
 			name:     "file",
 			fileName: filename,
@@ -574,8 +600,8 @@ func TestFileUploadParsesRawContentDispositionFilename(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d; want 200 body=%q", rec.Code, rec.Body.String())
 		}
-		if store.lastStagedFilename != filename {
-			t.Fatalf("staged filename = %q; want raw multipart filename %q", store.lastStagedFilename, filename)
+		if store.lastStagedFilename != "data.csv" {
+			t.Fatalf("staged filename = %q; want basename of %q", store.lastStagedFilename, filename)
 		}
 		assertStageDirEmpty(t, stageDir)
 	})
@@ -827,14 +853,13 @@ func TestFileListResponseShapeAndQueryValidation(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 			t.Fatalf("decode empty list response: %v", err)
 		}
-		if string(raw["data"]) != "[]" || string(raw["first_id"]) != "null" || string(raw["last_id"]) != "null" || string(raw["has_more"]) != "false" {
-			t.Fatalf("empty list response = %s; want data=[], first_id=null, last_id=null, has_more=false", rec.Body.String())
+		if string(raw["data"]) != "[]" || string(raw["next_page"]) != "null" || len(raw) != 2 {
+			t.Fatalf("empty list response = %s; want data=[], next_page=null", rec.Body.String())
 		}
 	})
 
 	t.Run("shape and options", func(t *testing.T) {
-		firstID := "file_first"
-		lastID := "file_last"
+		nextPage := "signed-page-token"
 		store := &recordingFileService{
 			listResult: files.ListResult{
 				Data: []*files.FileMetadata{{
@@ -842,14 +867,13 @@ func TestFileListResponseShapeAndQueryValidation(t *testing.T) {
 					CreatedAt: time.Unix(1, 0).UTC(),
 					Scope:     &files.FileScope{Type: "session", ID: "sesn_123"},
 				}},
-				FirstID: &firstID,
-				LastID:  &lastID,
-				HasMore: true,
+				NextPage: &nextPage,
+				HasMore:  true,
 			},
 		}
 		handler := httpapi.NewFileHandler(store, t.TempDir(), httpapi.FileHandlerLimits{})
 		router := newAuthenticatedRouter(t, newTestHandler(t), httpapi.WithFileHandler(handler))
-		req := httptest.NewRequest(http.MethodGet, "/v1/files?limit=1000&after_id=file_after&before_id=file_before&scope_id=sesn_123", nil)
+		req := httptest.NewRequest(http.MethodGet, "/v1/files?limit=1000&page=input-page-token&scope_id=sesn_123", nil)
 		setAuthHeader(req)
 		rec := httptest.NewRecorder()
 
@@ -862,15 +886,15 @@ func TestFileListResponseShapeAndQueryValidation(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 			t.Fatalf("decode list response: %v", err)
 		}
-		for _, key := range []string{"data", "first_id", "last_id", "has_more"} {
+		for _, key := range []string{"data", "next_page"} {
 			if _, ok := raw[key]; !ok {
 				t.Fatalf("list response missing %q in %s", key, rec.Body.String())
 			}
 		}
-		if len(raw) != 4 {
+		if len(raw) != 2 {
 			t.Fatalf("list response keys = %v; want exact Files list envelope", raw)
 		}
-		if store.lastOptions.Limit != 1000 || store.lastOptions.AfterID != "file_after" || store.lastOptions.BeforeID != "file_before" || store.lastOptions.ScopeID != "sesn_123" {
+		if store.lastOptions.Limit != 1000 || store.lastOptions.Page != "input-page-token" || store.lastOptions.ScopeID != "sesn_123" {
 			t.Fatalf("list options = %+v", store.lastOptions)
 		}
 		var decoded files.ListResult
@@ -887,10 +911,9 @@ func TestFileListResponseShapeAndQueryValidation(t *testing.T) {
 		"limit=-1",
 		"limit=1001",
 		"limit=abc",
-		"after_id=wrong",
-		"after_id=" + strings.Repeat("a", 257),
-		"before_id=wrong",
-		"before_id=" + strings.Repeat("a", 257),
+		"after_id=file_valid",
+		"before_id=file_valid",
+		"ids=file_valid",
 		"scope_id=",
 		"scope_id=bad%2Fscope",
 		"scope_id=" + strings.Repeat("a", 257),
@@ -900,6 +923,14 @@ func TestFileListResponseShapeAndQueryValidation(t *testing.T) {
 			store := &recordingFileService{}
 			handler := httpapi.NewFileHandler(store, t.TempDir(), httpapi.FileHandlerLimits{})
 			router := newAuthenticatedRouter(t, newTestHandler(t), httpapi.WithFileHandler(handler))
+			baseline := httptest.NewRequest(http.MethodGet, "/v1/files?limit=1", nil)
+			setAuthHeader(baseline)
+			accepted := httptest.NewRecorder()
+			router.ServeHTTP(accepted, baseline)
+			if accepted.Code != http.StatusOK {
+				t.Fatalf("valid baseline = %d, %s", accepted.Code, accepted.Body.String())
+			}
+			store.listCalls = 0
 			req := httptest.NewRequest(http.MethodGet, "/v1/files?"+query, nil)
 			setAuthHeader(req)
 			rec := httptest.NewRecorder()
@@ -907,6 +938,10 @@ func TestFileListResponseShapeAndQueryValidation(t *testing.T) {
 			router.ServeHTTP(rec, req)
 
 			assertFileError(t, rec, http.StatusBadRequest, "invalid_request_error")
+			field := strings.SplitN(query, "=", 2)[0]
+			if !strings.Contains(rec.Body.String(), field) {
+				t.Fatalf("wrong rejection for %s: %s", field, rec.Body.String())
+			}
 			if store.listCalls != 0 {
 				t.Fatalf("store ListFiles reached for invalid query %q", query)
 			}
@@ -991,7 +1026,15 @@ func TestFileHTTPContentDeleteAndPostDeleteBehavior(t *testing.T) {
 		seedHTTPFile(t, env, workspace.DefaultID, "file_http_visible_later_b", "fobj_http_visible_later_b", false, "", "", "later b")
 		seedHTTPFile(t, env, workspace.DefaultID, "file_http_session_deleted_later", "fobj_http_session_deleted_later", true, "session", "sesn_http_deleted_later", "deleted session")
 
-		req := httptest.NewRequest(http.MethodGet, "/v1/files?limit=3&after_id=file_http_download", nil)
+		firstReq := httptest.NewRequest(http.MethodGet, "/v1/files?limit=2", nil)
+		setAuthHeader(firstReq)
+		firstRec := httptest.NewRecorder()
+		router.ServeHTTP(firstRec, firstReq)
+		var firstPage files.ListResult
+		if firstRec.Code != http.StatusOK || json.Unmarshal(firstRec.Body.Bytes(), &firstPage) != nil || firstPage.NextPage == nil {
+			t.Fatalf("first page = %d %s", firstRec.Code, firstRec.Body.String())
+		}
+		req := httptest.NewRequest(http.MethodGet, "/v1/files?limit=3&page="+*firstPage.NextPage, nil)
 		setAuthHeader(req)
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, req)
@@ -1004,8 +1047,8 @@ func TestFileHTTPContentDeleteAndPostDeleteBehavior(t *testing.T) {
 			t.Fatalf("decode list: %v", err)
 		}
 		got := fileMetadataIDs(result.Data)
-		if strings.Join(got, ",") != "file_http_visible_later_a,file_http_session_active_later,file_http_visible_later_b" || result.HasMore {
-			t.Fatalf("list ids=%v has_more=%v; want non-deleted session files without underfill", got, result.HasMore)
+		if strings.Join(got, ",") != "file_http_visible_later_a,file_http_session_active_later,file_http_visible_later_b" || result.NextPage != nil {
+			t.Fatalf("list ids=%v next_page=%v; want non-deleted session files without underfill", got, result.NextPage)
 		}
 	})
 

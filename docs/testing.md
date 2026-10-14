@@ -27,10 +27,10 @@ named test. Full runs it, Affected runs it when its package is in the dependency
 closure, and Fast compiles it without starting its infrastructure.
 
 The runner prepares disposable PostgreSQL and a clean, pinned SDK checkout,
-checking Bun and Node and installing the SDK's frozen Yarn dependencies. The Go
+checking Bun and Node and installing the SDK's frozen pnpm dependencies. The Go
 test then starts local Engine Auth and API services, issues a test API key, and launches
 the SDK suite against that local address. Its child-process execution flag is
-only an SDK launch contract, not a CI selection rule. Jest's structured report
+only an SDK launch contract, not a CI selection rule. Vitest's structured JSON report
 must contain executed, passing assertions with no skipped or failed cases.
 This proves API authentication and database write/read behavior; it does not
 start a Sandbox or execute Git. Dependency setup failures and unexpected skips
@@ -43,14 +43,11 @@ installation can update ignored files such as `node_modules` even while Git
 reports a clean working tree. These installed files remain after verification;
 the runner removes only temporary checkouts it created itself.
 
-SDK pin changes also require the SDK's standalone source compatibility profile;
-the repository's protocol checks validate types and proof registration but do
-not execute that profile. From a clean SDK checkout at the runner's pinned
-commit, install frozen dependencies with lifecycle scripts disabled, run
-`bash ./scripts/build`, then run
-`TETRAL_ENGINE_ROOT=/absolute/path/to/engine bun run test:compatibility:static`.
-These source proofs complement the local SDK integration suites; they do not
-establish runtime or database interoperability by themselves.
+SDK support-scope registry rows do not all represent executable proofs. Only
+integration rows require a runner binding. Documentation and Engine-native
+behavior rows are not counted as SDK passes or skips. SDK CI owns ordinary
+public type checks; Engine CI retains real JSON-to-SDK projection checks and
+its native API and persistence tests.
 
 The registered SDK Session preview and typed OIDC Memory proofs run through
 `TestForkSDKIntegrationCompatibilityProofs` in the existing Go evidence owner. Its
@@ -184,7 +181,7 @@ pass (a skipped test counts as not passing where the step rejects skips).
 Under GitHub Actions the same excerpt goes to the job summary; the complete
 diagnostic stays in the evidence artifact. These dependency setup commands end
 the setup error the runner prints with up to the last 20 lines of their output
-when they fail: the Git commands that fetch the pinned SDK, the SDK's Yarn
+when they fail: the Git commands that fetch the pinned SDK, the SDK's pnpm
 install, the Bun workspace installs, the Docker check, image pulls, container
 starts and removals, and the egctl SecretType helper build. Native package
 commands remain appropriate while developing one owning package; the repository

@@ -25,12 +25,12 @@ func newRouterTestSkillStore() *fakeSkillStore {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	return &fakeSkillStore{
 		skillRow: &skill.Skill{
-			ID:            "skill_x",
-			Type:          "skill",
-			Source:        "custom",
-			LatestVersion: &latest,
-			CreatedAt:     now,
-			UpdatedAt:     now,
+			ID:              "skill_x",
+			Type:            "skill",
+			Source:          skill.SkillSource{Type: "custom"},
+			LatestVersionID: latest,
+			CreatedAt:       now,
+			UpdatedAt:       now,
 		},
 		version: &skill.SkillVersion{
 			ID:          "skill_version_x",

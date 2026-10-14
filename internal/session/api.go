@@ -127,6 +127,7 @@ type ThreadListResult struct {
 }
 
 type Response struct {
+	Budget             *struct{}             `json:"budget"`
 	ID                 string                `json:"id"`
 	Type               string                `json:"type"`
 	DeploymentID       *string               `json:"deployment_id"`
@@ -194,6 +195,7 @@ func (value SessionAgentResponse) MarshalJSON() ([]byte, error) {
 }
 
 type ThreadResponse struct {
+	WorkflowRunID  *string             `json:"workflow_run_id"`
 	ID             string              `json:"id"`
 	Type           string              `json:"type"`
 	SessionID      string              `json:"session_id"`

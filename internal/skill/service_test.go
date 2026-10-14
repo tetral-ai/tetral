@@ -23,13 +23,13 @@ func TestSkillDTOJSONShapeMatchesAnthropicParent(t *testing.T) {
 	latest := "1759178010641129"
 	created := time.Date(2026, 4, 7, 14, 0, 0, 0, time.UTC)
 	parent := &skill.Skill{
-		ID:            "skill_parent",
-		Type:          "skill",
-		Source:        "custom",
-		DisplayTitle:  &title,
-		LatestVersion: &latest,
-		CreatedAt:     created,
-		UpdatedAt:     created,
+		ID:              "skill_parent",
+		Type:            "skill",
+		Source:          skill.SkillSource{Type: "custom"},
+		DisplayName:     title,
+		LatestVersionID: latest,
+		CreatedAt:       created,
+		UpdatedAt:       created,
 	}
 
 	raw, err := json.Marshal(parent)
@@ -40,36 +40,14 @@ func TestSkillDTOJSONShapeMatchesAnthropicParent(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("Unmarshal Skill JSON: %v", err)
 	}
-	assertJSONKeys(t, got, []string{"id", "type", "source", "display_title", "latest_version", "created_at", "updated_at"})
+	assertJSONKeys(t, got, []string{"id", "type", "source", "display_name", "latest_version_id", "created_at", "updated_at"})
 	assertJSONValue(t, got, "id", `"skill_parent"`)
 	assertJSONValue(t, got, "type", `"skill"`)
-	assertJSONValue(t, got, "source", `"custom"`)
-	assertJSONValue(t, got, "display_title", `"Financial Analysis"`)
-	assertJSONValue(t, got, "latest_version", `"1759178010641129"`)
+	assertJSONValue(t, got, "source", `{"type":"custom"}`)
+	assertJSONValue(t, got, "display_name", `"Financial Analysis"`)
+	assertJSONValue(t, got, "latest_version_id", `"1759178010641129"`)
 	assertJSONValue(t, got, "created_at", `"2026-04-07T14:00:00Z"`)
 	assertJSONValue(t, got, "updated_at", `"2026-04-07T14:00:00Z"`)
-}
-
-func TestSkillDTOJSONShapeAllowsNullDisplayTitleAndLatestVersion(t *testing.T) {
-	parent := &skill.Skill{
-		ID:            "skill_parent",
-		Type:          "skill",
-		Source:        "custom",
-		DisplayTitle:  nil,
-		LatestVersion: nil,
-	}
-
-	raw, err := json.Marshal(parent)
-	if err != nil {
-		t.Fatalf("Marshal Skill: %v", err)
-	}
-	var got map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("Unmarshal Skill JSON: %v", err)
-	}
-	assertJSONKeys(t, got, []string{"id", "type", "source", "display_title", "latest_version", "created_at", "updated_at"})
-	assertJSONValue(t, got, "display_title", "null")
-	assertJSONValue(t, got, "latest_version", "null")
 }
 
 func TestSkillVersionDTOJSONShapeMatchesAnthropicVersion(t *testing.T) {
@@ -93,21 +71,19 @@ func TestSkillVersionDTOJSONShapeMatchesAnthropicVersion(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("Unmarshal SkillVersion JSON: %v", err)
 	}
-	assertJSONKeys(t, got, []string{"id", "type", "skill_id", "name", "description", "directory", "version", "created_at"})
+	assertJSONKeys(t, got, []string{"id", "type", "skill_id", "name", "description", "created_at"})
 	assertJSONValue(t, got, "id", `"skill_version_object"`)
 	assertJSONValue(t, got, "type", `"skill_version"`)
 	assertJSONValue(t, got, "skill_id", `"skill_parent"`)
 	assertJSONValue(t, got, "name", `"financial-analysis"`)
 	assertJSONValue(t, got, "description", `"Analyze financial data."`)
-	assertJSONValue(t, got, "directory", `"finance"`)
-	assertJSONValue(t, got, "version", `"1759178010641129"`)
 	assertJSONValue(t, got, "created_at", `"2026-04-07T14:00:00Z"`)
 }
 
 func TestSkillListDTOJSONShapeIncludesNextPage(t *testing.T) {
 	nextPage := "page_2"
 	result := skill.SkillListResult{
-		Data:     []*skill.Skill{{ID: "skill_parent", Type: "skill", Source: "custom"}},
+		Data:     []*skill.Skill{{ID: "skill_parent", Type: "skill", Source: skill.SkillSource{Type: "custom"}}},
 		HasMore:  true,
 		NextPage: &nextPage,
 	}
@@ -119,22 +95,21 @@ func TestSkillListDTOJSONShapeIncludesNextPage(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("Unmarshal SkillListResult JSON: %v", err)
 	}
-	assertJSONKeys(t, got, []string{"data", "has_more", "next_page"})
-	assertJSONValue(t, got, "has_more", "true")
+	assertJSONKeys(t, got, []string{"data", "next_page"})
 	assertJSONValue(t, got, "next_page", `"page_2"`)
 }
 
-func TestSkillServiceCreateSkillValidatesDisplayTitleAndDelegates(t *testing.T) {
+func TestSkillServiceCreateSkillValidatesDisplayNameAndDelegates(t *testing.T) {
 	stageDir := t.TempDir()
 	files := stageUploadParts(t, stageDir, []uploadFile{{filename: "finance/SKILL.md", body: skillMD("financial-analysis", "Analyze financial data.")}})
 	defer cleanupParts(t, files)
 	backend := &recordingSkillBackend{
-		createSkillResult: &skill.Skill{ID: "skill_created", Type: "skill", Source: "custom"},
+		createSkillResult: &skill.Skill{ID: "skill_created", Type: "skill", Source: skill.SkillSource{Type: "custom"}},
 	}
 	service := skill.NewService(backend, skill.WithPackageStageDir(stageDir))
 	ctx := context.WithValue(context.Background(), contextKey{}, "create")
-	title := "Financial Analysis\nQ1"
-	input := skill.CreateSkillInput{DisplayTitle: &title, Files: files}
+	title := "Financial Analysis Q1"
+	input := skill.CreateSkillInput{DisplayName: &title, Files: files}
 
 	got, err := service.CreateSkill(ctx, workspace.DefaultID, input)
 	if err != nil {
@@ -152,8 +127,8 @@ func TestSkillServiceCreateSkillValidatesDisplayTitleAndDelegates(t *testing.T) 
 	if backend.createSkillWorkspace != workspace.DefaultID {
 		t.Fatalf("backend workspace = %q; want %q", backend.createSkillWorkspace, workspace.DefaultID)
 	}
-	if backend.createSkillInput.DisplayTitle == nil || *backend.createSkillInput.DisplayTitle != title {
-		t.Fatalf("backend display_title = %v; want %q", backend.createSkillInput.DisplayTitle, title)
+	if backend.createSkillInput.DisplayName == nil || *backend.createSkillInput.DisplayName != title {
+		t.Fatalf("backend display_name = %v; want %q", backend.createSkillInput.DisplayName, title)
 	}
 	if len(backend.createSkillInput.Files) != 0 {
 		t.Fatalf("backend received raw Files: %+v", backend.createSkillInput.Files)
@@ -164,14 +139,14 @@ func TestSkillServiceCreateSkillValidatesDisplayTitleAndDelegates(t *testing.T) 
 	}
 }
 
-func TestSkillServiceCreateSkillAcceptsValidDisplayTitleBoundaries(t *testing.T) {
+func TestSkillServiceCreateSkillAcceptsValidDisplayNameBoundaries(t *testing.T) {
 	tests := []struct {
 		name  string
 		title string
 	}{
-		{name: "exactly 1024 ascii runes", title: strings.Repeat("a", 1024)},
-		{name: "exactly 1024 multibyte runes", title: strings.Repeat("界", 1024)},
-		{name: "ordinary whitespace", title: "Finance\tQ1\nReports\r"},
+		{name: "exactly 255 ascii runes", title: strings.Repeat("a", 255)},
+		{name: "exactly 255 multibyte runes", title: strings.Repeat("界", 255)},
+		{name: "ordinary whitespace", title: "Finance Q1 Reports"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -181,7 +156,7 @@ func TestSkillServiceCreateSkillAcceptsValidDisplayTitleBoundaries(t *testing.T)
 			backend := &recordingSkillBackend{createSkillResult: &skill.Skill{ID: "skill_created"}}
 			service := skill.NewService(backend, skill.WithPackageStageDir(stageDir))
 
-			if _, err := service.CreateSkill(context.Background(), workspace.DefaultID, skill.CreateSkillInput{DisplayTitle: &tc.title, Files: files}); err != nil {
+			if _, err := service.CreateSkill(context.Background(), workspace.DefaultID, skill.CreateSkillInput{DisplayName: &tc.title, Files: files}); err != nil {
 				t.Fatalf("CreateSkill: %v", err)
 			}
 			if backend.createSkillCalls != 1 {
@@ -191,7 +166,7 @@ func TestSkillServiceCreateSkillAcceptsValidDisplayTitleBoundaries(t *testing.T)
 	}
 }
 
-func TestSkillServiceCreateSkillRejectsInvalidDisplayTitleBeforeBackend(t *testing.T) {
+func TestSkillServiceCreateSkillRejectsInvalidDisplayNameBeforeBackend(t *testing.T) {
 	tests := []struct {
 		name  string
 		title string
@@ -199,24 +174,37 @@ func TestSkillServiceCreateSkillRejectsInvalidDisplayTitleBeforeBackend(t *testi
 		{name: "invalid utf8", title: string([]byte{0xff, 0xfe})},
 		{name: "nul", title: "bad\x00title"},
 		{name: "control", title: "bad\x01title"},
-		{name: "oversized ascii", title: strings.Repeat("a", 1025)},
-		{name: "oversized multibyte", title: strings.Repeat("界", 1025)},
+		{name: "newline", title: "two\nlines"},
+		{name: "tab", title: "two\tcolumns"},
+		{name: "unicode line", title: "two\u2028lines"},
+		{name: "oversized ascii", title: strings.Repeat("a", 256)},
+		{name: "oversized multibyte", title: strings.Repeat("界", 256)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			backend := &recordingSkillBackend{}
-			service := skill.NewService(backend)
-
-			_, err := service.CreateSkill(context.Background(), workspace.DefaultID, skill.CreateSkillInput{DisplayTitle: &tc.title})
+			stageDir := t.TempDir()
+			files := stageUploadParts(t, stageDir, []uploadFile{{filename: "finance/SKILL.md", body: skillMD("financial-analysis", "description")}})
+			defer cleanupParts(t, files)
+			backend := &recordingSkillBackend{createSkillResult: &skill.Skill{ID: "skill_valid"}}
+			service := skill.NewService(backend, skill.WithPackageStageDir(stageDir))
+			valid := "valid name"
+			if _, err := service.CreateSkill(context.Background(), workspace.DefaultID, skill.CreateSkillInput{DisplayName: &valid, Files: files}); err != nil {
+				t.Fatalf("valid baseline: %v", err)
+			}
+			backend.createSkillCalls = 0
+			_, err := service.CreateSkill(context.Background(), workspace.DefaultID, skill.CreateSkillInput{DisplayName: &tc.title, Files: files})
 			var validation *skill.ValidationError
 			if !errors.As(err, &validation) {
 				t.Fatalf("CreateSkill error = %T %v; want ValidationError", err, err)
+			}
+			if !strings.Contains(err.Error(), "display_name") {
+				t.Fatalf("wrong rejection reason: %v", err)
 			}
 			if backend.createSkillCalls != 0 {
 				t.Fatalf("backend CreateSkill calls = %d; want 0", backend.createSkillCalls)
 			}
 			if strings.Contains(err.Error(), tc.title) {
-				t.Fatalf("validation error echoed submitted display_title: %q", err.Error())
+				t.Fatalf("validation error echoed submitted display_name: %q", err.Error())
 			}
 		})
 	}
@@ -267,8 +255,8 @@ func TestSkillServiceCleansNormalizedPackageOnBackendError(t *testing.T) {
 
 func TestSkillServiceDelegatesReadListDeleteMethods(t *testing.T) {
 	backend := &recordingSkillBackend{
-		getSkillResult:      &skill.Skill{ID: "skill_get", Type: "skill", Source: "custom"},
-		listSkillsResult:    skill.SkillListResult{Data: []*skill.Skill{{ID: "skill_list", Type: "skill", Source: "custom"}}},
+		getSkillResult:      &skill.Skill{ID: "skill_get", Type: "skill", Source: skill.SkillSource{Type: "custom"}},
+		listSkillsResult:    skill.SkillListResult{Data: []*skill.Skill{{ID: "skill_list", Type: "skill", Source: skill.SkillSource{Type: "custom"}}}},
 		createVersionResult: &skill.SkillVersion{ID: "skill_version_created", Type: "skill_version"},
 		getVersionResult:    &skill.SkillVersion{ID: "skill_version_get", Type: "skill_version"},
 		listVersionsResult:  skill.SkillVersionListResult{Data: []*skill.SkillVersion{{ID: "skill_version_list", Type: "skill_version"}}},
@@ -639,4 +627,8 @@ func (b *recordingSkillBackend) callCounts() map[string]int {
 		"DeleteVersion":                b.deleteVersionCalls,
 		"ValidateAgentSkillReferences": b.validateAgentCalls,
 	}
+}
+
+func (b *recordingSkillBackend) ResolveSkillReferences(ctx context.Context, tx agent.Transaction, workspaceID string, refs []agent.SkillReference) ([]agent.SkillReference, error) {
+	return refs, b.ValidateAgentSkillReferences(ctx, tx, workspaceID, refs)
 }

@@ -376,8 +376,7 @@ func (v *recordingMCPOAuthValidator) Validate(_ context.Context, input vault.MCP
 			Status:          "valid",
 			ValidatedAt:     time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
 			HasRefreshToken: input.Auth.Refresh != nil && input.Auth.Refresh.RefreshToken != "",
-			Refresh:         &vault.CredentialValidationCheck{Status: "succeeded", HTTPResponse: &vault.CredentialValidationHTTPResponse{StatusCode: 200}},
-			MCPProbe:        &vault.CredentialValidationCheck{Method: "initialize", HTTPResponse: &vault.CredentialValidationHTTPResponse{StatusCode: 200}},
+			Refresh:         &vault.CredentialValidationCheck{Status: "succeeded"},
 		},
 	}, nil
 }
@@ -455,7 +454,6 @@ func TestListVaultsRejectsMalformedPageQuery(t *testing.T) {
 	cases := []string{
 		"/v1/vaults?limit=0",
 		"/v1/vaults?limit=abc",
-		"/v1/vaults?page=",
 		"/v1/vaults?include_archived=maybe",
 		"/v1/vaults?cursor=vlt_one",
 		"/v1/vaults?limit=1&limit=2",
@@ -964,7 +962,6 @@ func TestListCredentialsRejectsMalformedQueryBeforeParentLookup(t *testing.T) {
 		{name: "non positive limit", target: "/v1/vaults/vlt_parent/credentials?limit=0"},
 		{name: "duplicate limit", target: "/v1/vaults/vlt_parent/credentials?limit=1&limit=2"},
 		{name: "unknown parameter", target: "/v1/vaults/vlt_parent/credentials?cursor=cred_one"},
-		{name: "empty page", target: "/v1/vaults/vlt_parent/credentials?page="},
 		{name: "invalid include archived", target: "/v1/vaults/vlt_parent/credentials?include_archived=maybe"},
 	}
 
@@ -1748,7 +1745,7 @@ func TestValidateMCPOAuthCredentialRouteReturnsScrubbedDiagnostic(t *testing.T) 
 		response.ValidatedAt == "" ||
 		!response.HasRefreshToken ||
 		response.Refresh == nil ||
-		response.MCPProbe == nil {
+		response.MCPProbe != nil {
 		t.Fatalf("validation response = %+v", response)
 	}
 	if response.Auth != nil {

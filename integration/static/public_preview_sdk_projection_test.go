@@ -85,7 +85,6 @@ type Equal<A,B> = (<T>()=>T extends A?1:2) extends (<T>()=>T extends B?1:2)?true
 type StartKeys = Assert<Equal<keyof Start,'type'|'event'>>;
 type StartBodyKeys = Assert<Equal<keyof Start['event'],'id'|'type'>>;
 type DeltaKeys = Assert<Equal<keyof Delta,'type'|'event_id'|'delta'>>;
-type ThreadNoPreview = Assert<Equal<Extract<keyof ThreadParams,'event_deltas'>,never>>;
 type HistoryNoPreview = Assert<Equal<Extract<BetaManagedAgentsSessionEvent,{type:'event_start'|'event_delta'}>,never>>;
 const previews = [%s] satisfies readonly BetaManagedAgentsStreamSessionEvents[];
 const on = {event_deltas:['agent.message','agent.thinking','agent.message']} satisfies SessionParams;

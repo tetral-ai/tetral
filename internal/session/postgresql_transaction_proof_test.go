@@ -5,15 +5,19 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/agent"
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/files"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/skill"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -646,4 +650,215 @@ func loadQueueJobByDedupe(t *testing.T, db *sql.DB, workspaceID workspace.ID, de
 		t.Fatalf("load queue job: %v", err)
 	}
 	return row
+}
+
+// Session admission holds the shared Skill registry lock until commit, so a
+// concurrent Skill deletion waits and the admitted Session keeps its content.
+func TestPostgreSQLSessionSkillAdmissionSerializesDeletion(t *testing.T) {
+	env, service, skills, parent, configured := newSessionSkillProofEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	blocker := newBlockingSessionSkillResolver(skills)
+	defer blocker.unblock()
+	service.skills = blocker
+	type result struct {
+		session *Response
+		err     error
+	}
+	created := make(chan result, 1)
+	go func() {
+		value, err := service.Create(ctx, workspace.DefaultID, CreateRequest{Agent: AgentReference{ID: configured.ID}, EnvironmentID: "env_test"})
+		created <- result{value, err}
+	}()
+	select {
+	case <-blocker.entered:
+	case <-ctx.Done():
+		t.Fatal("Session did not reach Skill admission")
+	}
+	deleted := make(chan error, 1)
+	go func() { deleted <- skills.DeleteSkill(ctx, workspace.DefaultID, parent.ID) }()
+	waitForSkillRegistryLockWaiter(ctx, t, env, deleted)
+	blocker.unblock()
+	got := <-created
+	if got.err != nil || got.session == nil {
+		t.Fatalf("create-first admission = %+v", got)
+	}
+	if err := <-deleted; err != nil {
+		t.Fatal(err)
+	}
+	saved, err := service.store.Get(ctx, workspace.DefaultID, got.session.ID)
+	if err != nil || len(saved.ResolvedSkills) != 1 || saved.ResolvedSkills[0].Version != parent.LatestVersionID {
+		t.Fatalf("saved binding = %+v, %v", saved, err)
+	}
+	if err := service.store.WithWorkspaceTx(ctx, workspace.DefaultID, func(tx Transaction) error {
+		mounts, err := tx.(*postgresqlTransaction).loadMaterializationSkills(ctx, saved.ID)
+		if err != nil {
+			return err
+		}
+		if len(mounts) != 1 || mounts[0].Version != parent.LatestVersionID {
+			t.Fatalf("retained mounts = %+v", mounts)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("created-first Session lost deleted content: %v", err)
+	}
+}
+
+// skillRegistryLockClass is the advisory lock class ("skil") of the workspace
+// Skill registry lock.
+const skillRegistryLockClass int64 = 0x736B696C
+
+// waitForSkillRegistryLockWaiter returns once a transaction is queued on the
+// Skill registry advisory lock, and fails if done reports first.
+func waitForSkillRegistryLockWaiter(ctx context.Context, t *testing.T, env *sessionPostgreSQLProofEnv, done <-chan error) {
+	t.Helper()
+	for {
+		var waiting int
+		if err := env.admin.QueryRowContext(ctx, `SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND granted=false AND classid=$1::oid`, skillRegistryLockClass).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting > 0 {
+			return
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("mutation bypassed the Session's registry lock: %v", err)
+		case <-ctx.Done():
+			t.Fatal("mutation did not wait for the Session's registry lock")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+func newSessionSkillProofEnv(t *testing.T) (*sessionPostgreSQLProofEnv, *Service, *skill.Service, *skill.Skill, *agent.Agent) {
+	t.Helper()
+	env := newSessionPostgreSQLProofEnv(t)
+	client := dbconnect.NewClientForTesting(env.runtime)
+	skills := skill.NewService(skill.NewPostgreSQLStore(client, blob.NewFakeBlobStore()), skill.WithPackageStageDir(t.TempDir()))
+	parent := uploadSessionProofSkill(t, skills, "", "first")
+	agents := agent.NewService(agent.NewPostgreSQLAgentStore(client), skills)
+	configured, err := agents.Create(context.Background(), workspace.DefaultID, agent.CreateAgentRequest{AgentConfig: agent.AgentConfig{
+		Name: "session-skills", Model: "anthropic/claude-opus-4-8", Tools: agent.RawArray{json.RawMessage(`{"type":"tetral_agent_toolset","family":"claude"}`)},
+		Skills: agent.RawArray{json.RawMessage(fmt.Sprintf(`{"type":"custom","skill_id":%q}`, parent.ID))},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := env.newService(time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC))
+	service.agents = agents
+	service.skills = skills
+	return env, service, skills, parent, configured
+}
+
+// An empty skillID creates the parent; otherwise this uploads another version
+// through the same package validator and storage path used by API uploads.
+func uploadSessionProofSkill(t *testing.T, skills *skill.Service, skillID, description string) *skill.Skill {
+	t.Helper()
+	var budget skill.UploadBudget
+	part, err := skill.StageUploadPart(context.Background(), strings.NewReader("---\nname: session-skill\ndescription: "+description+"\n---\n"+description+"\n"), t.TempDir(), "package-root/SKILL.md", &budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := []skill.StagedUploadPart{part}
+	defer func() { _ = skill.CleanupStagedUploadParts(parts) }()
+	if skillID == "" {
+		parent, err := skills.CreateSkill(context.Background(), workspace.DefaultID, skill.CreateSkillInput{Files: parts})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parent
+	}
+	if _, err := skills.CreateVersion(context.Background(), workspace.DefaultID, skillID, skill.CreateVersionInput{Files: parts}); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := skills.GetSkill(context.Background(), workspace.DefaultID, skillID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parent
+}
+
+type blockingSessionSkillResolver struct {
+	real    SkillResolver
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingSessionSkillResolver(real SkillResolver) *blockingSessionSkillResolver {
+	return &blockingSessionSkillResolver{real: real, entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (b *blockingSessionSkillResolver) unblock() { b.once.Do(func() { close(b.release) }) }
+
+// ResolveSkillReferences resolves inside the caller's transaction, so the
+// registry lock is held, then waits until the test releases it.
+func (b *blockingSessionSkillResolver) ResolveSkillReferences(ctx context.Context, tx agent.Transaction, ws string, refs []agent.SkillReference) ([]agent.SkillReference, error) {
+	resolved, err := b.real.ResolveSkillReferences(ctx, tx, ws, refs)
+	if err != nil {
+		return nil, err
+	}
+	close(b.entered)
+	select {
+	case <-b.release:
+		return resolved, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// Skill reference admissions in one workspace hold the registry lock only in
+// shared form: while one Session admission holds it, an Agent update and
+// another Session admission still commit.
+func TestPostgreSQLSkillReferenceAdmissionsDoNotWaitForEachOther(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(ctx context.Context, service *Service, configured *agent.Agent) error
+	}{
+		{"agent update", func(ctx context.Context, service *Service, configured *agent.Agent) error {
+			cfg := configured.AgentConfig
+			cfg.Name = "concurrent-update"
+			_, err := service.agents.(*agent.Service).Update(ctx, workspace.DefaultID, configured.ID, agent.UpdateAgentRequest{Version: configured.Version, AgentConfig: cfg})
+			return err
+		}},
+		{"session create", func(ctx context.Context, service *Service, configured *agent.Agent) error {
+			_, err := service.Create(ctx, workspace.DefaultID, CreateRequest{Agent: AgentReference{ID: configured.ID}, EnvironmentID: "env_test"})
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, service, skills, parent, configured := newSessionSkillProofEnv(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			blocker := newBlockingSessionSkillResolver(skills)
+			defer blocker.unblock()
+			holder := env.newService(time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC))
+			holder.agents = service.agents
+			holder.skills = blocker
+			holder.sessionIDStrategy = fixedSessionIDs("sesn_lock_holder")
+			held := make(chan error, 1)
+			go func() {
+				_, err := holder.Create(ctx, workspace.DefaultID, CreateRequest{Agent: AgentReference{ID: configured.ID}, EnvironmentID: "env_test"})
+				held <- err
+			}()
+			select {
+			case <-blocker.entered:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			waitCtx, waitCancel := context.WithTimeout(ctx, 3*time.Second)
+			defer waitCancel()
+			if err := tc.run(waitCtx, service, configured); err != nil {
+				t.Fatalf("%s while another admission holds the registry lock: %v", tc.name, err)
+			}
+			blocker.unblock()
+			if err := <-held; err != nil {
+				t.Fatalf("lock-holding Session admission: %v", err)
+			}
+			saved, err := holder.store.Get(ctx, workspace.DefaultID, "sesn_lock_holder")
+			if err != nil || saved.AgentVersion != configured.Version || len(saved.ResolvedSkills) != 1 || saved.ResolvedSkills[0].Version != parent.LatestVersionID {
+				t.Fatalf("lock-holding Session snapshot = %+v, %v", saved, err)
+			}
+		})
+	}
 }

@@ -207,9 +207,7 @@ func DecodeUpdateStoreRequest(body []byte) (StorePatch, error) {
 		switch key {
 		case "name":
 			if isJSONNull(value) {
-				patch.NameClear = true
-				patch.MutablePresent = true
-				continue
+				return StorePatch{}, &ValidationError{Message: "name must be a string"}
 			}
 			var name string
 			if err := json.Unmarshal(value, &name); err != nil {

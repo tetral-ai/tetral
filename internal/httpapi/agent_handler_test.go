@@ -1108,7 +1108,6 @@ func TestListAgentsRejectsMalformedQueryParams(t *testing.T) {
 		"/v1/agents?limit=-1",
 		"/v1/agents?limit=abc",
 		"/v1/agents?limit=1&limit=2",
-		"/v1/agents?page=",
 		"/v1/agents?include_archived=maybe",
 		"/v1/agents?created_at%5Bgte%5D=not-time",
 		"/v1/agents?created_at%5Blte%5D=not-time",

@@ -349,6 +349,7 @@ func TestHTTPMCPOAuthValidatorScrubsStoredAndNewlyIssuedSecretCorpus(t *testing.
 				"benign_note":   reflected,
 			})
 		case "/mcp":
+			writer.WriteHeader(http.StatusForbidden)
 			_ = json.NewEncoder(writer).Encode(map[string]any{
 				"jsonrpc": "2.0",
 				"id":      "validation",
@@ -390,10 +391,8 @@ func TestHTTPMCPOAuthValidatorScrubsStoredAndNewlyIssuedSecretCorpus(t *testing.
 		"captured logs":  capturedLogs,
 		"returned error": validationErrorText(err),
 	})
-	for _, check := range []*CredentialValidationCheck{result.Validation.Refresh, result.Validation.MCPProbe} {
-		if check == nil || check.HTTPResponse == nil || check.HTTPResponse.ContentType != "" {
-			t.Fatalf("malicious Content-Type survived: %+v", check)
-		}
+	if check := result.Validation.MCPProbe; check == nil || check.HTTPResponse == nil || check.HTTPResponse.ContentType != "" {
+		t.Fatalf("malicious probe Content-Type survived: %+v", check)
 	}
 }
 

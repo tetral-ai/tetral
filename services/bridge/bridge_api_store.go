@@ -687,18 +687,6 @@ func bridgeRawJSON(value string, fallback string) json.RawMessage {
 	return json.RawMessage(fallback)
 }
 
-func bridgeJSONFieldRaw(raw json.RawMessage, field string, fallback string) json.RawMessage {
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &object); err != nil {
-		return json.RawMessage(fallback)
-	}
-	value, ok := object[field]
-	if !ok || !json.Valid(value) {
-		return json.RawMessage(fallback)
-	}
-	return value
-}
-
 func nullableSQLString(value string) sql.NullString {
 	return sql.NullString{String: value, Valid: value != ""}
 }

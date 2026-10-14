@@ -23,6 +23,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/memory"
 	"github.com/tetral-ai/tetral/internal/session"
+	"github.com/tetral-ai/tetral/internal/skill"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
@@ -81,6 +82,7 @@ func newSessionIntegrationEnvOn(t *testing.T, runtimeDB, adminDB *sql.DB) *sessi
 		sessionStore,
 		sessionIntegrationEncryptor{},
 		session.WithClock(func() time.Time { return testEnv.clock }),
+		session.WithSkillResolver(skill.NewService(skill.NewPostgreSQLStore(runtimeClient, blob.NewFakeBlobStore()))),
 	)
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
 		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_session_integration"), nil //nolint:gosec // G101: synthetic test API key id
@@ -116,7 +118,7 @@ func TestSessionIntegrationCreateListResourcePathUsesServiceStoreAndFiles(t *tes
 	if created.Status != string(session.StatusIdle) || created.Agent.Version != 2 {
 		t.Fatalf("created session status/version = %s/%d", created.Status, created.Agent.Version)
 	}
-	if len(created.Agent.Skills) != 1 || created.Agent.Skills[0]["id"] != "skill_alpha" {
+	if len(created.Agent.Skills) != 1 || created.Agent.Skills[0]["skill_id"] != "skill_alpha" {
 		t.Fatalf("agent skills = %#v; want skill_alpha from service assembly", created.Agent.Skills)
 	}
 	if strings.Join(created.VaultIDs, ",") != "vlt_b,vlt_a" {
@@ -817,6 +819,13 @@ func countSessionIntegrationRows(t *testing.T, db *sql.DB, query string, workspa
 func seedSessionIntegrationReferences(t *testing.T, db *sql.DB, workspaceID workspace.ID) {
 	t.Helper()
 	seedHTTPWorkspace(t, db, workspaceID)
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO skills(workspace_id,skill_id,latest_version,created_at,updated_at) VALUES ($1,'skill_alpha','skver_http',now(),now()) ON CONFLICT DO NOTHING`, string(workspaceID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO skill_versions(workspace_id,skill_id,skill_version_id,version,name,description,directory,blob_key,size_bytes,sha256,created_at) VALUES ($1,'skill_alpha','skver_http','skver_http','http-skill','HTTP fixture','http-skill','http.zip',1,'hash',now()) ON CONFLICT DO NOTHING`, string(workspaceID)); err != nil {
+		t.Fatal(err)
+	}
+
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO agents (workspace_id, id, name, version, created_at, updated_at)
 		 VALUES ($1, $2, 'HTTP Session Agent', 3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
@@ -834,7 +843,7 @@ func seedSessionIntegrationReferences(t *testing.T, db *sql.DB, workspaceID work
 			"agv_http_session_"+string(rune('0'+version)),
 			sessionIntegrationAgentID,
 			version,
-			`{"name":"HTTP Session Agent","model":"anthropic/claude-opus-4-8","skills":[{"type":"custom","id":"skill_alpha"}]}`,
+			`{"name":"HTTP Session Agent","model":"anthropic/claude-opus-4-8","skills":[{"type":"custom","skill_id":"skill_alpha","version":"latest"}]}`,
 			"hash-http-session-"+string(rune('0'+version)),
 		); err != nil {
 			t.Fatalf("seed agent version %d: %v", version, err)
@@ -919,7 +928,7 @@ func newSessionIntegrationAgent(version int) *agent.Agent {
 			Name:   "HTTP Session Agent",
 			Model:  "anthropic/claude-opus-4-8",
 			Tools:  agent.RawArray{json.RawMessage(`{"type":"tetral_agent_toolset","family":"claude"}`)},
-			Skills: agent.RawArray{json.RawMessage(`{"type":"custom","id":"skill_alpha"}`)},
+			Skills: agent.RawArray{json.RawMessage(`{"type":"custom","skill_id":"skill_alpha","version":"latest"}`)},
 		},
 		CreatedAt: now,
 		UpdatedAt: now,

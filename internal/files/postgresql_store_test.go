@@ -107,11 +107,6 @@ func isFilesNotFound(err error) bool {
 	return errors.As(err, &notFound)
 }
 
-func isFilesValidation(err error) bool {
-	var validation *files.ValidationError
-	return errors.As(err, &validation)
-}
-
 func TestProductionStoreQuotaConstantsMatchContract(t *testing.T) {
 	if files.MaxRetainedBytesPerWorkspace != 500000000000 {
 		t.Fatalf("MaxRetainedBytesPerWorkspace = %d; want 500000000000", files.MaxRetainedBytesPerWorkspace)
@@ -589,139 +584,112 @@ func TestCreateUploadedFileDifferentWorkspacesDoNotBlockOnFilesLock(t *testing.T
 
 func TestListFilesEmptyAndDefaultLimitShape(t *testing.T) {
 	env := newFilesStoreEnv(t, files.StoreLimits{})
-
-	empty, err := env.store.ListFiles(context.Background(), workspace.DefaultID, files.ListOptions{})
+	service := files.NewService(env.store)
+	empty, err := service.ListFiles(context.Background(), workspace.DefaultID, files.ListOptions{})
 	if err != nil {
-		t.Fatalf("ListFiles empty: %v", err)
+		t.Fatal(err)
 	}
-	if len(empty.Data) != 0 || empty.FirstID != nil || empty.LastID != nil || empty.HasMore {
-		t.Fatalf("empty list = %+v; want empty data, nil cursors, has_more=false", empty)
+	if len(empty.Data) != 0 || empty.NextPage != nil {
+		t.Fatalf("empty list = %+v", empty)
 	}
-
 	for i := 0; i < 25; i++ {
 		seedVisibleFile(t, env, workspace.DefaultID, fmt.Sprintf("file_list_%02d", i), fmt.Sprintf("fobj_list_%02d", i), false, "", "")
 	}
-	got, err := env.store.ListFiles(context.Background(), workspace.DefaultID, files.ListOptions{})
+	got, err := service.ListFiles(context.Background(), workspace.DefaultID, files.ListOptions{})
 	if err != nil {
-		t.Fatalf("ListFiles default: %v", err)
+		t.Fatal(err)
 	}
-	if len(got.Data) != 20 {
-		t.Fatalf("default list length = %d; want 20", len(got.Data))
-	}
-	if got.FirstID == nil || *got.FirstID != "file_list_00" {
-		t.Fatalf("first_id = %v; want file_list_00", got.FirstID)
-	}
-	if got.LastID == nil || *got.LastID != "file_list_19" {
-		t.Fatalf("last_id = %v; want file_list_19", got.LastID)
-	}
-	if !got.HasMore {
-		t.Fatal("has_more = false; want true")
+	if len(got.Data) != 20 || got.Data[0].ID != "file_list_00" || got.Data[19].ID != "file_list_19" || got.NextPage == nil {
+		t.Fatalf("default page = %+v", got)
 	}
 }
 
 func TestListFilesLimitsOrderingDeletedAndCursors(t *testing.T) {
 	env := newFilesStoreEnv(t, files.StoreLimits{})
+	service := files.NewService(env.store)
 	for i := 0; i < 5; i++ {
 		seedVisibleFile(t, env, workspace.DefaultID, fmt.Sprintf("file_page_%02d", i), fmt.Sprintf("fobj_page_%02d", i), false, "", "")
 	}
 	seedDeletedFile(t, env.admin, workspace.DefaultID, "file_page_deleted", "fobj_page_deleted")
-
-	first, err := env.store.ListFiles(context.Background(), workspace.DefaultID, files.ListOptions{Limit: 1})
+	all, err := service.ListFiles(context.Background(), workspace.DefaultID, files.ListOptions{Limit: 1000})
 	if err != nil {
-		t.Fatalf("ListFiles limit 1: %v", err)
+		t.Fatal(err)
 	}
-	if idsOf(first.Data) != "file_page_00" || !first.HasMore {
-		t.Fatalf("limit 1 result ids=%s has_more=%v; want first row and has_more", idsOf(first.Data), first.HasMore)
+	if idsOf(all.Data) != "file_page_00,file_page_01,file_page_02,file_page_03,file_page_04" || all.NextPage != nil {
+		t.Fatalf("complete list = %+v", all)
 	}
-
-	thousand, err := env.store.ListFiles(context.Background(), workspace.DefaultID, files.ListOptions{Limit: 1000})
-	if err != nil {
-		t.Fatalf("ListFiles limit 1000: %v", err)
+	var page string
+	var got []string
+	for i := 0; i < 3; i++ {
+		result, err := service.ListFiles(context.Background(), workspace.DefaultID, files.ListOptions{Limit: 2, Page: page})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range result.Data {
+			got = append(got, item.ID)
+		}
+		if i == 0 {
+			// The cursor carries a sequence; continuation must not look up its deleted anchor.
+			if _, err := service.DeleteFile(context.Background(), workspace.DefaultID, result.Data[len(result.Data)-1].ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if i == 2 {
+			if result.NextPage != nil {
+				t.Fatalf("last page has cursor: %+v", result)
+			}
+		} else {
+			if result.NextPage == nil {
+				t.Fatalf("page %d ended early: %+v", i, result)
+			}
+			page = *result.NextPage
+		}
 	}
-	if idsOf(thousand.Data) != "file_page_00,file_page_01,file_page_02,file_page_03,file_page_04" {
-		t.Fatalf("limit 1000 ids = %s", idsOf(thousand.Data))
-	}
-	if thousand.HasMore {
-		t.Fatal("limit 1000 has_more = true; want false")
-	}
-	if thousand.FirstID == nil || *thousand.FirstID != "file_page_00" || thousand.LastID == nil || *thousand.LastID != "file_page_04" {
-		t.Fatalf("unexpected first/last: %+v", thousand)
-	}
-
-	after, err := env.store.ListFiles(context.Background(), workspace.DefaultID, files.ListOptions{Limit: 2, AfterID: "file_page_01"})
-	if err != nil {
-		t.Fatalf("ListFiles after: %v", err)
-	}
-	if idsOf(after.Data) != "file_page_02,file_page_03" || !after.HasMore {
-		t.Fatalf("after ids=%s has_more=%v; want page_02,page_03 and has_more", idsOf(after.Data), after.HasMore)
-	}
-
-	before, err := env.store.ListFiles(context.Background(), workspace.DefaultID, files.ListOptions{BeforeID: "file_page_03"})
-	if err != nil {
-		t.Fatalf("ListFiles before: %v", err)
-	}
-	if idsOf(before.Data) != "file_page_00,file_page_01,file_page_02" || before.HasMore {
-		t.Fatalf("before ids=%s has_more=%v; want first three and no more", idsOf(before.Data), before.HasMore)
-	}
-
-	between, err := env.store.ListFiles(context.Background(), workspace.DefaultID, files.ListOptions{AfterID: "file_page_01", BeforeID: "file_page_04"})
-	if err != nil {
-		t.Fatalf("ListFiles between: %v", err)
-	}
-	if idsOf(between.Data) != "file_page_02,file_page_03" || between.HasMore {
-		t.Fatalf("between ids=%s has_more=%v; want page_02,page_03 and no more", idsOf(between.Data), between.HasMore)
-	}
-
-	inverted, err := env.store.ListFiles(context.Background(), workspace.DefaultID, files.ListOptions{AfterID: "file_page_04", BeforeID: "file_page_01"})
-	if err != nil {
-		t.Fatalf("ListFiles inverted: %v", err)
-	}
-	if len(inverted.Data) != 0 || inverted.FirstID != nil || inverted.LastID != nil || inverted.HasMore {
-		t.Fatalf("inverted range = %+v; want empty", inverted)
+	if strings.Join(got, ",") != "file_page_00,file_page_01,file_page_02,file_page_03,file_page_04" {
+		t.Fatalf("pagination duplicated or omitted files: %v", got)
 	}
 }
 
 func TestListFilesCursorValidationAndScopedMetadata(t *testing.T) {
 	env := newFilesStoreEnv(t, files.StoreLimits{})
+	service := files.NewService(env.store)
 	workspaceB := workspace.ID("workspace_files_list_b")
 	seedWorkspace(t, env.admin, workspaceB)
 	seedFilesSession(t, env.admin, workspace.DefaultID, "sesn_a", false)
 	seedFilesSession(t, env.admin, workspace.DefaultID, "sesn_b", false)
 	seedVisibleFile(t, env, workspace.DefaultID, "file_original", "fobj_original", false, "", "")
 	seedVisibleFile(t, env, workspace.DefaultID, "file_session_a", "fobj_session_a", false, "session", "sesn_a")
+	seedVisibleFile(t, env, workspace.DefaultID, "file_session_a2", "fobj_session_a2", false, "session", "sesn_a")
 	seedVisibleFile(t, env, workspace.DefaultID, "file_session_b", "fobj_session_b", false, "session", "sesn_b")
-	seedDeletedFile(t, env.admin, workspace.DefaultID, "file_deleted_cursor", "fobj_deleted_cursor")
-	seedVisibleFile(t, env, workspaceB, "file_cross_cursor", "fobj_cross_cursor", false, "", "")
-
-	scoped, err := env.store.ListFiles(context.Background(), workspace.DefaultID, files.ListOptions{ScopeID: "sesn_a"})
+	scoped, err := service.ListFiles(context.Background(), workspace.DefaultID, files.ListOptions{Limit: 1, ScopeID: "sesn_a"})
 	if err != nil {
-		t.Fatalf("ListFiles scoped: %v", err)
+		t.Fatal(err)
 	}
-	if idsOf(scoped.Data) != "file_session_a" {
-		t.Fatalf("scoped ids = %s; want file_session_a", idsOf(scoped.Data))
+	if idsOf(scoped.Data) != "file_session_a" || scoped.NextPage == nil {
+		t.Fatalf("scoped page = %+v", scoped)
 	}
 	if scoped.Data[0].Scope == nil || scoped.Data[0].Scope.Type != "session" || scoped.Data[0].Scope.ID != "sesn_a" {
-		t.Fatalf("scoped metadata = %+v; want session/sesn_a", scoped.Data[0].Scope)
+		t.Fatalf("scope = %+v", scoped.Data[0].Scope)
 	}
-
+	next, err := service.ListFiles(context.Background(), workspace.DefaultID, files.ListOptions{Limit: 1, ScopeID: "sesn_a", Page: *scoped.NextPage})
+	if err != nil || idsOf(next.Data) != "file_session_a2" || next.NextPage != nil {
+		t.Fatalf("valid continuation = %+v, %v", next, err)
+	}
 	for _, tc := range []struct {
-		name    string
-		options files.ListOptions
+		name        string
+		ws          workspace.ID
+		scope, page string
 	}{
-		{name: "missing after", options: files.ListOptions{AfterID: "file_missing"}},
-		{name: "deleted after", options: files.ListOptions{AfterID: "file_deleted_cursor"}},
-		{name: "cross workspace after", options: files.ListOptions{AfterID: "file_cross_cursor"}},
-		{name: "scope mismatch after", options: files.ListOptions{AfterID: "file_session_b", ScopeID: "sesn_a"}},
-		{name: "missing before", options: files.ListOptions{BeforeID: "file_missing"}},
-		{name: "deleted before", options: files.ListOptions{BeforeID: "file_deleted_cursor"}},
-		{name: "cross workspace before", options: files.ListOptions{BeforeID: "file_cross_cursor"}},
-		{name: "scope mismatch before", options: files.ListOptions{BeforeID: "file_session_b", ScopeID: "sesn_a"}},
+		{"cross workspace", workspaceB, "sesn_a", *scoped.NextPage},
+		{"scope mismatch", workspace.DefaultID, "sesn_b", *scoped.NextPage},
+		{"scope omitted", workspace.DefaultID, "", *scoped.NextPage},
+		{"malformed", workspace.DefaultID, "sesn_a", "not-a-page-token"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := env.store.ListFiles(context.Background(), workspace.DefaultID, tc.options)
-			var validation *files.ValidationError
-			if !errors.As(err, &validation) {
-				t.Fatalf("ListFiles error = %T %v; want ValidationError", err, err)
+			_, err := service.ListFiles(context.Background(), tc.ws, files.ListOptions{Limit: 1, ScopeID: tc.scope, Page: tc.page})
+			var invalid *files.ValidationError
+			if !errors.As(err, &invalid) || invalid.Message != "invalid page token" {
+				t.Fatalf("invalid continuation error = %T %v", err, err)
 			}
 		})
 	}
@@ -923,9 +891,7 @@ func TestSessionScopedFilesUseDurableSessionVisibilityWithoutSandboxStateGate(t 
 	if len(scoped.Data) != 0 || scoped.HasMore {
 		t.Fatalf("hidden scoped ListFiles = %+v; want empty", scoped)
 	}
-	if _, err := env.store.ListFiles(ctx, workspace.DefaultID, files.ListOptions{AfterID: "file_session_deleted"}); !isFilesValidation(err) {
-		t.Fatalf("hidden cursor err = %T %v; want ValidationError", err, err)
-	}
+
 }
 
 func TestRetainedByteQuotaCountsObjectsAcrossSharedAndDeletedIdentities(t *testing.T) {

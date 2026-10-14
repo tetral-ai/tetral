@@ -506,7 +506,7 @@ func requireStrictQuery(r *http.Request, allowed []string) error {
 		if len(rawValues) != 1 {
 			return &memory.ValidationError{Message: "duplicate query parameter " + key}
 		}
-		if rawValues[0] == "" {
+		if rawValues[0] == "" && !emptyQueryValueAllowed(key) {
 			return &memory.ValidationError{Message: "empty query parameter " + key}
 		}
 		if _, ok := allowedSet[key]; !ok {

@@ -80,6 +80,27 @@ auto-delete removes them, under the interval the previous Sandbox service set
 on each one at creation (`TETRAL_SANDBOX_AUTO_DELETE_INTERVAL`, 720h in the
 previous manifests and chart), unless they are deleted there by hand.
 
+## SDK contract changes
+
+Compared with earlier prerelease builds of this stack, public SDK-facing
+requests and responses change as follows:
+
+| Surface | Earlier prerelease behavior | Final behavior | Caller action |
+|---|---|---|---|
+| Workspace header | `anthropic-workspace-id` was ignored | When supplied, exactly one nonempty value must match the authenticated workspace; mismatches, empty and repeated values return `403 permission_error` and record an authorization denial | Omit the header or send the token's workspace once; it cannot select a different workspace |
+| MCP OAuth refresh validation | Successful refreshes, and connection errors after a failed body read, included a status-only HTTP response object | `refresh.http_response` is `null` unless refresh status is `failed`; a failed refresh reports the status code and truncation flag with empty `body` and `content_type` | Handle explicit `null` for successful refreshes and connection errors |
+| Models | No lifecycle, retirement or line fields | List and retrieve include `lifecycle: "active"`, `deprecated_at: null`, `retires_at: null`, and `line` (`opus`, `fable`, or `null`) | Treat lifecycle as Engine availability, not the provider's retirement schedule |
+| Memory service attribution | Memory history service actors were `service_actor` with `service_id` | `service_account_actor` with `service_account_id`; the value is still the stable Engine identity ID, and stored actor types and authentication are unchanged | Switch to the SDK's `service_account_actor` discriminator and `service_account_id` field |
+| Memory store name | `name: null` on update cleared the name, and responses could return `name: null` | Responses always return a string `name`; an update with `name: null` returns `400 invalid_request_error` | Omit `name` to keep it, or send a non-empty name |
+| Session budget | Session responses had no `budget` field | Session responses include `budget: null`; budget configuration and enforcement remain unsupported | Accept the explicit `null` |
+| MCP OAuth validation | `mcp_probe` was always an object, and `refresh` reported `succeeded` or `no_refresh_token` even when no token exchange ran | `mcp_probe` is `null` when the probe succeeds; `refresh` is `null` unless an exchange ran or the probe got a 401 with no stored refresh token | Treat `null` as "nothing to report" for each check |
+| Idle events and Thread workflow fields | `session.status_idle`, `session.thread_status_idle`, `session.thread_created` and the Session Thread object had no such fields | Idle events include `stop_details: null`; `session.thread_created` and the Session Thread object include `workflow_run_id: null`. Engine produces no refusal details or workflow runs | Use the SDK 0.133.0 types, which include these fields |
+| List page cursor | An empty `page` query value returned `400 invalid_request_error` on every API list route | An empty `page`, which is how the SDK sends `page: null`, returns the first page; other empty query values still return 400 | None; a manual pagination loop can start from `page: null` |
+
+The workspace-header check covers API, Auth API-key and Event Stream public
+business routes. OAuth token issuance, health endpoints, Bridge, git-proxy and
+internal services remain outside that check.
+
 ## Database roles and Secret keys
 
 | | Previous | Final |
@@ -398,3 +419,41 @@ planning and alerting do not assume more.
 | Feed retention | Change rows can be pruned after 24 hours; connection age is unlimited. Only eligible positions a viewer had not yet read close its stream, through the existing reader-failure close; there is no new error frame and no silent cursor skip. |
 | Compaction | A compaction checkpoint accepts only text parts, including empty text, within the existing size bounds; reasoning, Tool call and Tool result parts are `InvalidArgument`. The shipped Runtime already sends text only. |
 | Schema | Fresh install only; previous databases are rebuilt, not migrated. Event and message history is retained for the life of the database; Session deletion is a tombstone, not a purge. |
+
+## Files pagination and upload names
+
+Files lists now accept `limit` and `page`, returning `{data, next_page}`.
+`after_id` and `before_id` return 400. Upgrade callers together with Engine;
+old SDK pagination cannot traverse the new envelope. Cursors are signed and
+bound to workspace and scope, and survive deletion of their last file.
+
+An omitted or empty upload filename now becomes `unnamed`, with an extension
+from the fixed mapping for known MIME types. Path-qualified names keep only
+the basename; a name without one, such as `dir/..`, becomes `unnamed` as well.
+Previously empty names were rejected and path text was stored.
+
+## Skill versions and Session binding
+
+Upgrade callers with Engine to use `display_name` (at most 255 characters,
+single line without controls), `latest_version_id`, and `source: {type: "custom"}`.
+Omitting `display_name` uses SKILL.md's name. The old `display_title` request
+field is rejected. Version responses omit `version` and `directory`, and lists
+omit `has_more`. Address versions by their returned `skver_` ID; old timestamp
+addressing fails. Only version GET accepts `latest`. All versions of a skill
+must keep the first version's frontmatter name.
+
+Session creation now resolves and saves concrete Skill versions transactionally.
+Session/Thread responses and Runtime loading return and use those saved versions.
+An existing Session no longer changes packages when a later version is uploaded
+or deleted. Agent `latest` remains a choice for future Sessions.
+
+Deleting a skill now soft-deletes all versions even when Agents reference it.
+Existing Sessions keep their packages; Agent reads remain unchanged, but Agent
+writes retaining the deleted reference and new Sessions using it return 400.
+Deleting a skill's last version alone returns 400; deleting its latest version
+when others remain selects the previous active version for future Sessions.
+
+The added `sessions.resolved_skills_json` column and non-null Skills latest
+pointer change the baseline checksum. Prepare a new empty database and isolated
+object namespace. Existing databases fail startup verification; no data migration
+or reference backfill is provided.

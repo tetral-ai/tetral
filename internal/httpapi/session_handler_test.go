@@ -429,7 +429,6 @@ func TestListSessionsRejectsMalformedQueryParameters(t *testing.T) {
 		"/v1/sessions?limit=",
 		"/v1/sessions?limit=abc",
 		"/v1/sessions?limit=0",
-		"/v1/sessions?page=",
 		"/v1/sessions?limit=%zz",
 		"/v1/sessions?limit=1;page=abc",
 	} {
@@ -523,7 +522,6 @@ func TestListSessionResourcesRejectsMalformedQueryParameters(t *testing.T) {
 		"/v1/sessions/sesn_test/resources?limit=",
 		"/v1/sessions/sesn_test/resources?limit=abc",
 		"/v1/sessions/sesn_test/resources?limit=0",
-		"/v1/sessions/sesn_test/resources?page=",
 	} {
 		t.Run(path, func(t *testing.T) {
 			recorder := httptest.NewRecorder()

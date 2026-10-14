@@ -572,3 +572,7 @@ submission or one worker observation with completion of durable business work.
 
 Fixed seconds buckets and replica percentile queries follow the
 [shared operation duration contract](../../internal/workload/README.md#operation-durations).
+
+Skill materialization reads concrete references saved on the Session. Later
+uploads or soft deletion of a Skill/version do not change an existing Session's
+package selection; retained version rows and blobs remain readable.

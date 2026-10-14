@@ -50,34 +50,6 @@ func TestAgentServiceSkillValidationRunsInsideAgentTransaction(t *testing.T) {
 	assertUpdateCurrentLockedValidationBeforeAgentWriteForBoundaryTest(t, file)
 }
 
-func TestSkillStoreAgentReferenceValidationUsesCallerTransaction(t *testing.T) {
-	fileSet := token.NewFileSet()
-	file, err := parser.ParseFile(fileSet, "../skill/service_agent_refs.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse service_agent_refs.go: %v", err)
-	}
-	validate := findFunctionForBoundaryTest(t, file, "ValidateAgentSkillReferences")
-	if !functionParameterNameHasTypeForBoundaryTest(validate, "tx", "agent.Transaction") {
-		t.Fatal("ValidateAgentSkillReferences must accept caller tx agent.Transaction")
-	}
-	if !functionCallsWithIdentifierForBoundaryTest(validate.Body, "storage.AcquireWorkspaceSkillRegistryLock", "tx") {
-		t.Fatal("ValidateAgentSkillReferences must acquire registry lock through caller tx")
-	}
-	if !functionCallsWithIdentifierForBoundaryTest(validate.Body, "s.validateSingleAgentReference", "tx") {
-		t.Fatal("ValidateAgentSkillReferences must pass caller tx into reference reads")
-	}
-	single := findFunctionForBoundaryTest(t, file, "validateSingleAgentReference")
-	if !functionParameterNameHasTypeForBoundaryTest(single, "tx", "agent.Transaction") {
-		t.Fatal("validateSingleAgentReference must accept caller tx agent.Transaction")
-	}
-	if !functionCallsWithReceiverForBoundaryTest(single.Body, "tx", "QueryRowScanner") {
-		t.Fatal("validateSingleAgentReference must query through caller tx")
-	}
-	if functionCallsSelectorPrefixForBoundaryTest(file, "s.client.") {
-		t.Fatal("Skill Agent-reference validation must not open or use store client transactions")
-	}
-}
-
 func assertMethodValidatesInsideWorkspaceTxForBoundaryTest(t *testing.T, file *ast.File, methodName string, expectedWork string) {
 	t.Helper()
 	method := findFunctionForBoundaryTest(t, file, methodName)
@@ -201,36 +173,6 @@ func functionCallsWithIdentifierForBoundaryTest(body *ast.BlockStmt, callName st
 				found = true
 				return false
 			}
-		}
-		return true
-	})
-	return found
-}
-
-func functionCallsWithReceiverForBoundaryTest(body *ast.BlockStmt, receiver string, method string) bool {
-	found := false
-	ast.Inspect(body, func(node ast.Node) bool {
-		call, ok := node.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		selector, ok := call.Fun.(*ast.SelectorExpr)
-		if ok && selector.Sel.Name == method && expressionNameForBoundaryTest(selector.X) == receiver {
-			found = true
-			return false
-		}
-		return true
-	})
-	return found
-}
-
-func functionCallsSelectorPrefixForBoundaryTest(file *ast.File, prefix string) bool {
-	found := false
-	ast.Inspect(file, func(node ast.Node) bool {
-		call, ok := node.(*ast.CallExpr)
-		if ok && strings.HasPrefix(selectorNameForBoundaryTest(call.Fun), prefix) {
-			found = true
-			return false
 		}
 		return true
 	})

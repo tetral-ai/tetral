@@ -177,13 +177,7 @@ type sessionSkillRef struct {
 func listSessionSkills(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string) ([]SkillMount, error) {
 	var configJSON string
 	err := tx.QueryRow(ctx,
-		`SELECT av.config_json
-		   FROM sessions s
-		   JOIN agent_versions av
-		     ON av.workspace_id = s.workspace_id
-		    AND av.id = s.agent_version_id
-		  WHERE s.workspace_id = $1
-		    AND s.id = $2`,
+		`SELECT s.resolved_skills_json FROM sessions s WHERE s.workspace_id = $1 AND s.id = $2`,
 		string(ws), sessionID,
 	).Scan(&configJSON)
 	if dbconnect.IsNoRows(err) {
@@ -192,21 +186,18 @@ func listSessionSkills(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, s
 	if err != nil {
 		return nil, err
 	}
-	var config struct {
-		Skills []sessionSkillRef `json:"skills"`
+	var refs []sessionSkillRef
+	if err := json.Unmarshal([]byte(configJSON), &refs); err != nil {
+		return nil, &ValidationError{Message: "session skill references are invalid"}
 	}
-	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
-		return nil, &ValidationError{Message: "session agent config is invalid"}
-	}
-	if len(config.Skills) == 0 {
+	if len(refs) == 0 {
 		return nil, nil
 	}
-	out := make([]SkillMount, 0, len(config.Skills))
-	for _, ref := range config.Skills {
-		if ref.SkillID == "" || ref.Version == "" {
+	out := make([]SkillMount, 0, len(refs))
+	for _, ref := range refs {
+		if ref.SkillID == "" || ref.Version == "" || ref.Version == "latest" {
 			return nil, &ValidationError{Message: "session agent skill reference is invalid"}
 		}
-		versionExpr := `CASE WHEN $3 = 'latest' THEN s.latest_version ELSE $3 END`
 		var mount SkillMount
 		err := tx.QueryRow(ctx,
 			`SELECT v.skill_id, v.skill_version_id, v.version, v.name, v.description, v.directory, v.blob_key, v.sha256, v.size_bytes
@@ -214,15 +205,13 @@ func listSessionSkills(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, s
 			   JOIN skill_versions v
 			     ON v.workspace_id = s.workspace_id
 			    AND v.skill_id = s.skill_id
-			    AND v.version = `+versionExpr+`
-			    AND v.deleted_at IS NULL
+			    AND v.version = $3
 			  WHERE s.workspace_id = $1
-			    AND s.skill_id = $2
-			    AND s.deleted_at IS NULL`,
+			    AND s.skill_id = $2`,
 			string(ws), ref.SkillID, ref.Version,
 		).Scan(&mount.SkillID, &mount.SkillVersionID, &mount.Version, &mount.Name, &mount.Description, &mount.Directory, &mount.BlobKey, &mount.SHA256, &mount.SizeBytes)
 		if dbconnect.IsNoRows(err) {
-			return nil, &ValidationError{Message: "session agent skill reference is not active"}
+			return nil, &ValidationError{Message: "saved session skill version is missing"}
 		}
 		if err != nil {
 			return nil, err
@@ -250,7 +239,7 @@ type SessionSkillIndexEntry struct {
 	Directory      string `json:"directory"`
 }
 
-// ResolveSessionSkillIndex resolves the same immutable Agent skill references
+// ResolveSessionSkillIndex reads the immutable Session skill references
 // used by Sandbox materialization into Runtime context metadata.
 func ResolveSessionSkillIndex(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string) ([]SessionSkillIndexEntry, error) {
 	mounts, err := listSessionSkills(ctx, tx, ws, sessionID)

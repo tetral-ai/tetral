@@ -56,7 +56,7 @@ func TestSDKCompatibilitySkillVersionContentMatchesDurableZip(t *testing.T) {
 	parent := createSkillViaHTTP(t, router, "downloadable-skill")
 	version := createVersionViaHTTP(t, router, parent.ID, "downloadable-skill", "Download exact durable bytes.")
 
-	key := "skills/" + string(workspace.DefaultID) + "/" + parent.ID + "/versions/" + version.Version + "/package.zip"
+	key := "skills/" + string(workspace.DefaultID) + "/" + parent.ID + "/versions/" + version.ID + "/package.zip"
 	durableReader, err := env.blob.Get(context.Background(), key)
 	if err != nil {
 		t.Fatalf("Get durable package: %v", err)
@@ -69,7 +69,7 @@ func TestSDKCompatibilitySkillVersionContentMatchesDurableZip(t *testing.T) {
 		t.Fatalf("Close durable package: %v", err)
 	}
 
-	recorder := performRequest(t, router, http.MethodGet, "/v1/skills/"+parent.ID+"/versions/"+version.Version+"/content?beta=true")
+	recorder := performRequest(t, router, http.MethodGet, "/v1/skills/"+parent.ID+"/versions/"+version.ID+"/content?beta=true")
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200 body=%q", recorder.Code, recorder.Body.String())
 	}

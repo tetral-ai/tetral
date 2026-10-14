@@ -166,29 +166,17 @@ func (t *postgresqlTransaction) loadResourceMaterializationSnapshot(ctx context.
 }
 
 func (t *postgresqlTransaction) loadMaterializationSkills(ctx context.Context, sessionID string) ([]sessionSkillMount, error) {
-	var configJSON string
-	if err := t.tx.QueryRowScanner(ctx,
-		`SELECT av.config_json
-		   FROM sessions s
-		   JOIN agent_versions av
-		     ON av.workspace_id = s.workspace_id AND av.id = s.agent_version_id
-		  WHERE s.workspace_id = $1 AND s.id = $2`,
-		string(t.workspaceID), sessionID,
-	).Scan(&configJSON); err != nil {
+	var refsJSON string
+	if err := t.tx.QueryRowScanner(ctx, `SELECT resolved_skills_json FROM sessions WHERE workspace_id = $1 AND id = $2`, string(t.workspaceID), sessionID).Scan(&refsJSON); err != nil {
 		return nil, err
 	}
-	var config struct {
-		Skills []struct {
-			SkillID string `json:"skill_id"`
-			Version string `json:"version"`
-		} `json:"skills"`
+	var refs []ResolvedSkillReference
+	if err := json.Unmarshal([]byte(refsJSON), &refs); err != nil {
+		return nil, &ValidationError{Message: "session skill references are invalid"}
 	}
-	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
-		return nil, &ValidationError{Message: "session agent config is invalid"}
-	}
-	out := make([]sessionSkillMount, 0, len(config.Skills))
-	for _, ref := range config.Skills {
-		if ref.SkillID == "" || ref.Version == "" {
+	out := make([]sessionSkillMount, 0, len(refs))
+	for _, ref := range refs {
+		if ref.SkillID == "" || ref.Version == "" || ref.Version == "latest" {
 			return nil, &ValidationError{Message: "session agent skill reference is invalid"}
 		}
 		var mount sessionSkillMount
@@ -199,9 +187,8 @@ func (t *postgresqlTransaction) loadMaterializationSkills(ctx context.Context, s
 			   JOIN skill_versions v
 			     ON v.workspace_id = s.workspace_id
 			    AND v.skill_id = s.skill_id
-			    AND v.version = CASE WHEN $3 = 'latest' THEN s.latest_version ELSE $3 END
-			    AND v.deleted_at IS NULL
-			  WHERE s.workspace_id = $1 AND s.skill_id = $2 AND s.deleted_at IS NULL`,
+			    AND v.version = $3
+			  WHERE s.workspace_id = $1 AND s.skill_id = $2`,
 			string(t.workspaceID), ref.SkillID, ref.Version,
 		).Scan(
 			&mount.SkillID, &mount.SkillVersionID, &mount.Version, &mount.Name,

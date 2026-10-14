@@ -279,7 +279,7 @@ func TestServiceValidateMCPOAuthCredentialPersistsRefreshedMaterialThroughLocked
 				CredentialID: "cred_oauth",
 				VaultID:      "vlt_test",
 				Status:       "valid",
-				Refresh:      &CredentialValidationCheck{Status: "succeeded", HTTPResponse: &CredentialValidationHTTPResponse{StatusCode: 200}},
+				Refresh:      &CredentialValidationCheck{Status: "succeeded"},
 			},
 			RefreshedAuth: &CredentialAuth{
 				Type:        credentialAuthTypeMCPOAuth,

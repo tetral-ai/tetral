@@ -278,26 +278,26 @@ func assertJSONKeys(t *testing.T, body []byte, want []string) {
 	}
 }
 
-func TestSkillHandlerCreateSkillUsesFilesAndDisplayTitleShape(t *testing.T) {
+func TestSkillHandlerCreateSkillUsesFilesAndDisplayNameShape(t *testing.T) {
 	env := newSkillHandlerEnv(t)
 	router := env.router(t)
-	parts := append([]uploadPart{{name: "display_title", body: []byte("Financial Analysis")}}, individualSkillParts("financial-analysis", "Analyze CSV files.")...)
+	parts := append([]uploadPart{{name: "display_name", body: []byte("Financial Analysis")}}, individualSkillParts("financial-analysis", "Analyze CSV files.")...)
 	body, contentType := buildMultipartBody(t, parts)
 
 	rec := performMultipartRequest(t, router, http.MethodPost, "/v1/skills", contentType, body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d (body=%q); want 200", rec.Code, rec.Body.String())
 	}
-	assertJSONKeys(t, rec.Body.Bytes(), []string{"id", "type", "source", "display_title", "latest_version", "created_at", "updated_at"})
+	assertJSONKeys(t, rec.Body.Bytes(), []string{"id", "type", "source", "display_name", "latest_version_id", "created_at", "updated_at"})
 	got := decodeSkill(t, rec)
-	if !strings.HasPrefix(got.ID, skill.IDPrefix) || got.Type != "skill" || got.Source != "custom" {
+	if !strings.HasPrefix(got.ID, skill.IDPrefix) || got.Type != "skill" || got.Source.Type != "custom" {
 		t.Fatalf("Skill identity = %+v", got)
 	}
-	if got.DisplayTitle == nil || *got.DisplayTitle != "Financial Analysis" {
-		t.Fatalf("display_title = %v", got.DisplayTitle)
+	if got.DisplayName != "Financial Analysis" {
+		t.Fatalf("display_name = %v", got.DisplayName)
 	}
-	if got.LatestVersion == nil || *got.LatestVersion == "" {
-		t.Fatalf("latest_version = %v", got.LatestVersion)
+	if got.LatestVersionID == "" {
+		t.Fatalf("latest_version_id = %v", got.LatestVersionID)
 	}
 	if strings.Contains(rec.Body.String(), `"runtime"`) || strings.Contains(rec.Body.String(), `"current_version"`) || strings.Contains(rec.Body.String(), `"description"`) {
 		t.Fatalf("response leaked legacy fields: %s", rec.Body.String())
@@ -305,9 +305,16 @@ func TestSkillHandlerCreateSkillUsesFilesAndDisplayTitleShape(t *testing.T) {
 	if env.blob.Len() != 1 {
 		t.Fatalf("blob count = %d; want 1", env.blob.Len())
 	}
+	parts[0].name = "display_title"
+	body, contentType = buildMultipartBody(t, parts)
+	rejected := performMultipartRequest(t, router, http.MethodPost, "/v1/skills", contentType, body)
+	message := assertSkillUploadError(t, rejected, http.StatusBadRequest, "invalid_request_error")
+	if !strings.Contains(message, "display_title") {
+		t.Fatalf("wrong rejection reason: %s", message)
+	}
 }
 
-func TestSkillHandlerCreateSkillWithoutDisplayTitleAndZip(t *testing.T) {
+func TestSkillHandlerCreateSkillWithoutDisplayNameAndZip(t *testing.T) {
 	env := newSkillHandlerEnv(t)
 	router := env.router(t)
 	body, contentType := buildMultipartBody(t, []uploadPart{
@@ -318,22 +325,22 @@ func TestSkillHandlerCreateSkillWithoutDisplayTitleAndZip(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d (body=%q); want 200", rec.Code, rec.Body.String())
 	}
-	assertJSONKeys(t, rec.Body.Bytes(), []string{"id", "type", "source", "display_title", "latest_version", "created_at", "updated_at"})
+	assertJSONKeys(t, rec.Body.Bytes(), []string{"id", "type", "source", "display_name", "latest_version_id", "created_at", "updated_at"})
 	got := decodeSkill(t, rec)
-	if got.DisplayTitle != nil {
-		t.Fatalf("display_title = %v; want nil", got.DisplayTitle)
+	if got.DisplayName != "zip-skill" {
+		t.Fatalf("display_name = %v; want zip-skill", got.DisplayName)
 	}
-	if !strings.Contains(rec.Body.String(), `"display_title":null`) {
-		t.Fatalf("display_title must be explicit JSON null: %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), `"display_name":"zip-skill"`) {
+		t.Fatalf("display_name must default to frontmatter name: %s", rec.Body.String())
 	}
 }
 
-func TestSkillHandlerCreateVersionShapeAndRejectsDisplayTitle(t *testing.T) {
+func TestSkillHandlerCreateVersionShapeAndRejectsDisplayName(t *testing.T) {
 	env := newSkillHandlerEnv(t)
 	router := env.router(t)
 	parent := createSkillViaHTTP(t, router, "versioned-skill")
 
-	rejectedBody, rejectedType := buildMultipartBody(t, append([]uploadPart{{name: "display_title", body: []byte("Nope")}}, individualSkillParts("versioned-skill", "v2")...))
+	rejectedBody, rejectedType := buildMultipartBody(t, append([]uploadPart{{name: "display_name", body: []byte("Nope")}}, individualSkillParts("versioned-skill", "v2")...))
 	rejected := performMultipartRequest(t, router, http.MethodPost, "/v1/skills/"+parent.ID+"/versions", rejectedType, rejectedBody)
 	assertSkillUploadError(t, rejected, http.StatusBadRequest, "invalid_request_error")
 
@@ -341,15 +348,15 @@ func TestSkillHandlerCreateVersionShapeAndRejectsDisplayTitle(t *testing.T) {
 	if !strings.HasPrefix(version.ID, skill.VersionIDPrefix) || version.Type != "skill_version" || version.SkillID != parent.ID {
 		t.Fatalf("SkillVersion identity = %+v", version)
 	}
-	if version.Name != "versioned-skill" || version.Description != "Second version." || version.Directory != "finance" || version.Version == "" {
+	if version.Name != "versioned-skill" || version.Description != "Second version." || version.ID == "" {
 		t.Fatalf("SkillVersion metadata = %+v", version)
 	}
 
-	rec := performRequest(t, router, http.MethodGet, "/v1/skills/"+parent.ID+"/versions/"+version.Version)
+	rec := performRequest(t, router, http.MethodGet, "/v1/skills/"+parent.ID+"/versions/"+version.ID)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get version status = %d (body=%q); want 200", rec.Code, rec.Body.String())
 	}
-	assertJSONKeys(t, rec.Body.Bytes(), []string{"id", "type", "skill_id", "name", "description", "directory", "version", "created_at"})
+	assertJSONKeys(t, rec.Body.Bytes(), []string{"id", "type", "skill_id", "name", "description", "created_at"})
 	if strings.Contains(rec.Body.String(), `"size_bytes"`) || strings.Contains(rec.Body.String(), `"sha256"`) {
 		t.Fatalf("version response leaked storage metadata: %s", rec.Body.String())
 	}
@@ -365,12 +372,12 @@ func TestSkillHandlerMultipartValidationRejectsInvalidFields(t *testing.T) {
 		path   string
 		parts  []uploadPart
 	}{
-		{name: "duplicate display_title", method: http.MethodPost, path: "/v1/skills", parts: append([]uploadPart{{name: "display_title", body: []byte("one")}, {name: "display_title", body: []byte("two")}}, individualSkillParts("dup-title", "d")...)},
-		{name: "file display_title", method: http.MethodPost, path: "/v1/skills", parts: append([]uploadPart{{name: "display_title", shape: "file", fileName: "title.txt", body: []byte("bad")}}, individualSkillParts("file-title", "d")...)},
-		{name: "invalid utf8 display_title", method: http.MethodPost, path: "/v1/skills", parts: append([]uploadPart{{name: "display_title", body: []byte{0xff}}}, individualSkillParts("bad-utf8", "d")...)},
-		{name: "nul display_title", method: http.MethodPost, path: "/v1/skills", parts: append([]uploadPart{{name: "display_title", body: []byte("secret\x00title")}}, individualSkillParts("nul-title", "d")...)},
-		{name: "oversized display_title", method: http.MethodPost, path: "/v1/skills", parts: append([]uploadPart{{name: "display_title", body: []byte(longTitle)}}, individualSkillParts("long-title", "d")...)},
-		{name: "missing files", method: http.MethodPost, path: "/v1/skills", parts: []uploadPart{{name: "display_title", body: []byte("Only title")}}},
+		{name: "duplicate display_name", method: http.MethodPost, path: "/v1/skills", parts: append([]uploadPart{{name: "display_name", body: []byte("one")}, {name: "display_name", body: []byte("two")}}, individualSkillParts("dup-title", "d")...)},
+		{name: "file display_name", method: http.MethodPost, path: "/v1/skills", parts: append([]uploadPart{{name: "display_name", shape: "file", fileName: "title.txt", body: []byte("bad")}}, individualSkillParts("file-title", "d")...)},
+		{name: "invalid utf8 display_name", method: http.MethodPost, path: "/v1/skills", parts: append([]uploadPart{{name: "display_name", body: []byte{0xff}}}, individualSkillParts("bad-utf8", "d")...)},
+		{name: "nul display_name", method: http.MethodPost, path: "/v1/skills", parts: append([]uploadPart{{name: "display_name", body: []byte("secret\x00title")}}, individualSkillParts("nul-title", "d")...)},
+		{name: "oversized display_name", method: http.MethodPost, path: "/v1/skills", parts: append([]uploadPart{{name: "display_name", body: []byte(longTitle)}}, individualSkillParts("long-title", "d")...)},
+		{name: "missing files", method: http.MethodPost, path: "/v1/skills", parts: []uploadPart{{name: "display_name", body: []byte("Only title")}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -378,7 +385,7 @@ func TestSkillHandlerMultipartValidationRejectsInvalidFields(t *testing.T) {
 			rec := performMultipartRequest(t, router, tc.method, tc.path, contentType, body)
 			msg := assertSkillUploadError(t, rec, http.StatusBadRequest, "invalid_request_error")
 			if strings.Contains(msg, "secret") || strings.Contains(msg, longTitle) {
-				t.Fatalf("error message echoed submitted display_title: %q", msg)
+				t.Fatalf("error message echoed submitted display_name: %q", msg)
 			}
 		})
 	}
@@ -420,7 +427,7 @@ func TestSkillHandlerListQueryAndPageTokens(t *testing.T) {
 		t.Fatalf("first page status = %d (body=%q); want 200", first.Code, first.Body.String())
 	}
 	firstList := decodeSkillList(t, first)
-	if len(firstList.Data) != 2 || !firstList.HasMore || firstList.NextPage == nil {
+	if len(firstList.Data) != 2 || firstList.NextPage == nil {
 		t.Fatalf("first list = %+v", firstList)
 	}
 	second := performRequest(t, router, http.MethodGet, "/v1/skills?page="+*firstList.NextPage)
@@ -428,7 +435,7 @@ func TestSkillHandlerListQueryAndPageTokens(t *testing.T) {
 		t.Fatalf("second page status = %d (body=%q); want 200", second.Code, second.Body.String())
 	}
 	secondList := decodeSkillList(t, second)
-	if len(secondList.Data) != 1 || secondList.HasMore || secondList.NextPage != nil {
+	if len(secondList.Data) != 1 || secondList.NextPage != nil {
 		t.Fatalf("second list = %+v", secondList)
 	}
 
@@ -496,40 +503,54 @@ func TestSkillHandlerMalformedMultipartAndRouteCapErrors(t *testing.T) {
 	assertSkillUploadError(t, routeCapRec, http.StatusRequestEntityTooLarge, "request_too_large")
 }
 
-func TestSkillHandlerDeleteOrderAndNullLatestVersion(t *testing.T) {
+func TestSkillHandlerDeleteSkillAndRejectLastVersionDelete(t *testing.T) {
 	env := newSkillHandlerEnv(t)
 	router := env.router(t)
 	parent := createSkillViaHTTP(t, router, "delete-order")
-
-	rejectedParentDelete := performRequest(t, router, http.MethodDelete, "/v1/skills/"+parent.ID)
-	assertSkillUploadError(t, rejectedParentDelete, http.StatusBadRequest, "invalid_request_error")
-
-	deletedVersion := performRequest(t, router, http.MethodDelete, "/v1/skills/"+parent.ID+"/versions/"+*parent.LatestVersion)
+	version := createVersionViaHTTP(t, router, parent.ID, "delete-order", "v2")
+	latest := performRequest(t, router, http.MethodGet, "/v1/skills/"+parent.ID+"/versions/latest")
+	if latest.Code != http.StatusOK || decodeSkillVersion(t, latest).ID != version.ID {
+		t.Fatalf("latest = %d %s", latest.Code, latest.Body.String())
+	}
+	// A concrete version succeeds; only the alias is forbidden on content/delete.
+	content := performRequest(t, router, http.MethodGet, "/v1/skills/"+parent.ID+"/versions/"+version.ID+"/content")
+	if content.Code != http.StatusOK {
+		t.Fatalf("version content = %d %s", content.Code, content.Body.String())
+	}
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		path := "/v1/skills/" + parent.ID + "/versions/latest"
+		if method == http.MethodGet {
+			path += "/content"
+		}
+		rejected := performRequest(t, router, method, path)
+		assertSkillUploadError(t, rejected, http.StatusBadRequest, "invalid_request_error")
+		if !strings.Contains(rejected.Body.String(), "concrete version") {
+			t.Fatalf("wrong alias rejection: %s", rejected.Body.String())
+		}
+	}
+	deletedVersion := performRequest(t, router, http.MethodDelete, "/v1/skills/"+parent.ID+"/versions/"+version.ID)
 	if deletedVersion.Code != http.StatusOK {
-		t.Fatalf("delete version status = %d (body=%q); want 200", deletedVersion.Code, deletedVersion.Body.String())
+		t.Fatalf("delete non-final = %d %s", deletedVersion.Code, deletedVersion.Body.String())
 	}
 	assertJSONKeys(t, deletedVersion.Body.Bytes(), []string{"id", "type"})
-	if !strings.Contains(deletedVersion.Body.String(), `"id":"`+*parent.LatestVersion+`"`) || !strings.Contains(deletedVersion.Body.String(), `"type":"skill_version_deleted"`) {
-		t.Fatalf("delete version response = %s", deletedVersion.Body.String())
+	if body := deletedVersion.Body.String(); !strings.Contains(body, `"id":"`+version.ID+`"`) || !strings.Contains(body, `"type":"skill_version_deleted"`) {
+		t.Fatalf("delete version response = %s", body)
 	}
-	deletedContent := performRequest(t, router, http.MethodGet, "/v1/skills/"+parent.ID+"/versions/"+*parent.LatestVersion+"/content")
-	assertSkillUploadError(t, deletedContent, http.StatusNotFound, "not_found_error")
-
-	getParent := performRequest(t, router, http.MethodGet, "/v1/skills/"+parent.ID)
-	if getParent.Code != http.StatusOK {
-		t.Fatalf("get parent status = %d (body=%q); want 200", getParent.Code, getParent.Body.String())
+	rejected := performRequest(t, router, http.MethodDelete, "/v1/skills/"+parent.ID+"/versions/"+parent.LatestVersionID)
+	assertSkillUploadError(t, rejected, http.StatusBadRequest, "invalid_request_error")
+	if !strings.Contains(rejected.Body.String(), "last version") {
+		t.Fatalf("wrong final-version rejection: %s", rejected.Body.String())
 	}
-	got := decodeSkill(t, getParent)
-	if got.LatestVersion != nil {
-		t.Fatalf("latest_version = %v; want nil", got.LatestVersion)
+	got := performRequest(t, router, http.MethodGet, "/v1/skills/"+parent.ID)
+	if got.Code != http.StatusOK || decodeSkill(t, got).LatestVersionID != parent.LatestVersionID {
+		t.Fatalf("fallback parent = %d %s", got.Code, got.Body.String())
 	}
-	if !strings.Contains(getParent.Body.String(), `"latest_version":null`) {
-		t.Fatalf("latest_version must be explicit JSON null: %s", getParent.Body.String())
+	deleted := performRequest(t, router, http.MethodDelete, "/v1/skills/"+parent.ID)
+	if body := deleted.Body.String(); deleted.Code != http.StatusOK || !strings.Contains(body, `"id":"`+parent.ID+`"`) || !strings.Contains(body, `"type":"skill_deleted"`) {
+		t.Fatalf("delete parent = %d %s", deleted.Code, body)
 	}
-
-	deletedParent := performRequest(t, router, http.MethodDelete, "/v1/skills/"+parent.ID)
-	if deletedParent.Code != http.StatusOK {
-		t.Fatalf("delete parent status = %d (body=%q); want 200", deletedParent.Code, deletedParent.Body.String())
+	for _, id := range []string{parent.LatestVersionID, version.ID} {
+		assertSkillUploadError(t, performRequest(t, router, http.MethodGet, "/v1/skills/"+parent.ID+"/versions/"+id), http.StatusNotFound, "not_found_error")
 	}
 }
 
@@ -544,9 +565,9 @@ func TestSkillHandlerCrossWorkspaceIsolation(t *testing.T) {
 		path   string
 	}{
 		{http.MethodGet, "/v1/skills/" + otherParent.ID},
-		{http.MethodGet, "/v1/skills/" + otherParent.ID + "/versions/" + *otherParent.LatestVersion},
-		{http.MethodGet, "/v1/skills/" + otherParent.ID + "/versions/" + *otherParent.LatestVersion + "/content"},
-		{http.MethodDelete, "/v1/skills/" + otherParent.ID + "/versions/" + *otherParent.LatestVersion},
+		{http.MethodGet, "/v1/skills/" + otherParent.ID + "/versions/" + otherParent.LatestVersionID},
+		{http.MethodGet, "/v1/skills/" + otherParent.ID + "/versions/" + otherParent.LatestVersionID + "/content"},
+		{http.MethodDelete, "/v1/skills/" + otherParent.ID + "/versions/" + otherParent.LatestVersionID},
 		{http.MethodDelete, "/v1/skills/" + otherParent.ID},
 	} {
 		rec := performRequest(t, router, request.method, request.path)

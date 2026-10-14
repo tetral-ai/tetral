@@ -400,7 +400,7 @@ func parseStrictAgentQuery(r *http.Request, allowed []string) (url.Values, error
 		if len(rawValues) != 1 {
 			return nil, &agent.ValidationError{Message: "duplicate query parameter " + key}
 		}
-		if rawValues[0] == "" {
+		if rawValues[0] == "" && !emptyQueryValueAllowed(key) {
 			return nil, &agent.ValidationError{Message: "empty query parameter " + key}
 		}
 		if _, ok := allowedSet[key]; !ok {

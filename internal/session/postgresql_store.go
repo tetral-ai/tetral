@@ -362,6 +362,14 @@ func (t *postgresqlTransaction) CreateSession(ctx context.Context, sess *Session
 	if err != nil {
 		return err
 	}
+	resolvedSkills := sess.ResolvedSkills
+	if resolvedSkills == nil {
+		resolvedSkills = []ResolvedSkillReference{}
+	}
+	resolvedSkillsJSON, err := json.Marshal(resolvedSkills)
+	if err != nil {
+		return err
+	}
 	if sess.AgentVersionID == "" {
 		versionID, err := lookupAgentVersionID(ctx, t.tx, t.workspaceID, sess.AgentID, sess.AgentVersion)
 		if err != nil {
@@ -372,8 +380,8 @@ func (t *postgresqlTransaction) CreateSession(ctx context.Context, sess *Session
 	if _, err := t.tx.Exec(ctx,
 		`INSERT INTO sessions (
 			workspace_id, id, type, title, metadata_json, status, lifecycle_state, archived_at,
-			config_generation, approval_mode, installed_tools_json, agent_id, agent_version_id, agent_version, environment_id, vault_ids_json, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+			config_generation, approval_mode, installed_tools_json, resolved_skills_json, agent_id, agent_version_id, agent_version, environment_id, vault_ids_json, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
 		string(t.workspaceID),
 		sess.ID,
 		sess.Type,
@@ -385,6 +393,7 @@ func (t *postgresqlTransaction) CreateSession(ctx context.Context, sess *Session
 		sess.ConfigGeneration,
 		string(sess.ApprovalMode),
 		runtimeAgentConfigJSON,
+		string(resolvedSkillsJSON),
 		sess.AgentID,
 		sess.AgentVersionID,
 		sess.AgentVersion,
@@ -2227,7 +2236,7 @@ func sessionSelectSQL(alias string) string {
 		ELSE COALESCE(srs.status, %[1]s.status)
 	END AS status,
 	%[1]s.lifecycle_state, %[1]s.archived_at,
-	%[1]s.config_generation, %[1]s.approval_mode, %[1]s.installed_tools_json,
+	%[1]s.config_generation, %[1]s.approval_mode, %[1]s.installed_tools_json, %[1]s.resolved_skills_json,
 	%[1]s.agent_id, %[1]s.agent_version_id, %[1]s.agent_version, %[1]s.environment_id, %[1]s.vault_ids_json, %[1]s.usage_json,
 	srs.running_since, COALESCE(srs.active_seconds_total, 0), main_thread.closed_at,
 	%[1]s.created_at, %[1]s.updated_at
@@ -2341,32 +2350,33 @@ func scanSessionRows(rows QueryRows) (*Session, error) {
 
 func scanSession(scanner interface{ Scan(dest ...any) error }) (*Session, error) {
 	var (
-		workspaceIDValue  string
-		sessionID         string
-		typeValue         string
-		title             nullableString
-		metadataJSON      string
-		status            string
-		lifecycleState    string
-		archivedAt        sql.NullTime
-		configGeneration  int64
-		approvalMode      string
-		runtimeConfigJSON string
-		agentID           string
-		agentVersionID    string
-		agentVersion      int
-		environmentID     string
-		vaultIDsJSON      string
-		usageJSON         string
-		runningSince      sql.NullTime
-		activeSeconds     float64
-		terminatedAt      sql.NullTime
-		createdAt         time.Time
-		updatedAt         time.Time
+		workspaceIDValue   string
+		sessionID          string
+		typeValue          string
+		title              nullableString
+		metadataJSON       string
+		status             string
+		lifecycleState     string
+		archivedAt         sql.NullTime
+		configGeneration   int64
+		approvalMode       string
+		runtimeConfigJSON  string
+		resolvedSkillsJSON string
+		agentID            string
+		agentVersionID     string
+		agentVersion       int
+		environmentID      string
+		vaultIDsJSON       string
+		usageJSON          string
+		runningSince       sql.NullTime
+		activeSeconds      float64
+		terminatedAt       sql.NullTime
+		createdAt          time.Time
+		updatedAt          time.Time
 	)
 	err := scanner.Scan(
 		&workspaceIDValue, &sessionID, &typeValue, &title, &metadataJSON, &status, &lifecycleState, &archivedAt,
-		&configGeneration, &approvalMode, &runtimeConfigJSON,
+		&configGeneration, &approvalMode, &runtimeConfigJSON, &resolvedSkillsJSON,
 		&agentID, &agentVersionID, &agentVersion, &environmentID, &vaultIDsJSON, &usageJSON,
 		&runningSince, &activeSeconds, &terminatedAt, &createdAt, &updatedAt,
 	)
@@ -2374,6 +2384,10 @@ func scanSession(scanner interface{ Scan(dest ...any) error }) (*Session, error)
 		return nil, &NotFoundError{Message: "session not found"}
 	}
 	if err != nil {
+		return nil, err
+	}
+	resolvedSkills := []ResolvedSkillReference{}
+	if err := json.Unmarshal([]byte(resolvedSkillsJSON), &resolvedSkills); err != nil {
 		return nil, err
 	}
 	metadata := map[string]string{}
@@ -2443,6 +2457,7 @@ func scanSession(scanner interface{ Scan(dest ...any) error }) (*Session, error)
 		ConfigGeneration:   configGeneration,
 		ApprovalMode:       normalizedApprovalMode,
 		RuntimeAgentConfig: runtimeAgentConfig,
+		ResolvedSkills:     resolvedSkills,
 		ArchivedAt:         archived,
 		AgentID:            agentID,
 		AgentVersionID:     agentVersionID,

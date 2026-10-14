@@ -116,6 +116,22 @@ unauthenticated.
 | API keys | Owned by the `auth` service |
 | Health (`GET /health`) | Live (200), unauthenticated |
 
+### Files
+
+Files routes require `beta=true`. Lists accept `limit` (1–1000, default 20),
+`page` and `scope_id`, and return `{data, next_page}` in ascending storage order.
+The signed page token uses the API page-token secret and binds both workspace
+and scope. Deleting the last file on a page does not invalidate continuation.
+`after_id`, `before_id` and `ids` return 400 `invalid_request_error`.
+
+Uploads without a filename, including an empty filename, use `unnamed` plus
+a fixed extension for known stored MIME types; unknown MIME types add no
+extension. Path-qualified filenames retain only the basename, and a name with
+no last segment (such as `dir/..`) also becomes `unnamed`. Control characters or
+invalid UTF-8 anywhere in the supplied name return 400; the 255-character limit
+applies to the basename. Expiration
+configuration (`expires_in_seconds`) is rejected. Metadata omits `expires_at`.
+
 ## States & lifecycle
 
 ### Admission gate (every request)
@@ -123,6 +139,7 @@ unauthenticated.
 | Step | Rule | Failure |
 | --- | --- | --- |
 | Principal | Verify the `auth` signed principal's signature, audience, expiry, method, and path. The token is at most 32 KiB of strict JSON, issued no more than five seconds ahead of the receiver clock, with a lifetime of at most five minutes. Workspace authority comes from `Principal.workspace_id` only. | `401 authentication_error` |
+| Workspace header | A supplied `anthropic-workspace-id` must have exactly one nonempty value equal to the verified principal workspace. A missing header is allowed; the header never supplies authority. API, Auth API-key routes and Event Stream share this check before operation authorization, with one denial audit event. | `403 permission_error` |
 | Operation | Every registered business route, including authenticated stubs, declares a semantic action from `internal/auth`. The common Authorizer checks the verified principal's explicit operation ceiling against its typed workspace before any resource lookup. | `403 permission_error` |
 | Request text | Public request text must not contain U+0000, because Engine stores text in PostgreSQL, which cannot store it. After the Operation step, `httpapi.PublicOperationHandler` rejects a decoded path, query parameter name or query value that contains U+0000 or is not valid UTF-8, on every business route of api, auth's `/v1/api_keys` and event-stream (a path that is not valid UTF-8 normally fails the Principal step's path match first, with 401). Each JSON body reader rejects U+0000 in any string or object key. Both checks run before any lookup or write, so a rejected request stores nothing and writes no idempotency receipt. API key `name` and SKILL.md `description` are checked by their owners. Memory store and memory version page tokens are not signed, so their decoder also rejects a position the encoder never writes: an ID with U+0000, or a time that is not a canonical UTC RFC3339 time from year 1 on. File upload content and skill package file bodies may contain U+0000. The official API does not document how it handles U+0000. | `400 invalid_request_error` |
 | Selector binding | Client-supplied `workspace_id`, `session_id`, `vault_id`, etc. are selectors, never authority. Every query binds `Principal.workspace_id` plus the route selector. | — |
@@ -184,9 +201,13 @@ a message enumerating the allowed set: `openai/gpt-5.5`, `openai/gpt-5.6-sol`,
 `anthropic/claude-opus-4-8`, `anthropic/claude-fable-5`,
 `deepseek/deepseek-v4-pro`, `moonshotai/kimi-k3`, `zai/glm-5.2`. `speed` accepts
 only `standard`; `speed = fast` is `400`. `multiagent` accepts only omitted or
-`null`. `deployment_id` is always `null`.
+`null`. `deployment_id` is always `null`. `budget` is always `null`; budget
+requests remain unsupported.
 
 ### Thread lifecycle
+
+Public Session Thread objects include `workflow_run_id: null`; Engine does not
+execute workflow runs.
 
 Public thread APIs operate on threads with `visibility = public`; internal
 approval-reviewer threads are never returned. Thread status is one of `running`,
@@ -395,7 +416,7 @@ normalized zip in BlobStore; the version's `name`/`description` come from a root
 | Per-entry bytes | 10 MiB (`MaxPackageEntryBytes`) |
 | Expanded package bytes | 200 MiB (`MaxPackageExpandedBytes`) |
 | Normalized zip bytes | 31 MiB (`MaxNormalizedZipBytes`) |
-| Display title | ≤ 1024 runes (`maxDisplayTitleRunes`) |
+| Display name | ≤ 255 runes, one line, no control characters (`maxDisplayNameRunes`) |
 
 A root `SKILL.md` is required. Only the bounded segment between the opening and
 closing `---` delimiters reaches the YAML parser, capped at 32 KiB
@@ -407,6 +428,32 @@ containing U+0000, which a YAML `\0` escape can produce, is rejected with `400`
 because Engine stores it in PostgreSQL, which cannot store U+0000. The
 `gopkg.in/yaml.v3` parser is confined to this package
 (`internal/skill/dependency_test.go`).
+
+Skill responses expose `display_name`, `latest_version_id`, and
+`source: {type: "custom"}`. Multipart creation accepts `display_name`; omission
+uses the frontmatter `name`. `display_title` is rejected. Every
+version of a skill must keep its first version's frontmatter name. Versions
+use `skver_` IDs for both storage version fields and public addressing. Version
+responses omit `version` and `directory`; lists return `next_page` without
+`has_more`. Only version GET accepts `latest`; content and deletion require a
+concrete version ID.
+
+Session creation resolves Agent Skill references, including `latest`, under the
+shared workspace Skill registry lock in the same transaction that saves the
+Session, so Session creations do not wait for each other but never interleave
+with a Skill upload or deletion.
+The concrete references persist in `sessions.resolved_skills_json` (`[]` without
+skills). Session and Thread responses, Sandbox materialization, and Bridge
+Runtime configuration all use these saved references. Agent configuration keeps
+`latest` for future Sessions. Uploading a version or deleting a version or its
+parent never changes an existing Session's package content.
+
+Deleting a skill atomically soft-deletes all its versions without checking Agent
+references. Existing Sessions retain access to their saved packages; new Agent
+writes and Session creation reject deleted references. Reading a historical
+Agent remains valid. Deleting the last version alone returns 400; deleting the
+latest of several versions selects the previous active version for future
+Sessions.
 
 ### Memory store durable domain (`internal/memory`)
 
@@ -427,15 +474,19 @@ content), and `memory_versions` (immutable content, reached from
 | Optimistic concurrency | Update and delete may carry a content-hash precondition (`expected_content_sha256` / `MemoryPrecondition`); a mismatch is a `PreconditionFailedError` → `409 invalid_request_error`. |
 | Version redaction | `memory_versions` are redactable, but redacting the current live head is refused — an active memory always keeps non-NULL content. |
 
+Memory store responses always carry a string `name`. Updating a store with
+`name: null` returns 400 `invalid_request_error`; omission preserves its name.
+
 Memory version actors describe the credential that performed each write and
 redaction. Independent and identity-derived API keys use `api_actor` with the
 actual `api_key_id`; direct human tokens use `user_actor` with `user_id`; direct
-service tokens use `service_actor` with `service_id`. Human/service IDs are stable
-Engine identity IDs. Runtime writes retain `session_actor` with `session_id`.
+service tokens use `service_account_actor` with `service_account_id`. Human/service IDs are stable
+Engine identity IDs, not Anthropic `svac_` IDs; PostgreSQL still stores the
+`service_actor` type. Runtime writes retain `session_actor` with `session_id`.
 Exactly one actor ID is valid for its discriminator in both the model and
 PostgreSQL constraints. Reads require a verified authorized identity and do
 not require an API-key ID. The SDK version pinned by this repository types all
-four actor variants, including `service_actor`; see
+four actor variants, including `service_account_actor`; see
 [authentication](../../docs/authentication.md#verification) for the typed SDK
 verification.
 
@@ -488,6 +539,21 @@ never added through `POST /resources`) are covered above.
 
 ### SDK-compatibility surface
 
+- **Models.** List and retrieve return `lifecycle: "active"`,
+  `deprecated_at: null` and `retires_at: null`. Lifecycle means the Engine
+  currently provides the model, not the provider's retirement schedule.
+  `line` is `"opus"` for `anthropic/claude-opus-4-8`, `"fable"` for
+  `anthropic/claude-fable-5`, and `null` for the other catalog entries.
+- **MCP OAuth validation.** The refresh result's `http_response` is present
+  only when `status` is `failed`. It then carries the token endpoint's status
+  code and truncation flag, while `body` and `content_type` are always empty
+  strings; the official API returns a scrubbed body instead. It is explicitly
+  `null` for `succeeded`, `connect_error` and `no_refresh_token`. As in the
+  official API, `mcp_probe` is `null` when the probe succeeds, and `refresh` is
+  `null` unless a token exchange ran or the probe got a 401 with no stored
+  refresh token (`no_refresh_token`). Engine refreshes before probing when the
+  stored access token is expired or has no valid expiry time, and does not
+  refresh after a 401; the official API refreshes after a 401.
 - **Contract.** Errors use the SDK envelope
   `{"type":"error","error":{"type","message"},"request_id"}`, with the HTTP
   status chosen independently of the error `type`. The error-type set is exactly
@@ -498,7 +564,8 @@ never added through `POST /resources`) are covered above.
   exist and a route keeps its SDK family: the `Page` shape
   (`has_more`/`first_id`/`last_id`, plain id cursors) and the `PageCursor` shape
   (`next_page`/`page`, signed opaque cursors bound to workspace, filters,
-  ordering, and view).
+  ordering, and view). An empty `page`, which is how the SDK sends a null
+  cursor, asks for the first page; any other empty query value returns 400.
 - **Invariant.** Unsupported SDK *routes* (`/v1/messages`, user profiles,
   webhooks, deployments and deployment runs, self-host environment work APIs) are
   registered explicitly and answer `400 "unsupported SDK surface for this stage"` — a closed
