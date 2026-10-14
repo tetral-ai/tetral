@@ -185,7 +185,8 @@ a message enumerating the allowed set: `openai/gpt-5.5`, `openai/gpt-5.6-sol`,
 `anthropic/claude-opus-4-8`, `anthropic/claude-fable-5`,
 `deepseek/deepseek-v4-pro`, `moonshotai/kimi-k3`, `zai/glm-5.2`. `speed` accepts
 only `standard`; `speed = fast` is `400`. `multiagent` accepts only omitted or
-`null`. `deployment_id` is always `null`.
+`null`. `deployment_id` is always `null`. `budget` is always `null`; budget
+requests remain unsupported.
 
 ### Thread lifecycle
 

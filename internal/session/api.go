@@ -127,6 +127,7 @@ type ThreadListResult struct {
 }
 
 type Response struct {
+	Budget             *struct{}             `json:"budget"`
 	ID                 string                `json:"id"`
 	Type               string                `json:"type"`
 	DeploymentID       *string               `json:"deployment_id"`

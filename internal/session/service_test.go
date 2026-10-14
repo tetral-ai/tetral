@@ -602,6 +602,7 @@ func TestGetProjectsPublicSessionUsageDTO(t *testing.T) {
 	body := string(encoded)
 	for _, want := range []string{
 		`"outcome_evaluations":[]`,
+		`"budget":null`,
 		`"usage":{"input_tokens":11`,
 		`"output_tokens":7`,
 		`"cache_creation":{"ephemeral_1h_input_tokens":2,"ephemeral_5m_input_tokens":0}`,
