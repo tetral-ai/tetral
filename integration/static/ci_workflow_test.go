@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-const frozenForkSDKCommit = "149c5abff7e63345ac67626584d2d89fb3e785c3"
+const frozenForkSDKCommit = "3ec7351fca6324e165d0b0a27299bd862ccd3deb"
 
 func requireWorkflowActionsUseFullSHAs(t *testing.T, name string, text string) {
 	t.Helper()
