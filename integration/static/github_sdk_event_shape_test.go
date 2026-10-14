@@ -184,6 +184,7 @@ func runForkSDKFixtureTypecheck(t *testing.T, engineRoot string, fixtureName str
 	tsconfig := fmt.Sprintf(`{
   "compilerOptions": {
     "target": "ES2023",
+    "lib": ["ES2023"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "strict": true,

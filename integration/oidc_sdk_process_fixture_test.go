@@ -28,7 +28,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-const oidcSDKPin = "34344d60978094c7aef7374baaffd804ba9d10fd"
+const oidcSDKPin = "149c5abff7e63345ac67626584d2d89fb3e785c3"
 
 // Give each reported identity subtest custody of its actual isolated flow. The
 // child selects TLS PostgreSQL before global storage initialization; its fixed

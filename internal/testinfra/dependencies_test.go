@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -420,5 +421,33 @@ func TestRunnerOwnedPostgreSQLIsHostReadyWithoutDurability(t *testing.T) {
 		if actual != value {
 			t.Fatalf("server runs %s = %s; want %s", name, actual, value)
 		}
+	}
+}
+
+func TestSDKInstallUsesPinnedPackageManager(t *testing.T) {
+	for _, manager := range []string{"pnpm@10.34.5", "pnpm@11.4.0+sha512.fixture"} {
+		t.Run(manager, func(t *testing.T) {
+			directory := t.TempDir()
+			binary := filepath.Join(directory, "bun")
+			if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > arguments\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(directory, "package.json"), []byte(fmt.Sprintf(`{"packageManager":%q}`, manager)), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+			if err := installSDKDependencies(t.Context(), directory); err != nil {
+				t.Fatal(err)
+			}
+			actual, err := os.ReadFile(filepath.Join(directory, "arguments"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			version, _, _ := strings.Cut(manager, "+")
+			want := "x\n" + version + "\ninstall\n--frozen-lockfile\n--ignore-scripts\n"
+			if string(actual) != want {
+				t.Fatalf("installer arguments = %q; want %q", actual, want)
+			}
+		})
 	}
 }

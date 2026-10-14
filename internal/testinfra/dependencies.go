@@ -27,7 +27,7 @@ import (
 const (
 	postgresImage         = "ghcr.io/tetral-ai/mirror/postgres:18-alpine"
 	minioImage            = "ghcr.io/tetral-ai/mirror/minio:RELEASE.2025-09-07T16-13-09Z"
-	forkSDKCommit         = "34344d60978094c7aef7374baaffd804ba9d10fd"
+	forkSDKCommit         = "149c5abff7e63345ac67626584d2d89fb3e785c3"
 	dependencyStopTimeout = 30 * time.Second
 )
 
@@ -362,7 +362,22 @@ func (m *dependencyManager) startSDK(ctx context.Context) error {
 }
 
 func installSDKDependencies(ctx context.Context, directory string) error {
-	if err := runQuietInDir(ctx, directory, "bun", "x", "yarn@1.22.22", "install", "--frozen-lockfile", "--ignore-scripts", "--non-interactive"); err != nil {
+	//nolint:gosec // G304: directory is the runner-selected SDK checkout; package.json is a fixed filename.
+	contents, err := os.ReadFile(filepath.Join(directory, "package.json"))
+	if err != nil {
+		return fmt.Errorf("read SDK package manager: %w", err)
+	}
+	var pkg struct {
+		PackageManager string `json:"packageManager"`
+	}
+	if err := json.Unmarshal(contents, &pkg); err != nil {
+		return fmt.Errorf("decode SDK package manager: %w", err)
+	}
+	manager, _, _ := strings.Cut(pkg.PackageManager, "+")
+	if !strings.HasPrefix(manager, "pnpm@") || strings.TrimPrefix(manager, "pnpm@") == "" {
+		return fmt.Errorf("SDK packageManager must specify a pnpm version")
+	}
+	if err := runQuietInDir(ctx, directory, "bun", "x", manager, "install", "--frozen-lockfile", "--ignore-scripts"); err != nil {
 		return fmt.Errorf("install pinned SDK dependencies: %w", err)
 	}
 	return nil
