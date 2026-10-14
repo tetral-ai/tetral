@@ -104,7 +104,7 @@ func TestHTTPMCPOAuthValidatorRefreshesProbesAndScrubsPublicResult(t *testing.T)
 	if result.Validation.Status != "valid" || result.Validation.Type != "vault_credential_validation" || !result.Validation.HasRefreshToken {
 		t.Fatalf("validation = %+v", result.Validation)
 	}
-	if result.Validation.Refresh == nil || result.Validation.Refresh.Status != "succeeded" || result.Validation.Refresh.HTTPResponse == nil || result.Validation.Refresh.HTTPResponse.StatusCode != 200 {
+	if result.Validation.Refresh == nil || result.Validation.Refresh.Status != "succeeded" || result.Validation.Refresh.HTTPResponse != nil {
 		t.Fatalf("refresh check = %+v", result.Validation.Refresh)
 	}
 	if result.Validation.MCPProbe == nil || result.Validation.MCPProbe.Method != "initialize" || result.Validation.MCPProbe.HTTPResponse == nil || result.Validation.MCPProbe.HTTPResponse.StatusCode != 200 {
@@ -118,6 +118,12 @@ func TestHTTPMCPOAuthValidatorRefreshesProbesAndScrubsPublicResult(t *testing.T)
 	public, err := json.Marshal(result.Validation)
 	if err != nil {
 		t.Fatalf("marshal validation: %v", err)
+	}
+	var wire struct {
+		Refresh map[string]json.RawMessage `json:"refresh"`
+	}
+	if err := json.Unmarshal(public, &wire); err != nil || string(wire.Refresh["http_response"]) != "null" {
+		t.Fatalf("refresh wire response = %s; want explicit null HTTP response", public)
 	}
 	for _, forbidden := range []string{oldAccess, oldRefresh, clientSecret, newAccess, newRefresh, "tokens.example.com", "mcp.example.com"} {
 		if strings.Contains(string(public), forbidden) {
@@ -223,16 +229,18 @@ func TestHTTPMCPOAuthValidatorOmitsPartialRefreshBodyOnReadFailure(t *testing.T)
 		t.Fatalf("Validate: %v", err)
 	}
 	if result.Validation.Refresh == nil || result.Validation.Refresh.Status != "connect_error" ||
-		result.Validation.Refresh.HTTPResponse == nil {
-		t.Fatalf("refresh check = %+v", result.Validation.Refresh)
-	}
-	if response := result.Validation.Refresh.HTTPResponse; response.StatusCode != http.StatusOK ||
-		response.Body != "" || response.ContentType != "" {
-		t.Fatalf("refresh HTTP response = %+v; want status only", response)
+		result.Validation.Refresh.HTTPResponse != nil {
+		t.Fatalf("refresh check = %+v; want connect_error with null response", result.Validation.Refresh)
 	}
 	public, err := json.Marshal(result.Validation)
 	if err != nil {
 		t.Fatalf("marshal validation: %v", err)
+	}
+	var wire struct {
+		Refresh map[string]json.RawMessage `json:"refresh"`
+	}
+	if err := json.Unmarshal(public, &wire); err != nil || string(wire.Refresh["http_response"]) != "null" {
+		t.Fatalf("refresh wire response = %s; want explicit null HTTP response", public)
 	}
 	if strings.Contains(string(public), issuedToken) {
 		t.Fatalf("public validation leaked partial issued token: %s", public)

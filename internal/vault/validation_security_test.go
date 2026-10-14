@@ -390,10 +390,8 @@ func TestHTTPMCPOAuthValidatorScrubsStoredAndNewlyIssuedSecretCorpus(t *testing.
 		"captured logs":  capturedLogs,
 		"returned error": validationErrorText(err),
 	})
-	for _, check := range []*CredentialValidationCheck{result.Validation.Refresh, result.Validation.MCPProbe} {
-		if check == nil || check.HTTPResponse == nil || check.HTTPResponse.ContentType != "" {
-			t.Fatalf("malicious Content-Type survived: %+v", check)
-		}
+	if check := result.Validation.MCPProbe; check == nil || check.HTTPResponse == nil || check.HTTPResponse.ContentType != "" {
+		t.Fatalf("malicious probe Content-Type survived: %+v", check)
 	}
 }
 

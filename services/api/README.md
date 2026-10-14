@@ -494,6 +494,12 @@ never added through `POST /resources`) are covered above.
   currently provides the model, not the provider's retirement schedule.
   `line` is `"opus"` for `anthropic/claude-opus-4-8`, `"fable"` for
   `anthropic/claude-fable-5`, and `null` for the other catalog entries.
+- **MCP OAuth validation.** The refresh result's `http_response` is present
+  only when `status` is `failed`. It then carries the token endpoint's status
+  code and truncation flag, while `body` and `content_type` are always empty
+  strings; the official API returns a scrubbed body instead. It is explicitly
+  `null` for `succeeded`, `connect_error` and `no_refresh_token`. The MCP
+  probe keeps its separate HTTP-response shape.
 - **Contract.** Errors use the SDK envelope
   `{"type":"error","error":{"type","message"},"request_id"}`, with the HTTP
   status chosen independently of the error `type`. The error-type set is exactly

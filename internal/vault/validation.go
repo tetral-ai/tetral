@@ -308,6 +308,7 @@ func (v HTTPMCPOAuthValidator) refresh(ctx context.Context, auth CredentialAuth,
 	if readErr != nil {
 		check.ErrorKind = "refresh_transport_error"
 		check.Status = "connect_error"
+		check.HTTPResponse = nil
 		return check, nil
 	}
 	var payload struct {
@@ -334,6 +335,7 @@ func (v HTTPMCPOAuthValidator) refresh(ctx context.Context, auth CredentialAuth,
 		return check, nil
 	}
 	check.Status = "succeeded"
+	check.HTTPResponse = nil
 	return check, &mcpOAuthRefreshResult{
 		AccessToken:  payload.AccessToken,
 		RefreshToken: payload.RefreshToken,
