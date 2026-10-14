@@ -80,6 +80,19 @@ auto-delete removes them, under the interval the previous Sandbox service set
 on each one at creation (`TETRAL_SANDBOX_AUTO_DELETE_INTERVAL`, 720h in the
 previous manifests and chart), unless they are deleted there by hand.
 
+## SDK contract changes
+
+Compared with earlier prerelease builds of this stack, public SDK-facing
+requests and responses change as follows:
+
+| Surface | Earlier prerelease behavior | Final behavior | Caller action |
+|---|---|---|---|
+| Workspace header | `anthropic-workspace-id` was ignored | When supplied, exactly one nonempty value must match the authenticated workspace; mismatches, empty and repeated values return `403 permission_error` and record an authorization denial | Omit the header or send the token's workspace once; it cannot select a different workspace |
+
+The workspace-header check covers API, Auth API-key and Event Stream public
+business routes. OAuth token issuance, health endpoints, Bridge, git-proxy and
+internal services remain outside that check.
+
 ## Database roles and Secret keys
 
 | | Previous | Final |

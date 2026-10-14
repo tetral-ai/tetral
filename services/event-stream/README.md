@@ -437,6 +437,9 @@ and SSE registration declares its semantic action in the shared operation
 registry. The common Authorizer checks the principal's typed workspace and
 operation ceiling before any reader access, so a denied action returns
 `403 permission_error` independently of whether a selected resource exists.
+A supplied `anthropic-workspace-id` header must carry exactly one nonempty
+value equal to the principal's workspace; otherwise the same wrapper returns
+`403 permission_error` and records one authorization denial.
 The same wrapper then rejects a decoded path, query parameter name or query
 value that contains U+0000 or is not valid UTF-8 with `400
 invalid_request_error`, before any reader access, because Engine stores

@@ -33,6 +33,14 @@ func (h *PublicOperationHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, err)
 		return
 	}
+	if values, present := r.Header[http.CanonicalHeaderKey("anthropic-workspace-id")]; present && (len(values) != 1 || values[0] != string(principal.Workspace.ID)) {
+		err := &auth.PermissionError{}
+		facts := auth.AuditFacts(principal)
+		facts.Operation = h.Operation
+		auth.RecordDecision(ctx, "operation", err, facts)
+		writeError(w, r, err)
+		return
+	}
 	// Admission checks the trusted workspace operation first. A denied action
 	// cannot probe resource existence by triggering its owner lookup.
 	if err := auth.AuthorizeWithAudit(ctx, principal, h.Operation, workspaceReference(principal.Workspace.ID)); err != nil {

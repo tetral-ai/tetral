@@ -454,23 +454,36 @@ func TestPublicAuthorizationPreservesIngressValidationBeforeLookup(t *testing.T)
 	}
 }
 
+type publicOperationAudit struct {
+	events []auth.AuditEvent
+}
+
+func (a *publicOperationAudit) RecordAuthEvent(_ context.Context, event auth.AuditEvent) {
+	a.events = append(a.events, event)
+}
+
 func TestPublicOperationRejectsUnstorableRequestTarget(t *testing.T) {
 	full := identityAdmissionFixture(auth.IdentityHuman)
 	restricted := identityAdmissionFixture(auth.IdentityHuman)
 	restricted.Authority.Operations = []auth.Operation{auth.OperationModelsList}
 	for _, test := range []struct {
-		name        string
-		target      string
-		principal   auth.Principal
-		wantStatus  int
-		wantMessage string
+		name             string
+		target           string
+		principal        auth.Principal
+		workspaceHeaders []string
+		wantStatus       int
+		wantMessage      string
 	}{
-		{"path with U+0000", "/v1/sessions/sesn%00x", full, http.StatusBadRequest, "request path must be valid UTF-8 without U+0000"},
-		{"query value with U+0000", "/v1/sessions/sesn_ok?agent_id=agent%00", full, http.StatusBadRequest, "query parameter agent_id must be valid UTF-8 without U+0000"},
-		{"query value invalid UTF-8", "/v1/sessions/sesn_ok?agent_id=%FF", full, http.StatusBadRequest, "query parameter agent_id must be valid UTF-8 without U+0000"},
-		{"query name with U+0000", "/v1/sessions/sesn_ok?agent%00id=x", full, http.StatusBadRequest, "query parameter names must be valid UTF-8 without U+0000"},
-		{"denied operation answers first", "/v1/sessions/sesn%00x", restricted, http.StatusForbidden, "permission denied"},
-		{"ordinary request reaches handler", "/v1/sessions/sesn_ok?beta=true&agent_id=agent_ok", full, http.StatusNoContent, ""},
+		{"path with U+0000", "/v1/sessions/sesn%00x", full, nil, http.StatusBadRequest, "request path must be valid UTF-8 without U+0000"},
+		{"query value with U+0000", "/v1/sessions/sesn_ok?agent_id=agent%00", full, nil, http.StatusBadRequest, "query parameter agent_id must be valid UTF-8 without U+0000"},
+		{"query value invalid UTF-8", "/v1/sessions/sesn_ok?agent_id=%FF", full, nil, http.StatusBadRequest, "query parameter agent_id must be valid UTF-8 without U+0000"},
+		{"query name with U+0000", "/v1/sessions/sesn_ok?agent%00id=x", full, nil, http.StatusBadRequest, "query parameter names must be valid UTF-8 without U+0000"},
+		{"denied operation answers first", "/v1/sessions/sesn%00x", restricted, nil, http.StatusForbidden, "permission denied"},
+		{"ordinary request without workspace header reaches handler", "/v1/sessions/sesn_ok?beta=true&agent_id=agent_ok", full, nil, http.StatusNoContent, ""},
+		{"matching workspace header", "/v1/sessions/sesn_ok?beta=true&agent_id=agent_ok", full, []string{string(full.Workspace.ID)}, http.StatusNoContent, ""},
+		{"different workspace header", "/v1/sessions/sesn_ok?beta=true&agent_id=agent_ok", full, []string{"other-workspace"}, http.StatusForbidden, "permission denied"},
+		{"empty workspace header", "/v1/sessions/sesn_ok?beta=true&agent_id=agent_ok", full, []string{""}, http.StatusForbidden, "permission denied"},
+		{"duplicate matching workspace headers", "/v1/sessions/sesn_ok?beta=true&agent_id=agent_ok", full, []string{string(full.Workspace.ID), string(full.Workspace.ID)}, http.StatusForbidden, "permission denied"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			reached := false
@@ -479,7 +492,12 @@ func TestPublicOperationRejectsUnstorableRequestTarget(t *testing.T) {
 				w.WriteHeader(http.StatusNoContent)
 			})
 			request := httptest.NewRequest(http.MethodGet, test.target, nil)
-			request = request.WithContext(auth.WithPrincipal(request.Context(), test.principal))
+			for _, value := range test.workspaceHeaders {
+				request.Header.Add("anthropic-workspace-id", value)
+			}
+			audit := &publicOperationAudit{}
+			ctx := auth.WithPrincipal(request.Context(), test.principal)
+			request = request.WithContext(auth.WithAuditRecorder(ctx, audit))
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, request)
 			if response.Code != test.wantStatus || !strings.Contains(response.Body.String(), test.wantMessage) {
@@ -487,6 +505,16 @@ func TestPublicOperationRejectsUnstorableRequestTarget(t *testing.T) {
 			}
 			if reached != (test.wantStatus == http.StatusNoContent) {
 				t.Fatalf("handler reached=%t for status %d", reached, response.Code)
+			}
+			if test.wantStatus == http.StatusForbidden {
+				if !strings.Contains(response.Body.String(), `"type":"permission_error"`) {
+					t.Fatalf("denial body = %s; want permission_error", response.Body.String())
+				}
+				if len(audit.events) != 1 || audit.events[0].Code != "auth_operation_denied" || audit.events[0].Operation != auth.OperationSessionsRead {
+					t.Fatalf("denial audit = %+v; want one operation denial", audit.events)
+				}
+			} else if len(audit.events) != 0 {
+				t.Fatalf("unexpected denial audit = %+v", audit.events)
 			}
 		})
 	}
