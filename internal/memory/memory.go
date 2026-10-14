@@ -39,24 +39,19 @@ func (value Store) MarshalJSON() ([]byte, error) {
 	type response struct {
 		ID          string            `json:"id"`
 		Type        string            `json:"type"`
-		Name        *string           `json:"name"`
+		Name        string            `json:"name"`
 		Description string            `json:"description"`
 		Metadata    map[string]string `json:"metadata"`
 		CreatedAt   string            `json:"created_at"`
 		UpdatedAt   string            `json:"updated_at"`
 		ArchivedAt  *string           `json:"archived_at"`
 	}
-	var name *string
-	if value.Name != "" {
-		nameValue := value.Name
-		name = &nameValue
-	}
 	metadata := value.Metadata
 	if metadata == nil {
 		metadata = map[string]string{}
 	}
 	return json.Marshal(response{
-		ID: value.ID, Type: value.Type, Name: name, Description: value.Description,
+		ID: value.ID, Type: value.Type, Name: value.Name, Description: value.Description,
 		Metadata: metadata, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 		ArchivedAt: value.ArchivedAt,
 	})
@@ -70,7 +65,6 @@ type CreateStoreRequest struct {
 
 type StorePatch struct {
 	Name            *string
-	NameClear       bool
 	Description     *string
 	MetadataPatch   map[string]*string
 	MetadataPresent bool
@@ -79,9 +73,7 @@ type StorePatch struct {
 
 func (p StorePatch) Materialize(current Store) (Store, error) {
 	next := current
-	if p.NameClear {
-		next.Name = ""
-	} else if p.Name != nil {
+	if p.Name != nil {
 		name, err := normalizeStoreName(*p.Name)
 		if err != nil {
 			return Store{}, err

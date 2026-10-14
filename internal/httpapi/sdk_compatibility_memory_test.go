@@ -134,7 +134,7 @@ func TestHTTPMemoryUpdateWithNoMutableFieldsIsNoOp(t *testing.T) {
 	}
 }
 
-func TestSDKCompatibilityMemoryStoreNullClearsSurviveStore(t *testing.T) {
+func TestSDKCompatibilityMemoryStoreNullNameRejectedAndMetadataClearSurvivesStore(t *testing.T) {
 	env := newAuthTestEnv(t)
 	service := memory.NewService(memory.NewPostgreSQLStore(dbconnect.NewClientForTesting(env.runtime)))
 	router := env.router(httpapi.WithMemoryHandler(httpapi.NewMemoryHandler(service)))
@@ -146,14 +146,18 @@ func TestSDKCompatibilityMemoryStoreNullClearsSurviveStore(t *testing.T) {
 	var store memory.Store
 	decodeMemoryJSON(t, body, &store)
 	code, body = performJSONRequest(t, router, http.MethodPost, "/v1/memory_stores/"+store.ID, env.envKey, `{"name":null,"metadata":null}`)
+	if code != http.StatusBadRequest || !strings.Contains(body, `"type":"invalid_request_error"`) || !strings.Contains(body, "name must be a string") {
+		t.Fatalf("null name status/body = %d %s; want 400 invalid_request_error", code, body)
+	}
+	code, body = performJSONRequest(t, router, http.MethodPost, "/v1/memory_stores/"+store.ID, env.envKey, `{"metadata":null}`)
 	if code != http.StatusOK {
 		t.Fatalf("clear store status/body = %d %s; want 200", code, body)
 	}
-	if !strings.Contains(body, `"name":null`) || !strings.Contains(body, `"metadata":{}`) {
-		t.Fatalf("clear response = %s; want nullable name and empty metadata", body)
+	if !strings.Contains(body, `"name":"before"`) || !strings.Contains(body, `"metadata":{}`) {
+		t.Fatalf("clear response = %s; want unchanged name and empty metadata", body)
 	}
 	code, body = performJSONRequest(t, router, http.MethodGet, "/v1/memory_stores/"+store.ID, env.envKey, "")
-	if code != http.StatusOK || !strings.Contains(body, `"name":null`) || !strings.Contains(body, `"metadata":{}`) {
+	if code != http.StatusOK || !strings.Contains(body, `"name":"before"`) || !strings.Contains(body, `"metadata":{}`) {
 		t.Fatalf("stored clear response = %d %s", code, body)
 	}
 }

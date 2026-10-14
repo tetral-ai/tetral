@@ -428,6 +428,9 @@ content), and `memory_versions` (immutable content, reached from
 | Optimistic concurrency | Update and delete may carry a content-hash precondition (`expected_content_sha256` / `MemoryPrecondition`); a mismatch is a `PreconditionFailedError` → `409 invalid_request_error`. |
 | Version redaction | `memory_versions` are redactable, but redacting the current live head is refused — an active memory always keeps non-NULL content. |
 
+Memory store responses always carry a string `name`. Updating a store with
+`name: null` returns 400 `invalid_request_error`; omission preserves its name.
+
 Memory version actors describe the credential that performed each write and
 redaction. Independent and identity-derived API keys use `api_actor` with the
 actual `api_key_id`; direct human tokens use `user_actor` with `user_id`; direct

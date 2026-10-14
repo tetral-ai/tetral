@@ -32,27 +32,34 @@ func TestSDKCompatibilityMemoryDepthZeroUsesUnlimitedPath(t *testing.T) {
 	}
 }
 
-func TestSDKCompatibilityMemoryStoreUpdateNullClearsNameAndMetadata(t *testing.T) {
-	patch, err := memory.DecodeUpdateStoreRequest([]byte(`{"name":null,"metadata":null}`))
+func TestSDKCompatibilityMemoryStoreRejectsNullNameAndClearsMetadata(t *testing.T) {
+	if _, err := memory.DecodeUpdateStoreRequest([]byte(`{"name":null}`)); err == nil || err.Error() != "name must be a string" {
+		t.Fatalf("name:null error = %v; want name must be a string", err)
+	}
+	patch, err := memory.DecodeUpdateStoreRequest([]byte(`{"metadata":null}`))
 	if err != nil {
-		t.Fatalf("DecodeUpdateStoreRequest explicit nulls: %v", err)
+		t.Fatalf("DecodeUpdateStoreRequest metadata:null: %v", err)
 	}
 	next, err := patch.Materialize(memory.Store{
 		Name:     "before",
 		Metadata: map[string]string{"team": "runtime"},
 	})
 	if err != nil {
-		t.Fatalf("Materialize explicit nulls: %v", err)
+		t.Fatalf("Materialize metadata:null: %v", err)
 	}
-	if next.Name != "" || len(next.Metadata) != 0 {
-		t.Fatalf("store = %+v; want cleared name and metadata", next)
+	if next.Name != "before" || len(next.Metadata) != 0 {
+		t.Fatalf("store = %+v; want unchanged name and cleared metadata", next)
 	}
 	body, err := json.Marshal(next)
 	if err != nil {
-		t.Fatalf("Marshal cleared store: %v", err)
+		t.Fatalf("Marshal store: %v", err)
 	}
-	if !strings.Contains(string(body), `"name":null`) {
-		t.Fatalf("cleared public name = %s; want explicit null", body)
+	if !strings.Contains(string(body), `"name":"before"`) {
+		t.Fatalf("public name = %s; want unchanged string", body)
+	}
+	body, err = json.Marshal(memory.Store{})
+	if err != nil || !strings.Contains(string(body), `"name":""`) {
+		t.Fatalf("empty stored name must project a string: %s, %v", body, err)
 	}
 }
 
