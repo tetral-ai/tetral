@@ -401,9 +401,6 @@ func parseVaultListOptions(r *http.Request) (vault.ListOptions, error) {
 	}
 	if rawValues, ok := values["page"]; ok {
 		options.Page = rawValues[0]
-		if options.Page == "" {
-			return vault.ListOptions{}, &vault.ValidationError{Message: "page must be a non-empty token"}
-		}
 	}
 	if rawValues, ok := values["include_archived"]; ok {
 		switch rawValues[0] {

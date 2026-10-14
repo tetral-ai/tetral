@@ -21,7 +21,7 @@ func requireBetaQuery(r *http.Request, allowed ...string) (url.Values, error) {
 		if len(rawValues) != 1 {
 			return nil, &ValidationError{Message: "duplicate query parameter " + key}
 		}
-		if rawValues[0] == "" {
+		if rawValues[0] == "" && !emptyQueryValueAllowed(key) {
 			return nil, &ValidationError{Message: "empty query parameter " + key}
 		}
 	}
@@ -30,4 +30,10 @@ func requireBetaQuery(r *http.Request, allowed ...string) (url.Values, error) {
 	}
 	values.Del("beta")
 	return values, nil
+}
+
+// emptyQueryValueAllowed reports whether key may carry an empty value. The SDK
+// sends a null page cursor as "page=", which asks for the first page.
+func emptyQueryValueAllowed(key string) bool {
+	return key == "page"
 }

@@ -1184,7 +1184,7 @@ func parseStrictSessionQuery(r *http.Request, allowed []string) (url.Values, err
 		if len(rawValues) != 1 && key != "statuses[]" {
 			return nil, &ValidationError{Message: "duplicate query parameter " + key}
 		}
-		if rawValues[0] == "" {
+		if rawValues[0] == "" && !emptyQueryValueAllowed(key) {
 			return nil, &ValidationError{Message: "empty query parameter " + key}
 		}
 		if _, ok := allowedSet[key]; !ok {

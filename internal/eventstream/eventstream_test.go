@@ -241,7 +241,7 @@ func TestEventStreamSessionListDecodesSDKFiltersAndRejectsUnknownParameters(t *t
 	signer, verifier := testInternalPrincipalPair(t)
 	reader := &recordingReader{}
 	router := listRouter(reader, verifier, nil)
-	request := signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true&types[]=user.message&types[]=agent.message&created_at[gt]=2026-01-01T00:00:00Z&created_at[lte]=2026-01-02T00:00:00Z")
+	request := signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true&page=&types[]=user.message&types[]=agent.message&created_at[gt]=2026-01-01T00:00:00Z&created_at[lte]=2026-01-02T00:00:00Z")
 	recorder := httptest.NewRecorder()
 
 	router.ServeHTTP(recorder, request)
@@ -255,7 +255,7 @@ func TestEventStreamSessionListDecodesSDKFiltersAndRejectsUnknownParameters(t *t
 		t.Fatalf("decoded list filters = %+v", reader.listOptions)
 	}
 
-	request = signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/threads/thr_child/events?beta=true&types[]=user.message&created_at[gte]=2026-01-01T00:00:00Z")
+	request = signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/threads/thr_child/events?beta=true&page=&types[]=user.message&created_at[gte]=2026-01-01T00:00:00Z")
 	recorder = httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -267,6 +267,7 @@ func TestEventStreamSessionListDecodesSDKFiltersAndRejectsUnknownParameters(t *t
 
 	for _, test := range []struct{ query, message string }{
 		{query: "unknown=1", message: "unknown query parameter"},
+		{query: "page=&page=", message: "invalid query parameter"},
 		{query: "created_at[gte]=not-a-time", message: "created_at[gte] must be an RFC3339 timestamp with a UTC year of 1-9999"},
 		{query: "created_at[lt]=0001-01-01T00:00:00%2B01:00", message: "created_at[lt] must be an RFC3339 timestamp with a UTC year of 1-9999"},
 	} {

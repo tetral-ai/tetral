@@ -248,9 +248,6 @@ func parseFileListOptions(r *http.Request) (files.ListOptions, error) {
 		limit = parsed
 	}
 	page := query.Get("page")
-	if values, ok := query["page"]; ok && (len(values) != 1 || page == "") {
-		return files.ListOptions{}, &files.ValidationError{Message: "invalid page token"}
-	}
 	scopeID := ""
 	if values, ok := query["scope_id"]; ok {
 		if len(values) != 1 || !validFileScopeID(values[0]) {

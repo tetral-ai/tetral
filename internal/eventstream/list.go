@@ -212,9 +212,13 @@ func decodeListOptions(request *http.Request, allowFilters bool) (ListOptions, e
 		}
 		limit = parsed
 	}
-	page, _, err := singleQueryValue(values, "page")
-	if err != nil {
-		return ListOptions{}, err
+	// An empty page is how the SDK sends a null cursor; it asks for the first page.
+	page := ""
+	if raw, ok := values["page"]; ok {
+		if len(raw) != 1 {
+			return ListOptions{}, &httpapi.ValidationError{Message: "invalid query parameter"}
+		}
+		page = raw[0]
 	}
 	order := "asc"
 	if raw, ok, err := singleQueryValue(values, "order"); err != nil {

@@ -454,7 +454,6 @@ func TestListVaultsRejectsMalformedPageQuery(t *testing.T) {
 	cases := []string{
 		"/v1/vaults?limit=0",
 		"/v1/vaults?limit=abc",
-		"/v1/vaults?page=",
 		"/v1/vaults?include_archived=maybe",
 		"/v1/vaults?cursor=vlt_one",
 		"/v1/vaults?limit=1&limit=2",
@@ -963,7 +962,6 @@ func TestListCredentialsRejectsMalformedQueryBeforeParentLookup(t *testing.T) {
 		{name: "non positive limit", target: "/v1/vaults/vlt_parent/credentials?limit=0"},
 		{name: "duplicate limit", target: "/v1/vaults/vlt_parent/credentials?limit=1&limit=2"},
 		{name: "unknown parameter", target: "/v1/vaults/vlt_parent/credentials?cursor=cred_one"},
-		{name: "empty page", target: "/v1/vaults/vlt_parent/credentials?page="},
 		{name: "invalid include archived", target: "/v1/vaults/vlt_parent/credentials?include_archived=maybe"},
 	}
 

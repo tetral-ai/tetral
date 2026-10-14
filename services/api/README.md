@@ -564,7 +564,8 @@ never added through `POST /resources`) are covered above.
   exist and a route keeps its SDK family: the `Page` shape
   (`has_more`/`first_id`/`last_id`, plain id cursors) and the `PageCursor` shape
   (`next_page`/`page`, signed opaque cursors bound to workspace, filters,
-  ordering, and view).
+  ordering, and view). An empty `page`, which is how the SDK sends a null
+  cursor, asks for the first page; any other empty query value returns 400.
 - **Invariant.** Unsupported SDK *routes* (`/v1/messages`, user profiles,
   webhooks, deployments and deployment runs, self-host environment work APIs) are
   registered explicitly and answer `400 "unsupported SDK surface for this stage"` — a closed

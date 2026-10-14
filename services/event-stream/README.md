@@ -378,7 +378,8 @@ ReadSessionSignals(ctx, ws, sessionIDs) ([]SessionSignal, error)
 
 `ListSessionEvents` / `ListThreadEvents` back the list endpoints. The same
 package parses query parameters: `limit` (default 20, hard cap
-`maxListLimit` = 100 — a larger or non-positive `limit` is `400`), `page`,
+`maxListLimit` = 100 — a larger or non-positive `limit` is `400`), `page` (an
+empty `page` is the SDK's null cursor and asks for the first page),
 `order` (`asc`/`desc`), a `types` event-type filter, and
 `created_at[gt|gte|lt|lte]` admission-time bounds (RFC3339, UTC year 1–9999);
 `beta=true` is required and any unknown parameter or malformed value is `400`.
