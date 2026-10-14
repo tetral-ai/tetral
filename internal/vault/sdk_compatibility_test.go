@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -44,55 +45,83 @@ func TestSDKCompatibilityVaultAndCredentialMetadataNullClearsAll(t *testing.T) {
 }
 
 func TestSDKCompatibilityCredentialValidationUsesSDKShapeAndScrubbedHTTPResponse(t *testing.T) {
+	probeStatus := http.StatusUnauthorized
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/mcp" {
 			t.Fatalf("unexpected validation path %s", request.URL.Path)
 		}
 		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+		writer.WriteHeader(probeStatus)
 		_, _ = io.WriteString(writer, `{"jsonrpc":"2.0","id":"validation","result":{}}`)
 	}))
 	defer server.Close()
 	trustSDKValidationServer(t, server)
 	validator := sdkPinnedValidator(server)
-	result, err := validator.Validate(context.Background(), vault.MCPOAuthValidationInput{
-		Credential: vault.CredentialMetadata{ID: "cred_test", VaultID: "vlt_test"},
-		Auth: vault.CredentialAuth{
-			Type:         "mcp_oauth",
-			MCPServerURL: "https://example.com/mcp",
-			AccessToken:  "probe-access-token-sentinel",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	body, err := json.Marshal(result.Validation)
-	if err != nil {
-		t.Fatalf("Marshal validation: %v", err)
-	}
-	var response map[string]any
-	if err := json.Unmarshal(body, &response); err != nil {
-		t.Fatalf("Unmarshal validation: %v", err)
-	}
-	if response["type"] != "vault_credential_validation" || response["status"] != "valid" || response["credential_id"] != "cred_test" || response["vault_id"] != "vlt_test" || response["has_refresh_token"] != false {
-		t.Fatalf("validation top-level shape = %#v", response)
-	}
-	refresh, ok := response["refresh"].(map[string]any)
-	if !ok || refresh["status"] != "no_refresh_token" || refresh["http_response"] != nil {
-		t.Fatalf("refresh = %#v; want no_refresh_token/null response", response["refresh"])
-	}
-	probe, ok := response["mcp_probe"].(map[string]any)
-	if !ok || probe["method"] != "initialize" {
-		t.Fatalf("mcp_probe = %#v; want initialize", response["mcp_probe"])
-	}
-	httpResponse, ok := probe["http_response"].(map[string]any)
-	if !ok || httpResponse["status_code"] != float64(http.StatusOK) || httpResponse["content_type"] != "application/json" || httpResponse["body_truncated"] != false {
-		t.Fatalf("mcp_probe.http_response = %#v", probe["http_response"])
-	}
-	if bodyText, ok := httpResponse["body"].(string); !ok || !strings.Contains(bodyText, `"jsonrpc":"2.0"`) {
-		t.Fatalf("mcp_probe.http_response.body = %#v; want bounded response body", httpResponse["body"])
-	}
-	if strings.Contains(string(body), "probe-access-token-sentinel") {
-		t.Fatalf("validation leaked access token: %s", body)
+	notDue := &vault.CredentialOAuthRefresh{RefreshToken: "refresh-token-sentinel", ClientID: "client", TokenEndpoint: "https://example.com/token"}
+	for _, tc := range []struct {
+		name        string
+		probeStatus int
+		refresh     *vault.CredentialOAuthRefresh
+		wantStatus  string
+		wantRefresh any
+		wantProbe   bool
+	}{
+		{"probe rejected without refresh token", http.StatusUnauthorized, nil, "invalid", map[string]any{"status": "no_refresh_token", "http_response": nil}, true},
+		{"probe succeeds without refresh token", http.StatusOK, nil, "valid", nil, false},
+		{"probe succeeds with refresh token not yet due", http.StatusOK, notDue, "valid", nil, false},
+		{"probe forbidden without refresh token", http.StatusForbidden, nil, "invalid", nil, true},
+		{"probe rejected with refresh token not yet due", http.StatusUnauthorized, notDue, "invalid", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probeStatus = tc.probeStatus
+			result, err := validator.Validate(context.Background(), vault.MCPOAuthValidationInput{
+				Credential: vault.CredentialMetadata{ID: "cred_test", VaultID: "vlt_test"},
+				Auth: vault.CredentialAuth{
+					Type:         "mcp_oauth",
+					MCPServerURL: "https://example.com/mcp",
+					AccessToken:  "probe-access-token-sentinel",
+					ExpiresAt:    "2999-01-01T00:00:00Z",
+					Refresh:      tc.refresh,
+				},
+			})
+			if err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			body, err := json.Marshal(result.Validation)
+			if err != nil {
+				t.Fatalf("Marshal validation: %v", err)
+			}
+			var response map[string]any
+			if err := json.Unmarshal(body, &response); err != nil {
+				t.Fatalf("Unmarshal validation: %v", err)
+			}
+			if response["type"] != "vault_credential_validation" || response["status"] != tc.wantStatus || response["credential_id"] != "cred_test" || response["vault_id"] != "vlt_test" || response["has_refresh_token"] != (tc.refresh != nil) {
+				t.Fatalf("validation top-level shape = %#v", response)
+			}
+			if refresh, present := response["refresh"]; !present || !reflect.DeepEqual(refresh, tc.wantRefresh) {
+				t.Fatalf("refresh = %#v; want %#v", response["refresh"], tc.wantRefresh)
+			}
+			if strings.Contains(string(body), "sentinel") {
+				t.Fatalf("validation leaked a token: %s", body)
+			}
+			if !tc.wantProbe {
+				if probe, present := response["mcp_probe"]; !present || probe != nil {
+					t.Fatalf("mcp_probe = %#v; want explicit null for a successful probe", probe)
+				}
+				return
+			}
+			probe, ok := response["mcp_probe"].(map[string]any)
+			if !ok || probe["method"] != "initialize" {
+				t.Fatalf("mcp_probe = %#v; want initialize", response["mcp_probe"])
+			}
+			httpResponse, ok := probe["http_response"].(map[string]any)
+			if !ok || httpResponse["status_code"] != float64(tc.probeStatus) || httpResponse["content_type"] != "application/json" || httpResponse["body_truncated"] != false {
+				t.Fatalf("mcp_probe.http_response = %#v", probe["http_response"])
+			}
+			if bodyText, ok := httpResponse["body"].(string); !ok || !strings.Contains(bodyText, `"jsonrpc":"2.0"`) {
+				t.Fatalf("mcp_probe.http_response.body = %#v; want bounded response body", httpResponse["body"])
+			}
+		})
 	}
 }
 

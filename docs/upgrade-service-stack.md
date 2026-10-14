@@ -93,6 +93,7 @@ requests and responses change as follows:
 | Memory service attribution | Memory history service actors were `service_actor` with `service_id` | `service_account_actor` with `service_account_id`; the value is still the stable Engine identity ID, and stored actor types and authentication are unchanged | Switch to the SDK's `service_account_actor` discriminator and `service_account_id` field |
 | Memory store name | `name: null` on update cleared the name, and responses could return `name: null` | Responses always return a string `name`; an update with `name: null` returns `400 invalid_request_error` | Omit `name` to keep it, or send a non-empty name |
 | Session budget | Session responses had no `budget` field | Session responses include `budget: null`; budget configuration and enforcement remain unsupported | Accept the explicit `null` |
+| MCP OAuth validation | `mcp_probe` was always an object, and `refresh` reported `succeeded` or `no_refresh_token` even when no token exchange ran | `mcp_probe` is `null` when the probe succeeds; `refresh` is `null` unless an exchange ran or the probe got a 401 with no stored refresh token | Treat `null` as "nothing to report" for each check |
 
 The workspace-header check covers API, Auth API-key and Event Stream public
 business routes. OAuth token issuance, health endpoints, Bridge, git-proxy and

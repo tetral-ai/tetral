@@ -545,8 +545,12 @@ never added through `POST /resources`) are covered above.
   only when `status` is `failed`. It then carries the token endpoint's status
   code and truncation flag, while `body` and `content_type` are always empty
   strings; the official API returns a scrubbed body instead. It is explicitly
-  `null` for `succeeded`, `connect_error` and `no_refresh_token`. The MCP
-  probe keeps its separate HTTP-response shape.
+  `null` for `succeeded`, `connect_error` and `no_refresh_token`. As in the
+  official API, `mcp_probe` is `null` when the probe succeeds, and `refresh` is
+  `null` unless a token exchange ran or the probe got a 401 with no stored
+  refresh token (`no_refresh_token`). Engine refreshes before probing when the
+  stored access token is expired or has no valid expiry time, and does not
+  refresh after a 401; the official API refreshes after a 401.
 - **Contract.** Errors use the SDK envelope
   `{"type":"error","error":{"type","message"},"request_id"}`, with the HTTP
   status chosen independently of the error `type`. The error-type set is exactly

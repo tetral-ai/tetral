@@ -107,8 +107,8 @@ func TestHTTPMCPOAuthValidatorRefreshesProbesAndScrubsPublicResult(t *testing.T)
 	if result.Validation.Refresh == nil || result.Validation.Refresh.Status != "succeeded" || result.Validation.Refresh.HTTPResponse != nil {
 		t.Fatalf("refresh check = %+v", result.Validation.Refresh)
 	}
-	if result.Validation.MCPProbe == nil || result.Validation.MCPProbe.Method != "initialize" || result.Validation.MCPProbe.HTTPResponse == nil || result.Validation.MCPProbe.HTTPResponse.StatusCode != 200 {
-		t.Fatalf("probe check = %+v", result.Validation.MCPProbe)
+	if result.Validation.MCPProbe != nil {
+		t.Fatalf("successful probe check = %+v; want null", result.Validation.MCPProbe)
 	}
 	if result.RefreshedAuth == nil || result.RefreshedAuth.AccessToken != newAccess ||
 		result.RefreshedAuth.Refresh == nil || result.RefreshedAuth.Refresh.RefreshToken != newRefresh ||

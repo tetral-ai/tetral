@@ -377,7 +377,6 @@ func (v *recordingMCPOAuthValidator) Validate(_ context.Context, input vault.MCP
 			ValidatedAt:     time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
 			HasRefreshToken: input.Auth.Refresh != nil && input.Auth.Refresh.RefreshToken != "",
 			Refresh:         &vault.CredentialValidationCheck{Status: "succeeded"},
-			MCPProbe:        &vault.CredentialValidationCheck{Method: "initialize", HTTPResponse: &vault.CredentialValidationHTTPResponse{StatusCode: 200}},
 		},
 	}, nil
 }
@@ -1748,7 +1747,7 @@ func TestValidateMCPOAuthCredentialRouteReturnsScrubbedDiagnostic(t *testing.T) 
 		response.ValidatedAt == "" ||
 		!response.HasRefreshToken ||
 		response.Refresh == nil ||
-		response.MCPProbe == nil {
+		response.MCPProbe != nil {
 		t.Fatalf("validation response = %+v", response)
 	}
 	if response.Auth != nil {

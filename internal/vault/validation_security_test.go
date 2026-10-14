@@ -349,6 +349,7 @@ func TestHTTPMCPOAuthValidatorScrubsStoredAndNewlyIssuedSecretCorpus(t *testing.
 				"benign_note":   reflected,
 			})
 		case "/mcp":
+			writer.WriteHeader(http.StatusForbidden)
 			_ = json.NewEncoder(writer).Encode(map[string]any{
 				"jsonrpc": "2.0",
 				"id":      "validation",

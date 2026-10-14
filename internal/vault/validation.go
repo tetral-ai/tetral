@@ -55,8 +55,6 @@ func (v HTTPMCPOAuthValidator) Validate(ctx context.Context, input MCPOAuthValid
 		Status:          "valid",
 		ValidatedAt:     now,
 		HasRefreshToken: hasMCPRefreshToken(input.Auth),
-		Refresh:         &CredentialValidationCheck{Status: "no_refresh_token"},
-		MCPProbe:        &CredentialValidationCheck{Method: "initialize"},
 	}
 
 	authForProbe := input.Auth
@@ -80,12 +78,17 @@ func (v HTTPMCPOAuthValidator) Validate(ctx context.Context, input MCPOAuthValid
 			authForProbe = refreshedAuth
 			redactionCorpus = credentialValidationRedactionCorpus(input.Auth, []string{refreshResult.AccessToken, refreshResult.RefreshToken})
 		}
-	} else if hasMCPRefreshToken(input.Auth) {
-		out.Refresh = &CredentialValidationCheck{Status: "succeeded"}
 	}
 
+	// Like the official API, report only a failing probe, and report a refresh
+	// only when an exchange ran or a 401 found no refresh token to try.
 	probe, probeOutcome := v.probe(ctx, authForProbe, redactionCorpus)
-	out.MCPProbe = probe
+	if probeOutcome != "valid" {
+		out.MCPProbe = probe
+	}
+	if out.Refresh == nil && !hasMCPRefreshToken(input.Auth) && probe.HTTPStatus == http.StatusUnauthorized {
+		out.Refresh = &CredentialValidationCheck{Status: "no_refresh_token"}
+	}
 	if probeOutcome == "invalid" {
 		out.Status = "invalid"
 	} else if probeOutcome == "unknown" && out.Status == "valid" {
