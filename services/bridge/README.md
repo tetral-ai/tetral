@@ -784,3 +784,8 @@ receives the Bridge client and owns its own short registry transactions,
 because promotion must never run inside a Session transaction. Bridge remains the Runtime RPC owner and
 Job Runner remains the reconciliation owner. Mixed owner tests live in
 `integration/` and call each owner's actual production entry points.
+
+Skill references in Runtime configuration and the Skill index come from the
+Session's saved concrete versions. Loading context preserves those versions and
+retained package metadata after a Skill or version is soft-deleted; Agent
+`latest` is resolved only when a new Session is created.

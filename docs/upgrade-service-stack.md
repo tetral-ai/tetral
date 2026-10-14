@@ -416,3 +416,41 @@ planning and alerting do not assume more.
 | Feed retention | Change rows can be pruned after 24 hours; connection age is unlimited. Only eligible positions a viewer had not yet read close its stream, through the existing reader-failure close; there is no new error frame and no silent cursor skip. |
 | Compaction | A compaction checkpoint accepts only text parts, including empty text, within the existing size bounds; reasoning, Tool call and Tool result parts are `InvalidArgument`. The shipped Runtime already sends text only. |
 | Schema | Fresh install only; previous databases are rebuilt, not migrated. Event and message history is retained for the life of the database; Session deletion is a tombstone, not a purge. |
+
+## Files pagination and upload names
+
+Files lists now accept `limit` and `page`, returning `{data, next_page}`.
+`after_id` and `before_id` return 400. Upgrade callers together with Engine;
+old SDK pagination cannot traverse the new envelope. Cursors are signed and
+bound to workspace and scope, and survive deletion of their last file.
+
+An omitted or empty upload filename now becomes `unnamed`, with an extension
+from the fixed mapping for known MIME types. Path-qualified names keep only
+the basename; a name without one, such as `dir/..`, becomes `unnamed` as well.
+Previously empty names were rejected and path text was stored.
+
+## Skill versions and Session binding
+
+Upgrade callers with Engine to use `display_name` (at most 255 characters,
+single line without controls), `latest_version_id`, and `source: {type: "custom"}`.
+Omitting `display_name` uses SKILL.md's name. The old `display_title` request
+field is rejected. Version responses omit `version` and `directory`, and lists
+omit `has_more`. Address versions by their returned `skver_` ID; old timestamp
+addressing fails. Only version GET accepts `latest`. All versions of a skill
+must keep the first version's frontmatter name.
+
+Session creation now resolves and saves concrete Skill versions transactionally.
+Session/Thread responses and Runtime loading return and use those saved versions.
+An existing Session no longer changes packages when a later version is uploaded
+or deleted. Agent `latest` remains a choice for future Sessions.
+
+Deleting a skill now soft-deletes all versions even when Agents reference it.
+Existing Sessions keep their packages; Agent reads remain unchanged, but Agent
+writes retaining the deleted reference and new Sessions using it return 400.
+Deleting a skill's last version alone returns 400; deleting its latest version
+when others remain selects the previous active version for future Sessions.
+
+The added `sessions.resolved_skills_json` column and non-null Skills latest
+pointer change the baseline checksum. Prepare a new empty database and isolated
+object namespace. Existing databases fail startup verification; no data migration
+or reference backfill is provided.

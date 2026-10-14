@@ -116,6 +116,22 @@ unauthenticated.
 | API keys | Owned by the `auth` service |
 | Health (`GET /health`) | Live (200), unauthenticated |
 
+### Files
+
+Files routes require `beta=true`. Lists accept `limit` (1–1000, default 20),
+`page` and `scope_id`, and return `{data, next_page}` in ascending storage order.
+The signed page token uses the API page-token secret and binds both workspace
+and scope. Deleting the last file on a page does not invalidate continuation.
+`after_id`, `before_id` and `ids` return 400 `invalid_request_error`.
+
+Uploads without a filename, including an empty filename, use `unnamed` plus
+a fixed extension for known stored MIME types; unknown MIME types add no
+extension. Path-qualified filenames retain only the basename, and a name with
+no last segment (such as `dir/..`) also becomes `unnamed`. Control characters or
+invalid UTF-8 anywhere in the supplied name return 400; the 255-character limit
+applies to the basename. Expiration
+configuration (`expires_in_seconds`) is rejected. Metadata omits `expires_at`.
+
 ## States & lifecycle
 
 ### Admission gate (every request)
@@ -397,7 +413,7 @@ normalized zip in BlobStore; the version's `name`/`description` come from a root
 | Per-entry bytes | 10 MiB (`MaxPackageEntryBytes`) |
 | Expanded package bytes | 200 MiB (`MaxPackageExpandedBytes`) |
 | Normalized zip bytes | 31 MiB (`MaxNormalizedZipBytes`) |
-| Display title | ≤ 1024 runes (`maxDisplayTitleRunes`) |
+| Display name | ≤ 255 runes, one line, no control characters (`maxDisplayNameRunes`) |
 
 A root `SKILL.md` is required. Only the bounded segment between the opening and
 closing `---` delimiters reaches the YAML parser, capped at 32 KiB
@@ -409,6 +425,32 @@ containing U+0000, which a YAML `\0` escape can produce, is rejected with `400`
 because Engine stores it in PostgreSQL, which cannot store U+0000. The
 `gopkg.in/yaml.v3` parser is confined to this package
 (`internal/skill/dependency_test.go`).
+
+Skill responses expose `display_name`, `latest_version_id`, and
+`source: {type: "custom"}`. Multipart creation accepts `display_name`; omission
+uses the frontmatter `name`. `display_title` is rejected. Every
+version of a skill must keep its first version's frontmatter name. Versions
+use `skver_` IDs for both storage version fields and public addressing. Version
+responses omit `version` and `directory`; lists return `next_page` without
+`has_more`. Only version GET accepts `latest`; content and deletion require a
+concrete version ID.
+
+Session creation resolves Agent Skill references, including `latest`, under the
+shared workspace Skill registry lock in the same transaction that saves the
+Session, so Session creations do not wait for each other but never interleave
+with a Skill upload or deletion.
+The concrete references persist in `sessions.resolved_skills_json` (`[]` without
+skills). Session and Thread responses, Sandbox materialization, and Bridge
+Runtime configuration all use these saved references. Agent configuration keeps
+`latest` for future Sessions. Uploading a version or deleting a version or its
+parent never changes an existing Session's package content.
+
+Deleting a skill atomically soft-deletes all its versions without checking Agent
+references. Existing Sessions retain access to their saved packages; new Agent
+writes and Session creation reject deleted references. Reading a historical
+Agent remains valid. Deleting the last version alone returns 400; deleting the
+latest of several versions selects the previous active version for future
+Sessions.
 
 ### Memory store durable domain (`internal/memory`)
 
