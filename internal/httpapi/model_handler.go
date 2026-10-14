@@ -11,6 +11,7 @@ import (
 type modelCatalogEntry struct {
 	ID             string
 	DisplayName    string
+	Line           string
 	CreatedAt      string
 	MaxTokens      int
 	MaxInputTokens int
@@ -22,8 +23,8 @@ func currentModelCatalog() [modelCatalogSize]modelCatalogEntry {
 	return [modelCatalogSize]modelCatalogEntry{
 		{ID: "openai/gpt-5.5", DisplayName: "GPT-5.5", CreatedAt: "2026-04-23T00:00:00Z", MaxTokens: 128000, MaxInputTokens: 1050000},
 		{ID: "openai/gpt-5.6-sol", DisplayName: "GPT-5.6 Sol", CreatedAt: "2026-07-09T00:00:00Z", MaxTokens: 128000, MaxInputTokens: 1050000},
-		{ID: "anthropic/claude-opus-4-8", DisplayName: "Claude Opus 4.8", CreatedAt: "2026-05-28T00:00:00Z", MaxTokens: 128000, MaxInputTokens: 1000000},
-		{ID: "anthropic/claude-fable-5", DisplayName: "Claude Fable 5", CreatedAt: "2026-06-07T00:00:00Z", MaxTokens: 128000, MaxInputTokens: 1000000},
+		{ID: "anthropic/claude-opus-4-8", DisplayName: "Claude Opus 4.8", Line: "opus", CreatedAt: "2026-05-28T00:00:00Z", MaxTokens: 128000, MaxInputTokens: 1000000},
+		{ID: "anthropic/claude-fable-5", DisplayName: "Claude Fable 5", Line: "fable", CreatedAt: "2026-06-07T00:00:00Z", MaxTokens: 128000, MaxInputTokens: 1000000},
 		{ID: "deepseek/deepseek-v4-pro", DisplayName: "DeepSeek V4 Pro", CreatedAt: "2026-04-24T00:00:00Z", MaxTokens: 384000, MaxInputTokens: 1000000},
 		{ID: "moonshotai/kimi-k3", DisplayName: "Kimi K3", CreatedAt: "2026-07-16T00:00:00Z", MaxTokens: 131072, MaxInputTokens: 1048576},
 		{ID: "zai/glm-5.2", DisplayName: "GLM-5.2", CreatedAt: "2026-06-13T00:00:00Z", MaxTokens: 131072, MaxInputTokens: 1048576},
@@ -38,6 +39,10 @@ type modelInfoResponse struct {
 	MaxTokens             int       `json:"max_tokens"`
 	MaxInputTokens        *int      `json:"max_input_tokens"`
 	Capabilities          any       `json:"capabilities"`
+	Lifecycle             string    `json:"lifecycle"`
+	DeprecatedAt          *string   `json:"deprecated_at"`
+	RetiresAt             *string   `json:"retires_at"`
+	Line                  *string   `json:"line"`
 	AllowedFallbackModels *[]string `json:"allowed_fallback_models,omitempty"`
 }
 
@@ -125,6 +130,10 @@ func modelResponse(entry modelCatalogEntry, beta bool) modelInfoResponse {
 		MaxTokens:      entry.MaxTokens,
 		MaxInputTokens: &maxInputTokens,
 		Capabilities:   nil,
+		Lifecycle:      "active",
+	}
+	if entry.Line != "" {
+		response.Line = &entry.Line
 	}
 	if beta {
 		var none []string

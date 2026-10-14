@@ -23,6 +23,10 @@ type modelResponse struct {
 	MaxTokens             int      `json:"max_tokens"`
 	MaxInputTokens        *int     `json:"max_input_tokens"`
 	Capabilities          any      `json:"capabilities"`
+	Lifecycle             string   `json:"lifecycle"`
+	DeprecatedAt          *string  `json:"deprecated_at"`
+	RetiresAt             *string  `json:"retires_at"`
+	Line                  *string  `json:"line"`
 	AllowedFallbackModels []string `json:"allowed_fallback_models"`
 }
 
@@ -62,6 +66,13 @@ func TestModelsListServesTheStableSevenModelCatalog(t *testing.T) {
 		}
 		if response.Data[i].MaxTokens <= 0 || response.Data[i].MaxInputTokens == nil || *response.Data[i].MaxInputTokens <= 0 {
 			t.Fatalf("model[%d] missing token limits: %#v", i, response.Data[i])
+		}
+		if response.Data[i].Lifecycle != "active" || response.Data[i].DeprecatedAt != nil || response.Data[i].RetiresAt != nil {
+			t.Fatalf("model[%d] lifecycle fields = %#v; want active with null retirement dates", i, response.Data[i])
+		}
+		wantLine := map[string]string{"anthropic/claude-opus-4-8": "opus", "anthropic/claude-fable-5": "fable"}[wantID]
+		if line := response.Data[i].Line; (wantLine == "" && line != nil) || (wantLine != "" && (line == nil || *line != wantLine)) {
+			t.Fatalf("model[%d].line = %v; want %q or null for other models", i, line, wantLine)
 		}
 		if response.Data[i].Capabilities != nil {
 			t.Fatalf("model[%d].capabilities = %#v; want null", i, response.Data[i].Capabilities)
@@ -187,6 +198,11 @@ func TestBetaModelsRetrieveAddsFallbackFieldWithoutChangingCatalogData(t *testin
 	}
 	if string(raw["allowed_fallback_models"]) != "null" {
 		t.Fatalf("allowed_fallback_models = %s; want null", raw["allowed_fallback_models"])
+	}
+	for field, want := range map[string]string{"lifecycle": `"active"`, "deprecated_at": "null", "retires_at": "null", "line": "null"} {
+		if string(raw[field]) != want {
+			t.Fatalf("%s = %s; want %s", field, raw[field], want)
+		}
 	}
 	if string(raw["capabilities"]) != "null" {
 		t.Fatalf("capabilities = %s; want null", raw["capabilities"])

@@ -489,6 +489,11 @@ never added through `POST /resources`) are covered above.
 
 ### SDK-compatibility surface
 
+- **Models.** List and retrieve return `lifecycle: "active"`,
+  `deprecated_at: null` and `retires_at: null`. Lifecycle means the Engine
+  currently provides the model, not the provider's retirement schedule.
+  `line` is `"opus"` for `anthropic/claude-opus-4-8`, `"fable"` for
+  `anthropic/claude-fable-5`, and `null` for the other catalog entries.
 - **Contract.** Errors use the SDK envelope
   `{"type":"error","error":{"type","message"},"request_id"}`, with the HTTP
   status chosen independently of the error `type`. The error-type set is exactly

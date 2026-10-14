@@ -88,6 +88,7 @@ requests and responses change as follows:
 | Surface | Earlier prerelease behavior | Final behavior | Caller action |
 |---|---|---|---|
 | Workspace header | `anthropic-workspace-id` was ignored | When supplied, exactly one nonempty value must match the authenticated workspace; mismatches, empty and repeated values return `403 permission_error` and record an authorization denial | Omit the header or send the token's workspace once; it cannot select a different workspace |
+| Models | No lifecycle, retirement or line fields | List and retrieve include `lifecycle: "active"`, `deprecated_at: null`, `retires_at: null`, and `line` (`opus`, `fable`, or `null`) | Treat lifecycle as Engine availability, not the provider's retirement schedule |
 
 The workspace-header check covers API, Auth API-key and Event Stream public
 business routes. OAuth token issuance, health endpoints, Bridge, git-proxy and
