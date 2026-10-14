@@ -415,15 +415,15 @@ func TestForkSDKIntegrationSuiteRunsAgainstLocalEngineTopology(t *testing.T) {
 	standardAPIKey := mintSDKIntegrationAPIKey(t, edgeServer.URL, bootstrapKey)
 	ctx, cancel := context.WithTimeout(context.Background(), sdkIntegrationTimeout)
 	defer cancel()
-	reportPath := filepath.Join(t.TempDir(), "sdk-jest-results.json")
-	jestPath := filepath.Join(sdkRoot, "node_modules", "jest", "bin", "jest.js")
+	reportPath := filepath.Join(t.TempDir(), "sdk-vitest-results.json")
+	vitestPath := filepath.Join(sdkRoot, "node_modules", "vitest", "vitest.mjs")
 	//nolint:gosec // The SDK root comes from the runner's pinned dependency checkout.
-	if _, err := os.Stat(jestPath); err != nil {
-		t.Fatalf("SDK Jest dependency is not prepared: %v", err)
+	if _, err := os.Stat(vitestPath); err != nil {
+		t.Fatalf("SDK Vitest dependency is not prepared: %v", err)
 	}
 	//nolint:gosec // The runner prepares the pinned SDK checkout; all arguments are fixed test inputs.
-	command := exec.CommandContext(ctx, bunPath, "x", "--no-install", "jest",
-		"tests/integration/tetral.integration.test.ts", "--runInBand", "--json", "--outputFile", reportPath)
+	command := exec.CommandContext(ctx, bunPath, "x", "--no-install", "vitest", "run",
+		"tests/integration/tetral.integration.test.ts", "--maxWorkers=1", "--reporter=json", "--outputFile", reportPath)
 	command.Dir = sdkRoot
 	command.Env = append(filteredSDKIntegrationEnvironment(os.Environ()),
 		"TETRAL_COMPAT_LIVE=1",
@@ -440,7 +440,7 @@ func TestForkSDKIntegrationSuiteRunsAgainstLocalEngineTopology(t *testing.T) {
 	}
 	report, err := os.ReadFile(reportPath)
 	if err != nil {
-		t.Fatalf("read SDK Jest results: %v", err)
+		t.Fatalf("read SDK Vitest results: %v", err)
 	}
 	passed, err := validateSDKIntegrationReport(report)
 	if err != nil {

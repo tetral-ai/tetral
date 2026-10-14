@@ -738,6 +738,9 @@ func TestThreadResponseStatsAreNullThisStage(t *testing.T) {
 	if !bytes.Contains(body, []byte(`"stats":null`)) {
 		t.Fatalf("thread response = %s; want stats:null", body)
 	}
+	if !bytes.Contains(body, []byte(`"workflow_run_id":null`)) {
+		t.Fatalf("thread response = %s; want workflow_run_id:null", body)
+	}
 }
 
 func TestCreatePersistsSessionPrimaryThreadAndResources(t *testing.T) {

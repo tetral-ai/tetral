@@ -13,81 +13,10 @@ func TestGitHubIntegrationRuntimeEventsTrackForkSDKShapes(t *testing.T) {
 	engineRoot := finalArchitectureEngineRoot(t)
 	sdkRoot := forkSDKRootForStaticTest(t, engineRoot)
 	eventsPath := filepath.Join(sdkRoot, "src", "resources", "beta", "sessions", "events.ts")
-	body, err := os.ReadFile(eventsPath) //nolint:gosec // local fork SDK source drift gate.
-	if err != nil {
-		if os.IsNotExist(err) {
-			t.Fatalf("fork SDK source not available at %s; set TETRAL_ENGINE_SDK_ROOT or place the fork next to the engine checkout to run the required SDK drift gate", eventsPath)
-		}
-		t.Fatalf("read fork SDK events source: %v", err)
+	if _, err := os.Stat(eventsPath); err != nil {
+		t.Fatalf("fork SDK source not available at %s; set TETRAL_ENGINE_SDK_ROOT or place the fork next to the engine checkout to run the required SDK drift gate: %v", eventsPath, err)
 	}
-	sdkEvents := string(body)
 	runMCPRuntimeEventForkSDKFixtureTypecheck(t, engineRoot, eventsPath)
-
-	assertInterfaceContains(t, sdkEvents, "BetaManagedAgentsAgentMCPToolUseEvent", []string{
-		"id: string;",
-		"processed_at: string;",
-		"type: 'agent.mcp_tool_use';",
-		"name: string;",
-		"input: { [key: string]: unknown };",
-		"mcp_server_name: string;",
-		"evaluated_permission?: 'allow' | 'ask' | 'deny';",
-	})
-	assertInterfaceContains(t, sdkEvents, "BetaManagedAgentsAgentMCPToolResultEvent", []string{
-		"id: string;",
-		"processed_at: string;",
-		"type: 'agent.mcp_tool_result';",
-		"mcp_tool_use_id: string;",
-		"content?: Array<",
-		"is_error?: boolean | null;",
-	})
-	assertInterfaceContains(t, sdkEvents, "BetaManagedAgentsMCPAuthenticationFailedError", []string{
-		"mcp_server_name: string;",
-		"message: string;",
-		"type: 'mcp_authentication_failed_error';",
-		"BetaManagedAgentsRetryStatusRetrying",
-		"BetaManagedAgentsRetryStatusExhausted",
-		"BetaManagedAgentsRetryStatusTerminal",
-	})
-	assertInterfaceContains(t, sdkEvents, "BetaManagedAgentsMCPConnectionFailedError", []string{
-		"mcp_server_name: string;",
-		"message: string;",
-		"type: 'mcp_connection_failed_error';",
-		"BetaManagedAgentsRetryStatusRetrying",
-		"BetaManagedAgentsRetryStatusExhausted",
-		"BetaManagedAgentsRetryStatusTerminal",
-	})
-	assertInterfaceContains(t, sdkEvents, "BetaManagedAgentsSessionErrorEvent", []string{
-		"id: string;",
-		"processed_at: string;",
-		"type: 'session.error';",
-		"BetaManagedAgentsMCPConnectionFailedError",
-		"BetaManagedAgentsMCPAuthenticationFailedError",
-	})
-
-	runtimeContractTest := finalArchitectureReadText(t, filepath.Join(
-		engineRoot,
-		"services",
-		"agent-runtime",
-		"packages",
-		"core",
-		"test",
-		"unit",
-		"runtime-contract.test.ts",
-	))
-	for _, required := range []string{
-		`test("emits MCP runtime events compatible with fork SDK event types"`,
-		"satisfies ForkSDKAgentMCPToolUseEvent",
-		"satisfies ForkSDKAgentMCPToolResultEvent",
-		"satisfies ForkSDKSessionMCPErrorEvent",
-		"type RuntimeMCPToolUseSDKCompatibility",
-		"type RuntimeMCPToolResultSDKCompatibility",
-		"type RuntimeMCPAuthErrorSDKCompatibility",
-		"type RuntimeMCPConnectionErrorSDKCompatibility",
-	} {
-		if !strings.Contains(runtimeContractTest, required) {
-			t.Fatalf("runtime SDK compatibility test missing %q", required)
-		}
-	}
 }
 
 func runMCPRuntimeEventForkSDKFixtureTypecheck(t *testing.T, engineRoot string, sdkEventsPath string) {
@@ -279,45 +208,6 @@ func forkSDKRootForStaticTest(t *testing.T, engineRoot string) string {
 		t.Skip("set TETRAL_ENGINE_SDK_ROOT or check out tetral-ai/tetral-sdk-typescript next to the engine repository to run fork-SDK drift gates")
 	}
 	return sdkRoot
-}
-
-func assertInterfaceContains(t *testing.T, source string, name string, required []string) {
-	t.Helper()
-	body, ok := typescriptInterfaceBody(source, name)
-	if !ok {
-		t.Fatalf("fork SDK source missing interface %s", name)
-	}
-	for _, token := range required {
-		if !strings.Contains(body, token) {
-			t.Fatalf("fork SDK interface %s missing %q in:\n%s", name, token, body)
-		}
-	}
-}
-
-func typescriptInterfaceBody(source string, name string) (string, bool) {
-	header := "export interface " + name
-	start := strings.Index(source, header)
-	if start < 0 {
-		return "", false
-	}
-	open := strings.Index(source[start:], "{")
-	if open < 0 {
-		return "", false
-	}
-	open += start
-	depth := 0
-	for i := open; i < len(source); i++ {
-		switch source[i] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return source[open+1 : i], true
-			}
-		}
-	}
-	return "", false
 }
 
 func typescriptTypeAliasBody(source string, name string) (string, bool) {

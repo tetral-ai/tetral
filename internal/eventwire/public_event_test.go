@@ -75,6 +75,7 @@ func TestMarshalPublicEventProjectsBridgeChildVariantsWithExactLineage(t *testin
 			want: map[string]any{
 				"session_thread_id": "sthr_created_distinct",
 				"agent_name":        "callable_created",
+				"workflow_run_id":   nil,
 			},
 		},
 		{
@@ -87,12 +88,19 @@ func TestMarshalPublicEventProjectsBridgeChildVariantsWithExactLineage(t *testin
 			},
 		},
 		{
+			name:      "session idle adds null stop details",
+			eventType: "session.status_idle",
+			payload:   `{"type":"session.status_idle","stop_reason":{"type":"end_turn"}}`,
+			want:      map[string]any{"stop_reason": map[string]any{"type": "end_turn"}, "stop_details": nil},
+		},
+		{
 			name:      "thread idle retains stop reason and callable task name",
 			eventType: "session.thread_status_idle",
 			payload:   `{"type":"session.thread_status_idle","session_thread_id":"sthr_idle_distinct","task_name":"callable_idle","agent_type":"research","stop_reason":{"type":"requires_action","event_ids":["sevt_wait_second","sevt_wait_first"]}}`,
 			want: map[string]any{
 				"session_thread_id": "sthr_idle_distinct",
 				"agent_name":        "callable_idle",
+				"stop_details":      nil,
 				"stop_reason": map[string]any{
 					"type":      "requires_action",
 					"event_ids": []any{"sevt_wait_second", "sevt_wait_first"},
