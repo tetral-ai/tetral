@@ -22,21 +22,25 @@ import "time"
 const IDPrefix = "skill_"
 
 // VersionIDPrefix is the stable prefix every SkillVersion object id
-// uses. The Version field remains a separate opaque timestamp string.
-const VersionIDPrefix = "skill_version_"
+// uses; the ID is stored in both version identity columns.
+const VersionIDPrefix = "skver_"
 
 // Skill is the workspace-scoped Anthropic parent resource returned by
 // the replacement `/v1/skills` JSON endpoints.
 type Skill struct {
-	ID            string    `json:"id"`
-	Type          string    `json:"type"`
-	Source        string    `json:"source"`
-	DisplayTitle  *string   `json:"display_title"`
-	LatestVersion *string   `json:"latest_version"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID              string      `json:"id"`
+	Type            string      `json:"type"`
+	Source          SkillSource `json:"source"`
+	DisplayName     string      `json:"display_name"`
+	LatestVersionID string      `json:"latest_version_id"`
+	CreatedAt       time.Time   `json:"created_at"`
+	UpdatedAt       time.Time   `json:"updated_at"`
 
 	storageSequence int64
+}
+
+type SkillSource struct {
+	Type string `json:"type"`
 }
 
 // SkillVersion is the immutable Anthropic SkillVersion resource.
@@ -46,8 +50,8 @@ type SkillVersion struct {
 	SkillID     string    `json:"skill_id"`
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
-	Directory   string    `json:"directory"`
-	Version     string    `json:"version"`
+	Directory   string    `json:"-"`
+	Version     string    `json:"-"`
 	CreatedAt   time.Time `json:"created_at"`
 
 	storageSequence int64
@@ -56,7 +60,7 @@ type SkillVersion struct {
 // SkillListResult is the Anthropic list envelope for parent Skills.
 type SkillListResult struct {
 	Data     []*Skill `json:"data"`
-	HasMore  bool     `json:"has_more"`
+	HasMore  bool     `json:"-"`
 	NextPage *string  `json:"next_page"`
 }
 
@@ -64,7 +68,7 @@ type SkillListResult struct {
 // SkillVersion resources.
 type SkillVersionListResult struct {
 	Data     []*SkillVersion `json:"data"`
-	HasMore  bool            `json:"has_more"`
+	HasMore  bool            `json:"-"`
 	NextPage *string         `json:"next_page"`
 }
 

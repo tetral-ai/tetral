@@ -117,6 +117,14 @@ const (
 	ApprovalModeApproveForMe   ApprovalMode = "approve_for_me"
 )
 
+// ResolvedSkillReference is the immutable custom Skill binding selected during
+// Session admission. It remains readable after public Skill/version deletion.
+type ResolvedSkillReference struct {
+	Type    string `json:"type"`
+	SkillID string `json:"skill_id"`
+	Version string `json:"version"`
+}
+
 type Session struct {
 	ID                 string
 	Type               string
@@ -129,6 +137,7 @@ type Session struct {
 	ApprovalMode       ApprovalMode
 	RuntimeAgentConfig *RuntimeAgentConfig
 	ArchivedAt         *time.Time
+	ResolvedSkills     []ResolvedSkillReference
 	AgentID            string
 	AgentVersionID     string
 	AgentVersion       int

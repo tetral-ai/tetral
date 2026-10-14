@@ -299,6 +299,7 @@ func BuildRouter(ctx context.Context, cfg RouterConfig) (handler http.Handler, r
 		vaultService,
 		sessionStore,
 		encryptor,
+		session.WithSkillResolver(skillRefResolver),
 	)
 
 	routerOpts := []httpapi.RouterOption{
@@ -390,7 +391,7 @@ func loadInternalPrincipalVerifierFromEnv(env Env) (*auth.InternalPrincipalVerif
 	return verifier, nil
 }
 
-func buildSkillReferenceResolver(runtimeClient *dbconnect.Client, pageTokenSecret []byte) agent.SkillReferenceResolver {
+func buildSkillReferenceResolver(runtimeClient *dbconnect.Client, pageTokenSecret []byte) *skill.Service {
 	skillStore := skill.NewPostgreSQLStore(runtimeClient, nil)
 	return skill.NewService(skillStore, skill.WithPageTokenSecret(pageTokenSecret))
 }

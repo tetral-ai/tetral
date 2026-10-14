@@ -61,12 +61,12 @@ func TestPostgreSQLSandboxLifecycleConvergesBeforeReenqueueingExecution(t *testi
 	if current != SandboxLifecycleApplied || activation.Kind != ActivationCreate {
 		t.Fatalf("activation = %+v current=%s; want current create", activation, current)
 	}
-	if _, err := adminDB.Exec(`UPDATE agent_versions SET config_json=(config_json::jsonb || '{"skills":[{"skill_id":"skill_role","version":"1"}]}'::jsonb)::text;
+	if _, err := adminDB.Exec(`UPDATE sessions SET resolved_skills_json='[{"type":"custom","skill_id":"skill_role","version":"1"}]' WHERE workspace_id='ws_execution_store';
  INSERT INTO skills(workspace_id,skill_id,latest_version,created_at,updated_at) VALUES ('ws_execution_store','skill_role','1',now(),now());
  INSERT INTO skill_versions(workspace_id,skill_id,skill_version_id,version,name,description,directory,blob_key,size_bytes,sha256,created_at) VALUES ('ws_execution_store','skill_role','sv_role','1','role skill','role description','role','role.zip',1,'hash',now())`); err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"session_file_resources", "session_github_repository_resources", "agent_versions", "skill_versions"} {
+	for _, table := range []string{"session_file_resources", "session_github_repository_resources", "skill_versions"} {
 		workload.RequirePrivilege(t, table, "SELECT", func() error {
 			_, err := lifecycle.CompleteActivation(ctx, activation, sandbox.ProviderHandle{Provider: "daytona", SandboxID: "provider_execution_store"}, now.Add(time.Second))
 			return err

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -102,8 +101,8 @@ func (s *PostgreSQLSkillStore) SetTxRunner(runner func(context.Context, string, 
 	s.txAndCleanup = runner
 }
 
-func defaultVersionStrategy(now time.Time) string {
-	return strconv.FormatInt(now.UnixMicro(), 10)
+func defaultVersionStrategy(_ time.Time) string {
+	return id.New(VersionIDPrefix)
 }
 
 func packageBlobKey(ws workspace.ID, skillID, version string) string {
@@ -116,6 +115,9 @@ func (s *PostgreSQLSkillStore) CreateSkill(ctx context.Context, ws workspace.ID,
 	}
 	if input.Package == nil {
 		return nil, errors.New("skill: normalized package is required")
+	}
+	if input.DisplayName == nil {
+		input.DisplayName = &input.Package.Name
 	}
 	now := s.clock()
 	timestamp := now.Format(time.RFC3339)
@@ -132,7 +134,7 @@ func (s *PostgreSQLSkillStore) CreateSkill(ctx context.Context, ws workspace.ID,
 		if err := s.assertRetainedBytesQuota(ctx, tx, ws, input.Package.SizeBytes); err != nil {
 			return err
 		}
-		versionID, version, blobKey, err := s.insertVersionWithRetry(ctx, tx, ws, skillID, input.Package, input.DisplayTitle, timestamp, true)
+		versionID, version, blobKey, err := s.insertVersionWithRetry(ctx, tx, ws, skillID, input.Package, input.DisplayName, timestamp, true)
 		if err != nil {
 			return err
 		}
@@ -141,8 +143,8 @@ func (s *PostgreSQLSkillStore) CreateSkill(ctx context.Context, ws workspace.ID,
 		}
 		blobPutOK = blobKey
 		result = &Skill{
-			ID: skillID, Type: "skill", Source: "custom", DisplayTitle: input.DisplayTitle,
-			LatestVersion: &version, CreatedAt: now, UpdatedAt: now,
+			ID: skillID, Type: "skill", Source: SkillSource{Type: "custom"}, DisplayName: *input.DisplayName,
+			LatestVersionID: version, CreatedAt: now, UpdatedAt: now,
 		}
 		_ = versionID
 		return nil
@@ -170,6 +172,13 @@ func (s *PostgreSQLSkillStore) CreateVersion(ctx context.Context, ws workspace.I
 		}
 		if _, err := s.loadActiveSkillForUpdate(ctx, tx, ws, skillID); err != nil {
 			return err
+		}
+		var originalName string
+		if err := tx.QueryRow(ctx, `SELECT name FROM skill_versions WHERE workspace_id = $1 AND skill_id = $2 ORDER BY storage_sequence ASC LIMIT 1`, string(ws), skillID).Scan(&originalName); err != nil {
+			return err
+		}
+		if input.Package.Name != originalName {
+			return &ValidationError{Message: "version name must match the skill's original name"}
 		}
 		if err := s.assertVersionCountQuota(ctx, tx, ws, skillID); err != nil {
 			return err
@@ -202,8 +211,8 @@ func (s *PostgreSQLSkillStore) CreateVersion(ctx context.Context, ws workspace.I
 func (s *PostgreSQLSkillStore) insertVersionWithRetry(ctx context.Context, tx Transaction, ws workspace.ID, skillID string, pkg *StagedPackage, displayTitle *string, timestamp string, initial bool) (string, string, string, error) {
 	const savepoint = "skill_version_attempt"
 	for attempt := 0; attempt < s.maxVersionRetry; attempt++ {
-		versionID := id.New(VersionIDPrefix)
 		version := s.versionStrategy(s.clock())
+		versionID := version
 		blobKey := packageBlobKey(ws, skillID, version)
 		if _, err := tx.Exec(ctx, "SAVEPOINT "+savepoint); err != nil {
 			return "", "", "", err
@@ -283,8 +292,12 @@ func (s *PostgreSQLSkillStore) GetVersion(ctx context.Context, ws workspace.ID, 
 	var result *SkillVersion
 	err := s.client.WithWorkspaceTx(ctx, string(ws), "skill.transaction", func(tx *dbconnect.Tx) error {
 		skillTx := runtimeTransaction{tx: tx}
-		if _, err := s.selectActiveSkill(ctx, skillTx, ws, skillID, false); err != nil {
+		parent, err := s.selectActiveSkill(ctx, skillTx, ws, skillID, false)
+		if err != nil {
 			return err
+		}
+		if version == "latest" {
+			version = parent.LatestVersionID
 		}
 		versionRow, err := s.selectActiveVersion(ctx, skillTx, ws, skillID, version)
 		if err != nil {
@@ -297,6 +310,9 @@ func (s *PostgreSQLSkillStore) GetVersion(ctx context.Context, ws workspace.ID, 
 }
 
 func (s *PostgreSQLSkillStore) OpenVersionContent(ctx context.Context, ws workspace.ID, skillID, version string) (io.ReadCloser, error) {
+	if version == "latest" {
+		return nil, &ValidationError{Message: "content requires a concrete version id"}
+	}
 	if _, err := s.GetVersion(ctx, ws, skillID, version); err != nil {
 		return nil, err
 	}
@@ -389,14 +405,8 @@ func (s *PostgreSQLSkillStore) DeleteSkill(ctx context.Context, ws workspace.ID,
 		if _, err := s.loadActiveSkillForUpdate(ctx, runtimeTransaction{tx: tx}, ws, skillID); err != nil {
 			return err
 		}
-		var activeVersions int
-		if err := tx.QueryRow(ctx,
-			`SELECT count(*) FROM skill_versions WHERE workspace_id = $1 AND skill_id = $2 AND deleted_at IS NULL`,
-			string(ws), skillID).Scan(&activeVersions); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE skill_versions SET deleted_at = $1 WHERE workspace_id = $2 AND skill_id = $3 AND deleted_at IS NULL`, deletedAt, string(ws), skillID); err != nil {
 			return err
-		}
-		if activeVersions > 0 {
-			return &ValidationError{Message: "delete Skill versions before deleting the Skill"}
 		}
 		res, err := tx.Exec(ctx,
 			`UPDATE skills SET deleted_at = $1, updated_at = $1 WHERE workspace_id = $2 AND skill_id = $3 AND deleted_at IS NULL`,
@@ -413,6 +423,9 @@ func (s *PostgreSQLSkillStore) DeleteSkill(ctx context.Context, ws workspace.ID,
 }
 
 func (s *PostgreSQLSkillStore) DeleteVersion(ctx context.Context, ws workspace.ID, skillID, version string) error {
+	if version == "latest" {
+		return &ValidationError{Message: "delete requires a concrete version id"}
+	}
 	if err := requireWorkspace(ws); err != nil {
 		return err
 	}
@@ -435,20 +448,19 @@ func (s *PostgreSQLSkillStore) DeleteVersion(ctx context.Context, ws workspace.I
 		if affected == 0 {
 			return &NotFoundError{Message: "skill version not found"}
 		}
-		if parent.latestVersion.Valid && parent.latestVersion.String != version {
-			_, err := tx.Exec(ctx, `UPDATE skills SET updated_at = $1 WHERE workspace_id = $2 AND skill_id = $3`, deletedAt, string(ws), skillID)
-			return err
-		}
-		var next sql.NullString
+		var next string
 		if err := tx.QueryRow(ctx,
-			`SELECT version FROM skill_versions
-			  WHERE workspace_id = $1 AND skill_id = $2 AND deleted_at IS NULL
-			  ORDER BY storage_sequence DESC LIMIT 1`,
+			`SELECT version FROM skill_versions WHERE workspace_id = $1 AND skill_id = $2 AND deleted_at IS NULL ORDER BY storage_sequence DESC LIMIT 1`,
 			string(ws), skillID).Scan(&next); errors.Is(err, sql.ErrNoRows) {
-			next.Valid = false
+			return &ValidationError{Message: "cannot delete the last version of a skill"}
 		} else if err != nil {
 			return err
 		}
+		if parent.latestVersion != version {
+			_, err := tx.Exec(ctx, `UPDATE skills SET updated_at = $1 WHERE workspace_id = $2 AND skill_id = $3`, deletedAt, string(ws), skillID)
+			return err
+		}
+
 		_, err = tx.Exec(ctx,
 			`UPDATE skills SET latest_version = $1, updated_at = $2 WHERE workspace_id = $3 AND skill_id = $4`,
 			next, deletedAt, string(ws), skillID)
@@ -457,11 +469,11 @@ func (s *PostgreSQLSkillStore) DeleteVersion(ctx context.Context, ws workspace.I
 }
 
 type activeParent struct {
-	latestVersion sql.NullString
+	latestVersion string
 }
 
 func (s *PostgreSQLSkillStore) loadActiveSkillForUpdate(ctx context.Context, tx Transaction, ws workspace.ID, skillID string) (*activeParent, error) {
-	var latest sql.NullString
+	var latest string
 	err := tx.QueryRow(ctx,
 		`SELECT latest_version FROM skills WHERE workspace_id = $1 AND skill_id = $2 AND deleted_at IS NULL FOR UPDATE`,
 		string(ws), skillID).Scan(&latest)
@@ -514,12 +526,12 @@ func scanSkill(row rowScanner) (*Skill, error) {
 	}
 	created := createdAt.UTC()
 	updated := updatedAt.UTC()
-	result := &Skill{ID: skillID, Type: "skill", Source: "custom", CreatedAt: created, UpdatedAt: updated, storageSequence: sequence}
+	result := &Skill{ID: skillID, Type: "skill", Source: SkillSource{Type: "custom"}, CreatedAt: created, UpdatedAt: updated, storageSequence: sequence}
 	if displayTitle.Valid {
-		result.DisplayTitle = &displayTitle.String
+		result.DisplayName = displayTitle.String
 	}
 	if latestVersion.Valid {
-		result.LatestVersion = &latestVersion.String
+		result.LatestVersionID = latestVersion.String
 	}
 	return result, nil
 }

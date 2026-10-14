@@ -67,13 +67,15 @@ func (s *PostgreSQLAgentStore) loadCurrentAgent(ctx context.Context, tx Transact
 	return scanStoredAgentRow(row, "agent not found")
 }
 
+// Agent updates and archive never change referenced keys, so a no-key update
+// lock serializes them without blocking Session foreign-key checks on the Agent.
 func (s *PostgreSQLAgentStore) loadCurrentAgentForUpdate(ctx context.Context, tx Transaction, ws workspace.ID, agentID string) (*storedAgent, error) {
 	row := tx.QueryRowScanner(ctx,
 		`SELECT a.id, av.id, a.version, a.archived_at, a.created_at, a.updated_at, av.config_json, av.config_hash
 		   FROM agents a JOIN agent_versions av
 		        ON a.id = av.agent_id AND a.version = av.version
 		  WHERE a.id = $1 AND a.workspace_id = $2 AND av.workspace_id = $2
-		  FOR UPDATE OF a`,
+		  FOR NO KEY UPDATE OF a`,
 		agentID, string(ws),
 	)
 	return scanStoredAgentRow(row, "agent not found")

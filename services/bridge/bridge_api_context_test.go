@@ -64,9 +64,13 @@ func TestLoadContextReturnsDirectNarrowContextFacts(t *testing.T) {
 	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("narrow-context-test-signing-key")
-	if _, err := admin.Exec(`UPDATE agent_versions SET config_json=(config_json::jsonb || '{"skills":[{"skill_id":"skill_context","version":"1"}]}'::jsonb)::text;
+	if _, err := admin.Exec(`UPDATE agent_versions SET config_json=(config_json::jsonb || '{"skills":[{"skill_id":"skill_context","version":"latest"}]}'::jsonb)::text;
+ UPDATE sessions SET resolved_skills_json='[{"type":"custom","skill_id":"skill_context","version":"1"}]' WHERE workspace_id='default';
  INSERT INTO skills(workspace_id,skill_id,latest_version,created_at,updated_at) VALUES ('default','skill_context','1',now(),now());
  INSERT INTO skill_versions(workspace_id,skill_id,skill_version_id,version,name,description,directory,blob_key,size_bytes,sha256,created_at) VALUES ('default','skill_context','sv_context','1','context skill','context description','context','context.zip',1,'hash',now())`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(`UPDATE skills SET deleted_at=now() WHERE skill_id='skill_context'; UPDATE skill_versions SET deleted_at=now() WHERE skill_id='skill_context'`); err != nil {
 		t.Fatal(err)
 	}
 	workload.RequirePrivilege(t, "skill_versions", "SELECT", func() error {
@@ -83,6 +87,9 @@ func TestLoadContextReturnsDirectNarrowContextFacts(t *testing.T) {
 	}
 	if !strings.Contains(string(payload.RuntimeConfig.SkillsIndex), `"skill_version_id":"sv_context"`) || !strings.Contains(string(payload.RuntimeConfig.SkillsIndex), "context skill") || !strings.Contains(string(payload.RuntimeConfig.SkillsIndex), "context description") {
 		t.Fatalf("skill index = %s; want configured version metadata", payload.RuntimeConfig.SkillsIndex)
+	}
+	if !strings.Contains(string(payload.RuntimeConfig.Skills), `"version":"1"`) || strings.Contains(string(payload.RuntimeConfig.Skills), "latest") {
+		t.Fatalf("Runtime Skills must use saved concrete reference: %s", payload.RuntimeConfig.Skills)
 	}
 	if len(payload.Messages) != 1 || payload.Messages[0].MessageSequence != 1 || payload.Messages[0].ContextKind != "user" || len(payload.Messages[0].Parts) != 1 {
 		t.Fatalf("context entries = %#v", payload.Messages)

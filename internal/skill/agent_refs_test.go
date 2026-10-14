@@ -34,7 +34,7 @@ func TestServiceValidateAgentSkillReferencesHappyPathLatestAndConcrete(t *testin
 	if err := runCheck(t, runtime, service, workspace.DefaultID, []agent.SkillReference{{SkillID: created.ID, Version: "latest"}}); err != nil {
 		t.Fatalf("latest ref rejected: %v", err)
 	}
-	if err := runCheck(t, runtime, service, workspace.DefaultID, []agent.SkillReference{{SkillID: created.ID, Version: *created.LatestVersion}}); err != nil {
+	if err := runCheck(t, runtime, service, workspace.DefaultID, []agent.SkillReference{{SkillID: created.ID, Version: created.LatestVersionID}}); err != nil {
 		t.Fatalf("concrete ref rejected: %v", err)
 	}
 }
@@ -160,7 +160,7 @@ func (row recordingRow) Scan(dest ...any) error {
 	return nil
 }
 
-func TestServiceValidateAgentSkillReferencesRejectsLatestWhenNoActiveVersion(t *testing.T) {
+func TestServiceValidateAgentSkillReferencesRejectsLatestForDeletedSkill(t *testing.T) {
 	runtime, _, _, stageDir, store := newSkillStoreEnv(t)
 	service := skill.NewService(store, skill.WithPackageStageDir(stageDir))
 	pkg := normalizedPackage(t, stageDir, []uploadFile{{filename: "empty/SKILL.md", body: skillMD("empty", "v1")}})
@@ -169,8 +169,8 @@ func TestServiceValidateAgentSkillReferencesRejectsLatestWhenNoActiveVersion(t *
 	if err != nil {
 		t.Fatalf("CreateSkill: %v", err)
 	}
-	if err := store.DeleteVersion(context.Background(), workspace.DefaultID, created.ID, *created.LatestVersion); err != nil {
-		t.Fatalf("DeleteVersion: %v", err)
+	if err := store.DeleteSkill(context.Background(), workspace.DefaultID, created.ID); err != nil {
+		t.Fatalf("DeleteSkill: %v", err)
 	}
 	err = runCheck(t, runtime, service, workspace.DefaultID, []agent.SkillReference{{SkillID: created.ID, Version: "latest"}})
 	if !errors.As(err, new(*agent.ValidationError)) {
@@ -187,7 +187,10 @@ func TestServiceValidateAgentSkillReferencesRejectsConcreteDeletedVersion(t *tes
 	if err != nil {
 		t.Fatalf("CreateSkill: %v", err)
 	}
-	deletedVersion := *created.LatestVersion
+	deletedVersion := created.LatestVersionID
+	if _, err := store.CreateVersion(context.Background(), workspace.DefaultID, created.ID, skill.CreateVersionInput{Package: pkg}); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.DeleteVersion(context.Background(), workspace.DefaultID, created.ID, deletedVersion); err != nil {
 		t.Fatalf("DeleteVersion: %v", err)
 	}

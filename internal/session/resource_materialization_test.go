@@ -11,18 +11,18 @@ import (
 )
 
 func TestPostgreSQLSessionResourceMutationAdvancesRevisionAndQueuesOneMaterialization(t *testing.T) {
-	env := newSessionPostgreSQLProofEnv(t)
+	env, service, skills, parent, configured := newSessionSkillProofEnv(t)
 	seedEnvironmentArtifact(t, env.admin, workspace.DefaultID, "env_test", 1, "ready")
 	seedSessionSourceFile(t, env.admin, workspace.DefaultID, "file_resource_first_source", 5)
 	seedSessionSourceFile(t, env.admin, workspace.DefaultID, "file_resource_second_source", 6)
 	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
-	service := env.newService(now)
+	service.clock = func() time.Time { return now }
 	service.sessionIDStrategy = fixedSessionIDs("sesn_resource_materialize")
 	service.threadIDStrategy = fixedSessionIDs("thread_resource_materialize")
 	service.resourceIDStrategy = fixedSessionIDs("sesrsc_resource_first", "sesrsc_resource_second")
 	service.fileIDStrategy = fixedSessionIDs("file_resource_first_session", "file_resource_second_session")
 	if _, err := service.Create(context.Background(), workspace.DefaultID, CreateRequest{
-		Agent: AgentReference{ID: "agent_test"}, EnvironmentID: "env_test",
+		Agent: AgentReference{ID: configured.ID}, EnvironmentID: "env_test",
 	}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -37,6 +37,10 @@ func TestPostgreSQLSessionResourceMutationAdvancesRevisionAndQueuesOneMaterializ
 		t.Fatalf("seed sandbox binding: %v", err)
 	}
 
+	uploadSessionProofSkill(t, skills, parent.ID, "newer version")
+	if err := skills.DeleteSkill(context.Background(), workspace.DefaultID, parent.ID); err != nil {
+		t.Fatal(err)
+	}
 	for _, sourceFileID := range []string{"file_resource_first_source", "file_resource_second_source"} {
 		if _, err := service.AddResource(context.Background(), workspace.DefaultID, "sesn_resource_materialize", ResourceRequest{
 			Type: string(ResourceTypeFile), FileID: sourceFileID,
@@ -68,6 +72,14 @@ func TestPostgreSQLSessionResourceMutationAdvancesRevisionAndQueuesOneMaterializ
 	var snapshot map[string]any
 	if err := json.Unmarshal([]byte(resourcesJSON), &snapshot); err != nil {
 		t.Fatalf("decode materialization snapshot: %v", err)
+	}
+	skillMounts, ok := snapshot["Skills"].([]any)
+	if !ok || len(skillMounts) != 1 {
+		t.Fatalf("materialization Skills = %#v", snapshot["Skills"])
+	}
+	mount := skillMounts[0].(map[string]any)
+	if mount["Version"] != parent.LatestVersionID || mount["SkillVersionID"] != parent.LatestVersionID || mount["Directory"] != "package-root" {
+		t.Fatalf("materialization changed saved Skill version: %#v", mount)
 	}
 	files, ok := snapshot["Files"].([]any)
 	if !ok || len(files) != 1 {

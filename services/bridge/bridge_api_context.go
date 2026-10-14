@@ -950,6 +950,7 @@ func loadThreadRuntimeConfigTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		configGeneration int64
 		approvalMode     string
 		installedTools   string
+		resolvedSkills   string
 		agentConfig      string
 		envGeneration    int64
 		envConfig        string
@@ -962,6 +963,7 @@ func loadThreadRuntimeConfigTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		        s.config_generation,
 		        s.approval_mode,
 		        s.installed_tools_json,
+		        s.resolved_skills_json,
 		        av.config_json,
 		        e.current_generation,
 		        e.config_json
@@ -984,6 +986,7 @@ func loadThreadRuntimeConfigTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		&configGeneration,
 		&approvalMode,
 		&installedTools,
+		&resolvedSkills,
 		&agentConfig,
 		&envGeneration,
 		&envConfig,
@@ -1032,7 +1035,7 @@ func loadThreadRuntimeConfigTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 			Config:            bridgeRawJSON(envConfig, "{}"),
 		},
 		ToolPolicy:     settings.ToolPolicy,
-		Skills:         bridgeJSONFieldRaw(agentConfigRaw, "skills", "[]"),
+		Skills:         bridgeRawJSON(resolvedSkills, "[]"),
 		SkillsIndex:    skillsIndex,
 		InstalledTools: json.RawMessage(installedToolDeclarations),
 	}, nil

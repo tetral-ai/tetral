@@ -79,6 +79,7 @@ const (
 		vault_ids_json TEXT NOT NULL DEFAULT '[]',
 		provider_access_json TEXT NOT NULL DEFAULT '{}',
 		installed_tools_json TEXT NOT NULL DEFAULT '[]',
+		resolved_skills_json TEXT NOT NULL DEFAULT '[]',
 		delete_cleanup_id TEXT,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
@@ -1617,7 +1618,7 @@ END $$`
 		workspace_id TEXT NOT NULL,
 		skill_id TEXT NOT NULL,
 		display_title TEXT,
-		latest_version TEXT,
+		latest_version TEXT NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		deleted_at TIMESTAMPTZ,
@@ -2439,11 +2440,12 @@ type sessionFileTransactionExecutor interface {
 
 // AcquireWorkspaceSkillRegistryLock takes a transaction-scoped
 // PostgreSQL advisory lock keyed deterministically by workspaceID.
-// The lock serializes Skill registry mutations (new Skill upload, new
-// version upload, soft-delete) plus Agent create/update transactions
-// that reference non-empty skills[] for the same workspace, so quota
-// checks, active name uniqueness checks, and version generation see
-// a consistent registry view per workspace.
+// The exclusive lock serializes Skill registry mutations (new Skill
+// upload, new version upload, soft-delete) for the same workspace, so
+// quota checks, active name uniqueness checks, and version generation
+// see a consistent registry view per workspace. Transactions that only
+// read references take the shared form
+// (AcquireWorkspaceSkillRegistryLockShared).
 //
 // Lock release is automatic on COMMIT or ROLLBACK because the call
 // uses pg_advisory_xact_lock; callers do not need an explicit
@@ -2456,6 +2458,24 @@ func AcquireWorkspaceSkillRegistryLock(ctx context.Context, tx transactionExecut
 	resource := workspaceSkillRegistryLockResource(workspaceID)
 	if _, err := tx.ExecContext(ctx,
 		"SELECT pg_advisory_xact_lock($1, $2)",
+		skillRegistryAdvisoryLockCategory, resource,
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+// AcquireWorkspaceSkillRegistryLockShared takes the shared form of the
+// workspace Skill registry lock. Agent writes and Session creation that
+// resolve skills[] hold it until commit: they run concurrently with each
+// other but never interleave with a Skill registry mutation.
+func AcquireWorkspaceSkillRegistryLockShared(ctx context.Context, tx transactionExecutor, workspaceID string) error {
+	if workspaceID == "" {
+		return errors.New("storage: workspace skill registry lock requires a non-empty workspace_id")
+	}
+	resource := workspaceSkillRegistryLockResource(workspaceID)
+	if _, err := tx.ExecContext(ctx,
+		"SELECT pg_advisory_xact_lock_shared($1, $2)",
 		skillRegistryAdvisoryLockCategory, resource,
 	); err != nil {
 		return err

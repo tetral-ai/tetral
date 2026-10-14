@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -23,7 +24,10 @@ import (
 	"github.com/tetral-ai/tetral/internal/agent"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/blob"
+	"github.com/tetral-ai/tetral/internal/environment"
 	"github.com/tetral-ai/tetral/internal/httpapi"
+	"github.com/tetral-ai/tetral/internal/sandbox"
+	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/skill"
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -32,154 +36,211 @@ import (
 
 const testAPIKey = "test-api-key-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
-// TestSkillUploadAgentReferenceLifecycleEndToEnd is the end-to-end proof:
-// upload a Skill via /v1/skills, create an Agent
-// referencing it, read the Agent back, delete the Skill, then verify
-// (a) the historical Agent read returns the stored skills[] bytes
-// unchanged, and (b) a NEW Agent referencing the deleted Skill is
-// rejected with 400 invalid_request_error. The test does NOT assert
-// Sandbox materialization; that belongs to the lazy tool-execution path.
+// The lifecycle proof uses uploaded packages and public/service calls throughout.
+// Saved Session bindings, Sandbox's real index and retained ZIP bytes must agree
+// across new versions, individual version deletion and parent deletion.
 func TestSkillUploadAgentReferenceLifecycleEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	ws := workspace.DefaultID
 	runtimeDB := storagetest.NewPostgreSQLDB(t)
-	apiKeyStore := auth.NewAPIKeyStore(runtimeDB)
-	if err := auth.RefreshBootstrap(context.Background(), apiKeyStore, workspace.DefaultID, testAPIKey); err != nil {
-		t.Fatalf("seed bootstrap: %v", err)
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	if err := auth.RefreshBootstrap(ctx, auth.NewAPIKeyStore(runtimeDB), ws, testAPIKey); err != nil {
+		t.Fatal(err)
 	}
-
-	blobStore := blob.NewFakeBlobStore()
-	skillStore := skill.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB), blobStore)
-	stageDir := t.TempDir()
-	skillService := skill.NewService(skillStore, skill.WithPackageStageDir(stageDir))
-	skillHandler := httpapi.NewSkillHandler(skillService, stageDir)
-
-	agentService := agent.NewService(agent.NewPostgreSQLAgentStore(dbconnect.NewClientForTesting(runtimeDB)), skillService)
-	agentHandler := httpapi.NewAgentHandler(agentService)
-
-	authenticator := auth.AuthenticatorFunc(auth.NewAuthorityResolver(runtimeDB, "", nil).AuthenticateKey)
-	router := httpapi.NewRouter(nil, "",
-		httpapi.WithAuthenticator(authenticator),
-		httpapi.WithAgentHandler(agentHandler),
-		httpapi.WithSkillHandler(skillHandler),
+	blobs := blob.NewFakeBlobStore()
+	skills := skill.NewService(skill.NewPostgreSQLStore(client, blobs), skill.WithPackageStageDir(t.TempDir()))
+	agents := agent.NewService(agent.NewPostgreSQLAgentStore(client), skills)
+	environments := environment.NewService(environment.NewPostgreSQLEnvironmentStore(client, environment.WithDefaultArtifactRef("artifact_skill_e2e")))
+	env, err := environments.Create(ctx, ws, environment.CreateEnvironmentRequest{Name: "skill-e2e", Config: environment.EnvironmentConfig{Type: "cloud"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionStore := session.NewPostgreSQLSessionStore(client)
+	sessions := session.NewService(agents, environments, nil, nil, nil, sessionStore, nil, session.WithSkillResolver(skills))
+	router := httpapi.NewRouter(httpapi.NewSessionHandler(sessions), "",
+		httpapi.WithAuthenticator(auth.AuthenticatorFunc(auth.NewAuthorityResolver(runtimeDB, "", nil).AuthenticateKey)),
+		httpapi.WithAgentHandler(httpapi.NewAgentHandler(agents)),
+		httpapi.WithSkillHandler(httpapi.NewSkillHandler(skills, t.TempDir())),
 	)
 	server := httptest.NewServer(router)
-	t.Cleanup(server.Close)
-
-	// 1. Upload a Skill.
-	uploadURL := server.URL + "/v1/skills?beta=true"
-	uploadBody, contentType := newSkillUpload(t, "e2e-skill", "End-to-end smoke fixture.")
-	uploadResp := doMultipart(t, http.MethodPost, uploadURL, contentType, uploadBody, testAPIKey)
-	if uploadResp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(uploadResp.Body)
-		t.Fatalf("upload status = %d (body=%q)", uploadResp.StatusCode, body)
+	defer server.Close()
+	readResponse := func(resp *http.Response, status int) []byte {
+		t.Helper()
+		defer func() { _ = resp.Body.Close() }()
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil || resp.StatusCode != status {
+			t.Fatalf("HTTP status=%d want=%d body=%s error=%v", resp.StatusCode, status, raw, err)
+		}
+		return raw
 	}
-	var uploadedSkill skill.Skill
-	if err := json.NewDecoder(uploadResp.Body).Decode(&uploadedSkill); err != nil {
-		t.Fatalf("decode skill envelope: %v", err)
+	request := func(method, path string, body []byte, status int) []byte {
+		t.Helper()
+		return readResponse(doJSON(t, method, server.URL+path, body, testAPIKey), status)
 	}
-	_ = uploadResp.Body.Close()
-	skillID := uploadedSkill.ID
-
-	// 2. Create an Agent referencing the Skill (omitted version
-	// defaults to "latest").
-	agentBody := []byte(fmt.Sprintf(`{
-		"name": "e2e-agent",
-		"model": "anthropic/claude-opus-4-8",
-		"tools": [{"type":"tetral_agent_toolset","family":"claude"}],
-		"skills": [{"type":"custom","skill_id": %q}]
-	}`, skillID))
-	createResp := doJSON(t, http.MethodPost, server.URL+"/v1/agents?beta=true", agentBody, testAPIKey)
-	if createResp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(createResp.Body)
-		t.Fatalf("create agent status = %d (body=%q)", createResp.StatusCode, body)
+	const name = "e2e-skill"
+	upload := func(path, description string) []byte {
+		t.Helper()
+		body, contentType := newSkillUpload(t, name, description)
+		return readResponse(doMultipart(t, http.MethodPost, server.URL+path, contentType, body, testAPIKey), http.StatusOK)
 	}
-	var createdAgent struct {
+	var parent skill.Skill
+	if err := json.Unmarshal(upload("/v1/skills?beta=true", "Version one."), &parent); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(parent.LatestVersionID, "skver_") || parent.DisplayName != name {
+		t.Fatalf("uploaded parent = %+v", parent)
+	}
+	type createdAgent struct {
 		ID      string          `json:"id"`
-		Skills  json.RawMessage `json:"skills"`
 		Version int             `json:"version"`
+		Skills  json.RawMessage `json:"skills"`
 	}
-	if err := json.NewDecoder(createResp.Body).Decode(&createdAgent); err != nil {
-		t.Fatalf("decode created agent: %v", err)
+	createAgent := func(agentName, version string) (createdAgent, []byte) {
+		t.Helper()
+		versionField := ""
+		if version != "" {
+			versionField = fmt.Sprintf(",\"version\":%q", version)
+		}
+		body := []byte(fmt.Sprintf(`{"name":%q,"model":"anthropic/claude-opus-4-8","tools":[{"type":"tetral_agent_toolset","family":"claude"}],"skills":[{"type":"custom","skill_id":%q%s}]}`, agentName, parent.ID, versionField))
+		var created createdAgent
+		if err := json.Unmarshal(request(http.MethodPost, "/v1/agents?beta=true", body, http.StatusOK), &created); err != nil {
+			t.Fatal(err)
+		}
+		return created, body
 	}
-	_ = createResp.Body.Close()
-	wantSkills := fmt.Sprintf(`[{"type":"custom","skill_id":%q,"version":"latest"}]`, skillID)
-	if string(createdAgent.Skills) != wantSkills {
-		t.Errorf("created agent skills = %s; want %s", string(createdAgent.Skills), wantSkills)
+	newSession := func(a createdAgent) session.Response {
+		t.Helper()
+		var created session.Response
+		body := []byte(fmt.Sprintf(`{"agent":{"type":"agent","id":%q,"version":%d},"environment_id":%q,"vault_ids":[]}`, a.ID, a.Version, env.ID))
+		if err := json.Unmarshal(request(http.MethodPost, "/v1/sessions?beta=true", body, http.StatusOK), &created); err != nil {
+			t.Fatal(err)
+		}
+		return created
 	}
-
-	// 3. Read the Agent back; skills[] is byte-equal.
-	getResp := doJSON(t, http.MethodGet, server.URL+"/v1/agents/"+createdAgent.ID+"?beta=true", nil, testAPIKey)
-	if getResp.StatusCode != http.StatusOK {
-		t.Fatalf("get agent status = %d", getResp.StatusCode)
+	checkSession := func(sessionID, version, description string) {
+		t.Helper()
+		saved, err := sessionStore.Get(ctx, ws, sessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(saved.ResolvedSkills) != 1 || saved.ResolvedSkills[0] != (session.ResolvedSkillReference{Type: "custom", SkillID: parent.ID, Version: version}) {
+			t.Fatalf("saved bindings = %+v", saved.ResolvedSkills)
+		}
+		expected := fmt.Sprintf(`{"type":"custom","skill_id":%q,"version":%q}`, parent.ID, version)
+		var public session.Response
+		if err := json.Unmarshal(request(http.MethodGet, "/v1/sessions/"+sessionID+"?beta=true", nil, http.StatusOK), &public); err != nil {
+			t.Fatal(err)
+		}
+		if len(public.Agent.Skills) != 1 || string(public.Agent.Skills[0]) != expected {
+			t.Fatalf("Session skills = %s want %s", public.Agent.Skills, expected)
+		}
+		threads, err := sessions.ListThreads(ctx, ws, sessionID, session.ThreadListOptions{})
+		if err != nil || len(threads.Data) != 1 {
+			t.Fatalf("threads = %+v, %v", threads, err)
+		}
+		thread, err := sessions.GetThread(ctx, ws, sessionID, threads.Data[0].ID)
+		if err != nil || len(thread.Agent.Skills) != 1 || string(thread.Agent.Skills[0]) != expected {
+			t.Fatalf("Thread skills = %+v, %v", thread, err)
+		}
+		var blobKey string
+		if err := client.WithWorkspaceTx(ctx, string(ws), "skill.e2e.read", func(tx *dbconnect.Tx) error {
+			index, err := sandbox.ResolveSessionSkillIndex(ctx, tx, ws, sessionID)
+			if err != nil {
+				return err
+			}
+			if len(index) != 1 || index[0].Version != version || index[0].SkillVersionID != version || index[0].Directory != name {
+				t.Fatalf("Sandbox index = %+v", index)
+			}
+			return tx.QueryRow(ctx, `SELECT blob_key FROM skill_versions WHERE workspace_id=$1 AND skill_id=$2 AND version=$3`, string(ws), parent.ID, version).Scan(&blobKey)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		reader, err := blobs.Get(ctx, blobKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := io.ReadAll(reader)
+		_ = reader.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		archive, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, file := range archive.File {
+			if file.Name != name+"/SKILL.md" {
+				continue
+			}
+			content, err := file.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(content)
+			_ = content.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "---\nname: " + name + "\ndescription: " + description + "\n---\nBody.\n"
+			if string(body) != want {
+				t.Fatalf("bound package body=%q want=%q", body, want)
+			}
+			found = true
+		}
+		if !found {
+			t.Fatal("bound package lacks uploaded SKILL.md")
+		}
 	}
-	var gotAgent struct {
-		Skills json.RawMessage `json:"skills"`
+	pinned, pinnedBody := createAgent("pinned-agent", parent.LatestVersionID)
+	pinnedSession := newSession(pinned)
+	checkSession(pinnedSession.ID, parent.LatestVersionID, "Version one.")
+	latest, latestBody := createAgent("latest-agent", "")
+	sessionA := newSession(latest)
+	var v2 skill.SkillVersion
+	if err := json.Unmarshal(upload("/v1/skills/"+parent.ID+"/versions?beta=true", "Version two."), &v2); err != nil {
+		t.Fatal(err)
 	}
-	if err := json.NewDecoder(getResp.Body).Decode(&gotAgent); err != nil {
-		t.Fatalf("decode got agent: %v", err)
+	checkSession(sessionA.ID, parent.LatestVersionID, "Version one.")
+	sessionB := newSession(latest)
+	checkSession(sessionB.ID, v2.ID, "Version two.")
+	request(http.MethodDelete, "/v1/skills/"+parent.ID+"/versions/"+v2.ID+"?beta=true", nil, http.StatusOK)
+	checkSession(sessionB.ID, v2.ID, "Version two.")
+	sessionC := newSession(latest)
+	checkSession(sessionC.ID, parent.LatestVersionID, "Version one.")
+	request(http.MethodDelete, "/v1/skills/"+parent.ID+"?beta=true", nil, http.StatusOK)
+	checkSession(pinnedSession.ID, parent.LatestVersionID, "Version one.")
+	checkSession(sessionA.ID, parent.LatestVersionID, "Version one.")
+	checkSession(sessionB.ID, v2.ID, "Version two.")
+	checkSession(sessionC.ID, parent.LatestVersionID, "Version one.")
+	assertRejected := func(raw []byte) {
+		t.Helper()
+		var failure struct {
+			Error struct{ Type, Message string } `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &failure); err != nil {
+			t.Fatal(err)
+		}
+		if failure.Error.Type != "invalid_request_error" || !strings.Contains(failure.Error.Message, parent.ID) {
+			t.Fatalf("wrong rejection: %s", raw)
+		}
 	}
-	_ = getResp.Body.Close()
-	if string(gotAgent.Skills) != wantSkills {
-		t.Errorf("Get agent skills = %s; want %s", string(gotAgent.Skills), wantSkills)
-	}
-
-	// 4. Delete the uploaded version, then delete the parent Skill.
-	versionResp := doJSON(t, http.MethodDelete, server.URL+"/v1/skills/"+skillID+"/versions/"+*uploadedSkill.LatestVersion+"?beta=true", nil, testAPIKey)
-	if versionResp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(versionResp.Body)
-		t.Fatalf("delete skill version status = %d (body=%q)", versionResp.StatusCode, body)
-	}
-	_ = versionResp.Body.Close()
-	delResp := doJSON(t, http.MethodDelete, server.URL+"/v1/skills/"+skillID+"?beta=true", nil, testAPIKey)
-	if delResp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(delResp.Body)
-		t.Fatalf("delete skill status = %d (body=%q)", delResp.StatusCode, body)
-	}
-	_ = delResp.Body.Close()
-
-	// 5. Historical Agent read returns the stored skills[] unchanged.
-	getResp2 := doJSON(t, http.MethodGet, server.URL+"/v1/agents/"+createdAgent.ID+"?beta=true", nil, testAPIKey)
-	if getResp2.StatusCode != http.StatusOK {
-		t.Fatalf("post-delete get agent status = %d", getResp2.StatusCode)
-	}
-	var historicalAgent struct {
-		Skills json.RawMessage `json:"skills"`
-	}
-	if err := json.NewDecoder(getResp2.Body).Decode(&historicalAgent); err != nil {
-		t.Fatalf("decode historical agent: %v", err)
-	}
-	_ = getResp2.Body.Close()
-	if string(historicalAgent.Skills) != wantSkills {
-		t.Errorf("historical Get must return stored skills bytes verbatim; got %s want %s", string(historicalAgent.Skills), wantSkills)
-	}
-
-	// 6. A NEW Agent referencing the deleted Skill MUST reject with
-	// 400 invalid_request_error.
-	rejectBody := []byte(fmt.Sprintf(`{
-		"name": "e2e-after-delete",
-		"model": "anthropic/claude-opus-4-8",
-		"tools": [{"type":"tetral_agent_toolset","family":"claude"}],
-		"skills": [{"type":"custom","skill_id": %q}]
-	}`, skillID))
-	rejectResp := doJSON(t, http.MethodPost, server.URL+"/v1/agents?beta=true", rejectBody, testAPIKey)
-	if rejectResp.StatusCode != http.StatusBadRequest {
-		body, _ := io.ReadAll(rejectResp.Body)
-		t.Fatalf("post-delete create-agent status = %d (body=%q); want 400", rejectResp.StatusCode, body)
-	}
-	var errResp struct {
-		Error struct {
-			Type    string `json:"type"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.NewDecoder(rejectResp.Body).Decode(&errResp); err != nil {
-		t.Fatalf("decode error: %v", err)
-	}
-	_ = rejectResp.Body.Close()
-	if errResp.Error.Type != "invalid_request_error" {
-		t.Errorf("error.type = %q; want invalid_request_error", errResp.Error.Type)
-	}
-	if !strings.Contains(errResp.Error.Message, skillID) {
-		t.Errorf("error message must name the deleted skill_id; got %q", errResp.Error.Message)
+	for _, entry := range []struct {
+		a    createdAgent
+		body []byte
+	}{{pinned, pinnedBody}, {latest, latestBody}} {
+		var historical createdAgent
+		if err := json.Unmarshal(request(http.MethodGet, "/v1/agents/"+entry.a.ID+"?beta=true", nil, http.StatusOK), &historical); err != nil {
+			t.Fatal(err)
+		}
+		if string(historical.Skills) != string(entry.a.Skills) {
+			t.Fatalf("historical Agent skills changed: %s -> %s", entry.a.Skills, historical.Skills)
+		}
+		assertRejected(request(http.MethodPost, "/v1/agents?beta=true", entry.body, http.StatusBadRequest))
+		update := append([]byte(fmt.Sprintf(`{"version":%d,`, entry.a.Version)), entry.body[1:]...)
+		assertRejected(request(http.MethodPost, "/v1/agents/"+entry.a.ID+"?beta=true", update, http.StatusBadRequest))
+		body := []byte(fmt.Sprintf(`{"agent":{"type":"agent","id":%q,"version":%d},"environment_id":%q,"vault_ids":[]}`, entry.a.ID, entry.a.Version, env.ID))
+		assertRejected(request(http.MethodPost, "/v1/sessions?beta=true", body, http.StatusBadRequest))
 	}
 }
 
@@ -225,7 +286,17 @@ func TestAgentSkillReferenceTransactionsSerializeConcurrentSkillDelete(t *testin
 			runtimeDB, adminDB, skillStore, stageDir := newAgentSkillStoreIntegrationEnvWithAdmin(t)
 			skillService := skill.NewService(skillStore, skill.WithPackageStageDir(stageDir))
 			ws := workspace.DefaultID
-			createdSkill := createIntegrationSkill(t, skillStore, stageDir, strings.ReplaceAll(tc.name, "_", "-")+"-skill")
+			name := strings.ReplaceAll(tc.name, "_", "-") + "-skill"
+			createdSkill := createIntegrationSkill(t, skillStore, stageDir, name)
+			var budget skill.UploadBudget
+			part, err := skill.StageUploadPart(context.Background(), strings.NewReader("---\nname: "+name+"\ndescription: Second version.\n---\nBody.\n"), stageDir, name+"/SKILL.md", &budget)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = skill.CleanupStagedUploadParts([]skill.StagedUploadPart{part}) }()
+			if _, err := skillService.CreateVersion(context.Background(), ws, createdSkill.ID, skill.CreateVersionInput{Files: []skill.StagedUploadPart{part}}); err != nil {
+				t.Fatal(err)
+			}
 
 			resolver := newBlockingSkillReferenceResolver(skillService)
 			defer resolver.release()
@@ -251,7 +322,7 @@ func TestAgentSkillReferenceTransactionsSerializeConcurrentSkillDelete(t *testin
 
 			deleteDone := make(chan error, 1)
 			go func() {
-				deleteDone <- skillStore.DeleteVersion(context.Background(), ws, createdSkill.ID, *createdSkill.LatestVersion)
+				deleteDone <- skillStore.DeleteVersion(context.Background(), ws, createdSkill.ID, createdSkill.LatestVersionID)
 			}()
 			waitForBlockedSkillRegistryLock(t, adminDB, ws)
 			select {
@@ -291,9 +362,6 @@ func TestAgentSkillReferenceTransactionsSerializeConcurrentSkillParentDelete(t *
 			skillService := skill.NewService(skillStore, skill.WithPackageStageDir(stageDir))
 			ws := workspace.DefaultID
 			createdSkill := createIntegrationSkill(t, skillStore, stageDir, "parent-delete-"+tc.name+"-skill")
-			if err := skillStore.DeleteVersion(context.Background(), ws, createdSkill.ID, *createdSkill.LatestVersion); err != nil {
-				t.Fatalf("setup DeleteVersion to make parent Skill deletable: %v", err)
-			}
 
 			resolver := newBlockingBeforeValidationSkillReferenceResolver(skillService)
 			defer resolver.release()
@@ -353,16 +421,15 @@ func TestAgentSkillReferenceTransactionsSerializeConcurrentSkillParentDelete(t *
 
 			resolver.release()
 			opResult := waitForAgentResult(t, agentDone)
-			assertAgentValidationError(t, opResult.err)
-			if opResult.agent != nil {
-				t.Fatalf("Agent %s returned persisted Agent on validation failure: %+v", tc.name, opResult.agent)
+			if opResult.err != nil || opResult.agent == nil {
+				t.Fatalf("Agent %s admitted before deletion: agent=%+v error=%v", tc.name, opResult.agent, opResult.err)
 			}
 			if tc.name == "update" {
-				if got := countAgentVersions(t, adminDB, ws, setupAgent.ID); got != beforeVersions {
-					t.Fatalf("rejected Update left %d agent_versions; want %d", got, beforeVersions)
+				if got := countAgentVersions(t, adminDB, ws, setupAgent.ID); got != beforeVersions+1 {
+					t.Fatalf("Update left %d agent_versions; want %d", got, beforeVersions+1)
 				}
-			} else if got := countAgentVersionsByName(t, adminDB, ws, tc.agentName); got != 0 {
-				t.Fatalf("rejected Create inserted %d agent_versions; want 0", got)
+			} else if got := countAgentVersionsByName(t, adminDB, ws, tc.agentName); got != 1 {
+				t.Fatalf("Create inserted %d agent_versions; want 1", got)
 			}
 
 			waitForDeleteResult(t, deleteDone)
@@ -407,7 +474,7 @@ func TestAgentRejectsLatestReferenceWhenCurrentSkillVersionHidden(t *testing.T) 
 	if _, err := adminDB.ExecContext(context.Background(),
 		`UPDATE skill_versions SET deleted_at = $1
 		  WHERE workspace_id = $2 AND skill_id = $3 AND version = $4`,
-		"2026-04-30T00:00:00Z", string(ws), createdSkill.ID, *createdSkill.LatestVersion,
+		"2026-04-30T00:00:00Z", string(ws), createdSkill.ID, createdSkill.LatestVersionID,
 	); err != nil {
 		t.Fatalf("hide current Skill version: %v", err)
 	}
@@ -442,7 +509,7 @@ func TestAgentRejectsConcreteReferenceWhenPinnedSkillVersionHidden(t *testing.T)
 	skillService := skill.NewService(skillStore, skill.WithPackageStageDir(stageDir))
 	ws := workspace.DefaultID
 	createdSkill := createIntegrationSkill(t, skillStore, stageDir, "stale-concrete")
-	pinnedVersion := *createdSkill.LatestVersion
+	pinnedVersion := createdSkill.LatestVersionID
 	agentService := agent.NewService(agent.NewPostgreSQLAgentStore(dbconnect.NewClientForTesting(runtimeDB)), skillService)
 
 	createdAgent, err := agentService.Create(context.Background(), ws, agentCreateRequestWithSkillVersion("stale-concrete-existing", createdSkill.ID, pinnedVersion))

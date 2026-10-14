@@ -30,7 +30,9 @@ package session
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -45,6 +47,7 @@ import (
 )
 
 type Service struct {
+	skills       SkillResolver
 	agents       AgentReader
 	environments EnvironmentReader
 	files        FileIdentityService
@@ -60,7 +63,17 @@ type Service struct {
 	fileIDStrategy     func() string
 }
 
+// SkillResolver shares the registry's validation and locking rules with Agent
+// writes, but returns concrete versions for durable Session binding.
+type SkillResolver interface {
+	ResolveSkillReferences(context.Context, agent.Transaction, string, []agent.SkillReference) ([]agent.SkillReference, error)
+}
+
 type Option func(*Service)
+
+func WithSkillResolver(resolver SkillResolver) Option {
+	return func(s *Service) { s.skills = resolver }
+}
 
 func WithClock(clock func() time.Time) Option {
 	return func(s *Service) { s.clock = clock }
@@ -152,6 +165,11 @@ func (s *Service) Create(ctx context.Context, ws workspace.ID, request CreateReq
 		UpdatedAt:      now,
 	}
 	if err := s.store.WithWorkspaceTxAndCleanup(ctx, ws, func(tx Transaction) error {
+		var err error
+		stored.ResolvedSkills, err = s.resolveSkillsForCreate(ctx, tx, ws, resolvedAgent.Skills)
+		if err != nil {
+			return err
+		}
 		if err := tx.CreateSession(ctx, stored); err != nil {
 			return err
 		}
@@ -249,7 +267,7 @@ func (s *Service) GetThread(ctx context.Context, ws workspace.ID, sessionID stri
 	if err != nil {
 		return nil, err
 	}
-	return assembleThreadResponse(thread, agentSnapshot, sess.RuntimeAgentConfig, sess.ApprovalMode)
+	return assembleThreadResponse(thread, withSessionSkills(agentSnapshot, sess.ResolvedSkills), sess.RuntimeAgentConfig, sess.ApprovalMode)
 }
 
 func (s *Service) ArchiveThread(ctx context.Context, ws workspace.ID, sessionID string, threadID string) (*ThreadResponse, error) {
@@ -265,7 +283,7 @@ func (s *Service) ArchiveThread(ctx context.Context, ws workspace.ID, sessionID 
 	if err != nil {
 		return nil, err
 	}
-	return assembleThreadResponse(thread, agentSnapshot, sess.RuntimeAgentConfig, sess.ApprovalMode)
+	return assembleThreadResponse(thread, withSessionSkills(agentSnapshot, sess.ResolvedSkills), sess.RuntimeAgentConfig, sess.ApprovalMode)
 }
 
 func (s *Service) Update(ctx context.Context, ws workspace.ID, sessionID string, request UpdateRequest) (*Response, error) {
@@ -947,7 +965,7 @@ func (s *Service) assemble(ctx context.Context, ws workspace.ID, stored *Session
 	if err != nil {
 		return nil, err
 	}
-	resolvedAgent = overlayAgentRuntimeConfig(resolvedAgent, stored.RuntimeAgentConfig)
+	resolvedAgent = overlayAgentRuntimeConfig(withSessionSkills(resolvedAgent, stored.ResolvedSkills), stored.RuntimeAgentConfig)
 	resolvedAgent.ApprovalMode = agent.ApprovalMode(stored.ApprovalMode)
 	providers, err := s.store.ListSessionProviderAuth(ctx, ws, stored.ID)
 	if err != nil {
@@ -1033,7 +1051,7 @@ func (s *Service) assembleThreads(ctx context.Context, ws workspace.ID, sessionI
 	}
 	responses := make([]*ThreadResponse, 0, len(threads))
 	for _, thread := range threads {
-		response, err := assembleThreadResponse(thread, agentSnapshot, sess.RuntimeAgentConfig, sess.ApprovalMode)
+		response, err := assembleThreadResponse(thread, withSessionSkills(agentSnapshot, sess.ResolvedSkills), sess.RuntimeAgentConfig, sess.ApprovalMode)
 		if err != nil {
 			return nil, err
 		}
@@ -1234,4 +1252,78 @@ func (s *Service) LookupSessionDeletion(ctx context.Context, ws workspace.ID, se
 // repeated deletion while proving its actual session/workspace relationship.
 func (s *Service) LookupResourceDeletion(ctx context.Context, ws workspace.ID, sessionID, resourceID string) (string, error) {
 	return s.store.LookupResourceDeletion(ctx, ws, sessionID, resourceID)
+}
+
+func (s *Service) resolveSkillsForCreate(ctx context.Context, tx Transaction, ws workspace.ID, raw agent.RawArray) ([]ResolvedSkillReference, error) {
+	resolved := make([]ResolvedSkillReference, 0, len(raw))
+	if len(raw) == 0 {
+		return resolved, nil
+	}
+	if s.skills == nil {
+		return nil, errors.New("session: skill reference resolver is not configured")
+	}
+	refs := make([]agent.SkillReference, 0, len(raw))
+	for _, value := range raw {
+		var ref ResolvedSkillReference
+		if err := json.Unmarshal(value, &ref); err != nil || ref.Type != "custom" {
+			return nil, &ValidationError{Message: "agent skill reference is invalid"}
+		}
+		refs = append(refs, agent.SkillReference{SkillID: ref.SkillID, Version: ref.Version})
+	}
+	versions, err := s.skills.ResolveSkillReferences(ctx, skillReferenceTx{tx}, string(ws), refs)
+	if err != nil {
+		var invalid *agent.ValidationError
+		if errors.As(err, &invalid) {
+			return nil, &ValidationError{Message: invalid.Message}
+		}
+		return nil, err
+	}
+	for _, ref := range versions {
+		resolved = append(resolved, ResolvedSkillReference{Type: "custom", SkillID: ref.SkillID, Version: ref.Version})
+	}
+	return resolved, nil
+}
+
+func withSessionSkills(snapshot *agent.Agent, refs []ResolvedSkillReference) *agent.Agent {
+	if snapshot == nil {
+		return nil
+	}
+	result := *snapshot
+	result.Skills = make(agent.RawArray, 0, len(refs))
+	for _, ref := range refs {
+		// The binding contains only strings, so JSON encoding cannot fail.
+		value, _ := json.Marshal(ref)
+		result.Skills = append(result.Skills, value)
+	}
+	return &result
+}
+
+// Adapt the Session-owned transaction capabilities without exposing database
+// handles or opening a second transaction for Skill resolution.
+type skillReferenceTx struct{ tx Transaction }
+type skillReferenceResult struct{ ExecResult }
+
+func (r skillReferenceResult) LastInsertId() (int64, error) {
+	return 0, fmt.Errorf("LastInsertId is unsupported")
+}
+func (t skillReferenceTx) Exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	result, err := t.tx.Exec(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return skillReferenceResult{result}, nil
+}
+func (t skillReferenceTx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return t.Exec(ctx, query, args...)
+}
+func (t skillReferenceTx) QueryRows(ctx context.Context, query string, args ...any) (interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+	Close() error
+}, error) {
+	return t.tx.QueryRows(ctx, query, args...)
+}
+func (t skillReferenceTx) QueryRowScanner(ctx context.Context, query string, args ...any) interface{ Scan(...any) error } {
+	return t.tx.QueryRowScanner(ctx, query, args...)
 }

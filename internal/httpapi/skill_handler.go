@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -19,7 +20,7 @@ import (
 
 const (
 	skillUploadCap               = 31 * 1024 * 1024
-	displayTitleFieldByteCap     = 1024*4 + 1
+	displayNameFieldByteCap      = 255*4 + 1
 	defaultSkillListLimit        = 20
 	maxSkillListLimit            = 100
 	defaultSkillVersionListLimit = 20
@@ -64,8 +65,8 @@ func (h *SkillHandler) createSkill(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = skill.CleanupStagedUploadParts(parsed.files) }()
 	created, err := h.service.CreateSkill(r.Context(), ws, skill.CreateSkillInput{
-		DisplayTitle: parsed.displayTitle,
-		Files:        parsed.files,
+		DisplayName: parsed.displayName,
+		Files:       parsed.files,
 	})
 	if err != nil {
 		writeError(w, r, err)
@@ -99,11 +100,11 @@ func (h *SkillHandler) createVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 type parsedSkillUpload struct {
-	displayTitle *string
-	files        []skill.StagedUploadPart
+	displayName *string
+	files       []skill.StagedUploadPart
 }
 
-func (h *SkillHandler) parseUploadMultipart(w http.ResponseWriter, r *http.Request, allowDisplayTitle bool) (*parsedSkillUpload, error) {
+func (h *SkillHandler) parseUploadMultipart(w http.ResponseWriter, r *http.Request, allowDisplayName bool) (*parsedSkillUpload, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, skillUploadCap)
 	mr, err := r.MultipartReader()
 	if err != nil {
@@ -115,7 +116,7 @@ func (h *SkillHandler) parseUploadMultipart(w http.ResponseWriter, r *http.Reque
 		_ = skill.CleanupStagedUploadParts(parsed.files)
 		parsed.files = nil
 	}
-	var displayTitleSet bool
+	var displayNameSet bool
 	for {
 		part, err := mr.NextPart()
 		if errors.Is(err, io.EOF) {
@@ -129,26 +130,26 @@ func (h *SkillHandler) parseUploadMultipart(w http.ResponseWriter, r *http.Reque
 			return nil, &skill.ValidationError{Message: "multipart body is malformed"}
 		}
 		switch part.FormName() {
-		case "display_title":
-			if !allowDisplayTitle {
+		case "display_name":
+			if !allowDisplayName {
 				cleanupOnError()
-				return nil, &skill.ValidationError{Message: "version upload must not include display_title"}
+				return nil, &skill.ValidationError{Message: "version upload must not include display_name"}
 			}
 			if _, ok := multipartFilename(part); ok {
 				cleanupOnError()
-				return nil, &skill.ValidationError{Message: "display_title must be a text field"}
+				return nil, &skill.ValidationError{Message: "display_name must be a text field"}
 			}
-			if displayTitleSet {
+			if displayNameSet {
 				cleanupOnError()
-				return nil, &skill.ValidationError{Message: "request contains multiple display_title fields"}
+				return nil, &skill.ValidationError{Message: "request contains multiple display_name fields"}
 			}
-			title, err := readDisplayTitle(part)
+			title, err := readDisplayName(part)
 			if err != nil {
 				cleanupOnError()
 				return nil, err
 			}
-			displayTitleSet = true
-			parsed.displayTitle = &title
+			displayNameSet = true
+			parsed.displayName = &title
 		case "files[]":
 			filename, ok := multipartFilename(part)
 			if !ok {
@@ -163,7 +164,7 @@ func (h *SkillHandler) parseUploadMultipart(w http.ResponseWriter, r *http.Reque
 			parsed.files = append(parsed.files, staged)
 		default:
 			cleanupOnError()
-			return nil, &skill.ValidationError{Message: "request contains an unexpected form part"}
+			return nil, &skill.ValidationError{Message: fmt.Sprintf("unsupported form field %q", part.FormName())}
 		}
 	}
 	if len(parsed.files) == 0 {
@@ -173,21 +174,21 @@ func (h *SkillHandler) parseUploadMultipart(w http.ResponseWriter, r *http.Reque
 	return parsed, nil
 }
 
-func readDisplayTitle(part *multipart.Part) (string, error) {
-	body, err := io.ReadAll(io.LimitReader(skillMaxBytesMappingReader{reader: part}, displayTitleFieldByteCap+1))
+func readDisplayName(part *multipart.Part) (string, error) {
+	body, err := io.ReadAll(io.LimitReader(skillMaxBytesMappingReader{reader: part}, displayNameFieldByteCap+1))
 	if err != nil {
 		var tooLarge *skill.RequestTooLargeError
 		if errors.As(err, &tooLarge) {
 			return "", tooLarge
 		}
-		return "", &skill.ValidationError{Message: "display_title is malformed"}
+		return "", &skill.ValidationError{Message: "display_name is malformed"}
 	}
-	if len(body) > displayTitleFieldByteCap {
-		return "", &skill.ValidationError{Message: "display_title must be at most 1024 characters"}
+	if len(body) > displayNameFieldByteCap {
+		return "", &skill.ValidationError{Message: "display_name must be at most 255 characters"}
 	}
 	title := string(body)
 	if !utf8.ValidString(title) {
-		return "", &skill.ValidationError{Message: "display_title must be valid UTF-8"}
+		return "", &skill.ValidationError{Message: "display_name must be valid UTF-8"}
 	}
 	return title, nil
 }
