@@ -104,6 +104,15 @@ binding and Drive sync owners reach the Connection owner through
 crate its implementation belongs to; joining the implementations to the owners
 that use them belongs to `appserver`.
 
+## Records and metrics
+
+`observe` writes every record and holds every metric; its README states the
+record rules. A record is one JSON line, written by two sinks: stderr, and the
+log file once it is opened. `TETRAL_LOG_LEVEL` sets the lowest level for both.
+`observability.json` is the catalogue of every event and metric family the CLI
+records, which `observe::catalogue` embeds and checks; a change that records a
+new one adds it there in the same change.
+
 ## Dependencies
 
 The CLI depends on no Engine service, database, queue or internal package, on

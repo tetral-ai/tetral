@@ -1,0 +1,62 @@
+error[E0277]: the trait bound `&str: RecordValue` is not satisfied
+ --> tests/ui/str_field.rs:3:5
+  |
+3 |     observe::info!("cold_start.phase_started", cold_start.phase = path);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |     |
+  |     the trait `RecordEnum` is not implemented for `&str`
+  |     required by a bound introduced by this call
+  |
+  = help: the following other types implement trait `RecordValue`:
+            Code
+            Id<'s>
+            bool
+            i16
+            i32
+            i64
+            i8
+            isize
+          and $N others
+  = note: required for `&str` to implement `RecordValue`
+  = note: this error originates in the macro `$crate::__record` which comes from the expansion of the macro `observe::info` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `&str: RecordValue` is not satisfied
+ --> tests/ui/str_field.rs:3:5
+  |
+3 |     observe::info!("cold_start.phase_started", cold_start.phase = path);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |     |
+  |     the trait `RecordEnum` is not implemented for `&str`
+  |     required by a bound introduced by this call
+  |
+  = help: the following other types implement trait `RecordValue`:
+            Code
+            Id<'s>
+            bool
+            i16
+            i32
+            i64
+            i8
+            isize
+          and $N others
+  = note: required for `&str` to implement `RecordValue`
+  = note: this error originates in the macro `$crate::__record` which comes from the expansion of the macro `observe::info` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `&str: RecordEnum` is not satisfied
+ --> tests/ui/str_field.rs:3:5
+  |
+3 |     observe::info!("cold_start.phase_started", cold_start.phase = path);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `RecordEnum` is not implemented for `&str`
+  |
+  = help: the following other types implement trait `RecordValue`:
+            Code
+            Id<'s>
+            bool
+            i16
+            i32
+            i64
+            i8
+            isize
+          and $N others
+  = note: required for `&str` to implement `RecordValue`
+  = note: this error originates in the macro `$crate::__record` which comes from the expansion of the macro `observe::info` (in Nightly builds, run with -Z macro-backtrace for more info)

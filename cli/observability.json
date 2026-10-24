@@ -1,0 +1,36 @@
+{
+  "events": [
+    {"name": "cold_start.phase_started", "level": "INFO", "fields": [{"name": "cold_start.kind", "type": "enum", "values": ["cli"]}, {"name": "cold_start.phase", "type": "enum", "values": ["config", "connect", "ready"]}]},
+    {"name": "cold_start.phase_completed", "level": "INFO", "fields": [{"name": "cold_start.kind", "type": "enum", "values": ["cli"]}, {"name": "cold_start.phase", "type": "enum", "values": ["config", "connect", "ready"]}, {"name": "config_ms", "type": "ms"}, {"name": "connect_ms", "type": "ms"}, {"name": "ready_ms", "type": "ms"}]},
+    {"name": "diagnostic.invalid_event", "level": "WARN", "log_type": "app", "fields": [{"name": "event.original", "type": "event_name"}]}
+  ],
+  "metrics": [
+    {"name": "tetral_connection_state", "type": "gauge", "labels": [{"name": "state", "values": ["disconnected", "connecting", "registering", "online", "resuming", "blocked", "stopping", "stopped"]}]},
+    {"name": "tetral_reconnects_total", "type": "counter", "labels": [{"name": "kind", "values": ["resume", "new"]}]},
+    {"name": "tetral_startup_phase_seconds", "type": "gauge", "labels": [{"name": "phase", "values": ["config", "connect", "ready"]}]},
+    {"name": "tetral_probes_in_progress", "type": "gauge"},
+    {"name": "tetral_probes_limit", "type": "gauge"},
+    {"name": "tetral_probes_queued", "type": "gauge"},
+    {"name": "tetral_probes_oldest_queued_seconds", "type": "gauge"},
+    {"name": "tetral_probes_queue_wait_seconds", "type": "histogram", "buckets": [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]},
+    {"name": "tetral_probes_rejected_total", "type": "counter", "labels": [{"name": "cause", "values": ["timeout"]}]},
+    {"name": "tetral_tasks_in_progress", "type": "gauge"},
+    {"name": "tetral_tasks_queued", "type": "gauge"},
+    {"name": "tetral_tasks_oldest_queued_seconds", "type": "gauge"},
+    {"name": "tetral_tasks_queue_wait_seconds", "type": "histogram", "buckets": [0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800]},
+    {"name": "tetral_tasks_rejected_total", "type": "counter", "labels": [{"name": "cause", "values": ["resource_exhausted"]}]},
+    {"name": "tetral_uploads_in_progress", "type": "gauge"},
+    {"name": "tetral_uploads_limit", "type": "gauge"},
+    {"name": "tetral_uploads_queued", "type": "gauge"},
+    {"name": "tetral_uploads_oldest_queued_seconds", "type": "gauge"},
+    {"name": "tetral_uploads_queue_wait_seconds", "type": "histogram", "buckets": [0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800]},
+    {"name": "tetral_uploads_rejected_total", "type": "counter", "labels": [{"name": "cause", "values": ["rate_limited"]}]},
+    {"name": "tetral_downloads_in_progress", "type": "gauge"},
+    {"name": "tetral_downloads_limit", "type": "gauge"},
+    {"name": "tetral_downloads_queued", "type": "gauge"},
+    {"name": "tetral_downloads_oldest_queued_seconds", "type": "gauge"},
+    {"name": "tetral_downloads_queue_wait_seconds", "type": "histogram", "buckets": [0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800]},
+    {"name": "tetral_downloads_rejected_total", "type": "counter", "labels": [{"name": "cause", "values": ["rate_limited"]}]},
+    {"name": "tetral_log_write_failures_total", "type": "counter", "labels": [{"name": "sink", "values": ["stderr", "file"]}]}
+  ]
+}

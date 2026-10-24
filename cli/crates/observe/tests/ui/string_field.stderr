@@ -1,0 +1,62 @@
+error[E0277]: the trait bound `String: RecordValue` is not satisfied
+ --> tests/ui/string_field.rs:3:5
+  |
+3 |     observe::info!("cold_start.phase_started", cold_start.phase = path);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |     |
+  |     the trait `RecordEnum` is not implemented for `String`
+  |     required by a bound introduced by this call
+  |
+  = help: the following other types implement trait `RecordValue`:
+            Code
+            Id<'s>
+            bool
+            i16
+            i32
+            i64
+            i8
+            isize
+          and $N others
+  = note: required for `String` to implement `RecordValue`
+  = note: this error originates in the macro `$crate::__record` which comes from the expansion of the macro `observe::info` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `String: RecordValue` is not satisfied
+ --> tests/ui/string_field.rs:3:5
+  |
+3 |     observe::info!("cold_start.phase_started", cold_start.phase = path);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |     |
+  |     the trait `RecordEnum` is not implemented for `String`
+  |     required by a bound introduced by this call
+  |
+  = help: the following other types implement trait `RecordValue`:
+            Code
+            Id<'s>
+            bool
+            i16
+            i32
+            i64
+            i8
+            isize
+          and $N others
+  = note: required for `String` to implement `RecordValue`
+  = note: this error originates in the macro `$crate::__record` which comes from the expansion of the macro `observe::info` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `String: RecordEnum` is not satisfied
+ --> tests/ui/string_field.rs:3:5
+  |
+3 |     observe::info!("cold_start.phase_started", cold_start.phase = path);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `RecordEnum` is not implemented for `String`
+  |
+  = help: the following other types implement trait `RecordValue`:
+            Code
+            Id<'s>
+            bool
+            i16
+            i32
+            i64
+            i8
+            isize
+          and $N others
+  = note: required for `String` to implement `RecordValue`
+  = note: this error originates in the macro `$crate::__record` which comes from the expansion of the macro `observe::info` (in Nightly builds, run with -Z macro-backtrace for more info)
