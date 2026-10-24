@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-[dev-dependencies]
+[dependencies]
+reqwest = { workspace = true, features = ["blocking", "json"] }
+rustix = { workspace = true, features = ["process"] }
 serde_json.workspace = true
 tempfile.workspace = true

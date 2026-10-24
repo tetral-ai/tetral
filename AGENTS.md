@@ -57,7 +57,8 @@ TypeScript (Bun; run inside `services/agent-runtime` or
 
 Rust (the Tetral CLI, a Cargo workspace with its own toolchain; run every
 `cargo` command inside `cli/`, never with `--manifest-path` from the root):
-`cargo build`, `cargo test`.
+`cargo build`, `cargo test`; `cargo test` writes its acceptance records into
+the directory that `TETRAL_ACCEPTANCE_DIR` names and fails without it.
 
 Pull requests are gated by `.github/workflows/pull-request-verification.yml`;
 its `Merge Gate` job is the repository's required check. Repository-wide

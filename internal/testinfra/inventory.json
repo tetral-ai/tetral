@@ -757,7 +757,7 @@
       "kind": "cargo",
       "profiles": ["affected", "full"],
       "dependencies": [],
-      "paths": ["cli/*", "cli/crates/**", "cli/tests/**", "cli/scripts/**", "cli/docs/**", "cli/examples/**", "protocol/**"]
+      "paths": ["cli/*", "cli/crates/**", "cli/tests/**", "cli/reference/**", "cli/scripts/**", "cli/docs/**", "cli/examples/**", "protocol/**"]
     }
   ],
   "full_fallback_paths": [

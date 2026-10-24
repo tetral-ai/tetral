@@ -14,6 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use serde_json::{Value, json};
+use tetral_tests::record::Case;
 
 const TEST_PACKAGE: &str = "tetral-tests";
 
@@ -94,13 +95,18 @@ fn workspace_dir() -> PathBuf {
         .to_path_buf()
 }
 
-fn metadata() -> Value {
+/// The workspace's `cargo metadata`, noted in the case's record.
+fn metadata(case: &mut Case) -> Value {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     let output = Command::new(cargo)
         .args(["metadata", "--format-version", "1"])
         .current_dir(workspace_dir())
         .output()
         .expect("cargo metadata runs");
+    case.command(
+        "cargo metadata --format-version 1",
+        &output.status.to_string(),
+    );
     assert!(
         output.status.success(),
         "cargo metadata failed: {}",
@@ -454,22 +460,29 @@ fn add_dependency(
 
 #[test]
 fn the_workspace_holds_the_layered_crates_and_the_test_package() {
+    let mut case =
+        tetral_tests::record!().case("the workspace holds the layered crates and the test package");
     let mut expected: BTreeSet<String> = ALLOWED_DEPENDENCIES
         .iter()
         .map(|(name, _)| (*name).to_owned())
         .collect();
     expected.insert(TEST_PACKAGE.to_owned());
-    assert_eq!(workspace_names(&metadata()), expected);
+    assert_eq!(workspace_names(&metadata(&mut case)), expected);
+    case.observe(format!("the members are exactly {expected:?}"));
 }
 
 #[test]
 fn the_workspace_graph_breaks_no_rule() {
-    assert_eq!(violations(&metadata()), Vec::new());
+    let mut case = tetral_tests::record!().case("the workspace graph breaks no rule");
+    assert_eq!(violations(&metadata(&mut case)), Vec::new());
+    case.observe("no violation of the five rules");
 }
 
 #[test]
 fn each_injected_breach_is_reported_once_by_its_rule() {
-    let mut metadata = metadata();
+    let mut case =
+        tetral_tests::record!().case("each injected breach is reported once by its rule");
+    let mut metadata = metadata(&mut case);
     let root = workspace_dir();
 
     add_dependency(
@@ -556,10 +569,13 @@ fn each_injected_breach_is_reported_once_by_its_rule() {
             },
         ]
     );
+    case.observe("seven injected breaches, each reported once by its rule, in order");
 }
 
 #[test]
 fn breaches_reached_through_features_or_patches_are_reported() {
+    let mut case =
+        tetral_tests::record!().case("breaches reached through features or patches are reported");
     type Injection = fn(&mut Value, &Path);
     let cases: [(&str, Injection, Vec<Violation>); 5] = [
         (
@@ -641,10 +657,12 @@ fn breaches_reached_through_features_or_patches_are_reported() {
     ];
 
     let root = workspace_dir();
-    for (case, inject, expected) in cases {
-        let mut metadata = metadata();
+    for (name, inject, expected) in cases {
+        let mut metadata = metadata(&mut case);
         inject(&mut metadata, &root);
-        assert_eq!(violations(&metadata), expected, "{case}");
+        assert_eq!(violations(&metadata), expected, "{name}");
+        let rules: Vec<u8> = expected.iter().map(Violation::rule).collect();
+        case.observe(format!("{name}: reported by rule {rules:?}"));
     }
 }
 
@@ -813,6 +831,7 @@ fn code_only(text: &str) -> String {
 
 #[test]
 fn no_library_crate_prints() {
+    let _case = tetral_tests::record!().case("no library crate prints");
     let sources = library_sources(&workspace_dir().join("crates"));
     for name in library_crates() {
         let lib = workspace_dir().join("crates").join(name).join("src/lib.rs");
@@ -827,6 +846,7 @@ fn no_library_crate_prints() {
 
 #[test]
 fn each_injected_print_call_is_reported_once() {
+    let _case = tetral_tests::record!().case("each injected print call is reported once");
     for call in [
         "print!(\"done\")",
         "println!(\"done\")",
@@ -859,6 +879,8 @@ fn each_injected_print_call_is_reported_once() {
 
 #[test]
 fn a_print_call_is_found_after_any_literal_and_never_inside_a_comment_or_literal() {
+    let _case = tetral_tests::record!()
+        .case("a print call is found after any literal and never inside a comment or literal");
     let injected = PathBuf::from("injected.rs");
     let rows: &[(&str, &[usize])] = &[
         ("let url = \"http://example\"; println!(\"{url}\");", &[1]),
