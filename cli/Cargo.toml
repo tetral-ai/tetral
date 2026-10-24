@@ -29,14 +29,16 @@ eventsource-stream = "0.2.3"
 flate2 = "1.1.10"
 fuser = "0.18.0"
 hyper-util = "0.1.21"
-jsonschema = "0.60.1"
+jsonschema = { version = "0.60.1", default-features = false }
 nfsserve = "0.11.0"
 rand = "0.10.3"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 rmcp = "=3.5.1"
 rustix = "1.1.5"
 serde = "1.0.229"
-serde_json = "1.0.154"
+# Every build reads a decimal as its nearest double; test builds would
+# otherwise differ, since jsonschema turns this feature on for them.
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 sha2 = "0.11.1"
 sqlx = { version = "0.9.0", default-features = false, features = ["sqlite-bundled"] }
 tar = "0.4.46"
