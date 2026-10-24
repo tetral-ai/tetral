@@ -37,7 +37,8 @@ is restated here.
 ## Build and test
 
 Local test prerequisites include Python 3 (`python3` on PATH) for the release
-command fixtures, in addition to Go and Bun.
+command fixtures and `rustup` for the Tetral CLI's `cli` group, in addition to
+Go and Bun.
 
 Go (one module, run from the repository root): `make build` / `make test` /
 `make test-affected` / `make test-full` / `make lint` / `make vulncheck`;

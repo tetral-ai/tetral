@@ -69,6 +69,22 @@ func TestGoCommandsApplyIntegrationPackageWatchdog(t *testing.T) {
 	})
 }
 
+func TestCLISelectionBuildsThenTestsTheCargoWorkspace(t *testing.T) {
+	commands, err := commandsForSelection(Plan{Profile: ProfileAffected}, Selection{Group: "cli"}, t.TempDir(), t.TempDir(), DependencyAuditChanged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{{"cargo", "build"}, {"cargo", "test"}}
+	if len(commands) != len(want) {
+		t.Fatalf("cli commands = %v; want %v", commands, want)
+	}
+	for index, command := range commands {
+		if !slices.Equal(command.Arguments, want[index]) || command.WorkingDir != "cli" {
+			t.Fatalf("cli command %d = %v in %q; want %v in cli", index, command.Arguments, command.WorkingDir, want[index])
+		}
+	}
+}
+
 func TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests(t *testing.T) {
 	commands, err := commandsForSelection(
 		Plan{},

@@ -117,3 +117,7 @@ Every `cargo` command runs with `cli/` as its working directory, so that
 `--manifest-path cli/Cargo.toml` from the repository root.
 
 - `cargo build` and `cargo test` in `cli/` build and test the workspace.
+- `make test-affected` at the repository root runs the evidence group `cli`
+  (the same two commands) for a change under `cli/` outside `cli/reference/`.
+  A change under `protocol/` makes it fall back to the full profile, which runs
+  the `cli` group and every Go package.
