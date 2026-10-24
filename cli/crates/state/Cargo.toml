@@ -4,3 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+
+[features]
+test-seams = ["dep:tokio"]
+
+[dependencies]
+rustix = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["rt"], optional = true }

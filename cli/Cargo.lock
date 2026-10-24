@@ -747,6 +747,10 @@ checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
 [[package]]
 name = "state"
 version = "0.1.0-alpha.1"
+dependencies = [
+ "rustix",
+ "tokio",
+]
 
 [[package]]
 name = "strum"
@@ -824,6 +828,7 @@ name = "tetral"
 version = "0.1.0-alpha.1"
 dependencies = [
  "appserver",
+ "state",
 ]
 
 [[package]]
