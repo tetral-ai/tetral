@@ -1,0 +1,115 @@
+name: CLI Verification
+
+# No path filter: CLI results reports on every pull request, so it can be a
+# required check; the changed job decides whether the build jobs run.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+cache-mode: read
+
+concurrency:
+  group: cli-verification-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changed:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      cli: ${{ steps.paths.outputs.cli }}
+    steps:
+      - name: Check out the pull request with its history
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Find changes to the CLI
+        id: paths
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "cli=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The three-dot range lists what the pull request changes since its
+          # merge base, not what the base branch gained since. -z prints each
+          # path verbatim, ended by NUL; without it git quotes a path holding a
+          # non-ASCII byte, a quote or a control character, and the quoted form
+          # would miss the pattern.
+          changed="$RUNNER_TEMP/changed-paths"
+          git diff --name-only --no-renames -z "$BASE_SHA...$HEAD_SHA" > "$changed"
+          if grep -qzE '^(cli/|protocol/|\.github/workflows/cli-verification\.yml$)' "$changed"; then
+            echo "cli=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "cli=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  linux:
+    needs: changed
+    if: needs.changed.outputs.cli == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out the revision under test
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Set up Go for the reference control server
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.26.9'
+          cache: false
+      - name: Allow unprivileged user namespaces
+        run: |
+          set -euo pipefail
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Install the pinned Rust toolchain
+        working-directory: cli
+        run: rustup toolchain install
+      - name: Build
+        working-directory: cli
+        run: cargo build
+      - name: Test
+        working-directory: cli
+        env:
+          TETRAL_ACCEPTANCE_DIR: ${{ runner.temp }}/acceptance
+        run: cargo test
+
+  results:
+    name: CLI results
+    needs: [changed, linux]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every job that ran to pass
+        env:
+          CHANGED_RESULT: ${{ needs.changed.result }}
+          CLI_CHANGED: ${{ needs.changed.outputs.cli }}
+          BUILD_RESULTS: ${{ needs.linux.result }}
+        run: |
+          set -euo pipefail
+          if [ "$CHANGED_RESULT" != "success" ]; then
+            echo "the changed job ended with $CHANGED_RESULT"
+            exit 1
+          fi
+          if [ "$CLI_CHANGED" = "false" ]; then
+            exit 0
+          fi
+          for result in $BUILD_RESULTS; do
+            if [ "$result" != "success" ]; then
+              echo "a build job ended with $result"
+              exit 1
+            fi
+          done

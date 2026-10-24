@@ -213,6 +213,13 @@ The readable CI topology is:
   workflow source and run, taking each producer's result from the latest
   attempt that has one, and accepts each only from the job that runs that
   producer.
+- **CLI Verification**: runs on every pull request. Its job `changed` starts
+  the build and tests of the `cli/` Cargo workspace in the job `linux` only
+  when the pull request changes `cli/`, `protocol/` or the workflow itself;
+  **CLI results** is the workflow's result, passing when none of them changed
+  and otherwise only when every job that ran passed. The test inventory's
+  `cli` group runs the same `cargo build` and `cargo test`, so no job of Pull
+  Request Verification runs it.
 - **Main Branch Verification**: the same evidence owners run independently on
   the exact merged commit. Go Race runs the same shards; repository, static,
   Runtime, Gateway, protocol, deployment, image, and security evidence run in
@@ -429,9 +436,10 @@ or gcc version changed or the entry was evicted or expired (seven days
 unused). Per ref, a newer run replaces a pending one and never cancels a
 running one, so an upload always completes.
 
-Pull request workflows only read the Actions cache: Pull Request Verification
-and `engine-vulncheck.yml` declare `cache-mode: read`, which GitHub enforces
-with scoped cache tokens, and main's Go Race jobs restore with the same mode.
+Pull request workflows only read the Actions cache: Pull Request Verification,
+CLI Verification and `engine-vulncheck.yml` declare `cache-mode: read`, which
+GitHub enforces with scoped cache tokens, and main's Go Race jobs restore with
+the same mode.
 `VerifyGoBuildCacheWorkflows` keeps writes explicit: only the Go Build Cache
 job and CI Benchmark's guarded `produce` job declare a write-capable
 `cache-mode` or use `actions/cache/save`, no workflow uses `actions/cache`,

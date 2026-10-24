@@ -121,3 +121,13 @@ Every `cargo` command runs with `cli/` as its working directory, so that
   (the same two commands) for a change under `cli/` outside `cli/reference/`.
   A change under `protocol/` makes it fall back to the full profile, which runs
   the `cli` group and every Go package.
+
+## Continuous integration
+
+`.github/workflows/cli-verification.yml` (**CLI Verification**) runs on every
+pull request. Its job `changed` finds whether the pull request changes a path
+under `cli/` or `protocol/` or the workflow file; only then does the job
+`linux` build and test the workspace on `ubuntu-24.04`, with unprivileged user
+namespaces enabled. The job `CLI results` is the workflow's result: it passes
+when nothing of the CLI changed, and otherwise only when every job that ran
+passed.
