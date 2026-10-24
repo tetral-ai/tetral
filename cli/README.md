@@ -116,6 +116,17 @@ new one adds it there in the same change. No library crate prints, and only
 crates deny the print lints, and `tests/tests/crate_graph.rs` fails on a print
 or `dbg!` call in their sources.
 
+## Reference control server
+
+`reference/` is for the reference control server: a Go stand-in for Engine's
+side of the client connection, which the CLI's cross-process tests run
+`tetral` against and which is never part of a release. It is Go in the
+repository's root Go module, not part of this workspace. `reference/wire/`
+holds the reference control server's own types for the protocol of
+`protocol/` at the repository root, written apart from the Rust types of
+`protocol` and tested against the same fixtures; neither set imports the
+other or any Engine package.
+
 ## Dependencies
 
 The CLI depends on no Engine service, database, queue or internal package, on
@@ -129,6 +140,8 @@ Every `cargo` command runs with `cli/` as its working directory, so that
 `--manifest-path cli/Cargo.toml` from the repository root.
 
 - `cargo build` and `cargo test` in `cli/` build and test the workspace.
+- `go test -race ./cli/reference/...` at the repository root tests the Go
+  packages under `reference/`.
 - `make test-affected` at the repository root runs the evidence group `cli`
   (the same two commands) for a change under `cli/` outside `cli/reference/`.
   A change under `protocol/` makes it fall back to the full profile, which runs
