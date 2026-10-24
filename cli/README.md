@@ -66,7 +66,7 @@ other features, so that the released binary holds none.
 | 4 | `mcp` | The MCP manager |
 | 5 | `protocol` | The wire types, the local API types and the interfaces of `protocol::ports` |
 | 5 | `state` | Paths, private-file checks, the configuration and credential files, atomic writes, the clock and the test seams |
-| 5 | `observe` | Records, the log file, the catalogue of events and metrics, the metrics registry and trace context |
+| 5 | `observe` | Records, the log file, the catalogue of events and metrics, the metrics registry, trace context, stopwatches and the startup phases |
 
 Each crate's `README.md` is its orientation and its crate documentation.
 Library crates return typed errors made with `thiserror`; only the command

@@ -5,6 +5,7 @@ mod level;
 mod metrics;
 mod record;
 mod sinks;
+mod stopwatch;
 mod trace_context;
 
 use std::io;
@@ -21,6 +22,7 @@ pub use level::{InvalidLevel, LEVEL_VARIABLE, Level};
 pub use metrics::{Counter, Gauge, Histogram, Registry, registry, render};
 pub use record::{Code, Id, Identity, RecordEnum, RecordLayer, RecordValue, correlation_span};
 pub use sinks::{LOG_FILE_LIMIT_BYTES, LogFile, SINK_QUEUE_RECORDS, Sink, Sinks};
+pub use stopwatch::{MonotonicClock, Ms, Startup, StartupPhases, Stopwatch};
 pub use trace_context::TraceContext;
 
 #[doc(hidden)]
@@ -28,6 +30,9 @@ pub mod __private {
     pub use crate::record::{RecordValue, check_declared};
     pub use tracing;
 }
+
+/// One per process, since a process makes at most one server start.
+pub static STARTUP: Startup = Startup::new();
 
 /// The installed recording of this process.
 pub struct Observer {

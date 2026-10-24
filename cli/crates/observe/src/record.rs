@@ -90,8 +90,8 @@ pub trait RecordEnum {
     fn record_str(&self) -> &'static str;
 }
 
-/// A value that a record field can hold: integers, booleans, `Id`, `Code` and
-/// `RecordEnum` types. No string type implements it, so text reaches a record
+/// A value that a record field can hold: integers, booleans, `Id`, `Code`, `Ms`
+/// and `RecordEnum` types. No string type implements it, so text reaches a record
 /// only as an identity, an enum's declared value or a code's catalogue text,
 /// never as free text such as a command line.
 pub trait RecordValue {
@@ -271,6 +271,7 @@ enum Captured {
     Signed(i64),
     Bool(bool),
     Text(String),
+    Ms(u64),
 }
 
 struct Fields {
@@ -328,6 +329,10 @@ impl Visit for Fields {
     }
     fn record_bool(&mut self, field: &Field, value: bool) {
         self.set(field.name(), Captured::Bool(value));
+    }
+    fn record_u128(&mut self, field: &Field, value: u128) {
+        let ms = u64::try_from(value).unwrap_or(u64::MAX);
+        self.set(field.name(), Captured::Ms(ms));
     }
     fn record_str(&mut self, field: &Field, value: &str) {
         let limit = if field.name() == "event" {
@@ -530,7 +535,7 @@ fn encode(spec: &EventSpec, declared: bool, fields: &Fields, correlation: &Field
             };
             let typed = match (field.kind, value) {
                 (FieldKind::Integer, Captured::Unsigned(_) | Captured::Signed(_)) => true,
-                (FieldKind::Ms, Captured::Unsigned(_)) => true,
+                (FieldKind::Ms, Captured::Ms(_)) => true,
                 (FieldKind::Boolean, Captured::Bool(_)) => true,
                 (FieldKind::Identity, Captured::Text(_)) => true,
                 (FieldKind::EventName, Captured::Text(text)) => is_event_name(text),
@@ -633,7 +638,9 @@ impl JsonObject {
 
     fn captured(&mut self, name: &str, value: &Captured) {
         match value {
-            Captured::Unsigned(number) => self.raw(name, &number.to_string()),
+            Captured::Unsigned(number) | Captured::Ms(number) => {
+                self.raw(name, &number.to_string())
+            }
             Captured::Signed(number) => self.raw(name, &number.to_string()),
             Captured::Bool(flag) => self.raw(name, if *flag { "true" } else { "false" }),
             Captured::Text(text) => self.text(name, text),
@@ -726,7 +733,7 @@ pub(crate) mod tests {
     }
 
     impl Written {
-        fn records(&self) -> Vec<Value> {
+        pub(crate) fn records(&self) -> Vec<Value> {
             String::from_utf8(self.0.lock().unwrap().clone())
                 .unwrap()
                 .lines()
@@ -740,7 +747,7 @@ pub(crate) mod tests {
 
     /// Runs `work` under a record layer whose two sinks write to buffers,
     /// and returns them once every record is written.
-    fn record_with(level: Level, work: impl FnOnce()) -> (Written, Written) {
+    pub(crate) fn record_with(level: Level, work: impl FnOnce()) -> (Written, Written) {
         record_with_limit(level, STRING_LIMIT_BYTES, work)
     }
 

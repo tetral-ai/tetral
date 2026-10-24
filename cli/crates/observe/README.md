@@ -2,7 +2,7 @@
 
 How the CLI records belongs here: structured records on stderr and in the log
 file, the declared catalogue of events and metric families, the metrics
-registry and trace context.
+registry, trace context and stopwatches.
 
 ## Design rules
 
@@ -17,7 +17,8 @@ registry and trace context.
 - Text reaches a record only as an identity (`Id`), an enum field's declared
   value, or `error.message_safe`, the catalogue's fixed text for the event's
   `error.code`: no string type is a `RecordValue`. A string value longer than
-  `STRING_LIMIT_BYTES` is replaced without being copied.
+  `STRING_LIMIT_BYTES` is replaced without being copied. A duration field
+  holds only an `Ms`, read by a `Stopwatch` or by `Startup`.
 - Every event and metric family is declared in `cli/observability.json`, each
   event with its level and error codes. Recording an undeclared event, metric
   series or error code, or a declared event at another level, fails the test
@@ -30,8 +31,9 @@ registry and trace context.
   (`fail_undeclared`).
 - Recording never makes a task wait (`Sink`), and a record is built only after
   a sink has room for it (`Sinks::write_with`).
-- The registry and the sinks are atomics and bounded queues that hold no App
-  Server state, so the workspace's state-owner rule does not apply to them.
+- The registry, `Startup` and the sinks are atomics and bounded queues that
+  hold no App Server state, so the workspace's state-owner rule does not apply
+  to them.
 - A pressure point is a place where work waits or is refused; its series carry
   the point's name as their prefix, and the catalogue checks that each has its
   siblings (`check_pressure_point`).
@@ -48,6 +50,8 @@ registry and trace context.
   Prometheus text format 0.0.4.
 - `Level::from_env` reads `TETRAL_LOG_LEVEL`; `TraceContext::parse` accepts a
   `traceparent` value.
+- `Stopwatch` measures a duration, and `STARTUP` the startup phases of a
+  server start, on the monotonic clock their caller passes in.
 
 ## Where things live
 
@@ -59,5 +63,6 @@ registry and trace context.
 | `src/metrics.rs` | `Counter`, `Gauge`, `Histogram`, `Registry` and the text format |
 | `src/level.rs` | `Level` and `TETRAL_LOG_LEVEL` |
 | `src/trace_context.rs` | `TraceContext` |
+| `src/stopwatch.rs` | `Stopwatch`, `Ms` and `Startup`, which records the `cold_start` events |
 | `tests/string_fields.rs` | The compile-fail cases of `tests/ui/`: a `String` or a `&str` field does not compile |
 | `tests/level_variable.rs` | `Level::from_env` reading `TETRAL_LOG_LEVEL` |
