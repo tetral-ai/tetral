@@ -10,4 +10,4 @@ The typed client of the App Server's local API belongs here, for apps that run
 
 ## Where things are
 
-- `lib.rs`: this documentation only.
+- `lib.rs`: this documentation and the print lints that `cli/README.md` states.

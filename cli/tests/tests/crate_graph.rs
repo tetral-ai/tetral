@@ -2,8 +2,14 @@
 //! [`Violation::rule`] numbers them in the order that file states them:
 //! layering, paths outside the workspace, AGPL licences, test code in the
 //! release graph, and test seams.
+//!
+//! Beside the graph, no library crate prints: only the `tetral` binary may
+//! write to stdout, and every record goes through `observe`. Library crates
+//! also deny the print lints, but no build runs clippy, so this test reads
+//! their sources.
 
 use std::collections::{BTreeSet, HashMap};
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -639,5 +645,241 @@ fn breaches_reached_through_features_or_patches_are_reported() {
         let mut metadata = metadata();
         inject(&mut metadata, &root);
         assert_eq!(violations(&metadata), expected, "{case}");
+    }
+}
+
+const PRINT_MACROS: &[&str] = &["print", "println", "eprint", "eprintln", "dbg"];
+
+/// The sources of every library crate: every workspace crate but `tetral`.
+fn library_sources(crates: &Path) -> Vec<(PathBuf, String)> {
+    fn walk(directory: &Path, sources: &mut Vec<(PathBuf, String)>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, sources);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let text = fs::read_to_string(&path).unwrap();
+                sources.push((path, text));
+            }
+        }
+    }
+    let mut sources = Vec::new();
+    for name in library_crates() {
+        walk(&crates.join(name).join("src"), &mut sources);
+    }
+    sources
+}
+
+fn library_crates() -> impl Iterator<Item = &'static str> {
+    ALLOWED_DEPENDENCIES
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| *name != "tetral")
+}
+
+/// Each line that calls a print macro, read with comments and the contents
+/// of string and character literals blanked out.
+fn print_calls(sources: &[(PathBuf, String)]) -> Vec<(PathBuf, usize)> {
+    let mut calls = Vec::new();
+    for (path, text) in sources {
+        for (index, code) in code_only(text).lines().enumerate() {
+            let prints = PRINT_MACROS.iter().any(|name| {
+                code.match_indices(&format!("{name}!")).any(|(at, _)| {
+                    let before = code[..at].chars().next_back();
+                    !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                })
+            });
+            if prints {
+                calls.push((path.clone(), index + 1));
+            }
+        }
+    }
+    calls
+}
+
+/// `text` with every character of a comment or inside a string, raw string or
+/// character literal replaced by a space, newlines kept, so that lines and
+/// columns stay where they were.
+fn code_only(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut code = String::with_capacity(text.len());
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let blank = |code: &mut String, c: char| code.push(if c == '\n' { '\n' } else { ' ' });
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        if c == '/' && next == Some('/') {
+            while i < chars.len() && chars[i] != '\n' {
+                blank(&mut code, chars[i]);
+                i += 1;
+            }
+        } else if c == '/' && next == Some('*') {
+            let mut depth = 0;
+            loop {
+                if i >= chars.len() {
+                    break;
+                }
+                if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+                    depth += 1;
+                    code.push_str("  ");
+                    i += 2;
+                } else if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+                    depth -= 1;
+                    code.push_str("  ");
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    blank(&mut code, chars[i]);
+                    i += 1;
+                }
+            }
+        } else if c == '"' {
+            // A raw string is `r`, any number of `#`, then the quote, with no
+            // word character before the `r` but a `b` or `c` prefix.
+            let hashes = chars[..i].iter().rev().take_while(|&&c| c == '#').count();
+            let r = i.checked_sub(hashes + 1).filter(|&r| chars[r] == 'r');
+            let raw = r.is_some_and(|r| {
+                let before = r.checked_sub(1).map(|b| chars[b]);
+                match before {
+                    Some('b' | 'c') => !r.checked_sub(2).is_some_and(|b| is_word(chars[b])),
+                    Some(before) => !is_word(before),
+                    None => true,
+                }
+            });
+            code.push('"');
+            i += 1;
+            while i < chars.len() {
+                if raw {
+                    if chars[i] == '"'
+                        && chars[i + 1..]
+                            .iter()
+                            .take(hashes)
+                            .filter(|&&c| c == '#')
+                            .count()
+                            == hashes
+                    {
+                        break;
+                    }
+                } else if chars[i] == '\\' {
+                    blank(&mut code, chars[i]);
+                    i += 1;
+                    if i < chars.len() {
+                        blank(&mut code, chars[i]);
+                        i += 1;
+                    }
+                    continue;
+                } else if chars[i] == '"' {
+                    break;
+                }
+                blank(&mut code, chars[i]);
+                i += 1;
+            }
+            if i < chars.len() {
+                code.push('"');
+                i += 1;
+            }
+        } else if c == '\'' && next == Some('\\') {
+            code.push('\'');
+            i += 1;
+            while i < chars.len() && chars[i] != '\'' {
+                if chars[i] == '\\' {
+                    blank(&mut code, chars[i]);
+                    i += 1;
+                }
+                if i < chars.len() {
+                    blank(&mut code, chars[i]);
+                    i += 1;
+                }
+            }
+            if i < chars.len() {
+                code.push('\'');
+                i += 1;
+            }
+        } else if c == '\'' && chars.get(i + 2) == Some(&'\'') {
+            // A one-character literal; `'a` without a closing quote is a
+            // lifetime and stays code.
+            code.push_str("' '");
+            i += 3;
+        } else {
+            code.push(c);
+            i += 1;
+        }
+    }
+    code
+}
+
+#[test]
+fn no_library_crate_prints() {
+    let sources = library_sources(&workspace_dir().join("crates"));
+    for name in library_crates() {
+        let lib = workspace_dir().join("crates").join(name).join("src/lib.rs");
+        assert!(
+            sources.iter().any(|(path, _)| *path == lib),
+            "{} was not read",
+            lib.display()
+        );
+    }
+    assert_eq!(print_calls(&sources), Vec::new());
+}
+
+#[test]
+fn each_injected_print_call_is_reported_once() {
+    for call in [
+        "print!(\"done\")",
+        "println!(\"done\")",
+        "eprint!(\"done\")",
+        "eprintln!(\"done\")",
+        "dbg!(done)",
+    ] {
+        // Every library crate's sources, with the call in a nested module.
+        let root = tempfile::tempdir().unwrap();
+        let crates = root.path().join("crates");
+        for name in library_crates() {
+            let src = crates.join(name).join("src");
+            fs::create_dir_all(&src).unwrap();
+            fs::write(src.join("lib.rs"), "mod tasks;\n").unwrap();
+        }
+        let injected = crates.join("session/src/tasks/report.rs");
+        fs::create_dir_all(injected.parent().unwrap()).unwrap();
+        fs::write(
+            &injected,
+            format!("fn report() {{\n    {call};\n    // {call}\n    my_{call};\n}}\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            print_calls(&library_sources(&crates)),
+            vec![(injected.clone(), 2)],
+            "{call}"
+        );
+    }
+}
+
+#[test]
+fn a_print_call_is_found_after_any_literal_and_never_inside_a_comment_or_literal() {
+    let injected = PathBuf::from("injected.rs");
+    let rows: &[(&str, &[usize])] = &[
+        ("let url = \"http://example\"; println!(\"{url}\");", &[1]),
+        ("let quote = '\"'; println!(\"{quote}\");", &[1]),
+        ("let slash = '\\\\'; let s = \"//\"; dbg!(s);", &[1]),
+        ("let raw = r#\"a \" // b\"#; eprintln!(\"{raw}\");", &[1]),
+        ("fn f<'a>(x: &'a str) { print!(\"{x}\") }", &[1]),
+        ("let text = \"println!(\\\"x\\\")\";", &[]),
+        ("let raw = br##\"print!(\"x\")\"##;", &[]),
+        ("/* outer /* inner */ println!(\"x\") */ let x = 1;", &[]),
+        ("/// println!(\"x\")\nlet x = 1;", &[]),
+        (
+            "let s = \"a\nprintln!(\\\"x\\\")\";\nprint!(\"{s}\");",
+            &[3],
+        ),
+    ];
+    for (source, lines) in rows {
+        let found: Vec<usize> = print_calls(&[(injected.clone(), source.to_string())])
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect();
+        assert_eq!(found, *lines, "{source}");
     }
 }

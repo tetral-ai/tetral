@@ -15,4 +15,4 @@ ones it uses belong here too.
 
 ## Where things are
 
-- `lib.rs`: this documentation only.
+- `lib.rs`: this documentation and the print lints that `cli/README.md` states.

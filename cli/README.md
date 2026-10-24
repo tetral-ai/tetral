@@ -111,7 +111,10 @@ record rules. A record is one JSON line, written by two sinks: stderr, and the
 log file once it is opened. `TETRAL_LOG_LEVEL` sets the lowest level for both.
 `observability.json` is the catalogue of every event and metric family the CLI
 records, which `observe::catalogue` embeds and checks; a change that records a
-new one adds it there in the same change.
+new one adds it there in the same change. No library crate prints, and only
+`tetral` may write to stdout, where a command's result object goes: library
+crates deny the print lints, and `tests/tests/crate_graph.rs` fails on a print
+or `dbg!` call in their sources.
 
 ## Dependencies
 

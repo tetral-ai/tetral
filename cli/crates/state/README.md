@@ -11,4 +11,4 @@ replacement, the clock and the test seams.
 
 ## Where things are
 
-- `lib.rs`: this documentation only.
+- `lib.rs`: this documentation and the print lints that `cli/README.md` states.
