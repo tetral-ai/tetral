@@ -1,0 +1,119 @@
+# Tetral CLI
+
+`tetral` is one program for Linux and macOS that runs on users' own machines
+and on cloud machines alike. It connects out to Engine and executes, on the
+machine, the work that Engine sends for the Sessions that use it. This
+directory is its Cargo workspace, with its own `Cargo.lock` and its own
+toolchain in `rust-toolchain.toml`; it is built, tested and released apart from
+the repository's Go module, and depends on no Engine code.
+
+## Terms
+
+- **App Server**: the long-running `tetral` process on a machine. It holds the
+  connection to Engine and every piece of the CLI's state on that machine;
+  other processes reach it only through its local API, HTTP and JSON over a
+  Unix socket.
+- **State root**: the CLI's private directory, one per app account, which
+  holds its configuration, credentials, log file and the data it keeps for
+  Sessions and drives. The local API's socket and the projects' working
+  directories lie outside it. One App Server at a time owns it.
+- **Session record**: what the CLI keeps on this machine about one Engine
+  Session that uses the machine as one of its computers.
+- **Directory probe**: the short-lived child process that checks a Session's
+  working directory before its preparation is reported: it resolves symbolic
+  links, checks that the target is a directory outside the state root that
+  the App Server's user can enter, and enters it.
+- **Binding**: one preparation of this machine for one Session on one
+  connection to Engine, issued by Engine. A resumed event stream keeps its
+  bindings; a new connection needs new ones.
+- **Instruction** and **report**: an instruction is a message that Engine sends
+  on the event stream, such as a Session's preparation, its close or a tool
+  call; a report is the CLI's answer to an instruction, or a later message
+  about it, sent as an HTTP request. A report is **frozen** once its body is
+  final and written to disk; every send of it, retries included, carries
+  those bytes.
+- **Ready**: the message the CLI sends on each new connection to declare its
+  versions and capabilities, before Engine sends it any Session instruction.
+- **Task**: one execution of one tool call on this machine, with its process
+  tree.
+- **Drive**: a cloud folder of the workspace that Sessions bind and machines
+  mount. **Catch-up** applies to a mounted drive the changes committed
+  elsewhere since this machine last saw it.
+
+## Crates
+
+A crate depends only on crates of lower layers, and crates of one layer never
+depend on each other. The test package `tetral-tests` (`tests/`) may depend on
+every crate, and no crate depends on it. No package may come from a path
+outside `cli/`, as a path dependency or through a `[patch]`, and no package of
+the resolved graph, development and build dependencies included, may be
+licensed under the AGPL. The normal dependencies of `tetral`, followed to the
+end, must hold neither `tetral-tests` nor the test-only `jsonschema`. Test
+seams must sit behind a crate feature named `test-seams`, which no crate may
+enable by default and no normal dependency may enable, directly or through
+other features, so that the released binary holds none.
+`tests/tests/crate_graph.rs` checks these rules over `cargo metadata`.
+
+| Layer | Crate | Responsible for |
+|---|---|---|
+| 1 | `tetral` | The binary: its commands, the App Server assembly, and the internal entry points the App Server runs as child processes |
+| 2 | `appserver` | The state-root lock, the local API server, startup, shutdown and the lifecycle task |
+| 2 | `sdk` | The typed client of the local API; it depends on `protocol` only |
+| 3 | `connection` | The Connection owner, the Report outbox, the HTTP and SSE transport to Engine and the drive transfer client |
+| 3 | `session` | The Session binding owners, the directory probe and repository clones |
+| 4 | `execution` | The Task supervisors, the translation of `sandbox_policy`, each call's permissions, into process isolation, and the tools |
+| 4 | `drive` | The Drive sync owners, the Content cache, the drive mounts and the `DriveTransfer` interface |
+| 4 | `mcp` | The MCP manager |
+| 5 | `protocol` | The wire types, the local API types and the interfaces of `protocol::ports` |
+| 5 | `state` | Paths, private-file checks, the configuration and credential files, atomic writes, the clock and the test seams |
+| 5 | `observe` | Records, the log file, the catalogue of events and metrics, the metrics registry and trace context |
+
+Each crate's `README.md` is its orientation and its crate documentation.
+Library crates return typed errors made with `thiserror`; only the command
+entry points of `tetral` use `anyhow`.
+
+## State owners
+
+Every piece of App Server state has exactly one owner: one of the owners in the
+table below, or the lifecycle task of `appserver`, which holds whether the App
+Server is running or stopping, the shutdown sequence and the idle timer. An
+owner is one tokio task with one unbounded mailbox; it handles its messages one
+at a time, in arrival order, and no state is shared behind a lock. A handler
+never awaits another owner's reply: it sends its request with a reply channel,
+and a spawned task awaits the reply and posts it to the owner's mailbox as a
+new message. Stream readers, request tasks and local API handlers are not
+owners; they send messages and await replies.
+
+| Owner | How many | Crate | Owns |
+|---|---|---|---|
+| Connection | One per App Server | `connection` | The connection to Engine: authentication, the event stream and its resume, ready, heartbeats, credential renewal, and the routing of Session instructions |
+| Session binding | One per Session on this machine | `session` | The Session record, its bindings and their states, and the admission of new work |
+| Task supervisor | One per task | `execution` | One task's process tree |
+| Report outbox | One per App Server | `connection` | The frozen reports, their sending and their retries |
+| Drive sync | One per Session on this machine | `drive` | The Session's drive sync state, the checks before a command, uploads and catch-up |
+| Content cache | One per machine | `drive` | The cached file contents and the slots that bound concurrent uploads and downloads |
+| MCP manager | One per App Server | `mcp` | The local MCP servers and each binding's MCP connections |
+
+Peer crates reach each other only through interfaces. `session`,
+`execution`, `drive` and `mcp` may send no HTTP request: their reports go to
+`protocol::ports::ReportSink` and their drive transfer requests to
+`drive::DriveTransfer`. The Connection owner reaches Session binding owners
+through `protocol::ports::SessionFactory` and `SessionHandle`, and Session
+binding and Drive sync owners reach the Connection owner through
+`protocol::ports::ConnectionPort`. Each interface's documentation names the
+crate its implementation belongs to; joining the implementations to the owners
+that use them belongs to `appserver`.
+
+## Dependencies
+
+The CLI depends on no Engine service, database, queue or internal package, on
+no provider SDK and on no provider credential. `UPSTREAM.md` lists every
+outside source with its pinned version and licence.
+
+## Build and test
+
+Every `cargo` command runs with `cli/` as its working directory, so that
+`rust-toolchain.toml` selects the pinned toolchain; none passes
+`--manifest-path cli/Cargo.toml` from the repository root.
+
+- `cargo build` and `cargo test` in `cli/` build and test the workspace.

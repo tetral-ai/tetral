@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "tests"]
+
+[workspace.package]
+version = "0.1.0-alpha.1"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+appserver = { path = "crates/appserver" }
+connection = { path = "crates/connection" }
+drive = { path = "crates/drive" }
+execution = { path = "crates/execution" }
+mcp = { path = "crates/mcp" }
+observe = { path = "crates/observe" }
+protocol = { path = "crates/protocol" }
+sdk = { path = "crates/sdk" }
+session = { path = "crates/session" }
+state = { path = "crates/state" }
+
+anyhow = "1.0.104"
+axum = "0.8.9"
+base64 = "0.23.1"
+caseless = "0.2.2"
+clap = "4.6.7"
+eventsource-stream = "0.2.3"
+flate2 = "1.1.10"
+fuser = "0.18.0"
+hyper-util = "0.1.21"
+jsonschema = "0.60.1"
+nfsserve = "0.11.0"
+rand = "0.10.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+rmcp = "=3.5.1"
+rustix = "1.1.5"
+serde = "1.0.229"
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+sqlx = { version = "0.9.0", default-features = false, features = ["sqlite-bundled"] }
+tar = "0.4.46"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+tokio = "1.54.1"
+toml = "1.1.8"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+unicode-normalization = "0.1.26"
+unicode-properties = { version = "0.1.4", default-features = false, features = ["general-category"] }
+
+codex-linux-sandbox = { git = "https://github.com/openai/codex", tag = "rust-v0.164.0" }
+codex-protocol = { git = "https://github.com/openai/codex", tag = "rust-v0.164.0" }
+codex-sandboxing = { git = "https://github.com/openai/codex", tag = "rust-v0.164.0" }
+codex-utils-absolute-path = { git = "https://github.com/openai/codex", tag = "rust-v0.164.0" }
+codex-utils-path-uri = { git = "https://github.com/openai/codex", tag = "rust-v0.164.0" }
+codex-utils-pty = { git = "https://github.com/openai/codex", tag = "rust-v0.164.0" }

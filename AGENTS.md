@@ -13,6 +13,7 @@ is restated here.
 | `services/<name>/README.md` | Per-service contract: responsibilities, lifecycle, seams, testing. `services/api` also holds the boot environment, the workspace isolation model, and `/v1` surface status. |
 | `internal/<name>/README.md` | Shared-package contracts: process lifecycle and diagnostics (`internal/workload`), Runtime configuration and control, MCP manifests, TypeScript observability and database pools. |
 | `deploy/**/README.md` | Installation and deployment contracts for the Helm chart (`deploy/helm/tetral`), the raw manifests and any separately installed dependency. |
+| `cli/README.md` | The Tetral CLI: its Cargo workspace, crates, state owners, dependencies, and build and test commands; each crate's own `README.md` is its orientation. |
 | `docs/*.md` | Cross-service guides, for example testing and CI ownership, bootstrap, authentication (`docs/authentication.md`), and the service-stack upgrade from the previous release (`docs/upgrade-service-stack.md`). |
 | `CONTRIBUTING.md` | The pre-PR self-check every contribution runs. |
 
@@ -51,6 +52,10 @@ role rather than a shared writable schema.
 TypeScript (Bun; run inside `services/agent-runtime` or
 `services/gateway` package dirs): `bun install --frozen-lockfile`,
 `bun run typecheck`, `bun run test`, `bun run build`.
+
+Rust (the Tetral CLI, a Cargo workspace with its own toolchain; run every
+`cargo` command inside `cli/`, never with `--manifest-path` from the root):
+`cargo build`, `cargo test`.
 
 Pull requests are gated by `.github/workflows/pull-request-verification.yml`;
 its `Merge Gate` job is the repository's required check. Repository-wide
