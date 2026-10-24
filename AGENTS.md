@@ -14,6 +14,7 @@ is restated here.
 | `internal/<name>/README.md` | Shared-package contracts: process lifecycle and diagnostics (`internal/workload`), Runtime configuration and control, MCP manifests, TypeScript observability and database pools. |
 | `deploy/**/README.md` | Installation and deployment contracts for the Helm chart (`deploy/helm/tetral`), the raw manifests and any separately installed dependency. |
 | `cli/README.md` | The Tetral CLI: its Cargo workspace, crates, state owners, dependencies, and build and test commands; each crate's own `README.md` is its orientation. |
+| `protocol/README.md` | The protocol between the CLI and Engine: connections, tool execution, the MCP proxy, drive transfer and drives on a machine, with every limit, timeout and error code; its schemas and fixtures sit beside it. |
 | `docs/*.md` | Cross-service guides, for example testing and CI ownership, bootstrap, authentication (`docs/authentication.md`), and the service-stack upgrade from the previous release (`docs/upgrade-service-stack.md`). |
 | `CONTRIBUTING.md` | The pre-PR self-check every contribution runs. |
 

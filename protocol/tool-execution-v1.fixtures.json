@@ -1,0 +1,2041 @@
+[
+  {
+    "name": "execute_exec_command",
+    "schema": "Downstream",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "type": "tool.execute",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "tool": "exec_command",
+        "input": {
+          "cmd": "printf done",
+          "on_wait_expiry": "detach"
+        },
+        "sandbox_policy": {
+          "schema_version": 1,
+          "filesystem": {
+            "rules": [
+              {
+                "path": "/project",
+                "access": "read_write"
+              }
+            ]
+          },
+          "network": {
+            "mode": "disabled"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "execute_edit",
+    "schema": "Downstream",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "type": "tool.execute",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "tool": "edit",
+        "input": {
+          "path": "file",
+          "old_string": "before",
+          "new_string": ""
+        },
+        "sandbox_policy": {
+          "schema_version": 1,
+          "filesystem": {
+            "rules": [
+              {
+                "path": "/project",
+                "access": "read_write"
+              }
+            ]
+          },
+          "network": {
+            "mode": "disabled"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "execute_view_image",
+    "schema": "Downstream",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "type": "tool.execute",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "tool": "view_image",
+        "input": {
+          "path": "picture.png"
+        },
+        "sandbox_policy": {
+          "schema_version": 1,
+          "filesystem": {
+            "rules": [
+              {
+                "path": "/project",
+                "access": "read_write"
+              }
+            ]
+          },
+          "network": {
+            "mode": "disabled"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "control_stdin_read",
+    "schema": "Downstream",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "type": "tool.stdin",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "chars": "",
+        "wait_ms": 5000
+      }
+    }
+  },
+  {
+    "name": "control_stdin",
+    "schema": "Downstream",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "type": "tool.stdin",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "chars": "hello\n",
+        "write_seq": 1,
+        "wait_ms": 250
+      }
+    }
+  },
+  {
+    "name": "control_cancel",
+    "schema": "Downstream",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "type": "tool.cancel",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "reason": "requested"
+      }
+    }
+  },
+  {
+    "name": "mcp_call",
+    "schema": "Downstream",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "type": "mcp.call",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "server": "cua",
+        "tool": "get_desktop_state",
+        "arguments": {
+          "max_image_dimension": 1280
+        }
+      }
+    }
+  },
+  {
+    "name": "terminal",
+    "schema": "ToolStatus",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "id_tool_use_event_id",
+      "task_id": "id_task_id",
+      "request_message_id": "execute_1",
+      "kind": "execution",
+      "phase": "terminal",
+      "report_seq": 2,
+      "result": {
+        "schema_version": 1,
+        "tool": "exec_command",
+        "status": "success",
+        "truncated": false,
+        "error": null,
+        "result": {
+          "task_id": "id_task_id",
+          "exit_code": 0,
+          "signal": null,
+          "timed_out": false,
+          "stdout": {
+            "text": "done\n",
+            "total_bytes": 5,
+            "total_lines": 1,
+            "returned_bytes": 5,
+            "truncated": false
+          },
+          "stderr": {
+            "text": "",
+            "total_bytes": 0,
+            "total_lines": 0,
+            "returned_bytes": 0,
+            "truncated": false
+          },
+          "duration_ms": 12
+        },
+        "metrics": {
+          "wall_time_ms": 1250,
+          "queued_ms": 3,
+          "drive_wait_ms": 40,
+          "run_ms": 1180,
+          "sync_ms": 20
+        }
+      }
+    }
+  },
+  {
+    "name": "running",
+    "schema": "ToolStatus",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "id_tool_use_event_id",
+      "task_id": "id_task_id",
+      "request_message_id": "execute_1",
+      "kind": "execution",
+      "phase": "running",
+      "report_seq": 1,
+      "result": {
+        "schema_version": 1,
+        "tool": "exec_command",
+        "status": "running",
+        "truncated": false,
+        "error": null,
+        "result": {
+          "task_id": "id_task_id",
+          "exit_code": null,
+          "signal": null,
+          "timed_out": false,
+          "stdout": {
+            "text": "done\n",
+            "total_bytes": 5,
+            "total_lines": 1,
+            "returned_bytes": 5,
+            "truncated": false
+          },
+          "stderr": {
+            "text": "",
+            "total_bytes": 0,
+            "total_lines": 0,
+            "returned_bytes": 0,
+            "truncated": false
+          },
+          "duration_ms": 12
+        }
+      }
+    }
+  },
+  {
+    "name": "stdin_read_reply",
+    "schema": "ToolStatus",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "read_call",
+      "task_id": "id_task_id",
+      "request_message_id": "read_1",
+      "kind": "control",
+      "result": {
+        "schema_version": 1,
+        "tool": "stdin",
+        "status": "success",
+        "truncated": false,
+        "error": null,
+        "result": {
+          "task_id": "id_task_id",
+          "exit_code": 0,
+          "signal": null,
+          "timed_out": false,
+          "stdout": {
+            "text": "done\n",
+            "total_bytes": 5,
+            "total_lines": 1,
+            "returned_bytes": 5,
+            "truncated": false
+          },
+          "stderr": {
+            "text": "",
+            "total_bytes": 0,
+            "total_lines": 0,
+            "returned_bytes": 0,
+            "truncated": false
+          },
+          "duration_ms": 12
+        }
+      }
+    }
+  },
+  {
+    "name": "terminal_with_drive_sync",
+    "schema": "ToolStatus",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "id_tool_use_event_id",
+      "task_id": "id_task_id",
+      "request_message_id": "execute_1",
+      "kind": "execution",
+      "phase": "terminal",
+      "report_seq": 1,
+      "result": {
+        "schema_version": 1,
+        "tool": "exec_command",
+        "status": "success",
+        "truncated": false,
+        "error": null,
+        "result": {
+          "task_id": "id_task_id",
+          "exit_code": 0,
+          "signal": null,
+          "timed_out": false,
+          "stdout": {
+            "text": "done\n",
+            "total_bytes": 5,
+            "total_lines": 1,
+            "returned_bytes": 5,
+            "truncated": false
+          },
+          "stderr": {
+            "text": "",
+            "total_bytes": 0,
+            "total_lines": 0,
+            "returned_bytes": 0,
+            "truncated": false
+          },
+          "duration_ms": 12
+        },
+        "drive_sync": {
+          "committed": 2,
+          "deleted": 0,
+          "rejected": [
+            {
+              "path": "/tetral/sessions/id_session_id/drives/id_drive_id/report.md",
+              "change": "write",
+              "reason": "conflict",
+              "current_version_id": "id_version_id",
+              "current_writer": {
+                "type": "session_actor",
+                "session_id": "id_other_session_id",
+                "computer_id": "id_other_computer_id"
+              }
+            }
+          ],
+          "not_synced": [
+            {
+              "path": "/tetral/sessions/id_session_id/drives/id_drive_id/vendor/library",
+              "reason": "git_repository"
+            }
+          ]
+        },
+        "metrics": {
+          "wall_time_ms": 1250,
+          "queued_ms": 3,
+          "drive_wait_ms": 40,
+          "run_ms": 1180,
+          "sync_ms": 20
+        }
+      }
+    }
+  },
+  {
+    "name": "not_synced_uploading",
+    "schema": "ToolStatus",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "id_tool_use_event_id",
+      "task_id": "id_task_id",
+      "request_message_id": "execute_1",
+      "kind": "execution",
+      "phase": "terminal",
+      "report_seq": 1,
+      "result": {
+        "schema_version": 1,
+        "tool": "exec_command",
+        "status": "success",
+        "truncated": false,
+        "error": null,
+        "result": {
+          "task_id": "id_task_id",
+          "exit_code": 0,
+          "signal": null,
+          "timed_out": false,
+          "stdout": {
+            "text": "done\n",
+            "total_bytes": 5,
+            "total_lines": 1,
+            "returned_bytes": 5,
+            "truncated": false
+          },
+          "stderr": {
+            "text": "",
+            "total_bytes": 0,
+            "total_lines": 0,
+            "returned_bytes": 0,
+            "truncated": false
+          },
+          "duration_ms": 12
+        },
+        "drive_sync": {
+          "committed": 1,
+          "deleted": 0,
+          "rejected": [],
+          "not_synced": [
+            {
+              "path": "/tetral/sessions/id_session_id/drives/id_drive_id/data/dataset.bin",
+              "reason": "uploading"
+            }
+          ]
+        },
+        "metrics": {
+          "wall_time_ms": 1250,
+          "queued_ms": 3,
+          "drive_wait_ms": 40,
+          "run_ms": 1180,
+          "sync_ms": 20
+        }
+      }
+    }
+  },
+  {
+    "name": "edit_match_ambiguous",
+    "schema": "ToolStatus",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "call_edit_1",
+      "task_id": "id_task_id",
+      "request_message_id": "execute_edit_1",
+      "kind": "execution",
+      "phase": "terminal",
+      "report_seq": 2,
+      "result": {
+        "schema_version": 1,
+        "tool": "edit",
+        "status": "error",
+        "truncated": false,
+        "error": {
+          "kind": "match_ambiguous",
+          "message": "old_string matches 2 spans; set replace_all or add context"
+        },
+        "result": {},
+        "metrics": {
+          "wall_time_ms": 1250,
+          "queued_ms": 3,
+          "drive_wait_ms": 40,
+          "run_ms": 1180,
+          "sync_ms": 20
+        }
+      }
+    }
+  },
+  {
+    "name": "dispatch_rejected",
+    "schema": "ToolStatus",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "id_tool_use_event_id",
+      "task_id": "id_task_id",
+      "request_message_id": "execute_1",
+      "kind": "execution",
+      "phase": "rejected",
+      "error": {
+        "code": "invalid_input",
+        "message": "invalid input"
+      }
+    }
+  },
+  {
+    "name": "unknown_target",
+    "schema": "ToolStatus",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "id_tool_use_event_id",
+      "task_id": "id_task_id",
+      "request_message_id": "read_1",
+      "kind": "control",
+      "error": {
+        "code": "task_not_found",
+        "message": "unknown task"
+      }
+    }
+  },
+  {
+    "name": "partial_stdin_error_preserves_result",
+    "schema": "ToolStatus",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "stdin_call",
+      "task_id": "id_task_id",
+      "request_message_id": "stdin_1",
+      "kind": "control",
+      "result": {
+        "schema_version": 1,
+        "tool": "stdin",
+        "status": "error",
+        "truncated": false,
+        "error": {
+          "kind": "stdin_closed",
+          "message": "partial write"
+        },
+        "result": {
+          "task_id": "id_task_id",
+          "exit_code": 0,
+          "signal": null,
+          "timed_out": false,
+          "stdout": {
+            "text": "done\n",
+            "total_bytes": 5,
+            "total_lines": 1,
+            "returned_bytes": 5,
+            "truncated": false
+          },
+          "stderr": {
+            "text": "",
+            "total_bytes": 0,
+            "total_lines": 0,
+            "returned_bytes": 0,
+            "truncated": false
+          },
+          "duration_ms": 12,
+          "written_bytes": 2
+        }
+      },
+      "error": {
+        "code": "stdin_closed",
+        "message": "partial write"
+      }
+    }
+  },
+  {
+    "name": "mcp_terminal",
+    "schema": "ToolStatus",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "id_tool_use_event_id",
+      "task_id": "id_task_id",
+      "request_message_id": "mcp_call_1",
+      "kind": "execution",
+      "phase": "terminal",
+      "report_seq": 1,
+      "result": {
+        "schema_version": 1,
+        "tool": "mcp",
+        "status": "success",
+        "truncated": false,
+        "error": null,
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "1 window"
+            },
+            {
+              "type": "image",
+              "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+              "mimeType": "image/png"
+            }
+          ],
+          "structuredContent": {
+            "windows": 1
+          },
+          "isError": false
+        },
+        "metrics": {
+          "wall_time_ms": 1250,
+          "queued_ms": 3,
+          "drive_wait_ms": 40,
+          "run_ms": 1180,
+          "sync_ms": 20
+        }
+      }
+    }
+  },
+  {
+    "name": "mcp_cancelled_before_sent",
+    "schema": "ToolStatus",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "id_tool_use_event_id",
+      "task_id": "id_task_id",
+      "request_message_id": "mcp_call_1",
+      "kind": "execution",
+      "phase": "terminal",
+      "report_seq": 1,
+      "result": {
+        "schema_version": 1,
+        "tool": "mcp",
+        "status": "error",
+        "truncated": false,
+        "error": {
+          "kind": "cancelled",
+          "message": "cancelled before the call was sent",
+          "detail": {
+            "sent": false
+          }
+        },
+        "result": {},
+        "metrics": {
+          "wall_time_ms": 1250,
+          "queued_ms": 3,
+          "drive_wait_ms": 40,
+          "run_ms": 1180,
+          "sync_ms": 20
+        }
+      }
+    }
+  },
+  {
+    "name": "mcp_cancel_reply",
+    "schema": "ToolStatus",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "cancel_call",
+      "task_id": "id_task_id",
+      "request_message_id": "cancel_1",
+      "kind": "control",
+      "result": {
+        "schema_version": 1,
+        "tool": "cancel",
+        "status": "success",
+        "truncated": false,
+        "error": null,
+        "result": {
+          "task_id": "id_task_id",
+          "exit_code": null,
+          "signal": null,
+          "timed_out": false,
+          "stdout": {
+            "text": "",
+            "total_bytes": 0,
+            "total_lines": 0,
+            "returned_bytes": 0,
+            "truncated": false
+          },
+          "stderr": {
+            "text": "",
+            "total_bytes": 0,
+            "total_lines": 0,
+            "returned_bytes": 0,
+            "truncated": false
+          },
+          "duration_ms": 0,
+          "cancelled": true,
+          "was_running": true
+        }
+      }
+    }
+  },
+  {
+    "name": "mcp_rejected_server_unavailable",
+    "schema": "ToolStatus",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "id_tool_use_event_id",
+      "task_id": "id_task_id",
+      "request_message_id": "mcp_call_1",
+      "kind": "execution",
+      "phase": "rejected",
+      "error": {
+        "code": "mcp_server_unavailable",
+        "message": "server cua is not running"
+      }
+    }
+  },
+  {
+    "name": "drive_sync_report",
+    "schema": "DriveSyncReport",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "drive_sync": {
+        "committed": 0,
+        "deleted": 0,
+        "rejected": [
+          {
+            "path": "/tetral/sessions/id_session_id/drives/id_drive_id/data/results.csv",
+            "change": "write",
+            "reason": "conflict",
+            "current_version_id": "id_version_id",
+            "current_writer": {
+              "type": "api_actor",
+              "api_key_id": "id_api_key_id"
+            }
+          },
+          {
+            "path": "/tetral/sessions/id_session_id/drives/id_drive_id/data/old-results.csv",
+            "change": "delete",
+            "reason": "conflict",
+            "current_version_id": "id_other_version_id",
+            "current_writer": {
+              "type": "user_actor",
+              "user_id": "id_user_id"
+            }
+          }
+        ],
+        "not_synced": []
+      }
+    }
+  },
+  {
+    "name": "drive_sync_report_with_task",
+    "schema": "DriveSyncReport",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_task_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "task_id": "id_task_id",
+      "drive_sync": {
+        "committed": 0,
+        "deleted": 0,
+        "rejected": [
+          {
+            "path": "/tetral/sessions/id_session_id/drives/id_drive_id/data/results.csv",
+            "change": "write",
+            "reason": "conflict",
+            "current_version_id": "id_version_id",
+            "current_writer": {
+              "type": "api_actor",
+              "api_key_id": "id_api_key_id"
+            }
+          }
+        ],
+        "not_synced": []
+      }
+    }
+  },
+  {
+    "name": "ack",
+    "schema": "Acknowledgement",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "report_1",
+      "accepted": true
+    }
+  },
+  {
+    "name": "protocol_error_without_request_id",
+    "schema": "ProtocolErrorReport",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "error": {
+        "code": "invalid_message",
+        "message": "invalid JSON"
+      }
+    }
+  },
+  {
+    "name": "ready_direct_and_disabled",
+    "schema": "ReadyExtension",
+    "valid": true,
+    "value": {
+      "tool_execution": {
+        "schema_version": 1,
+        "tools": [
+          "exec_command",
+          "edit",
+          "view_image"
+        ],
+        "controls": [
+          "stdin",
+          "cancel"
+        ],
+        "sandbox_policy_versions": [
+          1
+        ],
+        "network_modes": [
+          "disabled",
+          "direct"
+        ],
+        "limits": {
+          "metadata_json_bytes": 65536,
+          "tool_input_json_bytes": 4194304,
+          "execute_sse_json_bytes": 4259840,
+          "stdin_utf8_bytes": 32768,
+          "stdin_sse_json_bytes": 262144,
+          "default_message_json_bytes": 65536,
+          "helper_result_json_bytes": 262144,
+          "drive_sync_json_bytes": 65536,
+          "ordinary_tool_status_json_bytes": 327680,
+          "drive_sync_report_json_bytes": 131072,
+          "view_image_decoded_bytes": 10485760,
+          "media_tool_status_json_bytes": 14680064
+        }
+      }
+    }
+  },
+  {
+    "name": "ready_with_local_mcp",
+    "schema": "ReadyExtension",
+    "valid": true,
+    "value": {
+      "tool_execution": {
+        "schema_version": 1,
+        "tools": [
+          "exec_command",
+          "edit",
+          "view_image"
+        ],
+        "controls": [
+          "stdin",
+          "cancel"
+        ],
+        "sandbox_policy_versions": [
+          1
+        ],
+        "network_modes": [
+          "disabled",
+          "direct"
+        ],
+        "limits": {
+          "metadata_json_bytes": 65536,
+          "tool_input_json_bytes": 4194304,
+          "execute_sse_json_bytes": 4259840,
+          "stdin_utf8_bytes": 32768,
+          "stdin_sse_json_bytes": 262144,
+          "default_message_json_bytes": 65536,
+          "helper_result_json_bytes": 262144,
+          "drive_sync_json_bytes": 65536,
+          "ordinary_tool_status_json_bytes": 327680,
+          "drive_sync_report_json_bytes": 131072,
+          "view_image_decoded_bytes": 10485760,
+          "media_tool_status_json_bytes": 14680064
+        }
+      },
+      "local_mcp": {
+        "schema_version": 1
+      }
+    }
+  },
+  {
+    "name": "managed_explicit_rules",
+    "schema": "SandboxPolicy",
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "filesystem": {
+        "rules": [
+          {
+            "path": "/project",
+            "access": "read_write"
+          }
+        ]
+      },
+      "network": {
+        "mode": "managed",
+        "rules": {
+          "allow": [
+            {
+              "destination": {
+                "kind": "host",
+                "value": "example.com"
+              },
+              "transport": "tcp",
+              "ports": [
+                {
+                  "from": 443,
+                  "to": 443
+                }
+              ]
+            }
+          ],
+          "deny": [],
+          "listen": []
+        }
+      }
+    }
+  },
+  {
+    "name": "removed_tool_read",
+    "schema": "Downstream",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "type": "tool.execute",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "tool": "read",
+        "input": {
+          "path": "notes.txt"
+        },
+        "sandbox_policy": {
+          "schema_version": 1,
+          "filesystem": {
+            "rules": [
+              {
+                "path": "/project",
+                "access": "read_write"
+              }
+            ]
+          },
+          "network": {
+            "mode": "disabled"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "removed_type_tool_poll",
+    "schema": "Downstream",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "type": "tool.poll",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "wait_ms": 0
+      }
+    }
+  },
+  {
+    "name": "missing_policy",
+    "schema": "Downstream",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "type": "tool.execute",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "tool": "exec_command",
+        "input": {
+          "cmd": "printf done",
+          "on_wait_expiry": "detach"
+        }
+      }
+    }
+  },
+  {
+    "name": "null_policy",
+    "schema": "Downstream",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "type": "tool.execute",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "tool": "exec_command",
+        "input": {
+          "cmd": "printf done",
+          "on_wait_expiry": "detach"
+        },
+        "sandbox_policy": null
+      }
+    }
+  },
+  {
+    "name": "missing_network",
+    "schema": "SandboxPolicy",
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "filesystem": {
+        "rules": [
+          {
+            "path": "/project",
+            "access": "read_write"
+          }
+        ]
+      },
+      "network": {}
+    }
+  },
+  {
+    "name": "unknown_policy_field",
+    "schema": "SandboxPolicy",
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "filesystem": {
+        "rules": [
+          {
+            "path": "/project",
+            "access": "read_write"
+          }
+        ]
+      },
+      "network": {
+        "mode": "disabled"
+      },
+      "disable_protection": true
+    }
+  },
+  {
+    "name": "relative_permission_path",
+    "schema": "SandboxPolicy",
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "filesystem": {
+        "rules": [
+          {
+            "path": "project",
+            "access": "read_write"
+          }
+        ]
+      },
+      "network": {
+        "mode": "disabled"
+      }
+    }
+  },
+  {
+    "name": "unknown_network_mode",
+    "schema": "SandboxPolicy",
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "filesystem": {
+        "rules": [
+          {
+            "path": "/project",
+            "access": "read_write"
+          }
+        ]
+      },
+      "network": {
+        "mode": "full_access"
+      }
+    }
+  },
+  {
+    "name": "managed_without_rules",
+    "schema": "SandboxPolicy",
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "filesystem": {
+        "rules": [
+          {
+            "path": "/project",
+            "access": "read_write"
+          }
+        ]
+      },
+      "network": {
+        "mode": "managed"
+      }
+    }
+  },
+  {
+    "name": "control_with_execution_sequence",
+    "schema": "ToolStatus",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "read_call",
+      "task_id": "id_task_id",
+      "request_message_id": "read_1",
+      "kind": "control",
+      "result": {
+        "schema_version": 1,
+        "tool": "stdin",
+        "status": "success",
+        "truncated": false,
+        "error": null,
+        "result": {
+          "task_id": "id_task_id",
+          "exit_code": 0,
+          "signal": null,
+          "timed_out": false,
+          "stdout": {
+            "text": "done\n",
+            "total_bytes": 5,
+            "total_lines": 1,
+            "returned_bytes": 5,
+            "truncated": false
+          },
+          "stderr": {
+            "text": "",
+            "total_bytes": 0,
+            "total_lines": 0,
+            "returned_bytes": 0,
+            "truncated": false
+          },
+          "duration_ms": 12
+        }
+      },
+      "report_seq": 1
+    }
+  },
+  {
+    "name": "control_with_execution_phase",
+    "schema": "ToolStatus",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "read_call",
+      "task_id": "id_task_id",
+      "request_message_id": "read_1",
+      "kind": "control",
+      "result": {
+        "schema_version": 1,
+        "tool": "stdin",
+        "status": "success",
+        "truncated": false,
+        "error": null,
+        "result": {
+          "task_id": "id_task_id",
+          "exit_code": 0,
+          "signal": null,
+          "timed_out": false,
+          "stdout": {
+            "text": "done\n",
+            "total_bytes": 5,
+            "total_lines": 1,
+            "returned_bytes": 5,
+            "truncated": false
+          },
+          "stderr": {
+            "text": "",
+            "total_bytes": 0,
+            "total_lines": 0,
+            "returned_bytes": 0,
+            "truncated": false
+          },
+          "duration_ms": 12
+        }
+      },
+      "phase": "terminal"
+    }
+  },
+  {
+    "name": "terminal_without_sequence",
+    "schema": "ToolStatus",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "id_tool_use_event_id",
+      "task_id": "id_task_id",
+      "request_message_id": "execute_1",
+      "kind": "execution",
+      "phase": "terminal",
+      "result": {
+        "schema_version": 1,
+        "tool": "exec_command",
+        "status": "success",
+        "truncated": false,
+        "error": null,
+        "result": {
+          "task_id": "id_task_id",
+          "exit_code": 0,
+          "signal": null,
+          "timed_out": false,
+          "stdout": {
+            "text": "done\n",
+            "total_bytes": 5,
+            "total_lines": 1,
+            "returned_bytes": 5,
+            "truncated": false
+          },
+          "stderr": {
+            "text": "",
+            "total_bytes": 0,
+            "total_lines": 0,
+            "returned_bytes": 0,
+            "truncated": false
+          },
+          "duration_ms": 12
+        },
+        "metrics": {
+          "wall_time_ms": 1250,
+          "queued_ms": 3,
+          "drive_wait_ms": 40,
+          "run_ms": 1180,
+          "sync_ms": 20
+        }
+      }
+    }
+  },
+  {
+    "name": "rejected_with_sequence",
+    "schema": "ToolStatus",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "id_tool_use_event_id",
+      "task_id": "id_task_id",
+      "request_message_id": "execute_1",
+      "kind": "execution",
+      "phase": "rejected",
+      "error": {
+        "code": "invalid_input",
+        "message": "invalid input"
+      },
+      "report_seq": 1
+    }
+  },
+  {
+    "name": "edit_empty_old_string",
+    "schema": "Downstream",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "type": "tool.execute",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "tool": "edit",
+        "input": {
+          "path": "file",
+          "old_string": "",
+          "new_string": ""
+        },
+        "sandbox_policy": {
+          "schema_version": 1,
+          "filesystem": {
+            "rules": [
+              {
+                "path": "/project",
+                "access": "read_write"
+              }
+            ]
+          },
+          "network": {
+            "mode": "disabled"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "stdin_without_sequence",
+    "schema": "Downstream",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "type": "tool.stdin",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "chars": "hello\n",
+        "wait_ms": 250
+      }
+    }
+  },
+  {
+    "name": "wrong_protocol_version",
+    "schema": "Downstream",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 2,
+      "type": "tool.execute",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "tool": "exec_command",
+        "input": {
+          "cmd": "printf done",
+          "on_wait_expiry": "detach"
+        },
+        "sandbox_policy": {
+          "schema_version": 1,
+          "filesystem": {
+            "rules": [
+              {
+                "path": "/project",
+                "access": "read_write"
+              }
+            ]
+          },
+          "network": {
+            "mode": "disabled"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "managed_ready_missing_capability",
+    "schema": "ReadyExtension",
+    "valid": false,
+    "value": {
+      "tool_execution": {
+        "schema_version": 1,
+        "tools": [
+          "exec_command",
+          "edit",
+          "view_image"
+        ],
+        "controls": [
+          "stdin",
+          "cancel"
+        ],
+        "sandbox_policy_versions": [
+          1
+        ],
+        "network_modes": [
+          "disabled",
+          "direct",
+          "managed"
+        ],
+        "limits": {
+          "metadata_json_bytes": 65536,
+          "tool_input_json_bytes": 4194304,
+          "execute_sse_json_bytes": 4259840,
+          "stdin_utf8_bytes": 32768,
+          "stdin_sse_json_bytes": 262144,
+          "default_message_json_bytes": 65536,
+          "helper_result_json_bytes": 262144,
+          "drive_sync_json_bytes": 65536,
+          "ordinary_tool_status_json_bytes": 327680,
+          "drive_sync_report_json_bytes": 131072,
+          "view_image_decoded_bytes": 10485760,
+          "media_tool_status_json_bytes": 14680064
+        }
+      }
+    }
+  },
+  {
+    "name": "ready_exec_command_without_stdin",
+    "schema": "ReadyExtension",
+    "valid": false,
+    "value": {
+      "tool_execution": {
+        "schema_version": 1,
+        "tools": [
+          "exec_command",
+          "edit",
+          "view_image"
+        ],
+        "controls": [
+          "cancel"
+        ],
+        "sandbox_policy_versions": [
+          1
+        ],
+        "network_modes": [
+          "disabled",
+          "direct"
+        ],
+        "limits": {
+          "metadata_json_bytes": 65536,
+          "tool_input_json_bytes": 4194304,
+          "execute_sse_json_bytes": 4259840,
+          "stdin_utf8_bytes": 32768,
+          "stdin_sse_json_bytes": 262144,
+          "default_message_json_bytes": 65536,
+          "helper_result_json_bytes": 262144,
+          "drive_sync_json_bytes": 65536,
+          "ordinary_tool_status_json_bytes": 327680,
+          "drive_sync_report_json_bytes": 131072,
+          "view_image_decoded_bytes": 10485760,
+          "media_tool_status_json_bytes": 14680064
+        }
+      }
+    }
+  },
+  {
+    "name": "ready_tools_without_cancel",
+    "schema": "ReadyExtension",
+    "valid": false,
+    "value": {
+      "tool_execution": {
+        "schema_version": 1,
+        "tools": [
+          "edit",
+          "view_image"
+        ],
+        "controls": [
+          "stdin"
+        ],
+        "sandbox_policy_versions": [
+          1
+        ],
+        "network_modes": [
+          "disabled",
+          "direct"
+        ],
+        "limits": {
+          "metadata_json_bytes": 65536,
+          "tool_input_json_bytes": 4194304,
+          "execute_sse_json_bytes": 4259840,
+          "stdin_utf8_bytes": 32768,
+          "stdin_sse_json_bytes": 262144,
+          "default_message_json_bytes": 65536,
+          "helper_result_json_bytes": 262144,
+          "drive_sync_json_bytes": 65536,
+          "ordinary_tool_status_json_bytes": 327680,
+          "drive_sync_report_json_bytes": 131072,
+          "view_image_decoded_bytes": 10485760,
+          "media_tool_status_json_bytes": 14680064
+        }
+      }
+    }
+  },
+  {
+    "name": "ready_local_mcp_without_cancel",
+    "schema": "ReadyExtension",
+    "valid": false,
+    "value": {
+      "tool_execution": {
+        "schema_version": 1,
+        "tools": [],
+        "controls": [],
+        "sandbox_policy_versions": [
+          1
+        ],
+        "network_modes": [
+          "disabled",
+          "direct"
+        ],
+        "limits": {
+          "metadata_json_bytes": 65536,
+          "tool_input_json_bytes": 4194304,
+          "execute_sse_json_bytes": 4259840,
+          "stdin_utf8_bytes": 32768,
+          "stdin_sse_json_bytes": 262144,
+          "default_message_json_bytes": 65536,
+          "helper_result_json_bytes": 262144,
+          "drive_sync_json_bytes": 65536,
+          "ordinary_tool_status_json_bytes": 327680,
+          "drive_sync_report_json_bytes": 131072,
+          "view_image_decoded_bytes": 10485760,
+          "media_tool_status_json_bytes": 14680064
+        }
+      },
+      "local_mcp": {
+        "schema_version": 1
+      }
+    }
+  },
+  {
+    "name": "false_ack",
+    "schema": "Acknowledgement",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "report_1",
+      "accepted": false
+    }
+  },
+  {
+    "name": "mcp_call_with_sandbox_policy",
+    "schema": "Downstream",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "type": "mcp.call",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "server": "cua",
+        "tool": "get_desktop_state",
+        "arguments": {
+          "max_image_dimension": 1280
+        },
+        "sandbox_policy": {
+          "schema_version": 1,
+          "filesystem": {
+            "rules": [
+              {
+                "path": "/project",
+                "access": "read_write"
+              }
+            ]
+          },
+          "network": {
+            "mode": "disabled"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "mcp_call_arguments_not_object",
+    "schema": "Downstream",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "type": "mcp.call",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "server": "cua",
+        "tool": "get_desktop_state",
+        "arguments": [
+          1280
+        ]
+      }
+    }
+  },
+  {
+    "name": "mcp_result_truncated",
+    "schema": "ToolStatus",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "id_tool_use_event_id",
+      "task_id": "id_task_id",
+      "request_message_id": "mcp_call_1",
+      "kind": "execution",
+      "phase": "terminal",
+      "report_seq": 1,
+      "result": {
+        "schema_version": 1,
+        "tool": "mcp",
+        "status": "success",
+        "truncated": true,
+        "error": null,
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "1 window"
+            },
+            {
+              "type": "image",
+              "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+              "mimeType": "image/png"
+            }
+          ],
+          "structuredContent": {
+            "windows": 1
+          },
+          "isError": false
+        },
+        "metrics": {
+          "wall_time_ms": 1250,
+          "queued_ms": 3,
+          "drive_wait_ms": 40,
+          "run_ms": 1180,
+          "sync_ms": 20
+        }
+      }
+    }
+  },
+  {
+    "name": "mcp_result_with_meta",
+    "schema": "ToolStatus",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "id_tool_use_event_id",
+      "task_id": "id_task_id",
+      "request_message_id": "mcp_call_1",
+      "kind": "execution",
+      "phase": "terminal",
+      "report_seq": 1,
+      "result": {
+        "schema_version": 1,
+        "tool": "mcp",
+        "status": "success",
+        "truncated": false,
+        "error": null,
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "1 window"
+            },
+            {
+              "type": "image",
+              "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+              "mimeType": "image/png"
+            }
+          ],
+          "structuredContent": {
+            "windows": 1
+          },
+          "isError": false,
+          "_meta": {
+            "trace": "x"
+          }
+        },
+        "metrics": {
+          "wall_time_ms": 1250,
+          "queued_ms": 3,
+          "drive_wait_ms": 40,
+          "run_ms": 1180,
+          "sync_ms": 20
+        }
+      }
+    }
+  },
+  {
+    "name": "mcp_cancelled_without_sent",
+    "schema": "ToolStatus",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "id_tool_use_event_id",
+      "task_id": "id_task_id",
+      "request_message_id": "mcp_call_1",
+      "kind": "execution",
+      "phase": "terminal",
+      "report_seq": 1,
+      "result": {
+        "schema_version": 1,
+        "tool": "mcp",
+        "status": "error",
+        "truncated": false,
+        "error": {
+          "kind": "cancelled",
+          "message": "cancelled before the call was sent"
+        },
+        "result": {},
+        "metrics": {
+          "wall_time_ms": 1250,
+          "queued_ms": 3,
+          "drive_wait_ms": 40,
+          "run_ms": 1180,
+          "sync_ms": 20
+        }
+      }
+    }
+  },
+  {
+    "name": "rejected_with_control_error_code",
+    "schema": "ToolStatus",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "id_tool_use_event_id",
+      "task_id": "id_task_id",
+      "request_message_id": "execute_1",
+      "kind": "execution",
+      "phase": "rejected",
+      "error": {
+        "code": "task_not_found",
+        "message": "invalid input"
+      }
+    }
+  },
+  {
+    "name": "control_error_with_rejection_code",
+    "schema": "ToolStatus",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "id_tool_use_event_id",
+      "task_id": "id_task_id",
+      "request_message_id": "read_1",
+      "kind": "control",
+      "error": {
+        "code": "binding_unavailable",
+        "message": "unknown task"
+      }
+    }
+  },
+  {
+    "name": "protocol_error_with_rejection_code",
+    "schema": "ProtocolErrorReport",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "error": {
+        "code": "invalid_input",
+        "message": "invalid JSON"
+      }
+    }
+  },
+  {
+    "name": "terminal_without_metrics",
+    "schema": "ToolStatus",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "id_tool_use_event_id",
+      "task_id": "id_task_id",
+      "request_message_id": "execute_1",
+      "kind": "execution",
+      "phase": "terminal",
+      "report_seq": 2,
+      "result": {
+        "schema_version": 1,
+        "tool": "exec_command",
+        "status": "success",
+        "truncated": false,
+        "error": null,
+        "result": {
+          "task_id": "id_task_id",
+          "exit_code": 0,
+          "signal": null,
+          "timed_out": false,
+          "stdout": {
+            "text": "done\n",
+            "total_bytes": 5,
+            "total_lines": 1,
+            "returned_bytes": 5,
+            "truncated": false
+          },
+          "stderr": {
+            "text": "",
+            "total_bytes": 0,
+            "total_lines": 0,
+            "returned_bytes": 0,
+            "truncated": false
+          },
+          "duration_ms": 12
+        }
+      }
+    }
+  },
+  {
+    "name": "terminal_metrics_missing_phase",
+    "schema": "ToolStatus",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "session_id": "id_session_id",
+      "binding_id": "id_binding_id",
+      "tool_use_event_id": "id_tool_use_event_id",
+      "task_id": "id_task_id",
+      "request_message_id": "execute_1",
+      "kind": "execution",
+      "phase": "terminal",
+      "report_seq": 2,
+      "result": {
+        "schema_version": 1,
+        "tool": "exec_command",
+        "status": "success",
+        "truncated": false,
+        "error": null,
+        "result": {
+          "task_id": "id_task_id",
+          "exit_code": 0,
+          "signal": null,
+          "timed_out": false,
+          "stdout": {
+            "text": "done\n",
+            "total_bytes": 5,
+            "total_lines": 1,
+            "returned_bytes": 5,
+            "truncated": false
+          },
+          "stderr": {
+            "text": "",
+            "total_bytes": 0,
+            "total_lines": 0,
+            "returned_bytes": 0,
+            "truncated": false
+          },
+          "duration_ms": 12
+        },
+        "metrics": {
+          "wall_time_ms": 1250,
+          "queued_ms": 3,
+          "drive_wait_ms": 40,
+          "run_ms": 1180
+        }
+      }
+    }
+  },
+  {
+    "name": "execute_with_traceparent",
+    "schema": "Downstream",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "type": "tool.execute",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "tool": "exec_command",
+        "input": {
+          "cmd": "printf done",
+          "on_wait_expiry": "detach"
+        },
+        "sandbox_policy": {
+          "schema_version": 1,
+          "filesystem": {
+            "rules": [
+              {
+                "path": "/project",
+                "access": "read_write"
+              }
+            ]
+          },
+          "network": {
+            "mode": "disabled"
+          }
+        }
+      },
+      "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    }
+  },
+  {
+    "name": "execute_with_unusable_traceparent",
+    "schema": "Downstream",
+    "valid": true,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "type": "tool.execute",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "tool": "exec_command",
+        "input": {
+          "cmd": "printf done",
+          "on_wait_expiry": "detach"
+        },
+        "sandbox_policy": {
+          "schema_version": 1,
+          "filesystem": {
+            "rules": [
+              {
+                "path": "/project",
+                "access": "read_write"
+              }
+            ]
+          },
+          "network": {
+            "mode": "disabled"
+          }
+        }
+      },
+      "traceparent": "00-00000000000000000000000000000000-00f067aa0ba902b7-01"
+    }
+  },
+  {
+    "name": "execute_traceparent_not_string",
+    "schema": "Downstream",
+    "valid": false,
+    "value": {
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "protocol_version": 1,
+      "type": "tool.execute",
+      "payload": {
+        "session_id": "id_session_id",
+        "binding_id": "id_binding_id",
+        "tool_use_event_id": "id_tool_use_event_id",
+        "task_id": "id_task_id",
+        "tool": "exec_command",
+        "input": {
+          "cmd": "printf done",
+          "on_wait_expiry": "detach"
+        },
+        "sandbox_policy": {
+          "schema_version": 1,
+          "filesystem": {
+            "rules": [
+              {
+                "path": "/project",
+                "access": "read_write"
+              }
+            ]
+          },
+          "network": {
+            "mode": "disabled"
+          }
+        }
+      },
+      "traceparent": 1
+    }
+  }
+]
