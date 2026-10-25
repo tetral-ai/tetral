@@ -50,8 +50,9 @@ Error bodies:
 operations `instances.*` and `instance_credentials.*`.
 
 - Bodies are read by `httpapi.ReadJSONBody` (at most 1 MiB, else `413
-  request_too_large`; U+0000 refused) and must be one JSON object without
-  repeated or unknown keys.
+  request_too_large`; U+0000 refused; a body that cannot be read `400
+  invalid_request_error`) only after the instance and key checks below, and
+  must be one JSON object without repeated or unknown keys.
 - The issuing routes require `Idempotency-Key` once, 1 to 255 bytes after
   trimming, checked before any idempotency record is read. Creation checks the
   key, the record, then the body; issuance checks that the instance exists, the

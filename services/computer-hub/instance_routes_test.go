@@ -393,6 +393,7 @@ func TestInstanceCreationBoundsNamesAndIdempotencyKeys(t *testing.T) {
 		{"key of only spaces", []string{"   "}, `{"name":"laptop","credential":{}}`, http.StatusBadRequest, "Idempotency-Key"},
 		{"key of 256 bytes", []string{strings.Repeat("k", 256)}, `{"name":"laptop","credential":{}}`, http.StatusBadRequest, "Idempotency-Key"},
 		{"key of 255 bytes", []string{strings.Repeat("k", 255)}, `{"name":"laptop","credential":{}}`, http.StatusCreated, ""},
+		{"key sent twice with a body over 1 MiB", []string{"key-a", "key-b"}, `{"name":"laptop","credential":{}}` + strings.Repeat(" ", 1<<20), http.StatusBadRequest, "Idempotency-Key"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			before, statements := f.rowCounts(), f.recordStatements.Load()
@@ -412,6 +413,19 @@ func TestInstanceCreationBoundsNamesAndIdempotencyKeys(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestIssuanceChecksTheInstanceAndTheKeyBeforeTheBody sends credential
+// issuances whose bodies exceed 1 MiB: an unknown instance answers 404 and a
+// repeated Idempotency-Key 400 naming it, each before the body is read.
+func TestIssuanceChecksTheInstanceAndTheKeyBeforeTheBody(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	_, created := f.createInstance("checks-create", `{"name":"laptop","credential":{}}`)
+	large := `{"delivery":"response"}` + strings.Repeat(" ", 1<<20)
+	status, body := f.do(http.MethodPost, "/v1/instances/inst_absent/credentials", []string{"checks-absent"}, large)
+	requireAPIError(t, status, body, http.StatusNotFound, "not_found_error", "")
+	status, body = f.do(http.MethodPost, "/v1/instances/"+created.Instance["id"].(string)+"/credentials", []string{"key-a", "key-b"}, large)
+	requireAPIError(t, status, body, http.StatusBadRequest, "invalid_request_error", "Idempotency-Key")
 }
 
 // TestCredentialLimitHoldsUnderConcurrentIssuance races ten response-delivery

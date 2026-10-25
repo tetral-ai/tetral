@@ -22,8 +22,9 @@ import (
 const JSONBodyLimit = 1 << 20
 
 // ReadJSONBody reads a request body of at most JSONBodyLimit bytes, answering
-// a RequestTooLargeError that names the limit for a larger one, and refuses
-// U+0000 in it. Decoding is left to the route.
+// a RequestTooLargeError that names the limit for a larger one and a
+// ValidationError for a body that cannot be read (a truncated or malformed
+// chunked body), and refuses U+0000 in it. Decoding is left to the route.
 func ReadJSONBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, JSONBodyLimit))
 	if err != nil {
@@ -31,7 +32,7 @@ func ReadJSONBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 		if errors.As(err, &tooLarge) {
 			return nil, &RequestTooLargeError{Message: "request body exceeds the 1 MiB limit"}
 		}
-		return nil, err
+		return nil, &ValidationError{Message: "request body could not be read"}
 	}
 	if err := rejectUnstorableJSONText(body); err != nil {
 		return nil, err

@@ -76,12 +76,12 @@ func (h *instanceHandler) register(r chi.Router) {
 func (h *instanceHandler) createInstance(w http.ResponseWriter, r *http.Request) {
 	ctx, principal := r.Context(), mustPrincipal(r)
 	ws := principal.Workspace.ID
-	body, err := httpapi.ReadJSONBody(w, r)
+	key, err := idempotencyKey(r)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
 	}
-	key, err := idempotencyKey(r)
+	body, err := httpapi.ReadJSONBody(w, r)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -154,21 +154,32 @@ func (h *instanceHandler) createInstance(w http.ResponseWriter, r *http.Request)
 func (h *instanceHandler) issueCredential(w http.ResponseWriter, r *http.Request) {
 	ctx, principal := r.Context(), mustPrincipal(r)
 	ws, instanceID := principal.Workspace.ID, chi.URLParam(r, "instance_id")
+	// The instance and the key are checked before the body is read; an
+	// instance row is never deleted, so the transaction finds it again.
+	if err := h.Database.WithWorkspaceReadOnlyTx(ctx, string(ws), "computer_hub.instance_credentials_create", func(tx *dbconnect.Tx) error {
+		_, err := instance.ReadInstance(ctx, tx, ws, instanceID)
+		return err
+	}); err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	key, err := idempotencyKey(r)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
 	body, err := httpapi.ReadJSONBody(w, r)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
 	}
-	scope := instance.IdempotencyScope{PrincipalCredentialID: principal.Credential.ID, Route: r.Method + " " + r.URL.Path}
+	scope := instance.IdempotencyScope{PrincipalCredentialID: principal.Credential.ID, Route: r.Method + " " + r.URL.Path, Key: key}
 	fingerprint, canonical := instance.Fingerprint(body)
 	var issued issuance
 	err = h.idempotentTx(ctx, ws, "computer_hub.instance_credentials_create", func(tx *dbconnect.Tx) error {
 		issued = issuance{}
 		current, err := instance.LockInstance(ctx, tx, ws, instanceID)
 		if err != nil {
-			return err
-		}
-		if scope.Key, err = idempotencyKey(r); err != nil {
 			return err
 		}
 		if replayed, found, err := h.replay(ctx, tx, ws, scope, fingerprint, canonical); found || err != nil {
