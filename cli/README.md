@@ -127,7 +127,8 @@ repository's root Go module, not part of this workspace, and
 `reference/cmd/tetral-reference` runs it. `reference/wire/` holds its own
 types for the protocol of `protocol/` at the repository root, written apart
 from the Rust types of `protocol` and tested against the same fixtures;
-neither set imports the other or any Engine package.
+neither set imports the other or any Engine package but, for the Go set,
+`internal/pathvalidation`, the repository's one owner of the NFC check.
 
 The cross-process tests of `tests/tests/` run `tetral`, built with the feature
 `test-seams`, and, where a test needs Engine's side, the reference control
