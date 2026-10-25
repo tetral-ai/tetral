@@ -624,7 +624,7 @@ fn five_thousand_tasks_on_one_stream_each_issued_after_the_previous_terminal_ack
     let tasks = TaskMachine::start(&mut case, directory.path());
     let seams = &tasks.machine().seams;
     let policy = project_policy(&tasks.project, "disabled");
-    let answered = seams.count("outbox.answered");
+    let answered = tasks.answers_settled();
     for index in 0..5_000u64 {
         tasks.execute(
             &format!("task_{index}"),

@@ -96,19 +96,6 @@ fn sent_bodies(tasks: &TaskMachine, message_id: &Value) -> Vec<Value> {
         .collect()
 }
 
-/// Waits until the outbox has applied an answer to every report request
-/// that the reference control server has logged, and gives the count of
-/// applied answers: the next answer applied is then a later request's.
-fn answers_settled(tasks: &TaskMachine) -> u64 {
-    let seams = &tasks.machine().seams;
-    let requests = ["tool-status", "session-status"]
-        .iter()
-        .map(|endpoint| tasks.engine.requests(endpoint).len() as u64)
-        .sum();
-    seams.wait_for_count("outbox.answered", requests);
-    seams.count("outbox.answered")
-}
-
 /// Once the outbox has applied the answer to the attempt of the report
 /// `message_id` that followed `answered` answers, moves the clock past the
 /// first wait of its retry backoff (1 second with at most 20% of jitter)
@@ -136,7 +123,7 @@ fn a_write_is_recorded_by_its_write_seq_and_its_lost_reply_is_sent_again_unchang
     detached(&tasks, "task_cat", "cat > f", 1_800_000);
     let file = || fs::read_to_string(tasks.project.join("f")).unwrap_or_default();
 
-    let answered = answers_settled(&tasks);
+    let answered = tasks.answers_settled();
     answer_fault(
         &tasks.engine,
         json!({"endpoint": "tool-status", "action": "drop"}),
@@ -221,7 +208,7 @@ fn failed_controls_leave_the_task_and_its_reports_unchanged() {
     // The edit's own report, so that the fault below meets the read's reply.
     tasks.terminal("task_edit");
 
-    let answered = answers_settled(&tasks);
+    let answered = tasks.answers_settled();
     answer_fault(
         &tasks.engine,
         json!({"endpoint": "tool-status", "action": "wrong_identity"}),
@@ -421,7 +408,7 @@ fn a_lost_read_reply_returns_the_same_output_and_the_next_read_the_next_window()
     );
     assert_eq!(running_report["result"]["result"]["stdout"]["text"], "A");
 
-    let answered = answers_settled(&tasks);
+    let answered = tasks.answers_settled();
     answer_fault(
         &tasks.engine,
         json!({"endpoint": "tool-status", "action": "drop"}),

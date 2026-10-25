@@ -87,6 +87,8 @@ impl TaskMachine {
         };
         let issued = tasks.prepare(SESSION, BINDING, &tasks.project, None);
         tasks.wait_prepared(&issued);
+        // The prepared report is accepted before its answer is applied.
+        tasks.answers_settled();
         tasks
     }
 
@@ -148,6 +150,19 @@ impl TaskMachine {
         }
         let issued = self.engine.control("prepare", control);
         issued["message_id"].as_str().unwrap().to_owned()
+    }
+
+    /// Waits until the outbox has applied an answer to every report request
+    /// that the reference control server has logged, and gives the count of
+    /// applied answers: the next answer applied is then a later request's.
+    pub fn answers_settled(&self) -> u64 {
+        let seams = &self.machine().seams;
+        let requests = ["tool-status", "session-status"]
+            .iter()
+            .map(|endpoint| self.engine.requests(endpoint).len() as u64)
+            .sum();
+        seams.wait_for_count("outbox.answered", requests);
+        seams.count("outbox.answered")
     }
 
     /// Waits until the `prepared` report that answers `message_id` is

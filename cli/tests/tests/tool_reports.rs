@@ -241,7 +241,7 @@ fn a_throttled_media_report_completes_past_ten_seconds_and_one_without_an_answer
             &tasks.engine,
             json!({"endpoint": "tool-status", "action": "withhold"}),
         );
-        let answered = seams.count("outbox.answered");
+        let answered = tasks.answers_settled();
         view_image(&tasks, task, "large.jpg");
         wait_until("the withheld report", || accepted(&tasks, task).is_some());
         let message_id = accepted(&tasks, task).unwrap()["message_id"].clone();
