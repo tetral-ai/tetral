@@ -948,10 +948,10 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let clock = test_clock();
             let (url, seen) = stalling(stall, clock.clone()).await;
-            // A retry follows the end of an attempt within a millisecond.
+            // A retry follows the end of an attempt at the same time.
             let times = OutboxTimes {
-                backoff_start: Duration::from_millis(1),
-                backoff_max: Duration::from_millis(1),
+                backoff_start: Duration::ZERO,
+                backoff_max: Duration::ZERO,
                 ..OutboxTimes::default()
             };
             let (outbox, _events) = spawn_outbox(&url, &root.path().join("outbox"), &clock, times);
@@ -964,26 +964,24 @@ mod tests {
                 assert!(start.elapsed() < WAIT_LIMIT, "{stall:?}: no first attempt");
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
-            // Coarse steps up to 9.5 seconds, then fine ones, so that the
-            // clock at the retry tells when the attempt ended.
+            // Coarse steps up to 9.5 seconds, then fine ones, so that a retry
+            // before 10 seconds shows at the clock's time; the clock then
+            // stays at 10 seconds until the retry, however long that takes.
             while seen.lock().unwrap().accepted.len() < 2 {
                 assert!(start.elapsed() < WAIT_LIMIT, "{stall:?}: no second attempt");
                 let elapsed = clock.now() - seen.lock().unwrap().accepted[0];
-                assert!(
-                    elapsed < Duration::from_secs(20),
-                    "{stall:?}: no retry before 20 s"
-                );
-                clock.advance(if elapsed < Duration::from_millis(9_500) {
-                    Duration::from_millis(500)
-                } else {
-                    Duration::from_millis(10)
-                });
-                tokio::time::sleep(Duration::from_millis(2)).await;
+                if elapsed < Duration::from_millis(9_500) {
+                    clock.advance(Duration::from_millis(500));
+                } else if elapsed < Duration::from_secs(10) {
+                    clock.advance(Duration::from_millis(1));
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
             let accepted = seen.lock().unwrap().accepted.clone();
             let ended = accepted[1] - accepted[0];
-            assert!(
-                (Duration::from_secs(10)..Duration::from_millis(10_500)).contains(&ended),
+            assert_eq!(
+                ended,
+                Duration::from_secs(10),
                 "{stall:?}: the attempt was sent again after {ended:?}"
             );
         }
