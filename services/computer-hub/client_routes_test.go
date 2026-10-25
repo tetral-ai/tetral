@@ -444,11 +444,11 @@ func TestHeartbeatsFollowTheAcceptedReadyOnTheStreamClock(t *testing.T) {
 	if n := f.clock.waiting(); n != 1 {
 		t.Fatalf("pending timers before the ready = %d; want only the stream's age limit", n)
 	}
-	f.clock.Advance(2 * HeartbeatInterval)
+	f.clock.Advance(30 * time.Second)
 	f.acceptReady(cli, stream, "ready_1")
 	f.clock.waitTimers(t, 2)
 	requireNoEvent(t, stream)
-	f.clock.Advance(HeartbeatInterval - time.Second)
+	f.clock.Advance(14 * time.Second)
 	requireNoEvent(t, stream)
 	var seqs []int64
 	for range 2 {
@@ -459,7 +459,7 @@ func TestHeartbeatsFollowTheAcceptedReadyOnTheStreamClock(t *testing.T) {
 		}
 		seqs = append(seqs, report.HeartbeatSeq)
 		f.clock.waitTimers(t, 2)
-		f.clock.Advance(HeartbeatInterval - time.Second)
+		f.clock.Advance(14 * time.Second)
 	}
 	if seqs[0] != instance.HeartbeatSeqStride+1 || seqs[1] != instance.HeartbeatSeqStride+2 {
 		t.Fatalf("first stream heartbeat_seq = %v; want %d and %d", seqs, instance.HeartbeatSeqStride+1, instance.HeartbeatSeqStride+2)

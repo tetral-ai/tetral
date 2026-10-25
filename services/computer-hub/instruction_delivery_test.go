@@ -158,7 +158,7 @@ func TestLateResumeHeartbeatRenewsBeyondTheEarlierGrant(t *testing.T) {
 	}
 	answered := f.dbNow()
 	lease := parseTime(t, f.connectionRow(stream.connectionID)["lease_expires_at"])
-	if lease.Before(sent.Add(instance.LeaseGrant)) || lease.After(answered.Add(instance.LeaseGrant)) || !lease.After(earlier.Add(30*time.Second)) {
+	if lease.Before(sent.Add(45*time.Second)) || lease.After(answered.Add(45*time.Second)) || !lease.After(earlier.Add(30*time.Second)) {
 		t.Fatalf("lease %v after the answer between %v and %v; want 45 seconds after it, past the earlier grant %v", lease, sent, answered, earlier)
 	}
 }
@@ -305,14 +305,17 @@ func TestSixtyFourInstructionsGoOutBeforeTheFirstSessionReport(t *testing.T) {
 	for i := range 70 {
 		issued = append(issued, f.issueInstruction(f.ctx, stream.connectionID, "sess_"+strconv.Itoa(i)))
 	}
-	f.requireInstructions(stream, issued[:instance.SessionInstructionCap]...)
+	f.requireInstructions(stream, issued[:64]...)
 	requireNoEvent(t, stream)
 	if err := f.client.WithWorkspaceTx(f.ctx, string(f.ws), "computer_hub.test_report", func(tx *dbconnect.Tx) error {
 		return instance.MarkFirstSessionReport(f.ctx, tx, f.ws, stream.connectionID)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	f.requireInstructions(stream, issued[instance.SessionInstructionCap:]...)
+	if rest := issued[64:]; len(rest) != 6 {
+		t.Fatalf("%d instructions after the first 64; want 6", len(rest))
+	}
+	f.requireInstructions(stream, issued[64:]...)
 	requireNoEvent(t, stream)
 }
 
@@ -470,9 +473,9 @@ func TestWritersCommitWhileAPassTakesItsLocks(t *testing.T) {
 }
 
 // TestFailedPassesWaitLongerUntilAPassCommits fails a stream's passes one
-// after another: each retry waits twice the previous wait, at most
-// passRetryMax, times 1+r with r in 0 to 0.2, and after a pass commits the
-// next failure waits passRetryFirst again.
+// after another: the first retry waits 1 second, each later one twice the
+// previous wait, at most 30 seconds, times 1+r with r in 0 to 0.2, and after
+// a pass commits the next failure waits 1 second again.
 func TestFailedPassesWaitLongerUntilAPassCommits(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	// A pass's instance lock, which only passes take in this test.
@@ -496,12 +499,12 @@ func TestFailedPassesWaitLongerUntilAPassCommits(t *testing.T) {
 	f.clock.waitTimers(t, 2)
 	f.failOn(passLock)
 	instruction := f.issueInstruction(f.ctx, stream.connectionID, "sess_retried")
-	base := passRetryFirst
+	base := time.Second
 	for range 6 {
 		wait := nextRetry(base)
 		f.failOn(passLock)
 		f.clock.Advance(wait)
-		base = min(2*base, passRetryMax)
+		base = min(2*base, 30*time.Second)
 	}
 	f.clock.Advance(nextRetry(base))
 	for event := stream.next(); !bytes.Equal(event.Data, f.envelopeOf(instruction)); event = stream.next() {
@@ -514,7 +517,7 @@ func TestFailedPassesWaitLongerUntilAPassCommits(t *testing.T) {
 	if _, err := f.admin.ExecContext(f.ctx, `SELECT pg_notify($1,$2)`, instance.ConnectionNoticeChannel(hubTestPod), string(notice)); err != nil {
 		t.Fatal(err)
 	}
-	nextRetry(passRetryFirst)
+	nextRetry(time.Second)
 }
 
 // TestFirstWriteOfAFailedPassIsRecordedWithoutAResend fails a pass after it
