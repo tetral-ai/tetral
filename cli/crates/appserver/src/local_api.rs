@@ -19,7 +19,7 @@ use crate::lifecycle::Lifecycle;
 
 /// The status fields that do not change while the App Server runs.
 #[derive(Debug, Clone)]
-pub struct Identity {
+pub struct FixedStatus {
     pub instance_id: Id,
     pub credential_id: Id,
     pub expires_at: Rfc3339Utc,
@@ -27,40 +27,37 @@ pub struct Identity {
 }
 
 #[derive(Debug, Clone)]
-struct Served {
+struct ApiState {
     lifecycle: Lifecycle,
-    identity: Identity,
+    fixed: FixedStatus,
 }
 
-pub fn router(lifecycle: Lifecycle, identity: Identity) -> Router {
+pub fn router(lifecycle: Lifecycle, fixed: FixedStatus) -> Router {
     Router::new()
         .route("/v1/status", get(status))
         .route("/v1/sessions", get(sessions))
         .route("/v1/shutdown", post(shutdown))
-        .with_state(Served {
-            lifecycle,
-            identity,
-        })
+        .with_state(ApiState { lifecycle, fixed })
 }
 
 /// The status as of now.
-pub async fn current_status(lifecycle: &Lifecycle, identity: &Identity) -> Status {
+pub async fn current_status(lifecycle: &Lifecycle, fixed: &FixedStatus) -> Status {
     let states = lifecycle.states().await;
     Status {
         server_state: states.server,
         connection_state: states.connection,
-        instance_id: identity.instance_id.clone(),
+        instance_id: fixed.instance_id.clone(),
         connection_id: Nullable(None),
-        credential_id: identity.credential_id.clone(),
-        expires_at: identity.expires_at.clone(),
-        cli_version: identity.cli_version.clone(),
+        credential_id: fixed.credential_id.clone(),
+        expires_at: fixed.expires_at.clone(),
+        cli_version: fixed.cli_version.clone(),
         protocol_version: ProtocolVersion::default(),
         last_error: Nullable(None),
     }
 }
 
-async fn status(State(served): State<Served>) -> Json<Status> {
-    Json(current_status(&served.lifecycle, &served.identity).await)
+async fn status(State(api): State<ApiState>) -> Json<Status> {
+    Json(current_status(&api.lifecycle, &api.fixed).await)
 }
 
 async fn sessions() -> Json<Sessions> {
@@ -69,7 +66,7 @@ async fn sessions() -> Json<Sessions> {
     })
 }
 
-async fn shutdown(State(served): State<Served>) -> (StatusCode, Json<Value>) {
-    served.lifecycle.shutdown();
+async fn shutdown(State(api): State<ApiState>) -> (StatusCode, Json<Value>) {
+    api.lifecycle.shutdown();
     (StatusCode::ACCEPTED, Json(json!({})))
 }

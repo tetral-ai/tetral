@@ -4,7 +4,7 @@
 //! Server only through the local API.
 
 use appserver::lifecycle::{self, Times};
-use appserver::local_api::Identity;
+use appserver::local_api::FixedStatus;
 use appserver::startup::{self, StartError};
 use serde_json::{Value, json};
 use state::paths::{self, StateRoot};
@@ -25,13 +25,13 @@ pub fn run(root: &StateRoot, observer: &observe::Observer) -> Result<Value, Comm
                 error.code = observe::Code("log_file_open_failed")
             );
         }
-        let identity = Identity {
+        let fixed = FixedStatus {
             instance_id: started.configuration.credentials.instance_id.clone(),
             credential_id: started.configuration.credentials.credential_id.clone(),
             expires_at: started.configuration.credentials.expires_at.clone(),
             cli_version: env!("CARGO_PKG_VERSION").to_owned(),
         };
-        lifecycle::run(started, identity, Times::default())
+        lifecycle::run(started, fixed, Times::default())
             .await
             .map_err(|error| CommandError::new(Code::IoFailed, error.to_string()))
     })?;

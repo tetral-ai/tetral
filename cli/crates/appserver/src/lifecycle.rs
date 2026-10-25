@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 use protocol::local::Status;
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::local_api::{self, Identity};
+use crate::local_api::{self, FixedStatus};
 use crate::lock::RootLock;
 use crate::shutdown::{self, Sequence};
 use crate::startup::{self, Started};
@@ -30,7 +30,7 @@ pub struct States {
 
 /// The parts of the running App Server that the shutdown takes down.
 #[derive(Debug)]
-pub struct Parts {
+pub struct ShutdownParts {
     pub socket: std::path::PathBuf,
     pub lock: RootLock,
     /// How long after the trigger the shutdown stops waiting.
@@ -61,7 +61,7 @@ pub struct Lifecycle {
 
 /// Starts the lifecycle task; the receiver resolves once the shutdown
 /// sequence has finished.
-pub fn spawn(parts: Parts) -> (Lifecycle, oneshot::Receiver<()>) {
+pub fn spawn(parts: ShutdownParts) -> (Lifecycle, oneshot::Receiver<()>) {
     let (mailbox, inbox) = mpsc::unbounded_channel();
     let (finished, on_finished) = oneshot::channel();
     let lifecycle = Lifecycle { mailbox };
@@ -72,7 +72,7 @@ pub fn spawn(parts: Parts) -> (Lifecycle, oneshot::Receiver<()>) {
 async fn own(
     lifecycle: Lifecycle,
     mut inbox: mpsc::UnboundedReceiver<Message>,
-    parts: Parts,
+    parts: ShutdownParts,
     finished: oneshot::Sender<()>,
 ) {
     let mut states = States {
@@ -166,7 +166,7 @@ impl Default for Times {
 /// Serves the local API of a started App Server, keeps its socket fresh and
 /// takes SIGINT and SIGTERM as shutdown triggers, until the shutdown sequence
 /// ends; returns the status as of then.
-pub async fn run(started: Started, identity: Identity, times: Times) -> std::io::Result<Status> {
+pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io::Result<Status> {
     // Read before the local API serves, so that the socket's age never
     // exceeds one interval while a client can reach it.
     let first_touch = state::seams::now() + times.socket_touch_interval;
@@ -176,7 +176,7 @@ pub async fn run(started: Started, identity: Identity, times: Times) -> std::io:
         socket,
         listener,
     } = started;
-    let (lifecycle, finished) = spawn(Parts {
+    let (lifecycle, finished) = spawn(ShutdownParts {
         socket: socket.clone(),
         lock,
         deadline: times.shutdown_deadline,
@@ -184,7 +184,7 @@ pub async fn run(started: Started, identity: Identity, times: Times) -> std::io:
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
     let (stop, stopped) = oneshot::channel::<()>();
-    let router = local_api::router(lifecycle.clone(), identity.clone());
+    let router = local_api::router(lifecycle.clone(), fixed.clone());
     let served = tokio::spawn(async move {
         let _ = axum::serve(listener, router)
             .with_graceful_shutdown(async move {
@@ -208,5 +208,5 @@ pub async fn run(started: Started, identity: Identity, times: Times) -> std::io:
     ));
     let _ = finished.await;
     touching.abort();
-    Ok(local_api::current_status(&lifecycle, &identity).await)
+    Ok(local_api::current_status(&lifecycle, &fixed).await)
 }

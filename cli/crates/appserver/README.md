@@ -37,7 +37,7 @@ ones it uses belong here too.
 ## Entry points
 
 - `startup::lock(root)` and then `startup::serve(root, lock)` start an App
-  Server and give `Started`; `lifecycle::run(started, identity, times)` serves
+  Server and give `Started`; `lifecycle::run(started, fixed, times)` serves
   it until the shutdown sequence ends and gives the status as of then.
   `lifecycle::Times` holds the durations, each a constant but for tests.
 
@@ -53,5 +53,5 @@ ones it uses belong here too.
 - `lifecycle.rs`: the lifecycle task (`spawn`, `Lifecycle`, `States`) and
   `run`, which joins the local API, the signals and the socket's freshness.
 - `local_api.rs`: the routes (`router`), the status fields that do not change
-  while the App Server runs (`Identity`) and `current_status`.
+  while the App Server runs (`FixedStatus`) and `current_status`.
 - `shutdown.rs`: the shutdown sequence and its deadline.
