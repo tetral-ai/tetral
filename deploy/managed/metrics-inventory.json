@@ -407,6 +407,7 @@
         }
       }
     },
+    "computer-hub": {},
     "db-prepare": {},
     "event-stream": {
       "event_stream_active_sse_viewers": {

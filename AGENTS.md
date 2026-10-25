@@ -30,6 +30,7 @@ is restated here.
 | `services/gateway` | Provider lowering and MCP connector packages, deployed as independent workloads. |
 | `services/web-connector` | Independently deployed web search/fetch backend. |
 | `services/event-stream` | Read-only public event list and SSE. |
+| `services/computer-hub` | The machine side: CLI connections under `/v1/client/`, instances and their connection credentials, and instance requests. |
 | `services/git-proxy` | Credential-injecting Git smart-HTTP proxy. |
 | `services/cleanup` | Scheduled cleanup. |
 
