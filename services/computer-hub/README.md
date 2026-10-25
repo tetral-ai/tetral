@@ -222,7 +222,9 @@ only then stops; each listener drains within the window plus 10 seconds.
 
 Instruction writes (`dispatch.go`): a stream writes renewals and Session
 instructions in passes, one at its start and one each time a notice or the listener's return
-wakes it, inside a transaction that holds the connection row `FOR SHARE`. An
+wakes it, inside a transaction that reads the connection without a lock and
+then locks the instance, the connection's credential and the connection `FOR
+SHARE`, in that order. An
 ended connection writes `disconnect` with `scope: "connection"`, `retryable:
 false` and `code` `credential_revoked` (revoked) or `instance_unavailable`
 (deregistered), none for `lease_expired`, and closes the stream; a

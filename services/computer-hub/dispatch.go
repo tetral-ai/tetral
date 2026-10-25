@@ -2,6 +2,7 @@ package computerhub
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -9,12 +10,16 @@ import (
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
 // A stream writes Session instructions in passes. A pass runs when the
 // stream starts and whenever a connection notice or the listener's return
-// wakes it, in one transaction that holds the connection row FOR SHARE, so a
-// revocation or a resume commits wholly before or after the pass:
+// wakes it, in one transaction that reads its connection without a lock,
+// then locks the instance, the connection's credential and the connection
+// FOR SHARE, in the order of every writer of those rows (internal/instance),
+// so a revocation, a deregistration, an activation or a resume commits
+// wholly before or after the pass:
 //
 //  1. an ended connection writes its disconnect and ends the stream; a
 //     connection whose hub_pod or stream_count names another stream ends the
@@ -71,7 +76,7 @@ func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
 	var firsts []firstWrite
 	err := s.database.WithWorkspaceTx(ctx, string(stream.workspace), "computer_hub.instruction_write", func(tx *dbconnect.Tx) error {
 		outcome, firsts = passWritten, firsts[:0]
-		connection, err := instance.ShareConnection(ctx, tx, stream.workspace, stream.connection)
+		connection, current, credential, err := shareRows(ctx, tx, stream.workspace, stream.connection)
 		if err != nil {
 			return err
 		}
@@ -86,13 +91,16 @@ func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
 			outcome = passMoved
 			return nil
 		}
+		if connection.CredentialID != credential.ID {
+			return errCredentialMoved
+		}
 		if all {
 			bound = max(bound, connection.LastIssueSeq)
 			stream.raise(bound)
 		}
 		state.accepted = state.accepted || connection.ReadyAcceptedAt != nil
-		writable, now, err := s.writable(ctx, tx, connection)
-		if err != nil || !writable {
+		now, err := instance.Now(ctx, tx)
+		if err != nil || !writable(connection, current, credential, now) {
 			return err
 		}
 		renewals, err := instance.PendingRenewals(ctx, tx, stream.workspace, connection.InstanceID, stream.connection, now)
@@ -157,28 +165,43 @@ func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
 	return outcome
 }
 
-// writable reports whether a pass may write on connection at now, the
-// database clock it returns: the lease is later than now, the credential is
-// neither revoked nor expired, the instance is registered and the ready is
-// accepted. It reads the credential and the instance FOR SHARE.
-func (s *Streams) writable(ctx context.Context, tx *dbconnect.Tx, connection instance.Connection) (bool, time.Time, error) {
-	now, err := instance.Now(ctx, tx)
-	if err != nil || !connection.Live(now) || connection.ReadyAcceptedAt == nil {
-		return false, now, err
-	}
-	current, err := instance.ShareInstance(ctx, tx, connection.WorkspaceID, connection.InstanceID)
-	if err != nil || current.RegistrationState == instance.RegistrationDeregistered {
-		return false, now, err
-	}
-	credential, err := instance.ShareCredential(ctx, tx, connection.WorkspaceID, connection.InstanceID, connection.CredentialID)
+// errCredentialMoved is a connection whose credential changed between the
+// pass's unlocked read and its locks; only a resume, which also moves the
+// stream, changes it, so the next pass finds the stream moved.
+var errCredentialMoved = errors.New("computer-hub: the connection's credential changed during the pass")
+
+// shareRows reads connectionID without a lock, then locks its instance, its
+// credential and the connection FOR SHARE in that order, and returns them as
+// locked.
+func shareRows(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string) (instance.Connection, instance.Instance, instance.Credential, error) {
+	unlocked, err := instance.ReadConnection(ctx, tx, ws, connectionID)
 	if err != nil {
-		return false, now, err
+		return instance.Connection{}, instance.Instance{}, instance.Credential{}, err
+	}
+	current, err := instance.ShareInstance(ctx, tx, ws, unlocked.InstanceID)
+	if err != nil {
+		return instance.Connection{}, instance.Instance{}, instance.Credential{}, err
+	}
+	credential, err := instance.ShareCredential(ctx, tx, ws, unlocked.InstanceID, unlocked.CredentialID)
+	if err != nil {
+		return instance.Connection{}, instance.Instance{}, instance.Credential{}, err
+	}
+	connection, err := instance.ShareConnection(ctx, tx, ws, connectionID)
+	return connection, current, credential, err
+}
+
+// writable reports whether a pass may write on connection at now, the
+// database clock: the lease is later than now, the ready is accepted, the
+// instance is registered and the credential is neither revoked nor expired.
+func writable(connection instance.Connection, current instance.Instance, credential instance.Credential, now time.Time) bool {
+	if !connection.Live(now) || connection.ReadyAcceptedAt == nil || current.RegistrationState == instance.RegistrationDeregistered {
+		return false
 	}
 	switch instance.CredentialState(credential, now) {
 	case instance.CredentialRevoked, instance.CredentialExpired:
-		return false, now, nil
+		return false
 	}
-	return true, now, nil
+	return true
 }
 
 // renewMessageID is the message_id of credential.renew for credentialID. A

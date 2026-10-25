@@ -5,10 +5,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -332,6 +334,92 @@ func TestRevocationAndInstructionWritesNeverInterleave(t *testing.T) {
 		requireDisconnect(events[0])
 		<-revoked
 	})
+}
+
+// TestWritersCommitWhileAPassTakesItsLocks holds a write pass at its first
+// lock and shows that a revocation, a deregistration and an activation each
+// commit meanwhile, so none of them waits on the pass in a cycle.
+func TestWritersCommitWhileAPassTakesItsLocks(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	b := f.addPod(secondPod)
+	request := func(method, path string) func() <-chan int {
+		return func() <-chan int {
+			done := make(chan int, 1)
+			go func() {
+				status, _ := f.do(method, path, nil, "")
+				done <- status
+			}()
+			return done
+		}
+	}
+	disconnect := func(code protocol.ErrorCode) []protocol.DownstreamPayload {
+		return []protocol.DownstreamPayload{protocol.DisconnectPayload{Scope: "connection", Retryable: protocol.Some(false), Code: protocol.Some(string(code))}}
+	}
+	for _, row := range []struct {
+		name string
+		// prepare readies the writer and returns what starts it.
+		prepare func(cli *enginetest.CLI, stream *testStream) func() <-chan int
+		// events is what the held pass's stream writes before it ends.
+		events []protocol.DownstreamPayload
+	}{
+		{"revocation", func(cli *enginetest.CLI, _ *testStream) func() <-chan int {
+			return request(http.MethodDelete, "/v1/instances/"+cli.InstanceID+"/credentials/"+cli.CredentialID)
+		}, disconnect(protocol.ErrorCredentialRevoked)},
+		{"deregistration", func(cli *enginetest.CLI, _ *testStream) func() <-chan int {
+			return request(http.MethodDelete, "/v1/instances/"+cli.InstanceID)
+		}, disconnect(protocol.ErrorInstanceUnavailable)},
+		{"activation", func(cli *enginetest.CLI, stream *testStream) func() <-chan int {
+			pending := f.renewal(cli, stream, "renew-during-pass", `{}`)["id"].(string)
+			renewed := f.fetched(cli, stream.connectionID, pending)
+			renewed.BaseURL = b.url
+			resume := true
+			query := renewed.EventsQuery(stream.connectionID, &resume)
+			return func() <-chan int {
+				done := make(chan int, 1)
+				go func() {
+					opened, response, err := renewed.OpenEvents(f.ctx, query)
+					if opened != nil {
+						t.Cleanup(func() { _ = opened.Close() })
+					}
+					if err != nil {
+						done <- 0
+						return
+					}
+					done <- response.Status
+				}()
+				return done
+			}
+		}, nil},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			cli, stream := f.openOnline()
+			start := row.prepare(cli, stream)
+			pause := f.pauseOn("FROM instances WHERE workspace_id=$1 AND id=$2 FOR SHARE")
+			release := sync.OnceFunc(func() { close(pause.release) })
+			defer release()
+			issued, cancel := context.WithTimeout(f.ctx, 10*time.Second)
+			defer cancel()
+			f.issueInstruction(issued, stream.connectionID, "sess_"+row.name)
+			<-pause.reached
+			answered := start()
+			select {
+			case status := <-answered:
+				release()
+				if status != http.StatusNoContent && status != http.StatusOK {
+					t.Fatalf("%s = %d while the pass was held", row.name, status)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("the %s did not commit while the pass was held at its first lock", row.name)
+			}
+			var payloads []protocol.DownstreamPayload
+			for _, event := range stream.ended() {
+				payloads = append(payloads, event.Envelope.Payload)
+			}
+			if fmt.Sprint(payloads) != fmt.Sprint(row.events) {
+				t.Fatalf("the held pass's stream wrote %v; want %v", payloads, row.events)
+			}
+		})
+	}
 }
 
 func TestResentInstructionKeepsItsTraceAndMakesOneDeliverSpan(t *testing.T) {
