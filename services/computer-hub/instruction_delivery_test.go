@@ -228,6 +228,26 @@ func TestStreamEndsAtItsMaximumAgeAndTheConnectionResumes(t *testing.T) {
 	f.resume(f.url, cli, stream.connectionID)
 }
 
+// TestEveryStreamOfAStoppingPodGetsItsDisconnect drains a pod with a window
+// of 0 and stops its streams at once, as Run does once the drain is due:
+// each stream still writes its stream-only disconnect before it closes.
+func TestEveryStreamOfAStoppingPodGetsItsDisconnect(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	var streams []*testStream
+	for range 8 {
+		_, stream := f.openOnline()
+		streams = append(streams, stream)
+	}
+	f.streams.Drain(f.ctx, 0)
+	f.streams.closeAll()
+	for i, stream := range streams {
+		events := stream.ended()
+		if len(events) != 1 || events[0].Envelope.Payload != (protocol.DisconnectPayload{Scope: "stream"}) {
+			t.Fatalf("stream %d wrote %d events before it closed; want only the stream-only disconnect", i, len(events))
+		}
+	}
+}
+
 func TestNoticesReachOnlyThePodHoldingTheStream(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	b := f.addPod(secondPod)

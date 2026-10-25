@@ -281,6 +281,13 @@ func (s *Streams) serve(ctx context.Context, w http.ResponseWriter, stream *clie
 		case <-ctx.Done():
 			return
 		case <-stream.done:
+			// Run closes every stream once the last drain is due, so a
+			// stream whose drain began writes its disconnect first.
+			select {
+			case <-stream.drain:
+				_ = writer.write(id.New("msg_"), protocol.DisconnectPayload{Scope: "stream"})
+			default:
+			}
 			return
 		case <-stream.drain:
 			_ = writer.write(id.New("msg_"), protocol.DisconnectPayload{Scope: "stream"})
