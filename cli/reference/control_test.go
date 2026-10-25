@@ -148,6 +148,23 @@ func TestEventsControlMakesEventsRequestsSilent(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("count", func(t *testing.T) {
+		ts := startServer(t)
+		ts.call("events", map[string]any{"mode": "headers_only", "count": 2}, nil)
+		for range 2 {
+			if stream, _ := ts.open("tetral_ck_a", "inst_a", "cred_a", nil); stream == nil {
+				t.Fatal("no headers")
+			}
+		}
+		if state := ts.state(); len(state.Requests) != 2 || state.Requests[1].Code != "headers_only" || len(state.Connections) != 0 {
+			t.Fatalf("requests %+v with %d connections; want two silent requests", state.Requests, len(state.Connections))
+		}
+		if next := ts.mustOpen("tetral_ck_a", "inst_a", "cred_a", nil); next.expect("connected") == nil {
+			t.Fatal("the third request was silent too")
+		}
+		ts.api.CloseClientConnections()
+	})
 }
 
 func TestAnswerControlChangesTheNextAnswer(t *testing.T) {
@@ -260,6 +277,19 @@ func TestAnswerControlChangesTheNextAnswer(t *testing.T) {
 		}
 	})
 
+	t.Run("count", func(t *testing.T) {
+		ts, connectionID := readyOn(t)
+		ts.call("answer", map[string]any{"endpoint": "ready", "action": "error", "code": "rate_limited", "count": 2}, nil)
+		for attempt := range 2 {
+			if answer := ts.post("ready", "tetral_ck_a", readyBody(connectionID, "ready_1")); answer.status != http.StatusTooManyRequests {
+				t.Fatalf("request %d: %d %s; want the fault on each of the first two", attempt+1, answer.status, answer.body)
+			}
+		}
+		if answer := ts.post("ready", "tetral_ck_a", readyBody(connectionID, "ready_1")); answer.status != http.StatusOK {
+			t.Errorf("the third request: %d %s; want it answered as without the fault", answer.status, answer.body)
+		}
+	})
+
 	t.Run("a fault for another message", func(t *testing.T) {
 		ts, connectionID := readyOn(t)
 		ts.call("answer", map[string]any{"endpoint": "ready", "message_id": "ready_other", "action": "error", "code": "rate_limited"}, nil)
@@ -316,12 +346,14 @@ func TestBreakStreamControlKeepsTheLeaseForAResume(t *testing.T) {
 	prepare := ts.prepare("sess_1", "bind_1")
 	stream.expect("session.prepare")
 	lease := ts.connection(connectionID).LeaseUntil
+	// A break that granted the lease again would move it by this advance.
+	ts.advance(2 * time.Second)
 	ts.call("break_stream", map[string]any{"instance_id": "inst_a"}, nil)
 	stream.waitEnded()
 	if conn := ts.connection(connectionID); !conn.Live || conn.StreamOpen || !conn.LeaseUntil.Equal(lease) {
 		t.Fatalf("after the break %+v", conn)
 	}
-	ts.advance(40 * time.Second)
+	ts.advance(38 * time.Second)
 	resumed := ts.mustOpen("tetral_ck_a", "inst_a", "cred_a", url.Values{"previous_connection_id": {connectionID}, "resume": {"true"}})
 	if connected := resumed.expect("connected"); connected["connection_id"] != connectionID || payload(connected)["resumed"] != true {
 		t.Fatalf("resume %v", connected)
