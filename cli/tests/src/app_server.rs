@@ -43,9 +43,12 @@ impl Response {
 }
 
 /// Sends one request with an empty body and reads the whole answer; `None`
-/// when the socket refuses the connection or does not exist.
+/// when the socket refuses the connection or does not exist, or when the
+/// answer has not ended within [`WAIT_LIMIT`].
 pub fn request(socket: &Path, method: &str, path: &str) -> Option<Response> {
     let mut stream = UnixStream::connect(socket).ok()?;
+    stream.set_read_timeout(Some(WAIT_LIMIT)).ok()?;
+    stream.set_write_timeout(Some(WAIT_LIMIT)).ok()?;
     write!(
         stream,
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
