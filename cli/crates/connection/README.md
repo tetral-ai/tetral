@@ -39,8 +39,9 @@ Server:
 - Each event after a stream's first valid `connected` is handled in one
   order: its envelope's schema, then for a Session instruction its
   identities (`classify`), the replay ledger, the payload's schema of a
-  `session.close` or `session.drives`, and routing; the owners of the other
-  Session instructions decide their payloads' schema failures (`owner`). A
+  `session.close` or `session.drives`, and routing, where a
+  `session.prepare` is admitted (below); the owners of the other Session
+  instructions decide their payloads' schema failures (`owner`). A
   connection message whose `connection_id` is not the stream's is recorded
   as `protocol.foreign_connection` and ignored.
 - An instruction's content fingerprint is the SHA-256 of its envelope with

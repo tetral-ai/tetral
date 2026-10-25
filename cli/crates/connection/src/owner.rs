@@ -137,14 +137,16 @@ pub struct Config {
 }
 
 /// A Session instruction as the Connection owner routes it, its payload
-/// unchecked but for `session.close` and `session.drives`: its owner decides
-/// the schema failures of the others.
+/// checked for a `session.close` and a `session.drives` at the ledger and
+/// for a `session.prepare` at its admission; the owners of the others
+/// decide their schema failures.
 #[derive(Debug, Clone)]
 pub struct Instruction {
     pub message: SessionMessage,
-    /// Whether the replay ledger recorded it. One it had no room for is
-    /// refused by its owner with `resource_exhausted`, or, for a
-    /// `session.close` or `session.drives`, handled without an entry.
+    /// Whether the replay ledger recorded it. A new operation it had no room
+    /// for is refused with `resource_exhausted`, a `session.prepare` at its
+    /// admission; a `session.close` or `session.drives` is handled without
+    /// an entry.
     pub recorded: bool,
     /// Whether the ledger took it as a new operation: a `session.prepare` of
     /// a binding not yet routed on this connection, a `tool.execute` or an
