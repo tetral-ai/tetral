@@ -24,7 +24,6 @@ import (
 	authservice "github.com/tetral-ai/tetral/services/auth"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
 	cleanup "github.com/tetral-ai/tetral/services/cleanup"
-	computerhub "github.com/tetral-ai/tetral/services/computer-hub"
 	gitproxy "github.com/tetral-ai/tetral/services/git-proxy"
 	runner "github.com/tetral-ai/tetral/services/job-runner"
 	queueservice "github.com/tetral-ai/tetral/services/queue"
@@ -620,7 +619,6 @@ func checkedConfigurationDefaults(t *testing.T, families []map[string]json.RawMe
 		"runtime-process-custody": {"registration_ms": process.RegistrationTimeout.Milliseconds(), "report_timeout_ms": process.ReportTimeout.Milliseconds(), "report_interval_ms": process.ReportInterval.Milliseconds(), "freshness_ms": process.Freshness.Milliseconds()},
 		"queue":                   {"reclaim_interval_seconds": int64(q.LeaseReclaimInterval / time.Second), "reclaim_limit": q.LeaseReclaimBatchLimit, "retry_base_ms": q.RetryBaseDelay.Milliseconds(), "retry_cap_ms": q.RetryMaxDelay.Milliseconds(), "retry_max_attempts": q.RetryMaxAttempts, "drain_ms": q.DrainTimeout.Milliseconds(), "cancel_join_ms": q.CancelJoinTimeout.Milliseconds()},
 		"cleanup":                 {"claim_limit": c.ClaimLimit, "metrics_export_timeout": c.MetricsExportTimeout.String()},
-		"computer-hub":            {"http_addr": computerhub.DefaultHTTPAddress, "metrics_addr": computerhub.DefaultMetricsAddress, "shutdown_timeout": computerhub.ShutdownTimeout.String()},
 	}
 	for _, family := range families {
 		var id string

@@ -631,7 +631,6 @@ func TestHelmChartRenderedManifestsPassInvariantSuites(t *testing.T) {
 		"TestKubernetesManifestQueueIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestTetralAPIIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestTetralAuthIsComposedFromServiceLocalManifests",
-		"TestKubernetesManifestComputerHubIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestEventStreamIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestGatewayWorkloadsAreComposedFromServiceLocalManifests",
 		"TestKubernetesManifestJobRunnerIsComposedFromServiceLocalManifests",

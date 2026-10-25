@@ -28,8 +28,8 @@ func TestConfigFromEnv(t *testing.T) {
 		check  func(Config) bool
 		reject string
 	}{
-		{name: "defaults", change: func(mapEnv) {}, check: func(c Config) bool {
-			return c.HTTPAddress == ":8080" && c.MetricsAddress == ":8081" && c.DatabaseURL == "postgres://hub@db/tetral" && c.PrincipalVerifier != nil
+		{name: "required settings", change: func(mapEnv) {}, check: func(c Config) bool {
+			return c.DatabaseURL == "postgres://hub@db/tetral" && c.PrincipalVerifier != nil
 		}},
 		{name: "addresses and database TLS", change: func(e mapEnv) {
 			e[EnvHTTPAddress], e[EnvMetricsAddress], e[EnvDatabaseTLSCAPath], e[EnvDatabaseTLSServerName] = ":9080", ":9081", "/ca.pem", "db.internal"

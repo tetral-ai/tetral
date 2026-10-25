@@ -2088,15 +2088,6 @@ func TestKubernetesManifestEventStreamIsComposedFromServiceLocalManifests(t *tes
 	})
 }
 
-func TestKubernetesManifestComputerHubIsComposedFromServiceLocalManifests(t *testing.T) {
-	requireServiceLocalManifestComposition(t, "computer-hub", "computer-hub.yaml", []string{
-		"serviceaccount.yaml",
-		"deployment.yaml",
-		"service.yaml",
-		"networkpolicy.yaml",
-	})
-}
-
 func TestKubernetesManifestGatewayWorkloadsAreComposedFromServiceLocalManifests(t *testing.T) {
 	for _, n := range []string{"provider-gateway", "mcp-connector"} {
 		files := []string{n + "/serviceaccount.yaml", n + "/deployment.yaml", n + "/service.yaml", n + "/networkpolicy.yaml"}

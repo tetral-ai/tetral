@@ -71,7 +71,7 @@ redacted startup record. Shutdown drains both listeners within 10 seconds.
 
 ## Testing guide
 
-- `config_test.go`: defaults, overrides and each rejected setting.
+- `config_test.go`: the required settings, overrides and each rejected setting.
 - `integration/computer_hub_credential_class_test.go`: each credential class on
   the other class's routes, through `auth`'s Check and a Go edge with the
   production route rules, and straight at the hub with principals Check never
