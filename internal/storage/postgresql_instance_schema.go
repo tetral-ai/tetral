@@ -196,10 +196,10 @@ const createPostgreSQLConnectionProtocolErrorsTable = `CREATE TABLE connection_p
  FOREIGN KEY(workspace_id,connection_id) REFERENCES instance_connections(workspace_id,id)
 )`
 
-// Auth resolves a connection key before it knows the Workspace. The function
-// returns the digest's holder whatever the credential's state: Auth decides
-// only the credential class and identity, and computer-hub checks the state on
-// every request. Its auth_lookup policy is SELECT-only.
+// Auth resolves a connection key before it knows the Workspace: the function
+// returns the Workspace, instance and credential of the digest's holder
+// (auth.AuthorityResolver AuthenticateConnectionKey). Its auth_lookup policy
+// is SELECT-only.
 const createPostgreSQLAuthLookupConnectionKey = `CREATE FUNCTION public.tetral_auth_lookup_connection_key(bytea)
 RETURNS TABLE(workspace_id text,instance_id text,credential_id text)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog

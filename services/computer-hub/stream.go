@@ -17,7 +17,8 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-// HeartbeatInterval is the contract's spacing of heartbeats on a stream.
+// HeartbeatInterval is the time between two heartbeats a stream writes once
+// its connection's ready is accepted.
 const HeartbeatInterval = 15 * time.Second
 
 // streamWriteTimeout bounds one event write outside a pass, whose writes

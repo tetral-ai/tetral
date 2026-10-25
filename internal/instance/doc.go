@@ -21,7 +21,8 @@
 //     request fingerprint and the instance and credential it created.
 //   - Table instance_connections: one row per connection of an instance,
 //     kept after it ends; the latest one is the instance read's connection.
-//     It holds the opening credential, hub_pod (the pod holding the stream),
+//     It holds credential_id (the credential that opened it, or the renewal
+//     a resume activated), hub_pod (the pod holding the stream),
 //     the lease, stream_count, the accepted ready (its replay record, grant,
 //     os, arch, cli_version, capabilities) or the refused ready (its replay
 //     record and error), the latest accepted heartbeat (its replay record,
@@ -31,7 +32,8 @@
 //   - Table connection_upstream_messages: the replay ledger of a
 //     connection's accepted upstream messages other than ready and heartbeat,
 //     keyed by the SHA-256 of message_id, with route, fingerprint and the
-//     exact answer.
+//     answer a replay returns; a credential fetch stores status 200 with no
+//     body, never the key, so its retry is checked again.
 //   - Table connection_protocol_errors: one row per accepted protocol-error
 //     report.
 //   - Table connection_instructions: one row per Session instruction issued
@@ -68,8 +70,8 @@
 //	  (none) -> pending stream renewal    IssueRenewal         computer-hub
 //	  renewal unfetched -> fetched        FetchCredential      computer-hub
 //	  pending -> active, the replaced
-//	    credential -> revoked
-//	    (pending_activation)              ActivateCredential   computer-hub
+//	    credential, unless expired,
+//	    -> revoked (pending_activation)   ActivateCredential   computer-hub
 //	  latest reuse -> newer one           RecordCredentialReuse computer-hub
 //	  pending/active -> revoked (delete)  RevokeCredential     computer-hub
 //	  active -> deregistered instance,
@@ -85,15 +87,10 @@
 //	  ledger rows -> (none)               EndConnection        hubflow.EndConnection
 //	  (none) -> protocol error            RecordProtocolError  computer-hub
 //	  lease moved to another stream       ResumeConnection     computer-hub
-//	  (none) -> issued instruction        IssueInstruction     the units that
-//	                                                           issue Session
-//	                                                           instructions
+//	  (none) -> issued instruction        IssueInstruction     no service yet
 //	  unwritten -> written                MarkWritten          computer-hub
-//	  unreported -> reported              MarkReported         the units that
-//	                                                           store final reports
-//	  no Session report -> first stored   MarkFirstSessionReport the unit that
-//	                                                           stores Session
-//	                                                           reports
+//	  unreported -> reported              MarkReported         no service yet
+//	  no Session report -> first stored   MarkFirstSessionReport no service yet
 //
 //	Readers: ReadInstance, LockInstance, ShareInstance,
 //	LockInstanceNoKeyUpdate, ListInstances, ReadObjects,
@@ -121,10 +118,9 @@
 //   - Times are the database clock (Now); expiries are stored to the
 //     microsecond (ResolveExpiry).
 //   - Auth resolves a key only through the security-definer function
-//     tetral_auth_lookup_connection_key, which returns the digest's holder
-//     whatever the credential's state. Auth decides the credential class and
-//     identity; computer-hub checks the credential's state, the registration
-//     and the connection on every request.
+//     tetral_auth_lookup_connection_key (auth.AuthorityResolver
+//     AuthenticateConnectionKey); computer-hub checks the credential's state,
+//     the registration and the connection on every request.
 //   - Every row function runs in a transaction scoped to the row's Workspace.
 //   - AuditCredentialOperation writes one record per issued, fetched,
 //     activated or revoked credential after the commit; a revocation that
@@ -149,7 +145,7 @@
 //     connection row keeps the ready's record and the latest heartbeat's
 //     only; EndConnection deletes the ledger rows.
 //   - Every writer that changes what a connection's stream must write
-//     (IssueInstruction, MarkFirstSessionReport, EndConnection,
+//     (IssueInstruction, IssueRenewal, MarkFirstSessionReport, EndConnection,
 //     hubflow.AcceptReady) notifies the pod named by hub_pod in its
 //     transaction, and ResumeConnection the pod that held the previous
 //     stream. The notice carries the Workspace, the connection and an

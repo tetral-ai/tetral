@@ -67,8 +67,8 @@ func safeTokenError() error {
 
 // TraceparentUnaryClientInterceptor and TraceparentStreamClientInterceptor
 // write the caller's traceparent into every internal call's metadata, so the
-// server continues the caller's trace. Every internal dial installs them
-// beside the service-account credentials.
+// server continues the caller's trace. Every internal dial option set
+// installs them (internalgrpc's boundedInternalDialOptions).
 func TraceparentUnaryClientInterceptor() grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		return invoker(withOutgoingTraceparent(ctx), method, req, reply, cc, opts...)

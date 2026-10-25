@@ -721,8 +721,10 @@ Runtime, Runtime Core, gRPC listener and TokenReview client are ready, and
 ends it as `startup_error`. The command server continues the caller's trace
 from `traceparent` metadata, and every client to Bridge, Provider Gateway,
 MCP Connector and the Web service writes it; calls to model providers carry no
-trace context. `@tetral/ts-observability/effect` provides the Effect layer
-that turns Runtime Core logs and spans into the same records and spans. Existing safe admission,
+trace context. `@tetral/ts-observability/effect` provides `ObservabilityLive`,
+the Effect layer that turns Effect logs and spans into the same records and
+spans; no Runtime program provides it yet, so Runtime Core's Effect logs are
+not among the records. Existing safe admission,
 provider transport, reviewer, closeout and committed-settlement builders retain
 bounded operator classifications and identities. Stream backpressure and
 asynchronous stderr failures appear through the existing HTTP metrics endpoint.
