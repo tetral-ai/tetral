@@ -11,11 +11,13 @@ ones it uses belong here too.
 ## Design rules
 
 - Every task here that holds App Server state follows the owner rules of
-  `cli/README.md`. The lifecycle task owns the server state and the
-  connection state (`lifecycle::States`); local API handlers and the signal
-  task only send it messages. The status fields that do not change while the
-  App Server runs, `credential_id` and `expires_at` of `credentials.json`
-  among them, are given to `lifecycle::run` at start.
+  `cli/README.md`. The lifecycle task owns the server state; local API
+  handlers and the signal task only send it messages. A status is read from
+  the lifecycle task, the Connection owner, which owns the connection's
+  fields, and the fields that do not change while the App Server runs
+  (`local_api::StatusSources`).
+- The capabilities that ready advertises are assembled once at start from
+  the providers this build has (`capabilities`).
 - Startup runs its steps in order and a failure leaves every later step
   undone: the lock, the removal of the temporary files that interrupted
   replacements left, the configuration read under it, the socket directory `S`
@@ -27,9 +29,11 @@ ones it uses belong here too.
 - A local API handler reads only the state the owners report and never waits
   for Engine (`local_api`).
 - The first of `POST /v1/shutdown`, SIGINT and SIGTERM starts the shutdown;
-  later ones change nothing. The sequence stops the listener, removes the
-  socket and then releases the lock, waiting for handlers only until
-  `SHUTDOWN_DEADLINE` after the trigger on the seam clock (`shutdown`).
+  later ones change nothing. The sequence stops the Connection owner, stops
+  the listener, removes the socket and then releases the lock, waiting for
+  the Connection owner and the handlers only until `SHUTDOWN_DEADLINE` after
+  the trigger on the seam clock; it counts the start of its wait for the
+  handlers as the test seam counter `shutdown.waiting` (`shutdown`).
 - While it runs, the App Server sets the socket's modification time to now
   every `SOCKET_TOUCH_INTERVAL` of the seam clock and counts each as the test
   seam counter `socket.touched` (`startup::keep_socket_fresh`).
@@ -37,10 +41,11 @@ ones it uses belong here too.
 ## Entry points
 
 - `startup::lock(root)` and then `startup::serve(root, lock)` start an App
-  Server and give `Started`; `lifecycle::run(started, fixed, times)` serves
-  it until the shutdown sequence ends and gives `lifecycle::Ended`: the
-  status as of then and the time left before the shutdown's deadline.
-  `lifecycle::Times` holds the durations, each a constant but for tests.
+  Server and give `Started`; `lifecycle::run(started, fixed, times)` starts
+  the Connection owner, serves the App Server until the shutdown sequence
+  ends and gives `lifecycle::Ended`: the status as of then and the time left
+  before the shutdown's deadline. `lifecycle::Times` holds the durations,
+  each a constant but for tests.
 
 ## Where things are
 
@@ -51,8 +56,11 @@ ones it uses belong here too.
   under the lock and refused when the two files disagree (`read`).
 - `startup.rs`: the start steps (`lock`, `serve`, `StartError`) and the
   socket's hourly modification time (`keep_socket_fresh`).
-- `lifecycle.rs`: the lifecycle task (`spawn`, `Lifecycle`, `States`) and
-  `run`, which joins the local API, the signals and the socket's freshness.
+- `capabilities.rs`: the capabilities of ready (`assemble`).
+- `lifecycle.rs`: the lifecycle task (`spawn`, `Lifecycle`) and `run`, which
+  starts the Connection owner and joins the local API, the signals and the
+  socket's freshness.
 - `local_api.rs`: the routes (`router`), the status fields that do not change
-  while the App Server runs (`FixedStatus`) and `current_status`.
+  while the App Server runs (`FixedStatus`), the sources of a status
+  (`StatusSources`) and `current_status`.
 - `shutdown.rs`: the shutdown sequence and its deadline.

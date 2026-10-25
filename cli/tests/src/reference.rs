@@ -71,6 +71,31 @@ impl ReferenceServer {
         self.control("state", json!({}))
     }
 
+    /// The request log's entries of `endpoint` (`events`, `ready`, ...),
+    /// refused ones included, in arrival order.
+    pub fn requests(&self, endpoint: &str) -> Vec<Value> {
+        self.entries("requests", endpoint)
+    }
+
+    /// The messages of `endpoint` that the server accepted, each once.
+    pub fn received(&self, endpoint: &str) -> Vec<Value> {
+        self.entries("received", endpoint)
+    }
+
+    fn entries(&self, log: &str, endpoint: &str) -> Vec<Value> {
+        let state = self.state();
+        state[log]
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|entry| entry["endpoint"] == endpoint)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Moves the server's clock forward.
     pub fn advance(&self, step: Duration) {
         let advance_ms = u64::try_from(step.as_millis()).expect("a step in milliseconds");

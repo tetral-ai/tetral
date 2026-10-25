@@ -8,10 +8,10 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use connection::Connection;
 use protocol::field::Nullable;
 use protocol::id::Id;
 use protocol::local::{Sessions, Status};
-use protocol::time::Rfc3339Utc;
 use protocol::tool::ProtocolVersion;
 use serde_json::{Value, json};
 
@@ -21,43 +21,45 @@ use crate::lifecycle::Lifecycle;
 #[derive(Debug, Clone)]
 pub struct FixedStatus {
     pub instance_id: Id,
-    pub credential_id: Id,
-    pub expires_at: Rfc3339Utc,
     pub cli_version: String,
 }
 
+/// What a status is read from: the lifecycle task, the Connection owner and
+/// the fixed fields.
 #[derive(Debug, Clone)]
-struct ApiState {
-    lifecycle: Lifecycle,
-    fixed: FixedStatus,
+pub struct StatusSources {
+    pub lifecycle: Lifecycle,
+    pub connection: Connection,
+    pub fixed: FixedStatus,
 }
 
-pub fn router(lifecycle: Lifecycle, fixed: FixedStatus) -> Router {
+pub fn router(sources: StatusSources) -> Router {
     Router::new()
         .route("/v1/status", get(status))
         .route("/v1/sessions", get(sessions))
         .route("/v1/shutdown", post(shutdown))
-        .with_state(ApiState { lifecycle, fixed })
+        .with_state(sources)
 }
 
 /// The status as of now.
-pub async fn current_status(lifecycle: &Lifecycle, fixed: &FixedStatus) -> Status {
-    let states = lifecycle.states().await;
+pub async fn current_status(sources: &StatusSources) -> Status {
+    let server_state = sources.lifecycle.server_state().await;
+    let connection = sources.connection.status().await;
     Status {
-        server_state: states.server,
-        connection_state: states.connection,
-        instance_id: fixed.instance_id.clone(),
-        connection_id: Nullable(None),
-        credential_id: fixed.credential_id.clone(),
-        expires_at: fixed.expires_at.clone(),
-        cli_version: fixed.cli_version.clone(),
+        server_state,
+        connection_state: connection.state,
+        instance_id: sources.fixed.instance_id.clone(),
+        connection_id: Nullable(connection.connection_id),
+        credential_id: connection.credential_id,
+        expires_at: connection.expires_at,
+        cli_version: sources.fixed.cli_version.clone(),
         protocol_version: ProtocolVersion::default(),
-        last_error: Nullable(None),
+        last_error: Nullable(connection.last_error),
     }
 }
 
-async fn status(State(api): State<ApiState>) -> Json<Status> {
-    Json(current_status(&api.lifecycle, &api.fixed).await)
+async fn status(State(sources): State<StatusSources>) -> Json<Status> {
+    Json(current_status(&sources).await)
 }
 
 async fn sessions() -> Json<Sessions> {
@@ -66,7 +68,7 @@ async fn sessions() -> Json<Sessions> {
     })
 }
 
-async fn shutdown(State(api): State<ApiState>) -> (StatusCode, Json<Value>) {
-    api.lifecycle.shutdown();
+async fn shutdown(State(sources): State<StatusSources>) -> (StatusCode, Json<Value>) {
+    sources.lifecycle.shutdown();
     (StatusCode::ACCEPTED, Json(json!({})))
 }

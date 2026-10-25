@@ -2,7 +2,11 @@
 //! argument, input and root checks, the private modes of what configure
 //! creates, every failure code it writes, a failed command changing nothing in
 //! the root, configure over what another run left in the root, and no key
-//! reaching its output or its argument list.
+//! reaching its output or its argument list. Against the reference control
+//! server: the credential a `server run` authenticates with after an
+//! interrupted configure, configure beside an online App Server, a broken
+//! configuration that never reaches Engine, and no key in the output, log
+//! file or argument list of a `server run` that connects.
 
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -10,8 +14,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use tetral_tests::app_server::{AppServer, wait_until};
 use tetral_tests::other_user;
 use tetral_tests::record::Case;
+use tetral_tests::reference::ReferenceServer;
 use tetral_tests::run::{self, Run, Tetral};
 use tetral_tests::seams::Seams;
 use tetral_tests::snapshot::snapshot;
@@ -688,4 +694,304 @@ fn argument_list(pid: u32) -> String {
             .unwrap();
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
+}
+
+/// A reference control server that knows each `(instance, credential, key,
+/// state)`.
+fn engine(credentials: &[(&str, &str, &str, &str)]) -> ReferenceServer {
+    let credentials: Vec<Value> = credentials
+        .iter()
+        .map(|(instance, credential, key, state)| {
+            json!({
+                "instance_id": instance,
+                "credential_id": credential,
+                "connection_key": key,
+                "expires_at": "2099-01-01T00:00:00Z",
+                "state": state,
+            })
+        })
+        .collect();
+    ReferenceServer::start(&json!({
+        "credentials": credentials,
+        "clock_start": "2030-01-01T00:00:00Z",
+    }))
+}
+
+fn engine_bootstrap(
+    engine: &ReferenceServer,
+    instance: &str,
+    credential: &str,
+    key: &str,
+) -> Value {
+    json!({
+        "server_url": engine.url,
+        "instance_id": instance,
+        "credential_id": credential,
+        "connection_key": key,
+        "expires_at": "2099-01-01T00:00:00Z",
+    })
+}
+
+fn server_run(root: &Path, seams: &Seams) -> Tetral {
+    Tetral::new(["server", "run", "--app", APP])
+        .home(root)
+        .seams(seams)
+}
+
+/// Waits until the App Server's connection is in `state` and gives the
+/// status then.
+fn wait_for_state(app_server: &AppServer, state: &str) -> Value {
+    let mut seen = Value::Null;
+    wait_until(&format!("connection_state {state}"), || {
+        seen = app_server.status();
+        seen["connection_state"] == state
+    });
+    seen
+}
+
+fn request_count(engine: &ReferenceServer) -> usize {
+    engine.state()["requests"].as_array().map_or(0, Vec::len)
+}
+
+#[test]
+fn server_run_after_an_interrupted_configure_authenticates_with_one_whole_credential() {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let engine = engine(&[
+        ("inst_one", "ccred_old", "tetral_ck_old", "active"),
+        ("inst_two", "ccred_new", "tetral_ck_new", "active"),
+    ]);
+    let old = engine_bootstrap(&engine, "inst_one", "ccred_old", "tetral_ck_old");
+    let new = engine_bootstrap(&engine, "inst_two", "ccred_new", "tetral_ck_new");
+    for (barrier, authenticates) in [
+        ("configure.locked", Some(("inst_one", "ccred_old"))),
+        ("configure.credentials_replaced", None),
+        ("configure.config_replaced", Some(("inst_two", "ccred_new"))),
+    ] {
+        let mut case = record.case(&format!("configure killed at {barrier}, then server run"));
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("root");
+        let run = configure(&root, bytes(&old)).run();
+        case.command(
+            "tetral configure --app app_one --from-stdin (old bootstrap)",
+            &run.exit(),
+        );
+        assert_eq!(run.object(), json!({}));
+        let seams = Seams::serve(directory.path(), Duration::from_secs(1));
+        seams.hold(barrier);
+        let mut child = configure(&root, bytes(&new)).seams(&seams).spawn();
+        seams.wait_until_waiting(barrier, 1);
+        child.kill().unwrap();
+        let _ = child.wait();
+        case.command(
+            &format!(
+                "tetral configure --app app_one --from-stdin (new bootstrap), killed at {barrier}"
+            ),
+            "killed",
+        );
+        let before = engine.requests("events").len();
+        let requests_before = request_count(&engine);
+        match authenticates {
+            None => {
+                let run = server_run(&root, &seams).run();
+                case.command("tetral server run --app app_one", &run.exit());
+                assert_eq!(run.error_code(), "invalid_configuration");
+                assert_eq!(request_count(&engine), requests_before);
+                case.observe("server run exited with invalid_configuration before the reference server recorded any request");
+            }
+            Some((instance, credential)) => {
+                let app_server = AppServer::start(server_run(&root, &seams), &root);
+                case.command("tetral server run --app app_one", "running");
+                wait_for_state(&app_server, "online");
+                let events = engine.requests("events");
+                assert_eq!(events.len(), before + 1);
+                assert_eq!(events[before]["status"], 200);
+                assert_eq!(events[before]["query"]["instance_id"], instance);
+                assert_eq!(events[before]["query"]["credential_id"], credential);
+                case.observe(format!(
+                    "server run authenticated as {instance} with {credential} and is online"
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn configure_beside_an_online_app_server_leaves_its_connection_alone() {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let mut case = record.case("configure while an App Server is online");
+    let engine = engine(&[("inst_one", "ccred_one", "tetral_ck_one", "active")]);
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("root");
+    let bootstrap = engine_bootstrap(&engine, "inst_one", "ccred_one", "tetral_ck_one");
+    let run = configure(&root, bytes(&bootstrap)).run();
+    case.command("tetral configure --app app_one --from-stdin", &run.exit());
+    let seams = Seams::serve(directory.path(), Duration::from_secs(1));
+    let app_server = AppServer::start(server_run(&root, &seams), &root);
+    case.command("tetral server run --app app_one", "running");
+    let online = wait_for_state(&app_server, "online");
+    let events = engine.requests("events").len();
+
+    let mut replacement = bootstrap.clone();
+    replacement["credential_id"] = json!("ccred_other");
+    replacement["connection_key"] = json!("tetral_ck_other");
+    let run = configure(&root, bytes(&replacement)).run();
+    case.command(
+        "tetral configure --app app_one --from-stdin (another credential)",
+        &run.exit(),
+    );
+    assert_eq!(run.error_code(), "server_running");
+    seams.wait_for_more("connection.checked", 2);
+    assert_eq!(engine.requests("events").len(), events);
+    let state = engine.state();
+    let requests = state["requests"].as_array().unwrap();
+    assert!(
+        requests.iter().all(|request| request["status"] != 401),
+        "{requests:?}"
+    );
+    assert_eq!(app_server.status(), online);
+    case.observe("configure failed with server_running; the reference server recorded no new events request and no 401, and the App Server is online on the same connection");
+}
+
+#[test]
+fn a_broken_configuration_never_reaches_engine() {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let engine = engine(&[
+        (
+            "inst_deleted",
+            "ccred_deleted",
+            "tetral_ck_deleted",
+            "active",
+        ),
+        (
+            "inst_mismatch",
+            "ccred_mismatch",
+            "tetral_ck_mismatch",
+            "active",
+        ),
+        (
+            "inst_not_toml",
+            "ccred_not_toml",
+            "tetral_ck_not_toml",
+            "active",
+        ),
+    ]);
+    for (name, suffix, break_root, repairable) in [
+        (
+            "credentials.json deleted",
+            "deleted",
+            (|root: &Path| fs::remove_file(root.join("credentials.json")).unwrap()) as fn(&Path),
+            true,
+        ),
+        (
+            "config.toml naming another instance_id",
+            "mismatch",
+            |root: &Path| {
+                let config = fs::read_to_string(root.join("config.toml")).unwrap();
+                fs::write(
+                    root.join("config.toml"),
+                    config.replace("inst_mismatch", "inst_other"),
+                )
+                .unwrap();
+            },
+            true,
+        ),
+        (
+            "config.toml that is not TOML",
+            "not_toml",
+            |root: &Path| fs::write(root.join("config.toml"), "app = [not toml").unwrap(),
+            false,
+        ),
+    ] {
+        let mut case = record.case(&format!("server run with {name}"));
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("root");
+        let bootstrap = engine_bootstrap(
+            &engine,
+            &format!("inst_{suffix}"),
+            &format!("ccred_{suffix}"),
+            &format!("tetral_ck_{suffix}"),
+        );
+        let run = configure(&root, bytes(&bootstrap)).run();
+        case.command("tetral configure --app app_one --from-stdin", &run.exit());
+        break_root(&root);
+        let before = request_count(&engine);
+        let seams = Seams::serve(directory.path(), Duration::from_secs(1));
+        let run = server_run(&root, &seams).run();
+        case.command("tetral server run --app app_one", &run.exit());
+        assert_eq!(run.error_code(), "invalid_configuration");
+        assert_eq!(request_count(&engine), before);
+        case.observe("invalid_configuration; the reference server recorded no request");
+        if !repairable {
+            continue;
+        }
+        let run = configure(&root, bytes(&bootstrap)).run();
+        case.command(
+            "tetral configure --app app_one --from-stdin (again)",
+            &run.exit(),
+        );
+        assert_eq!(run.object(), json!({}));
+        let app_server = AppServer::start(server_run(&root, &seams), &root);
+        case.command("tetral server run --app app_one", "running");
+        wait_for_state(&app_server, "online");
+        case.observe("after configure replaced the configuration, server run reached online");
+    }
+}
+
+#[test]
+fn no_key_reaches_the_output_log_or_arguments_of_a_server_run_that_connects() {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let mut case = record.case("a server run that connects, gets a 401 and is shut down");
+    let canary = format!("tetral_ck_CANARY_RUN{}", std::process::id());
+    let engine = engine(&[("inst_one", "ccred_one", &canary, "revoked")]);
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("root");
+    let run = configure(
+        &root,
+        bytes(&engine_bootstrap(&engine, "inst_one", "ccred_one", &canary)),
+    )
+    .run();
+    case.command(
+        "tetral configure --app app_one --from-stdin < bootstrap with a canary key",
+        &run.exit(),
+    );
+    let seams = Seams::serve(directory.path(), Duration::from_secs(1));
+    let app_server = AppServer::start(
+        server_run(&root, &seams).env("TETRAL_LOG_LEVEL", "debug"),
+        &root,
+    );
+    case.command(
+        "TETRAL_LOG_LEVEL=debug tetral server run --app app_one",
+        "running",
+    );
+    let status = wait_for_state(&app_server, "blocked");
+    assert_eq!(status["last_error"]["code"], "credential_revoked");
+    assert!(!status.to_string().contains(&canary));
+    let arguments = argument_list(app_server.pid());
+    assert!(!arguments.is_empty());
+    assert!(!arguments.contains(&canary), "{arguments}");
+    let stop = Tetral::new(["server", "stop", "--app", APP])
+        .home(&root)
+        .run();
+    case.command("tetral server stop --app app_one", &stop.exit());
+    let (run, _) = app_server.exited();
+    case.command("tetral server run --app app_one", &run.exit());
+    let log = fs::read(root.join("logs/tetral.log")).unwrap();
+    for (place, bytes) in [
+        ("stdout", &run.stdout),
+        ("stderr", &run.stderr),
+        ("the log file", &log),
+    ] {
+        assert!(!bytes.is_empty(), "{place} is empty");
+        assert!(
+            !String::from_utf8_lossy(bytes).contains(&canary),
+            "{place} holds the key"
+        );
+    }
+    case.observe(format!(
+        "blocked with credential_revoked; argument list {arguments:?}; status, stdout, stderr and the log file hold no canary"
+    ));
 }

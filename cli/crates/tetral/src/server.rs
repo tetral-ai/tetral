@@ -27,8 +27,6 @@ pub fn run(root: &StateRoot, observer: &observe::Observer) -> Result<Value, Comm
         }
         let fixed = FixedStatus {
             instance_id: started.configuration.credentials.instance_id.clone(),
-            credential_id: started.configuration.credentials.credential_id.clone(),
-            expires_at: started.configuration.credentials.expires_at.clone(),
             cli_version: env!("CARGO_PKG_VERSION").to_owned(),
         };
         lifecycle::run(started, fixed, Times::default())

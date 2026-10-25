@@ -28,9 +28,13 @@ use tetral_tests::socket_directory::{self, socket_dir};
 const APP: &str = "app_one";
 const KEY: &str = "tetral_ck_canary_status_4f1d";
 
+/// A loopback address where nothing listens, so that every connection
+/// attempt fails at once and Engine stays unreachable.
+const UNREACHABLE_ENGINE: &str = "http://127.0.0.1:1";
+
 fn bootstrap() -> Vec<u8> {
     serde_json::to_vec(&json!({
-        "server_url": "https://engine.example.com",
+        "server_url": UNREACHABLE_ENGINE,
         "instance_id": "inst_one",
         "credential_id": "ccred_one",
         "connection_key": KEY,
@@ -91,6 +95,19 @@ fn expected_status(server_state: &str, connection_state: &str) -> Value {
     })
 }
 
+/// A running App Server's status while Engine is unreachable, whose
+/// connection is `connecting` during an attempt and `disconnected` between
+/// attempts, with the state read as `disconnected`.
+fn while_unreachable(mut status: Value) -> Value {
+    let state = status["connection_state"].clone();
+    assert!(
+        state == "connecting" || state == "disconnected",
+        "connection_state {state} while Engine is unreachable"
+    );
+    status["connection_state"] = json!("disconnected");
+    status
+}
+
 /// Runs a command that must fail with `code` and leave `root` unchanged.
 fn fails_and_changes_nothing(
     case: &mut Case,
@@ -143,7 +160,7 @@ fn status_answers_without_engine_and_shutdown_ends_the_process() {
     let client = client(&root);
     let status = runtime.block_on(client.status()).unwrap();
     assert_eq!(
-        serde_json::to_value(&status).unwrap(),
+        while_unreachable(serde_json::to_value(&status).unwrap()),
         expected_status("running", "disconnected")
     );
     case.observe("status through the SDK: running, connection disconnected");
@@ -195,7 +212,7 @@ fn one_app_server_owns_a_root_and_others_disturb_nothing() {
     let root = configured_root(&mut case, directory.path());
     let app_server = start(&mut case, &root);
     let socket_before = fs::symlink_metadata(&app_server.socket).unwrap();
-    let status_before = app_server.status();
+    let status_before = while_unreachable(app_server.status());
     let configuration = |root: &Path| {
         (
             fs::read(root.join("config.toml")).unwrap(),
@@ -232,7 +249,7 @@ fn one_app_server_owns_a_root_and_others_disturb_nothing() {
                 socket_before.mtime_nsec()
             )
         );
-        assert_eq!(app_server.status(), status_before);
+        assert_eq!(while_unreachable(app_server.status()), status_before);
         assert_eq!(configuration(&root), files_before);
         case.observe(format!(
             "{command}: server_running; the socket, the status and both configuration files are unchanged"
@@ -276,7 +293,10 @@ fn a_killed_app_server_leaves_a_socket_that_the_next_start_replaces() {
     assert!(request(&socket, "GET", "/v1/status").is_none());
     case.observe("the killed App Server's socket remains and refuses connections");
     let next = start(&mut case, &root);
-    assert_eq!(next.status(), expected_status("running", "disconnected"));
+    assert_eq!(
+        while_unreachable(next.status()),
+        expected_status("running", "disconnected")
+    );
     case.observe("the next server run serves status at the same path");
 }
 
@@ -323,7 +343,7 @@ fn sixteen_sdk_clients_at_once_all_succeed() {
     assert_eq!(answers.len(), 16);
     for (status, sessions) in answers {
         assert_eq!(
-            serde_json::to_value(status).unwrap(),
+            while_unreachable(serde_json::to_value(status).unwrap()),
             expected_status("running", "disconnected")
         );
         assert!(sessions.sessions.is_empty());
@@ -346,7 +366,10 @@ fn server_commands_write_their_results_and_each_failure_code() {
     let app_server = start(&mut case, &root);
     let status = server("status", &root).run();
     case.command("tetral server status --app app_one", &status.exit());
-    assert_eq!(status.object(), expected_status("running", "disconnected"));
+    assert_eq!(
+        while_unreachable(status.object()),
+        expected_status("running", "disconnected")
+    );
     assert!(
         !root.join(".replace-a1b2c3").exists(),
         "server run removes the temporary file of an interrupted replacement"
@@ -545,7 +568,10 @@ fn the_socket_lies_in_a_private_directory_and_stays_fresh() {
     assert_eq!(mode(&app_server.socket), 0o600);
     assert!(app_server.socket.as_os_str().len() <= 57);
     let status = server("status", &root).run();
-    assert_eq!(status.object(), expected_status("running", "disconnected"));
+    assert_eq!(
+        while_unreachable(status.object()),
+        expected_status("running", "disconnected")
+    );
     runtime().block_on(client(&root).status()).unwrap();
     case.observe(format!(
         "served at {} ({} bytes), S 0700, the socket 0600; server status and the SDK reach it",
@@ -723,6 +749,9 @@ fn shutdown_ends_the_process_while_a_handler_is_blocked() {
     let posted = std::time::Instant::now();
     let shutdown = request(&app_server.socket, "POST", "/v1/shutdown").unwrap();
     assert_eq!((shutdown.status, shutdown.json()), (202, json!({})));
+    // Moved once the Connection owner has stopped, so that only the blocked
+    // handler meets the deadline.
+    seams.wait_for_count("shutdown.waiting", 1);
     seams.advance(Duration::from_secs(5));
     let (run, _) = app_server.exited();
     let took = posted.elapsed();

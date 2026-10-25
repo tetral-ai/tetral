@@ -48,7 +48,7 @@ temporary directories. No workspace crate depends on this package.
 - `src/lib.rs`: `workspace_dir` and `repository_root`, where the builds run.
 - `src/binaries.rs`: the builds of `tetral` and the reference control server.
 - `src/reference.rs`: `ReferenceServer`, the server as a process, its startup
-  input and its controls.
+  input, its controls and its request log.
 - `src/run.rs`: `Tetral`, a command line of the `tetral` under test, and
   `Run`, its exit status, output and result object.
 - `src/seams.rs`: `Seams`, the harness side of the seam protocol, which
@@ -65,7 +65,17 @@ temporary directories. No workspace crate depends on this package.
   arguments, bootstraps, apps and control paths with the root unchanged, the
   size limit and private modes of a new root, each failure code, configure
   over a broken pair, a newer `config.toml` and interrupted replacements, and
-  no key in the output or the argument list.
+  no key in the output or the argument list; against the reference control
+  server, the credential a `server run` authenticates with after an
+  interrupted configure, configure beside an online App Server, a broken
+  configuration that sends no request, and no key in what a connecting
+  `server run` writes or shows.
+- `tests/connection.rs`: the Connection owner against the reference control
+  server: refused credentials and versions, the attempt timeout and the
+  backoff, staging until the ready ACK and its limit, grants from first
+  sends, conflicts and predecessors, a deadline passed in one clock step,
+  answers of an ended connection, the event size and protocol version, the
+  startup phases in ready, and a redirect that is not followed.
 - `tests/local_service.rs`: `server run`, `server status` and `server stop`
   and the local API: status while Engine is unreachable, the wrong routes,
   shutdown on request, on each signal and with a handler blocked, one owner

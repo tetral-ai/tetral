@@ -7,32 +7,25 @@
 
 use std::time::Duration;
 
-use protocol::local::{ConnectionState, ServerState};
+use connection::{Connection, Credential, ReadyFields};
+use protocol::connection::SemVer;
+use protocol::local::{ServerState, Status};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use protocol::local::Status;
-use tokio::signal::unix::{SignalKind, signal};
-
-use crate::local_api::{self, FixedStatus};
+use crate::capabilities;
+use crate::local_api::{self, FixedStatus, StatusSources};
 use crate::lock::RootLock;
 use crate::shutdown::{self, Sequence};
 use crate::startup::{self, Started};
-
-/// The states the lifecycle task reports for `GET /v1/status`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct States {
-    pub server: ServerState,
-    /// No connection to Engine is made: `disconnected`, then `stopping` and
-    /// `stopped` as the shutdown passes its connection step.
-    pub connection: ConnectionState,
-}
 
 /// The parts of the running App Server that the shutdown takes down.
 #[derive(Debug)]
 pub struct ShutdownParts {
     pub socket: std::path::PathBuf,
     pub lock: RootLock,
+    pub connection: Connection,
     /// How long after the trigger the shutdown stops waiting.
     pub deadline: Duration,
 }
@@ -45,11 +38,10 @@ pub struct Listener {
 }
 
 enum Message {
-    States(oneshot::Sender<States>),
+    ServerState(oneshot::Sender<ServerState>),
     Serving(Listener),
     /// A trigger, with the seam clock's time when it arrived.
     Shutdown(Duration),
-    ConnectionStopped,
     /// The end of the shutdown sequence, with its deadline.
     Finished(Duration),
 }
@@ -76,33 +68,29 @@ async fn own(
     parts: ShutdownParts,
     finished: oneshot::Sender<Duration>,
 ) {
-    let mut states = States {
-        server: ServerState::Running,
-        connection: ConnectionState::Disconnected,
-    };
+    let mut server = ServerState::Running;
     let mut parts = Some(parts);
     let mut listener = None;
     let mut finished = Some(finished);
     while let Some(message) = inbox.recv().await {
         match message {
-            Message::States(reply) => {
-                let _ = reply.send(states);
+            Message::ServerState(reply) => {
+                let _ = reply.send(server);
             }
             Message::Serving(serving) => listener = Some(serving),
             Message::Shutdown(triggered_at) => {
                 if let Some(parts) = parts.take() {
-                    states.server = ServerState::Stopping;
-                    states.connection = ConnectionState::Stopping;
+                    server = ServerState::Stopping;
                     let sequence = Sequence {
                         deadline: triggered_at + parts.deadline,
                         socket: parts.socket,
                         lock: parts.lock,
+                        connection: parts.connection,
                         listener: listener.take(),
                     };
                     tokio::spawn(shutdown::run(sequence, lifecycle.clone()));
                 }
             }
-            Message::ConnectionStopped => states.connection = ConnectionState::Stopped,
             Message::Finished(deadline) => {
                 if let Some(finished) = finished.take() {
                     let _ = finished.send(deadline);
@@ -113,9 +101,9 @@ async fn own(
 }
 
 impl Lifecycle {
-    pub async fn states(&self) -> States {
+    pub async fn server_state(&self) -> ServerState {
         let (reply, answer) = oneshot::channel();
-        self.send(Message::States(reply));
+        self.send(Message::ServerState(reply));
         answer
             .await
             .expect("the lifecycle task answers every message")
@@ -131,10 +119,6 @@ impl Lifecycle {
     /// later than the trigger's answer.
     pub fn shutdown(&self) {
         self.send(Message::Shutdown(state::seams::now()));
-    }
-
-    pub(crate) fn connection_stopped(&self) {
-        self.send(Message::ConnectionStopped);
     }
 
     pub(crate) fn finished(&self, deadline: Duration) {
@@ -153,6 +137,7 @@ impl Lifecycle {
 pub struct Times {
     pub shutdown_deadline: Duration,
     pub socket_touch_interval: Duration,
+    pub connection: connection::Times,
 }
 
 impl Default for Times {
@@ -160,6 +145,7 @@ impl Default for Times {
         Times {
             shutdown_deadline: shutdown::SHUTDOWN_DEADLINE,
             socket_touch_interval: startup::SOCKET_TOUCH_INTERVAL,
+            connection: connection::Times::default(),
         }
     }
 }
@@ -173,28 +159,52 @@ pub struct Ended {
     pub left: Duration,
 }
 
-/// Serves the local API of a started App Server, keeps its socket fresh and
-/// takes SIGINT and SIGTERM as shutdown triggers, until the shutdown sequence
-/// ends.
+/// Starts the Connection owner, serves the local API of a started App
+/// Server, keeps its socket fresh and takes SIGINT and SIGTERM as shutdown
+/// triggers, until the shutdown sequence ends.
 pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io::Result<Ended> {
     // Read before the local API serves, so that the socket's age never
     // exceeds one interval while a client can reach it.
-    let first_touch = state::seams::now() + times.socket_touch_interval;
+    let start = state::seams::now();
+    let first_touch = start + times.socket_touch_interval;
     let Started {
         lock,
-        configuration: _,
+        configuration,
         socket,
         listener,
     } = started;
+    let credentials = configuration.credentials;
+    let connection = Connection::spawn(connection::Config {
+        server_url: credentials.server_url.as_str().to_owned(),
+        instance_id: credentials.instance_id,
+        credential: Credential {
+            credential_id: credentials.credential_id,
+            key: credentials.connection_key,
+            expires_at: credentials.expires_at,
+        },
+        ready: ReadyFields {
+            cli_version: SemVer::new(fixed.cli_version.as_str())
+                .expect("the package version is a semantic version"),
+            capabilities: capabilities::assemble(),
+        },
+        started: start,
+        times: times.connection,
+    });
     let (lifecycle, finished) = spawn(ShutdownParts {
         socket: socket.clone(),
         lock,
+        connection: connection.clone(),
         deadline: times.shutdown_deadline,
     });
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
     let (stop, stopped) = oneshot::channel::<()>();
-    let router = local_api::router(lifecycle.clone(), fixed.clone());
+    let sources = StatusSources {
+        lifecycle: lifecycle.clone(),
+        connection,
+        fixed,
+    };
+    let router = local_api::router(sources.clone());
     let served = tokio::spawn(async move {
         let _ = axum::serve(listener, router)
             .with_graceful_shutdown(async move {
@@ -218,7 +228,7 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
     ));
     let deadline = finished.await.unwrap_or_else(|_| state::seams::now());
     touching.abort();
-    let status = local_api::current_status(&lifecycle, &fixed).await;
+    let status = local_api::current_status(&sources).await;
     Ok(Ended {
         status,
         left: deadline.saturating_sub(state::seams::now()),
