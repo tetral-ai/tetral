@@ -49,6 +49,13 @@ which owns that task's process tree; the translation of a call's
   process result over the ordinary limits is rendered again from its stored
   output with half the visible byte budget until it fits, its counters and
   exit facts unchanged (`report`).
+- A stream's stored output stays bounded however much the command writes,
+  so reading its pipe never stops: the cumulative capture, which no read
+  consumes, and the window, which each `running` report and `tool.stdin`
+  reply takes, each keep `STORED_HALF_BYTES` of head and of tail and count
+  the bytes between. A snapshot splits a byte and a line budget between head
+  and tail, cuts both on UTF-8 boundaries and marks the rest
+  `\n[... <n> bytes truncated ...]\n` (`capture`).
 - A task is named during its admission, before its policy is translated,
   so that its profile names its private temporary directory in `T`; a
   rejected instruction keeps no name (`store`).
@@ -70,6 +77,8 @@ which owns that task's process tree; the translation of a call's
 - `isolation/linux.rs`: the choice of `bwrap` and its candidates, the walk
   for a planted `bwrap`, the digest check of the bundled one, the WSL1 test,
   the namespace probe and the launch profile.
+- `capture.rs`: `StreamCapture`, a stream's two buffers and counters, the
+  `Window` taken from it, and their snapshots.
 - `report.rs`: `Report`, its `Correlation` and `Body`, the error bounds
   (`bounded`) and the size fitting of a process result (`fit`).
 - `store.rs`: a task's name and the paths of `T` and of a task's temporary

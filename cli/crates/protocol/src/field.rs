@@ -389,6 +389,11 @@ impl Count {
         (value >= 0).then_some(Count(value))
     }
 
+    /// `value`, or `i64::MAX` when it is larger.
+    pub fn saturating(value: u64) -> Count {
+        Count(i64::try_from(value).unwrap_or(i64::MAX))
+    }
+
     pub fn get(self) -> i64 {
         self.0
     }
