@@ -226,18 +226,29 @@ fn failed_attempts_end_at_ten_seconds_and_wait_by_the_backoff() {
         ));
     }
     machine.wait_for("online");
+    engine.control("break_stream", json!({ "instance_id": INSTANCE }));
+    machine.wait_for("resuming");
+    machine.advance(seconds(29.999));
+    assert_eq!(machine.attempts(), 8);
+    machine.seams.advance(seconds(6.002));
+    machine.seams.wait_for_count("connection.attempt", 9);
+    let events = wait_for_requests(&engine, "events", 9);
+    assert_eq!(events[8]["query"]["resume"], "true");
+    machine.wait_for("online");
+    case.observe("online; the stream broken before any heartbeat ACK was resumed after at least 30 and at most 36 seconds, the ready ACK resetting no backoff");
+
     engine.advance(seconds(15.0));
     machine.seams.wait_for_count("connection.granted", 2);
-    case.observe("online, then the heartbeat 15 seconds later was acknowledged");
+    case.observe("the heartbeat 15 seconds later was acknowledged");
 
     engine.control("break_stream", json!({ "instance_id": INSTANCE }));
     machine.wait_for("resuming");
     machine.advance(seconds(0.999));
-    assert_eq!(machine.attempts(), 8);
+    assert_eq!(machine.attempts(), 9);
     machine.seams.advance(seconds(0.201));
-    machine.seams.wait_for_count("connection.attempt", 9);
-    let events = wait_for_requests(&engine, "events", 9);
-    assert_eq!(events[8]["query"]["resume"], "true");
+    machine.seams.wait_for_count("connection.attempt", 10);
+    let events = wait_for_requests(&engine, "events", 10);
+    assert_eq!(events[9]["query"]["resume"], "true");
     case.observe(
         "after the stream broke, the resume began after at least 1 and at most 1.2 seconds",
     );
