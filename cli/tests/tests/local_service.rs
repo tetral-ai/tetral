@@ -461,6 +461,27 @@ fn server_commands_write_their_results_and_each_failure_code() {
         server("run", &directory.path().join("missing/root")),
         "invalid_configuration",
     );
+    drop(case);
+
+    let mut case = record.case("io_failed for server run");
+    if case.runs_as_non_root("root may write into a directory of mode 0500") {
+        fs::remove_file(root.join("run/app-server.lock")).unwrap();
+        fs::set_permissions(root.join("run"), fs::Permissions::from_mode(0o500)).unwrap();
+        let run = fails_and_changes_nothing(
+            &mut case,
+            &root,
+            "tetral server run with run/ of mode 0500 and no lock file",
+            server("run", &root),
+            "io_failed",
+        );
+        assert!(
+            run.message()
+                .contains(root.join("run/app-server.lock").to_str().unwrap()),
+            "{}",
+            run.message()
+        );
+        fs::set_permissions(root.join("run"), fs::Permissions::from_mode(0o700)).unwrap();
+    }
 }
 
 /// A directory whose path is exactly `length` bytes, under `parent`.
