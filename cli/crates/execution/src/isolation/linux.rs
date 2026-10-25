@@ -76,6 +76,34 @@ pub(super) async fn check(
     }
 }
 
+/// Every `bwrap` that `select` could pick for a call: each existing `bwrap`
+/// file in a directory of `PATH`, a leading `~` expanded as Codex's lookup
+/// expands it, and the bundled one, each canonical. The profile is built
+/// before the selection, which skips a system `bwrap` that the profile would
+/// leave writable; keeping every candidate read-only keeps whichever one it
+/// picks out of the call's reach.
+pub(super) fn bwrap_candidates(tetral: &Path, cwd: &Path) -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let directories = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let system = directories.into_iter().filter_map(|directory| {
+        let directory = match (directory.strip_prefix("~"), &home) {
+            (Ok(rest), Some(home)) => home.join(rest),
+            _ => directory,
+        };
+        let candidate = directory.join("bwrap");
+        if !std::fs::metadata(&candidate).ok()?.is_file() {
+            return None;
+        }
+        candidate.canonicalize().ok()
+    });
+    let bundled =
+        codex_linux_sandbox::find_bundled_bwrap_for_exe(tetral, cwd, |name| std::env::var_os(name))
+            .and_then(|bundled| bundled.into_path_buf().canonicalize().ok());
+    system.chain(bundled).collect()
+}
+
 /// The system `bwrap` when one on `PATH` passes the capability probe,
 /// otherwise the bundled one beside `tetral` when its digest matches.
 async fn select(

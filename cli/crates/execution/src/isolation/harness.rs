@@ -3,10 +3,10 @@
 //! task supervisor runs them, so that cross-process tests can start real
 //! restricted processes through this path.
 //!
-//! Its request is one JSON object: `policy`, the translation inputs
+//! Its request is one JSON object: `policy`, the translation inputs other
+//! than the trusted programs, which it finds as admission does
 //! (`state_root`, `socket_directory`, `task_directories`,
-//! `task_temporary_directory`, `drives` and `trusted_programs`), `cwd`, `argv`
-//! and `env`. Its answer is one JSON line: `{"rejected": {code, message}}`,
+//! `task_temporary_directory` and `drives`), `cwd`, `argv` and `env`. Its answer is one JSON line: `{"rejected": {code, message}}`,
 //! `{"spawn_error": message}` or `{"exit_code", "stdout", "stderr"}`.
 
 use std::collections::HashMap;
@@ -61,17 +61,19 @@ async fn run_request(request: &Value) -> Value {
             })
             .collect(),
     });
+    let cwd = path("cwd");
+    let tetral = match std::env::current_exe().and_then(|exe| exe.canonicalize()) {
+        Ok(tetral) => tetral,
+        Err(error) => return json!({"spawn_error": error.to_string()}),
+    };
     let inputs = TranslationInputs {
         state_root: path("state_root"),
         socket_directory: path("socket_directory"),
         task_directories: path("task_directories"),
         task_temporary_directory: path("task_temporary_directory"),
         drives,
-        trusted_programs: strings(&request["trusted_programs"])
-            .map(PathBuf::from)
-            .collect(),
+        trusted_programs: super::trusted_programs(&tetral, &cwd),
     };
-    let cwd = path("cwd");
     let command = Command {
         argv: strings(&request["argv"]).map(str::to_owned).collect(),
         env: request["env"]
@@ -80,10 +82,6 @@ async fn run_request(request: &Value) -> Value {
             .flatten()
             .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_owned())))
             .collect::<HashMap<_, _>>(),
-    };
-    let tetral = match std::env::current_exe().and_then(|exe| exe.canonicalize()) {
-        Ok(tetral) => tetral,
-        Err(error) => return json!({"spawn_error": error.to_string()}),
     };
 
     let permissions = match TaskPermissions::admit(request.get("policy"), &inputs) {

@@ -10,7 +10,7 @@ mod linux;
 
 use std::collections::HashMap;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -61,6 +61,23 @@ pub enum LaunchError {
     Rejected(PolicyRejection),
     /// The sandboxed command could not be started.
     Spawn(io::Error),
+}
+
+/// The trusted programs of a call whose working directory is `cwd`: the
+/// running `tetral` and, on Linux, every `bwrap` that its launch could
+/// select, each canonical and found with `stat`, none run. The profile keeps
+/// each of them read-only (`policy::TranslationInputs`).
+pub fn trusted_programs(tetral: &Path, cwd: &Path) -> Vec<PathBuf> {
+    let mut programs = vec![tetral.to_path_buf()];
+    #[cfg(target_os = "linux")]
+    for bwrap in linux::bwrap_candidates(tetral, cwd) {
+        if !programs.contains(&bwrap) {
+            programs.push(bwrap);
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = cwd;
+    programs
 }
 
 impl Isolation {

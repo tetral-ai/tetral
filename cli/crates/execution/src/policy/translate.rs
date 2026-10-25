@@ -30,8 +30,8 @@ pub struct TranslationInputs {
     pub task_temporary_directory: PathBuf,
     /// The Session's drives, when it binds any.
     pub drives: Option<SessionDrives>,
-    /// The running `tetral`, the `bwrap` the isolation uses and the recorded
-    /// cua-driver.
+    /// The running `tetral`, every `bwrap` the launch could select
+    /// (`isolation::trusted_programs`) and the recorded cua-driver.
     pub trusted_programs: Vec<PathBuf>,
 }
 

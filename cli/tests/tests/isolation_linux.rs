@@ -131,7 +131,6 @@ impl World {
                 "directory": self.drives,
                 "mounts": [{"path": self.mount, "access": "read_only"}],
             },
-            "trusted_programs": [self.tetral, host_bwrap()],
             "cwd": cwd,
             "argv": argv,
             "env": {"PATH": path, "HOME": self.task_temporary},
@@ -625,11 +624,13 @@ fn fake_bwrap(directory: &Path, body: &str) -> PathBuf {
 }
 
 /// One way of offering a `bwrap` to the isolation: the `tetral` build, the
-/// App Server's `PATH`, and the bytes of a `bwrap` beside `tetral`.
+/// App Server's `PATH`, and the bytes of a `bwrap` beside `tetral`. A `PATH`
+/// of `None` is the call's `read_write` directory alone, holding a copy of
+/// the host's `bwrap`.
 struct Offer<'a> {
     name: &'a str,
     tetral: &'a Path,
-    path: &'a str,
+    path: Option<&'a str>,
     beside: Option<Vec<u8>>,
     available: bool,
 }
@@ -658,35 +659,42 @@ fn an_unusable_bwrap_rejects_the_call_before_any_process_starts() {
         Offer {
             name: "no bwrap on PATH and none beside tetral",
             tetral: binaries::tetral(),
-            path: empty,
+            path: Some(empty),
             beside: None,
             available: false,
         },
         Offer {
             name: "the only bwrap on PATH lacks --as-pid-1",
             tetral: binaries::tetral(),
-            path: old_help.to_str().unwrap(),
+            path: Some(old_help.to_str().unwrap()),
             beside: None,
             available: false,
         },
         Offer {
             name: "a bwrap beside a tetral built with a digest that its bytes do not match",
             tetral: digest_build,
-            path: empty,
+            path: Some(empty),
             beside: Some([host_bwrap_bytes.as_slice(), b"\0"].concat()),
             available: false,
         },
         Offer {
             name: "the bwrap on PATH cannot create a namespace",
             tetral: binaries::tetral(),
-            path: no_namespaces.to_str().unwrap(),
+            path: Some(no_namespaces.to_str().unwrap()),
             beside: None,
             available: false,
         },
         Offer {
             name: "the host's bwrap on PATH",
             tetral: binaries::tetral(),
-            path: SYSTEM_PATH,
+            path: Some(SYSTEM_PATH),
+            beside: None,
+            available: true,
+        },
+        Offer {
+            name: "the host's bwrap copied into the directory that the call may write, alone on PATH",
+            tetral: binaries::tetral(),
+            path: None,
             beside: None,
             available: true,
         },
@@ -705,6 +713,13 @@ fn an_unusable_bwrap_rejects_the_call_before_any_process_starts() {
             fs::write(&bwrap, bytes).unwrap();
             fs::set_permissions(&bwrap, fs::Permissions::from_mode(0o755)).unwrap();
         }
+        let path = match path {
+            Some(path) => path,
+            None => {
+                fs::copy(host_bwrap(), world.project.join("bwrap")).unwrap();
+                world.project.to_str().unwrap()
+            }
+        };
         let marker = world.project.join("marker");
         let request = world.request(
             &read_write(&world.project),
@@ -746,7 +761,7 @@ fn the_bundled_bwrap_with_its_digest_runs_tools_where_no_system_bwrap_exists() {
     // The App Server's PATH and the commands' hold the tools but no bwrap.
     let tools = world.base.join("tools");
     fs::create_dir_all(&tools).unwrap();
-    for tool in ["bash", "cat", "mv", "python3"] {
+    for tool in ["bash", "cat", "cp", "mv", "python3"] {
         let target = Path::new("/usr/bin").join(tool).canonicalize().unwrap();
         symlink(target, tools.join(tool)).unwrap();
     }
@@ -787,10 +802,18 @@ fn the_bundled_bwrap_with_its_digest_runs_tools_where_no_system_bwrap_exists() {
             format!("mv {} {}", quoted(&p.join(".git")), quoted(&p.join("g"))),
             Fails,
         ),
+        (
+            "replace the bwrap beside tetral",
+            format!(
+                "cp /bin/true {r} && mv -f {r} {b}",
+                r = quoted(&p.join("replacement")),
+                b = quoted(&bwrap)
+            ),
+            Fails,
+        ),
     ];
     let policy = read_write(p);
-    let mut request = world.request(&policy, p, &["/bin/bash", "-c", &script(&probes)], path);
-    request["trusted_programs"] = json!([world.tetral, bwrap]);
+    let request = world.request(&policy, p, &["/bin/bash", "-c", &script(&probes)], path);
     let outcome = harness(&world.tetral, &request, path, None);
     check_probes(&mut case, &policy, &outcome, &probes);
     assert!(!outside.exists(), "{} was written", outside.display());
