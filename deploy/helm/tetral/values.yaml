@@ -191,6 +191,12 @@ computerHub:
   # Latest expiry an issued connection credential may have, as a Go duration
   # after issuance; also the lifetime of a credential issued without one.
   maxCredentialLifetime: 720h
+  # Semantic versions: a ready from a CLI older than minCLIVersion is refused
+  # with cli_upgrade_required; an instance whose CLI is older than
+  # recommendedCLIVersion reads cli_update_available. The recommended version
+  # is never lower than the minimum.
+  minCLIVersion: "0.0.0"
+  recommendedCLIVersion: "0.0.0"
 
 resources:
   agentRuntime:

@@ -68,6 +68,14 @@ spec:
                 secretKeyRef:
                   name: "computer-hub-page-token"
                   key: page-token-key
+            - name: TETRAL_COMPUTER_HUB_MIN_CLI_VERSION
+              value: "0.0.0"
+            - name: TETRAL_COMPUTER_HUB_RECOMMENDED_CLI_VERSION
+              value: "0.0.0"
+            - name: TETRAL_COMPUTER_HUB_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT
               value: "local"
             - name: TETRAL_SERVICE_VERSION

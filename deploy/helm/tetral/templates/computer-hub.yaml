@@ -58,6 +58,14 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secrets.computerHubPageToken | quote }}
                   key: page-token-key
+            - name: TETRAL_COMPUTER_HUB_MIN_CLI_VERSION
+              value: {{ .Values.computerHub.minCLIVersion | quote }}
+            - name: TETRAL_COMPUTER_HUB_RECOMMENDED_CLI_VERSION
+              value: {{ .Values.computerHub.recommendedCLIVersion | quote }}
+            - name: TETRAL_COMPUTER_HUB_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT
               value: {{ .Values.observability.deploymentEnvironment | quote }}
             - name: TETRAL_SERVICE_VERSION

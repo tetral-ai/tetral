@@ -353,6 +353,10 @@ Their declared Deployment replica defaults are one. Set `replicas.api`, `replica
 `replicas.webConnector` independently to a positive integer.
 `computerHub.replicas` defaults to two, so a CLI keeps a serving hub while one
 Pod restarts.
+`computerHub.minCLIVersion` and `computerHub.recommendedCLIVersion`, semantic
+versions defaulting to `0.0.0`, set the oldest CLI whose ready the hub accepts
+and the version below which instance reads report `cli_update_available`; the
+recommended version must not be lower than the minimum.
 
 `autoscaling.providerGateway.enabled` defaults to true and retains the existing
 HPA: minimum two, maximum ten, CPU utilization target 70 percent. An enabled

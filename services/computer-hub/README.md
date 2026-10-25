@@ -110,6 +110,9 @@ names a workspace.
 | `TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64` | required | Auth's Ed25519 public key for the signed internal principal |
 | `TETRAL_COMPUTER_HUB_MAX_CREDENTIAL_LIFETIME` | `720h` | how far after issuance an issued credential's `expires_at` may lie, and the lifetime of one issued without it; a positive Go duration, Helm `computerHub.maxCredentialLifetime` |
 | `TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY` | required | 32 bytes as 64 hexadecimal characters that sign list page tokens; every pod reads the same key from the Secret Helm `secrets.computerHubPageToken` names, key `page-token-key` |
+| `TETRAL_COMPUTER_HUB_MIN_CLI_VERSION` | `0.0.0` | a ready from a CLI older than this semantic version is refused with `cli_upgrade_required`; Helm `computerHub.minCLIVersion` |
+| `TETRAL_COMPUTER_HUB_RECOMMENDED_CLI_VERSION` | `0.0.0` | an instance whose CLI is older than this semantic version reads `cli_update_available: true`; never lower than the minimum; Helm `computerHub.recommendedCLIVersion` |
+| `TETRAL_COMPUTER_HUB_POD_NAME` | required | this pod's name, from the downward API: the `hub_pod` of the connections whose streams it holds and the source of its connection notice channel |
 | `TETRAL_BLOB_*` | | the blob store settings `api` and Bridge use (`internal/blob`) |
 | `TETRAL_HTTP_TRANSPORT`, `TETRAL_HTTP_TLS_*` | | the public listener's native TLS from the edge (`internal/transportsecurity`) |
 
