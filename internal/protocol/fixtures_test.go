@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -21,6 +22,16 @@ type fixture struct {
 	Valid      bool            `json:"valid"`
 	Value      json.RawMessage `json:"value"`
 	HTTPStatus int             `json:"http_status"`
+	// Endpoint and Status are the endpoint and HTTP status of an error
+	// body; Endpoint and Error name the answer a rejected request gets.
+	Endpoint DriveTransferEndpoint `json:"endpoint"`
+	Status   int                   `json:"status"`
+	Error    *ClientError          `json:"error"`
+	// Pair names the fixtures of the request a response answers.
+	Pair map[string]string `json:"pair"`
+	// Expect names the rules an invalid drive transfer fixture breaks, a
+	// relation beyond the schema as semantic:<name>.
+	Expect []string `json:"expect"`
 }
 
 // codec decodes one schema definition's fixtures through its exported
@@ -102,6 +113,105 @@ var connectionCodecs = map[string]codec{
 	"ProtocolErrorReport": toolExecutionCodecs["ProtocolErrorReport"],
 }
 
+// driveTransferCodecs decode the drive transfer fixtures; a response's
+// decoder takes the decoded fixtures that its fixture's pair names as the
+// request it answers.
+func driveTransferCodecs(fixtures []fixture) map[string]codec {
+	byName := make(map[string]fixture, len(fixtures))
+	for _, f := range fixtures {
+		byName[f.Name] = f
+	}
+	codecs := map[string]codec{
+		"ListFilesQuery":   parameterCodec(values(DecodeListFilesQuery), listFilesQuery, ListFilesQuery.Query),
+		"ListChangesQuery": parameterCodec(values(DecodeListChangesQuery), listChangesQuery, ListChangesQuery.Query),
+		"CommonQuery":      parameterCodec(values(DecodeCommonQuery), commonQuery, CommonQuery.Query),
+		"DrivePathParams": parameterCodec(DecodeDrivePathParams, drivePathParams, func(p DrivePathParams) map[string][]string {
+			return singleValues(p.Params())
+		}),
+		"ContentPathParams": parameterCodec(DecodeContentPathParams, contentPathParams, func(p ContentPathParams) map[string][]string {
+			return singleValues(p.Params())
+		}),
+		"UploadContentRequestHeaders":   parameterCodec(values(DecodeUploadContentRequestHeaders), uploadContentRequestHeaders, UploadContentRequestHeaders.Header),
+		"DownloadContentRequestHeaders": parameterCodec(values(DecodeDownloadContentRequestHeaders), downloadContentRequestHeaders, DownloadContentRequestHeaders.Header),
+		"RateLimitedResponseHeaders":    parameterCodec(values(DecodeRateLimitedResponseHeaders), rateLimitedResponseHeaders, RateLimitedResponseHeaders.Header),
+		"DriveChanged":                  jsonCodec(DecodeDriveChanged),
+		"CommitRequest":                 jsonCodec(DecodeCommitRequest),
+		"Error": {
+			decode: func(f fixture, raw []byte) (any, error) { return DecodeDriveTransferError(f.Endpoint, f.Status, raw) },
+			encode: func(v any) []byte { return Encode(v.(ErrorBody)) },
+		},
+	}
+	// paired decodes the fixture that f's pair names under key.
+	paired := func(f fixture, key string) (any, bool) {
+		name, ok := f.Pair[key]
+		if !ok {
+			return nil, false
+		}
+		request := byName[name]
+		v, err := codecs[request.Schema].decode(request, request.Value)
+		if err != nil {
+			panic("paired fixture " + name + " does not decode: " + err.Error())
+		}
+		return v, true
+	}
+	codecs["PartialContentResponseHeaders"] = codec{
+		decode: func(f fixture, raw []byte) (any, error) {
+			var ctx PartialContentResponseContext
+			if h, ok := paired(f, "request_headers"); ok {
+				ctx.RequestHeaders = Some(h.(DownloadContentRequestHeaders))
+			}
+			return parameterCodec(values(func(h http.Header) (PartialContentResponseHeaders, error) {
+				return DecodePartialContentResponseHeaders(h, ctx)
+			}), partialContentResponseHeaders, PartialContentResponseHeaders.Header).decode(f, raw)
+		},
+		encode: parameterCodec[PartialContentResponseHeaders](nil, nil, PartialContentResponseHeaders.Header).encode,
+	}
+	codecs["ListFilesResponse"] = codec{
+		decode: func(f fixture, raw []byte) (any, error) {
+			var ctx ListFilesResponseContext
+			if q, ok := paired(f, "query"); ok {
+				ctx.Query = Some(q.(ListFilesQuery))
+			}
+			return DecodeListFilesResponse(raw, ctx)
+		},
+		encode: func(v any) []byte { return Encode(v.(ListFilesResponse)) },
+	}
+	codecs["ListChangesResponse"] = codec{
+		decode: func(f fixture, raw []byte) (any, error) {
+			var ctx ListChangesResponseContext
+			if q, ok := paired(f, "query"); ok {
+				ctx.Query = Some(q.(ListChangesQuery))
+			}
+			return DecodeListChangesResponse(raw, ctx)
+		},
+		encode: func(v any) []byte { return Encode(v.(ListChangesResponse)) },
+	}
+	codecs["UploadContentResponse"] = codec{
+		decode: func(f fixture, raw []byte) (any, error) {
+			var ctx UploadContentResponseContext
+			if p, ok := paired(f, "path_params"); ok {
+				ctx.PathParams = Some(p.(ContentPathParams))
+			}
+			if h, ok := paired(f, "request_headers"); ok {
+				ctx.RequestHeaders = Some(h.(UploadContentRequestHeaders))
+			}
+			return DecodeUploadContentResponse(raw, ctx)
+		},
+		encode: func(v any) []byte { return Encode(v.(UploadContentResponse)) },
+	}
+	codecs["CommitResponse"] = codec{
+		decode: func(f fixture, raw []byte) (any, error) {
+			var ctx CommitResponseContext
+			if r, ok := paired(f, "request"); ok {
+				ctx.Request = Some(r.(CommitRequest))
+			}
+			return DecodeCommitResponse(raw, ctx)
+		},
+		encode: func(v any) []byte { return Encode(v.(CommitResponse)) },
+	}
+	return codecs
+}
+
 func readFixtures(t *testing.T, name string) []fixture {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("..", "..", "protocol", name))
@@ -126,6 +236,7 @@ func TestFixturesDecodeAndReencode(t *testing.T) {
 	}{
 		{"tool-execution-v1.fixtures.json", map[string]int{"fixtures": 61, "valid": 29}, func([]fixture) map[string]codec { return toolExecutionCodecs }},
 		{"connection-v1.fixtures.json", map[string]int{"fixtures": 239, "valid": 61, "http_status": 17}, func([]fixture) map[string]codec { return connectionCodecs }},
+		{"drive-transfer-v1.fixtures.json", map[string]int{"fixtures": 126, "valid": 49, "relation only": 34, "endpoint and status": 15, "endpoint and error": 23, "pair": 30}, driveTransferCodecs},
 	}
 	for _, file := range files {
 		t.Run(file.name, func(t *testing.T) {
@@ -152,6 +263,18 @@ func census(fixtures []fixture) map[string]int {
 		if f.HTTPStatus != 0 {
 			counts["http_status"]++
 		}
+		if f.Endpoint != "" && f.Status != 0 {
+			counts["endpoint and status"]++
+		}
+		if f.Endpoint != "" && f.Error != nil {
+			counts["endpoint and error"]++
+		}
+		if len(f.Pair) > 0 {
+			counts["pair"]++
+		}
+		if !f.Valid && len(f.Expect) > 0 && !slices.ContainsFunc(f.Expect, func(rule string) bool { return !strings.HasPrefix(rule, "semantic:") }) {
+			counts["relation only"]++
+		}
 	}
 	return counts
 }
@@ -176,13 +299,16 @@ func runFixture(t *testing.T, codecs map[string]codec, f fixture) {
 		if !errors.As(err, &decodeErr) {
 			t.Fatalf("invalid fixture decoded: %v, %v", got, err)
 		}
+		if f.Error != nil && (decodeErr.Status != f.Error.Status || decodeErr.Code != f.Error.Code) {
+			t.Fatalf("answered %d %s, want %d %s", decodeErr.Status, decodeErr.Code, f.Error.Status, f.Error.Code)
+		}
 		return
 	}
 	if err != nil {
 		t.Fatalf("valid fixture rejected: %v", err)
 	}
 	assertReencodes(t, c, f, got)
-	if f.HTTPStatus != 0 {
+	if f.HTTPStatus != 0 || f.Endpoint != "" {
 		assertRejectedUnderAnotherStatus(t, c, f)
 	}
 }
@@ -192,11 +318,15 @@ func runFixture(t *testing.T, codecs map[string]codec, f fixture) {
 func assertRejectedUnderAnotherStatus(t *testing.T, c codec, f fixture) {
 	t.Helper()
 	another := 400
-	if f.HTTPStatus == 400 {
+	if f.HTTPStatus == 400 || f.Status == 400 {
 		another = 409
 	}
 	other := f
-	other.HTTPStatus = another
+	if f.HTTPStatus != 0 {
+		other.HTTPStatus = another
+	} else {
+		other.Status = another
+	}
 	_, err := c.decode(other, f.Value)
 	var decodeErr *DecodeError
 	if !errors.As(err, &decodeErr) || decodeErr.Status != 400 || decodeErr.Code != ErrorInvalidMessage {
@@ -344,5 +474,75 @@ func readSchema(t *testing.T, name string, schema any) {
 	}
 	if err := json.Unmarshal(data, schema); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestDriveTransferEndpointsMatchTheSchemaTable compares DriveTransferEndpoints
+// with the drive transfer schema's endpoint table, pair by pair, and each pair
+// with ClientErrors.
+func TestDriveTransferEndpointsMatchTheSchemaTable(t *testing.T) {
+	var drive struct {
+		Defs struct {
+			DriveTransferEndpoints struct {
+				Properties map[DriveTransferEndpoint]struct {
+					Const struct {
+						Errors []string `json:"errors"`
+					} `json:"const"`
+				} `json:"properties"`
+			}
+		} `json:"$defs"`
+	}
+	readSchema(t, "drive-transfer-v1.schema.json", &drive)
+	endpoints := drive.Defs.DriveTransferEndpoints.Properties
+	if len(endpoints) != len(DriveTransferEndpoints) {
+		t.Fatalf("DriveTransferEndpoints has %d endpoints, the schema %d", len(DriveTransferEndpoints), len(endpoints))
+	}
+	for endpoint, answers := range DriveTransferEndpoints {
+		var got []string
+		for _, answer := range answers {
+			if ClientErrors[answer.Code] != answer.Status {
+				t.Errorf("%s: %d %s is not a pair of ClientErrors", endpoint, answer.Status, answer.Code)
+			}
+			got = append(got, strconv.Itoa(answer.Status)+" "+string(answer.Code))
+		}
+		want := endpoints[endpoint].Const.Errors
+		slices.Sort(got)
+		slices.Sort(want)
+		if !slices.Equal(got, want) {
+			t.Errorf("%s: DriveTransferEndpoints lists %q, the schema %q", endpoint, got, want)
+		}
+	}
+}
+
+// TestDriveTransferLimitsMatchTheSchema compares each limit the decoders apply
+// with the drive transfer schema's DriveTransferLimits.
+func TestDriveTransferLimitsMatchTheSchema(t *testing.T) {
+	var drive struct {
+		Defs struct {
+			DriveTransferLimits struct {
+				Properties map[string]struct {
+					Const *int64 `json:"const"`
+				} `json:"properties"`
+			}
+		} `json:"$defs"`
+	}
+	readSchema(t, "drive-transfer-v1.schema.json", &drive)
+	limits := drive.Defs.DriveTransferLimits.Properties
+	for name, got := range map[string]int64{
+		"list_page_max_items":              ListPageMaxItems,
+		"list_page_max_json_bytes":         ListPageMaxJSONBytes,
+		"commit_max_changes":               CommitMaxChanges,
+		"commit_request_max_json_bytes":    CommitRequestMaxJSONBytes,
+		"commit_response_max_json_bytes":   CommitResponseMaxJSONBytes,
+		"rule_max_utf8_bytes":              RuleMaxUTF8Bytes,
+		"file_max_bytes":                   FileMaxBytes,
+		"path_max_utf8_bytes":              drivePathMaxBytes,
+		"path_segment_max_utf8_bytes":      driveSegmentMaxSize,
+		"drive_changed_sse_max_json_bytes": DriveChangedSSEMaxJSONBytes,
+		"retry_after_max_seconds":          retryAfterMaxSeconds,
+	} {
+		if want := limits[name].Const; want == nil || *want != got {
+			t.Errorf("%s is %d in the decoders and %v in the schema", name, got, want)
+		}
 	}
 }

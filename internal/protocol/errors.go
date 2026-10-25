@@ -71,6 +71,48 @@ func errorCodeNames() []string {
 	return names
 }
 
+// ClientError is the status and code of one error answer.
+type ClientError struct {
+	Status int
+	Code   ErrorCode
+}
+
+// DriveTransferEndpoints lists the error answers of each drive transfer
+// endpoint, as the drive transfer schema's endpoint table states them.
+var DriveTransferEndpoints = map[DriveTransferEndpoint][]ClientError{
+	EndpointListFiles: transferErrors(),
+	EndpointListChanges: append(transferErrors(),
+		ClientError{http.StatusGone, ErrorDriveCursorExpired},
+	),
+	EndpointUploadContent: append(transferErrors(),
+		ClientError{http.StatusBadRequest, ErrorContentHashMismatch},
+		ClientError{http.StatusRequestEntityTooLarge, ErrorFileTooLarge},
+		ClientError{http.StatusTooManyRequests, ErrorRateLimited},
+	),
+	EndpointCommit: append(transferErrors(),
+		ClientError{http.StatusConflict, ErrorContentMissing},
+		ClientError{http.StatusRequestEntityTooLarge, ErrorRequestTooLarge},
+	),
+	EndpointDownloadContent: append(transferErrors(),
+		ClientError{http.StatusNotFound, ErrorContentNotFound},
+		ClientError{http.StatusRequestedRangeNotSatisfiable, ErrorRangeNotSatisfiable},
+	),
+}
+
+// transferErrors are the answers every drive transfer endpoint lists.
+func transferErrors() []ClientError {
+	return []ClientError{
+		{http.StatusBadRequest, ErrorInvalidMessage},
+		{http.StatusUnauthorized, ErrorCredentialExpired},
+		{http.StatusUnauthorized, ErrorCredentialInvalid},
+		{http.StatusUnauthorized, ErrorCredentialRevoked},
+		{http.StatusForbidden, ErrorDriveAccessDenied},
+		{http.StatusForbidden, ErrorInstanceUnavailable},
+		{http.StatusConflict, ErrorStaleBinding},
+		{http.StatusConflict, ErrorStaleConnection},
+	}
+}
+
 // DecodeError is a decoding failure: the JSON pointer of the first value that
 // fails and the answer computer-hub sends for it.
 type DecodeError struct {
@@ -86,13 +128,15 @@ func (e *DecodeError) Error() string {
 
 // invalid is the answer of every decoding failure, 400 invalid_message, also
 // for a member over its own limit inside a body within its limit, but a
-// request body over its complete limit.
+// request body over its complete limit, an upload Content-Length above
+// 500,000,000, a download Range naming more than one range and a commit of
+// more than 10,000 changes.
 func invalid(ptr, reason string) *DecodeError {
 	return &DecodeError{Pointer: ptr, Status: http.StatusBadRequest, Code: ErrorInvalidMessage, Reason: reason}
 }
 
-// tooLarge answers a request body over its complete limit with 413
-// request_too_large.
+// tooLarge answers a request body over its complete limit, and a commit of
+// more than 10,000 changes, with 413 request_too_large.
 func tooLarge(ptr, reason string) *DecodeError {
 	return &DecodeError{Pointer: ptr, Status: http.StatusRequestEntityTooLarge, Code: ErrorRequestTooLarge, Reason: reason}
 }

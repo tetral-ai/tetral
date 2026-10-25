@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -81,6 +82,24 @@ func TestDecodingRulesBeyondTheFixtures(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+	}
+	long := func(n int) string { return strings.Repeat("v", n) }
+	files := func(paths ...string) func() error {
+		entries := make([]string, len(paths))
+		for i, path := range paths {
+			entries[i] = `{"path":"` + path + `","version_id":"v1","content_sha256":"331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95","size_bytes":7,"executable":false}`
+		}
+		return func() error {
+			_, err := DecodeListFilesResponse([]byte(`{"files":[`+strings.Join(entries, ",")+`],"has_more":false}`), ListFilesResponseContext{})
+			return err
+		}
+	}
+	commit := func(n int) []byte {
+		changes := make([]string, n)
+		for i := range changes {
+			changes[i] = `{"path":"f` + strconv.Itoa(i) + `","change":"delete","base_sha256":"331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95"}`
+		}
+		return []byte(`{"protocol_version":1,"connection_id":"conn","binding_id":"bind","changes":[` + strings.Join(changes, ",") + `]}`)
 	}
 	tests := []struct {
 		name string
@@ -192,6 +211,135 @@ func TestDecodingRulesBeyondTheFixtures(t *testing.T) {
 			decode: func() error { _, err := DecodeHeartbeat(escapedHeartbeat(DefaultMessageJSONBytes + 1)); return err },
 			status: http.StatusRequestEntityTooLarge,
 			code:   ErrorRequestTooLarge,
+		},
+		{
+			name: "a files page over 4 MiB",
+			decode: func() error {
+				_, err := DecodeListFilesResponse([]byte(`{"files":[{"path":"a.md","version_id":"`+long(ListPageMaxJSONBytes)+
+					`","content_sha256":"331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95","size_bytes":7,"executable":false}],"has_more":false}`), ListFilesResponseContext{})
+				return err
+			},
+		},
+		{
+			name: "a protocol_version fraction on a files page",
+			decode: func() error {
+				_, err := DecodeListFilesResponse([]byte(`{"files":[],"has_more":false,"protocol_version":1.0}`), ListFilesResponseContext{})
+				return err
+			},
+			pointer: "/protocol_version",
+		},
+		{name: "paths that differ only in the case of a Cherokee letter from U+13A0 to U+13EF", decode: files("\u13a0", "\uab70"), pointer: "/files/1/path"},
+		{name: "paths that differ only in the case of a Cherokee letter from U+13F0 to U+13F5", decode: files("\u13f0", "\u13f8"), pointer: "/files/1/path"},
+		{
+			name: "a changes page over 4 MiB",
+			decode: func() error {
+				_, err := DecodeListChangesResponse([]byte(`{"records":[{"seq":42,"index":0,"path":"a.md","operation":"deleted","version_id":"`+
+					long(ListPageMaxJSONBytes)+`","content_sha256":null,"size_bytes":0,"executable":false}],"has_more":false}`), ListChangesResponseContext{})
+				return err
+			},
+		},
+		{
+			name: "a commit response over 16 MiB",
+			decode: func() error {
+				_, err := DecodeCommitResponse([]byte(`{"seq":43,"results":[{"status":"accepted","version_id":"`+
+					long(CommitResponseMaxJSONBytes)+`"}]}`), CommitResponseContext{})
+				return err
+			},
+		},
+		{
+			name: "an accepted commit result with a rule over 512 bytes",
+			decode: func() error {
+				_, err := DecodeCommitResponse([]byte(`{"seq":43,"results":[{"status":"accepted","version_id":"v1","rule":"`+
+					long(RuleMaxUTF8Bytes+1)+`"}]}`), CommitResponseContext{})
+				return err
+			},
+			pointer: "/results/0/rule",
+		},
+		{
+			name: "an accepted commit result with a rule of 257 two-byte characters",
+			decode: func() error {
+				_, err := DecodeCommitResponse([]byte(`{"seq":43,"results":[{"status":"accepted","version_id":"v1","rule":"`+
+					strings.Repeat("é", RuleMaxUTF8Bytes/2+1)+`"}]}`), CommitResponseContext{})
+				return err
+			},
+			pointer: "/results/0/rule",
+		},
+		{
+			name: "a header the definition models, given twice",
+			decode: func() error {
+				_, err := DecodeDownloadContentRequestHeaders(http.Header{"Range": {"bytes=0-1", "bytes=2-3"}})
+				return err
+			},
+			pointer: "/Range",
+		},
+		{
+			name: "a header the definition does not model, given twice, is not read",
+			check: func(t *testing.T) {
+				if _, err := DecodeDownloadContentRequestHeaders(http.Header{"Range": {"bytes=0-1"}, "Accept": {"a", "b"}}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "a commit body over 16 MiB, answered before any other rule",
+			decode: func() error {
+				_, err := DecodeCommitRequest(bytes.Repeat([]byte("x"), CommitRequestMaxJSONBytes+1))
+				return err
+			},
+			status: http.StatusRequestEntityTooLarge,
+			code:   ErrorRequestTooLarge,
+		},
+		{
+			name: "a commit of 10,000 changes passes the change count",
+			check: func(t *testing.T) {
+				r, err := DecodeCommitRequest(commit(CommitMaxChanges))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := CheckCommitChanges(r); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "a commit of 10,001 changes decodes and fails the change count",
+			decode: func() error {
+				r, err := DecodeCommitRequest(commit(CommitMaxChanges + 1))
+				if err != nil {
+					return errors.New("the commit did not decode: " + err.Error())
+				}
+				return CheckCommitChanges(r)
+			},
+			pointer: "/changes",
+			status:  http.StatusRequestEntityTooLarge,
+			code:    ErrorRequestTooLarge,
+		},
+		{
+			name: "a commit of 10,001 changes with one path twice fails as a duplicate before the change count",
+			decode: func() error {
+				_, err := DecodeCommitRequest(bytes.Replace(commit(CommitMaxChanges+1), []byte(`"path":"f10000"`), []byte(`"path":"f0"`), 1))
+				return err
+			},
+			pointer: "/changes/10000/path",
+		},
+		{name: "a path of 30 non-starters in its NFKD form", check: accepted(files("\u00e9" + strings.Repeat("\u0301", 29)))},
+		{name: "a path of 31 non-starters in its NFKD form", decode: files("\u00e9" + strings.Repeat("\u0301", 30)), pointer: "/files/0/path"},
+		{
+			name: "a Sha256 followed by a line feed",
+			decode: func() error {
+				_, err := DecodeListFilesResponse([]byte(`{"files":[{"path":"a.md","version_id":"v1",`+
+					`"content_sha256":"331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95\n","size_bytes":7,"executable":false}],"has_more":false}`), ListFilesResponseContext{})
+				return err
+			},
+			pointer: "/files/0/content_sha256",
+		},
+		{
+			name: "a drive.changed notice over 64 KiB",
+			decode: func() error {
+				_, err := DecodeDriveChanged([]byte(`{"protocol_version":1,"connection_id":"conn","message_id":"msg","type":"drive.changed",` +
+					`"payload":{"drive_id":"drive","seq":43},"padding":"` + long(DriveChangedSSEMaxJSONBytes) + `"}`))
+				return err
+			},
 		},
 	}
 	for _, test := range tests {

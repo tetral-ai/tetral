@@ -419,9 +419,9 @@ func stringSize(s string) int {
 // failure, after which every step is a no-op.
 type decoder struct {
 	err error
-	// unreadable holds the query parameters given more than once or with a
-	// value that is not UTF-8: reading one fails, and one that the definition
-	// does not model is never read.
+	// unreadable holds the parameters and headers given more than once or
+	// with a value that is not UTF-8: reading one fails, and one that the
+	// definition does not model is never read.
 	unreadable map[*value]string
 	// unreadableErr is the first such read, recorded even after another
 	// failure: that rule comes first, so its failure is the one returned.
@@ -871,8 +871,8 @@ func integerTokens[T any](check func(T, *value) error, names ...string) func(T, 
 	}
 }
 
-// decodeParameters decodes query parameters as the object of strings the
-// schema's definition models.
+// decodeParameters decodes query parameters, path parameters or headers as
+// the object of strings the schema's definition models.
 func decodeParameters[T any](params map[string][]string, f decodeFunc[T]) (T, error) {
 	var zero T
 	names := make([]string, 0, len(params))
@@ -912,4 +912,17 @@ func singleValues(params map[string]string) map[string][]string {
 		values[name] = []string{v}
 	}
 	return values
+}
+
+// decodeCheckedParameters decodes parameters and then applies check.
+func decodeCheckedParameters[T any](params map[string][]string, f decodeFunc[T], check func(T, *value) error) (T, error) {
+	p, err := decodeParameters(params, f)
+	if err == nil && check != nil {
+		err = check(p, nil)
+	}
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	return p, nil
 }
