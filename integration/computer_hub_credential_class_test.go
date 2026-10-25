@@ -97,7 +97,7 @@ func TestComputerHubSeparatesConnectionKeysFromWorkspaceCredentials(t *testing.T
 		t.Fatal(err)
 	}
 	hubDB := dbconnect.NewClientForTesting(workloads.OpenWorkload(t, "computer_hub", nil))
-	instances := computerhub.InstanceRoutes{Database: hubDB, MaxCredentialLifetime: time.Hour, PageTokenKey: make([]byte, 32), Events: computerhub.NewInstanceEvents(hubDB, nil)}
+	instances := computerhub.InstanceRoutes{Database: hubDB, MaxCredentialLifetime: time.Hour, PageTokenKey: make([]byte, 32), Events: computerhub.NewInstanceEvents(hubDB, "0.0.0", nil)}
 	hub := httptest.NewServer(computerhub.BuildHTTPHandler(workload.NewReadiness(), computerhub.NewRouter(verifier, computerhub.WithInstanceRoutes(instances))))
 	t.Cleanup(hub.Close)
 	edge := httptest.NewServer(classEdge{checkAddress: startSDKAuthorization(t, authDB, signer, time.Minute), hubURL: hub.URL})

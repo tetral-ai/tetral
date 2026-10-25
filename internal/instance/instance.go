@@ -119,22 +119,21 @@ func NotifyInstanceEvent(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID,
 	return err
 }
 
-// InstanceObject is the public instance object. The connection, CLI and
-// count fields hold their values before any connection.
+// InstanceObject is the public instance object.
 type InstanceObject struct {
-	ID                  string           `json:"id"`
-	Kind                string           `json:"kind"`
-	ComputerID          *string          `json:"computer_id"`
-	Name                *string          `json:"name"`
-	RegistrationState   string           `json:"registration_state"`
-	Unused              bool             `json:"unused"`
-	Connection          json.RawMessage  `json:"connection"`
-	CLIVersion          *string          `json:"cli_version"`
-	CLIUpdateAvailable  bool             `json:"cli_update_available"`
-	ComputerCount       int              `json:"computer_count"`
-	BindingCount        int              `json:"binding_count"`
-	LastCredentialReuse *CredentialReuse `json:"last_credential_reuse"`
-	ObservedAt          string           `json:"observed_at"`
+	ID                  string            `json:"id"`
+	Kind                string            `json:"kind"`
+	ComputerID          *string           `json:"computer_id"`
+	Name                *string           `json:"name"`
+	RegistrationState   string            `json:"registration_state"`
+	Unused              bool              `json:"unused"`
+	Connection          *ConnectionObject `json:"connection"`
+	CLIVersion          *string           `json:"cli_version"`
+	CLIUpdateAvailable  bool              `json:"cli_update_available"`
+	ComputerCount       int               `json:"computer_count"`
+	BindingCount        int               `json:"binding_count"`
+	LastCredentialReuse *CredentialReuse  `json:"last_credential_reuse"`
+	ObservedAt          string            `json:"observed_at"`
 }
 
 // CredentialReuse is the latest use of a credential that a pending
@@ -144,16 +143,44 @@ type CredentialReuse struct {
 	DetectedAt   string `json:"detected_at"`
 }
 
-// ObjectOf returns the instance object observed at observedAt, the database
-// clock of the read.
-func ObjectOf(value Instance, observedAt time.Time) InstanceObject {
-	return InstanceObject{
-		ID:                value.ID,
-		Kind:              value.Kind,
-		Name:              value.Name,
-		RegistrationState: value.RegistrationState,
-		ObservedAt:        FormatTime(observedAt),
+// ReadObjects returns the instance objects of values observed at now, the
+// database clock of tx: each one's latest connection, the capabilities of
+// its latest accepted ready, and cli_update_available against
+// recommendedCLI, the recommended CLI version.
+func ReadObjects(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, values []Instance, recommendedCLI string, now time.Time) ([]InstanceObject, error) {
+	ids := make([]string, len(values))
+	for i, value := range values {
+		ids[i] = value.ID
 	}
+	connections, capabilities, err := connectionFacts(ctx, tx, ws, ids)
+	if err != nil {
+		return nil, err
+	}
+	objects := make([]InstanceObject, len(values))
+	for i, value := range values {
+		objects[i] = InstanceObject{
+			ID:                 value.ID,
+			Kind:               value.Kind,
+			Name:               value.Name,
+			RegistrationState:  value.RegistrationState,
+			CLIVersion:         value.CLIVersion,
+			CLIUpdateAvailable: value.CLIVersion != nil && VersionBelow(*value.CLIVersion, recommendedCLI),
+			ObservedAt:         FormatTime(now),
+		}
+		if connection, ok := connections[value.ID]; ok {
+			objects[i].Connection = connectionObjectOf(connection, capabilities[value.ID], now)
+		}
+	}
+	return objects, nil
+}
+
+// ReadObject returns the instance object of value observed at now.
+func ReadObject(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, value Instance, recommendedCLI string, now time.Time) (InstanceObject, error) {
+	objects, err := ReadObjects(ctx, tx, ws, []Instance{value}, recommendedCLI, now)
+	if err != nil {
+		return InstanceObject{}, err
+	}
+	return objects[0], nil
 }
 
 // FormatTime renders a time as the API does: RFC 3339 in UTC.

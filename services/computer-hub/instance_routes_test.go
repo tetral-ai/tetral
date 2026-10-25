@@ -78,7 +78,7 @@ func newHubFixture(t *testing.T, maxLifetime time.Duration) *hubFixture {
 	}
 	logger := workload.NewProcessLogger(f.logs, ServiceName, "test", "test", workload.DefaultDiagnosticConfig()).Logger
 	client := dbconnect.NewClientForTesting(hubDB)
-	f.events = NewInstanceEvents(client, logger)
+	f.events = NewInstanceEvents(client, "0.0.0", logger)
 	go func() { _ = f.events.Run(ctx) }()
 	router := NewRouter(verifier, WithLogger(logger), WithInstanceRoutes(InstanceRoutes{
 		Database:              client,

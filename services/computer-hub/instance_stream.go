@@ -27,6 +27,8 @@ const subscriberBuffer = 64
 type InstanceEvents struct {
 	database *dbconnect.Client
 	logger   *slog.Logger
+	// recommendedCLI decides the events' cli_update_available.
+	recommendedCLI string
 	// listening is closed once the first LISTEN is in place.
 	listening     chan struct{}
 	listeningOnce sync.Once
@@ -45,13 +47,14 @@ type instanceEvent struct {
 	data []byte
 }
 
-// NewInstanceEvents returns the fan-out over database; Run receives the
+// NewInstanceEvents returns the fan-out over database, whose instance
+// objects read cli_update_available against recommendedCLI; Run receives the
 // notices.
-func NewInstanceEvents(database *dbconnect.Client, logger *slog.Logger) *InstanceEvents {
+func NewInstanceEvents(database *dbconnect.Client, recommendedCLI string, logger *slog.Logger) *InstanceEvents {
 	if logger == nil {
 		logger = workload.ComponentLogger(ServiceName)
 	}
-	return &InstanceEvents{database: database, logger: logger, listening: make(chan struct{}), subscribers: map[workspace.ID]map[*instanceSubscriber]struct{}{}}
+	return &InstanceEvents{database: database, logger: logger, recommendedCLI: recommendedCLI, listening: make(chan struct{}), subscribers: map[workspace.ID]map[*instanceSubscriber]struct{}{}}
 }
 
 // Run listens on EventChannel, reconnecting after a failure, until ctx ends;
@@ -133,7 +136,10 @@ func (e *InstanceEvents) deliver(ctx context.Context, payload string) {
 			return err
 		}
 		now, err := instance.Now(ctx, tx)
-		object = instance.ObjectOf(row, now)
+		if err != nil {
+			return err
+		}
+		object, err = instance.ReadObject(ctx, tx, ws, row, e.recommendedCLI, now)
 		return err
 	})
 	if err != nil {

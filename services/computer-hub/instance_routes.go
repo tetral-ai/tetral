@@ -22,11 +22,14 @@ import (
 )
 
 // InstanceRoutes is what the instance routes need: the serving database
-// client, the two settings they apply and the pod's instance event fan-out.
+// client, the settings they apply and the pod's instance event fan-out.
 type InstanceRoutes struct {
 	Database              *dbconnect.Client
 	MaxCredentialLifetime time.Duration
 	PageTokenKey          []byte
+	// RecommendedCLIVersion decides each instance read's
+	// cli_update_available.
+	RecommendedCLIVersion string
 	Events                *InstanceEvents
 }
 
@@ -131,6 +134,9 @@ func (h *instanceHandler) createInstance(w http.ResponseWriter, r *http.Request)
 			return err
 		}
 		issued = issuance{instance: created, credential: credential, key: &connectionKey, now: now}
+		if issued.object, err = instance.ReadObject(ctx, tx, ws, created, h.RecommendedCLIVersion, now); err != nil {
+			return err
+		}
 		return instance.SaveIdempotencyRecord(ctx, tx, ws, scope, instance.IdempotencyRecord{Fingerprint: fingerprint, InstanceID: created.ID, CredentialID: credential.ID, Status: http.StatusCreated})
 	})
 	if err != nil {
@@ -141,7 +147,7 @@ func (h *instanceHandler) createInstance(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusCreated, struct {
 		Instance   instance.InstanceObject         `json:"instance"`
 		Credential instance.IssuedCredentialObject `json:"credential"`
-	}{instance.ObjectOf(issued.instance, issued.now), issued.credentialObject()})
+	}{issued.object, issued.credentialObject()})
 }
 
 func (h *instanceHandler) issueCredential(w http.ResponseWriter, r *http.Request) {
@@ -237,9 +243,11 @@ func (h *instanceHandler) listInstances(w http.ResponseWriter, r *http.Request) 
 		}
 		more := len(rows) > page.limit
 		rows = rows[:min(len(rows), page.limit)]
-		for _, row := range rows {
-			response.Data = append(response.Data, instance.ObjectOf(row, now))
+		objects, err := instance.ReadObjects(ctx, tx, ws, rows, h.RecommendedCLIVersion, now)
+		if err != nil {
+			return err
 		}
+		response.Data = append(response.Data, objects...)
 		if more {
 			response.NextPage = nextPage(h.PageTokenKey, binding, rows[len(rows)-1].StorageSequence, true)
 		}
@@ -261,7 +269,10 @@ func (h *instanceHandler) readInstance(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		now, err := instance.Now(ctx, tx)
-		object = instance.ObjectOf(row, now)
+		if err != nil {
+			return err
+		}
+		object, err = instance.ReadObject(ctx, tx, ws, row, h.RecommendedCLIVersion, now)
 		return err
 	})
 	if err != nil {
@@ -312,10 +323,14 @@ func (h *instanceHandler) listCredentials(w http.ResponseWriter, r *http.Request
 		if err != nil {
 			return err
 		}
+		live, err := instance.LiveCredentialID(ctx, tx, ws, instanceID, now)
+		if err != nil {
+			return err
+		}
 		more := len(rows) > page.limit
 		rows = rows[:min(len(rows), page.limit)]
 		for _, row := range rows {
-			response.Data = append(response.Data, instance.CredentialObjectOf(row, now))
+			response.Data = append(response.Data, instance.CredentialObjectOf(row, live, now))
 		}
 		if more {
 			response.NextPage = nextPage(h.PageTokenKey, binding, rows[len(rows)-1].StorageSequence, true)
@@ -348,16 +363,20 @@ func (h *instanceHandler) revokeCredential(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// issuance is the result of an issuing request. key is nil on a replay.
+// issuance is the result of an issuing request. key is nil on a replay;
+// object is the instance object of an instance creation, and live the
+// credential of the instance's live connection.
 type issuance struct {
 	instance   instance.Instance
+	object     instance.InstanceObject
 	credential instance.Credential
 	key        *instance.ConnectionKey
+	live       string
 	now        time.Time
 }
 
 func (i issuance) credentialObject() instance.IssuedCredentialObject {
-	object := instance.IssuedCredentialObject{CredentialObject: instance.CredentialObjectOf(i.credential, i.now)}
+	object := instance.IssuedCredentialObject{CredentialObject: instance.CredentialObjectOf(i.credential, i.live, i.now)}
 	if i.key != nil {
 		plaintext := i.key.Reveal()
 		object.ConnectionKey = &plaintext
@@ -385,7 +404,15 @@ func (h *instanceHandler) replay(ctx context.Context, tx *dbconnect.Tx, ws works
 		return issuance{}, true, err
 	}
 	now, err := instance.Now(ctx, tx)
-	return issuance{instance: current, credential: credential, now: now}, true, err
+	if err != nil {
+		return issuance{}, true, err
+	}
+	object, err := instance.ReadObject(ctx, tx, ws, current, h.RecommendedCLIVersion, now)
+	if err != nil {
+		return issuance{}, true, err
+	}
+	live, err := instance.LiveCredentialID(ctx, tx, ws, current.ID, now)
+	return issuance{instance: current, object: object, credential: credential, live: live, now: now}, true, err
 }
 
 // idempotentTx runs fn in one transaction and runs it once more when a

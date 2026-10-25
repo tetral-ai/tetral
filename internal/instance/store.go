@@ -38,7 +38,9 @@ type Instance struct {
 	RegistrationState string
 	CreatedAt         time.Time
 	DeregisteredAt    *time.Time
-	StorageSequence   int64
+	// CLIVersion is the cli_version of the instance's latest ready.
+	CLIVersion      *string
+	StorageSequence int64
 }
 
 // Credential is one instance_credentials row without its digest, which no
@@ -72,7 +74,7 @@ type NewCredential struct {
 	ExpiresAt  time.Time
 }
 
-const instanceColumns = `workspace_id,id,kind,name,registration_state,created_at,deregistered_at,storage_sequence`
+const instanceColumns = `workspace_id,id,kind,name,registration_state,created_at,deregistered_at,cli_version,storage_sequence`
 const credentialColumns = `workspace_id,instance_id,id,state,issued_at,expires_at,revoked_at,revocation_cause,storage_sequence`
 
 // The row functions run inside a transaction scoped to ws
@@ -105,9 +107,9 @@ type scanner interface{ Scan(dest ...any) error }
 
 func scanInstance(row scanner) (Instance, error) {
 	var value Instance
-	var name sql.NullString
+	var name, cliVersion sql.NullString
 	var deregistered sql.NullTime
-	err := row.Scan(&value.WorkspaceID, &value.ID, &value.Kind, &name, &value.RegistrationState, &value.CreatedAt, &deregistered, &value.StorageSequence)
+	err := row.Scan(&value.WorkspaceID, &value.ID, &value.Kind, &name, &value.RegistrationState, &value.CreatedAt, &deregistered, &cliVersion, &value.StorageSequence)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Instance{}, ErrNotFound
 	}
@@ -121,6 +123,7 @@ func scanInstance(row scanner) (Instance, error) {
 		at := deregistered.Time.UTC()
 		value.DeregisteredAt = &at
 	}
+	value.CLIVersion = stringOrNil(cliVersion)
 	value.CreatedAt = value.CreatedAt.UTC()
 	return value, nil
 }

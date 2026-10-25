@@ -1,5 +1,6 @@
 // Package instance owns CLI registrations (instances), their connection
-// credentials and the idempotency records of the issuing routes.
+// credentials, the idempotency records of the issuing routes, and the CLI
+// connections with their replay ledger and protocol-error reports.
 //
 // OWNS:
 //   - Table instances: one row per registration of a CLI with a Workspace.
@@ -12,9 +13,24 @@
 //   - Table instance_idempotency_records: one row per (principal credential,
 //     route, Idempotency-Key) of an issuing request, holding the canonical
 //     request fingerprint and the instance and credential it created.
+//   - Table instance_connections: one row per connection of an instance,
+//     kept after it ends; the latest one is the instance read's connection.
+//     It holds the opening credential, hub_pod (the pod holding the stream),
+//     the lease, stream_count, the accepted ready (its replay record, grant,
+//     os, arch, cli_version, capabilities) or the refused ready (its replay
+//     record and error), the latest accepted heartbeat (its replay record,
+//     sequence, time and grant), and the end. instances.cli_version is the
+//     latest ready's.
+//   - Table connection_upstream_messages: the replay ledger of a
+//     connection's accepted upstream messages other than ready and heartbeat,
+//     keyed by the SHA-256 of message_id, with route, fingerprint and the
+//     exact answer.
+//   - Table connection_protocol_errors: one row per accepted protocol-error
+//     report.
 //   - The connection key format: KeyPrefix followed by the unpadded base64url
 //     encoding of 32 bytes from crypto/rand, KeyLength characters in all.
-//   - The instance event notice on EventChannel.
+//   - The instance event notice on EventChannel, and the connection notice on
+//     each hub pod's ConnectionNoticeChannel.
 //
 // STATES:
 //
@@ -25,6 +41,12 @@
 //	                              whose expires_at is not later than the
 //	                              database clock reads as expired
 //	                              (CredentialState).
+//	instance_connections:         live (not ended, lease_expires_at later
+//	                              than the database clock), lease passed,
+//	                              ended (ended_at, end_cause lease_expired,
+//	                              revoked or deregistered). The instance read
+//	                              shows registering, online or offline
+//	                              (ConnectionState).
 //
 //	Transitions (writer; callers):
 //	  (none) -> active user instance      CreateUserInstance   computer-hub
@@ -36,9 +58,20 @@
 //	    unrevoked -> revoked (deregistration) Deregister       computer-hub
 //	  (none) -> idempotency record        SaveIdempotencyRecord computer-hub
 //	  stale record -> (none)              FindIdempotencyRecord computer-hub
+//	  (none) -> live connection           CreateConnection     computer-hub
+//	  ready unanswered -> accepted        AcceptReady          hubflow.AcceptReady
+//	  ready unanswered -> refused         RefuseReady          computer-hub
+//	  latest heartbeat -> newer one       AcceptHeartbeat      computer-hub
+//	  not ended -> ended                  EndConnection        hubflow.EndConnection
+//	  (none) -> ledger row                SaveUpstreamMessage  computer-hub
+//	  ledger rows -> (none)               EndConnection        hubflow.EndConnection
+//	  (none) -> protocol error            RecordProtocolError  computer-hub
 //
-//	Readers: ReadInstance, LockInstance, ListInstances, ReadCredential,
-//	ReadInstanceCredential, ListCredentials, FindIdempotencyRecord.
+//	Readers: ReadInstance, LockInstance, ListInstances, ReadObjects,
+//	ReadCredential, ReadInstanceCredential, ListCredentials,
+//	LiveCredentialID, FindIdempotencyRecord, LockUnendedConnection,
+//	LockLiveConnection, LockLiveConnectionOf, ReadConnection,
+//	FindUpstreamMessage.
 //
 // INVARIANTS:
 //   - The plaintext of a key is never stored, logged or returned except in
@@ -66,6 +99,17 @@
 //   - AuditCredentialOperation writes one record per issued or revoked
 //     credential after the commit; a revocation that changes nothing writes
 //     none.
+//   - An instance has at most one connection that has not ended (a partial
+//     unique index; IsConnectionRace reports the loser of two concurrent
+//     creations). Every lease and grant is the database clock plus at most
+//     LeaseGrant, capped by the connection credential's expires_at (Grant).
+//   - A replay record is written in the transaction that accepts the
+//     message; a message refused by an earlier check records nothing. The
+//     connection row keeps the ready's record and the latest heartbeat's
+//     only; EndConnection deletes the ledger rows.
+//   - EndConnection and hubflow.AcceptReady notify the pod named by hub_pod
+//     in their transaction; the notice carries only the Workspace and the
+//     connection, and the pod reads the row.
 //
 // UPDATE-WITH:
 //
@@ -76,6 +120,9 @@
 //	internal/httpapi/errors.go (the API error types of this package's errors);
 //	services/computer-hub/instance_routes.go and instance_stream.go (the
 //	  routes over these writers and the EventChannel listener);
+//	services/computer-hub/client_*.go, stream.go and notice.go (the client
+//	  routes, the streams and the connection notice listener);
+//	internal/hubflow (the steps that accept a ready and end a connection);
 //	services/computer-hub/observability.json (AuditEvent);
 //	internal/auth/authority_resolver.go (AuthenticateConnectionKey);
 //	services/auth/ext_authz.go (the credential class rules at the edge).

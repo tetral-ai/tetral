@@ -128,6 +128,18 @@ func ListCredentials(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, ins
 	return credentials, rows.Err()
 }
 
+// LiveCredentialID returns the credential of instanceID's live connection at
+// now, or "" when it has none.
+func LiveCredentialID(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string, now time.Time) (string, error) {
+	var credentialID string
+	err := tx.QueryRow(ctx, `SELECT credential_id FROM instance_connections
+		WHERE workspace_id=$1 AND instance_id=$2 AND ended_at IS NULL AND lease_expires_at>$3`, string(ws), instanceID, now).Scan(&credentialID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return credentialID, err
+}
+
 // CredentialState is the state a read shows at now, the database clock:
 // revoked once revoked_at is set, expired once expires_at is not later than
 // now, otherwise the stored pending or active.
@@ -162,12 +174,15 @@ type IssuedCredentialObject struct {
 	ConnectionKey *string `json:"connection_key"`
 }
 
-// CredentialObjectOf returns the credential object observed at now.
-func CredentialObjectOf(value Credential, now time.Time) CredentialObject {
+// CredentialObjectOf returns the credential object observed at now;
+// liveCredentialID is the credential of the instance's live connection, or
+// "" (LiveCredentialID).
+func CredentialObjectOf(value Credential, liveCredentialID string, now time.Time) CredentialObject {
 	object := CredentialObject{
 		ID:         value.ID,
 		InstanceID: value.InstanceID,
 		State:      CredentialState(value, now),
+		InUse:      value.ID == liveCredentialID,
 		IssuedAt:   FormatTime(value.IssuedAt),
 		ExpiresAt:  FormatTime(value.ExpiresAt),
 	}
