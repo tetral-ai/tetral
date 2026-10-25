@@ -71,7 +71,8 @@ pub fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
     }
 }
 
-/// A running `server run`, killed when dropped.
+/// A running `server run`, killed when dropped, which also removes the
+/// socket that the killed process leaves in the shared `S`.
 pub struct AppServer {
     child: Option<Child>,
     pub socket: PathBuf,
@@ -109,7 +110,7 @@ impl AppServer {
     /// gives its run and how long the exit took.
     pub fn exited(mut self) -> (Run, Duration) {
         let start = Instant::now();
-        let mut child = self.child.take().expect("the process runs");
+        let child = self.child.as_mut().expect("the process runs");
         wait_until("the exit of server run", || {
             child
                 .try_wait()
@@ -117,6 +118,7 @@ impl AppServer {
                 .is_some()
         });
         let elapsed = start.elapsed();
+        let child = self.child.take().expect("the process runs");
         (run::finish(child), elapsed)
     }
 
@@ -133,6 +135,7 @@ impl Drop for AppServer {
         if let Some(child) = &mut self.child {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = std::fs::remove_file(&self.socket);
         }
     }
 }
