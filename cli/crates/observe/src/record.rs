@@ -777,10 +777,10 @@ pub(crate) mod tests {
     ) -> (Written, Written) {
         let registry = Registry::new(catalogue());
         let (stderr, file) = (Written::default(), Written::default());
-        let sinks = Arc::new(Sinks::new(Sink::spawn_stderr(
-            Box::new(stderr.clone()),
-            &registry,
-        )));
+        let sinks = Arc::new(Sinks::new(
+            Sink::spawn_stderr(Box::new(stderr.clone()), &registry),
+            crate::sinks::tests::TEST_CLOCK,
+        ));
         sinks.attach_file(Sink::spawn_file(Box::new(file.clone()), &registry));
         let subscriber = tracing_subscriber::registry().with(layer(sinks.clone()));
         tracing::subscriber::with_default(subscriber, work);

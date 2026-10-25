@@ -148,7 +148,13 @@ pub fn run(arguments: Vec<OsString>) -> Result<Value, CommandError> {
         }
         _ => {}
     }
-    let observer = observe::install(level);
+    let observer = observe::install(
+        level,
+        observe::FlushClock {
+            now: state::seams::now,
+            recheck: state::seams::recheck_interval(),
+        },
+    );
     if matches!(
         cli.command,
         Command::Server {

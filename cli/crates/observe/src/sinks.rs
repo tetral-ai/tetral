@@ -8,11 +8,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rustix::fs::{Mode, OFlags, RenameFlags};
 
 use crate::metrics::{Counter, Registry};
+use crate::stopwatch::MonotonicClock;
 
 /// Records a sink holds that are queued or being written.
 pub const SINK_QUEUE_RECORDS: usize = 1024;
@@ -137,11 +138,23 @@ impl Sink {
     }
 
     /// Waits until every record sent before the call is written or dropped,
-    /// or until `deadline`.
-    fn flush_until(&self, deadline: Instant) {
+    /// or until `deadline` on `clock`.
+    fn flush_until(&self, deadline: Duration, clock: FlushClock) {
         let (done, written) = mpsc::channel();
-        if self.sender.send(Job::Flush(done)).is_ok() {
-            let _ = written.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        if self.sender.send(Job::Flush(done)).is_err() {
+            return;
+        }
+        loop {
+            let left = deadline.saturating_sub((clock.now)());
+            if left.is_zero() {
+                return;
+            }
+            if !matches!(
+                written.recv_timeout(left.min(clock.recheck)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                return;
+            }
         }
     }
 }
@@ -150,27 +163,39 @@ pub(crate) fn failures(registry: &Registry, sink: &str) -> Counter {
     registry.counter("tetral_log_write_failures_total", &[("sink", sink)])
 }
 
+/// The clock a flush waits by, which the caller passes in: its time, and
+/// the longest a flush sleeps before it reads the time again, so that an end
+/// that passed while the machine slept, or while a test moved the clock,
+/// ends the wait within that interval.
+#[derive(Debug, Clone, Copy)]
+pub struct FlushClock {
+    pub now: MonotonicClock,
+    pub recheck: Duration,
+}
+
 /// Stderr from the start, and the log file once one is attached.
 pub struct Sinks {
     stderr: Sink,
     file: OnceLock<Sink>,
-    /// The instant at which every flush ends, once one is set.
-    flush_end: OnceLock<Instant>,
+    clock: FlushClock,
+    /// The time on `clock` at which every flush ends, once one is set.
+    flush_end: OnceLock<Duration>,
 }
 
 impl Sinks {
-    pub fn new(stderr: Sink) -> Sinks {
+    pub fn new(stderr: Sink, clock: FlushClock) -> Sinks {
         Sinks {
             stderr,
             file: OnceLock::new(),
+            clock,
             flush_end: OnceLock::new(),
         }
     }
 
-    /// Makes every later flush end by `end` at the latest; a second end is
-    /// ignored.
-    pub fn end_flushes_by(&self, end: Instant) {
-        let _ = self.flush_end.set(end);
+    /// Makes every later flush end within `left` from now at the latest; a
+    /// second end is ignored.
+    pub fn end_flushes_within(&self, left: Duration) {
+        let _ = self.flush_end.set((self.clock.now)() + left);
     }
 
     /// Attaches the log file's sink; a second one is ignored.
@@ -201,16 +226,16 @@ impl Sinks {
 
     /// Waits until every record written before the call is written or
     /// dropped, at most `limit` in all and never past the end that
-    /// [`Sinks::end_flushes_by`] set; a held log-file sink writes nothing
+    /// [`Sinks::end_flushes_within`] set; a held log-file sink writes nothing
     /// before its slot is filled or dropped.
     pub fn flush(&self, limit: Duration) {
-        let mut deadline = Instant::now() + limit;
+        let mut deadline = (self.clock.now)() + limit;
         if let Some(end) = self.flush_end.get() {
             deadline = deadline.min(*end);
         }
-        self.stderr.flush_until(deadline);
+        self.stderr.flush_until(deadline, self.clock);
         if let Some(file) = self.file.get() {
-            file.flush_until(deadline);
+            file.flush_until(deadline, self.clock);
         }
     }
 }
@@ -303,14 +328,33 @@ impl Write for LogFile {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Barrier;
+    use std::sync::atomic::AtomicU64;
+    use std::time::Instant;
 
     use super::*;
     use crate::catalogue::catalogue;
     use crate::record::tests::{FLUSH, Written};
+
+    fn elapsed() -> Duration {
+        static START: OnceLock<Instant> = OnceLock::new();
+        START.get_or_init(Instant::now).elapsed()
+    }
+
+    /// A clock that moves with real time, for flushes that wait for writers.
+    pub(crate) const TEST_CLOCK: FlushClock = FlushClock {
+        now: elapsed,
+        recheck: Duration::from_millis(10),
+    };
+
+    static MOVED_BY_TEST: AtomicU64 = AtomicU64::new(0);
+
+    fn moved_by_test() -> Duration {
+        Duration::from_millis(MOVED_BY_TEST.load(Ordering::SeqCst))
+    }
 
     fn mode(path: &Path) -> u32 {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
@@ -399,7 +443,10 @@ mod tests {
         let logs = root.path().join("logs");
         let registry = Registry::new(catalogue());
         let stderr = Written::default();
-        let sinks = Sinks::new(Sink::spawn_stderr(Box::new(stderr.clone()), &registry));
+        let sinks = Sinks::new(
+            Sink::spawn_stderr(Box::new(stderr.clone()), &registry),
+            TEST_CLOCK,
+        );
         let file = LogFile::open_with_limit(&logs, 100).unwrap();
         sinks.attach_file(Sink::spawn_file(Box::new(file), &registry));
         fs::set_permissions(&logs, fs::Permissions::from_mode(0o500)).unwrap();
@@ -424,7 +471,10 @@ mod tests {
             registry.counter("tetral_log_write_failures_total", &[("sink", "file")]);
         let stderr = Written::default();
         let file = Written::default();
-        let sinks = Sinks::new(Sink::spawn_stderr(Box::new(stderr.clone()), &registry));
+        let sinks = Sinks::new(
+            Sink::spawn_stderr(Box::new(stderr.clone()), &registry),
+            TEST_CLOCK,
+        );
         let (held, slot) = Sink::spawn_held(SINK_QUEUE_RECORDS, failures(&registry, "file"));
         sinks.attach_file(held);
         sinks.write(record(60));
@@ -437,7 +487,10 @@ mod tests {
 
         // A log file that could not be opened counts every record it was to
         // take, those held before included, while stderr goes on.
-        let sinks = Sinks::new(Sink::spawn_stderr(Box::new(stderr.clone()), &registry));
+        let sinks = Sinks::new(
+            Sink::spawn_stderr(Box::new(stderr.clone()), &registry),
+            TEST_CLOCK,
+        );
         let (held, slot) = Sink::spawn_held(SINK_QUEUE_RECORDS, failures(&registry, "file"));
         sinks.attach_file(held);
         sinks.write(record(60));
@@ -450,7 +503,10 @@ mod tests {
 
         // A start that fails before the log file opens drops its slot: the
         // held records are discarded uncounted and a flush still returns.
-        let sinks = Sinks::new(Sink::spawn_stderr(Box::new(stderr.clone()), &registry));
+        let sinks = Sinks::new(
+            Sink::spawn_stderr(Box::new(stderr.clone()), &registry),
+            TEST_CLOCK,
+        );
         let (held, slot) = Sink::spawn_held(SINK_QUEUE_RECORDS, failures(&registry, "file"));
         sinks.attach_file(held);
         sinks.write(record(60));
@@ -480,10 +536,10 @@ mod tests {
         let registry = Registry::new(catalogue());
         let stderr_held = Arc::new(Barrier::new(2));
         let file_held = Arc::new(Barrier::new(2));
-        let sinks = Sinks::new(Sink::spawn_stderr(
-            Box::new(Held(stderr_held.clone(), false)),
-            &registry,
-        ));
+        let sinks = Sinks::new(
+            Sink::spawn_stderr(Box::new(Held(stderr_held.clone(), false)), &registry),
+            TEST_CLOCK,
+        );
         sinks.attach_file(Sink::spawn_file(
             Box::new(Held(file_held.clone(), false)),
             &registry,
@@ -546,18 +602,46 @@ mod tests {
     fn a_flush_ends_by_the_end_set_for_it_while_a_writer_is_held() {
         let registry = Registry::new(catalogue());
         let held = Arc::new(Barrier::new(2));
-        let sinks = Sinks::new(Sink::spawn_stderr(
-            Box::new(Held(held.clone(), false)),
-            &registry,
-        ));
+        let sinks = Sinks::new(
+            Sink::spawn_stderr(Box::new(Held(held.clone(), false)), &registry),
+            TEST_CLOCK,
+        );
         sinks.write(record(10));
-        sinks.end_flushes_by(Instant::now());
+        sinks.end_flushes_within(Duration::ZERO);
         let flushing = Instant::now();
         sinks.flush(Duration::from_secs(60));
         assert!(
             flushing.elapsed() < Duration::from_secs(5),
             "a flush waited past the end set for it"
         );
+        held.wait();
+    }
+
+    #[test]
+    fn a_flush_ends_once_its_clock_passes_the_end_set_for_it_while_a_writer_is_held() {
+        let registry = Registry::new(catalogue());
+        let held = Arc::new(Barrier::new(2));
+        let clock = FlushClock {
+            now: moved_by_test,
+            recheck: Duration::from_millis(10),
+        };
+        let sinks = Sinks::new(
+            Sink::spawn_stderr(Box::new(Held(held.clone(), false)), &registry),
+            clock,
+        );
+        sinks.write(record(10));
+        sinks.end_flushes_within(Duration::from_secs(60));
+        let mover = thread::spawn(|| {
+            thread::sleep(Duration::from_millis(50));
+            MOVED_BY_TEST.fetch_add(60_000, Ordering::SeqCst);
+        });
+        let flushing = Instant::now();
+        sinks.flush(Duration::from_secs(3_600));
+        assert!(
+            flushing.elapsed() < Duration::from_secs(5),
+            "a flush waited past the end set for it on its clock"
+        );
+        mover.join().unwrap();
         held.wait();
     }
 }

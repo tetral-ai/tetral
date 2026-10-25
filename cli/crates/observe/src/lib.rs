@@ -13,7 +13,7 @@ mod trace_context;
 use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tracing_subscriber::layer::SubscriberExt;
 
@@ -25,7 +25,8 @@ pub use level::{InvalidLevel, LEVEL_VARIABLE, Level};
 pub use metrics::{Counter, Gauge, Histogram, Registry, registry, render};
 pub use record::{Code, Id, Identity, RecordEnum, RecordLayer, RecordValue, correlation_span};
 pub use sinks::{
-    EXIT_FLUSH_LIMIT, LOG_FILE_LIMIT_BYTES, LogFile, SINK_QUEUE_RECORDS, Sink, Sinks, WriterSlot,
+    EXIT_FLUSH_LIMIT, FlushClock, LOG_FILE_LIMIT_BYTES, LogFile, SINK_QUEUE_RECORDS, Sink, Sinks,
+    WriterSlot,
 };
 pub use stopwatch::{MonotonicClock, Ms, Startup, StartupPhases, Stopwatch};
 pub use trace_context::TraceContext;
@@ -47,11 +48,11 @@ pub struct Observer {
 
 /// Installs the record layer for the whole process, writing to stderr at
 /// `level` and above.
-pub fn install(level: Level) -> Observer {
-    let sinks = Arc::new(Sinks::new(Sink::spawn_stderr(
-        Box::new(io::stderr()),
-        registry(),
-    )));
+pub fn install(level: Level, clock: FlushClock) -> Observer {
+    let sinks = Arc::new(Sinks::new(
+        Sink::spawn_stderr(Box::new(io::stderr()), registry()),
+        clock,
+    ));
     let subscriber = tracing_subscriber::registry().with(RecordLayer::new(level, sinks.clone()));
     let _ = tracing::subscriber::set_global_default(subscriber);
     Observer {
@@ -105,7 +106,7 @@ impl Observer {
 
     /// Makes every later flush end within `left` from now.
     pub fn end_flush_within(&self, left: Duration) {
-        self.sinks.end_flushes_by(Instant::now() + left);
+        self.sinks.end_flushes_within(left);
     }
 
     fn held(&self) -> std::sync::MutexGuard<'_, Option<WriterSlot>> {
