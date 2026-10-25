@@ -64,8 +64,11 @@ type requestLog struct {
 	ConnectionID string            `json:"connection_id,omitempty"`
 	MessageID    string            `json:"message_id,omitempty"`
 	Traceparent  string            `json:"traceparent,omitempty"`
-	Status       int               `json:"status"`
-	Code         string            `json:"code,omitempty"`
+	// BodySHA256 is the lowercase hexadecimal SHA-256 of an upstream
+	// message's body as read, so a test can tell a byte-identical retry.
+	BodySHA256 string `json:"body_sha256,omitempty"`
+	Status     int    `json:"status"`
+	Code       string `json:"code,omitempty"`
 }
 
 // receivedMessage is an upstream message the server accepted.

@@ -2,6 +2,9 @@ package reference
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
@@ -485,10 +488,12 @@ func TestOneClockAdvanceDoesEverythingItMakesDueInTimeOrder(t *testing.T) {
 func TestStateControlReportsWhatTheServerReceived(t *testing.T) {
 	ts := startServer(t)
 	_, connectionID := ts.online()
-	ts.post("protocol-error", "tetral_ck_a", map[string]any{
+	report := map[string]any{
 		"protocol_version": 1, "connection_id": connectionID, "message_id": "error_1", "request_message_id": "msg_bad",
 		"error": map[string]any{"code": "invalid_message", "message": "an envelope that is not JSON"},
-	})
+	}
+	ts.post("protocol-error", "tetral_ck_a", report)
+	ts.post("protocol-error", "tetral_ck_a", report)
 	ts.post("heartbeat", "tetral_ck_a", heartbeatBody(connectionID, "beat_1", "msg_x", 0))
 	prepareID := ts.prepare("sess_1", "bind_1")
 	state := ts.state()
@@ -498,6 +503,17 @@ func TestStateControlReportsWhatTheServerReceived(t *testing.T) {
 	}
 	if len(endpoints) != 2 || endpoints[0] != "ready/ready_1" || endpoints[1] != "protocol-error/error_1" {
 		t.Errorf("received %v", endpoints)
+	}
+	encoded, _ := json.Marshal(report)
+	digest := sha256.Sum256(encoded)
+	var hashes []string
+	for _, entry := range state.Requests {
+		if entry.Endpoint == "protocol-error" {
+			hashes = append(hashes, entry.BodySHA256)
+		}
+	}
+	if want := hex.EncodeToString(digest[:]); !slices.Equal(hashes, []string{want, want}) {
+		t.Errorf("protocol-error body hashes %v; want %s twice", hashes, want)
 	}
 	last := state.Requests[len(state.Requests)-1]
 	if last.Endpoint != "heartbeat" || last.Status != http.StatusBadRequest || last.Code != "invalid_message" {

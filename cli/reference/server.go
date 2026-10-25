@@ -2,6 +2,8 @@ package reference
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -348,7 +350,11 @@ type endpoint struct {
 // request, refused or not, enters the request log.
 func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec endpoint) {
 	body, _ := io.ReadAll(io.LimitReader(request.Body, int64(spec.maxBytes)+1))
-	entry := requestLog{Method: "POST", Endpoint: spec.name, Traceparent: request.Header.Get("traceparent")}
+	digest := sha256.Sum256(body)
+	entry := requestLog{
+		Method: "POST", Endpoint: spec.name, Traceparent: request.Header.Get("traceparent"),
+		BodySHA256: hex.EncodeToString(digest[:]),
+	}
 	server.mu.Lock()
 	entry.At = server.clock.Now()
 	cred, denied := server.authenticate(bearer(request), "", "", false)

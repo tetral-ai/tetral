@@ -16,7 +16,7 @@ its own protocol types in `wire/`; `tetral` never depends on it.
   the advance makes due.
 - Each upstream request passes the steps of `serve` in its order, and the
   first refusal answers with its code; every request, refused or not, enters
-  the request log.
+  the request log, an upstream message with the SHA-256 of its body.
 - A connection's replay ledger holds the answer to each accepted message: a
   retry with the same content, compared as JSON with sorted member names, gets
   that answer again, and other content under the same `message_id` gets
