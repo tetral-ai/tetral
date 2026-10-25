@@ -3,8 +3,8 @@
 //! the root:
 //!
 //! 1. the arguments (`invalid_arguments`): a known command and options,
-//!    `TETRAL_HOME` an absolute path, `--app` nonempty and
-//!    `TETRAL_LOG_LEVEL` one that `observe` accepts;
+//!    `TETRAL_HOME` an absolute path, `--app` nonempty, `--idle-exit` a
+//!    `<duration>` and `TETRAL_LOG_LEVEL` one that `observe` accepts;
 //! 2. the root checks of `state::private` (`unsafe_control_path`);
 //! 3. the recorded app: an existing `config.toml` must parse
 //!    (`invalid_configuration`) and name the same app (`app_mismatch`);

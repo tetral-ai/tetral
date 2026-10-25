@@ -103,9 +103,10 @@ pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
 /// Server.
 pub const SOCKET_TOUCH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
-/// Sets the socket's modification time to now at `first` and then every
-/// interval of the seam clock, reporting each to the test seams as
-/// `socket.touched` once the next one is due.
+/// Sets the socket's modification time to now at `first` and then one
+/// interval of the seam clock after each, counting each as the test seam
+/// counter `socket.touched` only once the next one is scheduled, so that a
+/// harness that advances the clock on seeing the count reaches the next.
 pub(crate) async fn keep_socket_fresh(socket: PathBuf, first: Duration, interval: Duration) {
     let mut next = first;
     loop {

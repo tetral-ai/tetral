@@ -167,8 +167,8 @@ impl Default for Times {
 /// takes SIGINT and SIGTERM as shutdown triggers, until the shutdown sequence
 /// ends; returns the status as of then.
 pub async fn run(started: Started, identity: Identity, times: Times) -> std::io::Result<Status> {
-    // Read before the socket answers, so that no client sees the App Server
-    // before its first refresh is due.
+    // Read before the local API serves, so that the socket's age never
+    // exceeds one interval while a client can reach it.
     let first_touch = state::seams::now() + times.socket_touch_interval;
     let Started {
         lock,

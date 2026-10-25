@@ -11,8 +11,11 @@ ones it uses belong here too.
 ## Design rules
 
 - Every task here that holds App Server state follows the owner rules of
-  `cli/README.md`. The lifecycle task owns the server state; local API
-  handlers and the signal task only send it messages.
+  `cli/README.md`. The lifecycle task owns the server state and the
+  connection state (`lifecycle::States`); local API handlers and the signal
+  task only send it messages. The status fields that do not change while the
+  App Server runs, `credential_id` and `expires_at` of `credentials.json`
+  among them, are given to `lifecycle::run` at start.
 - Startup runs its steps in order and a failure leaves every later step
   undone: the lock, the removal of the temporary files that interrupted
   replacements left, the configuration read under it, the socket directory `S`
@@ -28,8 +31,8 @@ ones it uses belong here too.
   socket and then releases the lock, waiting for handlers only until
   `SHUTDOWN_DEADLINE` after the trigger on the seam clock (`shutdown`).
 - While it runs, the App Server sets the socket's modification time to now
-  every `SOCKET_TOUCH_INTERVAL` of the seam clock
-  (`startup::keep_socket_fresh`).
+  every `SOCKET_TOUCH_INTERVAL` of the seam clock and counts each as the test
+  seam counter `socket.touched` (`startup::keep_socket_fresh`).
 
 ## Entry points
 
