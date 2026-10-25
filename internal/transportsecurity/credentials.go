@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc/credentials"
+
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 // Config refers only to mounted material. Certificate and key are optional
@@ -143,7 +145,7 @@ func (o *Owner) logReload(level slog.Level, event, outcome string, count uint64)
 	if purpose == "" {
 		purpose = "native-transport"
 	}
-	slog.Log(context.Background(), level, event, "component", purpose, "transport.stage", "credential_reload", "transport.outcome", outcome, "failed.count", count)
+	workload.CurrentTelemetry().Logger().Log(context.Background(), level, event, "component", purpose, "transport.stage", "credential_reload", "transport.outcome", outcome, "failed.count", count)
 }
 
 // SetActivationObserver installs one owning transport's valid-generation hook.

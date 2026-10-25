@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"log"
 	"log/slog"
 	"net"
 	"os"
@@ -22,6 +21,7 @@ import (
 
 	"github.com/tetral-ai/tetral/integration/transporttest"
 	"github.com/tetral-ai/tetral/internal/testinfra"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 func TestPostgreSQLPreviewTLSLifecycle(t *testing.T) {
@@ -750,20 +750,14 @@ func (h previewReloadObserver) WithAttrs(attrs []slog.Attr) slog.Handler {
 func (h previewReloadObserver) WithGroup(name string) slog.Handler {
 	return previewReloadObserver{h.handler.WithGroup(name), h.rejected}
 }
+
+// previewObserveNativeReloads counts the native transport's rejected reloads,
+// which it records through the process telemetry's logger.
 func previewObserveNativeReloads(t *testing.T) *atomic.Uint64 {
 	t.Helper()
-	previous := slog.Default()
-	previousWriter, previousFlags, previousPrefix := log.Writer(), log.Flags(), log.Prefix()
 	rejected := &atomic.Uint64{}
-	// Wrapping slog's defaultHandler would recurse through log.Default after
-	// SetDefault redirects it to this handler. Own an independent writer.
-	slog.SetDefault(slog.New(previewReloadObserver{slog.NewTextHandler(os.Stderr, nil), rejected}))
-	t.Cleanup(func() {
-		slog.SetDefault(previous)
-		log.SetOutput(previousWriter)
-		log.SetFlags(previousFlags)
-		log.SetPrefix(previousPrefix)
-	})
+	observer := slog.New(previewReloadObserver{slog.NewTextHandler(os.Stderr, nil), rejected})
+	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: workload.CurrentTelemetry().Service(), Logger: observer})))
 	return rejected
 }
 

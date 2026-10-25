@@ -779,6 +779,28 @@
             }
           }
         },
+        "transport.credential_reload_failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "failed.count": "integer",
+            "transport.outcome": "string",
+            "transport.stage": "string"
+          }
+        },
+        "transport.credential_reload_recovered": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "failed.count": "integer",
+            "transport.outcome": "string",
+            "transport.stage": "string"
+          }
+        },
         "workload.http.panic": {
           "level": "ERROR",
           "log_type": "app",

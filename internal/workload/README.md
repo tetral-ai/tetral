@@ -127,7 +127,9 @@ service tests cover real Queue poll/heartbeat and authenticated gRPC caller nois
 
 ## Recording rules
 
-Every Go Engine service records through this library.
+Every Go Engine service records through this library; `integration/static`
+fails any other `slog` package-level call or TypeScript `console` call in
+service code.
 
 - **Records.** One JSON object per line on stderr with the fields above. A
   failure adds `error.class`, `error.code` and `error.message_safe`, the fixed
@@ -160,8 +162,8 @@ templates in `observability.json` at its package root
 `services/<name>/packages/<package>/observability.json`). This package's own
 [`observability.json`](observability.json) declares what the library and the
 boundaries every Go service shares write: process lifecycle, HTTP, internal
-gRPC, database statements, cold starts, pressure points and diagnostics; a
-service table never repeats them. A Go service embeds its
+gRPC, database statements, transport security, cold starts, pressure points
+and diagnostics; a service table never repeats them. A Go service embeds its
 table and calls `RegisterDeclarations` from an `init` function. A logger of a
 registered service refuses an undeclared event and `Observe` an undeclared
 operation: a test binary fails at once, production writes

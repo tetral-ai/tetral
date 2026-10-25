@@ -18,6 +18,7 @@ import (
 
 	"github.com/tetral-ai/tetral/integration/transporttest"
 	"github.com/tetral-ai/tetral/internal/transportsecurity"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 func nativeOwner(t *testing.T, root *transporttest.Authority, leaf transporttest.Leaf) (*transportsecurity.Owner, string) {
@@ -289,8 +290,6 @@ func (h failingReloadHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h failingReloadHandler) WithGroup(string) slog.Handler      { return h }
 
 func TestCredentialReloadDiagnosticsAreBoundedAndIndependent(t *testing.T) {
-	previous := slog.Default()
-	defer slog.SetDefault(previous)
 	root := transporttest.Must(transporttest.NewAuthority("diagnostics"))
 	leaf := transporttest.Must(root.ValidLeaf("receiver.transport.test", transporttest.ReceiverURI))
 	for _, mode := range []string{"json", "silent", "error", "panic"} {
@@ -300,7 +299,7 @@ func TestCredentialReloadDiagnosticsAreBoundedAndIndependent(t *testing.T) {
 			if mode != "json" {
 				handler = failingReloadHandler{panicSink: mode == "panic", silent: mode == "silent"}
 			}
-			slog.SetDefault(slog.New(handler))
+			defer workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: "test", Logger: slog.New(handler)}))()
 			dir := t.TempDir()
 			transporttest.Must(0, transporttest.Project(dir, "valid", map[string][]byte{"ca.crt": root.PEM, "tls.crt": leaf.Certificate, "tls.key": leaf.Key}))
 			owner := transporttest.Must(transportsecurity.Open(t.Context(), transportsecurity.Config{CAPath: filepath.Join(dir, "ca.crt"), CertPath: filepath.Join(dir, "tls.crt"), KeyPath: filepath.Join(dir, "tls.key"), Purpose: "runtime-direct"}))
