@@ -17,6 +17,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/httpapi"
+	"github.com/tetral-ai/tetral/internal/hubflow"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -204,8 +205,8 @@ func (h *instanceHandler) issueCredential(w http.ResponseWriter, r *http.Request
 			if err := instance.CheckCredentialLimit(ctx, tx, ws, instanceID, now); err != nil {
 				return err
 			}
-			// Stream delivery needs an online connection, and no connection
-			// is online until the hub serves CLI connections.
+			// Stream delivery is live credential renewal, which the hub
+			// does not serve yet, so every instance answers as offline.
 			return &instance.OfflineError{}
 		}
 		credential, connectionKey, err := instance.IssueCredential(ctx, tx, ws, instanceID, instance.CredentialActive, now, expiresAt)
@@ -288,8 +289,10 @@ func (h *instanceHandler) deregisterInstance(w http.ResponseWriter, r *http.Requ
 	var revoked []string
 	err := h.Database.WithWorkspaceTx(ctx, string(ws), "computer_hub.instances_delete", func(tx *dbconnect.Tx) error {
 		var err error
-		revoked, err = instance.Deregister(ctx, tx, ws, instanceID)
-		return err
+		if revoked, err = instance.Deregister(ctx, tx, ws, instanceID); err != nil {
+			return err
+		}
+		return endLiveConnection(ctx, tx, ws, instanceID, "", instance.EndDeregistered)
 	})
 	if err != nil {
 		h.writeError(w, r, err)
@@ -350,8 +353,10 @@ func (h *instanceHandler) revokeCredential(w http.ResponseWriter, r *http.Reques
 	var revoked bool
 	err := h.Database.WithWorkspaceTx(ctx, string(ws), "computer_hub.instance_credentials_delete", func(tx *dbconnect.Tx) error {
 		var err error
-		revoked, err = instance.RevokeCredential(ctx, tx, ws, instanceID, credentialID)
-		return err
+		if revoked, err = instance.RevokeCredential(ctx, tx, ws, instanceID, credentialID); err != nil || !revoked {
+			return err
+		}
+		return endLiveConnection(ctx, tx, ws, instanceID, credentialID, instance.EndRevoked)
 	})
 	if err != nil {
 		h.writeError(w, r, err)
@@ -361,6 +366,21 @@ func (h *instanceHandler) revokeCredential(w http.ResponseWriter, r *http.Reques
 		instance.AuditCredentialOperation(ctx, h.logger, actorOf(principal), instanceID, credentialID, instance.AuditRevoke)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// endLiveConnection ends the instance's live connection, only one under
+// credentialID when that is set, in the revoking transaction: the row lock
+// orders the end against every request holding the connection.
+func endLiveConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, credentialID, cause string) error {
+	now, err := instance.Now(ctx, tx)
+	if err != nil {
+		return err
+	}
+	connection, found, err := instance.LockLiveConnectionOf(ctx, tx, ws, instanceID, credentialID, now)
+	if err != nil || !found {
+		return err
+	}
+	return hubflow.EndConnection(ctx, tx, ws, connection, cause)
 }
 
 // issuance is the result of an issuing request. key is nil on a replay;
