@@ -8,6 +8,7 @@ pub mod errors;
 pub mod field;
 pub mod fingerprint;
 pub mod id;
+pub mod image;
 pub mod local;
 pub mod path;
 pub mod ports;

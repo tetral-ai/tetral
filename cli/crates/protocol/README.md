@@ -70,6 +70,10 @@ description, schemas and fixtures are in `protocol/` at the repository root.
   protocol-error reports and the tool part of a ready's capabilities.
 - `drive_transfer.rs`: the messages of `drive-transfer-v1.schema.json`:
   listings, uploads, downloads with their headers, and commits.
+- `image.rs`: an image's `Format`, recognized from its first
+  `SIGNATURE_BYTES`, its `Dimensions`, read from its header within
+  `HEADER_MAX_BYTES`, and `Acceptance`, which every image a tool result
+  carries must pass.
 - `errors.rs`: the client error table (`ErrorCode` with its status),
   `ErrorBody`, the endpoint table `DriveTransferEndpoint`, and the readers of
   an error body, `decode_client_error` and `decode_drive_transfer_error`.
@@ -93,4 +97,5 @@ description, schemas and fixtures are in `protocol/` at the repository root.
   fixtures, the tables of members sent as `null`, refused or, where the
   schema allows it and no fixture sends it, kept, and of unknown members in
   every closed object; `tests/common/` reads the schema and fixture files and
-  decodes a fixture as the type of its schema.
+  decodes a fixture as the type of its schema; `tests/image.rs` reads the
+  dimensions of encoded images in `tests/images/`.
