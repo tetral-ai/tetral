@@ -157,6 +157,7 @@ dependencies = [
  "observe",
  "protocol",
  "rustix",
+ "serde",
  "serde_json",
  "session",
  "state",

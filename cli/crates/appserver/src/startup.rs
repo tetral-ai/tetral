@@ -10,6 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use protocol::connection::Capabilities;
 use rustix::fs::{AtFlags, CWD, Timespec, Timestamps, UTIME_NOW, UTIME_OMIT};
 
 use state::files::{self, IoFailure};
@@ -17,6 +18,7 @@ use state::paths::{self, StateRoot};
 use state::private::{self, CheckError};
 use tokio::net::UnixListener;
 
+use crate::capabilities;
 use crate::configuration::{self, Configuration, ConfigurationError};
 use crate::lock::{self, LockError, RootLock};
 
@@ -28,6 +30,7 @@ pub struct Started {
     pub socket: PathBuf,
     pub listener: UnixListener,
     pub outbox: PathBuf,
+    pub capabilities: Capabilities,
     /// The state root as `TETRAL_HOME` gives it.
     pub root: PathBuf,
     /// The state root's canonical path.
@@ -44,6 +47,9 @@ pub enum StartError {
     Unsafe(CheckError),
     #[error(transparent)]
     Io(#[from] IoFailure),
+    #[cfg(feature = "test-seams")]
+    #[error("{0}")]
+    TestToolExecution(String),
 }
 
 impl From<CheckError> for StartError {
@@ -77,13 +83,14 @@ pub fn lock(root: &StateRoot) -> Result<RootLock, StartError> {
     Ok(lock)
 }
 
-/// The steps after the lock: the configuration; `outbox/` emptied, whose
-/// reports belong to connections of an earlier process, only once the
-/// configuration is valid, so that a start that fails on it leaves the root
-/// as it was; then `S` and the socket, bound with mode `0600` before it
-/// accepts a connection.
+/// The steps after the lock: the configuration and the capabilities;
+/// `outbox/` emptied, whose reports belong to connections of an earlier
+/// process, only once both are valid, so that a start that fails on them
+/// leaves the root as it was; then `S` and the socket, bound with mode
+/// `0600` before it accepts a connection.
 pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
     let configuration = configuration::read(root)?;
+    let capabilities = capabilities::assemble()?;
     let canonical_root =
         std::fs::canonicalize(root.path()).map_err(|error| IoFailure::new(root.path(), error))?;
     observe::STARTUP.config_loaded(state::seams::now());
@@ -107,6 +114,7 @@ pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
         socket,
         listener,
         outbox: root.join(paths::OUTBOX),
+        capabilities,
         root: root.path().to_path_buf(),
         canonical_root,
     })

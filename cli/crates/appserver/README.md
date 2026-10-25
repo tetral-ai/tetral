@@ -17,7 +17,10 @@ ones it uses belong here too.
   fields, and the fields that do not change while the App Server runs
   (`local_api::StatusSources`).
 - The capabilities that ready advertises are assembled once at start from
-  the providers this build has (`capabilities`).
+  the providers this build has (`capabilities`). A `test-seams` build
+  advertises as `tool_execution` the fragment in
+  `TETRAL_TEST_TOOL_EXECUTION`; a value that does not decode as one fails
+  the start.
 - Startup runs its steps in order and a failure leaves every later step
   undone: the lock, the removal of the temporary files that interrupted
   replacements left, the configuration read under it, `outbox/` emptied, the

@@ -16,7 +16,6 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::capabilities;
 use crate::local_api::{self, FixedStatus, StatusSources};
 use crate::lock::RootLock;
 use crate::shutdown::{self, Sequence};
@@ -178,6 +177,7 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
         socket,
         listener,
         outbox,
+        capabilities,
         root,
         canonical_root,
     } = started;
@@ -204,7 +204,7 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
         ready: ReadyFields {
             cli_version: SemVer::new(fixed.cli_version.as_str())
                 .expect("the package version is a semantic version"),
-            capabilities: capabilities::assemble(),
+            capabilities,
         },
         started: start,
         outbox,

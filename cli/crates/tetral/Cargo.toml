@@ -6,7 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-test-seams = ["execution/test-seams", "state/test-seams"]
+test-seams = ["appserver/test-seams", "execution/test-seams", "state/test-seams"]
 
 [dependencies]
 appserver.workspace = true

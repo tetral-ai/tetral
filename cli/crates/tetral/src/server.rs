@@ -82,5 +82,9 @@ fn start_failed(error: StartError) -> CommandError {
         },
         StartError::Unsafe(check) => check_failed(check),
         StartError::Io(failure) => io_failed(failure),
+        #[cfg(feature = "test-seams")]
+        StartError::TestToolExecution(_) => {
+            CommandError::new(Code::InvalidConfiguration, error.to_string())
+        }
     }
 }
