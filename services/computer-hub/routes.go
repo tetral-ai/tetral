@@ -8,11 +8,9 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/httpapi"
+	"github.com/tetral-ai/tetral/internal/protocol"
 	"github.com/tetral-ai/tetral/internal/workload"
 )
-
-// ClientRoutePrefix holds the routes a CLI calls with its connection key.
-const ClientRoutePrefix = "/v1/client/"
 
 // ManagementRoutePrefixes are the developer and Controller routes the hub
 // serves under the API envelope.
@@ -75,7 +73,7 @@ func NewRouter(verifier *auth.InternalPrincipalVerifier, opts ...RouterOption) h
 		r.Use(principalMiddleware(verifier, writeClientPrincipalError))
 		r.Use(requireConnectionKey)
 		r.Use(correlationFields)
-		r.Handle(ClientRoutePrefix+"*", http.HandlerFunc(writeClientNotFound))
+		r.Handle(protocol.ClientRoutePrefix+"*", http.HandlerFunc(writeClientNotFound))
 		if options.clients != nil {
 			(&clientHandler{ClientRoutes: *options.clients, logger: options.logger}).register(r)
 		}

@@ -1368,6 +1368,9 @@ func (r GitTicketResponse) encode(e *encoder) {
 	e.endObject()
 }
 
+// ClientRoutePrefix holds the routes a CLI calls with its connection key.
+const ClientRoutePrefix = "/v1/client/"
+
 // ErrorBody is the body of every /v1/client/* error response.
 type ErrorBody struct {
 	Code          ErrorCode

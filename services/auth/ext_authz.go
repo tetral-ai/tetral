@@ -19,14 +19,12 @@ import (
 	"google.golang.org/grpc/codes"
 
 	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/protocol"
 	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 const ExternalAuthorizationTimeout = 5 * time.Second
 const internalPrincipalHeader = "x-tetral-internal-principal"
-
-// clientRoutePrefix holds the routes a CLI calls with its connection key.
-const clientRoutePrefix = "/v1/client/"
 
 // ExternalAuthorizationConfig borrows the Auth application's domain owners.
 // It performs no bootstrap mutation, transport construction, or database opening.
@@ -87,7 +85,7 @@ func (a *ExternalAuthorization) Check(ctx context.Context, req *authv3.CheckRequ
 	// client routes admit only a connection key, and every other route
 	// rejects one before any lookup.
 	var principal auth.Principal
-	if strings.HasPrefix(metadata.path, clientRoutePrefix) {
+	if strings.HasPrefix(metadata.path, protocol.ClientRoutePrefix) {
 		principal, err = a.cfg.Authenticator.AuthenticateConnection(ctx, credentials)
 		if err != nil {
 			return deniedClientAuthorization(err, requestID), nil
