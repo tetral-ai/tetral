@@ -113,7 +113,9 @@ temporary directories. No workspace crate depends on this package.
   full replay ledger, and a preparation that names an earlier connection.
 - `tests/tool_admission.rs`: tool instructions against the reference control
   server: one event of up to 4,259,840 bytes read and a larger one that
-  closes the stream unread.
+  closes the stream unread, and the budgets of `input`, `chars` and metadata
+  and the 65,536 bytes of `tool.cancel` and `session.close`, each instruction
+  with its own report or protocol error.
 - `tests/local_service.rs`: `server run`, `server status` and `server stop`
   and the local API: status while Engine is unreachable, the wrong routes,
   shutdown on request, on each signal and with a handler blocked, one owner

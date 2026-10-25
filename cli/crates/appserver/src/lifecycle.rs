@@ -11,7 +11,7 @@ use std::time::Duration;
 use connection::{Connection, Credential, ReadyFields};
 use protocol::connection::SemVer;
 use protocol::local::{ServerState, Status};
-use session::{Factory, NoTasks, RootPaths, Shared};
+use session::{Factory, NoTasks, RootPaths, Shared, ToolContext};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -181,14 +181,22 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
         root,
         canonical_root,
     } = started;
+    let probe_program = std::env::current_exe()?;
+    let socket_directory = socket.parent().unwrap_or(&socket).canonicalize()?;
+    let tools = ToolContext {
+        capability: capabilities.tool_execution.clone(),
+        socket_directory,
+        tetral: probe_program.canonicalize()?,
+    };
     let sessions = Factory::new(
         Shared {
             paths: Arc::new(RootPaths {
                 given: root,
                 canonical: canonical_root,
-                probe_program: std::env::current_exe()?,
+                probe_program,
             }),
             times: times.session,
+            tools: Arc::new(tools),
         },
         NoTasks,
     );

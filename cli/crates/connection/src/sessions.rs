@@ -10,7 +10,7 @@ use protocol::id::{Id, SafeId};
 use protocol::local::SessionEntry;
 use protocol::ports::{
     Close, ConnectionPort, Prepare, ProbeRequest, ProbeSlot, ReportSink, SessionFactory,
-    SessionHandle,
+    SessionHandle, ToolCall,
 };
 use tokio::sync::mpsc;
 
@@ -125,6 +125,19 @@ impl Owners {
     pub fn close(&self, session_id: &SafeId, close: Close) {
         if let Some(owned) = self.owners.get(session_id) {
             owned.handle.close(close);
+        }
+    }
+
+    /// Hands `call` to its Session's owner, or, for a Session without one,
+    /// to the factory, which rejects it; it never creates an owner or a
+    /// record.
+    pub fn tool(&self, call: ToolCall) {
+        let owned = SafeId::new(call.session_id.as_str())
+            .ok()
+            .and_then(|session_id| self.owners.get(&session_id));
+        match owned {
+            Some(owned) => owned.handle.tool(call),
+            None => self.factory.unbound_tool(call, self.reports.clone()),
         }
     }
 

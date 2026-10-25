@@ -43,7 +43,9 @@ use protocol::field::{Nullable, PositiveInt};
 use protocol::fingerprint::fingerprint;
 use protocol::id::Id;
 use protocol::local::{ConnectionState, ErrorObject, SessionEntry, SessionState};
-use protocol::ports::{Close, Prepare, ProbeSlot, ReportSink, SessionFactory, Submission};
+use protocol::ports::{
+    Close, Prepare, ProbeSlot, ReportSink, SessionFactory, Submission, ToolCall,
+};
 use protocol::time::Rfc3339Utc;
 use protocol::tool::ProtocolVersion;
 use tokio::sync::{mpsc, oneshot};
@@ -166,6 +168,8 @@ pub struct Instruction {
     /// when its `traceparent` is usable, its `trace_id`.
     pub span: tracing::Span,
     pub trace: Option<TraceContext>,
+    /// When the stream delivered it, on the seam clock.
+    pub received: Duration,
 }
 
 pub(crate) enum Message {
@@ -1029,6 +1033,7 @@ impl Owner {
             new_operation,
             span,
             trace,
+            received: now,
         };
         let admission = match held.registration.as_mut() {
             Some(registration) => registration.staging.admit(instruction),
@@ -1413,16 +1418,60 @@ impl Owner {
     }
 
     /// Hands a Session instruction on once the ready ACK came, counted as
-    /// the test seam counter `route.session`: a `session.prepare` or a
-    /// `session.close` to the Session binding owner of its `session_id`.
+    /// the test seam counter `route.session`: a `session.prepare`, a
+    /// `session.close` or a tool instruction to the Session binding owner of
+    /// its `session_id`.
     fn route(&mut self, held: &mut Held, instruction: Instruction) {
         state::seams::count("route.session");
         let _entered = instruction.span.clone().entered();
         match instruction.message.envelope.kind {
             DownstreamType::SessionPrepare => self.route_prepare(held, instruction),
             DownstreamType::SessionClose => self.route_close(held, &instruction),
+            DownstreamType::ToolExecute
+            | DownstreamType::ToolStdin
+            | DownstreamType::ToolCancel => self.route_tool(held, instruction),
             _ => {}
         }
+    }
+
+    /// Hands a tool instruction to its Session's owner, which decodes and
+    /// admits it. One whose identities no report can carry back is a
+    /// protocol error.
+    fn route_tool(&mut self, held: &Held, instruction: Instruction) {
+        let Instruction {
+            mut message,
+            recorded,
+            trace,
+            received,
+            ..
+        } = instruction;
+        let identity = |value: Option<&str>| value.and_then(|value| Id::new(value).ok());
+        let (Some(session_id), Some(binding_id), Some(tool_use_event_id), Some(task_id)) = (
+            identity(Some(&message.session_id)),
+            identity(Some(&message.binding_id)),
+            identity(message.tool_use_event_id.as_deref()),
+            identity(message.task_id.as_deref()),
+        ) else {
+            let kind = ProtocolErrorKind::InvalidPayload;
+            let message_id = message.envelope.message_id.clone();
+            self.protocol_error(&held.id, kind, Some(message_id), trace.as_ref());
+            return;
+        };
+        let payload = serde_json::Value::Object(std::mem::take(&mut message.envelope.payload));
+        self.owners.tool(ToolCall {
+            connection_id: held.id.clone(),
+            message_id: message.envelope.message_id,
+            kind: message.envelope.kind,
+            session_id,
+            binding_id,
+            tool_use_event_id,
+            task_id,
+            data: message.data,
+            fingerprint: fingerprint(&payload),
+            recorded,
+            traceparent: trace.map(|trace| trace.header_value().to_owned()),
+            received,
+        });
     }
 
     /// Admits a `session.prepare`: one whose payload fails its schema, one

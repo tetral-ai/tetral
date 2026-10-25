@@ -17,11 +17,25 @@ that is no longer the binding's is discarded.
 ## Design rules
 
 - A `session.close` and a command for the same binding are ordered by the
-  arrival order of the owner's mailbox: a command starts only in the
-  Session's current binding before its close is handled
-  (`SessionOwner::admits`), so a command handled after the close never
-  starts and one handled before it has already started; a close of another
+  arrival order of the owner's mailbox: a command starts only in a binding
+  that is `prepared` or `prepared_pending_ack`, so a command handled after
+  the close is rejected `binding_unavailable` and one handled before it has
+  already started or is staged, which the close prevents; a close of another
   binding changes nothing for it.
+- A `tool.execute` is admitted in fixed steps, the first failing one
+  deciding its `rejected` report, before any side effect: its task identity
+  in the binding's registry (an equal payload joins the task, another is
+  `task_conflict`), the replay ledger's room, its schema, budgets and tool
+  against the ready's list, its policy, its binding. Step 3 judges
+  everything but the policy, which step 4 judges by `execution::policy`,
+  translated with the paths of a task name chosen just before it
+  (`execution::store`); only a registered task keeps its name (`tools`).
+- A task admitted while its binding waits for the ACK of its `prepared`
+  report waits in the binding's staging queue; that ACK starts the queue in
+  arrival order before the binding's next instruction, and a close, a cancel
+  of the task or the connection's end prevents a staged start (`tools`).
+- A control finds its task only in the registry of the binding it names on
+  its own connection; an absent task is `task_not_found` (`tools`).
 - An owner starts admitted commands only from its handler, through the
   `TaskStarter` it is given, so a start never races its binding's close.
 - Owners follow the owner rules of `cli/README.md`. An owner reaches the
@@ -48,7 +62,9 @@ that is no longer the binding's is discarded.
 
 - `Factory::new(shared, starter)`: the `protocol::ports::SessionFactory` that
   creates an owner per Session, with the state root's paths and the running
-  executable (`RootPaths`) and its durations (`Times`).
+  executable (`RootPaths`), its durations (`Times`) and what tool admission
+  reads (`ToolContext`), and rejects the tool instructions of a Session that
+  has no owner.
 - `probe_child::read_input` and `probe_child::run(input)`: the probe's whole
   work, from its stdin to its one line of stdout, for `tetral` run as
   `probe_child::PROBE_NAME`.
@@ -56,9 +72,11 @@ that is no longer the binding's is discarded.
 ## Where things are
 
 - `owner.rs`: `Factory`, `SessionMessage`, `SessionMailbox`, the owner's
-  loop and state, the admission of commands (`Admission`, `TaskStart`,
-  `TaskStarter`, `SessionOwner::admits`), and a close, a connection's end and
-  the shutdown as they end a preparation.
+  loop and state, `TaskStarter`, and a close, a connection's end and the
+  shutdown as they end a preparation.
+- `tools.rs`: the admission of tool instructions (`ToolContext`,
+  `TaskStart`), a binding's task registry and staging queue (`Tasks`), and
+  their reports.
 - `record.rs`: `Record`, `Binding` and the entries of `GET /v1/sessions`.
 - `cases.rs`: the cases of a `session.prepare` (`Case`, `decide`).
 - `prepare.rs`: the steps of a preparation, from the connection check to the

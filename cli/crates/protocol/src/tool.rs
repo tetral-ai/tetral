@@ -284,25 +284,64 @@ pub struct McpCallPayload {
     pub limits: Absent,
 }
 
-/// The encoded size limit of each tool instruction type, and a `tool.stdin`
-/// that writes only with its `write_seq`.
+/// The size budgets of each tool instruction type, and a `tool.stdin` that
+/// writes only with its `write_seq`: the event within its type's limit, a
+/// `tool.execute`'s `input` and a `tool.stdin`'s raw `chars` within theirs,
+/// and the message's metadata, its compact JSON with that content replaced
+/// by an empty value of its type, within `METADATA_JSON_BYTES`.
 pub(crate) fn check_instruction(
     instruction: &ToolInstruction<'_>,
-    bytes: usize,
+    received: &Received<'_>,
 ) -> Result<(), DecodeError> {
-    let limit = match instruction {
-        ToolInstruction::Execute(_) => limits::EXECUTE_SSE_JSON_BYTES,
+    let payload = &received.value["payload"];
+    // The compact bytes of the large content and of its empty replacement.
+    let (limit, content) = match instruction {
+        ToolInstruction::Execute(_) => {
+            let input = compact_len(&payload["input"]);
+            rule(
+                input <= limits::TOOL_INPUT_JSON_BYTES,
+                "tool.execute input over its limit",
+            )?;
+            (limits::EXECUTE_SSE_JSON_BYTES, Some((input, "{}".len())))
+        }
         ToolInstruction::Stdin(stdin) => {
             rule(
                 stdin.chars.is_empty() || stdin.write_seq.is_some(),
                 "a nonempty tool.stdin without write_seq",
             )?;
-            limits::STDIN_SSE_JSON_BYTES
+            rule(
+                stdin.chars.len() <= limits::STDIN_UTF8_BYTES,
+                "tool.stdin chars over its limit",
+            )?;
+            let chars = compact_len(&payload["chars"]);
+            (limits::STDIN_SSE_JSON_BYTES, Some((chars, "\"\"".len())))
         }
-        ToolInstruction::Cancel(_) => limits::DEFAULT_MESSAGE_JSON_BYTES,
-        ToolInstruction::McpCall(_) => limits::MCP_CALL_SSE_JSON_BYTES,
+        ToolInstruction::Cancel(_) => (limits::DEFAULT_MESSAGE_JSON_BYTES, None),
+        ToolInstruction::McpCall(_) => (limits::MCP_CALL_SSE_JSON_BYTES, None),
     };
-    rule(bytes <= limit, "tool instruction over its limit")
+    rule(received.bytes <= limit, "tool instruction over its limit")?;
+    let (content, empty) = content.unwrap_or_default();
+    rule(
+        compact_len(received.value) - content + empty <= limits::METADATA_JSON_BYTES,
+        "tool instruction metadata over its limit",
+    )
+}
+
+/// The bytes of `value` as compact JSON, counted without keeping them.
+fn compact_len(value: &Value) -> usize {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value).expect("a JSON value always serializes");
+    counter.0
 }
 
 /// The payload of a tool instruction, borrowed from its envelope.

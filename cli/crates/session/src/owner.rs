@@ -16,21 +16,18 @@ use protocol::id::{Id, SafeId};
 use protocol::local::SessionState;
 use protocol::ports::{
     Close, ConnectionPort, EntriesReply, Prepare, ProbeRequest, ProbeSlot, ReportId,
-    ReportListener, ReportOutcome, ReportSink, SessionFactory, SessionHandle,
+    ReportListener, ReportOutcome, ReportSink, SessionFactory, SessionHandle, ToolCall,
 };
 use tokio::sync::{mpsc, oneshot};
 
 use crate::probe::{PROBE_LIMIT, Probe};
 use crate::probe_child::Output;
 use crate::record::Record;
+use crate::tools::{self, TaskStart, ToolContext};
 
 pub enum SessionMessage {
-    /// A tool instruction for one of this Session's bindings; the reply says
-    /// whether it started.
-    Tool {
-        task: TaskStart,
-        reply: oneshot::Sender<Admission>,
-    },
+    /// A tool instruction for one of this Session's bindings.
+    Tool(Box<ToolCall>),
     /// A `session.close` of one of this Session's bindings; the reply comes
     /// once the close is admitted.
     Close {
@@ -58,27 +55,13 @@ pub enum SessionMessage {
 
 pub type SessionMailbox = mpsc::UnboundedSender<SessionMessage>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Admission {
-    Started,
-    /// The binding is not the Session's current one, or its close was
-    /// admitted earlier, so nothing more starts in it.
-    Refused,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskStart {
-    pub task_id: String,
-    pub binding_id: Id,
-}
-
 /// Starts the task of an admitted command.
 pub trait TaskStarter: Send + 'static {
     fn start(&mut self, task: TaskStart);
 }
 
-/// The starter of an App Server that executes no tool: its Connection owner
-/// routes no tool instruction to a Session binding owner.
+/// The starter of an App Server that executes no tool: its ready advertises
+/// no `tool_execution`, so no tool instruction is admitted.
 #[derive(Debug, Clone, Copy)]
 pub struct NoTasks;
 
@@ -116,6 +99,7 @@ impl Default for Times {
 pub struct Shared {
     pub paths: Arc<RootPaths>,
     pub times: Times,
+    pub tools: Arc<ToolContext>,
 }
 
 /// Creates the Session binding owners of an App Server.
@@ -148,6 +132,10 @@ impl<S: TaskStarter + Clone + Sync> SessionFactory for Factory<S> {
         tokio::spawn(own(owner, messages));
         Arc::new(Handle { mailbox })
     }
+
+    fn unbound_tool(&self, call: ToolCall, reports: Arc<dyn ReportSink>) {
+        tools::unbound(&self.shared, call, reports.as_ref());
+    }
 }
 
 /// The Connection owner's handle on one owner: each call is a message.
@@ -169,6 +157,10 @@ impl SessionHandle for Handle {
     fn close(&self, close: Close) {
         let (reply, _) = oneshot::channel();
         self.send(SessionMessage::Close { close, reply });
+    }
+
+    fn tool(&self, call: ToolCall) {
+        self.send(SessionMessage::Tool(Box::new(call)));
     }
 
     fn probe_slot(&self, request: ProbeRequest, answer: ProbeSlot) {
@@ -276,15 +268,7 @@ impl<S: TaskStarter> SessionOwner<S> {
 
     fn handle(&mut self, message: SessionMessage) {
         match message {
-            SessionMessage::Tool { task, reply } => {
-                let admission = if self.admits(&task.binding_id) {
-                    self.starter.start(task);
-                    Admission::Started
-                } else {
-                    Admission::Refused
-                };
-                let _ = reply.send(admission);
-            }
+            SessionMessage::Tool(call) => self.tool(*call),
             SessionMessage::Close { close, reply } => {
                 self.close(&close);
                 let _ = reply.send(());
@@ -303,17 +287,6 @@ impl<S: TaskStarter> SessionOwner<S> {
                 reply(entries);
             }
         }
-    }
-
-    /// Whether a command may start in `binding_id`: only in the Session's
-    /// current binding, and only before its close is handled.
-    fn admits(&self, binding_id: &Id) -> bool {
-        self.record
-            .as_ref()
-            .and_then(|record| record.current.as_ref())
-            .is_some_and(|binding| {
-                binding.binding_id == *binding_id && binding.state != SessionState::Closing
-            })
     }
 
     /// The time until the owner must read the clock again, while a probe
@@ -351,7 +324,7 @@ impl<S: TaskStarter> SessionOwner<S> {
     }
 
     /// A close of the current binding: it enters `closing`, its preparation
-    /// ends, and retries of its reports stop.
+    /// ends, retries of its reports stop and its staged tasks never start.
     fn close(&mut self, close: &Close) {
         let Some(binding) = self
             .record
@@ -363,6 +336,7 @@ impl<S: TaskStarter> SessionOwner<S> {
         };
         binding.state = SessionState::Closing;
         binding.waiting.clear();
+        binding.tasks.prevent_staged();
         let operation = binding.operation;
         let reports = std::mem::take(&mut binding.reports);
         self.end_operation(operation);
@@ -374,7 +348,7 @@ impl<S: TaskStarter> SessionOwner<S> {
     }
 
     /// The bindings of the ended connection become `unavailable`; a running
-    /// preparation of one ends.
+    /// preparation of one ends and its staged tasks are discarded.
     fn connection_ended(&mut self, connection: &Id) {
         let Some(record) = self.record.as_mut() else {
             return;
@@ -388,6 +362,7 @@ impl<S: TaskStarter> SessionOwner<S> {
         binding.state = SessionState::Unavailable;
         binding.waiting.clear();
         binding.reports.clear();
+        binding.tasks.prevent_staged();
         let operation = binding.operation;
         record.unavailable = Some(binding);
         self.end_operation(operation);
@@ -437,10 +412,12 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use protocol::connection::{PreparationError, PreparationErrorCode};
+    use protocol::connection::{DownstreamType, PreparationError, PreparationErrorCode};
     use protocol::field::AbsolutePath;
     use protocol::local::SessionEntry;
     use protocol::ports::Submission;
+    use protocol::tool::{ExecutionReport, ToolStatus};
+    use serde_json::json;
     use tokio::sync::oneshot::error::TryRecvError;
     use tokio::sync::{Barrier, oneshot};
 
@@ -459,25 +436,104 @@ mod tests {
                 connection_id: id("conn_1"),
                 requested_cwd: AbsolutePath::new("/project").unwrap(),
                 create_cwd: false,
-                cwd: None,
+                cwd: (state == SessionState::Prepared)
+                    .then(|| AbsolutePath::new("/project").unwrap()),
                 state,
                 error: None,
                 fingerprint: "a".repeat(64),
                 operation: 1,
                 waiting: Vec::new(),
                 reports: Vec::new(),
+                tasks: Default::default(),
             }),
             unavailable: None,
         }
     }
 
-    /// Starts an owner whose Session's current binding is `bind_1`, prepared.
-    fn owner_with_binding<S: TaskStarter>(starter: S) -> SessionMailbox {
+    /// What the owners of the tests share: an App Server whose ready lists
+    /// `exec_command`.
+    fn shared() -> Shared {
+        let capability = json!({
+            "schema_version": 1,
+            "tools": ["exec_command", "edit", "view_image"],
+            "controls": ["stdin", "cancel"],
+            "sandbox_policy_versions": [1],
+            "network_modes": ["disabled", "direct"],
+            "limits": {
+                "metadata_json_bytes": 65536, "tool_input_json_bytes": 4194304,
+                "execute_sse_json_bytes": 4259840, "stdin_utf8_bytes": 32768,
+                "stdin_sse_json_bytes": 262144, "default_message_json_bytes": 65536,
+                "helper_result_json_bytes": 262144, "drive_sync_json_bytes": 65536,
+                "ordinary_tool_status_json_bytes": 327680,
+                "drive_sync_report_json_bytes": 131072,
+                "view_image_decoded_bytes": 10485760,
+                "media_tool_status_json_bytes": 14680064,
+            },
+        });
+        Shared {
+            paths: Arc::new(RootPaths {
+                given: "/root".into(),
+                canonical: "/root".into(),
+                probe_program: "/probe".into(),
+            }),
+            times: Times::default(),
+            tools: Arc::new(ToolContext {
+                capability: Some(serde_json::from_value(capability).unwrap()),
+                socket_directory: "/sockets".into(),
+                tetral: "/tetral".into(),
+            }),
+        }
+    }
+
+    /// The `task_id` of each `rejected` report submitted.
+    #[derive(Default)]
+    struct Rejections(Mutex<Vec<String>>);
+
+    impl Rejections {
+        fn of(&self, task_id: &str) -> bool {
+            self.0.lock().unwrap().iter().any(|task| task == task_id)
+        }
+    }
+
+    impl ReportSink for Rejections {
+        fn submit(&self, submission: Submission) -> ReportId {
+            let bytes = (submission.build)(&id("conn_1"), &id("r1")).unwrap();
+            if let ToolStatus::Execution(ExecutionReport::Rejected { header, .. }) =
+                protocol::decode::<ToolStatus>(&bytes).unwrap()
+            {
+                let task_id = header.task_id.as_str().to_owned();
+                self.0.lock().unwrap().push(task_id);
+            }
+            ReportId(0)
+        }
+        fn cancel(&self, _report: ReportId) {}
+    }
+
+    /// Starts an owner whose Session's current binding is `bind_1`, prepared,
+    /// with the rejections it submits.
+    fn owner_with_binding<S: TaskStarter>(starter: S) -> (SessionMailbox, Arc<Rejections>) {
         let (mailbox, messages) = mpsc::unbounded_channel();
-        let mut owner = SessionOwner::new(None, starter, mailbox.clone());
+        let rejections = Arc::new(Rejections::default());
+        let preparation = Preparation {
+            session_id: SafeId::new("sess_1").unwrap(),
+            connection: Arc::new(NoConnection),
+            reports: rejections.clone(),
+            shared: shared(),
+        };
+        let mut owner = SessionOwner::new(Some(preparation), starter, mailbox.clone());
         owner.record = Some(record_with(SessionState::Prepared));
         tokio::spawn(own(owner, messages));
-        mailbox
+        (mailbox, rejections)
+    }
+
+    /// Returns once the owner has handled every message sent before.
+    async fn handled(mailbox: &SessionMailbox) {
+        let (reply, read) = oneshot::channel();
+        let entries = SessionMessage::Entries(Box::new(move |_| {
+            let _ = reply.send(());
+        }));
+        assert!(mailbox.send(entries).is_ok());
+        read.await.unwrap();
     }
 
     struct NoConnection;
@@ -585,18 +641,47 @@ mod tests {
     }
 
     struct Outcome {
-        admission: Admission,
+        /// Whether the command was rejected rather than started.
+        refused: bool,
         starts_after_close: usize,
         starts: usize,
     }
 
-    fn tool(task_id: &str) -> (SessionMessage, oneshot::Receiver<Admission>) {
-        let (reply, admission) = oneshot::channel();
-        let task = TaskStart {
-            task_id: task_id.to_owned(),
+    /// A `tool.execute` of `bind_1` that every other admission step admits.
+    fn tool(task_id: &str) -> SessionMessage {
+        let data = json!({
+            "protocol_version": 1,
+            "connection_id": "conn_1",
+            "message_id": format!("msg_{task_id}"),
+            "type": "tool.execute",
+            "payload": {
+                "session_id": "sess_1",
+                "binding_id": "bind_1",
+                "tool_use_event_id": format!("call_{task_id}"),
+                "task_id": task_id,
+                "tool": "exec_command",
+                "input": {"cmd": "true"},
+                "sandbox_policy": {
+                    "schema_version": 1,
+                    "filesystem": {"rules": [{"path": "/project", "access": "read_write"}]},
+                    "network": {"mode": "disabled"},
+                },
+            },
+        });
+        SessionMessage::Tool(Box::new(ToolCall {
+            connection_id: id("conn_1"),
+            message_id: id(&format!("msg_{task_id}")),
+            kind: DownstreamType::ToolExecute,
+            session_id: id("sess_1"),
             binding_id: id("bind_1"),
-        };
-        (SessionMessage::Tool { task, reply }, admission)
+            tool_use_event_id: id(&format!("call_{task_id}")),
+            task_id: id(task_id),
+            fingerprint: protocol::fingerprint::fingerprint(&data["payload"]),
+            data: data.to_string(),
+            recorded: true,
+            traceparent: None,
+            received: Duration::ZERO,
+        }))
     }
 
     async fn close_and_command(close_first: bool) -> Outcome {
@@ -604,7 +689,7 @@ mod tests {
             (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
         let (reply, admitted) = oneshot::channel();
         let close = CloseAdmitted::new(admitted);
-        let mailbox = owner_with_binding(CountingStarter {
+        let (mailbox, rejections) = owner_with_binding(CountingStarter {
             starts: starts.clone(),
             starts_after_close: starts_after_close.clone(),
             close: close.clone(),
@@ -634,19 +719,18 @@ mod tests {
             let (mailbox, barrier) = (mailbox.clone(), barrier.clone());
             async move {
                 barrier.wait().await;
-                let (message, admission) = tool("task-1");
-                tool_turn.send(&mailbox, message).await;
-                admission.await.unwrap()
+                tool_turn.send(&mailbox, tool("task-1")).await;
+                handled(&mailbox).await;
             }
         });
 
         closer.await.unwrap();
-        let admission = commander.await.unwrap();
-        let (message, late) = tool("task-2");
-        assert!(mailbox.send(message).is_ok());
-        assert_eq!(late.await.unwrap(), Admission::Refused);
+        commander.await.unwrap();
+        assert!(mailbox.send(tool("task-2")).is_ok());
+        handled(&mailbox).await;
+        assert!(rejections.of("task-2"));
         Outcome {
-            admission,
+            refused: rejections.of("task-1"),
             starts_after_close: starts_after_close.load(Ordering::SeqCst),
             starts: starts.load(Ordering::SeqCst),
         }
@@ -661,7 +745,7 @@ mod tests {
     async fn a_close_handled_first_refuses_the_command() {
         for round in 0..ROUNDS {
             let outcome = close_and_command(true).await;
-            assert_eq!(outcome.admission, Admission::Refused, "round {round}");
+            assert!(outcome.refused, "round {round}");
             assert_eq!(outcome.starts_after_close, 0, "round {round}");
             assert_eq!(outcome.starts, 0, "round {round}");
         }
@@ -671,7 +755,7 @@ mod tests {
     async fn a_command_handled_first_starts_and_nothing_starts_after_the_close() {
         for round in 0..ROUNDS {
             let outcome = close_and_command(false).await;
-            assert_eq!(outcome.admission, Admission::Started, "round {round}");
+            assert!(!outcome.refused, "round {round}");
             assert_eq!(outcome.starts_after_close, 0, "round {round}");
             assert_eq!(outcome.starts, 1, "round {round}");
         }
@@ -679,7 +763,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_close_of_another_binding_leaves_the_current_binding_admitting() {
-        let mailbox = owner_with_binding(NoTasks);
+        let starts = Arc::new(AtomicUsize::new(0));
+        // No close of `bind_1` comes, so its reply stays open and unsent.
+        let (_open, never) = oneshot::channel();
+        let (mailbox, rejections) = owner_with_binding(CountingStarter {
+            starts: starts.clone(),
+            starts_after_close: Arc::new(AtomicUsize::new(0)),
+            close: CloseAdmitted::new(never),
+        });
         let (reply, admitted) = oneshot::channel();
         let message = SessionMessage::Close {
             close: close_of("bind_replaced"),
@@ -687,9 +778,10 @@ mod tests {
         };
         assert!(mailbox.send(message).is_ok());
         admitted.await.unwrap();
-        let (message, admission) = tool("task-1");
-        assert!(mailbox.send(message).is_ok());
-        assert_eq!(admission.await.unwrap(), Admission::Started);
+        assert!(mailbox.send(tool("task-1")).is_ok());
+        handled(&mailbox).await;
+        assert!(!rejections.of("task-1"));
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
     }
 
     /// The entry of a Session whose running probe of operation 1 has the
@@ -700,14 +792,7 @@ mod tests {
             session_id: SafeId::new("sess_1").unwrap(),
             connection: Arc::new(NoConnection),
             reports: Arc::new(NoReports),
-            shared: Shared {
-                paths: Arc::new(RootPaths {
-                    given: "/root".into(),
-                    canonical: "/root".into(),
-                    probe_program: "/probe".into(),
-                }),
-                times: Times::default(),
-            },
+            shared: shared(),
         };
         let mut owner = SessionOwner::new(Some(preparation), NoTasks, mailbox.clone());
         owner.record = Some(record_with(SessionState::Preparing));

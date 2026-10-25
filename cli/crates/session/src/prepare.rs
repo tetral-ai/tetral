@@ -93,6 +93,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             operation,
             waiting: vec![requester],
             reports: Vec::new(),
+            tasks: Default::default(),
         };
         let record = self.record.get_or_insert_with(Record::default);
         record.current = Some(binding);
@@ -276,6 +277,7 @@ impl<S: TaskStarter> SessionOwner<S> {
         binding.reports.remove(index);
         if outcome == ReportOutcome::Acked && binding.state == SessionState::PreparedPendingAck {
             binding.state = SessionState::Prepared;
+            self.start_staged();
         }
     }
 

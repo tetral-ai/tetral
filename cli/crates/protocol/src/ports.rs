@@ -2,8 +2,9 @@
 //! without depending on each other.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use crate::connection::{McpTools, SessionPreparePayload, SessionStatus};
+use crate::connection::{DownstreamType, McpTools, SessionPreparePayload, SessionStatus};
 use crate::id::{Id, SafeId};
 use crate::local::SessionEntry;
 use crate::tool::{DriveSyncReport, ProtocolErrorReport, ToolStatus};
@@ -154,6 +155,34 @@ pub struct Close {
     pub binding_id: Id,
 }
 
+/// A `tool.execute`, `tool.stdin` or `tool.cancel` that the replay ledger
+/// has read, for the Session binding owner of its `session_id`, which
+/// decodes, admits or rejects it.
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    /// The online connection the Connection owner routed it on.
+    pub connection_id: Id,
+    pub message_id: Id,
+    pub kind: DownstreamType,
+    pub session_id: Id,
+    pub binding_id: Id,
+    pub tool_use_event_id: Id,
+    pub task_id: Id,
+    /// The event's data as it arrived.
+    pub data: String,
+    /// The payload's content fingerprint (`fingerprint`), which tells a
+    /// repeated task from a conflicting one.
+    pub fingerprint: String,
+    /// Whether the replay ledger recorded it: a new `tool.execute` it had no
+    /// room for is rejected `resource_exhausted`, a control that did not fit
+    /// even its reserve gets that control error.
+    pub recorded: bool,
+    /// The instruction's `traceparent`, when it is usable.
+    pub traceparent: Option<String>,
+    /// When the CLI received it, on the seam clock.
+    pub received: Duration,
+}
+
 /// One probe-slot request of a Session binding owner, unique within it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProbeRequest(pub u64);
@@ -183,6 +212,11 @@ pub trait SessionFactory: Send + Sync {
         connection: Arc<dyn ConnectionPort>,
         reports: Arc<dyn ReportSink>,
     ) -> Arc<dyn SessionHandle>;
+
+    /// Answers a tool instruction of a Session that has no owner here, so no
+    /// binding: it is rejected at its first failing admission step, which is
+    /// at the latest its binding's.
+    fn unbound_tool(&self, call: ToolCall, reports: Arc<dyn ReportSink>);
 }
 
 /// The Connection owner's handle on one Session binding owner; its
@@ -191,6 +225,7 @@ pub trait SessionFactory: Send + Sync {
 pub trait SessionHandle: Send + Sync {
     fn prepare(&self, prepare: Prepare);
     fn close(&self, close: Close);
+    fn tool(&self, call: ToolCall);
     /// The answer to the owner's request `request`.
     fn probe_slot(&self, request: ProbeRequest, answer: ProbeSlot);
     /// The connection ended: its bindings become `unavailable`.

@@ -80,6 +80,9 @@ Server:
   `stream::TOOL_EVENT_MAX_BYTES` from then on, a resumed stream of that
   connection from its start; a larger event closes the stream unread
   (`stream::EventLimit`, `owner`).
+- A tool instruction goes to its Session's owner, which decodes and admits
+  it, or, for a Session without one, to the factory, which rejects it; it
+  creates no owner and no record (`sessions`).
 - The replay ledger records a new operation only while its reserve stays
   free after recording it; the rest may use the reserve; it never removes an
   entry to make room, and an entry goes only once its instruction's final
@@ -110,8 +113,9 @@ and its running attempt.
   `sessions()` the entries of `GET /v1/sessions`, and `stop()` stops it,
   after which it stays `stopped`. It routes each Session instruction as an
   `Instruction`: the instruction as read, whether the ledger recorded it and
-  as a new operation, and the span its work runs in; a `session.prepare` and
-  a `session.close` go to their Session's owner.
+  as a new operation, and the span its work runs in; a `session.prepare`, a
+  `session.close` and a tool instruction (`protocol::ports::ToolCall`) go to
+  their Session's owner.
 - `Times` holds the owner's durations and limits, each a constant but for
   tests.
 - `Outbox::spawn(OutboxConfig)` starts the Report outbox, which implements

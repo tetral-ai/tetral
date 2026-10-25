@@ -10,6 +10,8 @@ use protocol::id::{Id, SafeId};
 use protocol::local::{SessionEntry, SessionState};
 use protocol::ports::ReportId;
 
+use crate::tools::Tasks;
+
 #[derive(Debug, Default)]
 pub struct Record {
     pub current: Option<Binding>,
@@ -35,6 +37,7 @@ pub struct Binding {
     pub waiting: Vec<Requester>,
     /// The reports of this binding's result that wait for their ACK.
     pub reports: Vec<ReportId>,
+    pub tasks: Tasks,
 }
 
 /// A `session.prepare` that a report answers.

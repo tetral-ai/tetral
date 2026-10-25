@@ -1,0 +1,456 @@
+//! Tool instructions in a Session binding owner. A `tool.execute` passes its
+//! admission steps in a fixed order, the first failing one deciding its
+//! `rejected` report, and every step precedes any side effect: its task
+//! identity against the binding's registry, the replay ledger's room, its
+//! schema, budgets and tool, its policy, then its binding. An admitted task
+//! enters its binding's registry and starts, or waits in the binding's
+//! staging queue while the binding waits for the ACK of its `prepared`
+//! report; that ACK starts the queue in arrival order
+//! ([`SessionOwner::start_staged`]). A control finds its task only in the
+//! registry of the binding it names, on its own connection.
+
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use execution::policy::{TaskPermissions, TranslationInputs, validate};
+use execution::report::{Body, Correlation, Report};
+use execution::{isolation, store};
+use protocol::connection::{Downstream, DownstreamPayload, DownstreamType};
+use protocol::id::Id;
+use protocol::local::SessionState;
+use protocol::ports::{ReportSink, ToolCall};
+use protocol::tool::{
+    ControlErrorCode, ExecutePayload, ExecutionTool, ProtocolError, RejectionCode,
+    ToolExecutionCapability, ToolInput, VisibleLimits,
+};
+use serde_json::{Value, json};
+
+use crate::owner::{SessionOwner, Shared, TaskStarter};
+use crate::record::{Binding, Record};
+
+/// What the admission of tool instructions reads besides a binding, the
+/// same for every Session of an App Server.
+#[derive(Debug, Clone)]
+pub struct ToolContext {
+    /// The `tool_execution` that every ready of this App Server advertises;
+    /// without it no tool is admitted.
+    pub capability: Option<ToolExecutionCapability>,
+    /// The control socket's directory `S`, canonical.
+    pub socket_directory: PathBuf,
+    /// The running `tetral`, canonical.
+    pub tetral: PathBuf,
+}
+
+/// An admitted task as its task supervisor starts it.
+#[derive(Debug, Clone)]
+pub struct TaskStart {
+    pub connection_id: Id,
+    pub correlation: Correlation,
+    pub tool: ToolInput,
+    pub permissions: TaskPermissions,
+    pub limits: Option<VisibleLimits>,
+    /// The binding's canonical working directory.
+    pub cwd: PathBuf,
+    /// The name its files are kept under ([`store`]).
+    pub task_name: String,
+    pub traceparent: Option<String>,
+    /// When the instruction was received, on the seam clock.
+    pub received: Duration,
+}
+
+/// One binding's tasks: its registry by `task_id` and its staging queue.
+#[derive(Debug, Default)]
+pub struct Tasks {
+    registry: HashMap<Id, Task>,
+    /// The tasks admitted while the binding waits for its ACK, in arrival
+    /// order.
+    staged: VecDeque<Id>,
+}
+
+#[derive(Debug)]
+struct Task {
+    /// Its `tool.execute` payload's content fingerprint.
+    fingerprint: String,
+    /// The `message_id`s of the instructions it answers: the one that
+    /// registered it and each identical one that joined it.
+    instructions: Vec<Id>,
+    start: TaskStart,
+    state: TaskState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskState {
+    Staged,
+    Started,
+    /// A close or a cancel prevented its start while it was staged.
+    Prevented,
+}
+
+impl Tasks {
+    /// Prevents the start of every staged task: at once, never behind
+    /// another binding's ACK.
+    pub fn prevent_staged(&mut self) {
+        for task_id in std::mem::take(&mut self.staged) {
+            if let Some(task) = self.registry.get_mut(&task_id) {
+                task.state = TaskState::Prevented;
+            }
+        }
+    }
+
+    /// The staged tasks in arrival order, each now started.
+    fn start_staged(&mut self) -> Vec<TaskStart> {
+        std::mem::take(&mut self.staged)
+            .into_iter()
+            .filter_map(|task_id| {
+                let task = self.registry.get_mut(&task_id)?;
+                task.state = TaskState::Started;
+                Some(task.start.clone())
+            })
+            .collect()
+    }
+}
+
+/// The policy that stands in for an instruction's own while step 3 decides
+/// whether the instruction fails for anything but its policy, which step 4
+/// judges.
+fn stand_in_policy() -> Value {
+    json!({
+        "schema_version": 1,
+        "filesystem": {"rules": []},
+        "network": {"mode": "disabled"},
+    })
+}
+
+impl<S: TaskStarter> SessionOwner<S> {
+    pub(crate) fn tool(&mut self, call: ToolCall) {
+        let Some(preparation) = &self.preparation else {
+            return;
+        };
+        let reports = preparation.reports.clone();
+        let refusal = match call.kind {
+            DownstreamType::ToolExecute => self.execute(&call).err(),
+            _ => self.control(&call).err(),
+        };
+        if let Some(body) = refusal {
+            submit(reports.as_ref(), &call, body);
+        }
+    }
+
+    /// The admission steps of a `tool.execute`; an admitted task registers,
+    /// then starts or is staged.
+    fn execute(&mut self, call: &ToolCall) -> Result<(), Body> {
+        let shared = &self.preparation.as_ref().expect("a preparing owner").shared;
+        let connection_binding = self
+            .record
+            .as_mut()
+            .and_then(|record| record.current.as_mut())
+            .filter(|binding| binding.connection_id == call.connection_id);
+        if let Some(task) =
+            connection_binding.and_then(|binding| binding.tasks.registry.get_mut(&call.task_id))
+        {
+            if task.fingerprint != call.fingerprint {
+                return Err(rejected(
+                    RejectionCode::TaskConflict,
+                    "task_id names a task of this connection with another payload",
+                ));
+            }
+            task.instructions.push(call.message_id.clone());
+            return Ok(());
+        }
+        if !call.recorded {
+            return Err(rejected(
+                RejectionCode::ResourceExhausted,
+                "the connection has no room to record a new task",
+            ));
+        }
+        let cwd = named_binding(self.record.as_ref(), call)
+            .and_then(|binding| binding.cwd.as_ref())
+            .map(|cwd| PathBuf::from(cwd.as_str()));
+        let task_name = store::task_name();
+        let (payload, permissions) = validated(
+            shared,
+            call,
+            cwd.as_deref().unwrap_or(&shared.paths.canonical),
+            &task_name,
+        )?;
+        let prepared = self
+            .record
+            .as_mut()
+            .and_then(|record| record.current.as_mut())
+            .filter(|binding| {
+                binding.binding_id == call.binding_id
+                    && binding.connection_id == call.connection_id
+                    && matches!(
+                        binding.state,
+                        SessionState::Prepared | SessionState::PreparedPendingAck
+                    )
+            });
+        let Some((binding, cwd)) = prepared.zip(cwd) else {
+            return Err(binding_unavailable());
+        };
+        let start = TaskStart {
+            connection_id: call.connection_id.clone(),
+            correlation: correlation(call),
+            tool: payload.tool,
+            permissions,
+            limits: payload.limits,
+            cwd,
+            task_name,
+            traceparent: call.traceparent.clone(),
+            received: call.received,
+        };
+        let staged = binding.state == SessionState::PreparedPendingAck;
+        binding.tasks.registry.insert(
+            call.task_id.clone(),
+            Task {
+                fingerprint: call.fingerprint.clone(),
+                instructions: vec![call.message_id.clone()],
+                start: start.clone(),
+                state: if staged {
+                    TaskState::Staged
+                } else {
+                    TaskState::Started
+                },
+            },
+        );
+        if staged {
+            binding.tasks.staged.push_back(call.task_id.clone());
+        } else {
+            self.starter.start(start);
+        }
+        Ok(())
+    }
+
+    /// The admission of a `tool.stdin` or `tool.cancel`: the ledger's room,
+    /// its schema and budgets, then its task in the named binding's registry.
+    /// A cancel of a staged task prevents its start.
+    fn control(&mut self, call: &ToolCall) -> Result<(), Body> {
+        control_checks(call)?;
+        let task = self
+            .record
+            .as_mut()
+            .and_then(|record| record.current.as_mut())
+            .filter(|binding| {
+                binding.binding_id == call.binding_id && binding.connection_id == call.connection_id
+            })
+            .and_then(|binding| {
+                let tasks = &mut binding.tasks;
+                tasks
+                    .registry
+                    .get_mut(&call.task_id)
+                    .map(|task| (task, &mut tasks.staged))
+            });
+        let Some((task, staged)) = task else {
+            return Err(task_not_found());
+        };
+        if call.kind == DownstreamType::ToolCancel && task.state == TaskState::Staged {
+            task.state = TaskState::Prevented;
+            staged.retain(|task_id| *task_id != call.task_id);
+        }
+        Ok(())
+    }
+
+    /// Starts the binding's staged tasks in arrival order, once the ACK of
+    /// its `prepared` report has made it `prepared`, before any later
+    /// instruction of the binding.
+    pub(crate) fn start_staged(&mut self) {
+        let Some(binding) = self
+            .record
+            .as_mut()
+            .and_then(|record| record.current.as_mut())
+            .filter(|binding| binding.state == SessionState::Prepared)
+        else {
+            return;
+        };
+        for start in binding.tasks.start_staged() {
+            self.starter.start(start);
+        }
+    }
+}
+
+/// Rejects a tool instruction of a Session without an owner here: such a
+/// Session has no binding, so a `tool.execute` fails at its binding step at
+/// the latest and a control finds no task.
+pub(crate) fn unbound(shared: &Shared, call: ToolCall, reports: &dyn ReportSink) {
+    let body = match call.kind {
+        DownstreamType::ToolExecute if !call.recorded => rejected(
+            RejectionCode::ResourceExhausted,
+            "the connection has no room to record a new task",
+        ),
+        DownstreamType::ToolExecute => {
+            match validated(shared, &call, &shared.paths.canonical, &store::task_name()) {
+                Err(body) => body,
+                Ok(_) => binding_unavailable(),
+            }
+        }
+        _ => control_checks(&call).err().unwrap_or_else(task_not_found),
+    };
+    submit(reports, &call, body);
+}
+
+/// The binding `call` names, when it is the Session's binding on the call's
+/// connection.
+fn named_binding<'a>(record: Option<&'a Record>, call: &ToolCall) -> Option<&'a Binding> {
+    record
+        .and_then(|record| record.current.as_ref())
+        .filter(|binding| {
+            binding.binding_id == call.binding_id && binding.connection_id == call.connection_id
+        })
+}
+
+/// Steps 3 and 4 of a `tool.execute`: its schema, budgets and tool against
+/// the ready's list, then its policy, translated with `cwd` as the working
+/// directory its trusted programs are looked up from and `task_name` naming
+/// its temporary directory.
+fn validated(
+    shared: &Shared,
+    call: &ToolCall,
+    cwd: &Path,
+    task_name: &str,
+) -> Result<(ExecutePayload, TaskPermissions), Body> {
+    let (payload, value) = match protocol::decode_value::<Downstream>(call.data.as_bytes()) {
+        Ok((
+            Downstream {
+                payload: DownstreamPayload::ToolExecute(payload),
+                ..
+            },
+            value,
+        )) => (payload, value),
+        _ => return Err(schema_failure(call)),
+    };
+    let listed = shared.tools.capability.as_ref().is_some_and(|capability| {
+        capability
+            .tools
+            .iter()
+            .any(|tool| *tool == tool_of(&payload.tool))
+    });
+    if !listed {
+        return Err(rejected(
+            RejectionCode::InvalidInput,
+            "tool is not one that this CLI's ready lists",
+        ));
+    }
+    let root = &shared.paths.canonical;
+    let parent = store::task_parent(root);
+    let inputs = TranslationInputs {
+        state_root: root.clone(),
+        socket_directory: shared.tools.socket_directory.clone(),
+        task_temporary_directory: store::task_temporary_directory(&parent, task_name),
+        task_directories: parent,
+        drives: None,
+        trusted_programs: isolation::trusted_programs(&shared.tools.tetral, cwd),
+    };
+    let permissions = TaskPermissions::admit(value["payload"].get("sandbox_policy"), &inputs)
+        .map_err(Body::Rejected)?;
+    Ok((payload, permissions))
+}
+
+/// The rejection of a `tool.execute` that does not decode: `invalid_input`,
+/// unless it decodes with a valid stand-in for its policy, when its own
+/// policy decides as step 4 judges it.
+fn schema_failure(call: &ToolCall) -> Body {
+    let invalid = || {
+        rejected(
+            RejectionCode::InvalidInput,
+            "the instruction does not match its schema or exceeds a size budget",
+        )
+    };
+    let Ok(mut value) = serde_json::from_str::<Value>(&call.data) else {
+        return invalid();
+    };
+    let Some(policy) = value
+        .get_mut("payload")
+        .and_then(|payload| payload.get_mut("sandbox_policy"))
+    else {
+        return invalid();
+    };
+    let policy = std::mem::replace(policy, stand_in_policy());
+    if protocol::decode::<Downstream>(&protocol::encode(&value)).is_err() {
+        return invalid();
+    }
+    match validate(Some(&policy)) {
+        Err(rejection) => Body::Rejected(rejection),
+        Ok(_) => invalid(),
+    }
+}
+
+/// The checks of a control before its task is looked up.
+fn control_checks(call: &ToolCall) -> Result<(), Body> {
+    if !call.recorded {
+        return Err(control_error(
+            ControlErrorCode::ResourceExhausted,
+            "the connection has no room to record the control",
+        ));
+    }
+    match protocol::decode::<Downstream>(call.data.as_bytes()) {
+        Ok(Downstream {
+            payload: DownstreamPayload::ToolStdin(_) | DownstreamPayload::ToolCancel(_),
+            ..
+        }) => Ok(()),
+        _ => Err(control_error(
+            ControlErrorCode::InvalidInput,
+            "the control does not match its schema or exceeds a size budget",
+        )),
+    }
+}
+
+fn tool_of(input: &ToolInput) -> ExecutionTool {
+    match input {
+        ToolInput::ExecCommand(_) => ExecutionTool::ExecCommand,
+        ToolInput::Edit(_) => ExecutionTool::Edit,
+        ToolInput::ViewImage(_) => ExecutionTool::ViewImage,
+    }
+}
+
+fn rejected(code: RejectionCode, message: &str) -> Body {
+    Body::Rejected(ProtocolError {
+        code,
+        message: message.to_owned(),
+    })
+}
+
+fn binding_unavailable() -> Body {
+    rejected(
+        RejectionCode::BindingUnavailable,
+        "binding_id names no prepared binding of this Session on this connection",
+    )
+}
+
+fn control_error(code: ControlErrorCode, message: &str) -> Body {
+    Body::Control {
+        result: None,
+        error: Some(ProtocolError {
+            code,
+            message: message.to_owned(),
+        }),
+    }
+}
+
+fn task_not_found() -> Body {
+    control_error(
+        ControlErrorCode::TaskNotFound,
+        "task_id names no task of the named binding on this connection",
+    )
+}
+
+fn correlation(call: &ToolCall) -> Correlation {
+    Correlation {
+        session_id: call.session_id.clone(),
+        binding_id: call.binding_id.clone(),
+        tool_use_event_id: call.tool_use_event_id.clone(),
+        task_id: call.task_id.clone(),
+        request_message_id: call.message_id.clone(),
+    }
+}
+
+/// Hands the report that answers `call` to the outbox.
+fn submit(reports: &dyn ReportSink, call: &ToolCall, body: Body) {
+    let report = Report {
+        correlation: correlation(call),
+        body,
+    };
+    let mut submission = report.submission(call.connection_id.clone());
+    submission.traceparent = call.traceparent.clone();
+    reports.submit(submission);
+}

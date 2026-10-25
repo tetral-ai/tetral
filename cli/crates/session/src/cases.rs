@@ -57,6 +57,7 @@ mod tests {
             operation: 1,
             waiting: Vec::new(),
             reports: Vec::new(),
+            tasks: Default::default(),
         }
     }
 

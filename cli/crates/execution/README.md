@@ -43,6 +43,9 @@ which owns that task's process tree; the translation of a call's
   process result over the ordinary limits is rendered again from its stored
   output with half the visible byte budget until it fits, its counters and
   exit facts unchanged (`report`).
+- A task is named during its admission, before its policy is translated,
+  so that its profile names its private temporary directory in `T`; a
+  rejected instruction keeps no name (`store`).
 - Each probe of a `bwrap` candidate is bounded by `PROBE_TIMEOUT` and
   `PROBE_OUTPUT_LIMIT_BYTES`, which `Isolation::with_probe_bounds`
   overrides.
@@ -63,6 +66,8 @@ which owns that task's process tree; the translation of a call's
   launch profile.
 - `report.rs`: `Report`, its `Correlation` and `Body`, the error bounds
   (`bounded`) and the size fitting of a process result (`fit`).
+- `store.rs`: a task's name and the paths of `T` and of a task's temporary
+  directory.
 - `isolation/harness.rs`: the test entry `tetral-isolation-harness`, under the
   feature `test-seams`: one command through admission, the check and the
   launch.

@@ -409,7 +409,7 @@ impl Message for Downstream {
 
     fn check(&self, received: &Received<'_>) -> Result<(), DecodeError> {
         if let Some(instruction) = self.payload.tool_instruction() {
-            return tool::check_instruction(&instruction, received.bytes);
+            return tool::check_instruction(&instruction, received);
         }
         rule(
             received.bytes <= MESSAGE_MAX_BYTES,
