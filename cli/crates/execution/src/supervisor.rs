@@ -95,6 +95,15 @@ const WRITE_STARTED: &str = "task.write_started";
 /// counted once its result is applied.
 const GONE_CHECKED: &str = "task.gone_checked";
 
+/// The test seam counter of each reading of the clock by the timer of the
+/// termination procedure's next step.
+const ENDING_CHECKED: &str = "task.ending_checked";
+
+/// The test seam barrier that holds the supervisor's observation of the
+/// launched process's exit, so that a test can end a task whose exit is
+/// never seen.
+const EXIT_OBSERVED: &str = "task.exit_observed";
+
 /// The message of every failure to start other than a directory's.
 const NOT_STARTED: &str = "process could not start";
 
@@ -734,7 +743,7 @@ impl Supervisor {
                 () = state::seams::sleep_until(lifetime_ends), if detached && started && quiet => {
                     self.ending = Some((Termination::begin(pid, bounds.termination), Expiry::Lifetime));
                 }
-                () = state::seams::sleep_until(ending_due), if self.exit.is_none() && self.ending.is_some() => {
+                () = state::seams::sleep_until_counted(ending_due, ENDING_CHECKED), if self.exit.is_none() && self.ending.is_some() => {
                     let Some((termination, expiry)) = self.ending else { break };
                     match termination.step() {
                         Some(next) => self.ending = Some((next, expiry)),
@@ -870,7 +879,7 @@ impl Supervisor {
                     self.exit = Some((ExitFacts::default(), state::seams::now()));
                 }
                 () = state::seams::sleep_until(drain_ends), if self.exit.is_some() => break,
-                () = state::seams::sleep_until(ending_due), if self.exit.is_none() && self.ending.is_some() => {
+                () = state::seams::sleep_until_counted(ending_due, ENDING_CHECKED), if self.exit.is_none() && self.ending.is_some() => {
                     let Some((termination, expiry)) = self.ending else { break };
                     match termination.step() {
                         Some(next) => self.ending = Some((next, expiry)),
@@ -1555,7 +1564,11 @@ async fn initial_wait(ends: Duration, started: bool) {
 
 async fn wait_child(process: Option<&mut Process>) -> std::io::Result<std::process::ExitStatus> {
     match process {
-        Some(process) => process.child.wait().await,
+        Some(process) => {
+            let status = process.child.wait().await;
+            state::seams::barrier(EXIT_OBSERVED).await;
+            status
+        }
         None => std::future::pending().await,
     }
 }

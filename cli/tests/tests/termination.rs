@@ -1,11 +1,14 @@
 //! The end of tasks between `tetral server run`, whose ready advertises
 //! `tool_execution`, and the reference control server as separate
 //! processes, each on its own controlled clock, with real restricted
-//! processes: the termination procedure's grace, a shutdown that ends a
-//! running task through it, a connection's end with SIGKILL at once, a resume
-//! that keeps a task running, processes that stay after SIGKILL and the
-//! `cleanup_pending` of their Session, an old connection's late events, and
-//! the records an App Server killed with SIGKILL leaves for the next start.
+//! processes: the termination procedure's grace, a cancelled task's report
+//! at the SIGKILL after the grace while a process stays blocked, and at the
+//! end of the wait after the SIGKILL when the task's exit is never observed,
+//! a shutdown that ends a running task through the procedure, a
+//! connection's end with SIGKILL at once, a resume that keeps a task
+//! running, processes that stay after SIGKILL and the `cleanup_pending` of
+//! their Session, an old connection's late events, and the records an App
+//! Server killed with SIGKILL leaves for the next start.
 //! The test seams these tests use are those `tetral_tests::tasks` and
 //! `tetral_tests::machine` name.
 
@@ -25,8 +28,8 @@ use tetral_tests::app_server::{request, wait_until};
 use tetral_tests::machine::{INSTANCE, answer_fault, seconds, send, wait_for_requests};
 use tetral_tests::socket_directory;
 use tetral_tests::tasks::{
-    GONE_CHECKED, REPLY_WAITING, SESSION, TaskMachine, WAIT_CHECKED, millis, policy,
-    process_running,
+    ENDING_CHECKED, EXIT_OBSERVED, GONE_CHECKED, REPLY_WAITING, SESSION, TaskMachine, WAIT_CHECKED,
+    millis, policy, process_running,
 };
 
 /// The test seam barrier before a record an earlier App Server left is
@@ -119,6 +122,26 @@ fn next_check(tasks: &TaskMachine, step: Duration) {
     seams.wait_for_count(GONE_CHECKED, checked + 1);
 }
 
+/// Moves the App Server's clock to 1 ms before the termination procedure's
+/// next step, due 2 seconds after the clock's last move, and waits until the
+/// step's timer has read that time twice.
+fn just_before_the_next_step(tasks: &TaskMachine) {
+    let seams = &tasks.machine().seams;
+    seams.advance(millis(1_999));
+    let checked = seams.count(ENDING_CHECKED);
+    // The first count may be of a reading from before the move.
+    seams.wait_for_count(ENDING_CHECKED, checked + 3);
+}
+
+/// Whether the reference control server has accepted a `terminal` report of
+/// `task_id`.
+fn has_terminal(tasks: &TaskMachine, task_id: &str) -> bool {
+    tasks
+        .reports(task_id)
+        .iter()
+        .any(|report| report["phase"] == "terminal")
+}
+
 /// Prepares `session`'s `binding` again, after each `cleanup_pending` once
 /// the next check of the earlier task's processes has run, until the
 /// Session prepares; gives the outcome.
@@ -170,6 +193,102 @@ fn a_cancel_gives_the_command_its_grace_to_run_its_term_trap_and_exit() {
         "{marks:?}"
     );
     case.observe("within the grace m held t, stdout after, and the terminal report exit_code 0 with cancelled");
+}
+
+#[test]
+fn a_cancel_of_a_task_ignoring_sigterm_reports_its_sigkill_two_seconds_later_with_a_read_left_blocked()
+ {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "trap '' TERM; sleep 1241 & cat mnt/f > out 2>&1; wait, with the read blocked on a FUSE mount that never answers, then a cancel",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    let mount = tasks.project.join("mnt");
+    fs::create_dir(&mount).unwrap();
+    let held = Arc::new((Mutex::new(false), Condvar::new()));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let session = fuser::spawn_mount(
+        Unanswered {
+            released: held.clone(),
+            reads: reads.clone(),
+        },
+        &mount,
+        &fuser::Config::default(),
+    )
+    .unwrap();
+    // cat holds no pipe of the task: a process left after SIGKILL that holds
+    // one keeps the report until the wait after SIGKILL ends, and the kernel
+    // may leave cat blocked in the read with all its descriptors open.
+    detached(
+        &tasks,
+        "task_blocked",
+        "trap '' TERM; sleep 1241 & cat mnt/f > out 2>&1; wait",
+    );
+    wait_until("the read reaching the mount", || {
+        reads.load(Ordering::SeqCst) > 0
+    });
+    let cancel = tasks.cancel("task_blocked", json!({}));
+    assert_eq!(tasks.reply(&cancel)["result"]["result"]["cancelled"], true);
+    just_before_the_next_step(&tasks);
+    assert!(process_running(&["sleep", "1241"]));
+    assert!(!has_terminal(&tasks, "task_blocked"));
+    tasks.machine().seams.advance(millis(1));
+    // The cancel came 250 ms after the start, so duration_ms 2,250 places the
+    // exit at the SIGKILL.
+    let terminal = tasks.terminal("task_blocked");
+    let result = &terminal["result"]["result"];
+    assert_eq!(
+        json!([
+            result["exit_code"],
+            result["signal"],
+            result["cancelled"],
+            result["duration_ms"]
+        ]),
+        json!([null, "killed", true, 2_250]),
+        "{terminal:#}"
+    );
+    release(&held);
+    drop(session);
+    case.observe("at 1,999 ms after the cancel sleep ran and no terminal report had come; at 2,000 ms the terminal report came with signal killed and cancelled while cat stayed blocked in the read");
+}
+
+#[test]
+fn a_cancelled_task_whose_exit_is_never_observed_reports_no_exit_four_seconds_after_the_cancel() {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "trap '' TERM; sleep 1251, then a cancel, with the observation of the launched process's exit held at task.exit_observed",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    let seams = &tasks.machine().seams;
+    seams.hold(EXIT_OBSERVED);
+    detached(&tasks, "task_unobserved", "trap '' TERM; sleep 1251");
+    let cancel = tasks.cancel("task_unobserved", json!({}));
+    assert_eq!(tasks.reply(&cancel)["result"]["result"]["cancelled"], true);
+    // The SIGKILL at the end of the grace ends the process, whose exit then
+    // waits at the barrier.
+    seams.advance(seconds(2.0));
+    seams.wait_until_waiting(EXIT_OBSERVED, 1);
+    just_before_the_next_step(&tasks);
+    assert!(!has_terminal(&tasks, "task_unobserved"));
+    seams.advance(millis(1));
+    let terminal = tasks.terminal("task_unobserved");
+    let result = &terminal["result"]["result"];
+    assert_eq!(
+        json!([
+            result["exit_code"],
+            result["signal"],
+            result["cancelled"],
+            result["duration_ms"]
+        ]),
+        json!([null, null, true, 4_250]),
+        "{terminal:#}"
+    );
+    seams.release(EXIT_OBSERVED);
+    case.observe("with the exit held, no terminal report had come at 3,999 ms after the cancel; at 4,000 ms it came with exit_code and signal null and cancelled");
 }
 
 #[test]

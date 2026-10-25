@@ -87,8 +87,9 @@ temporary directories. No workspace crate depends on this package.
 - `src/tasks.rs`: `TaskMachine`, such a machine with one prepared Session,
   which issues tool instructions and controls, reads their reports and
   replies, follows the seams of a task's start, initial wait, output, writes,
-  waiting replies and the checks of an ended task's processes, waits for the
-  App Server's exit after a shutdown, and removes `T` when it ends.
+  waiting replies, termination steps, observed exit and the checks of an
+  ended task's processes, waits for the App Server's exit after a shutdown,
+  and removes `T` when it ends.
 - `tests/configure.rs`: `tetral configure` and `tetral --version`: the refused
   arguments, bootstraps, apps and control paths with the root unchanged, the
   size limit and private modes of a new root, each failure code, configure
@@ -167,9 +168,12 @@ temporary directories. No workspace crate depends on this package.
   no other task reaches, `TMPDIR` with files and Unix sockets, the files'
   removal after the ACKs, and `T` after the App Server's death.
 - `tests/termination.rs`: the end of tasks: a cancel's grace for the
-  command's TERM trap, a shutdown that ends a running task through its TERM
-  trap before the App Server exits, a connection's end that discards staged
-  tasks and kills running ones at once, resumes that keep a task running,
+  command's TERM trap, a cancelled task's report at the SIGKILL after the
+  grace while a process stays blocked on a FUSE mount, and at the end of
+  the wait after the SIGKILL when the task's exit is never observed, a
+  shutdown that ends a running task through its TERM trap before the App
+  Server exits, a connection's end that discards staged tasks and kills
+  running ones at once, resumes that keep a task running,
   the deadline of a withheld resume and of a clock step, an old
   connection's waiter and output after a new one, processes blocked on a
   FUSE mount that keep their Session `cleanup_pending` while others

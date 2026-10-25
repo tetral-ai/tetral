@@ -8,8 +8,11 @@
 //! that starts to wait counts `task.reply_waiting`, each reading of the
 //! clock by the timer of a running task's waiting replies
 //! `task.reply_checked`, each read of a task's output `task.output_read`,
-//! each write that starts on a task's stdin pipe `task.write_started`, and
-//! each check of an ended task's processes `task.gone_checked`.
+//! each write that starts on a task's stdin pipe `task.write_started`, each
+//! check of an ended task's processes `task.gone_checked`, and each reading
+//! of the clock by the timer of the termination procedure's next step
+//! `task.ending_checked`. The supervisor's observation of the launched
+//! process's exit waits at the barrier `task.exit_observed`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -56,6 +59,14 @@ pub const GONE_CHECKED: &str = "task.gone_checked";
 /// How often the App Server checks an ended task's processes again, on its
 /// clock.
 pub const GONE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The counter of the readings of the clock by the timer of the
+/// termination procedure's next step.
+pub const ENDING_CHECKED: &str = "task.ending_checked";
+
+/// The barrier of the supervisor's observation of the launched process's
+/// exit.
+pub const EXIT_OBSERVED: &str = "task.exit_observed";
 
 /// How often the reference control server sends a heartbeat, on its clock.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
