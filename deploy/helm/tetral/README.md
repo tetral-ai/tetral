@@ -62,7 +62,7 @@ preparation and workspace seeding run independently before any service starts.
    ServiceAccounts are separate. Both routed profiles still require Istiod.
 
 5. **Create all in-cluster Secrets.** The chart creates no Secret values.
-   Create the following 15 Secrets with the keys referenced by the canonical
+   Create the following 16 Secrets with the keys referenced by the canonical
    manifests, using the names selected under `secrets`:
 
    ```text
@@ -71,6 +71,7 @@ preparation and workspace seeding run independently before any service starts.
    auth-bootstrap
    auth-database
    auth-internal-principal
+   computer-hub-page-token
    gateway-web-blob
    gateway-web-keypool
    queue-database

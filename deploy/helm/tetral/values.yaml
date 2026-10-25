@@ -116,6 +116,9 @@ secrets:
   authBootstrap: auth-bootstrap
   authDatabase: auth-database
   authInternalPrincipal: auth-internal-principal
+  # Key page-token-key: 32 bytes as 64 hexadecimal characters that sign
+  # computer-hub list page tokens; every hub Pod reads the same Secret.
+  computerHubPageToken: computer-hub-page-token
   gatewayWebBlob: gateway-web-blob
   gatewayWebKeypool: gateway-web-keypool
   queueDatabase: queue-database
@@ -185,6 +188,9 @@ jobRunner:
 # Two computer-hub replicas, so a CLI keeps a hub while one Pod restarts.
 computerHub:
   replicas: 2
+  # Latest expiry an issued connection credential may have, as a Go duration
+  # after issuance; also the lifetime of a credential issued without one.
+  maxCredentialLifetime: 720h
 
 resources:
   agentRuntime:

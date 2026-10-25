@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tetral-ai/tetral/internal/workload"
 )
@@ -20,7 +21,7 @@ func TestConfigFromEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	valid := func() mapEnv {
-		return mapEnv{EnvDatabaseURL: "postgres://hub@db/tetral", EnvInternalPrincipalPublicKey: base64.StdEncoding.EncodeToString(public)}
+		return mapEnv{EnvDatabaseURL: "postgres://hub@db/tetral", EnvInternalPrincipalPublicKey: base64.StdEncoding.EncodeToString(public), EnvPageTokenKey: strings.Repeat("ab", 32)}
 	}
 	for _, tc := range []struct {
 		name   string
@@ -29,7 +30,10 @@ func TestConfigFromEnv(t *testing.T) {
 		reject string
 	}{
 		{name: "required settings", change: func(mapEnv) {}, check: func(c Config) bool {
-			return c.DatabaseURL == "postgres://hub@db/tetral" && c.PrincipalVerifier != nil
+			return c.DatabaseURL == "postgres://hub@db/tetral" && c.PrincipalVerifier != nil && string(c.PageTokenKey) == strings.Repeat("\xab", 32)
+		}},
+		{name: "maximum credential lifetime", change: func(e mapEnv) { e[EnvMaxCredentialLifetime] = "1h" }, check: func(c Config) bool {
+			return c.MaxCredentialLifetime == time.Hour
 		}},
 		{name: "addresses and database TLS", change: func(e mapEnv) {
 			e[EnvHTTPAddress], e[EnvMetricsAddress], e[EnvDatabaseTLSCAPath], e[EnvDatabaseTLSServerName] = ":9080", ":9081", "/ca.pem", "db.internal"
@@ -40,6 +44,11 @@ func TestConfigFromEnv(t *testing.T) {
 		{name: "no database", change: func(e mapEnv) { delete(e, EnvDatabaseURL) }, reject: EnvDatabaseURL},
 		{name: "no principal key", change: func(e mapEnv) { delete(e, EnvInternalPrincipalPublicKey) }, reject: EnvInternalPrincipalPublicKey},
 		{name: "principal key not Ed25519", change: func(e mapEnv) { e[EnvInternalPrincipalPublicKey] = base64.StdEncoding.EncodeToString([]byte("short")) }, reject: EnvInternalPrincipalPublicKey},
+		{name: "lifetime not a duration", change: func(e mapEnv) { e[EnvMaxCredentialLifetime] = "30 days" }, reject: EnvMaxCredentialLifetime},
+		{name: "lifetime zero", change: func(e mapEnv) { e[EnvMaxCredentialLifetime] = "0s" }, reject: EnvMaxCredentialLifetime},
+		{name: "no page token key", change: func(e mapEnv) { delete(e, EnvPageTokenKey) }, reject: EnvPageTokenKey},
+		{name: "page token key of 31 bytes", change: func(e mapEnv) { e[EnvPageTokenKey] = strings.Repeat("ab", 31) }, reject: EnvPageTokenKey},
+		{name: "page token key not hexadecimal", change: func(e mapEnv) { e[EnvPageTokenKey] = strings.Repeat("zz", 32) }, reject: EnvPageTokenKey},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := valid()

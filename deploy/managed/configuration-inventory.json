@@ -517,7 +517,9 @@
       "environment_keys": [
         "TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64",
         "TETRAL_COMPUTER_HUB_HTTP_ADDR",
+        "TETRAL_COMPUTER_HUB_MAX_CREDENTIAL_LIFETIME",
         "TETRAL_COMPUTER_HUB_METRICS_ADDR",
+        "TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY",
         "TETRAL_DATABASE_TLS_CA_PATH",
         "TETRAL_DATABASE_TLS_SERVER_NAME",
         "TETRAL_DATABASE_URL"
@@ -525,12 +527,13 @@
       "defaults": {
         "http_addr": ":8080",
         "metrics_addr": ":8081",
-        "shutdown_timeout": "10s"
+        "shutdown_timeout": "10s",
+        "max_credential_lifetime": "720h"
       },
       "units": "listen addresses, Go duration",
-      "unset_zero": "Whitespace empty addresses default; database DSN and principal key required.",
-      "constraints": "Metrics address differs from the public address; the principal key is a base64 Ed25519 public key; blob settings pass blob production readiness.",
-      "projection": "Fixed ports 8080/8081, computer-hub-url DSN key of the database Secret, blob Secret keys, and computerHub.replicas (default two); no other hub setting is chart-owned.",
+      "unset_zero": "Whitespace empty addresses and an empty maximum credential lifetime default; database DSN, principal key and page token key required.",
+      "constraints": "Metrics address differs from the public address; the principal key is a base64 Ed25519 public key; the maximum credential lifetime is a positive Go duration; the page token key is 32 bytes as 64 hexadecimal characters; blob settings pass blob production readiness.",
+      "projection": "Fixed ports 8080/8081, computer-hub-url DSN key of the database Secret, blob Secret keys, the page-token-key of the Secret secrets.computerHubPageToken names, computerHub.replicas (default two) and computerHub.maxCredentialLifetime (default 720h); no other hub setting is chart-owned.",
       "proofs": [
         "services/computer-hub/config_test.go",
         "deploy/helm/configuration_projection_test.go",

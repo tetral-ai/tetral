@@ -51,6 +51,13 @@ spec:
               value: ":8080"
             - name: TETRAL_COMPUTER_HUB_METRICS_ADDR
               value: ":8081"
+            - name: TETRAL_COMPUTER_HUB_MAX_CREDENTIAL_LIFETIME
+              value: {{ .Values.computerHub.maxCredentialLifetime | quote }}
+            - name: TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.computerHubPageToken | quote }}
+                  key: page-token-key
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT
               value: {{ .Values.observability.deploymentEnvironment | quote }}
             - name: TETRAL_SERVICE_VERSION

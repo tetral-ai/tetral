@@ -1,6 +1,7 @@
 package computerhub
 
 import (
+	"encoding/hex"
 	"strings"
 	"time"
 
@@ -19,9 +20,12 @@ const (
 	EnvDatabaseTLSCAPath          = "TETRAL_DATABASE_TLS_CA_PATH"
 	EnvDatabaseTLSServerName      = "TETRAL_DATABASE_TLS_SERVER_NAME"
 	EnvInternalPrincipalPublicKey = "TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64"
+	EnvMaxCredentialLifetime      = "TETRAL_COMPUTER_HUB_MAX_CREDENTIAL_LIFETIME" //nolint:gosec // G101: environment variable name, not credential material.
+	EnvPageTokenKey               = "TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY"          //nolint:gosec // G101: environment variable name, not credential material.
 
-	DefaultHTTPAddress    = ":8080"
-	DefaultMetricsAddress = ":8081"
+	DefaultHTTPAddress           = ":8080"
+	DefaultMetricsAddress        = ":8081"
+	DefaultMaxCredentialLifetime = 720 * time.Hour
 
 	// ShutdownTimeout bounds the drain of each listener after shutdown
 	// begins.
@@ -44,6 +48,12 @@ type Config struct {
 	DeploymentEnvironment string
 	ServiceVersion        string
 	PrincipalVerifier     *auth.InternalPrincipalVerifier
+	// MaxCredentialLifetime bounds how far ahead an issued credential's
+	// expires_at may lie, and is the lifetime of one issued without it.
+	MaxCredentialLifetime time.Duration
+	// PageTokenKey signs the list page tokens; every hub pod holds the same
+	// 32 bytes.
+	PageTokenKey []byte
 }
 
 func ConfigFromEnv(env Env) (Config, error) {
@@ -78,6 +88,17 @@ func ConfigFromEnv(env Env) (Config, error) {
 	cfg.PrincipalVerifier, err = auth.NewInternalPrincipalVerifierFromBase64(rawKey)
 	if err != nil {
 		return Config{}, workload.NewConfigError(EnvInternalPrincipalPublicKey + " must be a base64 Ed25519 public key")
+	}
+	cfg.MaxCredentialLifetime = DefaultMaxCredentialLifetime
+	if raw := strings.TrimSpace(env.Getenv(EnvMaxCredentialLifetime)); raw != "" {
+		cfg.MaxCredentialLifetime, err = time.ParseDuration(raw)
+		if err != nil || cfg.MaxCredentialLifetime <= 0 {
+			return Config{}, workload.NewConfigError(EnvMaxCredentialLifetime + " must be a positive duration")
+		}
+	}
+	cfg.PageTokenKey, err = hex.DecodeString(strings.TrimSpace(env.Getenv(EnvPageTokenKey)))
+	if err != nil || len(cfg.PageTokenKey) != 32 {
+		return Config{}, workload.NewConfigError(EnvPageTokenKey + " must be 32 bytes as 64 hexadecimal characters")
 	}
 	return cfg, nil
 }
