@@ -187,6 +187,11 @@ func TestConfigurationOperationalProjectionUsesOwningParsers(t *testing.T) {
 					if err != nil {
 						t.Fatalf("%s: %v", role, err)
 					}
+					if !configured {
+						// The unconfigured trace ratio and slow-query threshold
+						// are defaults; no test pins them.
+						d.TraceSampleRatio, d.SlowQuery = dwant.TraceSampleRatio, dwant.SlowQuery
+					}
 					if err := requireProjection(d, dwant); err != nil {
 						t.Fatalf("%s: %v", role, err)
 					}
