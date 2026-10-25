@@ -13,7 +13,6 @@ use crate::commands::{check_failed, io_failed};
 use crate::output::{Code, CommandError};
 
 pub fn run(root: &StateRoot, observer: &observe::Observer) -> Result<Value, CommandError> {
-    observe::STARTUP.process_started(state::seams::now());
     let runtime = runtime()?;
     let lock = startup::lock(root).map_err(start_failed)?;
     let status = runtime.block_on(async {

@@ -149,6 +149,14 @@ pub fn run(arguments: Vec<OsString>) -> Result<Value, CommandError> {
         _ => {}
     }
     let observer = observe::install(level);
+    if matches!(
+        cli.command,
+        Command::Server {
+            command: ServerCommand::Run { .. }
+        }
+    ) {
+        observe::STARTUP.config_started();
+    }
 
     private::check_root(&root).map_err(check_failed)?;
     if let Some(recorded) = config::read(&root).map_err(config_failed)?

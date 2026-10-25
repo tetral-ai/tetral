@@ -123,9 +123,13 @@ impl Startup {
         }
     }
 
-    /// Takes the process-start instant and records the start of `config`.
+    /// Takes the process-start instant, from which `config` is measured.
     pub fn process_started(&self, now: Duration) {
         self.process_start.store(nanos(now), Ordering::Release);
+    }
+
+    /// Records the start of `config`, once the records have a sink.
+    pub fn config_started(&self) {
         phase_started(Phase::Config);
     }
 
@@ -250,6 +254,7 @@ mod tests {
         let at = Duration::from_millis;
         let (stderr, _) = record_with(Level::Info, || {
             startup.process_started(at(100));
+            startup.config_started();
             startup.config_loaded(at(350));
             startup.config_loaded(at(500));
             startup.first_connected(at(2_350));

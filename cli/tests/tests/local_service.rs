@@ -108,6 +108,14 @@ fn fails_and_changes_nothing(
     run
 }
 
+/// The records a run wrote to stderr.
+fn records(run: &Run) -> impl Iterator<Item = Value> + '_ {
+    std::str::from_utf8(&run.stderr)
+        .expect("stderr is UTF-8")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each stderr line is one record"))
+}
+
 /// Whether nothing holds the root's lock: the test takes it without waiting.
 fn lock_is_free(root: &Path) -> bool {
     let file = File::open(root.join("run/app-server.lock")).unwrap();
@@ -358,13 +366,21 @@ fn server_commands_write_their_results_and_each_failure_code() {
 
     let mut case = record.case("app_mismatch and unsafe_control_path");
     for command in ["run", "status", "stop"] {
-        fails_and_changes_nothing(
+        let run = fails_and_changes_nothing(
             &mut case,
             &root,
             &format!("tetral server {command} --app app_two"),
             Tetral::new(["server", command, "--app", "app_two"]).home(&root),
             "app_mismatch",
         );
+        if command == "run" {
+            assert!(
+                records(&run).any(|record| record["event"] == "cold_start.phase_started"
+                    && record["cold_start.phase"] == "config"),
+                "server run records the start of its config phase before its checks"
+            );
+            case.observe("the refused server run recorded the start of its config phase");
+        }
     }
     fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
     for command in ["run", "status", "stop"] {

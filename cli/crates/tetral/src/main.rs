@@ -13,5 +13,6 @@ fn main() -> ExitCode {
         return output::write(Ok(output::version()));
     }
     state::seams::check_harness();
+    observe::STARTUP.process_started(state::seams::now());
     output::write(commands::run(arguments))
 }
