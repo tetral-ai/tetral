@@ -240,4 +240,9 @@ mod tests {
             "{reading:?} is not between {before:?} and {after:?}"
         );
     }
+
+    #[test]
+    fn without_a_harness_a_wait_reads_the_clock_again_at_least_once_per_second() {
+        assert_eq!(recheck_interval(), Duration::from_secs(1));
+    }
 }
