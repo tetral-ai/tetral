@@ -511,6 +511,7 @@ describe("ProviderGatewayServiceShell", () => {
     const gate = new Promise<void>((resolve) => { release = resolve; });
     try {
       const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+        maxConcurrentTurns: 8,
         logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
         providerStreamer: {
           stream: async function* () {

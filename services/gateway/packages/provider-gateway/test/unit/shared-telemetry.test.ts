@@ -102,7 +102,7 @@ describe("shared telemetry", () => {
   test("OTEL_EXPORTER_OTLP_ENDPOINT naming an OTLP/gRPC receiver gets it an ended span", async () => {
     const receiver = await otlpReceiver();
     try {
-      const telemetry = createTelemetry({ serviceName: "provider-gateway", declarations, diagnostics: parseDiagnosticConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: receiver.endpoint }) });
+      const telemetry = createTelemetry({ serviceName: "provider-gateway", declarations, diagnostics: parseDiagnosticConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: receiver.endpoint, TETRAL_TRACE_SAMPLE_RATIO: "1" }) });
       const observation = telemetry.observe("lookup");
       const traceId = observation.run(() => activeTraceparent())!.split("-")[1]!;
       observation.end();
