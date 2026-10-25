@@ -16,6 +16,7 @@ codex-utils-absolute-path.workspace = true
 codex-utils-path-uri.workspace = true
 codex-utils-pty.workspace = true
 idna.workspace = true
+libc.workspace = true
 protocol.workspace = true
 rand.workspace = true
 rustix = { workspace = true, features = ["fs", "process"] }

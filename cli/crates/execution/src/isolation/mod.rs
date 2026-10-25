@@ -10,7 +10,9 @@ mod linux;
 
 use std::collections::HashMap;
 use std::io;
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -18,7 +20,6 @@ use codex_sandboxing::{
     SandboxCommand, SandboxManager, SandboxTransformRequest, SandboxablePreference,
 };
 use codex_utils_path_uri::PathUri;
-use codex_utils_pty::SpawnedProcess;
 use protocol::tool::RejectionCode;
 
 use crate::policy::{PolicyRejection, TaskPermissions};
@@ -46,12 +47,31 @@ impl Default for Isolation {
 #[derive(Debug)]
 pub struct Available(());
 
-/// A tool's command: the program and its arguments, and exactly the
-/// environment it gets.
+/// A tool's command: the program and its arguments, exactly the environment
+/// it gets, and the directory it starts in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Command {
     pub argv: Vec<String>,
     pub env: HashMap<String, String>,
+    /// `None` starts it in the App Server's own working directory, the one
+    /// against which the availability check and Codex's helper both resolve
+    /// `PATH`, so that the check judges the `bwrap` the launch runs; a task
+    /// enters its own directory inside the sandbox (`child`).
+    pub directory: Option<PathBuf>,
+}
+
+/// The descriptor on which a launched command finds the descriptor that its
+/// launch passes it.
+pub const PASSED_DESCRIPTOR: RawFd = 3;
+
+/// A started sandboxed command, with its stdin, stdout and stderr piped. Its
+/// first process leads its own session and process group, so that a signal
+/// to that group reaches no process of the App Server.
+#[derive(Debug)]
+pub struct Process {
+    pub child: tokio::process::Child,
+    /// The first process's ID, which is also its process group's ID.
+    pub pid: u32,
 }
 
 #[derive(Debug)]
@@ -129,10 +149,11 @@ impl Isolation {
     }
 
     /// Starts `command` inside the sandbox that the task's permissions
-    /// describe, with `cwd` as its working directory and as the directory
-    /// the permissions resolve against. The sandboxed command runs `tetral`
-    /// as `codex-linux-sandbox`, which then runs the command under `bwrap`
-    /// and seccomp.
+    /// describe, with `cwd`, the binding's canonical working directory, as
+    /// the directory the permissions resolve against, and `passed`, when
+    /// given, as its descriptor [`PASSED_DESCRIPTOR`]. The sandboxed command
+    /// runs `tetral` as `codex-linux-sandbox`, which then runs the command
+    /// under `bwrap` and seccomp.
     pub async fn launch(
         &self,
         _available: &Available,
@@ -140,7 +161,8 @@ impl Isolation {
         permissions: &TaskPermissions,
         cwd: &Path,
         tetral: &Path,
-    ) -> Result<SpawnedProcess, LaunchError> {
+        passed: Option<OwnedFd>,
+    ) -> Result<Process, LaunchError> {
         let manager = SandboxManager::new();
         #[cfg(target_os = "linux")]
         let profile = &linux::launch_profile(permissions.profile());
@@ -153,6 +175,11 @@ impl Isolation {
             false,
         );
         let cwd_uri = PathUri::from_host_native_path(cwd).map_err(LaunchError::Spawn)?;
+        let start = match &command.directory {
+            Some(directory) => directory.clone(),
+            None => std::env::current_dir().map_err(LaunchError::Spawn)?,
+        };
+        let start_uri = PathUri::from_host_native_path(&start).map_err(LaunchError::Spawn)?;
         let mut argv = command.argv.into_iter();
         let program = argv.next().unwrap_or_default();
         let request = manager
@@ -160,7 +187,7 @@ impl Isolation {
                 command: SandboxCommand {
                     program: program.into(),
                     args: argv.collect(),
-                    cwd: cwd_uri.clone(),
+                    cwd: start_uri,
                     env: command.env,
                     managed_network: None,
                     additional_permissions: None,
@@ -186,9 +213,83 @@ impl Isolation {
                 "the sandboxed command is empty",
             )));
         };
+        let mut child = tokio::process::Command::new(program);
+        child
+            .args(args)
+            .env_clear()
+            .envs(&request.env)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(directory) = &command.directory {
+            child.current_dir(directory);
+        }
+        if let Some(arg0) = &request.arg0 {
+            child.arg0(arg0);
+        }
+        let passed_raw = passed.as_ref().map(AsRawFd::as_raw_fd);
+        let parent = rustix::process::getpid().as_raw_nonzero().get();
+        // SAFETY: the closure runs between fork and exec and makes only
+        // system calls, which allocate nothing.
+        unsafe {
+            child.pre_exec(move || prepare_child(passed_raw, parent));
+        }
         state::seams::count("process.spawn");
-        codex_utils_pty::spawn_pipe_process(program, args, cwd, &request.env, &request.arg0, &[])
-            .await
-            .map_err(|error| LaunchError::Spawn(io::Error::other(error)))
+        let child = child.spawn().map_err(LaunchError::Spawn)?;
+        drop(passed);
+        let pid = child
+            .id()
+            .ok_or_else(|| LaunchError::Spawn(io::Error::other("the command has no process ID")))?;
+        Ok(Process { child, pid })
     }
+}
+
+/// The child's side of a launch, as Codex's pipe spawn prepares it: a new
+/// session, so that the command has no terminal and its process group is its
+/// own; on Linux, SIGTERM once the App Server `parent` ends; and no
+/// descriptor but its pipes and the passed one, at [`PASSED_DESCRIPTOR`].
+fn prepare_child(passed: Option<RawFd>, parent: libc::pid_t) -> io::Result<()> {
+    codex_utils_pty::process_group::detach_from_tty()?;
+    codex_utils_pty::process_group::set_parent_death_signal(parent)?;
+    let kept = match passed {
+        Some(raw) => {
+            // SAFETY: `raw` is open in this process until exec; dup2 onto
+            // the passed descriptor clears its close-on-exec flag, and the
+            // same descriptor needs the flag cleared by hand.
+            let placed = unsafe {
+                if raw == PASSED_DESCRIPTOR {
+                    libc::fcntl(raw, libc::F_SETFD, 0)
+                } else {
+                    libc::dup2(raw, PASSED_DESCRIPTOR)
+                }
+            };
+            if placed < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            PASSED_DESCRIPTOR
+        }
+        None => PASSED_DESCRIPTOR - 1,
+    };
+    close_on_exec_from(kept + 1);
+    Ok(())
+}
+
+/// Marks every descriptor from `first` up close-on-exec, where the system
+/// can, rather than closing it: the spawn still reports a failed exec on its
+/// own close-on-exec pipe. One left unmarked is close-on-exec already in a
+/// process that opens files only with that flag.
+fn close_on_exec_from(first: RawFd) {
+    #[cfg(target_os = "linux")]
+    // SAFETY: close_range takes integers only and changes only this child's
+    // descriptors.
+    unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            first as libc::c_uint,
+            libc::c_uint::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = first;
 }

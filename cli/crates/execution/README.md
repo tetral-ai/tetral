@@ -20,8 +20,10 @@ which owns that task's process tree; the translation of a call's
   that check can call. The launch has Codex's sandbox manager compile the
   task's profile, filesystem and network together, into one `bwrap` and
   seccomp command with the preference `Require`, so that no grant runs
-  unsandboxed, and starts it with exactly the environment the tool gives and
-  no descriptor beyond its pipes (`isolation/mod.rs`).
+  unsandboxed, and starts it with exactly the environment the tool gives,
+  as the leader of a new session and process group, and with no descriptor
+  beyond its pipes and the one it passes at `PASSED_DESCRIPTOR`
+  (`isolation/mod.rs`).
 - The `bwrap` is the one Codex's helper picks for the same command: the
   system `bwrap` on `PATH` that passes the `--help` probe, otherwise the
   bundled one beside `tetral` whose digest matches `CODEX_BWRAP_SHA256`. None,
@@ -83,7 +85,8 @@ which owns that task's process tree; the translation of a call's
   network rules' host, CIDR and address forms.
 - `policy/translate.rs`: `TranslationInputs` and the profile's entries.
 - `isolation/mod.rs`: `Isolation`, its `check` and `launch`, `Available`,
-  `Command`, `LaunchError` and `trusted_programs`.
+  `Command`, `Process`, `PASSED_DESCRIPTOR`, `LaunchError` and
+  `trusted_programs`.
 - `isolation/linux.rs`: the choice of `bwrap` and its candidates, the walk
   for a planted `bwrap`, the digest check of the bundled one, the WSL1 test,
   the namespace probe and the launch profile.

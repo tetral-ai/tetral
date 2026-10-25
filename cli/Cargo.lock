@@ -2053,6 +2053,7 @@ dependencies = [
  "codex-utils-path-uri",
  "codex-utils-pty",
  "idna",
+ "libc",
  "protocol",
  "rand 0.10.3",
  "rustix",
