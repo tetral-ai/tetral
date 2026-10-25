@@ -76,6 +76,16 @@ pub fn check_harness() {
     harness::check();
 }
 
+/// The environment variable that names this process's test harness, for a
+/// child process that runs with an otherwise empty environment.
+pub fn harness_variable() -> Option<(&'static str, std::ffi::OsString)> {
+    #[cfg(feature = "test-seams")]
+    if let Some(harness) = harness::named() {
+        return Some((harness::SOCKET_VARIABLE, harness.socket().into()));
+    }
+    None
+}
+
 /// Waits until the test harness releases the barrier `name`.
 pub async fn barrier(name: &'static str) {
     #[cfg(feature = "test-seams")]
@@ -151,6 +161,10 @@ mod harness {
     }
 
     impl Harness {
+        pub fn socket(&self) -> &std::path::Path {
+            &self.socket
+        }
+
         fn request(&self, operation: &str, name: Option<&str>) -> String {
             let mut line = format!("{PROTOCOL} {} {operation}", std::process::id());
             if let Some(name) = name {

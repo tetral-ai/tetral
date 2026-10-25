@@ -1838,7 +1838,13 @@ name = "session"
 version = "0.1.0-alpha.1"
 dependencies = [
  "execution",
+ "observe",
  "protocol",
+ "rustix",
+ "serde",
+ "serde_json",
+ "state",
+ "tempfile",
  "tokio",
 ]
 
@@ -2048,6 +2054,7 @@ dependencies = [
  "protocol",
  "sdk",
  "serde_json",
+ "session",
  "state",
  "tempfile",
  "tokio",

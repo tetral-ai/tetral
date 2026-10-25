@@ -29,8 +29,10 @@ seams.
   waits for a deadline with `seams::sleep_until`, which reads the clock again
   at least every `seams::RECHECK_INTERVAL`.
 - Its test seams, `seams::check_harness`, `seams::barrier`,
-  `seams::barrier_blocking` and `seams::count`, do nothing unless the crate
-  feature `test-seams` is on (`seams`).
+  `seams::barrier_blocking`, `seams::count` and `seams::harness_variable`,
+  which hands the harness to a child process with an otherwise empty
+  environment, do nothing unless the crate feature `test-seams` is on
+  (`seams`).
 
 ## The state root and the control socket
 

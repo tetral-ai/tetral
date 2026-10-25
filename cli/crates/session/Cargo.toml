@@ -7,8 +7,14 @@ publish.workspace = true
 
 [dependencies]
 execution.workspace = true
+observe.workspace = true
 protocol.workspace = true
-tokio = { workspace = true, features = ["rt", "sync"] }
+rustix = { workspace = true, features = ["fs", "process"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+state.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "sync", "time"] }
 
 [dev-dependencies]
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }

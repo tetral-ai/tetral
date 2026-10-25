@@ -13,7 +13,11 @@ runs as child processes of itself.
 - Every command waits for its records to be written before it exits, at most
   `observe::EXIT_FLUSH_LIMIT`; after a shutdown, never past the shutdown's
   deadline, so that `server run` exits within it (`commands`, `server`).
-- `tetral --version` alone answers first, reading no environment variable and
+- Run with `argv[0]` `tetral-cwd-probe`, it is the App Server's directory
+  probe and nothing else: it reads at most
+  `session::probe_child::INPUT_MAX_BYTES` of stdin and writes the probe's one
+  line to stdout (`main`).
+- `tetral --version` alone answers next, reading no environment variable and
   no file. Every other command runs the checks of `commands` in order (the
   arguments, the root checks of `state::private`, the app recorded in an
   existing `config.toml`) before it does anything, and the first that fails
@@ -47,7 +51,8 @@ runs as child processes of itself.
 
 ## Where things are
 
-- `src/main.rs`: `main`. Past `--version`, it first checks the test harness
+- `src/main.rs`: `main` and the directory probe's entry point. Past
+  `--version`, it first checks the test harness
   (`state::seams::check_harness`).
 - `src/commands.rs`: the command line and the checks every command runs.
 - `src/server.rs`: `server run`, `server status` and `server stop`, and the

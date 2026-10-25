@@ -1,6 +1,27 @@
 //! The Session binding owner: one task per Session on this machine.
+//!
+//! The owner sets no timer for a probe's deadline: it reads the seam clock
+//! whenever it wakes and, while a probe runs, wakes at least once per
+//! recheck interval, as the Connection owner does. Probe tasks and report
+//! outcomes come back as messages tagged with their operation or report,
+//! and a result whose operation is no longer current is discarded.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use protocol::id::{Id, SafeId};
+use protocol::local::SessionState;
+use protocol::ports::{
+    Close, ConnectionPort, EntriesReply, Prepare, ProbeRequest, ProbeSlot, ReportId,
+    ReportListener, ReportOutcome, ReportSink, SessionFactory, SessionHandle,
+};
 use tokio::sync::{mpsc, oneshot};
+
+use crate::probe::{PROBE_LIMIT, Probe};
+use crate::probe_child::Output;
+use crate::record::Record;
 
 pub enum SessionMessage {
     /// A tool instruction for this Session; the reply says whether it started.
@@ -9,7 +30,27 @@ pub enum SessionMessage {
         reply: oneshot::Sender<Admission>,
     },
     /// The Session's `session.close`; the reply comes once the close is admitted.
-    Close { reply: oneshot::Sender<()> },
+    Close {
+        close: Option<Close>,
+        reply: oneshot::Sender<()>,
+    },
+    Prepare(Box<Prepare>),
+    ProbeSlot {
+        request: ProbeRequest,
+        answer: ProbeSlot,
+    },
+    /// The probe of `operation` is reaped, with its result if it wrote one.
+    ProbeDone {
+        operation: u64,
+        output: Option<Output>,
+    },
+    Report {
+        report: ReportId,
+        outcome: ReportOutcome,
+    },
+    ConnectionEnded(Id),
+    Shutdown,
+    Entries(EntriesReply),
 }
 
 pub type SessionMailbox = mpsc::UnboundedSender<SessionMessage>;
@@ -31,26 +72,214 @@ pub trait TaskStarter: Send + 'static {
     fn start(&mut self, task: TaskStart);
 }
 
-pub fn spawn<S: TaskStarter>(starter: S) -> SessionMailbox {
-    let (mailbox, mut messages) = mpsc::unbounded_channel();
-    let mut owner = SessionOwner {
-        closing: false,
-        starter,
-    };
-    tokio::spawn(async move {
-        while let Some(message) = messages.recv().await {
-            owner.handle(message);
+/// The starter of an App Server that executes no tool: its Connection owner
+/// routes no tool instruction to a Session binding owner.
+#[derive(Debug, Clone, Copy)]
+pub struct NoTasks;
+
+impl TaskStarter for NoTasks {
+    fn start(&mut self, _task: TaskStart) {}
+}
+
+/// The paths a preparation checks against and runs.
+#[derive(Debug, Clone)]
+pub struct RootPaths {
+    /// The state root as `TETRAL_HOME` gives it.
+    pub given: PathBuf,
+    /// The state root's canonical path.
+    pub canonical: PathBuf,
+    /// The running executable, which runs as the directory probe.
+    pub probe_program: PathBuf,
+}
+
+/// The durations an owner runs by, each a constant but for tests.
+#[derive(Debug, Clone, Copy)]
+pub struct Times {
+    pub probe_limit: Duration,
+}
+
+impl Default for Times {
+    fn default() -> Times {
+        Times {
+            probe_limit: PROBE_LIMIT,
         }
-    });
+    }
+}
+
+/// What every Session binding owner of an App Server shares.
+#[derive(Debug, Clone)]
+pub struct Shared {
+    pub paths: Arc<RootPaths>,
+    pub times: Times,
+}
+
+/// Starts the owner of a Session that only admits commands, as a Session
+/// without preparations does.
+pub fn spawn<S: TaskStarter>(starter: S) -> SessionMailbox {
+    let (mailbox, messages) = mpsc::unbounded_channel();
+    let owner = SessionOwner::new(None, starter, mailbox.clone());
+    tokio::spawn(own(owner, messages));
     mailbox
 }
 
-struct SessionOwner<S> {
-    closing: bool,
+/// Creates the Session binding owners of an App Server.
+pub struct Factory<S> {
+    shared: Shared,
     starter: S,
 }
 
+impl<S> Factory<S> {
+    pub fn new(shared: Shared, starter: S) -> Factory<S> {
+        Factory { shared, starter }
+    }
+}
+
+impl<S: TaskStarter + Clone + Sync> SessionFactory for Factory<S> {
+    fn create(
+        &self,
+        session_id: SafeId,
+        connection: Arc<dyn ConnectionPort>,
+        reports: Arc<dyn ReportSink>,
+    ) -> Arc<dyn SessionHandle> {
+        let (mailbox, messages) = mpsc::unbounded_channel();
+        let preparation = Preparation {
+            session_id,
+            connection,
+            reports,
+            shared: self.shared.clone(),
+        };
+        let owner = SessionOwner::new(Some(preparation), self.starter.clone(), mailbox.clone());
+        tokio::spawn(own(owner, messages));
+        Arc::new(Handle { mailbox })
+    }
+}
+
+/// The Connection owner's handle on one owner: each call is a message.
+struct Handle {
+    mailbox: SessionMailbox,
+}
+
+impl Handle {
+    fn send(&self, message: SessionMessage) {
+        let _ = self.mailbox.send(message);
+    }
+}
+
+impl SessionHandle for Handle {
+    fn prepare(&self, prepare: Prepare) {
+        self.send(SessionMessage::Prepare(Box::new(prepare)));
+    }
+
+    fn close(&self, close: Close) {
+        let (reply, _) = oneshot::channel();
+        self.send(SessionMessage::Close {
+            close: Some(close),
+            reply,
+        });
+    }
+
+    fn probe_slot(&self, request: ProbeRequest, answer: ProbeSlot) {
+        self.send(SessionMessage::ProbeSlot { request, answer });
+    }
+
+    fn connection_ended(&self, connection_id: Id) {
+        self.send(SessionMessage::ConnectionEnded(connection_id));
+    }
+
+    fn shutdown(&self) {
+        self.send(SessionMessage::Shutdown);
+    }
+
+    fn entries(&self, reply: EntriesReply) {
+        self.send(SessionMessage::Entries(reply));
+    }
+}
+
+/// Gives each report outcome back to the owner as a message.
+pub(crate) struct ReportEvents {
+    pub mailbox: SessionMailbox,
+}
+
+impl ReportListener for ReportEvents {
+    fn outcome(&self, report: ReportId, outcome: ReportOutcome) {
+        let _ = self
+            .mailbox
+            .send(SessionMessage::Report { report, outcome });
+    }
+}
+
+/// What an owner that prepares bindings holds beyond the admission of
+/// commands.
+pub(crate) struct Preparation {
+    pub session_id: SafeId,
+    pub connection: Arc<dyn ConnectionPort>,
+    pub reports: Arc<dyn ReportSink>,
+    pub shared: Shared,
+}
+
+/// A spawned probe, until its task reports it reaped.
+pub(crate) struct Running {
+    pub probe: Probe,
+    pub deadline: Duration,
+    pub killed: bool,
+}
+
+pub(crate) struct SessionOwner<S> {
+    pub closing: bool,
+    pub starter: S,
+    pub mailbox: SessionMailbox,
+    pub preparation: Option<Preparation>,
+    /// Absent until the first `session.prepare` is handled.
+    pub record: Option<Record>,
+    pub last_operation: u64,
+    pub last_request: u64,
+    /// Each slot request that may still wait, and its operation.
+    pub requests: HashMap<ProbeRequest, u64>,
+    /// Each probe not yet reaped, by operation.
+    pub probes: HashMap<u64, Running>,
+}
+
+async fn own<S: TaskStarter>(
+    mut owner: SessionOwner<S>,
+    mut messages: mpsc::UnboundedReceiver<SessionMessage>,
+) {
+    loop {
+        let wake = owner.wake_in();
+        tokio::select! {
+            message = messages.recv() => match message {
+                Some(message) => owner.handle(message),
+                None => return,
+            },
+            () = async {
+                match wake {
+                    Some(wake) => tokio::time::sleep(wake).await,
+                    None => std::future::pending().await,
+                }
+            } => {}
+        }
+        owner.check_deadlines();
+    }
+}
+
 impl<S: TaskStarter> SessionOwner<S> {
+    fn new(
+        preparation: Option<Preparation>,
+        starter: S,
+        mailbox: SessionMailbox,
+    ) -> SessionOwner<S> {
+        SessionOwner {
+            closing: false,
+            starter,
+            mailbox,
+            preparation,
+            record: None,
+            last_operation: 0,
+            last_request: 0,
+            requests: HashMap::new(),
+            probes: HashMap::new(),
+        }
+    }
+
     fn handle(&mut self, message: SessionMessage) {
         match message {
             SessionMessage::Tool { task, reply } => {
@@ -62,10 +291,141 @@ impl<S: TaskStarter> SessionOwner<S> {
                 };
                 let _ = reply.send(admission);
             }
-            SessionMessage::Close { reply } => {
+            SessionMessage::Close { close, reply } => {
                 self.closing = true;
+                if let Some(close) = close {
+                    self.close(&close);
+                }
                 let _ = reply.send(());
             }
+            SessionMessage::Prepare(prepare) => self.prepare(*prepare),
+            SessionMessage::ProbeSlot { request, answer } => self.probe_slot(request, answer),
+            SessionMessage::ProbeDone { operation, output } => self.probe_done(operation, output),
+            SessionMessage::Report { report, outcome } => self.report_outcome(report, outcome),
+            SessionMessage::ConnectionEnded(connection) => self.connection_ended(&connection),
+            SessionMessage::Shutdown => self.shutdown(),
+            SessionMessage::Entries(reply) => {
+                let entries = match (&self.record, &self.preparation) {
+                    (Some(record), Some(preparation)) => record.entries(&preparation.session_id),
+                    _ => Vec::new(),
+                };
+                reply(entries);
+            }
+        }
+    }
+
+    /// The time until the owner must read the clock again, while a probe
+    /// runs that has not been killed.
+    fn wake_in(&self) -> Option<Duration> {
+        let next = self
+            .probes
+            .values()
+            .filter(|running| !running.killed)
+            .map(|running| running.deadline)
+            .min()?;
+        Some(
+            next.saturating_sub(state::seams::now())
+                .min(state::seams::recheck_interval()),
+        )
+    }
+
+    /// Kills each probe whose time has passed; its preparation fails with
+    /// `cwd_check_timeout`, and its slot stays taken until it is reaped.
+    fn check_deadlines(&mut self) {
+        let now = state::seams::now();
+        let passed: Vec<u64> = self
+            .probes
+            .iter_mut()
+            .filter(|(_, running)| !running.killed && now >= running.deadline)
+            .map(|(operation, running)| {
+                running.probe.kill();
+                running.killed = true;
+                *operation
+            })
+            .collect();
+        for operation in passed {
+            self.probe_timed_out(operation);
+        }
+    }
+
+    /// A close of the current binding: it enters `closing`, its preparation
+    /// ends, and retries of its reports stop.
+    fn close(&mut self, close: &Close) {
+        let Some(binding) = self
+            .record
+            .as_mut()
+            .and_then(|record| record.current.as_mut())
+            .filter(|binding| binding.binding_id == close.binding_id)
+        else {
+            return;
+        };
+        binding.state = SessionState::Closing;
+        binding.waiting.clear();
+        let operation = binding.operation;
+        let reports = std::mem::take(&mut binding.reports);
+        self.end_operation(operation);
+        if let Some(preparation) = &self.preparation {
+            for report in reports {
+                preparation.reports.cancel(report);
+            }
+        }
+    }
+
+    /// The bindings of the ended connection become `unavailable`; a running
+    /// preparation of one ends.
+    fn connection_ended(&mut self, connection: &Id) {
+        let Some(record) = self.record.as_mut() else {
+            return;
+        };
+        let Some(mut binding) = record
+            .current
+            .take_if(|binding| binding.connection_id == *connection)
+        else {
+            return;
+        };
+        binding.state = SessionState::Unavailable;
+        binding.waiting.clear();
+        binding.reports.clear();
+        let operation = binding.operation;
+        record.unavailable = Some(binding);
+        self.end_operation(operation);
+    }
+
+    fn shutdown(&mut self) {
+        let operations: Vec<u64> = self
+            .requests
+            .values()
+            .chain(self.probes.keys())
+            .copied()
+            .collect();
+        for operation in operations {
+            self.end_operation(operation);
+        }
+    }
+
+    /// Ends `operation`: a slot request it still has is withdrawn and its
+    /// probe killed. Its result, if one comes, is discarded since no binding
+    /// holds the operation any more.
+    pub(crate) fn end_operation(&mut self, operation: u64) {
+        let withdrawn: Vec<ProbeRequest> = self
+            .requests
+            .iter()
+            .filter(|(_, waiting)| **waiting == operation)
+            .map(|(request, _)| *request)
+            .collect();
+        for request in withdrawn {
+            self.requests.remove(&request);
+            if let Some(preparation) = &self.preparation {
+                preparation
+                    .connection
+                    .probe_slot_withdraw(&preparation.session_id, request);
+            }
+        }
+        if let Some(running) = self.probes.get_mut(&operation)
+            && !running.killed
+        {
+            running.probe.kill();
+            running.killed = true;
         }
     }
 }
@@ -190,7 +550,7 @@ mod tests {
             async move {
                 barrier.wait().await;
                 close_turn
-                    .send(&mailbox, SessionMessage::Close { reply })
+                    .send(&mailbox, SessionMessage::Close { close: None, reply })
                     .await;
                 while !close.check() {
                     tokio::task::yield_now().await;
