@@ -1,11 +1,14 @@
 //! The capabilities that every ready of this App Server advertises,
-//! computed once at start from the providers this build has: Session
-//! preparation always, and drives without mounting until a drive mount
-//! provider exists. A build with the feature `test-seams` advertises as
-//! `tool_execution` the fragment that `TETRAL_TEST_TOOL_EXECUTION` holds, so
-//! that cross-process tests can negotiate tool execution with the providers
-//! this build has.
+//! computed once at start: Session preparation always, drives without
+//! mounting until a drive mount provider exists, and `tool_execution` with
+//! the tools whose startup checks pass (`execution::capability`). A build
+//! with the feature `test-seams` advertises as `tool_execution` the fragment
+//! that `TETRAL_TEST_TOOL_EXECUTION` holds, when it is set, so that
+//! cross-process tests can choose the fragment.
 
+use std::path::Path;
+
+use execution::capability::StartupChecks;
 use protocol::connection::{Capabilities, DriveCapability};
 use protocol::field::True;
 
@@ -19,12 +22,33 @@ pub const TEST_TOOL_EXECUTION_VARIABLE: &str = "TETRAL_TEST_TOOL_EXECUTION";
 /// The capabilities, or a start error when a `test-seams` build is given a
 /// value that is not a `tool_execution` fragment.
 pub fn assemble() -> Result<Capabilities, StartError> {
+    let tool_execution = match test_tool_execution()? {
+        Some(fragment) => Some(fragment),
+        None => execution::capability::fragment(startup_checks()),
+    };
     Ok(Capabilities {
         session_preparation: True,
         drives: DriveCapability { mount: false },
-        tool_execution: test_tool_execution()?,
+        tool_execution,
         local_mcp: None,
     })
+}
+
+/// The startup checks of tool execution: the running `tetral`, which every
+/// tool's restricted child runs, and a shell for `exec_command`.
+fn startup_checks() -> StartupChecks {
+    StartupChecks {
+        restricted_child: std::env::current_exe().is_ok_and(|tetral| executable(&tetral)),
+        shell: ["/bin/bash", "/bin/sh"]
+            .into_iter()
+            .any(|shell| executable(Path::new(shell))),
+    }
+}
+
+/// Whether `path` resolves to a regular file that this process may execute.
+fn executable(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+        && rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok()
 }
 
 #[cfg(feature = "test-seams")]

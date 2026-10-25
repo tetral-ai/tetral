@@ -13,12 +13,14 @@
 //! for each answer to a report's current attempt once it has applied it, a
 //! retry scheduled or the report released.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use crate::app_server::{AppServer, wait_until};
+use crate::binaries;
 use crate::record::Case;
 use crate::reference::ReferenceServer;
 use crate::run::Tetral;
@@ -144,6 +146,27 @@ impl Machine {
         Machine::start_with(case, directory, bootstrap, working_directory, &[])
     }
 
+    /// [`Machine::start`] with the App Server run by `program` with
+    /// `arguments` before its own command line, such as `bwrap` with the
+    /// mounts of the App Server's view of the file system.
+    pub fn start_under(
+        case: &mut Case,
+        directory: &Path,
+        bootstrap: &Value,
+        program: &str,
+        arguments: &[OsString],
+    ) -> Machine {
+        let mut command_line = arguments.to_vec();
+        command_line.push(binaries::tetral().into());
+        command_line.extend(["server", "run", "--app", APP].map(OsString::from));
+        Machine::start_as(
+            case,
+            directory,
+            bootstrap,
+            Tetral::at(Path::new(program), command_line),
+        )
+    }
+
     /// [`Machine::start_in`] with `environment` added to the App Server's.
     fn start_with(
         case: &mut Case,
@@ -151,6 +174,22 @@ impl Machine {
         bootstrap: &Value,
         working_directory: &Path,
         environment: &[(&str, String)],
+    ) -> Machine {
+        let mut server_run =
+            Tetral::new(["server", "run", "--app", APP]).current_dir(working_directory);
+        for (name, value) in environment {
+            server_run = server_run.env(name, value);
+        }
+        Machine::start_as(case, directory, bootstrap, server_run)
+    }
+
+    /// Configures a state root in `directory` and starts `server_run` on it
+    /// with its own seam clock.
+    fn start_as(
+        case: &mut Case,
+        directory: &Path,
+        bootstrap: &Value,
+        server_run: Tetral,
     ) -> Machine {
         std::fs::create_dir_all(directory).unwrap();
         let root = directory.join("root");
@@ -161,14 +200,7 @@ impl Machine {
         case.command("tetral configure --app app_one --from-stdin", &run.exit());
         assert_eq!(run.object(), json!({}));
         let seams = Seams::serve(directory, CLI_START);
-        let mut server_run = Tetral::new(["server", "run", "--app", APP])
-            .home(&root)
-            .seams(&seams)
-            .current_dir(working_directory);
-        for (name, value) in environment {
-            server_run = server_run.env(name, value);
-        }
-        let app_server = AppServer::start(server_run, &root);
+        let app_server = AppServer::start(server_run.home(&root).seams(&seams), &root);
         case.command("tetral server run --app app_one", "running");
         Machine {
             app_server,

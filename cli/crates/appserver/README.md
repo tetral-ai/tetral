@@ -18,10 +18,13 @@ ones it uses belong here too.
   `cleanup_pending` while one is unconfirmed, and the fields that do not
   change while the App Server runs (`local_api::StatusSources`).
 - The capabilities that ready advertises are assembled once at start from
-  the providers this build has (`capabilities`). A `test-seams` build
-  advertises as `tool_execution` the fragment in
-  `TETRAL_TEST_TOOL_EXECUTION`; a value that does not decode as one fails
-  the start.
+  the providers this build has (`capabilities`). `tool_execution` lists the
+  tools whose startup checks pass: all three while the running `tetral`
+  resolves to an executable regular file, and `exec_command` only while
+  `/bin/bash` or `/bin/sh` is executable; with none, the ready carries no
+  `tool_execution`. A `test-seams` build advertises instead the fragment in
+  `TETRAL_TEST_TOOL_EXECUTION` when it is set; a value that does not decode
+  as one fails the start.
 - Startup runs its steps in order and a failure leaves every later step
   undone: the lock, the removal of the temporary files that interrupted
   replacements left, the configuration read under it, `outbox/` emptied, the
@@ -72,7 +75,8 @@ ones it uses belong here too.
   under the lock and refused when the two files disagree (`read`).
 - `startup.rs`: the start steps (`lock`, `serve`, `StartError`) and the
   socket's hourly modification time (`keep_socket_fresh`).
-- `capabilities.rs`: the capabilities of ready (`assemble`).
+- `capabilities.rs`: the capabilities of ready (`assemble`) and the startup
+  checks of tool execution.
 - `lifecycle.rs`: the lifecycle task (`spawn`, `Lifecycle`) and `run`, which
   starts the Connection owner and joins the local API, the signals and the
   socket's freshness.

@@ -180,6 +180,8 @@ which owns that task's process tree; the translation of a call's
 - `stdin.rs`: `Request`, what a `tool.stdin` asks for with its wait, and
   `WriteRecords`, a task's handled writes.
 - `cancel.rs`: `Receipt`, the state in which a cancel finds its task.
+- `capability.rs`: the `tool_execution` fragment of ready from the startup
+  checks (`StartupChecks`).
 - `exec.rs`: `ExecCall`, a call's directory, waits and expiry; `shell`;
   `ExitFacts`; `Outcome`, the result envelope of a report.
 - `env.rs`: `command_environment`.

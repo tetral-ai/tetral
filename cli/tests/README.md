@@ -81,7 +81,9 @@ temporary directories. No workspace crate depends on this package.
   counters of the Connection owner; `Machine::start_with_tools` gives the App
   Server the protocol's `tool_execution` fixture to advertise, through the
   test seam `TETRAL_TEST_TOOL_EXECUTION`, and the system `PATH` for its
-  tasks; `task_parent` locates a root's `T` apart from the code under test.
+  tasks; `Machine::start_under` runs the App Server under another program,
+  such as `bwrap` with mounts that change what it finds; `task_parent`
+  locates a root's `T` apart from the code under test.
 - `src/tasks.rs`: `TaskMachine`, such a machine with one prepared Session,
   which issues tool instructions and controls, reads their reports and
   replies, follows the seams of a task's start, initial wait, output, writes
@@ -131,6 +133,8 @@ temporary directories. No workspace crate depends on this package.
   or freed by each ACK, and, with only the ledger's reserve free, new tasks
   refused while a running task's controls, its binding's close and its
   report are recorded.
+- `tests/capability.rs`: the `tool_execution` that ready advertises from
+  the App Server's own startup checks, with all tools and without a shell.
 - `tests/tool_reports.rs`: the reports of tool instructions: an ACK that
   names another report and one without `accepted` release nothing, and the
   report is sent again byte for byte; a media report that the server reads
