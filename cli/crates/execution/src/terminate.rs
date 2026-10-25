@@ -84,12 +84,20 @@ pub fn interrupt(pid: u32) {
 }
 
 fn group(pid: u32) -> Option<Pid> {
+    process_id(pid)
+}
+
+fn process_id(pid: u32) -> Option<Pid> {
     i32::try_from(pid).ok().and_then(Pid::from_raw)
+}
+
+fn leader(pid: u32) -> Option<Pid> {
+    crate::process::namespace_leader(pid).and_then(process_id)
 }
 
 #[cfg(target_os = "linux")]
 fn signal_task(pid: u32, signal: Signal) {
-    match linux::namespace_leader(pid) {
+    match leader(pid) {
         Some(leader) => {
             let _ = rustix::process::kill_process(leader, signal);
         }
@@ -110,63 +118,12 @@ fn signal_task(pid: u32, signal: Signal) {
 
 fn kill_task(pid: u32) {
     #[cfg(target_os = "linux")]
-    let leader = linux::namespace_leader(pid);
+    let leader = leader(pid);
     if let Some(group) = group(pid) {
         let _ = rustix::process::kill_process_group(group, Signal::KILL);
     }
     #[cfg(target_os = "linux")]
     if let Some(leader) = leader {
         let _ = rustix::process::kill_process(leader, Signal::KILL);
-    }
-}
-
-#[cfg(target_os = "linux")]
-mod linux {
-    use std::collections::VecDeque;
-
-    use rustix::process::Pid;
-
-    /// The first process of the PID namespace below the launched process
-    /// `pid`: its first descendant, breadth first, whose PID namespace lies
-    /// deeper than this process's, which is the process that the namespace
-    /// was created with. `None` while the sandbox has no namespace yet, or
-    /// no longer.
-    pub(super) fn namespace_leader(pid: u32) -> Option<Pid> {
-        let own = namespace_depth("self")?;
-        let mut queue = VecDeque::from(children(pid));
-        while let Some(process) = queue.pop_front() {
-            if namespace_depth(&process.to_string()).is_some_and(|depth| depth > own) {
-                return i32::try_from(process).ok().and_then(Pid::from_raw);
-            }
-            queue.extend(children(process));
-        }
-        None
-    }
-
-    /// How many PID namespaces the process `process` of `/proc` is seen
-    /// from: the number of IDs on its `NSpid` line.
-    fn namespace_depth(process: &str) -> Option<usize> {
-        let status = std::fs::read_to_string(format!("/proc/{process}/status")).ok()?;
-        status
-            .lines()
-            .find_map(|line| line.strip_prefix("NSpid:"))
-            .map(|ids| ids.split_whitespace().count())
-    }
-
-    /// The children of every thread of `pid`.
-    fn children(pid: u32) -> Vec<u32> {
-        let Ok(threads) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
-            return Vec::new();
-        };
-        threads
-            .flatten()
-            .filter_map(|thread| std::fs::read_to_string(thread.path().join("children")).ok())
-            .flat_map(|children| {
-                children
-                    .split_whitespace()
-                    .filter_map(|child| child.parse().ok())
-                    .collect::<Vec<u32>>()
-            })
-            .collect()
     }
 }

@@ -181,6 +181,7 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
         capabilities,
         root,
         canonical_root,
+        leftovers: (check, leftovers),
     } = started;
     let probe_program = std::env::current_exe()?;
     let socket_directory = socket.parent().unwrap_or(&socket).canonicalize()?;
@@ -199,13 +200,16 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
             }),
             times: times.session,
             tools: Arc::new(tools),
+            leftovers: leftovers.clone(),
         },
         Supervisors {
             tetral,
             isolation: execution::isolation::Isolation::new(),
             bounds: execution::supervisor::Bounds::default(),
+            boot_id: execution::process::boot_id(),
         },
     );
+    tokio::spawn(check.run());
     let credentials = configuration.credentials;
     let connection = Connection::spawn(connection::Config {
         server_url: credentials.server_url.as_str().to_owned(),
@@ -237,6 +241,7 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
     let sources = StatusSources {
         lifecycle: lifecycle.clone(),
         connection,
+        leftovers,
         fixed,
     };
     let router = local_api::router(sources.clone());

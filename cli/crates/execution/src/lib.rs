@@ -4,11 +4,13 @@
 pub mod cancel;
 pub mod capture;
 pub mod child;
+pub mod cleanup;
 pub mod env;
 pub mod exec;
 pub mod isolation;
 pub mod limits;
 pub mod policy;
+pub mod process;
 pub mod report;
 pub mod stdin;
 pub mod store;

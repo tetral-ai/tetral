@@ -14,8 +14,9 @@ ones it uses belong here too.
   `cli/README.md`. The lifecycle task owns the server state; local API
   handlers and the signal task only send it messages. A status is read from
   the lifecycle task, the Connection owner, which owns the connection's
-  fields, and the fields that do not change while the App Server runs
-  (`local_api::StatusSources`).
+  fields, the records an earlier App Server left, which make `last_error`
+  `cleanup_pending` while one is unconfirmed, and the fields that do not
+  change while the App Server runs (`local_api::StatusSources`).
 - The capabilities that ready advertises are assembled once at start from
   the providers this build has (`capabilities`). A `test-seams` build
   advertises as `tool_execution` the fragment in
@@ -25,7 +26,9 @@ ones it uses belong here too.
   undone: the lock, the removal of the temporary files that interrupted
   replacements left, the configuration read under it, `outbox/` emptied, the
   entries of `T` deleted when `T` passes its checks
-  (`execution::store::clear_task_parent`), the socket directory `S` created
+  (`execution::store::clear_task_parent`), the records of `execution/` read
+  before the first connection, whose checks then go on every second
+  (`execution::cleanup::Check`), the socket directory `S` created
   and checked, a socket left by an App Server that died removed, and
   the socket bound with mode `0600` before it accepts a connection
   (`startup`). A held lock is `Running` and touches nothing in `S`.

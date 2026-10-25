@@ -152,6 +152,8 @@ temporary directories. No workspace crate depends on this package.
   that cannot be created and a log that cannot be written, task files that
   no other task reaches, `TMPDIR` with files and Unix sockets, the files'
   removal after the ACKs, and `T` after the App Server's death.
+- `tests/termination.rs`: the records an App Server killed with SIGKILL
+  leaves for the next start, also one of another boot.
 - `tests/local_service.rs`: `server run`, `server status` and `server stop`
   and the local API: status while Engine is unreachable, the wrong routes,
   shutdown on request, on each signal and with a handler blocked, one owner

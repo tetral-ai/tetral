@@ -1,5 +1,6 @@
 //! The steps of a `session.prepare` in its Session binding owner: the
-//! connection it names, the cases against the Session's binding, the state
+//! connection it names, an earlier execution of the Session still being
+//! cleaned up, the cases against the Session's binding, the state
 //! root checked lexically without touching the target, a probe slot, the
 //! probe, the commit of its result while the connection, binding and
 //! operation are all still current, the report and, on its ACK, `prepared`.
@@ -42,6 +43,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             trace.as_ref(),
         )
         .entered();
+        let cleanup_pending = self.cleanup_pending();
         let record = self.record.get_or_insert_with(Record::default);
         let requester = Requester {
             message_id: prepare.message_id.clone(),
@@ -49,6 +51,10 @@ impl<S: TaskStarter> SessionOwner<S> {
         };
         if prepare.addressed_connection_id != prepare.connection_id {
             self.report_failure(&prepare, &requester, PreparationErrorCode::StaleConnection);
+            return;
+        }
+        if cleanup_pending {
+            self.report_failure(&prepare, &requester, PreparationErrorCode::CleanupPending);
             return;
         }
         let binding_id = prepare.payload.binding_id.as_str();

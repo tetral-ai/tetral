@@ -119,6 +119,22 @@ which owns that task's process tree; the translation of a call's
 - The termination procedure sends a task SIGTERM, on Linux to its PID
   namespace's first process, which passes it on to the command's process
   group, and SIGKILL after a grace (`terminate`).
+- A task stays tracked until its processes are confirmed gone: on Linux, no
+  process this user can inspect in its PID namespace, checked every
+  `cleanup::CHECK_INTERVAL`. Once the namespace's first process exists the
+  supervisor writes `execution/<task name>.json` with the boot ID, that
+  process's ID and start time and the namespace's inode; confirmation
+  deletes the record, and the task's files wait for it (`process`,
+  `cleanup::Record`, `supervisor`).
+- At its start an App Server reads the records an earlier one left: one of
+  another boot is confirmed at once and signals nothing; otherwise the
+  recorded process, the same ID with the same start time, gets SIGKILL, and
+  the record is confirmed once it and every inspectable process of its
+  namespace are gone. Until then its Session is `cleanup_pending`; its
+  Session's last confirmation removes the task directories the earlier
+  tasks left. The check owns the records and is the only writer of which
+  Sessions they keep `cleanup_pending`; readers see what it last published
+  (`cleanup::Check`, `cleanup::Leftovers`).
 - The initial wait runs from the spawn. One that ends before the command's
   start, whatever `on_wait_expiry` says, one under `kill`, and a detached
   command's lifetime end the command through the termination procedure
@@ -129,7 +145,7 @@ which owns that task's process tree; the translation of a call's
 - `supervisor.rs`: `spawn`, a task's `TaskSpec`, the shared `Context` and
   its `Bounds`, `SupervisorMessage`, `Control` and `SupervisorMailbox`; the
   start, the running loop, the reports, the controls with their waiters and
-  replies, and the cleanup.
+  replies, the confirmation and the cleanup.
 - `stdin.rs`: `Request`, what a `tool.stdin` asks for with its wait, and
   `WriteRecords`, a task's handled writes.
 - `cancel.rs`: `Receipt`, the state in which a cancel finds its task.
@@ -138,8 +154,12 @@ which owns that task's process tree; the translation of a call's
 - `env.rs`: `command_environment`.
 - `child/mod.rs`, `child/exec.rs`: the launcher entry `__tetral-task` and its
   `exec` kind.
-- `terminate.rs`: `Termination`, its `Steps`, `interrupt`, and on Linux the
-  PID namespace's first process.
+- `terminate.rs`: `Termination`, its `Steps` and `interrupt`.
+- `process/mod.rs`, `process/linux.rs`: a task's `Leader`, its PID
+  namespace and whether the namespace is empty, start times and the boot ID.
+- `cleanup.rs`: a task's `Record` and its path; `read`, `Check`, the records
+  an earlier App Server left and their checks, and `Leftovers`, which
+  Sessions they keep `cleanup_pending`.
 - `policy/mod.rs`: `TaskPermissions`, a task's stored permissions, and
   `PolicyRejection`.
 - `policy/validate.rs`: the validation steps, path normalization and the
@@ -157,8 +177,8 @@ which owns that task's process tree; the translation of a call's
 - `report.rs`: `Report`, its `Correlation` and `Body`, the error bounds
   (`bounded`) and the size fitting of a process result (`fit`).
 - `store.rs`: a task's name, the paths of `T`, of a task's directory and of
-  its temporary directory, `TaskFiles` with its `Log`s, and
-  `clear_task_parent`.
+  its temporary directory, `TaskFiles` with its `Log`s, `clear_task_parent`
+  and `clear_session_tasks`.
 - `isolation/harness.rs`: the test entry `tetral-isolation-harness`, under the
   feature `test-seams`: one command through admission, the check and the
   launch.

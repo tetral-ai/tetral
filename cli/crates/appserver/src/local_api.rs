@@ -9,9 +9,10 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use connection::Connection;
+use execution::cleanup::Leftovers;
 use protocol::field::Nullable;
 use protocol::id::Id;
-use protocol::local::{Sessions, Status};
+use protocol::local::{ErrorObject, Sessions, Status};
 use protocol::tool::ProtocolVersion;
 use serde_json::{Value, json};
 
@@ -24,12 +25,13 @@ pub struct FixedStatus {
     pub cli_version: String,
 }
 
-/// What a status is read from: the lifecycle task, the Connection owner and
-/// the fixed fields.
+/// What a status is read from: the lifecycle task, the Connection owner,
+/// the records an earlier App Server left and the fixed fields.
 #[derive(Debug, Clone)]
 pub struct StatusSources {
     pub lifecycle: Lifecycle,
     pub connection: Connection,
+    pub leftovers: Leftovers,
     pub fixed: FixedStatus,
 }
 
@@ -41,7 +43,9 @@ pub fn router(sources: StatusSources) -> Router {
         .with_state(sources)
 }
 
-/// The status as of now.
+/// The status as of now. `last_error` is `cleanup_pending` while a record
+/// an earlier App Server left is unconfirmed, and the connection's own
+/// otherwise.
 pub async fn current_status(sources: &StatusSources) -> Status {
     let server_state = sources.lifecycle.server_state().await;
     let connection = sources.connection.status().await;
@@ -54,7 +58,14 @@ pub async fn current_status(sources: &StatusSources) -> Status {
         expires_at: connection.expires_at,
         cli_version: sources.fixed.cli_version.clone(),
         protocol_version: ProtocolVersion::default(),
-        last_error: Nullable(connection.last_error),
+        last_error: Nullable(if sources.leftovers.any() {
+            Some(ErrorObject {
+                code: "cleanup_pending".to_owned(),
+                message: "processes of an earlier App Server are not yet confirmed gone".to_owned(),
+            })
+        } else {
+            connection.last_error
+        }),
     }
 }
 

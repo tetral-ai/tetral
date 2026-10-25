@@ -19,6 +19,8 @@ pub struct Supervisors {
     pub tetral: PathBuf,
     pub isolation: Isolation,
     pub bounds: Bounds,
+    /// The running system's boot ID, read at the start.
+    pub boot_id: Option<String>,
 }
 
 impl TaskStarter for Supervisors {
@@ -44,6 +46,7 @@ impl TaskStarter for Supervisors {
             ),
             traceparent: task.traceparent,
             received: task.received,
+            record: task.record,
         };
         Some(supervisor::spawn(
             spec,
@@ -52,6 +55,7 @@ impl TaskStarter for Supervisors {
                 isolation: self.isolation,
                 reports,
                 bounds: self.bounds,
+                boot_id: self.boot_id.clone(),
             },
         ))
     }

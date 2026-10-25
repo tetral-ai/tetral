@@ -12,6 +12,12 @@
 //! start or the cancel that prevents it: each waiting reply is a timer and a
 //! waiter of the supervisor, which meanwhile keeps reading output and
 //! handling the exit and other controls. Every wait reads the seam clock.
+//!
+//! Once the task's first process inside its sandbox exists, the supervisor
+//! writes the task's record ([`cleanup::Record`]). After the `terminal`
+//! report the task's processes are checked every
+//! [`cleanup::CHECK_INTERVAL`] until they are confirmed gone; only then do
+//! the record and, once every report has its outcome, the task's files go.
 
 use std::collections::{HashSet, VecDeque};
 use std::os::fd::OwnedFd;
@@ -35,10 +41,12 @@ use tracing::Instrument;
 
 use crate::cancel::Receipt;
 use crate::capture::StreamCapture;
+use crate::cleanup;
 use crate::exec::{self, ExecCall, ExitFacts, OnExpiry, Outcome};
 use crate::isolation::{Command, Isolation, LaunchError, Process};
 use crate::limits::Visible;
 use crate::policy::{PolicyRejection, TaskPermissions};
+use crate::process::{self, Leader};
 use crate::report::{self, Body, Correlation, ErrorBounds, Rendering, Report, StreamOutput};
 use crate::stdin::{self, Check, Request, WriteRecords};
 use crate::store::{Log, TaskFiles};
@@ -74,6 +82,10 @@ const OUTPUT_READ: &str = "task.output_read";
 /// once its deadline is set.
 const WRITE_STARTED: &str = "task.write_started";
 
+/// The test seam counter of each check of an ended task's processes,
+/// counted once its result is applied.
+const GONE_CHECKED: &str = "task.gone_checked";
+
 /// The message of every failure to start other than a directory's.
 const NOT_STARTED: &str = "process could not start";
 
@@ -96,6 +108,8 @@ pub struct TaskSpec {
     pub traceparent: Option<String>,
     /// When the instruction was received, on the seam clock.
     pub received: Duration,
+    /// Where the task's record goes ([`cleanup::record_path`]).
+    pub record: PathBuf,
 }
 
 /// What every supervisor of an App Server shares.
@@ -106,6 +120,9 @@ pub struct Context {
     pub isolation: Isolation,
     pub reports: Arc<dyn ReportSink>,
     pub bounds: Bounds,
+    /// The running system's boot ID, which each record carries; without it
+    /// no record is written.
+    pub boot_id: Option<String>,
 }
 
 /// The waits of a supervisor, each a constant but for tests.
@@ -206,6 +223,9 @@ pub fn spawn(spec: TaskSpec, context: Context) -> SupervisorMailbox {
         writes: VecDeque::new(),
         writing: None,
         waiters: Vec::new(),
+        leader: None,
+        gone: false,
+        checked: Duration::ZERO,
     };
     tokio::spawn(supervisor.run().instrument(span));
     mailbox
@@ -245,6 +265,12 @@ struct Supervisor {
     writes: VecDeque<Control<StdinPayload>>,
     writing: Option<Writing>,
     waiters: Vec<Waiter>,
+    /// The task's first process inside its sandbox, once seen.
+    leader: Option<Leader>,
+    /// Whether the task's processes are confirmed gone.
+    gone: bool,
+    /// When they were last checked.
+    checked: Duration,
 }
 
 /// Why a task did not reach `running`.
@@ -361,24 +387,82 @@ impl Supervisor {
     }
 
     /// `ended` and `cleaned`: controls are answered from what the task
-    /// left; the task's files go once every report has its outcome.
+    /// left; the task's processes are checked until they are confirmed
+    /// gone, and its files go once they are and every report has its
+    /// outcome.
     async fn settle(&mut self) {
+        let mut open = true;
+        self.check_gone();
         loop {
-            if !self.cleaned && self.awaited.is_empty() {
+            if !self.cleaned && self.gone && self.awaited.is_empty() {
                 self.clean();
             }
-            match self.messages.recv().await {
-                None => break,
-                Some(SupervisorMessage::Outcome(report, _)) => {
-                    self.awaited.remove(&report);
+            if !open && self.gone {
+                break;
+            }
+            let next_check = self.checked + cleanup::CHECK_INTERVAL;
+            tokio::select! {
+                message = self.messages.recv(), if open => match message {
+                    None => open = false,
+                    Some(SupervisorMessage::Outcome(report, _)) => {
+                        self.awaited.remove(&report);
+                    }
+                    Some(SupervisorMessage::Stdin(control)) => self.stdin(*control),
+                    Some(SupervisorMessage::Cancel(control)) => self.cancel(*control),
+                    Some(SupervisorMessage::Start) => {}
+                },
+                () = state::seams::sleep_until(next_check), if !self.gone => {
+                    self.check_gone();
                 }
-                Some(SupervisorMessage::Stdin(control)) => self.stdin(*control),
-                Some(SupervisorMessage::Cancel(control)) => self.cancel(*control),
-                Some(SupervisorMessage::Start) => {}
             }
         }
         if !self.cleaned {
             self.clean();
+        }
+    }
+
+    /// Confirms the task's processes gone when, on Linux, no process is in
+    /// its PID namespace; a task whose namespace was never seen is gone
+    /// once its launched process is reaped.
+    fn check_gone(&mut self) {
+        self.checked = state::seams::now();
+        let gone = match self.leader {
+            Some(leader) => process::namespace_empty(leader.namespace),
+            None => self.process.as_mut().is_none_or(|process| {
+                process
+                    .child
+                    .try_wait()
+                    .is_ok_and(|status| status.is_some())
+            }),
+        };
+        if gone {
+            self.confirm_gone();
+        }
+        state::seams::count(GONE_CHECKED);
+    }
+
+    fn confirm_gone(&mut self) {
+        if self.gone {
+            return;
+        }
+        self.gone = true;
+        cleanup::remove(&self.spec.record);
+    }
+
+    /// Notes the task's first process inside its sandbox once it exists and
+    /// writes the task's record.
+    fn find_leader(&mut self, pid: u32) {
+        if self.leader.is_some() {
+            return;
+        }
+        let Some(leader) = process::leader(pid) else {
+            return;
+        };
+        self.leader = Some(leader);
+        if let Some(boot_id) = &self.context.boot_id {
+            let record =
+                cleanup::Record::new(self.spec.correlation.session_id.as_str(), boot_id, leader);
+            let _ = record.write(&self.spec.record);
         }
     }
 
@@ -517,6 +601,9 @@ impl Supervisor {
             let detached = call.on_expiry == OnExpiry::Detach;
             let quiet = self.exit.is_none() && self.ending.is_none();
             let started = self.start.is_some();
+            if self.ending.is_some() {
+                self.find_leader(pid);
+            }
             tokio::select! {
                 read = self.out.read(), if self.out.is_open() => {
                     if self.out.take(read, &mut self.spec.files.stdout) {
@@ -536,6 +623,7 @@ impl Supervisor {
                             && let Some(rest) = bytes.strip_prefix(crate::child::STARTED)
                         {
                             self.start = Some(state::seams::now());
+                            self.find_leader(pid);
                             bytes = rest;
                         }
                         let room = LAUNCH_STATUS_MAX_BYTES.saturating_sub(failure.len());

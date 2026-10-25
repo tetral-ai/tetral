@@ -10,6 +10,10 @@
 //! supervisor from its admission on, `staged` until the owner starts it. A
 //! control finds its task only in the registry of the binding it names, on
 //! its own connection, and goes to that task's supervisor.
+//!
+//! Until every record an earlier App Server left for the Session is
+//! confirmed, the Session is `cleanup_pending`
+//! ([`SessionOwner::cleanup_pending`]).
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -18,7 +22,7 @@ use std::time::Duration;
 use execution::policy::{TaskPermissions, TranslationInputs, validate};
 use execution::report::{Body, Correlation, Report};
 use execution::supervisor::{Control, SupervisorMailbox, SupervisorMessage};
-use execution::{isolation, store};
+use execution::{cleanup, isolation, store};
 use protocol::connection::{Downstream, DownstreamPayload, DownstreamType};
 use protocol::id::Id;
 use protocol::local::SessionState;
@@ -59,6 +63,8 @@ pub struct TaskStart {
     pub task_directory: PathBuf,
     /// The task's private temporary directory in `T`.
     pub temporary_directory: PathBuf,
+    /// The task's record under `R/execution/` ([`cleanup::record_path`]).
+    pub record: PathBuf,
     pub traceparent: Option<String>,
     /// When the instruction was received, on the seam clock.
     pub received: Duration,
@@ -224,6 +230,7 @@ impl<S: TaskStarter> SessionOwner<S> {
                 &store::task_parent(root),
                 &task_name,
             ),
+            record: cleanup::record_path(root, &task_name),
             traceparent: call.traceparent.clone(),
             received: call.received,
         };
@@ -317,6 +324,17 @@ impl<S: TaskStarter> SessionOwner<S> {
         for supervisor in binding.tasks.start_staged() {
             self.starter.start(&supervisor);
         }
+    }
+
+    /// Whether an earlier execution of this Session may still run: a record
+    /// an earlier App Server left whose processes are not confirmed gone.
+    pub(crate) fn cleanup_pending(&self) -> bool {
+        self.preparation.as_ref().is_some_and(|preparation| {
+            preparation
+                .shared
+                .leftovers
+                .pending(preparation.session_id.as_str())
+        })
     }
 }
 

@@ -1,15 +1,17 @@
 //! The start of `server run` after the command's own checks, in this order:
 //! the state-root lock, the removal of interrupted replacements, the
 //! configuration read under the lock, an empty `outbox/`, the entries of `T`
-//! deleted, the socket directory `S`, and the socket. A failure at any step leaves the steps before it and
-//! touches nothing after it; without the lock, nothing in `S`
-//! is touched, since the lock is what proves that no other App Server serves
-//! the root's socket.
+//! deleted, the records an earlier App Server left in `execution/` read, the
+//! socket directory `S`, and the socket. A failure at any step leaves the
+//! steps before it and touches nothing after it; without the lock, nothing
+//! in `S` is touched, since the lock is what proves that no other App
+//! Server serves the root's socket.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use execution::cleanup::{Check, Leftovers};
 use protocol::connection::Capabilities;
 use rustix::fs::{AtFlags, CWD, Timespec, Timestamps, UTIME_NOW, UTIME_OMIT};
 
@@ -35,6 +37,9 @@ pub struct Started {
     pub root: PathBuf,
     /// The state root's canonical path.
     pub canonical_root: PathBuf,
+    /// The records an earlier App Server left, read before the first
+    /// connection, and which Sessions they keep `cleanup_pending`.
+    pub leftovers: (Check, Leftovers),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -85,10 +90,10 @@ pub fn lock(root: &StateRoot) -> Result<RootLock, StartError> {
 
 /// The steps after the lock: the configuration and the capabilities;
 /// `outbox/` emptied, whose reports belong to connections of an earlier
-/// process, and `T` emptied of its tasks' temporary directories, only once
-/// both are valid, so that a start that fails on them leaves the root as it
-/// was; then `S` and the socket, bound with mode `0600` before it accepts a
-/// connection.
+/// process, `T` emptied of its tasks' temporary directories and the records
+/// of `execution/` read, only once both are valid, so that a start that
+/// fails on them leaves the root as it was; then `S` and the socket, bound
+/// with mode `0600` before it accepts a connection.
 pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
     let configuration = configuration::read(root)?;
     let capabilities = capabilities::assemble()?;
@@ -97,6 +102,7 @@ pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
     observe::STARTUP.config_loaded(state::seams::now());
     state::outbox::reset(&root.join(paths::OUTBOX))?;
     execution::store::clear_task_parent(&execution::store::task_parent(&canonical_root));
+    let leftovers = execution::cleanup::read(&canonical_root)?;
 
     private::create_socket_dir()?;
     let socket = paths::socket_path(root)
@@ -119,6 +125,7 @@ pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
         capabilities,
         root: root.path().to_path_buf(),
         canonical_root,
+        leftovers,
     })
 }
 

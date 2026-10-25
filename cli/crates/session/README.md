@@ -46,6 +46,9 @@ that is no longer the binding's is discarded.
   its directory under its Session and its temporary directory, both named
   from the task's name chosen at admission, and the Session's Report outbox
   port (`tools::TaskStart`).
+- While a record an earlier App Server left for the Session is unconfirmed
+  (`execution::cleanup::Leftovers`), a preparation of the Session fails with
+  `cleanup_pending`, checked right after the connection it names (`tools`).
 - Owners follow the owner rules of `cli/README.md`. An owner reaches the
   Connection owner only through `protocol::ports::ConnectionPort` and hands
   its reports to `protocol::ports::ReportSink`.
@@ -83,8 +86,8 @@ that is no longer the binding's is discarded.
   loop and state, `TaskStarter`, and a close, a connection's end and the
   shutdown as they end a preparation.
 - `tools.rs`: the admission of tool instructions (`ToolContext`,
-  `TaskStart`), a binding's task registry and staging queue (`Tasks`), and
-  their reports.
+  `TaskStart`), a binding's task registry and staging queue (`Tasks`),
+  their reports and `cleanup_pending`.
 - `record.rs`: `Record`, `Binding` and the entries of `GET /v1/sessions`.
 - `cases.rs`: the cases of a `session.prepare` (`Case`, `decide`).
 - `prepare.rs`: the steps of a preparation, from the connection check to the

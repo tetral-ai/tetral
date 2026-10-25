@@ -205,10 +205,21 @@ impl Log {
 /// its entries are the temporary directories of an earlier process's tasks,
 /// which no task names any more.
 pub fn clear_task_parent(parent: &Path) {
-    if !is_private_directory(parent) {
-        return;
+    if is_private_directory(parent) {
+        remove_entries(parent);
     }
-    let Ok(entries) = fs::read_dir(parent) else {
+}
+
+/// Deletes every entry of `sessions/<session_id>/tasks/` under the canonical
+/// state root, never following a symbolic link out of it: the directories an
+/// earlier App Server's tasks of that Session left, once their processes are
+/// confirmed gone.
+pub fn clear_session_tasks(state_root: &Path, session_id: &str) {
+    remove_entries(&state::paths::session_directory(state_root, session_id).join(TASKS));
+}
+
+fn remove_entries(directory: &Path) {
+    let Ok(entries) = fs::read_dir(directory) else {
         return;
     };
     for entry in entries.flatten() {

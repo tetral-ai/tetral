@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use execution::cleanup::Leftovers;
 use execution::supervisor::{SupervisorMailbox, SupervisorMessage};
 use protocol::id::{Id, SafeId};
 use protocol::local::SessionState;
@@ -119,6 +120,9 @@ pub struct Shared {
     pub paths: Arc<RootPaths>,
     pub times: Times,
     pub tools: Arc<ToolContext>,
+    /// Which Sessions a record an earlier App Server left keeps
+    /// `cleanup_pending`.
+    pub leftovers: Leftovers,
 }
 
 /// Creates the Session binding owners of an App Server.
@@ -501,6 +505,7 @@ mod tests {
                 socket_directory: "/sockets".into(),
                 tetral: "/tetral".into(),
             }),
+            leftovers: Leftovers::none(),
         }
     }
 
