@@ -3,9 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -109,6 +112,45 @@ func TestJobRunnerDatabaseOpenFailureUsesDependencyReadinessCause(t *testing.T) 
 		if !strings.Contains(output, want) {
 			t.Fatalf("startup log missing %s: %s", want, output)
 		}
+	}
+}
+
+// The dependencies phase lasts until every dependency Job Runner opens at
+// start is connected, so a Kubernetes client that cannot be built ends the
+// cold start inside that phase.
+func TestJobRunnerKubernetesClientFailureEndsTheColdStartInItsDependenciesPhase(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	client := dbconnect.NewClientForTesting(storagetest.NewPostgreSQLDB(t))
+	previousOpen, previousVerify, previousListen := openDatabase, verifySchema, listenTCP
+	openDatabase = func(context.Context, string, string) (dbconnect.OpenResult, error) {
+		return dbconnect.OpenResult{Client: client}, nil
+	}
+	verifySchema = func(context.Context, *dbconnect.Client) error { return nil }
+	listenTCP = func(string, string) (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") }
+	t.Cleanup(func() { openDatabase, verifySchema, listenTCP = previousOpen, previousVerify, previousListen })
+
+	stderr, finish := captureStderr(t)
+	err := run(context.Background(), validJobRunnerSchemaEnv())
+	finish()
+	if err == nil {
+		t.Fatal("run returned nil without a Kubernetes cluster")
+	}
+	var started []string
+	var outcome any
+	for _, line := range strings.Split(strings.TrimSpace(stderr.String()), "\n") {
+		var record map[string]any
+		if json.Unmarshal([]byte(line), &record) != nil || record["cold_start.kind"] != "service_pod" {
+			continue
+		}
+		switch record["event"] {
+		case "cold_start.phase_started":
+			started = append(started, fmt.Sprint(record["cold_start.phase"]))
+		case "cold_start.completed":
+			outcome = record["outcome"]
+		}
+	}
+	if !slices.Equal(started, []string{"config", "dependencies"}) || outcome == nil || outcome == "ok" {
+		t.Fatalf("cold start phases started %v, outcome %v; want a failure in the dependencies phase:\n%s", started, outcome, stderr.String())
 	}
 }
 

@@ -121,7 +121,6 @@ func run(ctx context.Context, env jobrunner.Env) error {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	defer workload.ProcessCleanup(ctx, func() { _ = queueConn.Close() })
-	coldStart.Advance(ctx)
 	visibilityConfig, err := enginekubernetes.LoadConfig(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
@@ -165,6 +164,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 			logger.Error("shutdown.resource_close_failed", "operation", "close_blob_store", "error.class", "resource_shutdown", "error.code", "blob_store_close_failed")
 		}
 	}()
+	coldStart.Advance(ctx)
 	deliveryStore := jobrunner.NewJobRunnerRuntimeDeliveryStore(
 		database.Client,
 		logger,
