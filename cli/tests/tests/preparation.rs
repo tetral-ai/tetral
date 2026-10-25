@@ -616,6 +616,42 @@ fn a_waiting_preparation_spawns_only_once_a_probe_is_reaped_and_never_once_close
 }
 
 #[test]
+fn a_freed_probe_slot_goes_to_the_longest_waiting_preparation() {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let project = directory_with_marker(base.join("project"));
+    let engine = one_credential_engine();
+
+    let mut case = record.case("eight probes held, then a ninth and a tenth preparation waiting");
+    let machine = online_machine(&mut case, &engine, &base.join("machine"));
+    machine.seams.hold(PROBE_STARTED);
+    for index in 1..=8 {
+        prepare(
+            &engine,
+            &payload(&format!("sess_{index}"), "bind_1", &project),
+        );
+    }
+    machine.seams.wait_until_waiting(PROBE_STARTED, 8);
+    let ninth = prepare(&engine, &payload("sess_9", "bind_1", &project));
+    let tenth = prepare(&engine, &payload("sess_10", "bind_1", &project));
+    quiesce(&machine, 10);
+    assert_eq!(machine.seams.count(PROBE_SPAWN), 8);
+    machine.seams.release_one(PROBE_STARTED);
+    machine.seams.wait_for_count(PROBE_SPAWN, 9);
+    machine.seams.wait_until_waiting(PROBE_STARTED, 8);
+    // The probe that took the slot runs out its limit, and the preparation
+    // still waiting runs out its wait, at the same time.
+    machine.seams.advance(seconds(5.0));
+    assert_eq!(outcome(&engine, &ninth), failed("cwd_check_timeout"));
+    assert_eq!(outcome(&engine, &tenth), failed("resource_exhausted"));
+    assert_eq!(machine.seams.count(PROBE_SPAWN), 9);
+    case.observe("once one of the eight was reaped the ninth spawned and the tenth still waited: at 5 seconds the ninth's probe timed out with cwd_check_timeout and the tenth's wait ended with resource_exhausted");
+    machine.seams.release(PROBE_STARTED);
+}
+
+#[test]
 fn eight_probes_held_for_five_seconds_time_out_and_keep_their_slots_until_reaped() {
     let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
