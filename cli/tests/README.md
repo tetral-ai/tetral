@@ -116,6 +116,9 @@ temporary directories. No workspace crate depends on this package.
   closes the stream unread, and the budgets of `input`, `chars` and metadata
   and the 65,536 bytes of `tool.cancel` and `session.close`, each instruction
   with its own report or protocol error.
+- `tests/tool_reports.rs`: the reports of tool instructions: an ACK that
+  names another report and one without `accepted` release nothing, and the
+  report is sent again byte for byte.
 - `tests/local_service.rs`: `server run`, `server status` and `server stop`
   and the local API: status while Engine is unreachable, the wrong routes,
   shutdown on request, on each signal and with a handler blocked, one owner
