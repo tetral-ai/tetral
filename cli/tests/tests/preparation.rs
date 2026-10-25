@@ -378,6 +378,16 @@ fn a_repeated_preparation_starts_one_probe_and_two_app_servers_keep_their_own_bi
             assert_eq!(outcome(&engine, &message_id), prepared(project));
         }
     }
+    for (machine, session) in [
+        (&one, "sess_a"),
+        (&one, "sess_b"),
+        (&two, "sess_a"),
+        (&two, "sess_b"),
+    ] {
+        wait_until(&format!("{session} prepared at its ACK"), || {
+            state_of(machine, session) == "prepared"
+        });
+    }
     close(&engine, "sess_a", "bind_sess_a_one");
     quiesce(&one, 3);
     assert_eq!(state_of(&one, "sess_a"), "closing");
