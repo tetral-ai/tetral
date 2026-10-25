@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -590,27 +591,21 @@ func TestInstructionWithoutAStreamCountsAsQueued(t *testing.T) {
 	})
 	_ = stream.stream.Close()
 	waitUntil(t, func() bool { return f.streams.lookup(stream.connectionID) == nil })
-	f.issueInstruction(f.ctx, stream.connectionID, "sess_waiting")
-	now := f.dbNow()
-	collect := instructionPressure(f.client, func() time.Time { return now })
-	read := func() map[string]float64 {
-		t.Helper()
-		metrics, err := collect(f.ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		values := map[string]float64{}
-		for _, metric := range metrics {
-			values[metric.Name] = metric.Value
-		}
-		return values
+	waiting := f.issueInstruction(f.ctx, stream.connectionID, "sess_waiting")
+	if _, err := f.admin.ExecContext(f.ctx, `UPDATE connection_instructions SET created_at=clock_timestamp()-interval '30 seconds' WHERE message_id=$1`, waiting); err != nil {
+		t.Fatal(err)
 	}
-	first := read()
-	now = now.Add(90 * time.Second)
-	later := read()
-	if first["computerhub_instructions_queued"] != 1 || first["computerhub_instructions_in_progress"] != 1 ||
-		later["computerhub_instructions_oldest_queued_seconds"]-first["computerhub_instructions_oldest_queued_seconds"] != 90 {
-		t.Fatalf("pressure = %v then %v; want one written, one queued whose age grows by 90 seconds", first, later)
+	metrics, err := instructionPressure(f.client)(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]float64{}
+	for _, metric := range metrics {
+		values[metric.Name] = metric.Value
+	}
+	if values["computerhub_instructions_queued"] != 1 || values["computerhub_instructions_in_progress"] != 1 ||
+		math.Abs(values["computerhub_instructions_oldest_queued_seconds"]-30) > 1 {
+		t.Fatalf("pressure = %v; want one written and one queued 30 seconds ago, within a second", values)
 	}
 }
 

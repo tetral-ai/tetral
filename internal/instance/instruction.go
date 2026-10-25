@@ -151,12 +151,12 @@ type InstructionPressure struct {
 	OldestQueuedSeconds float64
 }
 
-// ReadInstructionPressure reads the pressure at now through the
-// security-definer tetral_computer_hub_instruction_pressure, the only
-// cross-Workspace read of these tables.
-func ReadInstructionPressure(ctx context.Context, tx *dbconnect.Tx, now time.Time) (InstructionPressure, error) {
+// ReadInstructionPressure reads the pressure through the security-definer
+// tetral_computer_hub_instruction_pressure, the only cross-Workspace read of
+// these tables, which measures ages by the database clock.
+func ReadInstructionPressure(ctx context.Context, tx *dbconnect.Tx) (InstructionPressure, error) {
 	var value InstructionPressure
-	err := tx.QueryRow(ctx, `SELECT in_progress,queued,oldest_queued_seconds FROM public.tetral_computer_hub_instruction_pressure($1)`, now).
+	err := tx.QueryRow(ctx, `SELECT in_progress,queued,oldest_queued_seconds FROM public.tetral_computer_hub_instruction_pressure()`).
 		Scan(&value.InProgress, &value.Queued, &value.OldestQueuedSeconds)
 	return value, err
 }

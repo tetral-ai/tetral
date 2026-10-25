@@ -276,10 +276,12 @@ Metrics: `computerhub_open_streams`, the streams this pod holds, which the
 autoscaler averages; `computerhub_connections_started_total{kind}`, each
 `connected` written, `new` or `resumed`; the pressure point
 `computerhub_instructions`: `_in_progress` (written, final report not
-stored), `_queued` (stored, never written) and `_oldest_queued_seconds`, read
-at scrape over the unreported instructions of every live connection through
+stored), `_queued` (stored, never written) and `_oldest_queued_seconds` (by
+the database clock), read at scrape over the unreported instructions of every
+live connection in every Workspace through
 `tetral_computer_hub_instruction_pressure`, so every pod reports the same
-values, and `_queue_wait_seconds`. The hub refuses no instruction, so the
+totals and dashboards and alerts aggregate them with `max`, never `sum`; and
+`_queue_wait_seconds`. The hub refuses no instruction, so the
 point has no rejection counter.
 
 A ready that carries `startup` and is answered for the first time records the

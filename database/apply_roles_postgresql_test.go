@@ -868,14 +868,14 @@ func assertInstructionPressureBoundary(t *testing.T, databaseName string, admin 
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM connection_instructions WHERE message_id LIKE 'msg_pressure_%'`).Scan(&visible); err != nil {
 		t.Fatal(err)
 	}
-	if err := tx.QueryRow(ctx, `SELECT queued FROM public.tetral_computer_hub_instruction_pressure(clock_timestamp())`).Scan(&queued); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT queued FROM public.tetral_computer_hub_instruction_pressure()`).Scan(&queued); err != nil {
 		t.Fatal(err)
 	}
 	if visible != 1 || queued != 2 {
 		t.Fatalf("visible instructions=%d queued=%d; want 1 in the Workspace and 2 counted", visible, queued)
 	}
 	_ = tx.Rollback(ctx)
-	assertWorkloadPrivilegeDenied(t, databaseName, declarations.Roles["api"], `SELECT * FROM public.tetral_computer_hub_instruction_pressure(clock_timestamp())`)
+	assertWorkloadPrivilegeDenied(t, databaseName, declarations.Roles["api"], `SELECT * FROM public.tetral_computer_hub_instruction_pressure()`)
 	var unsafe int
 	if err := admin.QueryRow(`SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname='tetral_computer_hub_instruction_pressure' AND (NOT p.prosecdef OR NOT ('search_path=pg_catalog'=ANY(p.proconfig)) OR EXISTS(SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE'))`).Scan(&unsafe); err != nil {
 		t.Fatal(err)

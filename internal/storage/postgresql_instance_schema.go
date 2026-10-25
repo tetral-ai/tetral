@@ -210,18 +210,18 @@ END $$`
 
 // The hub's instruction pressure gauges count the unreported instructions of
 // every connection that has not ended, across Workspaces: in_progress those
-// written to a stream, queued the others, and the age at $1 of the oldest
-// queued one. The function sets tetral.instruction_pressure, and the
+// written to a stream, queued the others, and the age of the oldest queued
+// one by the database clock. The function sets tetral.instruction_pressure, and the
 // SELECT-only instruction_pressure policies admit a row only when that flag is
 // set and current_user is the table owner.
-const createPostgreSQLComputerHubInstructionPressure = `CREATE FUNCTION public.tetral_computer_hub_instruction_pressure(timestamptz)
+const createPostgreSQLComputerHubInstructionPressure = `CREATE FUNCTION public.tetral_computer_hub_instruction_pressure()
 RETURNS TABLE(in_progress bigint,queued bigint,oldest_queued_seconds double precision)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog
 AS $$ BEGIN
  PERFORM pg_catalog.set_config('tetral.instruction_pressure','true',true);
  RETURN QUERY SELECT count(*) FILTER (WHERE i.first_written_at IS NOT NULL),
    count(*) FILTER (WHERE i.first_written_at IS NULL),
-   COALESCE(GREATEST(0,EXTRACT(EPOCH FROM $1-min(i.created_at) FILTER (WHERE i.first_written_at IS NULL)))::double precision,0)
+   COALESCE(GREATEST(0,EXTRACT(EPOCH FROM pg_catalog.clock_timestamp()-min(i.created_at) FILTER (WHERE i.first_written_at IS NULL)))::double precision,0)
   FROM public.instance_connections c JOIN public.connection_instructions i ON i.workspace_id=c.workspace_id AND i.connection_id=c.id
   WHERE c.ended_at IS NULL AND i.reported_at IS NULL;
 END $$`
@@ -260,6 +260,6 @@ func postgresqlInstanceFunctionSteps() []postgresqlSchemaStep {
 		{"rls_policy_instruction_pressure_instance_connections", instructionPressurePolicy("instance_connections")},
 		{"rls_policy_instruction_pressure_connection_instructions", instructionPressurePolicy("connection_instructions")},
 		{"create_computer_hub_instruction_pressure", createPostgreSQLComputerHubInstructionPressure},
-		{"revoke_computer_hub_instruction_pressure_public", `REVOKE ALL ON FUNCTION public.tetral_computer_hub_instruction_pressure(timestamptz) FROM PUBLIC`},
+		{"revoke_computer_hub_instruction_pressure_public", `REVOKE ALL ON FUNCTION public.tetral_computer_hub_instruction_pressure() FROM PUBLIC`},
 	}
 }

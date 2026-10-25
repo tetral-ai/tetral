@@ -56,16 +56,16 @@ func (m *hubMetrics) instructionDelivered(queued time.Duration) {
 	}
 }
 
-// instructionPressure reads the pressure point computerhub_instructions at
-// now(): the unreported instructions of every live connection written to a
-// stream (in_progress), not yet written (queued) and the age of the oldest
-// queued one. Every pod reports the same values.
-func instructionPressure(database *dbconnect.Client, now func() time.Time) workload.MetricsCollector {
+// instructionPressure reads the pressure point computerhub_instructions: the
+// unreported instructions of every live connection written to a stream
+// (in_progress), not yet written (queued) and the age of the oldest queued
+// one by the database clock. Every pod reports the same values.
+func instructionPressure(database *dbconnect.Client) workload.MetricsCollector {
 	return func(ctx context.Context) ([]workload.Metric, error) {
 		var pressure instance.InstructionPressure
 		err := database.WithTx(ctx, "computer_hub.instruction_pressure", nil, func(tx *dbconnect.Tx) error {
 			var err error
-			pressure, err = instance.ReadInstructionPressure(ctx, tx, now())
+			pressure, err = instance.ReadInstructionPressure(ctx, tx)
 			return err
 		})
 		if err != nil {

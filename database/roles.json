@@ -259,7 +259,7 @@
         "connection_instructions": ["SELECT", "INSERT", "UPDATE"],
         "tetral_schema_migrations": ["SELECT"]
       },
-      "functions": ["tetral_computer_hub_instruction_pressure(timestamptz)"]
+      "functions": ["tetral_computer_hub_instruction_pressure()"]
     }
   }
 }

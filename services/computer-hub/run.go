@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/workload"
@@ -50,7 +49,7 @@ func Run(ctx context.Context, cfg Config, runtime Runtime) error {
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
 		workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", runtime.Database)),
 		workload.WithMetricsCollector("computer_hub", hub.registry.Collector()),
-		workload.WithMetricsCollector("instruction_pressure", instructionPressure(runtime.Database, time.Now)),
+		workload.WithMetricsCollector("instruction_pressure", instructionPressure(runtime.Database)),
 	)
 	tlsOwner, tlsConfig, err := cfg.HTTPTransport.Open(ctx)
 	if err != nil {

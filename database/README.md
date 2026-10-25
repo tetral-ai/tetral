@@ -24,7 +24,7 @@ contracts.
   only, `tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer)`,
   `tetral_prune_event_idempotency` and `tetral_prune_event_changes`; for
   Queue only, `tetral_prune_job_runner_jobs`; and, for Computer Hub only,
-  `tetral_computer_hub_instruction_pressure(timestamptz)`.
+  `tetral_computer_hub_instruction_pressure()`.
   Operator-selected role names and credentials are inputs to the installer and
   never belong in this repository.
 - `ApplyRoleContract` owns role attributes, public-privilege revocation, schema
@@ -147,11 +147,12 @@ sequence and the time of its first Session report. Only the `computer_hub`
 role writes these four tables, and it may only insert protocol errors.
 The hub's instruction pressure gauges read across Workspaces through the
 migration-owned security-definer
-`public.tetral_computer_hub_instruction_pressure(timestamptz)`, which only
+`public.tetral_computer_hub_instruction_pressure()`, which only
 Computer Hub executes. It sets `tetral.instruction_pressure`, and the
 SELECT-only `instruction_pressure` policies on `instance_connections` and
 `connection_instructions` admit a row only when that flag is set and
-`current_user` is the table owner; it returns three counts and nothing else.
+`current_user` is the table owner; it returns the two counts and the age of
+the oldest queued instruction by the database clock, and nothing else.
 Auth resolves a connection key before it knows the Workspace through the
 migration-owned security-definer
 `public.tetral_auth_lookup_connection_key(bytea)`, which only Auth executes,
