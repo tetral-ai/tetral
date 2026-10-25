@@ -591,24 +591,38 @@ func TestAPassHeldPastItsDeadlineFailsAndRetries(t *testing.T) {
 }
 
 // TestFirstWriteOfAFailedPassIsRecordedWithoutAResend fails a pass after it
-// wrote an instruction: the stream's next pass records that first write and
-// does not write the instruction again.
+// wrote an instruction, at the update that records the write and at the
+// pass's commit: the stream's next pass records that first write and does
+// not write the instruction again.
 func TestFirstWriteOfAFailedPassIsRecordedWithoutAResend(t *testing.T) {
-	f := newHubFixture(t, 720*time.Hour)
-	_, stream := f.openOnline()
-	f.clock.waitTimers(t, 2)
-	f.failOn("SET first_written_at")
-	instruction := f.issueInstruction(f.ctx, stream.connectionID, "sess_failed_pass")
-	f.requireInstructions(stream, instruction)
-	f.clock.waitTimers(t, 3)
-	if f.count(`SELECT count(*) FROM connection_instructions WHERE message_id=$1 AND first_written_at IS NULL`, instruction) != 1 {
-		t.Fatal("the failed pass recorded the instruction's first write")
+	for _, row := range []struct{ name, fail string }{
+		{"the update", "SET first_written_at"},
+		{"the commit", "commit"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			f := newHubFixture(t, 720*time.Hour)
+			_, stream := f.openOnline()
+			f.clock.waitTimers(t, 2)
+			// Stored and announced outside the hub's pool, so that only the
+			// pass runs the failing statement.
+			instruction := f.storeWithoutNotice(stream.connectionID, "sess_failed_pass")
+			f.failOn(row.fail)
+			notice, _ := json.Marshal(instance.ConnectionNotice{WorkspaceID: string(f.ws), ConnectionID: stream.connectionID, IssueSeq: 1})
+			if _, err := f.admin.ExecContext(f.ctx, `SELECT pg_notify($1,$2)`, instance.ConnectionNoticeChannel(hubTestPod), string(notice)); err != nil {
+				t.Fatal(err)
+			}
+			f.requireInstructions(stream, instruction)
+			f.clock.waitTimers(t, 3)
+			if f.count(`SELECT count(*) FROM connection_instructions WHERE message_id=$1 AND first_written_at IS NULL`, instruction) != 1 {
+				t.Fatal("the failed pass recorded the instruction's first write")
+			}
+			f.clock.Advance(passRetryFirst + passRetryFirst/5)
+			waitUntil(t, func() bool {
+				return f.count(`SELECT count(*) FROM connection_instructions WHERE message_id=$1 AND first_written_at IS NOT NULL`, instruction) == 1
+			})
+			requireNoEvent(t, stream)
+		})
 	}
-	f.clock.Advance(2 * time.Second)
-	waitUntil(t, func() bool {
-		return f.count(`SELECT count(*) FROM connection_instructions WHERE message_id=$1 AND first_written_at IS NOT NULL`, instruction) == 1
-	})
-	requireNoEvent(t, stream)
 }
 
 func TestResentInstructionKeepsItsTraceAndMakesOneDeliverSpan(t *testing.T) {
