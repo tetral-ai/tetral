@@ -74,6 +74,7 @@ func NewRouter(verifier *auth.InternalPrincipalVerifier, opts ...RouterOption) h
 	router.Group(func(r chi.Router) {
 		r.Use(principalMiddleware(verifier, writeClientPrincipalError))
 		r.Use(requireConnectionKey)
+		r.Use(correlationFields)
 		r.Handle(ClientRoutePrefix+"*", http.HandlerFunc(writeClientNotFound))
 		if options.clients != nil {
 			(&clientHandler{ClientRoutes: *options.clients, logger: options.logger}).register(r)
@@ -82,6 +83,7 @@ func NewRouter(verifier *auth.InternalPrincipalVerifier, opts ...RouterOption) h
 	router.Group(func(r chi.Router) {
 		r.Use(principalMiddleware(verifier, httpapi.WriteError))
 		r.Use(rejectConnectionKey)
+		r.Use(correlationFields)
 		for _, prefix := range ManagementRoutePrefixes {
 			r.Handle(prefix, http.HandlerFunc(writeManagementNotFound))
 			r.Handle(prefix+"/*", http.HandlerFunc(writeManagementNotFound))
@@ -107,6 +109,16 @@ func principalMiddleware(verifier *auth.InternalPrincipalVerifier, writer auth.E
 		}
 	}
 	return auth.InternalPrincipalMiddleware(verifier, writer, httpapi.RequestIDFromContext)
+}
+
+// correlationFields gives every record of an admitted request, such as an
+// audit record, the request's workspace.id and request.id.
+func correlationFields(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		principal, _ := auth.PrincipalFromContext(r.Context())
+		ctx := workload.WithFields(r.Context(), "workspace.id", string(principal.Workspace.ID), "request.id", httpapi.RequestIDFromContext(r.Context()))
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 func requireConnectionKey(next http.Handler) http.Handler {

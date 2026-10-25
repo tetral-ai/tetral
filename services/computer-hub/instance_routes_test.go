@@ -428,6 +428,40 @@ func TestIssuanceChecksTheInstanceAndTheKeyBeforeTheBody(t *testing.T) {
 	requireAPIError(t, status, body, http.StatusBadRequest, "invalid_request_error", "Idempotency-Key")
 }
 
+// TestAuditRecordsCarryTheWorkspaceAndTheRequestID creates an instance and
+// finds its issue audit record by the request-id the answer carried.
+func TestAuditRecordsCarryTheWorkspaceAndTheRequestID(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	token, err := f.signer.Mint(f.principal, http.MethodPost, "/v1/instances", "req_audit", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequestWithContext(f.ctx, http.MethodPost, f.url+"/v1/instances", strings.NewReader(`{"name":"laptop","credential":{}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-Tetral-Internal-Principal", token)
+	request.Header.Set("Idempotency-Key", "audit-fields")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	requestID := response.Header.Get("request-id")
+	if response.StatusCode != http.StatusCreated || requestID == "" {
+		t.Fatalf("creation = %d with request-id %q", response.StatusCode, requestID)
+	}
+	for _, line := range strings.Split(f.logs.String(), "\n") {
+		if strings.Contains(line, `"event":"`+instance.AuditEvent+`"`) {
+			if !strings.Contains(line, `"workspace.id":"`+string(f.ws)+`"`) || !strings.Contains(line, `"request.id":"`+requestID+`"`) {
+				t.Fatalf("audit record %s; want workspace.id %s and request.id %s", line, f.ws, requestID)
+			}
+			return
+		}
+	}
+	t.Fatal("no audit record")
+}
+
 // TestCredentialLimitHoldsUnderConcurrentIssuance races ten response-delivery
 // issuances on an instance that holds one active credential. Each limit count
 // pauses after it returns, so without the instance lock every issuance would

@@ -411,7 +411,9 @@ records and metrics, the cold start of a service pod, and the `auth.*`
 decision records of the signed principal and the operation gate, and the
 `instance_credential_audit` record, the two listeners' disconnect records and
 `client.protocol_error`, declared in [`observability.json`](observability.json),
-and the `cli` cold start reported by each first answered ready. A `POST
+and the `cli` cold start reported by each first answered ready. Every record
+of a request the principal check admitted carries its `workspace.id` and
+`request.id` (`routes.go`). A `POST
 /v1/client/heartbeat` writes no request record, starts no trace and observes no
 request histogram; a `GET /v1/client/events` stream writes its record and
 stream sample when it ends but starts no span (`routes.go`).
