@@ -64,7 +64,7 @@ describe("ProviderGatewayApp lifecycle", () => {
       const metrics = await textProbe(started.httpUrl, "/metrics");
       expect(metrics.status).toBe(200);
       expect(metrics.body).toContain("providergateway_ready 1");
-      expect(metrics.body).toContain("providergateway_provider_streams_active");
+      expect(metrics.body).toContain("providergateway_turns_in_progress");
 
       const call = client.streamProviderRequest(request, metadata());
       const eventsPromise = collectEvents(call);

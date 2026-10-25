@@ -54,6 +54,6 @@ try{
   const final=await state();assert.equal(final.starts,1);assert.equal(variant==="drain_complete"?final.completed:final.cancelled,1);
  }
  await until(async()=>(await state()).active===0);
- assert(app.service.metricsText().includes("providergateway_provider_streams_active 0"));
+ assert(app.service.metricsText().includes("providergateway_turns_in_progress 0"));
 }finally{await client.close();await app.shutdown(new Date(Date.now()+500));}
 console.log(JSON.stringify({ok:true,completionSamples,...await state()}));

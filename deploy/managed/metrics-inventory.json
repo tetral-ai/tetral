@@ -712,11 +712,6 @@
         "labels": {},
         "type": "gauge"
       },
-      "providergateway_admission_rejections_total": {
-        "audience": "operators",
-        "labels": {},
-        "type": "counter"
-      },
       "providergateway_complete_frame_pending_bytes": {
         "audience": "operators",
         "labels": {},
@@ -746,6 +741,24 @@
         "audience": "operators",
         "labels": {},
         "type": "gauge"
+      },
+      "providergateway_output_tokens_per_second": {
+        "audience": "operators",
+        "buckets": [
+          1,
+          5,
+          10,
+          20,
+          40,
+          80,
+          160,
+          320
+        ],
+        "labels": {
+          "model": "the Gateway catalogue's model ids",
+          "provider": "the Gateway catalogue's provider ids"
+        },
+        "type": "histogram"
       },
       "providergateway_preview_accepted_total": {
         "audience": "operators",
@@ -830,10 +843,16 @@
         },
         "type": "counter"
       },
-      "providergateway_provider_stream_capacity": {
+      "providergateway_provider_rejected_total": {
         "audience": "operators",
-        "labels": {},
-        "type": "gauge"
+        "labels": {
+          "cause": [
+            "overloaded",
+            "rate_limited"
+          ],
+          "provider": "the Gateway catalogue's provider ids"
+        },
+        "type": "counter"
       },
       "providergateway_provider_stream_duration_ms_sum": {
         "audience": "operators",
@@ -845,11 +864,6 @@
         "labels": {},
         "type": "counter"
       },
-      "providergateway_provider_streams_active": {
-        "audience": "operators",
-        "labels": {},
-        "type": "gauge"
-      },
       "providergateway_provider_streams_total": {
         "audience": "operators",
         "labels": {},
@@ -859,6 +873,66 @@
         "audience": "operators",
         "labels": {},
         "type": "gauge"
+      },
+      "providergateway_stream_duration_seconds": {
+        "audience": "operators",
+        "buckets": "long",
+        "labels": {
+          "model": "the Gateway catalogue's model ids",
+          "outcome": [
+            "cancelled",
+            "error",
+            "ok"
+          ],
+          "provider": "the Gateway catalogue's provider ids"
+        },
+        "type": "histogram"
+      },
+      "providergateway_time_to_first_token_seconds": {
+        "audience": "operators",
+        "buckets": "long",
+        "labels": {
+          "first_kind": [
+            "reasoning",
+            "text",
+            "tool_call"
+          ],
+          "model": "the Gateway catalogue's model ids",
+          "provider": "the Gateway catalogue's provider ids"
+        },
+        "type": "histogram"
+      },
+      "providergateway_tokens_total": {
+        "audience": "operators",
+        "labels": {
+          "model": "the Gateway catalogue's model ids",
+          "provider": "the Gateway catalogue's provider ids",
+          "type": [
+            "cached",
+            "input",
+            "output"
+          ]
+        },
+        "type": "counter"
+      },
+      "providergateway_turns_in_progress": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "providergateway_turns_limit": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "providergateway_turns_rejected_total": {
+        "audience": "operators",
+        "labels": {
+          "cause": [
+            "capacity"
+          ]
+        },
+        "type": "counter"
       }
     },
     "queue": {

@@ -6049,23 +6049,6 @@
           "level": "WARN",
           "log_type": "app"
         },
-        "provider.stage_completed": {
-          "audience": "operators",
-          "fields": {
-            "bytes_in": "integer",
-            "bytes_out": "integer",
-            "component": "string",
-            "duration_ms": "number",
-            "event.kind": "string",
-            "kind": "string",
-            "operation": "string",
-            "outcome": "string",
-            "request.id": "string",
-            "stage": "string"
-          },
-          "level": "INFO",
-          "log_type": "app"
-        },
         "provider_request_streamed": {
           "audience": "operators",
           "errors": {
@@ -6139,6 +6122,10 @@
             },
             "invalid_tool_definition": {
               "class": "request_validation",
+              "message_safe": "provider request failed"
+            },
+            "provider_unavailable": {
+              "class": "provider_error",
               "message_safe": "provider request failed"
             },
             "too_many_attachments": {

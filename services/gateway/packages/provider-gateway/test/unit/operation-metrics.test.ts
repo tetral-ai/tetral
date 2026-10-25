@@ -32,7 +32,7 @@ test("declared long operations use the long buckets, success records as ok, an u
 
 test("Gateway stages render only seconds histograms and MCP terminal calls keep their call series", () => {
   const gateway = new ProviderGatewayMetricsRegistry();
-  gateway.observeProviderStage({stage:"provider_first_fragment",outcome:"cancelled",kind:"none",durationMs:250,canonicalBytes:0,encodedBytes:0});
+  gateway.observeProviderStage({stage:"provider_first_fragment",outcome:"cancelled",durationMs:250});
   const gatewayText = gateway.render({ready:true});
   expect(gatewayText).toContain('tetral_long_operation_duration_seconds_bucket{service="provider-gateway",operation="provider_first_fragment",outcome="cancelled",le="0.5"} 1');
   expect(gatewayText).not.toContain("providergateway_provider_first_fragment_");

@@ -78,5 +78,5 @@ try{
  client.close();await app.shutdown(new Date(Date.now()+500));await resolver.close();await resolver.close();
 }
 assert.equal(clientCloses,1);
-assert(app.service.metricsText().includes("providergateway_provider_streams_active 0"));
+assert(app.service.metricsText().includes("providergateway_turns_in_progress 0"));
 console.log(JSON.stringify({ok:true,providerCalls,clientCloses,hash,completionSamples}));
