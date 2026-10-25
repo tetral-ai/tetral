@@ -97,7 +97,8 @@
 //	                                                           stores Session
 //	                                                           reports
 //
-//	Readers: ReadInstance, LockInstance, ListInstances, ReadObjects,
+//	Readers: ReadInstance, LockInstance, ShareInstance,
+//	LockInstanceNoKeyUpdate, ListInstances, ReadObjects,
 //	ReadCredential, ReadInstanceCredential, ShareCredential, LockCredential,
 //	ListCredentials, LiveCredentialID, PendingRenewals, FindIdempotencyRecord,
 //	LockUnendedConnection, LockLiveConnection, LockLiveConnectionOf,

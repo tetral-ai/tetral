@@ -54,6 +54,14 @@ func ShareInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, insta
 	return scanInstance(tx.QueryRow(ctx, `SELECT `+instanceColumns+` FROM instances WHERE workspace_id=$1 AND id=$2 FOR SHARE`, string(ws), instanceID))
 }
 
+// LockInstanceNoKeyUpdate reads the instance and locks its row FOR NO KEY
+// UPDATE until the transaction ends, for a request that updates the row's
+// columns: it waits for share locks but not for the key share locks of
+// inserts that reference the instance.
+func LockInstanceNoKeyUpdate(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) (Instance, error) {
+	return scanInstance(tx.QueryRow(ctx, `SELECT `+instanceColumns+` FROM instances WHERE workspace_id=$1 AND id=$2 FOR NO KEY UPDATE`, string(ws), instanceID))
+}
+
 // CreateUserInstance creates an active user instance named name.
 func CreateUserInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, name string) (Instance, error) {
 	return InsertInstance(ctx, tx, ws, NewInstance{Kind: KindUser, Name: &name})

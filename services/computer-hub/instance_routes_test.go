@@ -112,6 +112,15 @@ func (f *hubFixture) pauseOn(match string) *statementPause {
 	return pause
 }
 
+// awaitLockWait waits until a statement on the test database waits for a
+// lock.
+func (f *hubFixture) awaitLockWait() {
+	f.t.Helper()
+	waitUntil(f.t, func() bool {
+		return f.count(`SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'`) > 0
+	})
+}
+
 func newHubFixture(t *testing.T, maxLifetime time.Duration, opts ...hubOption) *hubFixture {
 	t.Helper()
 	settings := hubOptions{minCLIVersion: DefaultCLIVersion, recommendedCLIVersion: DefaultCLIVersion, maxLifetime: maxLifetime, streamMaxAge: DefaultStreamMaxAge}

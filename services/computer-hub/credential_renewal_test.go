@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/tetral-ai/tetral/integration/enginetest"
+	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
 )
@@ -269,6 +271,82 @@ func TestOnlyUsesOfACredentialAnActivationRevokedAreRecorded(t *testing.T) {
 		t.Fatalf("a use of a deleted credential recorded %v", reuse)
 	}
 	events.none(t)
+}
+
+// TestEachUseOfACredentialAnActivationRevokedIsRecorded sends two uses of a
+// credential an activation revoked at once, and one use that took its first
+// read before the activation and its locks after: each answers 401
+// credential_revoked and sends its own credential_reused.
+func TestEachUseOfACredentialAnActivationRevokedIsRecorded(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	select {
+	case <-f.events.listening:
+	case <-f.ctx.Done():
+		t.Fatal("the instance event listener never listened")
+	}
+	events := streamedEventsOf(t, f.openStream(f.principal))
+	use := func(cli *enginetest.CLI, connectionID string) <-chan enginetest.Response {
+		done := make(chan enginetest.Response, 1)
+		go func() {
+			response, err := cli.Heartbeat(f.ctx, protocol.Heartbeat{ConnectionID: connectionID, MessageID: id.New("msg_"),
+				RequestMessageID: instance.HeartbeatMessageID(connectionID, 1), HeartbeatSeq: 1})
+			if err != nil {
+				response.Status = 0
+			}
+			done <- response
+		}()
+		return done
+	}
+	requireRevoked := func(response enginetest.Response) {
+		t.Helper()
+		if body, err := response.Error(); err != nil || response.Status != http.StatusUnauthorized || body.Code != protocol.ErrorCredentialRevoked {
+			t.Fatalf("use = %d %s; want 401 credential_revoked", response.Status, response.Body)
+		}
+	}
+	requireReuses := func(cli *enginetest.CLI, n int) {
+		t.Helper()
+		for range n {
+			if event := events.next(t); event.name != "credential_reused" || event.instanceID != cli.InstanceID {
+				t.Fatalf("instance event %+v; want credential_reused of %s", event, cli.InstanceID)
+			}
+		}
+		events.none(t)
+		if reuse, _ := f.instanceRead(cli.InstanceID)["last_credential_reuse"].(map[string]any); reuse == nil || reuse["credential_id"] != cli.CredentialID {
+			t.Fatalf("last_credential_reuse = %v; want %s", reuse, cli.CredentialID)
+		}
+	}
+
+	t.Run("two uses at once", func(t *testing.T) {
+		cli, stream := f.openOnline()
+		pending := f.renewal(cli, stream, "renew-two-uses", `{}`)["id"].(string)
+		f.resume(f.url, f.fetched(cli, stream.connectionID, pending), stream.connectionID)
+		pause := f.pauseOn("UPDATE instances SET last_credential_reuse")
+		release := sync.OnceFunc(func() { close(pause.release) })
+		defer release()
+		first := use(cli, stream.connectionID)
+		<-pause.reached
+		second := use(cli, stream.connectionID)
+		f.awaitLockWait()
+		release()
+		requireRevoked(<-first)
+		requireRevoked(<-second)
+		requireReuses(cli, 2)
+	})
+
+	t.Run("a use the activation overtook", func(t *testing.T) {
+		cli, stream := f.openOnline()
+		pending := f.renewal(cli, stream, "renew-overtaken", `{}`)["id"].(string)
+		renewed := f.fetched(cli, stream.connectionID, pending)
+		pause := f.pauseOn("FROM instances WHERE workspace_id=$1 AND id=$2 FOR SHARE")
+		release := sync.OnceFunc(func() { close(pause.release) })
+		defer release()
+		overtaken := use(cli, stream.connectionID)
+		<-pause.reached
+		f.resume(f.url, renewed, stream.connectionID)
+		release()
+		requireRevoked(<-overtaken)
+		requireReuses(cli, 1)
+	})
 }
 
 // streamedEvent is one event of the instance stream.

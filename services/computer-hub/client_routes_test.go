@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -213,6 +214,55 @@ func TestProtocolErrorReportReplaysAndConflicts(t *testing.T) {
 	if strings.Count(logs, `"event":"client.protocol_error"`) != 1 || strings.Contains(logs, "REPORT_TEXT_SENTINEL") ||
 		!strings.Contains(logs, `"request.message.id":"msg_never_sent"`) || !strings.Contains(logs, `"message.id":"report_1"`) {
 		t.Fatalf("logs hold %d client.protocol_error records or the report's message", strings.Count(logs, `"event":"client.protocol_error"`))
+	}
+}
+
+// TestConcurrentCopiesOfAMessageGetTheFirstOnesAnswer holds the first copy
+// of a ready and of a protocol-error report at its write while a second copy
+// with the same message_id and content waits for the first's locks: once the
+// first commits, the second answers its ACK byte for byte.
+func TestConcurrentCopiesOfAMessageGetTheFirstOnesAnswer(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	type answer struct {
+		response enginetest.Response
+		err      error
+	}
+	for _, row := range []struct {
+		name, hold string
+		send       func(cli *enginetest.CLI, connectionID string) (enginetest.Response, error)
+	}{
+		{"ready", "UPDATE instances SET cli_version", func(cli *enginetest.CLI, connectionID string) (enginetest.Response, error) {
+			return cli.Ready(f.ctx, readyOf(connectionID, "ready_copy", "1.0.0"))
+		}},
+		{"protocol-error report", "INSERT INTO connection_protocol_errors", func(cli *enginetest.CLI, connectionID string) (enginetest.Response, error) {
+			return cli.ProtocolError(f.ctx, protocol.ProtocolErrorReport{ConnectionID: connectionID, MessageID: "report_copy",
+				Error: protocol.ProtocolError{Code: "invalid_message", Message: "copy"}})
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			cli := f.userInstance(time.Time{})
+			stream := f.open(cli)
+			pause := f.pauseOn(row.hold)
+			release := sync.OnceFunc(func() { close(pause.release) })
+			defer release()
+			send := func() <-chan answer {
+				done := make(chan answer, 1)
+				go func() {
+					response, err := row.send(cli, stream.connectionID)
+					done <- answer{response, err}
+				}()
+				return done
+			}
+			first := send()
+			<-pause.reached
+			second := send()
+			f.awaitLockWait()
+			release()
+			a, b := <-first, <-second
+			if a.err != nil || b.err != nil || a.response.Status != http.StatusOK || b.response.Status != http.StatusOK || !bytes.Equal(a.response.Body, b.response.Body) {
+				t.Fatalf("copies = %d %s (%v) and %d %s (%v); want one ACK twice", a.response.Status, a.response.Body, a.err, b.response.Status, b.response.Body, b.err)
+			}
+		})
 	}
 }
 

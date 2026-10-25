@@ -25,8 +25,10 @@ import (
 //     413 for a body over its complete limit;
 //  3. identity, on GET /v1/client/events only (clientEvents);
 //  4. authority: authorize locks the principal's instance and credential
-//     FOR SHARE in the request's transaction (an activating credential FOR
-//     UPDATE);
+//     in the request's transaction, FOR SHARE unless the request updates the
+//     row: a ready and a use of a credential an activation revoked lock the
+//     instance FOR NO KEY UPDATE, and an activating credential is locked
+//     FOR UPDATE;
 //  5. connection, on every POST: the instance's live connection
 //     (instance.LockLiveConnection), else 409 stale_connection;
 //  6. the replay ledger (replayOf);
@@ -34,8 +36,8 @@ import (
 //
 // A refusal changes nothing, except one that records a credential reuse.
 // A database failure at any step answers 503 and changes nothing, so the
-// authority checks fail closed. Every lock is taken in the order instance,
-// credentials, connection.
+// authority checks fail closed. Locks follow the order of internal/instance:
+// instance, credentials, connection, each in its final mode at once.
 
 // clientFailure is a refusal with its code of the client error table and,
 // for previous_connection_active, its retry_after_ms. commit marks a refusal
@@ -59,8 +61,17 @@ func refuseRetryAfter(code protocol.ErrorCode, message string, retryAfterMS int6
 
 // clientTx runs fn in one transaction of the request's Workspace. A refusal
 // fn returns rolls back what it wrote, except a refusal marked commit, which
-// commits it before the refusal is answered.
+// commits it before the refusal is answered. A transaction that authorize
+// ends with errReuseRaced runs once more.
 func (h *clientHandler) clientTx(ctx context.Context, ws workspace.ID, operation string, fn func(*dbconnect.Tx) error) error {
+	err := h.clientTxOnce(ctx, ws, operation, fn)
+	if errors.Is(err, errReuseRaced) {
+		err = h.clientTxOnce(ctx, ws, operation, fn)
+	}
+	return err
+}
+
+func (h *clientHandler) clientTxOnce(ctx context.Context, ws workspace.ID, operation string, fn func(*dbconnect.Tx) error) error {
 	var kept error
 	err := h.Database.WithWorkspaceTx(ctx, string(ws), operation, func(tx *dbconnect.Tx) error {
 		kept = nil
@@ -168,32 +179,46 @@ type authority struct {
 	now        time.Time
 }
 
-// authorize locks the principal's instance and credential FOR SHARE and
-// refuses a deregistered instance (403 instance_unavailable), then a revoked
+// errReuseRaced is an activation that revoked the principal's credential
+// after authorize's unlocked read: the instance row it locked FOR SHARE
+// cannot take the reuse record, and the transaction runs again, whose read
+// sees the revocation.
+var errReuseRaced = errors.New("computer-hub: an activation revoked the credential during the authority check")
+
+// authorize locks the principal's instance and credential and refuses a
+// deregistered instance (403 instance_unavailable), then a revoked
 // (401 credential_revoked), expired (401 credential_expired) or pending
-// (401 credential_invalid) credential. With activating, the events request
-// that may activate it, a pending credential passes, locked FOR UPDATE for
-// its activation. A use of a credential that an activation revoked is
-// recorded as the instance's credential reuse in the request's transaction,
-// whose refusal commits it.
-func authorize(ctx context.Context, tx *dbconnect.Tx, id clientIdentity, activating bool) (authority, error) {
+// (401 credential_invalid) credential. An unlocked read of the credential
+// first chooses the lock modes. The instance row is locked FOR NO KEY
+// UPDATE when updatesInstance is set (a ready, which sets its cli_version)
+// or the credential was revoked by an activation, whose use the request's
+// transaction records as the instance's credential reuse and whose refusal
+// commits it; otherwise FOR SHARE. With activating, the events request that
+// may activate it, a pending credential passes, locked FOR UPDATE for its
+// activation.
+func authorize(ctx context.Context, tx *dbconnect.Tx, id clientIdentity, activating, updatesInstance bool) (authority, error) {
 	unknown := refuse(protocol.ErrorCredentialInvalid, "the connection key does not authenticate this request")
-	current, err := instance.ShareInstance(ctx, tx, id.workspace, id.instanceID)
+	peek, err := instance.ReadInstanceCredential(ctx, tx, id.workspace, id.instanceID, id.credentialID)
+	if err != nil && !errors.Is(err, instance.ErrNotFound) {
+		return authority{}, err
+	}
+	reused := err == nil && revokedByActivation(peek)
+	lockInstance := instance.ShareInstance
+	if updatesInstance || reused {
+		lockInstance = instance.LockInstanceNoKeyUpdate
+	}
+	current, err := lockInstance(ctx, tx, id.workspace, id.instanceID)
 	if errors.Is(err, instance.ErrNotFound) {
 		return authority{}, unknown
 	}
 	if err != nil {
 		return authority{}, err
 	}
-	lock := instance.ShareCredential
-	if activating {
-		// Two requests that both held a share lock could not both upgrade it.
-		peek, err := instance.ReadInstanceCredential(ctx, tx, id.workspace, id.instanceID, id.credentialID)
-		if err == nil && peek.State == instance.CredentialPending {
-			lock = instance.LockCredential
-		}
+	lockCredential := instance.ShareCredential
+	if activating && peek.State == instance.CredentialPending {
+		lockCredential = instance.LockCredential
 	}
-	credential, err := lock(ctx, tx, id.workspace, id.instanceID, id.credentialID)
+	credential, err := lockCredential(ctx, tx, id.workspace, id.instanceID, id.credentialID)
 	if errors.Is(err, instance.ErrNotFound) {
 		return authority{}, unknown
 	}
@@ -210,7 +235,10 @@ func authorize(ctx context.Context, tx *dbconnect.Tx, id clientIdentity, activat
 	switch instance.CredentialState(credential, now) {
 	case instance.CredentialRevoked:
 		failure := &clientFailure{code: protocol.ErrorCredentialRevoked, message: "the credential has been revoked"}
-		if credential.RevocationCause != nil && *credential.RevocationCause == instance.CausePendingActivation {
+		if revokedByActivation(credential) {
+			if !updatesInstance && !reused {
+				return authority{}, errReuseRaced
+			}
 			if err := instance.RecordCredentialReuse(ctx, tx, id.workspace, id.instanceID, credential.ID); err != nil {
 				return authority{}, err
 			}
@@ -225,6 +253,10 @@ func authorize(ctx context.Context, tx *dbconnect.Tx, id clientIdentity, activat
 		}
 	}
 	return authority{credential: credential, now: now}, nil
+}
+
+func revokedByActivation(credential instance.Credential) bool {
+	return credential.RevokedAt != nil && credential.RevocationCause != nil && *credential.RevocationCause == instance.CausePendingActivation
 }
 
 // grantFor locks the connection's credential FOR SHARE and returns the lease

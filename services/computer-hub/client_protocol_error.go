@@ -39,11 +39,13 @@ func (h *clientHandler) protocolError(w http.ResponseWriter, r *http.Request) {
 	)
 	err = h.clientTx(ctx, id.workspace, "computer_hub.client_protocol_error", func(tx *dbconnect.Tx) error {
 		recorded = false
-		granted, err := authorize(ctx, tx, id, false)
+		granted, err := authorize(ctx, tx, id, false, false)
 		if err != nil {
 			return err
 		}
-		connection, err := instance.LockLiveConnection(ctx, tx, id.workspace, id.instanceID, report.ConnectionID, granted.now, false)
+		// FOR UPDATE: a copy of the report in flight waits here and then
+		// finds the first one's replay record.
+		connection, err := instance.LockLiveConnection(ctx, tx, id.workspace, id.instanceID, report.ConnectionID, granted.now, true)
 		if err != nil {
 			return err
 		}

@@ -130,7 +130,11 @@ request in this order, the first failing check answering (`client_checks.go`):
 3. identity, on `GET /v1/client/events` only: the query's `instance_id` and
    `credential_id` must be the principal's, else `401 credential_invalid`;
 4. authority: the instance and credential rows locked `FOR SHARE` in the
-   request's transaction; a deregistered instance answers `403
+   request's transaction, except that a ready, which sets the instance's
+   `cli_version`, and a use of a credential an activation revoked lock the
+   instance `FOR NO KEY UPDATE`, chosen by an unlocked read of the
+   credential first; a use that an activation overtook between that read
+   and the locks runs its transaction again. A deregistered instance answers `403
    instance_unavailable`, a revoked credential `401 credential_revoked`, an
    expired one `401 credential_expired` and a `pending` one `401
    credential_invalid`, except on `GET /v1/client/events`, which activates
@@ -148,7 +152,10 @@ request in this order, the first failing check answering (`client_checks.go`):
 7. the route's own checks.
 
 A database failure answers `503` and changes nothing. Every transaction locks
-the instance, then credentials, then the connection. The ledger records the
+the instance, then credentials, then the connection, each at once in the mode
+its writes need (`internal/instance`): a protocol-error report locks the
+connection `FOR UPDATE`, so a copy in flight waits and gets the stored ACK, and
+a credential fetch locks the fetched credential before the connection. The ledger records the
 messages Engine accepts and the refused ready; a message refused by an earlier
 check records nothing. The connection row holds the ready's record and the
 latest heartbeat's; other messages are rows of `connection_upstream_messages`,

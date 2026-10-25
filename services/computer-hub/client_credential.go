@@ -39,9 +39,17 @@ func (h *clientHandler) credential(w http.ResponseWriter, r *http.Request) {
 		key     instance.ConnectionKey
 	)
 	err = h.clientTx(ctx, id.workspace, "computer_hub.client_credential", func(tx *dbconnect.Tx) error {
-		granted, err := authorize(ctx, tx, id, false)
+		granted, err := authorize(ctx, tx, id, false, false)
 		if err != nil {
 			return err
+		}
+		// The fetched credential is updated, so it is locked before the
+		// connection; the principal's own, already share-locked, is never
+		// fetchable.
+		if request.CredentialID != id.credentialID {
+			if _, err := instance.LockCredential(ctx, tx, id.workspace, id.instanceID, request.CredentialID); err != nil && !errors.Is(err, instance.ErrNotFound) {
+				return err
+			}
 		}
 		connection, err := instance.LockLiveConnection(ctx, tx, id.workspace, id.instanceID, request.ConnectionID, granted.now, false)
 		if err != nil {
