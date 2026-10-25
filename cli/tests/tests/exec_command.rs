@@ -710,9 +710,7 @@ fn a_tasks_reports_and_records_carry_its_instructions_trace_context_and_an_unusa
         seams.release(LAUNCH);
         let terminal = tasks.terminal(task);
         assert_eq!(summary(&terminal), exited("complete"), "{terminal:#}");
-        wait_until("the task's files removed", || {
-            tasks.task_directories(SESSION).is_empty()
-        });
+        tasks.wait_files_removed(SESSION);
         let report_ids: Vec<Value> = tasks
             .engine
             .received("tool-status")

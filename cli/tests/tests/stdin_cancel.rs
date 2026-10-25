@@ -496,11 +496,7 @@ fn a_reply_and_the_terminal_report_of_an_exit_during_its_wait_are_acknowledged_a
         "answer",
         json!({"endpoint": "tool-status", "action": "release"}),
     );
-    wait_until("the task's files removed", || {
-        tasks
-            .task_directories(tetral_tests::tasks::SESSION)
-            .is_empty()
-    });
+    tasks.wait_files_removed(tetral_tests::tasks::SESSION);
     case.observe("the terminal report arrived while the read reply's ACK was held; the reply said success with exit_code 3; a write to the ended task was stdin_closed with the exit facts; two reads of it replied at once with success and exit_code 3; the task's directory stayed until the held ACK was released");
 }
 

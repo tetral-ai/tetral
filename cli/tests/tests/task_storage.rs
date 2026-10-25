@@ -237,9 +237,7 @@ fn a_tasks_files_go_once_its_reports_are_acknowledged_and_its_project_files_stay
         "answer",
         json!({"endpoint": "tool-status", "action": "release"}),
     );
-    wait_until("the task's files removed", || {
-        tasks.task_directories(SESSION).is_empty() && tasks.temporary_directories().is_empty()
-    });
+    tasks.wait_files_removed(SESSION);
     assert!(tasks.project.join("kept").exists());
     case.observe("both directories stayed while the ACK was withheld and went after it; kept stayed in the project");
 }

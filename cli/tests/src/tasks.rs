@@ -8,7 +8,8 @@
 //! that starts to wait counts `task.reply_waiting`, each reading of the
 //! clock by the timer of a running task's waiting replies
 //! `task.reply_checked`, each read of a task's output `task.output_read`,
-//! and each write that starts on a task's stdin pipe `task.write_started`.
+//! each write that starts on a task's stdin pipe `task.write_started`, and
+//! each check of an ended task's processes `task.gone_checked`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,6 +47,14 @@ pub const OUTPUT_READ: &str = "task.output_read";
 
 /// The counter of the writes that start on a task's stdin pipe.
 pub const WRITE_STARTED: &str = "task.write_started";
+
+/// The counter of the checks of an ended task's processes, counted once
+/// each check's result is applied.
+pub const GONE_CHECKED: &str = "task.gone_checked";
+
+/// How often the App Server checks an ended task's processes again, on its
+/// clock.
+pub const GONE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How often the reference control server sends a heartbeat, on its clock.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
@@ -328,6 +337,30 @@ impl TaskMachine {
         self.advance(step);
         let checked = seams.count(WAIT_CHECKED);
         seams.wait_for_count(WAIT_CHECKED, checked + 2);
+    }
+
+    /// Waits until the Session `session`'s task directories and the entries
+    /// of `T` are gone. An ended task's files go only once no process is left
+    /// in its PID namespace, which the App Server checks again every
+    /// [`GONE_CHECK_INTERVAL`] of its clock and shows by deleting the task's
+    /// record under `execution/`; while a record is there, the clock moves
+    /// one interval and the next check runs.
+    pub fn wait_files_removed(&self, session: &str) {
+        let seams = &self.machine().seams;
+        let records = self.root.join("execution");
+        loop {
+            let checked = seams.count(GONE_CHECKED);
+            if listing(&records).is_empty() {
+                break;
+            }
+            self.advance(GONE_CHECK_INTERVAL);
+            wait_until("the next check of an ended task's processes", || {
+                seams.count(GONE_CHECKED) > checked || listing(&records).is_empty()
+            });
+        }
+        wait_until(&format!("the files of {session}'s tasks removed"), || {
+            self.task_directories(session).is_empty() && self.temporary_directories().is_empty()
+        });
     }
 
     /// The directories of the Session `session`'s current tasks.

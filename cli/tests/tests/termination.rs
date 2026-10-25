@@ -24,11 +24,9 @@ use tetral_tests::app_server::{request, wait_until};
 use tetral_tests::machine::{INSTANCE, answer_fault, seconds, send, wait_for_requests};
 use tetral_tests::socket_directory;
 use tetral_tests::tasks::{
-    REPLY_WAITING, SESSION, TaskMachine, WAIT_CHECKED, millis, policy, process_running,
+    GONE_CHECKED, REPLY_WAITING, SESSION, TaskMachine, WAIT_CHECKED, millis, policy,
+    process_running,
 };
-
-/// The test seam counter of each check of an ended task's processes.
-const GONE_CHECKED: &str = "task.gone_checked";
 
 /// The test seam barrier before a record an earlier App Server left is
 /// deleted as confirmed.
