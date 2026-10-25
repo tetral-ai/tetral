@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { Writable } from "node:stream";
 import { createDiagnosticStreamSink, createTetralJsonLogger, diagnosticDefaults, parseDiagnosticConfig, parseDiagnosticConfigResult, parseWorkloadResourceConfig, semanticErrorFields } from "@tetral/ts-observability";
 import { startupFailureLogRecord } from "../../src/logger.js";
@@ -165,6 +165,18 @@ describe("shared process diagnostics", () => {
     logger.error({ event: "dependency.failed", reason: "unavailable" });
     expect(lines).toHaveLength(2); expect(JSON.parse(lines[1]!)).toMatchObject({ level: "ERROR", event: "dependency.failed" });
     logger.flush();
+  });
+  test("record time follows the wall clock, the monotonic clock supplying only the sub-millisecond digits", () => {
+    const lines: string[] = [];
+    const wall = spyOn(Date, "now").mockReturnValue(Date.UTC(2026, 9, 2));
+    const monotonic = spyOn(performance, "now").mockReturnValue(5.25);
+    const logger = createTetralJsonLogger({ write: (line) => lines.push(line), serviceName: "test" });
+    try {
+      logger.info({ event: "safe" });
+      wall.mockReturnValue(Date.UTC(2026, 9, 2, 1));
+      logger.info({ event: "safe" });
+      expect(lines.map((line) => JSON.parse(line).time)).toEqual(["2026-10-02T00:00:00.000250Z", "2026-10-02T01:00:00.000250Z"]);
+    } finally { wall.mockRestore(); monotonic.mockRestore(); logger.close(); }
   });
   test("getter and clock failures are contained separately from sink errors", () => {
     const lines: string[] = []; const logger = createTetralJsonLogger({ write: (line) => lines.push(line), serviceName: "test" });

@@ -51,7 +51,8 @@ environment.
 ## Records
 
 A record is one newline-terminated JSON object with `time` (UTC, six fractional digits,
-from a clock anchored at `performance.timeOrigin`), `level` (`DEBUG`, `INFO`,
+the milliseconds from `Date.now()` and only the digits below them from
+`performance.now()`), `level` (`DEBUG`, `INFO`,
 `WARN` or `ERROR`), `event`, `msg` (equal to `event`), `operation` (the
 caller's, otherwise the event's first dot-separated segment), `log.type` (the
 event's declared `log_type`, otherwise `app`), `service.name`,

@@ -294,9 +294,12 @@ export function createTetralJsonLogger<TRecord extends TetralLogRecord = TetralL
   };
 }
 
-/** RFC 3339 UTC with exactly six fractional digits, from a monotonic-anchored clock unless one is injected. */
+/**
+ * RFC 3339 UTC with exactly six fractional digits, from the wall clock unless one is injected.
+ * `Date.now()` stops at milliseconds, so `performance.now()` supplies only the digits below them.
+ */
 function recordTime(clock: (() => Date) | undefined): string {
-  const micros = clock === undefined ? Math.floor((performance.timeOrigin + performance.now()) * 1000) : clock().getTime() * 1000;
+  const micros = clock === undefined ? Date.now() * 1000 + Math.floor((performance.now() % 1) * 1000) : clock().getTime() * 1000;
   const iso = new Date(Math.floor(micros / 1000)).toISOString();
   return `${iso.slice(0, -1)}${String(micros % 1000).padStart(3, "0")}Z`;
 }
