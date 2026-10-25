@@ -490,9 +490,9 @@ func TestWritersCommitWhileAPassTakesItsLocks(t *testing.T) {
 }
 
 // TestFailedPassesWaitLongerUntilAPassCommits fails a stream's passes one
-// after another: the first retry waits 1 second, each later one twice the
-// previous wait, at most 30 seconds, times 1+r with r in 0 to 0.2, and after
-// a pass commits the next failure waits 1 second again.
+// after another: the first retry waits passRetryFirst, each later one twice
+// the previous wait, at most passRetryMax, times 1+r with r in 0 to 0.2, and
+// after a pass commits the next failure waits passRetryFirst again.
 func TestFailedPassesWaitLongerUntilAPassCommits(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	// A pass's instance lock, which only passes take in this test.
@@ -500,7 +500,7 @@ func TestFailedPassesWaitLongerUntilAPassCommits(t *testing.T) {
 	_, stream := f.openOnline()
 	// retries returns the waits the stream asked its clock for after failed
 	// passes: every request but the age limit and the heartbeats.
-	seen := 2
+	seen, jittered := 2, false
 	nextRetry := func(base time.Duration) time.Duration {
 		t.Helper()
 		for {
@@ -509,6 +509,7 @@ func TestFailedPassesWaitLongerUntilAPassCommits(t *testing.T) {
 				if wait < base || wait > base+base/5 {
 					t.Fatalf("retry waits %v; want %v to %v", wait, base, base+base/5)
 				}
+				jittered = jittered || wait > base
 				return wait
 			}
 		}
@@ -516,14 +517,17 @@ func TestFailedPassesWaitLongerUntilAPassCommits(t *testing.T) {
 	f.clock.waitTimers(t, 2)
 	f.failOn(passLock)
 	instruction := f.issueInstruction(f.ctx, stream.connectionID, "sess_retried")
-	base := time.Second
+	base := passRetryFirst
 	for range 6 {
 		wait := nextRetry(base)
 		f.failOn(passLock)
 		f.clock.Advance(wait)
-		base = min(2*base, 30*time.Second)
+		base = min(2*base, passRetryMax)
 	}
 	f.clock.Advance(nextRetry(base))
+	if !jittered {
+		t.Fatal("no retry wait was above its base; want each times 1+r")
+	}
 	for event := stream.next(); !bytes.Equal(event.Data, f.envelopeOf(instruction)); event = stream.next() {
 		if _, ok := event.Envelope.Payload.(protocol.HeartbeatPayload); !ok {
 			t.Fatalf("event %s; want heartbeats, then the instruction", event.Data)
@@ -534,7 +538,7 @@ func TestFailedPassesWaitLongerUntilAPassCommits(t *testing.T) {
 	if _, err := f.admin.ExecContext(f.ctx, `SELECT pg_notify($1,$2)`, instance.ConnectionNoticeChannel(hubTestPod), string(notice)); err != nil {
 		t.Fatal(err)
 	}
-	nextRetry(time.Second)
+	nextRetry(passRetryFirst)
 }
 
 // TestAPassHeldPastItsDeadlineFailsAndRetries holds an online instance's row
