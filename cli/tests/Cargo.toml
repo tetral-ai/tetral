@@ -13,5 +13,7 @@ sdk.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 state.workspace = true
-tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+tempfile.workspace = true

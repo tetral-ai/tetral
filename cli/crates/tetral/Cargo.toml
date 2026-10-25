@@ -6,7 +6,6 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-# Test seams of the harness's builds; a release build never enables it.
 test-seams = ["state/test-seams"]
 
 [dependencies]
