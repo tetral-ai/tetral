@@ -789,25 +789,37 @@ fn the_event_limit_and_the_protocol_version_are_checked_before_an_event_is_handl
     assert_eq!(machine.routed(), 1);
     case.observe("the instruction with unknown members was routed and the one with protocol_version 2 was not");
 
-    let mut case = record.case("an event of 65,536 data bytes and one of 65,537");
-    let sized = |message_id: &str, size: usize| -> String {
-        let empty = session_close(message_id, 1).to_string();
-        let empty = format!("{},\"pad\":\"\"}}", &empty[..empty.len() - 1]);
-        let pad = "x".repeat(size - empty.len());
-        format!("{}{pad}\"}}", &empty[..empty.len() - 2])
-    };
-    let at_limit = sized("msg_at_limit", 65_536);
-    assert_eq!(at_limit.len(), 65_536);
-    engine.control("send", json!({ "instance_id": INSTANCE, "data": at_limit }));
-    engine.advance(seconds(15.0));
-    wait_for_received(&engine, "heartbeat", 2);
-    assert_eq!(machine.routed(), 2);
-    let over = sized("msg_over_limit", 65_537);
-    engine.control("send", json!({ "instance_id": INSTANCE, "data": over }));
-    machine.wait_for("resuming");
-    machine.settle();
-    assert_eq!(machine.routed(), 2);
-    case.observe("the event of 65,536 data bytes was routed; the one of 65,537 closed the stream unrouted and the connection is resuming");
+    // `connected` is the event that every connection reads before its ready.
+    let mut case = record.case("a connected event of 65,537 data bytes, then one of 65,536");
+    let engine = one_credential_engine();
+    for data_bytes in [65_537, 65_536] {
+        engine.control(
+            "events",
+            json!({ "mode": "pad_connected", "data_bytes": data_bytes }),
+        );
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let machine = Machine::start(
+        &mut case,
+        directory.path(),
+        &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+    );
+    wait_for_requests(&engine, "events", 1);
+    machine.wait_for("disconnected");
+    assert_eq!(engine.requests("ready").len(), 0);
+    // The server's connection of that stream holds the instance until its
+    // lease ends, since the CLI never learned it.
+    engine.advance(seconds(45.0));
+    machine.seams.advance(seconds(1.201));
+    machine.seams.wait_for_count("connection.attempt", 2);
+    let ready = wait_for_received(&engine, "ready", 1);
+    machine.wait_for("online");
+    let events = engine.requests("events");
+    assert_eq!(
+        ready[0]["body"]["connection_id"],
+        events[1]["connection_id"]
+    );
+    case.observe("the connected of 65,537 data bytes closed the stream and no ready was sent; the next attempt's connected of 65,536 was processed and its ready sent");
 }
 
 #[test]
