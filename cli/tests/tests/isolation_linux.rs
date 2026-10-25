@@ -427,6 +427,16 @@ fn every_grant_reaches_only_what_its_rules_allow_and_never_the_protected_paths()
     );
     case.observe("descriptors 3 to 1023: none open");
 
+    let everything = policy(json!([{"path": "/", "access": "read_write"}]), "direct");
+    let mut probes = vec![(
+        "write <p>/.git/config",
+        format!("printf x >> {}", quoted(&p.join(".git/config"))),
+        Succeeds,
+    )];
+    probes.extend(protected_probes(&world));
+    world.probe(&mut case, &everything, p, &probes);
+    assert_eq!(fs::metadata(&world.tetral).unwrap().ino(), tetral_inode);
+
     let nothing = policy(json!([]), "direct");
     let shell = world.run(
         &nothing,
@@ -458,6 +468,33 @@ fn every_grant_reaches_only_what_its_rules_allow_and_never_the_protected_paths()
             Fails,
         )],
     );
+}
+
+#[test]
+fn a_missing_deny_path_under_a_directory_of_another_user_stays_uncreatable_and_the_command_runs() {
+    let mut case = tetral_tests::record!().case(
+        "a missing deny path under a directory of another user stays uncreatable and the command runs",
+    );
+    if !case.runs_as_non_root("root may create entries in /") {
+        return;
+    }
+    let world = World::new();
+    let missing = PathBuf::from(format!("/tetral-isolation-missing-{}", std::process::id()));
+    assert!(!missing.exists());
+    let denied_missing = policy(
+        json!([
+            {"path": "/", "access": "read_write"},
+            {"path": missing.join("x"), "access": "deny"},
+        ]),
+        "direct",
+    );
+    world.probe(
+        &mut case,
+        &denied_missing,
+        &world.project,
+        &[("mkdir /<m>", format!("mkdir {}", quoted(&missing)), Fails)],
+    );
+    assert!(!missing.exists(), "{} exists", missing.display());
 }
 
 /// The host's LAN address: the source address of its default route.

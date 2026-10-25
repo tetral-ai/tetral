@@ -17,6 +17,7 @@ codex-utils-path-uri.workspace = true
 codex-utils-pty.workspace = true
 idna.workspace = true
 protocol.workspace = true
+rustix = { workspace = true, features = ["fs", "process"] }
 serde_json.workspace = true
 sha2.workspace = true
 state.workspace = true

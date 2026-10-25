@@ -1,12 +1,19 @@
 //! Linux: the `bwrap` that a launch uses, chosen as Codex's helper chooses
-//! it, and Codex's check that it can create the namespaces a sandbox needs.
+//! it, Codex's check that it can create the namespaces a sandbox needs, and
+//! the profile that a launch hands to the Codex crates.
 
 use std::fs::File;
 use std::io::Read;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::models::{ManagedFileSystemPermissions, PermissionProfile};
+use codex_protocol::permissions::{
+    FileSystemAccessMode, FileSystemPath, FileSystemSandboxEntry, FileSystemSandboxPolicy,
+};
+use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -91,6 +98,104 @@ async fn select(
     })?
     .into_path_buf();
     digest_matches(&bundled).then_some(bundled)
+}
+
+/// The profile that a launch hands to the Codex crates. Their `bwrap`
+/// arguments protect each missing `.git` at the top of a writable path, and
+/// each missing `read` or `deny` path inside one, by first creating an empty
+/// entry there as a mount target. In a directory that belongs to another user
+/// and grants this user no write, or on a read-only filesystem, `bwrap`
+/// cannot create it, and the operating system already refuses its creation:
+/// there the profile leaves the protection to that refusal, with write for
+/// such a `.git`, so that nothing is mounted at it, and without such a
+/// `read` or `deny` entry, as `Skip` would leave it out (the Codex crates
+/// apply `Skip` on Windows only).
+pub(super) fn launch_profile(profile: &PermissionProfile) -> PermissionProfile {
+    let PermissionProfile::Managed {
+        file_system:
+            ManagedFileSystemPermissions::Restricted {
+                entries,
+                glob_scan_max_depth,
+            },
+        network,
+    } = profile
+    else {
+        return profile.clone();
+    };
+    let path_of = |entry: &FileSystemSandboxEntry| match &entry.path {
+        FileSystemPath::Path { path } => path.to_abs_path().ok().map(PathBuf::from),
+        _ => None,
+    };
+    let writable: Vec<PathBuf> = entries
+        .iter()
+        .filter(|entry| entry.access == FileSystemAccessMode::Write)
+        .filter_map(path_of)
+        .collect();
+    let left_to_the_system = |entry: &FileSystemSandboxEntry| {
+        entry.access != FileSystemAccessMode::Write
+            && path_of(entry)
+                .and_then(|path| first_missing_component(&path))
+                .is_some_and(|missing| {
+                    writable.iter().any(|root| missing.starts_with(root))
+                        && missing.parent().is_some_and(refuses_new_entries)
+                })
+    };
+    let mut adjusted: Vec<FileSystemSandboxEntry> = entries
+        .iter()
+        .filter(|entry| !left_to_the_system(entry))
+        .cloned()
+        .collect();
+    for root in &writable {
+        let git = root.join(".git");
+        // Judged after the left-out entries, which no longer mount anything.
+        let has_entry = adjusted
+            .iter()
+            .any(|entry| path_of(entry).as_deref() == Some(git.as_path()));
+        if !has_entry
+            && root.is_dir()
+            && std::fs::symlink_metadata(&git).is_err()
+            && refuses_new_entries(root)
+            && let Ok(git) = AbsolutePathBuf::from_absolute_path(&git)
+        {
+            adjusted.push(FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: PathUri::from_abs_path(&git),
+                },
+                FileSystemAccessMode::Write,
+            ));
+        }
+    }
+    PermissionProfile::Managed {
+        file_system: ManagedFileSystemPermissions::Restricted {
+            entries: adjusted,
+            glob_scan_max_depth: *glob_scan_max_depth,
+        },
+        network: *network,
+    }
+}
+
+/// The first component of `path` that does not exist, as the Codex crates
+/// find it when they place a mount target.
+fn first_missing_component(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .find(|ancestor| !ancestor.exists())
+        .map(Path::to_path_buf)
+}
+
+/// Whether no process of this user can create an entry in `directory`:
+/// `access(2)` with `W_OK` fails, with `EROFS` or for a directory that another
+/// user owns. A directory of this user's own keeps the Codex default even
+/// without write, since a command could grant itself the write.
+fn refuses_new_entries(directory: &Path) -> bool {
+    match rustix::fs::access(directory, rustix::fs::Access::WRITE_OK) {
+        Ok(()) => false,
+        Err(rustix::io::Errno::ROFS) => true,
+        Err(_) => std::fs::metadata(directory)
+            .is_ok_and(|metadata| metadata.uid() != rustix::process::getuid().as_raw()),
+    }
 }
 
 fn digest_matches(bwrap: &Path) -> bool {

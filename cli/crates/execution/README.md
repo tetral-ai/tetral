@@ -28,6 +28,12 @@ which owns that task's process tree; the translation of a call's
   WSL1 or a refusal of user namespaces rejects the call
   `sandbox_unavailable`; a command the transform cannot build rejects it
   `unsupported_policy`; neither starts a process (`isolation/linux.rs`).
+- A missing protected path stays uncreatable. The Codex crates mount an
+  empty read-only entry at a missing top-level `.git` of a writable path, and
+  at a missing `read` or `deny` path inside one, which `bwrap` must first
+  create; where no process of the user could create it, the launch profile
+  leaves the protection to the operating system instead
+  (`isolation/linux.rs`, `launch_profile`).
 - Each probe of a `bwrap` candidate is bounded by `PROBE_TIMEOUT` and
   `PROBE_OUTPUT_LIMIT_BYTES`, which `Isolation::with_probe_bounds`
   overrides.
@@ -44,7 +50,7 @@ which owns that task's process tree; the translation of a call's
 - `isolation/mod.rs`: `Isolation`, its `check` and `launch`, `Available`,
   `Command` and `LaunchError`.
 - `isolation/linux.rs`: the choice of `bwrap`, the digest check of the
-  bundled one, the WSL1 test and the namespace probe.
+  bundled one, the WSL1 test, the namespace probe and the launch profile.
 - `isolation/harness.rs`: the test entry `tetral-isolation-harness`, under the
   feature `test-seams`: one command through admission, the check and the
   launch.

@@ -117,6 +117,9 @@ impl Isolation {
         tetral: &Path,
     ) -> Result<SpawnedProcess, LaunchError> {
         let manager = SandboxManager::new();
+        #[cfg(target_os = "linux")]
+        let profile = &linux::launch_profile(permissions.profile());
+        #[cfg(not(target_os = "linux"))]
         let profile = permissions.profile();
         let sandbox = manager.select_initial(
             profile,
