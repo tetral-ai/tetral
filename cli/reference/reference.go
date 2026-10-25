@@ -79,7 +79,7 @@ type Server struct {
 	connections map[string]*connection
 
 	faults        []*fault
-	eventsModes   []string
+	eventsModes   []eventsMode
 	earlyDispatch map[string][]instructionSpec
 	held          []*heldAnswer
 	tickets       map[computerKey][]string

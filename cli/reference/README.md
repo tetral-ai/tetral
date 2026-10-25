@@ -55,7 +55,7 @@ object or `400` with the reason; an unknown `<name>` gets `404`.
 | `credential` | `add` a credential (a pending one with `renew` is offered on the instance's stream as `credential.renew`), `revoke` or `expire` one |
 | `prepare`, `close` | Issue `session.prepare` or `session.close` with the given payload on the instance's live connection |
 | `send` | Write any event on the instance's stream as given (`event`, or raw `data`), or write an issued instruction again (`resend`); nothing is issued |
-| `events` | Make the next `count` events requests hold their headers (`hold_headers`), send headers and no event (`headers_only`) or send comments only (`comments_only`) |
+| `events` | Make the next `count` events requests hold their headers (`hold_headers`), send headers and no event (`headers_only`), send comments only (`comments_only`), or connect, with their headers and `connected`, only once the clock has advanced by `delay_ms` from this control (`delay_connected`) |
 | `answer` | For the next `count` requests to an endpoint, or to one `message_id` there: `delay` by `delay_ms` of the clock, `drop` after accepting, `withhold` until `release`, answer for a `wrong_identity`, answer `200` with a body that fails its schema (`schema_fail`), or answer an `error` code with the status the client error table gives it or with a given `status`, which a code outside the table needs |
 | `dispatch_before_ready_ack` | Send these Session instructions after the instance's next ready is accepted and before its ACK is answered, past the staging limit |
 | `break_stream` | Close the instance's stream; its connection keeps its lease |

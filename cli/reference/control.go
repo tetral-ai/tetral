@@ -246,24 +246,40 @@ func (server *Server) controlSend(body json.RawMessage) (any, error) {
 	return map[string]any{"connection_id": conn.id}, nil
 }
 
+// eventsMode is how one events request is answered instead of at once.
+type eventsMode struct {
+	name string
+	// until is the clock's time before which a `delay_connected` request
+	// does not connect.
+	until time.Time
+}
+
 // controlEvents makes the next events requests hold their headers
-// (`hold_headers`), send headers and no event (`headers_only`) or send
-// comments only (`comments_only`).
+// (`hold_headers`), send headers and no event (`headers_only`), send
+// comments only (`comments_only`) or connect only once the clock has
+// advanced by delay_ms from this control (`delay_connected`).
 func (server *Server) controlEvents(body json.RawMessage) (any, error) {
 	var input struct {
-		Mode  string `json:"mode"`
-		Count int    `json:"count"`
+		Mode    string `json:"mode"`
+		Count   int    `json:"count"`
+		DelayMs int64  `json:"delay_ms"`
 	}
 	if err := decodeControl(body, &input); err != nil {
 		return nil, err
 	}
-	if !slices.Contains([]string{"hold_headers", "headers_only", "comments_only"}, input.Mode) {
+	switch {
+	case input.Mode == "delay_connected" && input.DelayMs <= 0:
+		return nil, errors.New("delay_connected needs delay_ms above 0")
+	case input.Mode != "delay_connected" && !slices.Contains([]string{"hold_headers", "headers_only", "comments_only"}, input.Mode):
 		return nil, fmt.Errorf("unknown events mode %q", input.Mode)
 	}
+	// Counted from this control, so that a request arriving after an
+	// advance still connects at the time the control named.
+	mode := eventsMode{name: input.Mode, until: server.clock.Now().Add(time.Duration(input.DelayMs) * time.Millisecond)}
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	for range max(input.Count, 1) {
-		server.eventsModes = append(server.eventsModes, input.Mode)
+		server.eventsModes = append(server.eventsModes, mode)
 	}
 	return map[string]any{}, nil
 }

@@ -167,6 +167,41 @@ func TestEventsControlMakesEventsRequestsSilent(t *testing.T) {
 	})
 }
 
+func TestEventsControlDelaysConnectedFromTheControl(t *testing.T) {
+	ts := startServer(t)
+	if status, body := ts.callStatus("events", map[string]any{"mode": "delay_connected"}); status != http.StatusBadRequest {
+		t.Errorf("delay_connected without delay_ms: %d %s", status, body)
+	}
+	ts.call("events", map[string]any{"mode": "delay_connected", "delay_ms": 2000}, nil)
+	ts.advance(1999 * time.Millisecond)
+	opened := make(chan *eventStream, 1)
+	go func() {
+		stream, _ := ts.open("tetral_ck_a", "inst_a", "cred_a", nil)
+		opened <- stream
+	}()
+	waitFor(t, func() bool {
+		ts.server.mu.Lock()
+		defer ts.server.mu.Unlock()
+		return len(ts.server.eventsModes) == 0
+	})
+	if state := ts.state(); len(state.Connections) != 0 || len(state.Requests) != 0 {
+		t.Fatalf("%d connections and requests %+v before the delay ended", len(state.Connections), state.Requests)
+	}
+	ts.advance(time.Millisecond)
+	select {
+	case stream := <-opened:
+		if stream == nil || stream.expect("connected") == nil {
+			t.Fatal("no connected once the delay ended")
+		}
+	case <-time.After(waitLimit):
+		t.Fatal("still waiting 2 seconds after the control")
+	}
+	if state := ts.state(); len(state.Requests) != 1 || state.Requests[0].Status != http.StatusOK || state.Requests[0].ConnectionID == "" {
+		t.Errorf("requests %+v", state.Requests)
+	}
+	ts.api.CloseClientConnections()
+}
+
 func TestAnswerControlChangesTheNextAnswer(t *testing.T) {
 	readyOn := func(t *testing.T) (*testServer, string) {
 		ts := startServer(t)

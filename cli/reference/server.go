@@ -1,6 +1,7 @@
 package reference
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -184,11 +185,18 @@ func (server *Server) events(w http.ResponseWriter, request *http.Request) {
 	if len(server.eventsModes) > 0 {
 		mode := server.eventsModes[0]
 		server.eventsModes = server.eventsModes[1:]
-		entry.Status, entry.Code = http.StatusOK, mode
-		server.log.requests = append(server.log.requests, entry)
+		if mode.name != "delay_connected" {
+			entry.Status, entry.Code = http.StatusOK, mode.name
+			server.log.requests = append(server.log.requests, entry)
+			server.mu.Unlock()
+			server.silent(w, request, mode.name)
+			return
+		}
 		server.mu.Unlock()
-		server.silent(w, request, mode)
-		return
+		if !server.waitUntil(request.Context(), mode.until) {
+			return
+		}
+		server.mu.Lock()
 	}
 	conn, resumed, refusal := server.connect(cred, string(decoded.PreviousConnectionID.Value), decoded.Resume.Value == "true")
 	if refusal != nil {
@@ -286,6 +294,24 @@ func (server *Server) silent(w http.ResponseWriter, request *http.Request, mode 
 		case <-changed:
 		case <-request.Context().Done():
 			return
+		}
+	}
+}
+
+// waitUntil waits until the clock reaches until, or gives false when the
+// client goes away first.
+func (server *Server) waitUntil(ctx context.Context, until time.Time) bool {
+	for {
+		// Taken before the time is read, so that an advance in between still
+		// ends this wait.
+		changed := server.clock.Changed()
+		if !server.clock.Now().Before(until) {
+			return true
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return false
 		}
 	}
 }
