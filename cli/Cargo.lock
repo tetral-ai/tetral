@@ -500,7 +500,9 @@ dependencies = [
 name = "execution"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "idna",
  "protocol",
+ "serde_json",
  "tokio",
 ]
 

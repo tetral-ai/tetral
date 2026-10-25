@@ -32,6 +32,7 @@ fuser = "0.18.0"
 http-body = "1.1.0"
 hyper = "1.12.0"
 hyper-util = "0.1.21"
+idna = "1.1.0"
 jsonschema = { version = "0.60.1", default-features = false }
 nfsserve = "0.11.0"
 rand = "0.10.3"
