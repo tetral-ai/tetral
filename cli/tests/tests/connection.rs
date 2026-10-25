@@ -536,53 +536,50 @@ fn a_replayed_ack_grants_from_the_first_send() {
 fn a_conflict_blocks_only_from_forty_five_seconds_after_start() {
     let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
-    let mut case = record.case("a second App Server while the first holds the live connection");
+    let mut case = record.case(
+        "two more App Servers while the first holds the live connection, each conflicting at once and then once more 44.999 or 45 seconds after its start",
+    );
     let engine = one_credential_engine();
     let directory = tempfile::tempdir().unwrap();
     let first_bootstrap = bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY);
     let first = Machine::start(&mut case, &directory.path().join("first"), &first_bootstrap);
     first.wait_for("online");
-    let second = Machine::start(
-        &mut case,
-        &directory.path().join("second"),
-        &first_bootstrap,
-    );
-    let mut attempts = vec![second.seams.now() - CLI_START];
-    wait_for_requests(&engine, "events", 2);
-    second.wait_for("disconnected");
-    loop {
-        second.advance(seconds(1.0));
-        if second.attempts() as usize > attempts.len() {
-            attempts.push(second.seams.now() - CLI_START);
-            wait_for_requests(&engine, "events", attempts.len() + 1);
-            wait_until("the attempt's answer", || second.state() != "connecting");
-        }
-        let state = second.state();
-        if state == "blocked" {
-            break;
-        }
-        assert_eq!(state, "disconnected");
-        assert!(second.seams.now() - CLI_START < seconds(120.0));
+    let mut seen = Vec::new();
+    for (name, after_start, expected) in [
+        ("second", 44.999, "disconnected"),
+        ("third", 45.0, "blocked"),
+    ] {
+        let machine = Machine::start(&mut case, &directory.path().join(name), &first_bootstrap);
+        wait_until("the first attempt's conflict", || {
+            machine.attempts() == 1 && machine.state() == "disconnected"
+        });
+        // The retry is due within 1.2 seconds, so it starts, and its answer
+        // comes, at the time the clock is moved to.
+        machine.advance(CLI_START + seconds(after_start) - machine.seams.now());
+        wait_until("the second attempt's conflict", || {
+            machine.attempts() == 2 && machine.state() != "connecting"
+        });
+        let status = machine.status();
+        assert_eq!(status["connection_state"], expected, "{name}");
+        assert_eq!(
+            status["last_error"]["code"], "connection_conflict",
+            "{name}"
+        );
+        seen.push(format!("{after_start} s: {expected}"));
     }
-    let last = *attempts.last().unwrap();
-    assert!(last >= seconds(45.0), "{attempts:?}");
-    assert!(
-        attempts[..attempts.len() - 1]
-            .iter()
-            .all(|at| *at < seconds(45.0))
-    );
     let events = engine.requests("events");
+    assert_eq!(events.len(), 5);
     assert!(
         events[1..]
             .iter()
             .all(|event| event["code"] == "connection_conflict")
     );
-    assert_eq!(second.status()["last_error"]["code"], "connection_conflict");
     let first_status = first.status();
     assert_eq!(first_status["connection_state"], "online");
     assert_eq!(first_status["connection_id"], FIRST_CONNECTION);
     case.observe(format!(
-        "every attempt of the second got 409 connection_conflict; it was blocked at its conflict {last:?} after start and not before ({attempts:?}); the first stayed online on its connection"
+        "every attempt of the other two got 409 connection_conflict; a conflict 44.999 seconds after start was retried and one at 45 seconds blocked ({}); the first stayed online on its connection",
+        seen.join(", ")
     ));
 
     let mut case = record.case("an immediate restart after server stop");
