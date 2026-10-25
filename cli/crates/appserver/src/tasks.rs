@@ -1,0 +1,54 @@
+//! The Session binding owners' task starter: one Task supervisor for each
+//! started `exec_command` task.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use execution::isolation::Isolation;
+use execution::limits::Visible;
+use execution::store::{LOG_HEAD_BYTES, TaskFiles};
+use execution::supervisor::{self, Bounds, Context, TaskSpec};
+use protocol::ports::ReportSink;
+use protocol::tool::ToolInput;
+use session::{TaskStart, TaskStarter};
+
+/// What every supervisor of this App Server is started with.
+#[derive(Debug, Clone)]
+pub struct Supervisors {
+    /// The running `tetral`, canonical.
+    pub tetral: PathBuf,
+    pub isolation: Isolation,
+    pub bounds: Bounds,
+}
+
+impl TaskStarter for Supervisors {
+    fn start(&mut self, task: TaskStart, reports: Arc<dyn ReportSink>) {
+        let ToolInput::ExecCommand(input) = task.tool else {
+            return;
+        };
+        let spec = TaskSpec {
+            connection_id: task.connection_id,
+            correlation: task.correlation,
+            input,
+            permissions: task.permissions,
+            limits: Visible::requested(task.limits.as_ref()),
+            cwd: task.cwd,
+            files: TaskFiles::new(
+                task.task_directory,
+                task.temporary_directory,
+                LOG_HEAD_BYTES,
+            ),
+            traceparent: task.traceparent,
+            received: task.received,
+        };
+        supervisor::spawn(
+            spec,
+            Context {
+                tetral: self.tetral.clone(),
+                isolation: self.isolation,
+                reports,
+                bounds: self.bounds,
+            },
+        );
+    }
+}

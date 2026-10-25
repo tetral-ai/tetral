@@ -11,7 +11,7 @@ use std::time::Duration;
 use connection::{Connection, Credential, ReadyFields};
 use protocol::connection::SemVer;
 use protocol::local::{ServerState, Status};
-use session::{Factory, NoTasks, RootPaths, Shared, ToolContext};
+use session::{Factory, RootPaths, Shared, ToolContext};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -20,6 +20,7 @@ use crate::local_api::{self, FixedStatus, StatusSources};
 use crate::lock::RootLock;
 use crate::shutdown::{self, Sequence};
 use crate::startup::{self, Started};
+use crate::tasks::Supervisors;
 
 /// The parts of the running App Server that the shutdown takes down.
 #[derive(Debug)]
@@ -183,10 +184,11 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
     } = started;
     let probe_program = std::env::current_exe()?;
     let socket_directory = socket.parent().unwrap_or(&socket).canonicalize()?;
+    let tetral = probe_program.canonicalize()?;
     let tools = ToolContext {
         capability: capabilities.tool_execution.clone(),
         socket_directory,
-        tetral: probe_program.canonicalize()?,
+        tetral: tetral.clone(),
     };
     let sessions = Factory::new(
         Shared {
@@ -198,7 +200,11 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
             times: times.session,
             tools: Arc::new(tools),
         },
-        NoTasks,
+        Supervisors {
+            tetral,
+            isolation: execution::isolation::Isolation::new(),
+            bounds: execution::supervisor::Bounds::default(),
+        },
     );
     let credentials = configuration.credentials;
     let connection = Connection::spawn(connection::Config {

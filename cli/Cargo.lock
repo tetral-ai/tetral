@@ -2054,6 +2054,7 @@ dependencies = [
  "codex-utils-pty",
  "idna",
  "libc",
+ "observe",
  "protocol",
  "rand 0.10.3",
  "rustix",
@@ -2063,6 +2064,7 @@ dependencies = [
  "state",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
  "which",
 ]
 

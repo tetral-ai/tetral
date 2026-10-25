@@ -10,6 +10,7 @@ pub mod run;
 pub mod seams;
 pub mod snapshot;
 pub mod socket_directory;
+pub mod tasks;
 
 use std::path::{Path, PathBuf};
 

@@ -51,8 +51,10 @@ ones it uses belong here too.
   Server and give `Started`; `lifecycle::run(started, fixed, times)` starts
   the Connection owner and its Report outbox with the Session binding
   owners' factory (`session::Factory`), given the state root as given and
-  canonical and the running executable for the directory probe, serves the
-  App Server until the shutdown sequence ends and gives `lifecycle::Ended`: the status as of then and the time left
+  canonical and the running executable for the directory probe, and with
+  `tasks::Supervisors`, which starts a Task supervisor for each started
+  `exec_command` task, serves the App Server until the shutdown sequence
+  ends and gives `lifecycle::Ended`: the status as of then and the time left
   before the shutdown's deadline. `lifecycle::Times` holds the durations,
   each a constant but for tests.
 
@@ -73,3 +75,4 @@ ones it uses belong here too.
   while the App Server runs (`FixedStatus`), the sources of a status
   (`StatusSources`) and `current_status`.
 - `shutdown.rs`: the shutdown sequence and its deadline.
+- `tasks.rs`: `Supervisors`, the Session binding owners' `TaskStarter`.

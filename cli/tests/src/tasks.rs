@@ -1,0 +1,307 @@
+//! A machine that runs tasks: its App Server online with `tool_execution`
+//! against a reference control server, one prepared Session, and the
+//! helpers that issue tool instructions and read their reports. Each task's
+//! initial wait reports the test seam counter `task.wait_checked` after each
+//! reading of the clock, the launcher entry waits at the barrier
+//! `task.launch` between its directory's check and entering it (in a task
+//! with network), and the launch counts `process.spawn`.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use serde_json::{Value, json};
+
+use crate::app_server::wait_until;
+use crate::machine::{
+    CREDENTIAL, INSTANCE, KEY, Machine, bootstrap, one_credential_engine, task_parent,
+    wait_for_received,
+};
+use crate::record::Case;
+use crate::reference::ReferenceServer;
+
+pub const SESSION: &str = "sess_1";
+pub const BINDING: &str = "bind_1";
+
+/// The counter of the initial wait's readings of the clock.
+pub const WAIT_CHECKED: &str = "task.wait_checked";
+
+/// The barrier of the launcher entry before it enters its directory.
+pub const LAUNCH: &str = "task.launch";
+
+/// How often the reference control server sends a heartbeat, on its clock.
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+
+/// How long the reference control server's grant of a connection lasts
+/// after its last heartbeat ACK, with a margin.
+const PAST_LEASE: Duration = Duration::from_secs(46);
+
+pub struct TaskMachine {
+    pub engine: ReferenceServer,
+    machine: Option<Machine>,
+    /// The canonical state root.
+    pub root: PathBuf,
+    /// The prepared binding's directory, canonical.
+    pub project: PathBuf,
+}
+
+impl TaskMachine {
+    /// Starts the machine in `directory` and prepares [`SESSION`]'s binding
+    /// [`BINDING`] at `directory/project`.
+    pub fn start(case: &mut Case, directory: &Path) -> TaskMachine {
+        let engine = one_credential_engine();
+        let machine = Machine::start_with_tools(
+            case,
+            directory,
+            &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+        );
+        machine.wait_for("online");
+        let project = directory.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let tasks = TaskMachine {
+            engine,
+            root: machine.root.canonicalize().unwrap(),
+            machine: Some(machine),
+            project: project.canonicalize().unwrap(),
+        };
+        let issued = tasks.prepare(SESSION, BINDING, &tasks.project, None);
+        tasks.wait_prepared(&issued);
+        tasks
+    }
+
+    pub fn machine(&self) -> &Machine {
+        self.machine.as_ref().expect("the machine runs")
+    }
+
+    /// Kills the App Server with SIGKILL, runs `between` while none runs,
+    /// and starts it again on the same state root and clock; it is online
+    /// once this returns.
+    pub fn kill_and_restart(&mut self, between: impl FnOnce(&TaskMachine)) {
+        let Machine {
+            app_server,
+            seams,
+            root,
+        } = self.machine.take().expect("the machine runs");
+        app_server.kill();
+        between(self);
+        // The killed App Server's connection ends at its lease, so that the
+        // next one is not refused as a second connection of the instance.
+        self.engine.advance(PAST_LEASE);
+        let app_server = Machine::run_with_tools(&root, &seams);
+        let machine = Machine {
+            app_server,
+            seams,
+            root,
+        };
+        machine.wait_for("online");
+        self.machine = Some(machine);
+    }
+
+    /// The records of `event` that the App Server has written.
+    pub fn records(&self, event: &str) -> Vec<Value> {
+        let log = std::fs::read_to_string(self.root.join("logs/tetral.log")).unwrap_or_default();
+        log.lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|record| record["event"] == event)
+            .collect()
+    }
+
+    /// Issues `session.prepare` of `session`'s binding `binding` at `cwd`
+    /// and gives its `message_id`.
+    pub fn prepare(
+        &self,
+        session: &str,
+        binding: &str,
+        cwd: &Path,
+        traceparent: Option<&str>,
+    ) -> String {
+        let mut control = json!({
+            "instance_id": INSTANCE,
+            "payload": {
+                "session_id": session, "binding_id": binding, "cwd": cwd,
+                "drives": [], "drive_exclude": [], "repositories": [],
+            },
+        });
+        if let Some(traceparent) = traceparent {
+            control["traceparent"] = json!(traceparent);
+        }
+        let issued = self.engine.control("prepare", control);
+        issued["message_id"].as_str().unwrap().to_owned()
+    }
+
+    /// Waits until the `prepared` report that answers `message_id` is
+    /// accepted.
+    pub fn wait_prepared(&self, message_id: &str) {
+        wait_until(&format!("the prepared report of {message_id}"), || {
+            self.engine.received("session-status").iter().any(|report| {
+                report["body"]["request_message_id"] == message_id
+                    && report["body"]["status"] == "prepared"
+            })
+        });
+    }
+
+    /// Issues `exec_command` with `input` as `task_id` of the prepared
+    /// binding under `policy` and gives its `message_id`.
+    pub fn execute(&self, task_id: &str, input: Value, policy: Value) -> String {
+        self.execute_with(SESSION, BINDING, task_id, input, policy, None)
+    }
+
+    pub fn execute_with(
+        &self,
+        session: &str,
+        binding: &str,
+        task_id: &str,
+        input: Value,
+        policy: Value,
+        traceparent: Option<&str>,
+    ) -> String {
+        let mut control = json!({
+            "instance_id": INSTANCE,
+            "payload": {
+                "session_id": session, "binding_id": binding,
+                "tool_use_event_id": format!("call_{task_id}"), "task_id": task_id,
+                "tool": "exec_command", "input": input, "sandbox_policy": policy,
+            },
+        });
+        if let Some(traceparent) = traceparent {
+            control["traceparent"] = json!(traceparent);
+        }
+        let issued = self.engine.control("execute", control);
+        issued["message_id"].as_str().unwrap().to_owned()
+    }
+
+    /// The accepted execution reports of `task_id`, in arrival order.
+    pub fn reports(&self, task_id: &str) -> Vec<Value> {
+        self.engine
+            .received("tool-status")
+            .into_iter()
+            .map(|received| received["body"].clone())
+            .filter(|body| body["task_id"] == task_id && body["kind"] == "execution")
+            .collect()
+    }
+
+    /// Waits for the first accepted execution report of `task_id` in
+    /// `phase` and gives it.
+    pub fn report(&self, task_id: &str, phase: &str) -> Value {
+        let mut found = Value::Null;
+        wait_until(&format!("the {phase} report of {task_id}"), || {
+            match self
+                .reports(task_id)
+                .into_iter()
+                .find(|report| report["phase"] == phase)
+            {
+                Some(report) => {
+                    found = report;
+                    true
+                }
+                None => false,
+            }
+        });
+        found
+    }
+
+    pub fn terminal(&self, task_id: &str) -> Value {
+        self.report(task_id, "terminal")
+    }
+
+    /// Waits until the next task's initial wait has read the clock, which
+    /// shows that the task has started at the clock's current time.
+    pub fn wait_for_start(&self, checked: u64) {
+        self.machine()
+            .seams
+            .wait_for_count(WAIT_CHECKED, checked + 1);
+    }
+
+    /// Moves the App Server's clock by `step` with its connection kept
+    /// online: for each [`HEARTBEAT_INTERVAL`] of it the reference control
+    /// server's clock moves too, and the ACK of its heartbeat moves the
+    /// connection's deadline.
+    pub fn advance(&self, step: Duration) {
+        let seams = &self.machine().seams;
+        let mut left = step;
+        while left >= HEARTBEAT_INTERVAL {
+            let heartbeats = self.engine.received("heartbeat").len();
+            let grants = seams.count("connection.granted");
+            self.engine.advance(HEARTBEAT_INTERVAL);
+            wait_for_received(&self.engine, "heartbeat", heartbeats + 1);
+            seams.wait_for_count("connection.granted", grants + 1);
+            seams.advance(HEARTBEAT_INTERVAL);
+            left -= HEARTBEAT_INTERVAL;
+        }
+        seams.advance(left);
+    }
+
+    /// [`TaskMachine::advance`], then waits until a running initial wait
+    /// has read the new time.
+    pub fn advance_wait(&self, step: Duration) {
+        let seams = &self.machine().seams;
+        self.advance(step);
+        let checked = seams.count(WAIT_CHECKED);
+        seams.wait_for_count(WAIT_CHECKED, checked + 2);
+    }
+
+    /// The directories of the Session `session`'s current tasks.
+    pub fn task_directories(&self, session: &str) -> Vec<PathBuf> {
+        listing(&self.root.join("sessions").join(session).join("tasks"))
+    }
+
+    /// The entries of `T`.
+    pub fn temporary_directories(&self) -> Vec<PathBuf> {
+        listing(&task_parent(&self.root))
+    }
+}
+
+impl Drop for TaskMachine {
+    /// Stops the App Server, then removes `T`, which lies outside the test's
+    /// directory.
+    fn drop(&mut self) {
+        drop(self.machine.take());
+        let _ = std::fs::remove_dir_all(task_parent(&self.root));
+    }
+}
+
+fn listing(directory: &Path) -> Vec<PathBuf> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(directory)
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default();
+    entries.sort();
+    entries
+}
+
+/// Read access to the whole filesystem, write access to `project` and the
+/// network mode `network`.
+pub fn policy(project: &Path, network: &str) -> Value {
+    json!({
+        "schema_version": 1,
+        "filesystem": {"rules": [
+            {"path": "/", "access": "read"},
+            {"path": project, "access": "read_write"},
+        ]},
+        "network": {"mode": network},
+    })
+}
+
+pub fn millis(value: u64) -> Duration {
+    Duration::from_millis(value)
+}
+
+/// Whether a process of this machine runs with the argument list `argv`.
+pub fn process_running(argv: &[&str]) -> bool {
+    let wanted: Vec<u8> = argv
+        .iter()
+        .flat_map(|argument| [argument.as_bytes(), b"\0"].concat())
+        .collect();
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+        })
+        .any(|entry| {
+            std::fs::read(entry.path().join("cmdline")).is_ok_and(|cmdline| cmdline == wanted)
+        })
+}

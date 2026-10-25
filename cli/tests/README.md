@@ -80,7 +80,11 @@ temporary directories. No workspace crate depends on this package.
   credential, the helpers that drive and read that server, and the seam
   counters of the Connection owner; `Machine::start_with_tools` gives the App
   Server the protocol's `tool_execution` fixture to advertise, through the
-  test seam `TETRAL_TEST_TOOL_EXECUTION`.
+  test seam `TETRAL_TEST_TOOL_EXECUTION`, and the system `PATH` for its
+  tasks; `task_parent` locates a root's `T` apart from the code under test.
+- `src/tasks.rs`: `TaskMachine`, such a machine with one prepared Session,
+  which issues tool instructions, reads their reports, follows the seams of
+  a task's start and initial wait, and removes `T` when it ends.
 - `tests/configure.rs`: `tetral configure` and `tetral --version`: the refused
   arguments, bootstraps, apps and control paths with the root unchanged, the
   size limit and private modes of a new root, each failure code, configure
@@ -123,6 +127,15 @@ temporary directories. No workspace crate depends on this package.
 - `tests/tool_reports.rs`: the reports of tool instructions: an ACK that
   names another report and one without `accepted` release nothing, and the
   report is sent again byte for byte.
+- `tests/exec_command.rs`: `exec_command`: its reports and their sequence,
+  the initial wait under `kill` and `detach`, its clamp and a start that
+  never comes within it, a detached command's lifetime, the working
+  directory and its errors, the environment, the exit facts, the end of a
+  task's processes, the metrics and the trace context.
+- `tests/task_storage.rs`: a task's output beyond what a stream keeps, files
+  that cannot be created and a log that cannot be written, task files that
+  no other task reaches, `TMPDIR` with files and Unix sockets, the files'
+  removal after the ACKs, and `T` after the App Server's death.
 - `tests/local_service.rs`: `server run`, `server status` and `server stop`
   and the local API: status while Engine is unreachable, the wrong routes,
   shutdown on request, on each signal and with a handler blocked, one owner

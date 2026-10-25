@@ -52,8 +52,10 @@ pub struct TaskStart {
     pub limits: Option<VisibleLimits>,
     /// The binding's canonical working directory.
     pub cwd: PathBuf,
-    /// The name its files are kept under ([`store`]).
-    pub task_name: String,
+    /// The task's directory under its Session ([`store::task_directory`]).
+    pub task_directory: PathBuf,
+    /// The task's private temporary directory in `T`.
+    pub temporary_directory: PathBuf,
     pub traceparent: Option<String>,
     /// When the instruction was received, on the seam clock.
     pub received: Duration,
@@ -140,7 +142,8 @@ impl<S: TaskStarter> SessionOwner<S> {
     /// The admission steps of a `tool.execute`; an admitted task registers,
     /// then starts or is staged.
     fn execute(&mut self, call: &ToolCall) -> Result<(), Body> {
-        let shared = &self.preparation.as_ref().expect("a preparing owner").shared;
+        let preparation = self.preparation.as_ref().expect("a preparing owner");
+        let shared = &preparation.shared;
         let connection_binding = self
             .record
             .as_mut()
@@ -189,6 +192,7 @@ impl<S: TaskStarter> SessionOwner<S> {
         let Some((binding, cwd)) = prepared.zip(cwd) else {
             return Err(binding_unavailable());
         };
+        let root = &shared.paths.canonical;
         let start = TaskStart {
             connection_id: call.connection_id.clone(),
             correlation: correlation(call),
@@ -196,7 +200,15 @@ impl<S: TaskStarter> SessionOwner<S> {
             permissions,
             limits: payload.limits,
             cwd,
-            task_name,
+            task_directory: store::task_directory(
+                root,
+                preparation.session_id.as_str(),
+                &task_name,
+            ),
+            temporary_directory: store::task_temporary_directory(
+                &store::task_parent(root),
+                &task_name,
+            ),
             traceparent: call.traceparent.clone(),
             received: call.received,
         };
@@ -217,7 +229,7 @@ impl<S: TaskStarter> SessionOwner<S> {
         if staged {
             binding.tasks.staged.push_back(call.task_id.clone());
         } else {
-            self.starter.start(start);
+            self.starter.start(start, preparation.reports.clone());
         }
         Ok(())
     }
@@ -255,6 +267,9 @@ impl<S: TaskStarter> SessionOwner<S> {
     /// its `prepared` report has made it `prepared`, before any later
     /// instruction of the binding.
     pub(crate) fn start_staged(&mut self) {
+        let Some(preparation) = &self.preparation else {
+            return;
+        };
         let Some(binding) = self
             .record
             .as_mut()
@@ -264,7 +279,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             return;
         };
         for start in binding.tasks.start_staged() {
-            self.starter.start(start);
+            self.starter.start(start, preparation.reports.clone());
         }
     }
 }

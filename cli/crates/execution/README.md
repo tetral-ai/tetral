@@ -74,6 +74,13 @@ which owns that task's process tree; the translation of a call's
 - Each probe of a `bwrap` candidate is bounded by `PROBE_TIMEOUT` and
   `PROBE_OUTPUT_LIMIT_BYTES`, which `Isolation::with_probe_bounds`
   overrides.
+- A task's supervisor owns it from its start to its cleanup: `starting`
+  while it checks the isolation, creates the task's files and launches the
+  command, `running` from the command's actual start, `ended` with its
+  `terminal` report and `cleaned` once that report is acknowledged or
+  dropped and the files are gone. It reads both pipes all the time into the
+  capture and the logs, so no command blocks on its output, and every wait
+  reads the seam clock (`supervisor`).
 - `exec_command` runs as `tetral __tetral-task exec <directory> <shell>
   <cmd>` through the restricted path; inside the sandbox the launcher entry
   checks and enters the directory, with no fallback, and executes
@@ -90,11 +97,16 @@ which owns that task's process tree; the translation of a call's
 - The termination procedure sends a task SIGTERM, on Linux to its PID
   namespace's first process, which passes it on to the command's process
   group, and SIGKILL after a grace (`terminate`).
+- The initial wait runs from the spawn. One that ends before the command's
+  start, whatever `on_wait_expiry` says, one under `kill`, and a detached
+  command's lifetime end the command through the termination procedure
+  (`supervisor`).
 
 ## Where things are
 
-- `lib.rs`: `spawn_task_supervisor`, `SupervisorMessage` and
-  `SupervisorMailbox`.
+- `supervisor.rs`: `spawn`, a task's `TaskSpec`, the shared `Context` and
+  its `Bounds`, `SupervisorMessage` and `SupervisorMailbox`; the start, the
+  running loop and the reports.
 - `exec.rs`: `ExecCall`, a call's directory, waits and expiry; `shell`;
   `ExitFacts`; `Outcome`, the result envelope of a report.
 - `env.rs`: `command_environment`.

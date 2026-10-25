@@ -55,9 +55,9 @@ pub enum SessionMessage {
 
 pub type SessionMailbox = mpsc::UnboundedSender<SessionMessage>;
 
-/// Starts the task of an admitted command.
+/// Starts the task of an admitted command, whose reports go to `reports`.
 pub trait TaskStarter: Send + 'static {
-    fn start(&mut self, task: TaskStart);
+    fn start(&mut self, task: TaskStart, reports: Arc<dyn ReportSink>);
 }
 
 /// The starter of an App Server that executes no tool: its ready advertises
@@ -66,7 +66,7 @@ pub trait TaskStarter: Send + 'static {
 pub struct NoTasks;
 
 impl TaskStarter for NoTasks {
-    fn start(&mut self, _task: TaskStart) {}
+    fn start(&mut self, _task: TaskStart, _reports: Arc<dyn ReportSink>) {}
 }
 
 /// The paths a preparation checks against and runs.
@@ -595,7 +595,7 @@ mod tests {
     }
 
     impl TaskStarter for CountingStarter {
-        fn start(&mut self, _task: TaskStart) {
+        fn start(&mut self, _task: TaskStart, _reports: Arc<dyn ReportSink>) {
             self.starts.fetch_add(1, Ordering::SeqCst);
             if self.close.check() {
                 self.starts_after_close.fetch_add(1, Ordering::SeqCst);

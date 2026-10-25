@@ -41,6 +41,10 @@ pub const FIRST_CONNECTION: &str = "conn_1";
 /// ready's `capabilities.tool_execution`.
 pub const TOOL_EXECUTION_VARIABLE: &str = "TETRAL_TEST_TOOL_EXECUTION";
 
+/// The `PATH` of an App Server that runs tasks: the system's programs and
+/// its `bwrap`.
+pub const SYSTEM_PATH: &str = "/usr/bin:/bin";
+
 /// The `tool_execution` of the protocol's fixture `ready_direct_and_disabled`
 /// as compact JSON: the tools, controls, network modes and limits of the
 /// protocol, which the App Servers of the tool tests advertise.
@@ -117,14 +121,15 @@ impl Machine {
     }
 
     /// [`Machine::start`] with an App Server that advertises the protocol's
-    /// `tool_execution` ([`tool_execution_fragment`]).
+    /// `tool_execution` ([`tool_execution_fragment`]) and runs with
+    /// [`SYSTEM_PATH`], on which its tasks find `bwrap` and their programs.
     pub fn start_with_tools(case: &mut Case, directory: &Path, bootstrap: &Value) -> Machine {
         Machine::start_with(
             case,
             directory,
             bootstrap,
             &crate::workspace_dir().join("tests"),
-            &[(TOOL_EXECUTION_VARIABLE, tool_execution_fragment())],
+            &tool_environment(),
         )
     }
 
@@ -179,6 +184,19 @@ impl Machine {
         AppServer::start(server_run, root)
     }
 
+    /// [`Machine::run`] with the environment of
+    /// [`Machine::start_with_tools`].
+    pub fn run_with_tools(root: &Path, seams: &Seams) -> AppServer {
+        let mut server_run = Tetral::new(["server", "run", "--app", APP])
+            .home(root)
+            .seams(seams)
+            .current_dir(&crate::workspace_dir().join("tests"));
+        for (name, value) in tool_environment() {
+            server_run = server_run.env(name, value);
+        }
+        AppServer::start(server_run, root)
+    }
+
     pub fn status(&self) -> Value {
         self.app_server.status()
     }
@@ -222,6 +240,31 @@ impl Machine {
     pub fn state(&self) -> Value {
         self.status()["connection_state"].clone()
     }
+}
+
+fn tool_environment() -> [(&'static str, String); 2] {
+    [
+        (TOOL_EXECUTION_VARIABLE, tool_execution_fragment()),
+        ("PATH", SYSTEM_PATH.to_owned()),
+    ]
+}
+
+/// `T` of the state root at `root`, the parent of its tasks' temporary
+/// directories: `tetral-<h>` in the canonical path of `/tmp`, `<h>` the
+/// first 8 lowercase hexadecimal characters of the SHA-256 of the root's
+/// canonical path.
+pub fn task_parent(root: &Path) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let canonical = root.canonicalize().expect("the state root exists");
+    let digest = Sha256::digest(canonical.as_os_str().as_encoded_bytes());
+    let hex: String = digest[..4]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Path::new("/tmp")
+        .canonicalize()
+        .expect("/tmp exists")
+        .join(format!("tetral-{hex}"))
 }
 
 /// Waits until the reference control server has `count` requests of

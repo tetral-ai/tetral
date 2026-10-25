@@ -8,3 +8,4 @@ pub mod local_api;
 pub mod lock;
 pub mod shutdown;
 pub mod startup;
+pub mod tasks;
