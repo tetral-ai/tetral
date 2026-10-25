@@ -18,7 +18,7 @@ pub fn run(root: &StateRoot, observer: &observe::Observer) -> Result<Value, Comm
     let ended = runtime.block_on(async {
         let started = startup::serve(root, lock).map_err(start_failed)?;
         // Opened once the start can no longer fail, so that a refused start
-        // leaves the root as it was.
+        // creates no log file under the root.
         if observer.open_log_file(&root.join(paths::LOGS)).is_err() {
             observe::warn!(
                 "log.file_open_failed",
