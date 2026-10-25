@@ -10,6 +10,8 @@
 
 use std::future::poll_fn;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use eventsource_stream::{EventStream, EventStreamError};
@@ -18,6 +20,31 @@ use http_body::Body as _;
 
 /// The largest `data` of one event until a larger limit is given.
 pub const EVENT_MAX_BYTES: usize = protocol::connection::MESSAGE_MAX_BYTES;
+
+/// The largest `data` of one event from the moment the CLI starts submitting
+/// a ready that advertises `tool_execution`: a complete `tool.execute`.
+pub const TOOL_EVENT_MAX_BYTES: usize = protocol::tool::limits::EXECUTE_SSE_JSON_BYTES;
+
+/// The largest `data` of one event that a stream reads, shared between the
+/// stream's reader and the Connection owner, which raises it while the
+/// stream runs; each line and each event is checked against its value at
+/// that moment.
+#[derive(Debug, Clone)]
+pub struct EventLimit(Arc<AtomicUsize>);
+
+impl EventLimit {
+    pub fn new(max_data_bytes: usize) -> EventLimit {
+        EventLimit(Arc::new(AtomicUsize::new(max_data_bytes)))
+    }
+
+    pub fn set(&self, max_data_bytes: usize) {
+        self.0.store(max_data_bytes, Ordering::SeqCst);
+    }
+
+    fn get(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+}
 
 /// The length of `data: `, which precedes the data on its line.
 const DATA_PREFIX_BYTES: usize = 6;
@@ -46,8 +73,8 @@ pub enum End {
 /// line feeds.
 struct BoundedLines<S> {
     chunks: S,
-    max_line_bytes: usize,
-    max_data_bytes: usize,
+    /// A line may hold the limit's data bytes and `data: `.
+    limit: EventLimit,
     line: Vec<u8>,
     after_cr: bool,
     first_line: bool,
@@ -61,11 +88,10 @@ struct BoundedLines<S> {
 }
 
 impl<S> BoundedLines<S> {
-    fn new(chunks: S, max_data_bytes: usize) -> BoundedLines<S> {
+    fn new(chunks: S, limit: EventLimit) -> BoundedLines<S> {
         BoundedLines {
             chunks,
-            max_line_bytes: max_data_bytes + DATA_PREFIX_BYTES,
-            max_data_bytes,
+            limit,
             line: Vec::new(),
             after_cr: false,
             first_line: true,
@@ -101,7 +127,7 @@ impl<S> BoundedLines<S> {
     }
 
     fn extend(&mut self, bytes: &[u8]) -> Result<(), Overflow> {
-        if self.line.len() + bytes.len() > self.max_line_bytes {
+        if self.line.len() + bytes.len() > self.limit.get() + DATA_PREFIX_BYTES {
             return Err(Overflow::LineTooLong);
         }
         self.line.extend_from_slice(bytes);
@@ -122,7 +148,7 @@ impl<S> BoundedLines<S> {
                 Some(bytes) => bytes + 1 + value.len(),
                 None => value.len(),
             };
-            if joined > self.max_data_bytes {
+            if joined > self.limit.get() {
                 return Err(Overflow::DataTooLarge);
             }
             self.data_bytes = Some(joined);
@@ -189,8 +215,8 @@ impl<S, E> Events<S>
 where
     S: Stream<Item = Result<Vec<u8>, E>> + Unpin,
 {
-    pub fn new(chunks: S, max_data_bytes: usize) -> Events<S> {
-        Events(EventStream::new(BoundedLines::new(chunks, max_data_bytes)))
+    pub fn new(chunks: S, limit: EventLimit) -> Events<S> {
+        Events(EventStream::new(BoundedLines::new(chunks, limit)))
     }
 
     /// The next event's data, or how the stream ended.
@@ -254,7 +280,7 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
-            let mut events = Events::new(Given(chunks.into_iter()), limit);
+            let mut events = Events::new(Given(chunks.into_iter()), EventLimit::new(limit));
             let mut data = Vec::new();
             loop {
                 match events.next().await {

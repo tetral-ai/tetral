@@ -74,7 +74,9 @@ temporary directories. No workspace crate depends on this package.
 - `src/machine.rs`: `Machine`, a configured root and its App Server on its
   own seam clock against a reference control server that knows the test
   credential, the helpers that drive and read that server, and the seam
-  counters of the Connection owner.
+  counters of the Connection owner; `Machine::start_with_tools` gives the App
+  Server the protocol's `tool_execution` fixture to advertise, through the
+  test seam `TETRAL_TEST_TOOL_EXECUTION`.
 - `tests/configure.rs`: `tetral configure` and `tetral --version`: the refused
   arguments, bootstraps, apps and control paths with the root unchanged, the
   size limit and private modes of a new root, each failure code, configure
@@ -109,6 +111,9 @@ temporary directories. No workspace crate depends on this package.
   shutdown, the listing of a staged and of a failed preparation, reports
   refused as answering no issued instruction, a new binding refused by a
   full replay ledger, and a preparation that names an earlier connection.
+- `tests/tool_admission.rs`: tool instructions against the reference control
+  server: one event of up to 4,259,840 bytes read and a larger one that
+  closes the stream unread.
 - `tests/local_service.rs`: `server run`, `server status` and `server stop`
   and the local API: status while Engine is unreachable, the wrong routes,
   shutdown on request, on each signal and with a handler blocked, one owner

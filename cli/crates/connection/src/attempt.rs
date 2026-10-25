@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::http::Transport;
 use crate::owner::Message;
-use crate::stream::{Chunks, Events};
+use crate::stream::{Chunks, EventLimit, Events};
 
 /// The time from an attempt's start to its first valid `connected`.
 pub const ATTEMPT_TOTAL: Duration = Duration::from_secs(10);
@@ -76,7 +76,7 @@ pub(crate) async fn run(
     transport: Arc<Transport>,
     key: BootstrapKey,
     query: Vec<(&'static str, String)>,
-    max_event_bytes: usize,
+    limit: EventLimit,
     stream: u64,
     mailbox: mpsc::UnboundedSender<Message>,
 ) {
@@ -91,7 +91,7 @@ pub(crate) async fn run(
             return;
         }
     };
-    let mut events = Events::new(Chunks::new(response), max_event_bytes);
+    let mut events = Events::new(Chunks::new(response), limit);
     loop {
         match events.next().await {
             Ok(data) => {

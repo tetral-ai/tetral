@@ -75,6 +75,11 @@ Server:
   returns it after reaping its probe, and the stop is answered only once no
   probe holds one, so that the shutdown waits for them up to its deadline
   (`probe_slots`, `owner`).
+- A stream reads one event of up to `stream::EVENT_MAX_BYTES` until the CLI
+  starts submitting a ready that advertises `tool_execution`, and of up to
+  `stream::TOOL_EVENT_MAX_BYTES` from then on, a resumed stream of that
+  connection from its start; a larger event closes the stream unread
+  (`stream::EventLimit`, `owner`).
 - The replay ledger records a new operation only while its reserve stays
   free after recording it; the rest may use the reserve; it never removes an
   entry to make room, and an entry goes only once its instruction's final
@@ -134,5 +139,5 @@ and its running attempt.
 | `src/outbox.rs` | The Report outbox: identities `r<n>`, freezing, sending, retries, ACKs and refusals, connection ends, the record `report.dropped`, and the test seam counter `outbox.answered` |
 | `src/report_deadline.rs` | A report attempt's total and `STALL_LIMIT` |
 | `src/clock.rs` | The clock the outbox reads |
-| `src/stream.rs` | The bounded reading of an event stream (`Events`) and `EVENT_MAX_BYTES` |
+| `src/stream.rs` | The bounded reading of an event stream (`Events`), its shared limit (`EventLimit`), `EVENT_MAX_BYTES` and `TOOL_EVENT_MAX_BYTES` |
 | `src/status.rs` | `ConnectionStatus`, the record `connection.state_changed` and the metrics `tetral_connection_state` and `tetral_reconnects_total` |

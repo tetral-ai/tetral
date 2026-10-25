@@ -36,6 +36,24 @@ pub const CLI_START: Duration = Duration::from_secs(1_000);
 /// The first connection of a reference control server that just started.
 pub const FIRST_CONNECTION: &str = "conn_1";
 
+/// The variable whose value a `test-seams` App Server advertises as its
+/// ready's `capabilities.tool_execution`.
+pub const TOOL_EXECUTION_VARIABLE: &str = "TETRAL_TEST_TOOL_EXECUTION";
+
+/// The `tool_execution` of the protocol's fixture `ready_direct_and_disabled`
+/// as compact JSON: the tools, controls, network modes and limits of the
+/// protocol, which the App Servers of the tool tests advertise.
+pub fn tool_execution_fragment() -> String {
+    let path = crate::repository_root().join("protocol/tool-execution-v1.fixtures.json");
+    let fixtures: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(&path).expect("the tool fixtures")).unwrap();
+    let ready = fixtures
+        .iter()
+        .find(|fixture| fixture["name"] == "ready_direct_and_disabled")
+        .expect("the fixture ready_direct_and_disabled");
+    ready["value"]["tool_execution"].to_string()
+}
+
 pub fn seconds(value: f64) -> Duration {
     Duration::from_secs_f64(value)
 }
@@ -97,6 +115,18 @@ impl Machine {
         )
     }
 
+    /// [`Machine::start`] with an App Server that advertises the protocol's
+    /// `tool_execution` ([`tool_execution_fragment`]).
+    pub fn start_with_tools(case: &mut Case, directory: &Path, bootstrap: &Value) -> Machine {
+        Machine::start_with(
+            case,
+            directory,
+            bootstrap,
+            &crate::workspace_dir().join("tests"),
+            &[(TOOL_EXECUTION_VARIABLE, tool_execution_fragment())],
+        )
+    }
+
     /// [`Machine::start`] with the App Server's working directory
     /// `working_directory`.
     pub fn start_in(
@@ -104,6 +134,17 @@ impl Machine {
         directory: &Path,
         bootstrap: &Value,
         working_directory: &Path,
+    ) -> Machine {
+        Machine::start_with(case, directory, bootstrap, working_directory, &[])
+    }
+
+    /// [`Machine::start_in`] with `environment` added to the App Server's.
+    fn start_with(
+        case: &mut Case,
+        directory: &Path,
+        bootstrap: &Value,
+        working_directory: &Path,
+        environment: &[(&str, String)],
     ) -> Machine {
         std::fs::create_dir_all(directory).unwrap();
         let root = directory.join("root");
@@ -114,10 +155,13 @@ impl Machine {
         case.command("tetral configure --app app_one --from-stdin", &run.exit());
         assert_eq!(run.object(), json!({}));
         let seams = Seams::serve(directory, CLI_START);
-        let server_run = Tetral::new(["server", "run", "--app", APP])
+        let mut server_run = Tetral::new(["server", "run", "--app", APP])
             .home(&root)
             .seams(&seams)
             .current_dir(working_directory);
+        for (name, value) in environment {
+            server_run = server_run.env(name, value);
+        }
         let app_server = AppServer::start(server_run, &root);
         case.command("tetral server run --app app_one", "running");
         Machine {

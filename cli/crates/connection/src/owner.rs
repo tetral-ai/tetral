@@ -63,7 +63,7 @@ use crate::ready::{self, ReadyFields};
 use crate::sessions::{Owners, Port, PortMessage, RECORDS_MAX, SessionsView};
 use crate::staging::{Admission, STAGING_MAX, Staging};
 use crate::status::{ConnectionStatus, Reconnect, Reported};
-use crate::stream::EVENT_MAX_BYTES;
+use crate::stream::{EVENT_MAX_BYTES, EventLimit, TOOL_EVENT_MAX_BYTES};
 
 /// The time from `connected` within which the ready ACK must arrive.
 pub const REGISTRATION_DEADLINE: Duration = Duration::from_secs(45);
@@ -91,7 +91,11 @@ pub struct Times {
     pub backoff_start: Duration,
     pub backoff_max: Duration,
     pub staging_max: usize,
+    /// The event limit of a stream until the CLI starts submitting a ready
+    /// that advertises `tool_execution`.
     pub event_max_bytes: usize,
+    /// The event limit from that moment, for the rest of the connection.
+    pub tool_event_max_bytes: usize,
     pub ledger: ledger::Limits,
     pub outbox: OutboxTimes,
     pub records_max: usize,
@@ -110,6 +114,7 @@ impl Default for Times {
             backoff_max: BASE_MAX,
             staging_max: STAGING_MAX,
             event_max_bytes: EVENT_MAX_BYTES,
+            tool_event_max_bytes: TOOL_EVENT_MAX_BYTES,
             ledger: ledger::Limits::default(),
             outbox: OutboxTimes::default(),
             records_max: RECORDS_MAX,
@@ -327,6 +332,8 @@ struct Attempt {
     kind: AttemptKind,
     deadline: Duration,
     task: AbortHandle,
+    /// The event limit its stream reads with.
+    limit: EventLimit,
 }
 
 struct Held {
@@ -347,6 +354,8 @@ struct Held {
     /// The `(session_id, binding_id)` of each `session.prepare` routed on
     /// this connection; a later one of the same binding is no new operation.
     routed: HashSet<(String, String)>,
+    /// The event limit that a resume's stream starts with.
+    event_max_bytes: usize,
 }
 
 enum Stream {
@@ -463,7 +472,8 @@ impl Owner {
             Phase::Blocked
         } else {
             let kind = AttemptKind::Fresh { previous: None };
-            Phase::Connecting(self.attempt(kind, state::seams::now()))
+            let limit = self.times.event_max_bytes;
+            Phase::Connecting(self.attempt(kind, state::seams::now(), limit))
         };
         self.reported.change(self.state());
     }
@@ -638,7 +648,10 @@ impl Owner {
         let now = state::seams::now();
         let phase = std::mem::replace(&mut self.phase, Phase::Stopped);
         self.phase = match phase {
-            Phase::Waiting { at, kind } if now >= at => Phase::Connecting(self.attempt(kind, now)),
+            Phase::Waiting { at, kind } if now >= at => {
+                let limit = self.times.event_max_bytes;
+                Phase::Connecting(self.attempt(kind, now, limit))
+            }
             Phase::Connecting(attempt) if now >= attempt.deadline => {
                 self.attempt_failed(Phase::Connecting(attempt), now)
             }
@@ -666,7 +679,7 @@ impl Owner {
                 let kind = AttemptKind::Resume {
                     connection: held.id.clone(),
                 };
-                held.stream = Stream::Resuming(self.attempt(kind, now));
+                held.stream = Stream::Resuming(self.attempt(kind, now, held.event_max_bytes));
             }
             Stream::Resuming(attempt) if now >= attempt.deadline => {
                 attempt.task.abort();
@@ -711,16 +724,18 @@ impl Owner {
         self.last_tag
     }
 
-    /// Starts an attempt, counted as the test seam counter
+    /// Starts an attempt whose stream reads events of up to
+    /// `max_event_bytes`, counted as the test seam counter
     /// `connection.attempt`.
-    fn attempt(&mut self, kind: AttemptKind, now: Duration) -> Attempt {
+    fn attempt(&mut self, kind: AttemptKind, now: Duration, max_event_bytes: usize) -> Attempt {
         state::seams::count("connection.attempt");
         let stream = self.tag();
+        let limit = EventLimit::new(max_event_bytes);
         let task = tokio::spawn(attempt::run(
             self.transport.clone(),
             self.credential.key.clone(),
             kind.query(&self.instance_id, &self.credential.credential_id),
-            self.times.event_max_bytes,
+            limit.clone(),
             stream,
             self.mailbox.clone(),
         ))
@@ -730,6 +745,7 @@ impl Owner {
             kind,
             deadline: now + self.times.attempt_total,
             task,
+            limit,
         }
     }
 
@@ -860,34 +876,36 @@ impl Owner {
             Phase::Connecting(attempt) if attempt.stream == stream => {
                 match attempt.kind.connected(&data) {
                     Some((connection, false)) => {
-                        self.new_connection(connection, stream, attempt.task, now)
+                        self.new_connection(connection, stream, attempt.task, &attempt.limit, now)
                     }
                     _ => Phase::Connecting(attempt),
                 }
             }
             Phase::Held(mut held) => {
                 let resume = match &held.stream {
-                    Stream::Resuming(attempt) if attempt.stream == stream => {
-                        Some((attempt.kind.connected(&data), attempt.task.clone()))
-                    }
+                    Stream::Resuming(attempt) if attempt.stream == stream => Some((
+                        attempt.kind.connected(&data),
+                        attempt.task.clone(),
+                        attempt.limit.clone(),
+                    )),
                     _ => None,
                 };
                 let live =
                     matches!(&held.stream, Stream::Live { stream: live, .. } if *live == stream);
                 match resume {
-                    Some((Some((_, true)), task)) => {
+                    Some((Some((_, true)), task, _)) => {
                         held.stream = Stream::Live { stream, task };
                         self.reported.reconnected(Reconnect::Resume);
                         Phase::Held(held)
                     }
-                    Some((Some((connection, false)), task)) => {
+                    Some((Some((connection, false)), task, limit)) => {
                         // The old connection ends, but not this stream, which
                         // carries the new one.
                         held.stream = Stream::Waiting { at: now };
                         self.release_held(*held);
-                        self.new_connection(connection, stream, task, now)
+                        self.new_connection(connection, stream, task, &limit, now)
                     }
-                    Some((None, _)) => Phase::Held(held),
+                    Some((None, _, _)) => Phase::Held(held),
                     None if live => self.live_event(held, stream, data, now),
                     None => Phase::Held(held),
                 }
@@ -896,7 +914,19 @@ impl Owner {
         }
     }
 
-    fn new_connection(&mut self, id: Id, stream: u64, task: AbortHandle, now: Duration) -> Phase {
+    /// Starts connection `id` on stream `stream`, whose reader reads with
+    /// `limit`: the smaller event limit until the ready is submitted, the
+    /// larger one from then on when that ready advertises `tool_execution`,
+    /// so that no `tool.execute` is cut before the ready that allows it.
+    fn new_connection(
+        &mut self,
+        id: Id,
+        stream: u64,
+        task: AbortHandle,
+        limit: &EventLimit,
+        now: Duration,
+    ) -> Phase {
+        limit.set(self.times.event_max_bytes);
         STARTUP.first_connected(now);
         if self.held_count > 0 {
             self.reported.reconnected(Reconnect::New);
@@ -917,6 +947,7 @@ impl Owner {
             heartbeat: None,
             ledger: Ledger::new(self.times.ledger),
             routed: HashSet::new(),
+            event_max_bytes: self.times.event_max_bytes,
         });
         let message_id = held.next_message_id();
         let built = ready::ready(&self.ready, &held.id, message_id.clone(), now);
@@ -929,6 +960,10 @@ impl Owner {
             retry_at: None,
         });
         if let Some(ready) = &ready {
+            if tool_execution {
+                held.event_max_bytes = self.times.tool_event_max_bytes;
+                limit.set(held.event_max_bytes);
+            }
             self.post(&held.id, READY_PATH, Operation::Ready, ready.body.clone());
         }
         held.registration = Some(Registration {
