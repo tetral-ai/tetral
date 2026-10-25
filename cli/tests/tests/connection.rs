@@ -293,16 +293,24 @@ fn session_instructions_wait_for_the_ready_ack() {
     wait_for_received(&engine, "heartbeat", 1);
     case.observe("while staging, a stream-only disconnect resumed the connection at once and the resumed stream's heartbeat was answered");
 
-    for index in 0..3 {
-        engine.control(
-            "prepare",
-            json!({ "instance_id": INSTANCE, "payload": prepare(index) }),
-        );
-    }
+    // The second and third prepare one binding with two payloads, so the
+    // order they are routed in decides which one conflicts.
+    let mut repeated = prepare(1);
+    repeated["cwd"] = json!("/");
+    let issued: Vec<Value> = [prepare(0), prepare(1), repeated]
+        .into_iter()
+        .map(|payload| {
+            engine.control(
+                "prepare",
+                json!({ "instance_id": INSTANCE, "payload": payload }),
+            )["message_id"]
+                .clone()
+        })
+        .collect();
     engine.advance(seconds(15.0));
     wait_for_received(&engine, "heartbeat", 2);
     assert_eq!(machine.routed(), 0);
-    case.observe("three session.prepare and a later heartbeat arrived; the heartbeat was answered and no instruction was routed");
+    case.observe("three session.prepare, the last two for one binding with different cwd, and a later heartbeat arrived; the heartbeat was answered and no instruction was routed");
 
     machine.seams.advance(seconds(1.2));
     let readies = wait_for_requests(&engine, "ready", 2);
@@ -318,7 +326,25 @@ fn session_instructions_wait_for_the_ready_ack() {
     machine.wait_for("online");
     machine.settle();
     assert_eq!(machine.routed(), 3);
-    case.observe("after the matching ACK the three staged instructions were routed and the connection is online");
+    let answered = |message_id: &Value| {
+        let mut report = Value::Null;
+        wait_until(&format!("the report answering {message_id}"), || {
+            report = engine
+                .received("session-status")
+                .into_iter()
+                .map(|received| received["body"].clone())
+                .find(|body| body["request_message_id"] == *message_id)
+                .unwrap_or(Value::Null);
+            !report.is_null()
+        });
+        (report["status"].clone(), report["error"]["code"].clone())
+    };
+    assert_eq!(answered(&issued[1]), (json!("prepared"), Value::Null));
+    assert_eq!(
+        answered(&issued[2]),
+        (json!("failed"), json!("binding_conflict"))
+    );
+    case.observe("after the matching ACK the three staged instructions were routed in arrival order: of the two for one binding the first prepared and the second got binding_conflict; the connection is online");
 }
 
 #[test]
