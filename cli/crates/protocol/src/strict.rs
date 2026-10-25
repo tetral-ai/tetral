@@ -54,25 +54,35 @@ impl std::error::Error for StrictError {}
 /// surrogate, no number that is infinite as a 64-bit float and no integer
 /// token outside the signed 64-bit range.
 pub fn check(input: &[u8]) -> Result<(), StrictError> {
+    read(input).map(drop)
+}
+
+/// [`check`], returning the offset of each integer token `-0`.
+pub(crate) fn read(input: &[u8]) -> Result<Vec<usize>, StrictError> {
     if let Err(error) = std::str::from_utf8(input) {
         return Err(StrictError {
             kind: StrictErrorKind::InvalidUtf8,
             offset: error.valid_up_to(),
         });
     }
-    let mut reader = Reader { input, at: 0 };
+    let mut reader = Reader {
+        input,
+        at: 0,
+        negative_zeros: Vec::new(),
+    };
     reader.whitespace();
     reader.value(0)?;
     reader.whitespace();
     if reader.at != input.len() {
         return Err(reader.error(StrictErrorKind::TrailingData));
     }
-    Ok(())
+    Ok(reader.negative_zeros)
 }
 
 struct Reader<'a> {
     input: &'a [u8],
     at: usize,
+    negative_zeros: Vec<usize>,
 }
 
 impl Reader<'_> {
@@ -326,6 +336,9 @@ impl Reader<'_> {
             offset: start,
         };
         if integer {
+            if token == "-0" {
+                self.negative_zeros.push(start);
+            }
             token
                 .parse::<i64>()
                 .map(drop)

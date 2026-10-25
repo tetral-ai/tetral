@@ -22,8 +22,8 @@ own tests.
   present and may be `null`, `Maybe` may be absent, `null` or a value, `Opt`
   may be absent but never `null`, and `Absent` must be absent. Every other
   member is required and not `null`.
-- Integers are `int64`, read from the integer token; `7.0` and `7e0` are
-  refused.
+- Integers are `int64`, read from the integer token, `-0` as 0; `7.0` and
+  `7e0` are refused.
 - Each value's `check` holds its own rule or the relations between its
   members, at every depth. A message's `checkReceived` reads it as received,
   for its size or members no type keeps, and a response's `checkAnswer`

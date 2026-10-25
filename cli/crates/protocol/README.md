@@ -23,7 +23,8 @@ description, schemas and fixtures are in `protocol/` at the repository root.
   `Option` read with `field::present` may be absent but never `null`, and
   `Absent` must be absent.
 - Integers are read as signed 64-bit integers, never through floating point
-  (`field`).
+  (`field`); the integer `-0` reads as 0, as the schemas read it
+  (`decode_value`).
 - Only the `state` crate turns a `SafeId` into a path component (`id`).
 - Beyond the schema, a decoder checks the rules of `Message::check`: the
   narrower size limit of a downstream event, `connection::MESSAGE_MAX_BYTES`

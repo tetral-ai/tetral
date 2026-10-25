@@ -62,8 +62,12 @@ func TestTheDecoderReadsThroughTheStrictPassAndKeepsIntegersExact(t *testing.T) 
 			t.Errorf("%s: got %d, %v", row.input, decoded.HeartbeatSeq, err)
 		}
 	}
+	listing, err := Decode[ListFilesResponse]([]byte(`{"files":[],"has_more":false,"start_seq":-0}`))
+	if err != nil || !listing.StartSeq.Set || listing.StartSeq.Value != 0 {
+		t.Errorf("the integer -0: got %+v, %v", listing.StartSeq, err)
+	}
 	var refused *DecodeError
-	_, err := Decode[Heartbeat](heartbeat(`1,"heartbeat_seq":2`))
+	_, err = Decode[Heartbeat](heartbeat(`1,"heartbeat_seq":2`))
 	if !errors.As(err, &refused) || refused.Kind != Strict || refused.Strict.Kind != DuplicateMember {
 		t.Errorf("a repeated member: %v", err)
 	}

@@ -11,6 +11,7 @@ use std::collections::{BTreeSet, HashMap};
 use common::{FILES, Fixture, by_name, decode_fixture, fixtures, read_json, validator};
 use jsonschema::Validator;
 use protocol::connection::Heartbeat;
+use protocol::drive_transfer::ListFilesResponse;
 use protocol::{DecodeError, StrictErrorKind, decode, strict};
 use serde_json::Value;
 
@@ -93,6 +94,9 @@ fn the_decoder_reads_through_the_strict_pass_and_keeps_integers_exact() {
         let decoded: Heartbeat = decode(input.as_bytes()).expect("the sequence decodes");
         assert_eq!(decoded.heartbeat_seq.get(), seq);
     }
+    let listing: ListFilesResponse =
+        decode(br#"{"files":[],"has_more":false,"start_seq":-0}"#).expect("the integer -0 decodes");
+    assert_eq!(listing.start_seq.map(|seq| seq.get()), Some(0));
     let repeated = heartbeat("1,\"heartbeat_seq\":2");
     assert!(matches!(
         decode::<Heartbeat>(repeated.as_bytes()),

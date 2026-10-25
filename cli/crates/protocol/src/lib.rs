@@ -73,9 +73,20 @@ pub fn decode_value<M: Message>(input: &[u8]) -> Result<(M, Value), DecodeError>
             limit: M::MAX_BYTES,
         });
     }
-    strict::check(input)?;
-    let value: Value =
-        serde_json::from_slice(input).map_err(|error| DecodeError::Shape(error.to_string()))?;
+    let negative_zeros = strict::read(input)?;
+    let value: Value = if negative_zeros.is_empty() {
+        serde_json::from_slice(input)
+    } else {
+        // `serde_json` reads the integer `-0` as the float `-0.0`, which an
+        // integer member refuses, while the schemas read it as the integer 0;
+        // dropping its sign keeps the offsets and reads it as 0.
+        let mut unsigned = input.to_vec();
+        for at in negative_zeros {
+            unsigned[at] = b' ';
+        }
+        serde_json::from_slice(&unsigned)
+    }
+    .map_err(|error| DecodeError::Shape(error.to_string()))?;
     let message = M::deserialize(&value).map_err(|error| DecodeError::Shape(error.to_string()))?;
     message.check(&Received {
         value: &value,
