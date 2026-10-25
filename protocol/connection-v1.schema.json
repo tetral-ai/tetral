@@ -1,0 +1,1586 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tetral CLI connection protocol version 1",
+  "description": "The /v1/client/* connection endpoints, their responses and error bodies, and the SSE envelope with the connection types. The tool and local MCP messages, ACKs and protocol-error reports are referenced from tool-execution-v1.schema.json. Apply the semantic checks and byte limits that protocol/README.md lists in addition to JSON Schema.",
+  "$defs": {
+    "Absent": {
+      "description": "A field this message never carries.",
+      "not": {}
+    },
+    "Id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000]+$"
+    },
+    "SafeId": {
+      "description": "An identity the CLI uses verbatim as a folder name: no \"/\", not \".\" or \"..\".",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!\\.{1,2}$)[^/\\u0000]+$"
+    },
+    "PositiveInt": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "AbsolutePath": {
+      "type": "string",
+      "pattern": "^/[^\\u0000]*$"
+    },
+    "Sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "CommitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "DrivePath": {
+      "description": "A drive-relative path under the drive path rules, optionally ending with \"/\". At most 1,024 UTF-8 bytes and 255 per segment, NFC, and no format characters are semantic checks.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?:(?!\\.{1,2}(?:/|$))[^/\\u0000-\\u001f\\u007f-\\u009f]+/)*(?!\\.{1,2}(?:/|$))[^/\\u0000-\\u001f\\u007f-\\u009f]+/?$"
+    },
+    "ChangePath": {
+      "description": "The drive path of a machine's abandoned change. A mount creates no path that breaks the single-path rules, so it follows DrivePath without a trailing \"/\"; byte limits, NFC and format characters are semantic checks.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?:(?!\\.{1,2}(?:/|$))[^/\\u0000-\\u001f\\u007f-\\u009f]+/)*(?!\\.{1,2}(?:/|$))[^/\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "Rfc3339Utc": {
+      "description": "RFC 3339 UTC time; calendar validity is a semantic check.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$"
+    },
+    "SemVer": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$"
+    },
+    "ConnectionKey": {
+      "type": "string",
+      "pattern": "^tetral_ck_[^\\u0000]+$"
+    },
+    "ErrorCode": {
+      "description": "Codes of the client error table; the checker reads each code's HTTP status from it. A 5xx body is not defined.",
+      "enum": [
+        "invalid_message",
+        "content_hash_mismatch",
+        "credential_invalid",
+        "credential_expired",
+        "credential_revoked",
+        "instance_unavailable",
+        "cli_upgrade_required",
+        "drive_access_denied",
+        "not_found",
+        "content_not_found",
+        "connection_conflict",
+        "previous_connection_active",
+        "stale_connection",
+        "stale_binding",
+        "content_missing",
+        "message_conflict",
+        "unknown_instruction",
+        "drive_cursor_expired",
+        "request_too_large",
+        "file_too_large",
+        "range_not_satisfiable",
+        "rate_limited"
+      ]
+    },
+    "ErrorBody": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retry_after_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 45000
+        },
+        "missing_sha256": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10000,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/Sha256"
+          }
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "code"
+            ],
+            "properties": {
+              "code": {
+                "const": "previous_connection_active"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "retry_after_ms"
+            ]
+          },
+          "else": {
+            "properties": {
+              "retry_after_ms": {
+                "$ref": "#/$defs/Absent"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "code"
+            ],
+            "properties": {
+              "code": {
+                "const": "content_missing"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "missing_sha256"
+            ]
+          },
+          "else": {
+            "properties": {
+              "missing_sha256": {
+                "$ref": "#/$defs/Absent"
+              }
+            }
+          }
+        }
+      ],
+      "description": "The body of every /v1/client/* error response, the drive transfer endpoints included."
+    },
+    "EventsQuery": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": "1"
+        },
+        "instance_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "credential_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "previous_connection_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "resume": {
+          "enum": [
+            "true",
+            "false"
+          ]
+        }
+      },
+      "required": [
+        "protocol_version",
+        "instance_id",
+        "credential_id"
+      ],
+      "additionalProperties": true,
+      "description": "The decoded query parameters of GET /v1/client/events, each a string."
+    },
+    "ConnectedPayload": {
+      "type": "object",
+      "properties": {
+        "resumed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "resumed"
+      ],
+      "additionalProperties": true
+    },
+    "HeartbeatPayload": {
+      "type": "object",
+      "properties": {
+        "heartbeat_seq": {
+          "$ref": "#/$defs/PositiveInt"
+        }
+      },
+      "required": [
+        "heartbeat_seq"
+      ],
+      "additionalProperties": true
+    },
+    "DriveBinding": {
+      "type": "object",
+      "properties": {
+        "drive_id": {
+          "$ref": "#/$defs/SafeId"
+        },
+        "access": {
+          "enum": [
+            "read_only",
+            "read_write"
+          ]
+        }
+      },
+      "required": [
+        "drive_id",
+        "access"
+      ],
+      "additionalProperties": true
+    },
+    "DriveExclude": {
+      "type": "object",
+      "properties": {
+        "drive_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DrivePath"
+          }
+        }
+      },
+      "required": [
+        "drive_id",
+        "paths"
+      ],
+      "additionalProperties": true
+    },
+    "Checkout": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "branch",
+            "commit"
+          ]
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "branch"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha": {
+                "$ref": "#/$defs/Absent"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "commit"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "sha"
+            ],
+            "properties": {
+              "sha": {
+                "$ref": "#/$defs/CommitSha"
+              },
+              "name": {
+                "$ref": "#/$defs/Absent"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "GitIdentity": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "email"
+      ],
+      "additionalProperties": true
+    },
+    "Repository": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "checkout": {
+          "$ref": "#/$defs/Checkout"
+        },
+        "path": {
+          "$ref": "#/$defs/AbsolutePath"
+        },
+        "git_identity": {
+          "$ref": "#/$defs/GitIdentity"
+        },
+        "authorization_token": {
+          "$ref": "#/$defs/Absent"
+        }
+      },
+      "required": [
+        "url",
+        "checkout",
+        "path",
+        "git_identity"
+      ],
+      "additionalProperties": true
+    },
+    "SessionPreparePayload": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SafeId"
+        },
+        "binding_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "cwd": {
+          "$ref": "#/$defs/AbsolutePath"
+        },
+        "create_cwd": {
+          "type": "boolean"
+        },
+        "drives": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DriveBinding"
+          }
+        },
+        "drive_exclude": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DriveExclude"
+          }
+        },
+        "repositories": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Repository"
+          }
+        },
+        "ticket": {
+          "$ref": "#/$defs/Absent"
+        }
+      },
+      "required": [
+        "session_id",
+        "binding_id",
+        "cwd",
+        "drives",
+        "drive_exclude",
+        "repositories"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "create_cwd"
+            ],
+            "properties": {
+              "create_cwd": {
+                "const": true
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "repositories": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ],
+      "description": "Only a cloud computer (create_cwd: true) has repositories. Unique drive_id in drives and unique repository path are semantic checks."
+    },
+    "SessionClosePayload": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SafeId"
+        },
+        "binding_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "session_id",
+        "binding_id"
+      ],
+      "additionalProperties": true
+    },
+    "SessionDrivesPayload": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SafeId"
+        },
+        "binding_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "drives": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DriveBinding"
+          }
+        }
+      },
+      "required": [
+        "session_id",
+        "binding_id",
+        "drives"
+      ],
+      "additionalProperties": true,
+      "description": "The Session's new drive bindings; unique drive_id is a semantic check."
+    },
+    "CredentialRenewPayload": {
+      "type": "object",
+      "properties": {
+        "credential_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "connection_key": {
+          "$ref": "#/$defs/Absent"
+        }
+      },
+      "required": [
+        "credential_id"
+      ],
+      "additionalProperties": true
+    },
+    "DisconnectPayload": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "enum": [
+            "stream",
+            "connection"
+          ]
+        }
+      },
+      "required": [
+        "scope"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "scope"
+            ],
+            "properties": {
+              "scope": {
+                "const": "stream"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "retryable": {
+                "$ref": "#/$defs/Absent"
+              },
+              "code": {
+                "$ref": "#/$defs/Absent"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "scope"
+            ],
+            "properties": {
+              "scope": {
+                "const": "connection"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "retryable",
+              "code"
+            ],
+            "properties": {
+              "retryable": {
+                "type": "boolean"
+              },
+              "code": {
+                "$ref": "#/$defs/ErrorCode"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "DriveChangedPayload": {
+      "type": "object",
+      "properties": {
+        "drive_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveInt"
+        }
+      },
+      "required": [
+        "drive_id",
+        "seq"
+      ],
+      "additionalProperties": true
+    },
+    "Downstream": {
+      "description": "Every SSE envelope. The tool and local MCP types are the Downstream of tool-execution-v1.schema.json. A connection type's event is at most 64 KiB (semantic check).",
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": 1
+        },
+        "connection_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "message_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "type": {
+          "enum": [
+            "connected",
+            "heartbeat",
+            "session.prepare",
+            "session.close",
+            "session.drives",
+            "credential.renew",
+            "disconnect",
+            "drive.changed",
+            "tool.execute",
+            "tool.stdin",
+            "tool.cancel",
+            "mcp.call"
+          ]
+        },
+        "payload": {
+          "type": "object"
+        },
+        "traceparent": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "connection_id",
+        "message_id",
+        "type",
+        "payload"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "connected"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/ConnectedPayload"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "heartbeat"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/HeartbeatPayload"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "session.prepare"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/SessionPreparePayload"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "session.close"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/SessionClosePayload"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "session.drives"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/SessionDrivesPayload"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "credential.renew"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/CredentialRenewPayload"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "disconnect"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/DisconnectPayload"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "drive.changed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/DriveChangedPayload"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "enum": [
+                  "tool.execute",
+                  "tool.stdin",
+                  "tool.cancel",
+                  "mcp.call"
+                ]
+              }
+            }
+          },
+          "then": {
+            "$ref": "tool-execution-v1.schema.json#/$defs/Downstream"
+          }
+        }
+      ]
+    },
+    "DriveCapability": {
+      "type": "object",
+      "properties": {
+        "mount": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "mount"
+      ],
+      "additionalProperties": true
+    },
+    "Capabilities": {
+      "type": "object",
+      "properties": {
+        "session_preparation": {
+          "const": true
+        },
+        "drives": {
+          "$ref": "#/$defs/DriveCapability"
+        },
+        "tool_execution": {
+          "$ref": "tool-execution-v1.schema.json#/$defs/ToolExecutionCapability"
+        },
+        "local_mcp": {
+          "$ref": "tool-execution-v1.schema.json#/$defs/LocalMcpCapability"
+        }
+      },
+      "required": [
+        "session_preparation",
+        "drives"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "local_mcp"
+            ]
+          },
+          "then": {
+            "required": [
+              "tool_execution"
+            ],
+            "properties": {
+              "tool_execution": {
+                "properties": {
+                  "controls": {
+                    "contains": {
+                      "const": "cancel"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "tool_execution and local_mcp are the fragments of tool-execution-v1.schema.json; their field relationships and the rule that tool_execution with no tools needs local_mcp are semantic checks."
+    },
+    "LostChange": {
+      "type": "object",
+      "properties": {
+        "request_message_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "drive_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "paths": {
+          "type": "array",
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ChangePath"
+          }
+        },
+        "paths_total": {
+          "$ref": "#/$defs/PositiveInt"
+        }
+      },
+      "required": [
+        "request_message_id",
+        "drive_id",
+        "paths",
+        "paths_total"
+      ],
+      "additionalProperties": true,
+      "description": "Path order, paths_total against the listed paths, entry order and the 64 KiB fitting rule are semantic checks."
+    },
+    "LostChanges": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/LostChange"
+      }
+    },
+    "Ready": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": 1
+        },
+        "connection_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "message_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "os": {
+          "enum": [
+            "linux",
+            "macos"
+          ]
+        },
+        "arch": {
+          "enum": [
+            "x86_64",
+            "aarch64"
+          ]
+        },
+        "cli_version": {
+          "$ref": "#/$defs/SemVer"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/Capabilities"
+        },
+        "lost_changes": {
+          "$ref": "#/$defs/LostChanges"
+        },
+        "startup": {
+          "type": "object",
+          "properties": {
+            "config_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            "connect_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            "ready_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            }
+          },
+          "required": [
+            "config_ms",
+            "connect_ms",
+            "ready_ms"
+          ],
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "protocol_version",
+        "connection_id",
+        "message_id",
+        "os",
+        "arch",
+        "cli_version",
+        "capabilities"
+      ],
+      "additionalProperties": true
+    },
+    "Heartbeat": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": 1
+        },
+        "connection_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "message_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "request_message_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "heartbeat_seq": {
+          "$ref": "#/$defs/PositiveInt"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "connection_id",
+        "message_id",
+        "request_message_id",
+        "heartbeat_seq"
+      ],
+      "additionalProperties": true
+    },
+    "PreparationError": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            "cwd_not_found",
+            "cwd_not_directory",
+            "cwd_forbidden",
+            "cwd_inaccessible",
+            "cwd_check_timeout",
+            "invalid_input",
+            "stale_connection",
+            "binding_conflict",
+            "cleanup_pending",
+            "resource_exhausted",
+            "repository_path_exists",
+            "repository_path_forbidden"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "additionalProperties": true
+    },
+    "RepositoryFailure": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "$ref": "#/$defs/AbsolutePath"
+        },
+        "cause": {
+          "enum": [
+            "clone",
+            "not_found",
+            "authentication",
+            "forbidden",
+            "checkout"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "path",
+        "cause",
+        "message"
+      ],
+      "additionalProperties": true
+    },
+    "DriveMountFailures": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "tool-execution-v1.schema.json#/$defs/DriveMountFailure"
+      }
+    },
+    "RepositoryFailures": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/RepositoryFailure"
+      }
+    },
+    "SessionStatus": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": 1
+        },
+        "connection_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "message_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "request_message_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "session_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "binding_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "status": {
+          "enum": [
+            "prepared",
+            "failed",
+            "closed",
+            "applied"
+          ]
+        }
+      },
+      "required": [
+        "protocol_version",
+        "connection_id",
+        "message_id",
+        "request_message_id",
+        "session_id",
+        "binding_id",
+        "status"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "prepared"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "cwd"
+            ],
+            "properties": {
+              "cwd": {
+                "$ref": "#/$defs/AbsolutePath"
+              },
+              "drive_mount_failures": {
+                "$ref": "#/$defs/DriveMountFailures"
+              },
+              "repository_failures": {
+                "$ref": "#/$defs/RepositoryFailures"
+              },
+              "error": {
+                "$ref": "#/$defs/Absent"
+              },
+              "lost_changes": {
+                "$ref": "#/$defs/Absent"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "failed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "error"
+            ],
+            "properties": {
+              "error": {
+                "$ref": "#/$defs/PreparationError"
+              },
+              "cwd": {
+                "$ref": "#/$defs/Absent"
+              },
+              "drive_mount_failures": {
+                "$ref": "#/$defs/Absent"
+              },
+              "repository_failures": {
+                "$ref": "#/$defs/Absent"
+              },
+              "lost_changes": {
+                "$ref": "#/$defs/Absent"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "closed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "lost_changes": {
+                "$ref": "#/$defs/LostChanges"
+              },
+              "cwd": {
+                "$ref": "#/$defs/Absent"
+              },
+              "error": {
+                "$ref": "#/$defs/Absent"
+              },
+              "drive_mount_failures": {
+                "$ref": "#/$defs/Absent"
+              },
+              "repository_failures": {
+                "$ref": "#/$defs/Absent"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "applied"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "drive_mount_failures": {
+                "$ref": "#/$defs/DriveMountFailures"
+              },
+              "lost_changes": {
+                "$ref": "#/$defs/LostChanges"
+              },
+              "cwd": {
+                "$ref": "#/$defs/Absent"
+              },
+              "error": {
+                "$ref": "#/$defs/Absent"
+              },
+              "repository_failures": {
+                "$ref": "#/$defs/Absent"
+              }
+            }
+          }
+        }
+      ],
+      "description": "POST /v1/client/session-status. prepared and failed answer session.prepare, closed answers session.close, and applied answers session.drives. A drive_id appears at most once in drive_mount_failures and a path at most once in repository_failures (semantic checks)."
+    },
+    "McpServerInfo": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "version"
+      ],
+      "additionalProperties": true
+    },
+    "McpTool": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "inputSchema": {
+          "type": "object"
+        },
+        "outputSchema": {
+          "type": "object"
+        },
+        "annotations": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "inputSchema"
+      ],
+      "additionalProperties": false,
+      "description": "The six MCP tool fields the CLI keeps; name and inputSchema are required by MCP."
+    },
+    "McpListError": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "mcp_start_failed",
+            "mcp_list_failed",
+            "mcp_server_exited"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "additionalProperties": true
+    },
+    "McpTools": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": 1
+        },
+        "connection_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "message_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "server": {
+          "type": "string",
+          "minLength": 1
+        },
+        "seq": {
+          "$ref": "#/$defs/PositiveInt"
+        },
+        "server_info": {
+          "$ref": "#/$defs/McpServerInfo"
+        },
+        "tools": {
+          "type": "array",
+          "maxItems": 2048,
+          "items": {
+            "$ref": "#/$defs/McpTool"
+          }
+        },
+        "error": {
+          "$ref": "#/$defs/McpListError"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "connection_id",
+        "message_id",
+        "server",
+        "seq",
+        "server_info",
+        "tools",
+        "error"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "error"
+            ],
+            "properties": {
+              "error": {
+                "type": "object"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "tools": {
+                "maxItems": 0
+              },
+              "server_info": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "server_info"
+            ],
+            "properties": {
+              "server_info": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "tools": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ],
+      "description": "POST /v1/client/mcp-tools; at most 4 MiB and each tool name once (semantic checks)."
+    },
+    "CredentialRequest": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": 1
+        },
+        "connection_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "message_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "credential_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "connection_id",
+        "message_id",
+        "credential_id"
+      ],
+      "additionalProperties": true
+    },
+    "CredentialResponse": {
+      "type": "object",
+      "properties": {
+        "credential_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "connection_key": {
+          "$ref": "#/$defs/ConnectionKey"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/Rfc3339Utc"
+        }
+      },
+      "required": [
+        "credential_id",
+        "connection_key",
+        "expires_at"
+      ],
+      "additionalProperties": true
+    },
+    "GitTicketRequest": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": 1
+        },
+        "connection_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "message_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "binding_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "connection_id",
+        "message_id",
+        "binding_id"
+      ],
+      "additionalProperties": true
+    },
+    "GitTicketResponse": {
+      "type": "object",
+      "properties": {
+        "git_proxy_url": {
+          "description": "An https origin with no path and no trailing slash.",
+          "type": "string",
+          "pattern": "^https://[^/?#@\\s]+$"
+        },
+        "ticket": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "git_proxy_url",
+        "ticket"
+      ],
+      "additionalProperties": true
+    },
+    "GrantAcknowledgement": {
+      "description": "The ready or heartbeat ACK.",
+      "allOf": [
+        {
+          "$ref": "tool-execution-v1.schema.json#/$defs/Acknowledgement"
+        },
+        {
+          "required": [
+            "valid_for_ms"
+          ],
+          "properties": {
+            "valid_for_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 45000
+            }
+          }
+        }
+      ]
+    },
+    "Acknowledgement": {
+      "$ref": "tool-execution-v1.schema.json#/$defs/Acknowledgement"
+    },
+    "ToolStatus": {
+      "$ref": "tool-execution-v1.schema.json#/$defs/ToolStatus"
+    },
+    "DriveSyncReport": {
+      "$ref": "tool-execution-v1.schema.json#/$defs/DriveSyncReport"
+    },
+    "ProtocolErrorReport": {
+      "$ref": "tool-execution-v1.schema.json#/$defs/ProtocolErrorReport"
+    }
+  },
+  "anyOf": [
+    {
+      "$ref": "#/$defs/Downstream"
+    },
+    {
+      "$ref": "#/$defs/EventsQuery"
+    },
+    {
+      "$ref": "#/$defs/Ready"
+    },
+    {
+      "$ref": "#/$defs/Heartbeat"
+    },
+    {
+      "$ref": "#/$defs/SessionStatus"
+    },
+    {
+      "$ref": "#/$defs/McpTools"
+    },
+    {
+      "$ref": "#/$defs/CredentialRequest"
+    },
+    {
+      "$ref": "#/$defs/CredentialResponse"
+    },
+    {
+      "$ref": "#/$defs/GitTicketRequest"
+    },
+    {
+      "$ref": "#/$defs/GitTicketResponse"
+    },
+    {
+      "$ref": "#/$defs/GrantAcknowledgement"
+    },
+    {
+      "$ref": "#/$defs/Acknowledgement"
+    },
+    {
+      "$ref": "#/$defs/ErrorBody"
+    },
+    {
+      "$ref": "#/$defs/ToolStatus"
+    },
+    {
+      "$ref": "#/$defs/DriveSyncReport"
+    },
+    {
+      "$ref": "#/$defs/ProtocolErrorReport"
+    }
+  ]
+}
