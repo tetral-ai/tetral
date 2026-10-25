@@ -5,8 +5,9 @@
 //! its result, the curly-quote fallback that keeps every other byte, the
 //! write that keeps the file's mode, the images that image acceptance takes
 //! and refuses at its limits, files that are no image, files the policy
-//! denies, a missing working directory, the input budget and a cancel while
-//! the child runs. Every report is read back with the protocol's types. The
+//! denies, a missing file, a directory and a path longer than any file's,
+//! each failure of the working directory, the input budget and a cancel
+//! while the child runs. Every report is read back with the protocol's types. The
 //! test seams these tests use are those `tetral_tests::tasks` names and the
 //! barrier `file_tool.started`, at which a file tool's child waits once it
 //! has started.
@@ -111,8 +112,7 @@ fn each_step_of_an_edit_decides_its_result_and_only_a_success_writes() {
     let mut case = record.case(
         "edits of real files in the binding's directory: a unique match, identical strings, two \
          and three spans, replace_all, no whitespace fallback, a file over the cap and a \
-         replacement over it, special mode bits, a file under a read rule, then the directory \
-         removed",
+         replacement over it, special mode bits and a file under a read rule",
     );
     let directory = tempfile::tempdir().unwrap();
     let tasks = TaskMachine::start(&mut case, directory.path());
@@ -273,24 +273,10 @@ fn each_step_of_an_edit_decides_its_result_and_only_a_success_writes() {
     );
     assert_eq!(fs::read_to_string(path("data/report.csv")).unwrap(), "old");
     assert_eq!(entries(&path("data")), ["report.csv"]);
-
-    fs::remove_dir_all(&project).unwrap();
-    assert_eq!(
-        edit(
-            "task_no_directory",
-            json!({"path": "marker.txt", "old_string": "old", "new_string": "new"}),
-        ),
-        failure(
-            "cwd_not_found",
-            "working directory does not exist",
-            Some(&project)
-        )
-    );
-    assert!(!project.exists());
     case.observe(
         "each edit's only report is terminal with report_seq 1 and decodes; only the successes \
          changed their files; the read-only file kept its content and no temporary file stayed \
-         beside it; the special mode bits 07640 stayed; the removed directory was not created",
+         beside it; the special mode bits 07640 stayed",
     );
 }
 
@@ -433,6 +419,124 @@ fn files_the_policy_denies_or_the_cli_protects_are_neither_edited_nor_viewed() {
         .map(|outcome| outcome["error"].to_string())
         .collect();
     case.observe(format!("{}; the note kept its content", errors.join("; ")));
+}
+
+/// The input of `tool` for `path`: an `edit` of `old` to `new`.
+fn file_input(tool: &str, path: Value) -> Value {
+    match tool {
+        "edit" => json!({"path": path, "old_string": "old", "new_string": "new"}),
+        _ => json!({"path": path}),
+    }
+}
+
+#[test]
+fn a_missing_or_overlong_path_and_each_failure_of_the_working_directory_give_their_kinds() {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let mut case = record
+        .case("edits of a missing file, of a directory and of an absolute path of 400,000 bytes");
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    let project = tasks.project.clone();
+    let run = |task: &str, tool: &str, path: Value| {
+        call(
+            &tasks,
+            task,
+            tool,
+            file_input(tool, path),
+            policy(&project, "disabled"),
+        );
+        outcome(&tasks, task, tool)
+    };
+    assert_eq!(
+        run("task_missing", "edit", json!("missing.txt")),
+        failure(
+            "not_found",
+            "path does not exist",
+            Some(&project.join("missing.txt"))
+        )
+    );
+    assert!(!project.join("missing.txt").exists());
+    fs::create_dir(project.join("folder")).unwrap();
+    assert_eq!(
+        run("task_folder", "edit", json!("folder")),
+        failure(
+            "is_directory",
+            "path is a directory",
+            Some(&project.join("folder"))
+        )
+    );
+    let overlong = format!("/{}", "a".repeat(399_999));
+    let refused = run("task_overlong", "edit", json!(overlong));
+    let path = refused["error"]["path"].as_str().unwrap();
+    assert_eq!(
+        (&refused["status"], &refused["error"]["kind"]),
+        (&json!("error"), &json!("not_found")),
+        "{refused:#}"
+    );
+    assert!(path.len() <= 4_096, "{} bytes", path.len());
+    assert!(
+        path.starts_with("/a") && path.ends_with('a') && path.contains("\n[... truncated ...]\n")
+    );
+    case.observe(
+        "not_found \"path does not exist\" and no file created; is_directory \"path is a \
+         directory\"; the overlong path's not_found report accepted with an error.path of at \
+         most 4,096 bytes around the seam",
+    );
+
+    let failures = |state: &str, kind: &str, message: &str| {
+        for tool in ["edit", "view_image"] {
+            let task = format!("task_{state}_{tool}");
+            assert_eq!(
+                run(&task, tool, json!("note.txt")),
+                failure(kind, message, Some(&project)),
+                "{tool} with the working directory {state}"
+            );
+        }
+    };
+    let mut case = record.case(
+        "an edit and a view_image by relative path with the binding's directory removed, then \
+         replaced by a file",
+    );
+    fs::remove_dir_all(&project).unwrap();
+    failures(
+        "removed",
+        "cwd_not_found",
+        "working directory does not exist",
+    );
+    assert!(!project.exists());
+    fs::write(&project, "x").unwrap();
+    failures(
+        "file",
+        "cwd_not_directory",
+        "working directory is not a directory",
+    );
+    case.observe(
+        "cwd_not_found naming the directory, which was not created, then cwd_not_directory, for \
+         both tools",
+    );
+
+    let mut case = record.case(
+        "an edit and a view_image by relative path with the binding's directory of mode 0000",
+    );
+    if !case.runs_as_non_root("a directory of mode 0000 keeps out only a user who is not root") {
+        return;
+    }
+    fs::remove_file(&project).unwrap();
+    fs::create_dir(&project).unwrap();
+    fs::set_permissions(&project, fs::Permissions::from_mode(0o000)).unwrap();
+    let outcomes = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        failures(
+            "locked",
+            "cwd_inaccessible",
+            "working directory is not accessible",
+        )
+    }));
+    fs::set_permissions(&project, fs::Permissions::from_mode(0o700)).unwrap();
+    if let Err(panic) = outcomes {
+        std::panic::resume_unwind(panic);
+    }
+    case.observe("cwd_inaccessible naming the directory for both tools");
 }
 
 #[test]

@@ -141,6 +141,12 @@ temporary directories. No workspace crate depends on this package.
   slowly completes past 10 seconds within its total while heartbeats keep
   their timing, and one whose answer is withheld fails 10 seconds after its
   body and is sent again unchanged.
+- `tests/edit_view_image.rs`: `edit` and `view_image` through their
+  restricted children: each step of an edit, the curly-quote fallback, the
+  file's mode kept, the images at and past image acceptance's limits, files
+  that are no image, files the policy denies or the CLI protects, a missing
+  file, a directory and an overlong path, each failure of the working
+  directory, the input budget and a cancel after the child's start.
 - `tests/exec_command.rs`: `exec_command`: its reports and their sequence,
   the initial wait under `kill` and `detach`, its clamp and a start that
   never comes within it, a detached command's lifetime, the working
