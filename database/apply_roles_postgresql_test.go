@@ -760,7 +760,7 @@ func assertAuthLookupBoundary(t *testing.T, databaseName string, admin *sql.DB, 
 	t.Helper()
 	ctx := context.Background()
 	if _, err := admin.Exec(`INSERT INTO instances (workspace_id,id,kind,name,registration_state) VALUES ('ws_contract_b','inst_contract_b','user','contract','active');
- INSERT INTO instance_credentials (workspace_id,instance_id,id,state,key_digest,expires_at) VALUES ('ws_contract_b','inst_contract_b','ccred_contract_b','active',decode(repeat('03',32),'hex'),clock_timestamp()+interval '1 day')`); err != nil {
+ INSERT INTO instance_credentials (workspace_id,instance_id,id,state,key_digest,expires_at,delivery) VALUES ('ws_contract_b','inst_contract_b','ccred_contract_b','active',decode(repeat('03',32),'hex'),clock_timestamp()+interval '1 day','response')`); err != nil {
 		t.Fatal(err)
 	}
 	authConnection := openManagedRole(t, databaseName, declarations.Roles["auth"])
@@ -845,7 +845,7 @@ func assertInstructionPressureBoundary(t *testing.T, databaseName string, admin 
 			args      []any
 		}{
 			{`INSERT INTO instances (workspace_id,id,kind,name,registration_state) VALUES ($1,$2,'user','pressure','active')`, []any{ws, instanceID}},
-			{`INSERT INTO instance_credentials (workspace_id,instance_id,id,state,key_digest,expires_at) VALUES ($1,$2,$3,'active',sha256(convert_to($3,'UTF8')),clock_timestamp()+interval '1 day')`, []any{ws, instanceID, credentialID}},
+			{`INSERT INTO instance_credentials (workspace_id,instance_id,id,state,key_digest,expires_at,delivery) VALUES ($1,$2,$3,'active',sha256(convert_to($3,'UTF8')),clock_timestamp()+interval '1 day','response')`, []any{ws, instanceID, credentialID}},
 			{`INSERT INTO instance_connections (workspace_id,instance_id,id,credential_id,hub_pod,connected_at,lease_expires_at,stream_count) VALUES ($1,$2,$3,$4,'pod',clock_timestamp(),clock_timestamp()+interval '45 seconds',1)`, []any{ws, instanceID, connection, credentialID}},
 			{`INSERT INTO connection_instructions (workspace_id,connection_id,message_id,issue_seq,type,envelope) VALUES ($1,$2,$3,1,'session.close','{}')`, []any{ws, connection, messageID}},
 		} {

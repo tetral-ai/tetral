@@ -14,32 +14,49 @@ const createPostgreSQLInstancesTable = `CREATE TABLE instances (
  created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
  deregistered_at TIMESTAMPTZ,
  cli_version TEXT CHECK(char_length(cli_version) BETWEEN 1 AND 256),
+ last_credential_reuse_credential_id TEXT,
+ last_credential_reuse_at TIMESTAMPTZ,
  PRIMARY KEY(id),
  UNIQUE(workspace_id,id),
  CHECK((kind='user')=(name IS NOT NULL)),
- CHECK((registration_state='deregistered')=(deregistered_at IS NOT NULL))
+ CHECK((registration_state='deregistered')=(deregistered_at IS NOT NULL)),
+ CHECK((last_credential_reuse_credential_id IS NULL)=(last_credential_reuse_at IS NULL))
 )`
 
 // A connection credential stores only the SHA-256 digest of its key. The
 // stored state is pending, active or revoked; expiry is read from expires_at
-// against the database clock, never stored.
+// against the database clock, never stored. A credential delivered on the
+// stream is a live renewal of the connection renewal_connection_id, replacing
+// replaces_credential_id: it has no digest until the CLI fetches its key
+// (fetched_at), and used_at is its first authenticated use, which activates
+// it.
 const createPostgreSQLInstanceCredentialsTable = `CREATE TABLE instance_credentials (
  storage_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
  workspace_id TEXT NOT NULL,
  instance_id TEXT NOT NULL,
  id TEXT NOT NULL,
  state TEXT NOT NULL CHECK(state IN ('pending','active','revoked')),
- key_digest BYTEA NOT NULL UNIQUE CHECK(octet_length(key_digest)=32),
+ key_digest BYTEA UNIQUE CHECK(octet_length(key_digest)=32),
  issued_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
  expires_at TIMESTAMPTZ NOT NULL,
  revoked_at TIMESTAMPTZ,
- revocation_cause TEXT CHECK(revocation_cause IN ('delete','deregistration')),
+ revocation_cause TEXT CHECK(revocation_cause IN ('delete','deregistration','pending_activation')),
+ delivery TEXT NOT NULL CHECK(delivery IN ('response','stream')),
+ renewal_connection_id TEXT,
+ replaces_credential_id TEXT,
+ fetched_at TIMESTAMPTZ,
+ used_at TIMESTAMPTZ,
  PRIMARY KEY(id),
  UNIQUE(workspace_id,id),
  FOREIGN KEY(workspace_id,instance_id) REFERENCES instances(workspace_id,id),
+ FOREIGN KEY(workspace_id,replaces_credential_id) REFERENCES instance_credentials(workspace_id,id),
  CHECK(expires_at>issued_at),
  CHECK((state='revoked')=(revoked_at IS NOT NULL)),
- CHECK((revoked_at IS NULL)=(revocation_cause IS NULL))
+ CHECK((revoked_at IS NULL)=(revocation_cause IS NULL)),
+ CHECK((delivery='stream')=(renewal_connection_id IS NOT NULL)),
+ CHECK((delivery='stream')=(replaces_credential_id IS NOT NULL)),
+ CHECK(delivery='stream' OR fetched_at IS NULL),
+ CHECK((key_digest IS NULL)=(delivery='stream' AND fetched_at IS NULL))
 )`
 
 // One row per issuing request's Idempotency-Key, scoped to the principal's
@@ -56,7 +73,7 @@ const createPostgreSQLInstanceIdempotencyRecordsTable = `CREATE TABLE instance_i
  fingerprint BYTEA NOT NULL CHECK(octet_length(fingerprint)=32),
  instance_id TEXT NOT NULL,
  credential_id TEXT NOT NULL,
- status INTEGER NOT NULL CHECK(status=201),
+ status INTEGER NOT NULL CHECK(status IN (201,202)),
  created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
  PRIMARY KEY(workspace_id,principal_credential_id,route,idempotency_key),
  FOREIGN KEY(workspace_id,instance_id) REFERENCES instances(workspace_id,id),
@@ -222,6 +239,7 @@ func postgresqlInstanceTableSteps() []postgresqlSchemaStep {
 		{"create_connection_upstream_messages", createPostgreSQLConnectionUpstreamMessagesTable},
 		{"create_connection_protocol_errors", createPostgreSQLConnectionProtocolErrorsTable},
 		{"create_connection_instructions", createPostgreSQLConnectionInstructionsTable},
+		{"foreign_key_instance_credentials_renewal_connection", `ALTER TABLE instance_credentials ADD FOREIGN KEY(workspace_id,renewal_connection_id) REFERENCES instance_connections(workspace_id,id)`},
 		{"index_instances_workspace_seq", `CREATE INDEX idx_instances_workspace_seq ON instances(workspace_id,storage_sequence)`},
 		{"index_instance_credentials_instance_seq", `CREATE INDEX idx_instance_credentials_instance_seq ON instance_credentials(workspace_id,instance_id,storage_sequence)`},
 		{"index_instance_connections_instance_seq", `CREATE INDEX idx_instance_connections_instance_seq ON instance_connections(workspace_id,instance_id,storage_sequence)`},

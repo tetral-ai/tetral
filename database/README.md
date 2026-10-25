@@ -119,11 +119,16 @@ highest watermark across its feeds.
 `instances` and `instance_credentials` are Workspace-RLS tables of CLI
 registrations and their connection credentials, which only the `computer_hub`
 role writes. A credential row holds the SHA-256 digest of its key, never the
-key; a revoked one names its cause, `delete` or `deregistration`.
-`instance_idempotency_records`, also Workspace-RLS and the hub's alone, holds
-one row per issuing request's `Idempotency-Key`, scoped to the principal's
-credential and the route, with the request body's fingerprint and the
-instance and credential the request created.
+key; a revoked one names its cause, `delete`, `deregistration` or
+`pending_activation`. A credential delivered on the stream renews a live
+connection: it names that connection and the credential it replaces, has no
+digest until the CLI fetches its key, and records the fetch and its first
+authenticated use. An instance row keeps the latest use of a credential that
+such an activation revoked. `instance_idempotency_records`, also
+Workspace-RLS and the hub's alone, holds one row per issuing request's
+`Idempotency-Key`, scoped to the principal's credential and the route, with
+the request body's fingerprint, the instance and credential the request
+created and the status it answered.
 `instance_connections` holds one row per CLI connection of an instance, kept
 after it ends: its credential, the hub pod holding its stream, its lease, the
 accepted or refused ready, the latest accepted heartbeat and the end. A

@@ -87,12 +87,13 @@ func InsertInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, row 
 		VALUES ($1,$2,$3,$4,'active') RETURNING `+instanceColumns, string(ws), id.New("inst_"), row.Kind, row.Name))
 }
 
-// InsertCredential creates a credential with a new ccred_ ID. It checks no
-// limit; IssueCredential is the issuing writer.
+// InsertCredential creates a credential with a new ccred_ ID whose key is
+// delivered in the response. It checks no limit; IssueCredential is the
+// issuing writer.
 func InsertCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, row NewCredential) (Credential, error) {
 	issuedAt := sql.NullTime{Time: row.IssuedAt, Valid: !row.IssuedAt.IsZero()}
-	return scanCredential(tx.QueryRow(ctx, `INSERT INTO instance_credentials (workspace_id,instance_id,id,state,key_digest,issued_at,expires_at)
-		VALUES ($1,$2,$3,$4,$5,COALESCE($6,clock_timestamp()),$7) RETURNING `+credentialColumns, string(ws), row.InstanceID, id.New("ccred_"), row.State, row.Key.Digest(), issuedAt, row.ExpiresAt))
+	return scanCredential(tx.QueryRow(ctx, `INSERT INTO instance_credentials (workspace_id,instance_id,id,state,key_digest,issued_at,expires_at,delivery)
+		VALUES ($1,$2,$3,$4,$5,COALESCE($6,clock_timestamp()),$7,'response') RETURNING `+credentialColumns, string(ws), row.InstanceID, id.New("ccred_"), row.State, row.Key.Digest(), issuedAt, row.ExpiresAt))
 }
 
 func ReadInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) (Instance, error) {
