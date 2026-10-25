@@ -1,29 +1,21 @@
 #![doc = include_str!("../README.md")]
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+pub mod attempt;
 pub mod backoff;
+pub mod heartbeat;
+pub mod http;
+pub mod owner;
+pub mod ready;
 pub mod staging;
+pub mod status;
 pub mod stream;
 
 use tokio::sync::mpsc;
 
-pub enum ConnectionMessage {}
-
-pub type ConnectionMailbox = mpsc::UnboundedSender<ConnectionMessage>;
-
-pub fn spawn_connection_owner() -> ConnectionMailbox {
-    let (mailbox, mut messages) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        while let Some(message) = messages.recv().await {
-            handle_connection_message(message);
-        }
-    });
-    mailbox
-}
-
-fn handle_connection_message(message: ConnectionMessage) {
-    match message {}
-}
+pub use owner::{Config, Connection, Credential, Instruction, Times};
+pub use ready::ReadyFields;
+pub use status::ConnectionStatus;
 
 pub enum OutboxMessage {}
 

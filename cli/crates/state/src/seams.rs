@@ -59,7 +59,9 @@ pub async fn sleep_until(deadline: Duration) {
     }
 }
 
-fn recheck_interval() -> Duration {
+/// The longest a wait for a time on [`now`] sleeps before it reads the
+/// clock again.
+pub fn recheck_interval() -> Duration {
     #[cfg(feature = "test-seams")]
     if harness::named().is_some() {
         return HARNESS_RECHECK_INTERVAL;

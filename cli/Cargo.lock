@@ -364,9 +364,12 @@ dependencies = [
  "eventsource-stream",
  "futures-core",
  "http-body",
+ "observe",
  "protocol",
  "rand",
  "reqwest",
+ "serde_json",
+ "state",
  "thiserror",
  "tokio",
 ]

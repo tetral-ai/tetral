@@ -10,8 +10,11 @@ drive.workspace = true
 eventsource-stream.workspace = true
 futures-core.workspace = true
 http-body.workspace = true
+observe.workspace = true
 protocol.workspace = true
 rand.workspace = true
 reqwest.workspace = true
+serde_json.workspace = true
+state.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
