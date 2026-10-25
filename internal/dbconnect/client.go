@@ -377,7 +377,10 @@ type SessionLockConn struct {
 
 // QueryRow runs one statement on the lock-holding connection.
 func (c *SessionLockConn) QueryRow(ctx context.Context, query string, args ...any) *Row {
-	return &Row{row: c.conn.QueryRowContext(ctx, query, args...), client: c.client, op: c.operation}
+	ctx, done := observeStatement(ctx, c.operation)
+	row := c.conn.QueryRowContext(ctx, query, args...)
+	done(rowError(row))
+	return &Row{row: row, client: c.client, op: c.operation}
 }
 
 // sessionLockReleaseTimeout bounds the explicit unlock, which still runs after

@@ -90,6 +90,39 @@ func TestFastStatementWritesNoRecord(t *testing.T) {
 	}
 }
 
+// The lock's acquisition is a sample of the same operation, so the statement
+// on the lock-holding connection is counted from inside the callback.
+func TestSessionLockStatementIsObservedLikeAnyStatement(t *testing.T) {
+	records, telemetry := installStatementTelemetry(t)
+	client := NewClientForTesting(storagetest.NewPostgreSQLDB(t))
+	var before, after statementSample
+	locked, err := client.TryWithSessionLock(context.Background(), "statement.session_lock", "statement_observation", func(conn *SessionLockConn) error {
+		before = statementSamples(t, telemetry, "statement.session_lock")
+		var one int
+		if err := conn.QueryRow(context.Background(), "SELECT 1 FROM pg_sleep(0.3)").Scan(&one); err != nil {
+			return err
+		}
+		after = statementSamples(t, telemetry, "statement.session_lock")
+		return nil
+	})
+	if !locked || err != nil {
+		t.Fatalf("TryWithSessionLock = %v, %v; want the lock held and the statement run", locked, err)
+	}
+	if after.count-before.count != 1 || after.sum-before.sum <= 0.25 {
+		t.Fatalf("samples went from %+v to %+v; want one statement above 0.25 seconds", before, after)
+	}
+	var slow []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(records.String()), "\n") {
+		var record map[string]any
+		if json.Unmarshal([]byte(line), &record) == nil && record["event"] == "db.query.slow" {
+			slow = append(slow, record)
+		}
+	}
+	if len(slow) != 1 || slow[0]["operation"] != "statement.session_lock" {
+		t.Fatalf("records = %q; want one db.query.slow of the statement", records.String())
+	}
+}
+
 func TestListenObservesNoStatementSample(t *testing.T) {
 	_, telemetry := installStatementTelemetry(t)
 	client := NewClientForTesting(storagetest.NewPostgreSQLDB(t))
