@@ -23,6 +23,8 @@ pub const LOCK: &str = "run/app-server.lock";
 pub const LOGS: &str = "logs";
 /// The directory where the Report outbox freezes its reports (`outbox`).
 pub const OUTBOX: &str = "outbox";
+/// The directory that holds one directory of files per Session.
+pub const SESSIONS: &str = "sessions";
 
 /// The state root as `TETRAL_HOME` names it. The CLI reaches the root's
 /// control files through this form; the paths it builds for others start from
@@ -60,6 +62,13 @@ impl StateRoot {
             Err(error) => Err(error),
         }
     }
+}
+
+/// The directory of the Session `session_id` under the root's canonical path
+/// `root`, `sessions/<session_id>/`. `session_id` is a `SafeId`, which holds
+/// no `/` and is neither `.` nor `..`; no other identity names a directory.
+pub fn session_directory(root: &Path, session_id: &str) -> PathBuf {
+    root.join(SESSIONS).join(session_id)
 }
 
 #[cfg(target_os = "linux")]

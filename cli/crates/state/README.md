@@ -48,9 +48,10 @@ seams.
 The root itself has mode `0700`, and the check accepts no permission bit for
 group or others on any of these paths. `server run` also creates `logs/` for
 its log files (`paths::LOGS`, written by `observe::LogFile`), which the root
-checks do not cover. The App Server's socket lies outside
-the root, at `S/<h>.sock`: `S` is `/tmp/tetral-sock-<uid>` on Linux and
-`/private/tmp/tetral-sock-<uid>` on macOS, `<uid>` the process's real user ID,
+checks do not cover, nor `sessions/<session_id>/`, a Session's files
+(`paths::session_directory`), which holds its tasks' directories. The App
+Server's socket lies outside the root, at `S/<h>.sock`: `S` is
+`/tmp/tetral-sock-<uid>` on Linux and `/private/tmp/tetral-sock-<uid>` on macOS, `<uid>` the process's real user ID,
 and `<h>` the first 16 lowercase hexadecimal characters of the SHA-256 of the
 root's canonical path (`paths::socket_path`). The path is at most 57 bytes.
 Once the root exists, `S` must be a directory of the current user with mode

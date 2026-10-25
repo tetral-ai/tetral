@@ -23,5 +23,6 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 state.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "sync", "time"] }
 which.workspace = true

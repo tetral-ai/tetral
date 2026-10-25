@@ -61,6 +61,14 @@ which owns that task's process tree; the translation of a call's
 - A task is named during its admission, before its policy is translated,
   so that its profile names its private temporary directory in `T`; a
   rejected instruction keeps no name (`store`).
+- Before its launch a task gets `sessions/<session_id>/tasks/<task name>/`
+  with `stdout.log` and `stderr.log`, then its temporary directory in `T`,
+  which must be a directory of this user with no permission for group or
+  others; a failure names the path (`store::TaskFiles::create`). Each log
+  receives its stream's first `LOG_HEAD_BYTES` as they arrive and, at the
+  end, the capture's stored text (`store::Log`). Both directories go once the
+  task has ended and its reports are acknowledged, never following a
+  symbolic link out of them (`TaskFiles::remove`).
 - Each probe of a `bwrap` candidate is bounded by `PROBE_TIMEOUT` and
   `PROBE_OUTPUT_LIMIT_BYTES`, which `Isolation::with_probe_bounds`
   overrides.
@@ -84,8 +92,8 @@ which owns that task's process tree; the translation of a call's
 - `limits.rs`: `Visible`, the byte and line budget of each stream in a reply.
 - `report.rs`: `Report`, its `Correlation` and `Body`, the error bounds
   (`bounded`) and the size fitting of a process result (`fit`).
-- `store.rs`: a task's name and the paths of `T` and of a task's temporary
-  directory.
+- `store.rs`: a task's name, the paths of `T`, of a task's directory and of
+  its temporary directory, and `TaskFiles` with its `Log`s.
 - `isolation/harness.rs`: the test entry `tetral-isolation-harness`, under the
   feature `test-seams`: one command through admission, the check and the
   launch.
