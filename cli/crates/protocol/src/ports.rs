@@ -96,6 +96,11 @@ impl Submission {
     }
 }
 
+/// The longest `message_id` that the Report outbox gives a report: `r` and a
+/// `u64` in decimal. A builder that must fit a report within its limit
+/// before the outbox names it counts this one.
+pub const LONGEST_REPORT_MESSAGE_ID: &str = "r18446744073709551615";
+
 /// The outbox's name for one submitted report, unique in the process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReportId(pub u64);

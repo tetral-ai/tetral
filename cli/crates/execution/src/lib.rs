@@ -3,6 +3,7 @@
 
 pub mod isolation;
 pub mod policy;
+pub mod report;
 
 use tokio::sync::mpsc;
 

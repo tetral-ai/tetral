@@ -2,10 +2,11 @@
 //! answers or follows an instruction, from the moment it is frozen under
 //! `outbox/` until Engine acknowledges or refuses it or its connection ends.
 //!
-//! A report gets the next `r<n>` identity of its connection, is built and
-//! checked by its own decoder, frozen in `outbox/<n>/<message_id>.json` and
-//! sent at once in its own request; each retry sends the frozen file again,
-//! so its bytes never change. Reports are sent concurrently with no count
+//! A report gets the next `r<n>` identity of its connection, at most
+//! `protocol::ports::LONGEST_REPORT_MESSAGE_ID`, is built and checked by its
+//! own decoder, frozen in `outbox/<n>/<message_id>.json` and sent at once in
+//! its own request; each retry sends the frozen file again, so its bytes
+//! never change. Reports are sent concurrently with no count
 //! limit and apart from the Connection owner's requests, so a heartbeat never
 //! waits behind one. A report is never sent on another connection: the end
 //! of its connection cancels its uploads at once and deletes its directory.

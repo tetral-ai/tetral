@@ -37,6 +37,12 @@ which owns that task's process tree; the translation of a call's
   create; where no process of the user could create it, the launch profile
   leaves the protection to the operating system instead
   (`isolation/linux.rs`, `launch_profile`).
+- No report is handed to the Report outbox that Engine could never accept:
+  an error's `message` is cut to `ERROR_MESSAGE_MAX_BYTES` on UTF-8
+  boundaries and its `detail` rebuilt within `ERROR_DETAIL_MAX_BYTES`, and a
+  process result over the ordinary limits is rendered again from its stored
+  output with half the visible byte budget until it fits, its counters and
+  exit facts unchanged (`report`).
 - Each probe of a `bwrap` candidate is bounded by `PROBE_TIMEOUT` and
   `PROBE_OUTPUT_LIMIT_BYTES`, which `Isolation::with_probe_bounds`
   overrides.
@@ -55,6 +61,8 @@ which owns that task's process tree; the translation of a call's
 - `isolation/linux.rs`: the choice of `bwrap` and its candidates, the digest
   check of the bundled one, the WSL1 test, the namespace probe and the
   launch profile.
+- `report.rs`: `Report`, its `Correlation` and `Body`, the error bounds
+  (`bounded`) and the size fitting of a process result (`fit`).
 - `isolation/harness.rs`: the test entry `tetral-isolation-harness`, under the
   feature `test-seams`: one command through admission, the check and the
   launch.
