@@ -38,6 +38,7 @@ func run(ctx context.Context, env tetralcleanup.Env) error {
 	defer diagnosticOwner.CloseWithBudget()
 	logger := diagnosticOwner.Logger
 	defer workload.InstallDefaultLogger(logger)()
+	coldStart := workload.BeginServiceColdStart(ctx)
 	if diagnosticErr != nil {
 		return workload.LogStartupFailure(logger, "cleanup", diagnosticErr)
 	}
@@ -45,6 +46,7 @@ func run(ctx context.Context, env tetralcleanup.Env) error {
 	if err != nil {
 		return workload.LogStartupFailure(logger, "cleanup", err)
 	}
+	coldStart.Advance(ctx)
 	openResult, err := openDatabase(ctx)
 	if err != nil {
 		return workload.LogStartupFailure(logger, "cleanup", err)
@@ -56,6 +58,9 @@ func run(ctx context.Context, env tetralcleanup.Env) error {
 	if err := openResult.Client.VerifyRuntimeRole(ctx); err != nil {
 		return workload.LogStartupFailure(logger, "cleanup", err)
 	}
+	// A scheduled run has no readiness probe: it is ready once its
+	// dependencies are connected and its phases begin.
+	coldStart.Complete(ctx)
 	metrics := tetralcleanup.NewSchedulerMetrics()
 	err = runPhases(ctx, logger, openResult.Client, cfg, metrics)
 	// Every phase has run or been cancelled; their joined errors are returned

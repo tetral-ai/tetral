@@ -50,6 +50,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 	defer owner.CloseWithBudget()
 	logger := owner.Logger
 	defer workload.InstallDefaultLogger(logger)()
+	coldStart := workload.BeginServiceColdStart(ctx)
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
@@ -58,6 +59,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	workload.ConfigureProcessShutdown(ctx, cfg.DrainTimeout+cfg.CancelJoinTimeout, owner)
+	coldStart.Advance(ctx)
 	database, err := openDatabase(ctx, jobrunner.EnvDatabaseURL, cfg.DatabaseURL)
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
@@ -119,6 +121,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	defer workload.ProcessCleanup(ctx, func() { _ = queueConn.Close() })
+	coldStart.Advance(ctx)
 	visibilityConfig, err := enginekubernetes.LoadConfig(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))

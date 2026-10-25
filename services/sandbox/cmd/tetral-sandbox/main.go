@@ -60,6 +60,7 @@ func run(ctx context.Context, env envReader) (runErr error) {
 	defer diagnosticOwner.CloseWithBudget()
 	logger := diagnosticOwner.Logger
 	defer workload.InstallDefaultLogger(logger)()
+	coldStart := workload.BeginServiceColdStart(ctx)
 	if diagnosticErr != nil {
 		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, diagnosticErr)
 	}
@@ -67,6 +68,7 @@ func run(ctx context.Context, env envReader) (runErr error) {
 		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, cfgErr))
 	}
 	workload.ConfigureProcessShutdown(ctx, cfg.DrainTimeout+cfg.CancelJoinTimeout, diagnosticOwner)
+	coldStart.Advance(ctx)
 	openResult, err := openDatabase(resourcesCtx, tetralsandbox.EnvPostgresDSN, cfg.PostgresDSN)
 	if err != nil {
 		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
@@ -122,6 +124,7 @@ func run(ctx context.Context, env envReader) (runErr error) {
 	if err := transportsecurity.WaitForRoutingProxy(ctx, env.Getenv(transportsecurity.EnvRoutingProxyRequired) == "true"); err != nil {
 		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, err)
 	}
+	coldStart.Advance(ctx)
 	acquisitionCtx, closeAcquisition := context.WithCancel(ctx)
 	defer closeAcquisition()
 	workerCtx, cancelWorkers := context.WithCancel(resourcesCtx)

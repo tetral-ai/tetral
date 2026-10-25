@@ -106,6 +106,7 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 		admission.Lock()
 		if !draining.Load() {
 			ready.Store(true)
+			workload.MarkProcessReady()
 		}
 		admission.Unlock()
 		grpcErr <- server.Serve(grpcListener)

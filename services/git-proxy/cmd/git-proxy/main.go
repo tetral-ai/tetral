@@ -34,6 +34,7 @@ func run(ctx context.Context, env gitproxy.Env) error {
 	defer diagnosticOwner.CloseWithBudget()
 	logger := diagnosticOwner.Logger
 	defer workload.InstallDefaultLogger(logger)()
+	coldStart := workload.BeginServiceColdStart(ctx)
 	if diagnosticErr != nil {
 		return workload.LogStartupFailure(logger, gitproxy.ServiceName, diagnosticErr)
 	}
@@ -42,6 +43,7 @@ func run(ctx context.Context, env gitproxy.Env) error {
 		return workload.LogStartupFailure(logger, gitproxy.ServiceName, err)
 	}
 	workload.ConfigureProcessShutdown(ctx, cfg.DrainGrace, diagnosticOwner)
+	coldStart.Advance(ctx)
 	openResult, err := openDatabase(ctx, cfg.DatabaseURL, env.Getenv("TETRAL_DATABASE_TLS_CA_PATH"), env.Getenv("TETRAL_DATABASE_TLS_SERVER_NAME"))
 	if err != nil {
 		return workload.LogStartupFailure(logger, gitproxy.ServiceName, err)
@@ -57,6 +59,7 @@ func run(ctx context.Context, env gitproxy.Env) error {
 	if err != nil {
 		return workload.LogStartupFailure(logger, gitproxy.ServiceName, err)
 	}
+	coldStart.Advance(ctx)
 	return runGitProxy(ctx, cfg, openResult.Client, encryptor, gitproxy.RuntimeConfig{
 		Listen:          listenTCP,
 		Logger:          logger,

@@ -196,6 +196,45 @@ func TestCleanupRunsEveryPhaseInOrderAndReturnsJoinedErrorsAfterExport(t *testin
 	}
 }
 
+// The CronJob has no readiness probe, so its cold start ends when its run
+// begins: the cold start's completion precedes every record of the run.
+func TestCleanupRecordsItsColdStartBeforeItsRun(t *testing.T) {
+	admin := storagetest.NewPostgreSQLAdminDB(t)
+	w := storagetest.OpenWorkloadDB(t, admin, "cleanup")
+	previousOpen, previousVerify := openDatabase, verifySchema
+	openDatabase = func(context.Context) (dbconnect.OpenResult, error) {
+		return dbconnect.OpenResult{Client: dbconnect.NewClientForTesting(w.OpenWorkload(t, "cleanup", nil))}, nil
+	}
+	verifySchema = func(context.Context, *dbconnect.Client) error { return nil }
+	t.Cleanup(func() { openDatabase, verifySchema = previousOpen, previousVerify })
+
+	stderr, finish := captureStderr(t)
+	err := run(context.Background(), cleanupEnvMap{})
+	finish()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	var events []string
+	coldStart, firstRunRecord := -1, -1
+	for i, line := range strings.Split(strings.TrimSpace(stderr.String()), "\n") {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("record %d is not JSON: %q", i, line)
+		}
+		event, _ := record["event"].(string)
+		events = append(events, event)
+		if event == "cold_start.completed" && record["cold_start.kind"] == "service_pod" {
+			coldStart = i
+		}
+		if strings.HasPrefix(event, "cleanup.") && firstRunRecord < 0 {
+			firstRunRecord = i
+		}
+	}
+	if coldStart < 0 || firstRunRecord < 0 || coldStart > firstRunRecord {
+		t.Fatalf("records %v; want the service_pod cold_start.completed before the run's first cleanup record", events)
+	}
+}
+
 // phaseTracer records which Cleanup phase each statement belongs to and can
 // cancel the process context when a statement starts.
 type phaseTracer struct {
