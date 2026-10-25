@@ -1502,9 +1502,9 @@ follows the tool-status ACK and retry rules.
 
 ### Acknowledgement, deduplication and delivery
 
-- The ACK is `{connection_id, message_id, accepted: true}`. The CLI releases a
-  report only after its matching ACK; a wrong or late ACK for another identity
-  releases nothing.
+- The ACK (`tool-execution-v1.schema.json#/$defs/Acknowledgement`) names the
+  report's connection and message. The CLI releases a report only after its
+  matching ACK; a wrong or late ACK for another identity releases nothing.
 - Engine verifies that a report belongs to an instruction, connection and
   binding it issued (a drive sync report's `task_id` follows the [drive sync
   report](#drive-sync-report) rule), persists it, then ACKs. For a duplicate
@@ -1905,17 +1905,18 @@ the binding's MCP connection.
 
 ### MCP result
 
-The App Server answers each admitted call with exactly one tool report: `kind:
-execution`, `phase: terminal`, `report_seq: 1`. It never sends a `running`
+The App Server answers each admitted call with exactly one tool report
+(`tool-execution-v1.schema.json#/$defs/ExecutionReport`): `kind: execution`,
+`phase: terminal`, `report_seq: 1`. It never sends a `running`
 report and never a `drive_sync`. Its result envelope has `tool: "mcp"`,
 `truncated: false` and `metrics`, with `run_ms` the MCP call and `drive_wait_ms`
 and `sync_ms` `0`.
 
 - `status` is `success` whenever the server answered with a `CallToolResult`,
   `isError: true` included. `result` is then that `CallToolResult` without its
-  top-level `_meta`, every other field unchanged: `{content, structuredContent?,
-  isError?}`. Nothing in it is truncated; the [media](#mcp-media) rules bound
-  it.
+  top-level `_meta`, every other field unchanged
+  (`tool-execution-v1.schema.json#/$defs/McpResult`). Nothing in it is
+  truncated; the [media](#mcp-media) rules bound it.
 - Otherwise `status` is `error`, `result` is `{}` and `error` is `{kind,
   message, detail?}` with one of these kinds
   (`tool-execution-v1.schema.json#/$defs/McpToolError`):
