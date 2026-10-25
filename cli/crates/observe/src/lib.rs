@@ -54,12 +54,21 @@ pub fn install(level: Level) -> Observer {
 
 impl Observer {
     /// Opens the log file in `directory` and writes every later record to it
-    /// as well as to stderr.
+    /// as well as to stderr. When it cannot be opened, every later record
+    /// counts in `tetral_log_write_failures_total{sink="file"}`.
     pub fn open_log_file(&self, directory: &Path) -> io::Result<()> {
-        let file = LogFile::open(directory)?;
-        self.sinks
-            .attach_file(Sink::spawn_file(Box::new(file), registry()));
-        Ok(())
+        match LogFile::open(directory) {
+            Ok(file) => {
+                self.sinks
+                    .attach_file(Sink::spawn_file(Box::new(file), registry()));
+                Ok(())
+            }
+            Err(error) => {
+                self.sinks
+                    .attach_unopened_file(sinks::failures(registry(), "file"));
+                Err(error)
+            }
+        }
     }
 }
 

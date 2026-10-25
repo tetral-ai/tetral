@@ -110,14 +110,21 @@ impl Sink {
     }
 }
 
-fn failures(registry: &Registry, sink: &str) -> Counter {
+pub(crate) fn failures(registry: &Registry, sink: &str) -> Counter {
     registry.counter("tetral_log_write_failures_total", &[("sink", sink)])
 }
 
 /// Stderr from the start, and the log file once one is attached.
 pub struct Sinks {
     stderr: Sink,
-    file: OnceLock<Sink>,
+    file: OnceLock<FileSink>,
+}
+
+enum FileSink {
+    Open(Sink),
+    /// The log file could not be opened: each record it would have taken
+    /// counts as one it could not take.
+    Unopened(Counter),
 }
 
 impl Sinks {
@@ -130,7 +137,13 @@ impl Sinks {
 
     /// Attaches the log file; a second file is ignored.
     pub fn attach_file(&self, file: Sink) {
-        let _ = self.file.set(file);
+        let _ = self.file.set(FileSink::Open(file));
+    }
+
+    /// Stands in for a log file that could not be opened, counting in
+    /// `failures` every record written from then on.
+    pub fn attach_unopened_file(&self, failures: Counter) {
+        let _ = self.file.set(FileSink::Unopened(failures));
     }
 
     pub fn write(&self, line: Vec<u8>) {
@@ -140,7 +153,14 @@ impl Sinks {
     /// Writes the record that `build` makes, building it only once a sink has
     /// taken a place for it.
     pub fn write_with(&self, build: impl FnOnce() -> Vec<u8>) {
-        let file = self.file.get().filter(|file| file.reserve());
+        let file = match self.file.get() {
+            Some(FileSink::Open(file)) => Some(file).filter(|file| file.reserve()),
+            Some(FileSink::Unopened(failures)) => {
+                failures.increment();
+                None
+            }
+            None => None,
+        };
         let stderr = self.stderr.reserve();
         if file.is_none() && !stderr {
             return;
@@ -156,7 +176,7 @@ impl Sinks {
 
     pub fn flush(&self) {
         self.stderr.flush();
-        if let Some(file) = self.file.get() {
+        if let Some(FileSink::Open(file)) = self.file.get() {
             file.flush();
         }
     }
@@ -363,6 +383,24 @@ mod tests {
             registry.counter("tetral_log_write_failures_total", &[("sink", "file")]);
         assert_eq!(file_failures.get(), 2);
         assert_eq!(fs::metadata(logs.join("tetral.log")).unwrap().len(), 60);
+    }
+
+    #[test]
+    fn a_log_file_that_could_not_be_opened_counts_every_later_record() {
+        let registry = Registry::new(catalogue());
+        let stderr = Written::default();
+        let sinks = Sinks::new(Sink::spawn_stderr(Box::new(stderr.clone()), &registry));
+        sinks.attach_unopened_file(failures(&registry, "file"));
+
+        for _ in 0..3 {
+            sinks.write(record(60));
+        }
+        sinks.flush();
+
+        assert_eq!(stderr.text().len(), 180);
+        let file_failures =
+            registry.counter("tetral_log_write_failures_total", &[("sink", "file")]);
+        assert_eq!(file_failures.get(), 3);
     }
 
     /// A writer that blocks on a barrier before its first write.

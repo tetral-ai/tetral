@@ -41,7 +41,8 @@ registry, trace context and stopwatches.
 ## Entry points
 
 - `install(level)` makes the record layer the process's subscriber, writing to
-  stderr; `Observer::open_log_file` adds the log file.
+  stderr; `Observer::open_log_file` adds the log file, or, when it cannot be
+  opened, counts every later record as one the file could not take.
 - `info!("event.name", field = value, ...)`, and `debug!`, `warn!` and
   `error!`, record a declared event at its declared level.
 - `correlation_span` gives a span whose records carry the given identities and
