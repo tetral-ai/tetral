@@ -3,6 +3,7 @@
 
 pub mod capture;
 pub mod isolation;
+pub mod limits;
 pub mod policy;
 pub mod report;
 pub mod store;

@@ -56,6 +56,8 @@ which owns that task's process tree; the translation of a call's
   the bytes between. A snapshot splits a byte and a line budget between head
   and tail, cuts both on UTF-8 boundaries and marks the rest
   `\n[... <n> bytes truncated ...]\n` (`capture`).
+- A reply returns at most `VISIBLE_BYTES` and `VISIBLE_LINES` of each stream;
+  an instruction's `limits` can only lower them (`limits`).
 - A task is named during its admission, before its policy is translated,
   so that its profile names its private temporary directory in `T`; a
   rejected instruction keeps no name (`store`).
@@ -79,6 +81,7 @@ which owns that task's process tree; the translation of a call's
   the namespace probe and the launch profile.
 - `capture.rs`: `StreamCapture`, a stream's two buffers and counters, the
   `Window` taken from it, and their snapshots.
+- `limits.rs`: `Visible`, the byte and line budget of each stream in a reply.
 - `report.rs`: `Report`, its `Correlation` and `Body`, the error bounds
   (`bounded`) and the size fitting of a process result (`fit`).
 - `store.rs`: a task's name and the paths of `T` and of a task's temporary
