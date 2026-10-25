@@ -645,6 +645,7 @@ fn a_freed_probe_slot_goes_to_the_longest_waiting_preparation() {
     }
     machine.seams.wait_until_waiting(PROBE_STARTED, 8);
     let ninth = prepare(&engine, &payload("sess_9", "bind_1", &project));
+    quiesce(&machine, 9);
     let tenth = prepare(&engine, &payload("sess_10", "bind_1", &project));
     quiesce(&machine, 10);
     assert_eq!(machine.seams.count(PROBE_SPAWN), 8);
