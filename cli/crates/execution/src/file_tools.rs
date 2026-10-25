@@ -99,6 +99,15 @@ impl FileCall {
         valid.then_some(envelope)
     }
 
+    /// The result envelope of the child whose stdout `pipes` read to its
+    /// end: its result when that is valid, otherwise `helper_failure`.
+    pub fn outcome(&self, pipes: &Pipes) -> HelperEnvelope {
+        pipes
+            .result()
+            .and_then(|bytes| self.result(bytes))
+            .unwrap_or_else(|| self.failure(NO_VALID_RESULT))
+    }
+
     /// The result envelope `helper_failure` with `message`: a child that
     /// gave no valid result, or a start that failed.
     pub fn failure(&self, message: &str) -> HelperEnvelope {

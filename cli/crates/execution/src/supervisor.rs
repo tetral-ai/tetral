@@ -51,7 +51,7 @@ use crate::cancel::Receipt;
 use crate::capture::StreamCapture;
 use crate::cleanup;
 use crate::exec::{self, ExecCall, ExitFacts, OnExpiry, Outcome};
-use crate::file_tools::{self, FileCall, Pipes};
+use crate::file_tools::{FileCall, Pipes};
 use crate::isolation::{Command, Isolation, LaunchError, Process};
 use crate::limits::Visible;
 use crate::policy::{PolicyRejection, TaskPermissions};
@@ -898,10 +898,7 @@ impl Supervisor {
         let envelope = if self.cancelled {
             call.cancelled(self.start.is_some())
         } else {
-            pipes
-                .result()
-                .and_then(|bytes| call.result(bytes))
-                .unwrap_or_else(|| call.failure(file_tools::NO_VALID_RESULT))
+            call.outcome(&pipes)
         };
         pipes.close();
         self.report_file(envelope, run);
