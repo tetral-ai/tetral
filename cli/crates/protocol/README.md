@@ -75,8 +75,11 @@ description, schemas and fixtures are in `protocol/` at the repository root.
   `tetral configure` on stdin and that `credentials.json` holds, its member
   rules (`ServerUrl` among them), `BootstrapKey` and `BootstrapError`.
 - `local.rs`: the bodies of the local API.
-- `ports.rs`: `ReportSink`, `SessionFactory`, `SessionHandle` and
-  `ConnectionPort`.
+- `ports.rs`: `ReportSink`, which takes a `Submission`, a report built
+  with its identity only once the outbox names it and checked by its own
+  decoder, and gives each report's `ReportOutcome` to its `ReportListener`;
+  `Report`, the report types and their `ReportEndpoint`; `SessionFactory`,
+  `SessionHandle` and `ConnectionPort`.
 - `tests/fixtures.rs` decodes every fixture of `protocol/`;
   `tests/strict.rs` holds the strict pass's table and, built from edited
   fixtures, the tables of members sent as `null`, refused or, where the
