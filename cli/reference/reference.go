@@ -82,6 +82,7 @@ type Server struct {
 	eventsModes   []eventsMode
 	earlyDispatch map[string][]instructionSpec
 	held          []*heldAnswer
+	throttled     []*throttledRead
 	tickets       map[computerKey][]string
 
 	log serverLog

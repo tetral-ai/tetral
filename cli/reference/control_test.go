@@ -253,6 +253,32 @@ func TestAnswerControlChangesTheNextAnswer(t *testing.T) {
 		}
 	})
 
+	t.Run("throttle", func(t *testing.T) {
+		ts, connectionID := readyOn(t)
+		ts.call("answer", map[string]any{"endpoint": "ready", "action": "throttle", "bytes_per_second": 64}, nil)
+		body := readyBody(connectionID, "ready_1")
+		encoded, _ := json.Marshal(body)
+		size := int64(len(encoded))
+		done := ts.postAsync("ready", "tetral_ck_a", body)
+		waitFor(t, func() bool { return len(ts.state().Throttled) == 1 })
+		for read := int64(64); read < size; read += 64 {
+			ts.advance(time.Second)
+			waitFor(t, func() bool { return ts.state().Throttled[0].Read == read })
+			select {
+			case answer := <-done:
+				t.Fatalf("answered with %d of %d bytes read: %+v", read, size, answer)
+			default:
+			}
+		}
+		ts.advance(time.Second)
+		if answer := receive(t, done); answer.status != http.StatusOK {
+			t.Errorf("throttled answer %d %s", answer.status, answer.body)
+		}
+		if read := ts.state().Throttled[0].Read; read != size {
+			t.Errorf("read %d of %d bytes", read, size)
+		}
+	})
+
 	t.Run("withhold", func(t *testing.T) {
 		ts, connectionID := readyOn(t)
 		ts.call("answer", map[string]any{"endpoint": "ready", "action": "withhold"}, nil)

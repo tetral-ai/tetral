@@ -341,7 +341,8 @@ type endpoint struct {
 	apply      func(conn *connection, value any, body []byte) (answer, *refusal)
 }
 
-// serve runs one upstream request, in this order: authentication against
+// serve runs one upstream request, in this order: the body's read, at the
+// pace of a `throttle` that the answer control set, authentication against
 // the credential table, the body's size limit, decoding with package wire,
 // an error answer that the answer control set, the connection check, the
 // replay ledger, the endpoint's own rules and the recording of the accepted
@@ -349,7 +350,15 @@ type endpoint struct {
 // control's other faults. The first refusal answers with its code, and every
 // request, refused or not, enters the request log.
 func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec endpoint) {
-	body, _ := io.ReadAll(io.LimitReader(request.Body, int64(spec.maxBytes)+1))
+	reader := io.Reader(request.Body)
+	server.mu.Lock()
+	if throttle := server.takeFault(spec.name, "", true); throttle != nil {
+		read := &throttledRead{Endpoint: spec.name}
+		server.throttled = append(server.throttled, read)
+		reader = &throttledBody{server: server, request: request, start: server.clock.Now(), rate: throttle.BytesPerSecond, read: read}
+	}
+	server.mu.Unlock()
+	body, _ := io.ReadAll(io.LimitReader(reader, int64(spec.maxBytes)+1))
 	digest := sha256.Sum256(body)
 	entry := requestLog{
 		Method: "POST", Endpoint: spec.name, Traceparent: request.Header.Get("traceparent"),
@@ -375,7 +384,7 @@ func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec e
 		server.refused(w, &entry, refuse("invalid_message", err.Error()))
 		return
 	}
-	injected := server.takeFault(spec.name, messageID)
+	injected := server.takeFault(spec.name, messageID, false)
 	if injected != nil && injected.Action == "error" {
 		server.mu.Unlock()
 		server.refused(w, &entry, &refusal{code: injected.Code, message: "injected by the answer control", status: injected.Status})
@@ -426,6 +435,45 @@ func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec e
 	}
 	server.mu.Unlock()
 	server.deliver(w, request, result, injected, hold)
+}
+
+// throttledRead is how much of a request's body a `throttle` has read.
+type throttledRead struct {
+	Endpoint string `json:"endpoint"`
+	Read     int64  `json:"read"`
+}
+
+// throttledBody reads a request's body at rate bytes for each second of the
+// clock since start, waiting for the clock while it may read nothing.
+type throttledBody struct {
+	server  *Server
+	request *http.Request
+	start   time.Time
+	rate    int64
+	read    *throttledRead
+}
+
+func (body *throttledBody) Read(buffer []byte) (int, error) {
+	clock := body.server.clock
+	for {
+		changed := clock.Changed()
+		allowed := clock.Now().Sub(body.start).Milliseconds() * body.rate / 1000
+		body.server.mu.Lock()
+		room := allowed - body.read.Read
+		body.server.mu.Unlock()
+		if room > 0 {
+			count, err := body.request.Body.Read(buffer[:min(int64(len(buffer)), room)])
+			body.server.mu.Lock()
+			body.read.Read += int64(count)
+			body.server.mu.Unlock()
+			return count, err
+		}
+		select {
+		case <-changed:
+		case <-body.request.Context().Done():
+			return 0, body.request.Context().Err()
+		}
+	}
 }
 
 // heldAnswer is an answer that a delay or withhold fault holds back.

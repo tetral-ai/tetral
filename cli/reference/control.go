@@ -24,21 +24,29 @@ type fault struct {
 	// without an answer), `withhold` (accept, then hold the answer until the
 	// answer control releases it), `wrong_identity` (answer for another
 	// message_id), `without_accepted` (answer the ACK without `accepted`),
-	// `schema_fail` (answer `200` with Body, `{}` by default) or `error`
+	// `schema_fail` (answer `200` with Body, `{}` by default), `error`
 	// (answer Code with Status, by default the status the client error table
-	// gives Code, accepting nothing).
-	Action  string          `json:"action"`
-	DelayMs int64           `json:"delay_ms"`
-	Code    string          `json:"code"`
-	Status  int             `json:"status"`
-	Body    json.RawMessage `json:"body"`
+	// gives Code, accepting nothing) or `throttle` (read the body at
+	// BytesPerSecond of the clock, so that a clock held still stalls it; it
+	// matches an endpoint only, since it applies before the body is read).
+	Action  string `json:"action"`
+	DelayMs int64  `json:"delay_ms"`
+	// BytesPerSecond is how many bytes of the body a `throttle` reads for
+	// each second the clock advances after the request arrives.
+	BytesPerSecond int64           `json:"bytes_per_second"`
+	Code           string          `json:"code"`
+	Status         int             `json:"status"`
+	Body           json.RawMessage `json:"body"`
 	// Count is how many matching requests the fault changes; 0 means one.
 	Count int `json:"count"`
 }
 
-func (server *Server) takeFault(endpoint, messageID string) *fault {
+// takeFault takes the next fault for a message of an endpoint, or with
+// throttle the next `throttle` of the endpoint, which no other take sees.
+func (server *Server) takeFault(endpoint, messageID string, throttle bool) *fault {
 	for index, candidate := range server.faults {
-		if candidate.Endpoint != endpoint || (candidate.MessageID != "" && candidate.MessageID != messageID) {
+		if candidate.Endpoint != endpoint || (candidate.MessageID != "" && candidate.MessageID != messageID) ||
+			(candidate.Action == "throttle") != throttle {
 			continue
 		}
 		candidate.Count--
@@ -316,6 +324,10 @@ func (server *Server) controlAnswer(body json.RawMessage) (any, error) {
 		if input.DelayMs <= 0 {
 			return nil, errors.New("a delay needs delay_ms above 0")
 		}
+	case "throttle":
+		if input.BytesPerSecond <= 0 || input.MessageID != "" {
+			return nil, errors.New("a throttle needs bytes_per_second above 0 and no message_id")
+		}
 	case "error":
 		switch {
 		case input.Code == "":
@@ -400,6 +412,7 @@ type Snapshot struct {
 	Connections []ConnectionState   `json:"connections"`
 	Tickets     map[string][]string `json:"tickets"`
 	Held        []heldAnswer        `json:"held"`
+	Throttled   []throttledRead     `json:"throttled"`
 	Requests    []requestLog        `json:"requests"`
 	Received    []receivedMessage   `json:"received"`
 	Events      []sentEvent         `json:"events"`
@@ -460,6 +473,9 @@ func (server *Server) snapshot() Snapshot {
 	}
 	for _, hold := range server.held {
 		state.Held = append(state.Held, *hold)
+	}
+	for _, read := range server.throttled {
+		state.Throttled = append(state.Throttled, *read)
 	}
 	for _, cred := range server.credentials {
 		state.Credentials = append(state.Credentials, CredentialState{
