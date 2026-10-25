@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { credentials, Metadata, Server, ServerCredentials, status } from "@grpc/grpc-js";
-import { ProviderGatewayServiceClient, ProviderGatewayServiceService, RunWebRequest } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { sendUnaryData, ServerUnaryCall, ServiceDefinition } from "@grpc/grpc-js";
+import { ProviderGatewayServiceClient, ProviderGatewayServiceService, RunWebRequest, RunWebResponse } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import {
+  activeTraceparent,
   beginServiceColdStart,
   continueGrpcTraces,
   completeServiceColdStart,
@@ -9,8 +11,10 @@ import {
   createTetralJsonLogger,
   endServiceColdStartPhase,
   failServiceColdStart,
+  installTelemetry,
   MetricRegistry,
   parseDeclarations,
+  parseDiagnosticConfig,
   PressurePoint,
   Rejection,
   renderMetrics,
@@ -30,6 +34,34 @@ const declarations = parseDeclarations({
   metrics: {},
   spans: {},
 });
+
+/** The OTLP trace export method, with its messages left as encoded bytes. */
+const otlpTraceService = {
+  export: {
+    path: "/opentelemetry.proto.collector.trace.v1.TraceService/Export",
+    requestStream: false,
+    responseStream: false,
+    requestSerialize: (value: Buffer) => value,
+    requestDeserialize: (bytes: Buffer) => bytes,
+    responseSerialize: () => Buffer.alloc(0),
+    responseDeserialize: (bytes: Buffer) => bytes,
+  },
+} as unknown as ServiceDefinition;
+
+/** An in-process OTLP/gRPC trace collector; a request holds each span's trace ID as raw bytes. */
+async function otlpReceiver(): Promise<{ readonly endpoint: string; readonly received: (traceId: string) => boolean; readonly close: () => void }> {
+  const requests: Buffer[] = [];
+  const server = new Server();
+  server.addService(otlpTraceService, {
+    export: (call: ServerUnaryCall<Buffer, Buffer>, callback: sendUnaryData<Buffer>) => { requests.push(call.request); callback(null, Buffer.alloc(0)); },
+  });
+  const port = await new Promise<number>((resolve, reject) => server.bindAsync("127.0.0.1:0", ServerCredentials.createInsecure(), (error, bound) => error === null ? resolve(bound) : reject(error)));
+  return {
+    endpoint: `http://127.0.0.1:${port}`,
+    received: (traceId) => requests.some((request) => request.includes(Buffer.from(traceId, "hex"))),
+    close: () => server.forceShutdown(),
+  };
+}
 
 /** The fields a Go record carries with no caller field, outside a span and below ERROR. */
 const goRecordFields = ["time", "level", "msg", "event", "operation", "log.type", "service.name", "deployment.environment", "service.version", "service.instance.id", "process.pid"];
@@ -61,6 +93,48 @@ describe("shared telemetry", () => {
       expect(recording.spans()).toEqual([]);
       expect(recording.records()[0]?.trace_id).toMatch(/^(?!0{32})[0-9a-f]{32}$/);
     } finally { recording.restore(); }
+  });
+
+  test("OTEL_EXPORTER_OTLP_ENDPOINT naming an OTLP/gRPC receiver gets it an ended span", async () => {
+    const receiver = await otlpReceiver();
+    try {
+      const telemetry = createTelemetry({ serviceName: "provider-gateway", declarations, diagnostics: parseDiagnosticConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: receiver.endpoint }) });
+      const observation = telemetry.observe("lookup");
+      const traceId = observation.run(() => activeTraceparent())!.split("-")[1]!;
+      observation.end();
+      await telemetry.shutdown(5_000);
+      expect(receiver.received(traceId)).toBe(true);
+    } finally { receiver.close(); }
+  });
+
+  test("a ratio of 0 exports no new root span and exports the span whose incoming parent is sampled", async () => {
+    const receiver = await otlpReceiver();
+    const telemetry = createTelemetry({ serviceName: "provider-gateway", declarations, diagnostics: parseDiagnosticConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: receiver.endpoint, TETRAL_TRACE_SAMPLE_RATIO: "0" }) });
+    const restore = installTelemetry(telemetry);
+    const server = new Server();
+    server.addService(ProviderGatewayServiceService, continueGrpcTraces(ProviderGatewayServiceService, {
+      streamProviderRequest: (call: { end: () => void }) => call.end(),
+      runWeb: (_call: unknown, callback: (error: null, response: RunWebResponse) => void) => callback(null, RunWebResponse.fromPartial({})),
+    }));
+    const port = await new Promise<number>((resolve, reject) => server.bindAsync("127.0.0.1:0", ServerCredentials.createInsecure(), (error, bound) => error === null ? resolve(bound) : reject(error)));
+    const client = new ProviderGatewayServiceClient(`127.0.0.1:${port}`, credentials.createInsecure());
+    try {
+      const root = telemetry.observe("lookup");
+      const rootTraceId = root.run(() => activeTraceparent())!.split("-")[1]!;
+      root.end();
+      const parentTraceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+      const metadata = new Metadata();
+      metadata.set("traceparent", `00-${parentTraceId}-00f067aa0ba902b7-01`);
+      await new Promise<void>((resolve, reject) => client.runWeb(RunWebRequest.fromPartial({ sessionId: "sesn_sampled" }), metadata, (error) => error === null ? resolve() : reject(error)));
+      await telemetry.shutdown(5_000);
+      expect(receiver.received(parentTraceId)).toBe(true);
+      expect(receiver.received(rootTraceId)).toBe(false);
+    } finally {
+      client.close();
+      server.forceShutdown();
+      restore();
+      receiver.close();
+    }
   });
 
   test("the 1,024-byte string bound counts UTF-8 bytes", () => {
