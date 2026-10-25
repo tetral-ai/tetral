@@ -10,5 +10,5 @@ mod record;
 
 pub use owner::{
     Admission, Factory, NoTasks, RootPaths, SessionMailbox, SessionMessage, Shared, TaskStart,
-    TaskStarter, Times, spawn,
+    TaskStarter, Times,
 };

@@ -16,11 +16,14 @@ that is no longer the binding's is discarded.
 
 ## Design rules
 
-- A `session.close` and a command for the same Session are ordered by the
-  arrival order of the owner's mailbox: once the close is handled nothing more
-  starts, and a command handled before it has already started.
+- A `session.close` and a command for the same binding are ordered by the
+  arrival order of the owner's mailbox: a command starts only in the
+  Session's current binding before its close is handled
+  (`SessionOwner::admits`), so a command handled after the close never
+  starts and one handled before it has already started; a close of another
+  binding changes nothing for it.
 - An owner starts admitted commands only from its handler, through the
-  `TaskStarter` it is given, so a start never races the Session's close.
+  `TaskStarter` it is given, so a start never races its binding's close.
 - Owners follow the owner rules of `cli/README.md`. An owner reaches the
   Connection owner only through `protocol::ports::ConnectionPort` and hands
   its reports to `protocol::ports::ReportSink`.

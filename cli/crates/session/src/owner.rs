@@ -24,14 +24,16 @@ use crate::probe_child::Output;
 use crate::record::Record;
 
 pub enum SessionMessage {
-    /// A tool instruction for this Session; the reply says whether it started.
+    /// A tool instruction for one of this Session's bindings; the reply says
+    /// whether it started.
     Tool {
         task: TaskStart,
         reply: oneshot::Sender<Admission>,
     },
-    /// The Session's `session.close`; the reply comes once the close is admitted.
+    /// A `session.close` of one of this Session's bindings; the reply comes
+    /// once the close is admitted.
     Close {
-        close: Option<Close>,
+        close: Close,
         reply: oneshot::Sender<()>,
     },
     Prepare(Box<Prepare>),
@@ -58,13 +60,15 @@ pub type SessionMailbox = mpsc::UnboundedSender<SessionMessage>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Admission {
     Started,
-    /// The Session's close was admitted earlier, so nothing more starts.
+    /// The binding is not the Session's current one, or its close was
+    /// admitted earlier, so nothing more starts in it.
     Refused,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskStart {
     pub task_id: String,
+    pub binding_id: Id,
 }
 
 /// Starts the task of an admitted command.
@@ -111,15 +115,6 @@ impl Default for Times {
 pub struct Shared {
     pub paths: Arc<RootPaths>,
     pub times: Times,
-}
-
-/// Starts the owner of a Session that only admits commands, as a Session
-/// without preparations does.
-pub fn spawn<S: TaskStarter>(starter: S) -> SessionMailbox {
-    let (mailbox, messages) = mpsc::unbounded_channel();
-    let owner = SessionOwner::new(None, starter, mailbox.clone());
-    tokio::spawn(own(owner, messages));
-    mailbox
 }
 
 /// Creates the Session binding owners of an App Server.
@@ -172,10 +167,7 @@ impl SessionHandle for Handle {
 
     fn close(&self, close: Close) {
         let (reply, _) = oneshot::channel();
-        self.send(SessionMessage::Close {
-            close: Some(close),
-            reply,
-        });
+        self.send(SessionMessage::Close { close, reply });
     }
 
     fn probe_slot(&self, request: ProbeRequest, answer: ProbeSlot) {
@@ -225,7 +217,6 @@ pub(crate) struct Running {
 }
 
 pub(crate) struct SessionOwner<S> {
-    pub closing: bool,
     pub starter: S,
     pub mailbox: SessionMailbox,
     pub preparation: Option<Preparation>,
@@ -268,7 +259,6 @@ impl<S: TaskStarter> SessionOwner<S> {
         mailbox: SessionMailbox,
     ) -> SessionOwner<S> {
         SessionOwner {
-            closing: false,
             starter,
             mailbox,
             preparation,
@@ -283,19 +273,16 @@ impl<S: TaskStarter> SessionOwner<S> {
     fn handle(&mut self, message: SessionMessage) {
         match message {
             SessionMessage::Tool { task, reply } => {
-                let admission = if self.closing {
-                    Admission::Refused
-                } else {
+                let admission = if self.admits(&task.binding_id) {
                     self.starter.start(task);
                     Admission::Started
+                } else {
+                    Admission::Refused
                 };
                 let _ = reply.send(admission);
             }
             SessionMessage::Close { close, reply } => {
-                self.closing = true;
-                if let Some(close) = close {
-                    self.close(&close);
-                }
+                self.close(&close);
                 let _ = reply.send(());
             }
             SessionMessage::Prepare(prepare) => self.prepare(*prepare),
@@ -312,6 +299,17 @@ impl<S: TaskStarter> SessionOwner<S> {
                 reply(entries);
             }
         }
+    }
+
+    /// Whether a command may start in `binding_id`: only in the Session's
+    /// current binding, and only before its close is handled.
+    fn admits(&self, binding_id: &Id) -> bool {
+        self.record
+            .as_ref()
+            .and_then(|record| record.current.as_ref())
+            .is_some_and(|binding| {
+                binding.binding_id == *binding_id && binding.state != SessionState::Closing
+            })
     }
 
     /// The time until the owner must read the clock again, while a probe
@@ -435,10 +433,48 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use protocol::field::AbsolutePath;
     use tokio::sync::oneshot::error::TryRecvError;
     use tokio::sync::{Barrier, oneshot};
 
     use super::*;
+    use crate::record::Binding;
+
+    fn id(value: &str) -> Id {
+        Id::new(value).unwrap()
+    }
+
+    /// Starts an owner whose Session's current binding is `bind_1`, prepared.
+    fn owner_with_binding<S: TaskStarter>(starter: S) -> SessionMailbox {
+        let (mailbox, messages) = mpsc::unbounded_channel();
+        let mut owner = SessionOwner::new(None, starter, mailbox.clone());
+        owner.record = Some(Record {
+            current: Some(Binding {
+                binding_id: id("bind_1"),
+                connection_id: id("conn_1"),
+                requested_cwd: AbsolutePath::new("/project").unwrap(),
+                create_cwd: false,
+                cwd: Some(AbsolutePath::new("/project").unwrap()),
+                state: SessionState::Prepared,
+                error: None,
+                fingerprint: "a".repeat(64),
+                operation: 1,
+                waiting: Vec::new(),
+                reports: Vec::new(),
+            }),
+            unavailable: None,
+        });
+        tokio::spawn(own(owner, messages));
+        mailbox
+    }
+
+    fn close_of(binding_id: &str) -> Close {
+        Close {
+            connection_id: id("conn_1"),
+            message_id: id("msg_close"),
+            binding_id: id(binding_id),
+        }
+    }
 
     /// The close's reply, which the owner sends once it admits the close, as
     /// both the closer and the starter see it: the starter checks at each
@@ -528,6 +564,7 @@ mod tests {
         let (reply, admission) = oneshot::channel();
         let task = TaskStart {
             task_id: task_id.to_owned(),
+            binding_id: id("bind_1"),
         };
         (SessionMessage::Tool { task, reply }, admission)
     }
@@ -537,7 +574,7 @@ mod tests {
             (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
         let (reply, admitted) = oneshot::channel();
         let close = CloseAdmitted::new(admitted);
-        let mailbox = spawn(CountingStarter {
+        let mailbox = owner_with_binding(CountingStarter {
             starts: starts.clone(),
             starts_after_close: starts_after_close.clone(),
             close: close.clone(),
@@ -550,7 +587,13 @@ mod tests {
             async move {
                 barrier.wait().await;
                 close_turn
-                    .send(&mailbox, SessionMessage::Close { close: None, reply })
+                    .send(
+                        &mailbox,
+                        SessionMessage::Close {
+                            close: close_of("bind_1"),
+                            reply,
+                        },
+                    )
                     .await;
                 while !close.check() {
                     tokio::task::yield_now().await;
@@ -602,5 +645,20 @@ mod tests {
             assert_eq!(outcome.starts_after_close, 0, "round {round}");
             assert_eq!(outcome.starts, 1, "round {round}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_close_of_another_binding_leaves_the_current_binding_admitting() {
+        let mailbox = owner_with_binding(NoTasks);
+        let (reply, admitted) = oneshot::channel();
+        let message = SessionMessage::Close {
+            close: close_of("bind_replaced"),
+            reply,
+        };
+        assert!(mailbox.send(message).is_ok());
+        admitted.await.unwrap();
+        let (message, admission) = tool("task-1");
+        assert!(mailbox.send(message).is_ok());
+        assert_eq!(admission.await.unwrap(), Admission::Started);
     }
 }
