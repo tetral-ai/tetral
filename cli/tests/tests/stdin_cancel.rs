@@ -241,6 +241,40 @@ fn failed_controls_leave_the_task_and_its_reports_unchanged() {
 }
 
 #[test]
+fn a_write_after_its_tasks_cleanup_is_result_unavailable_and_the_files_stay_deleted() {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let mut case = record.case("true, its files removed, then a write with write_seq 1");
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    tasks.execute(
+        "task_done",
+        json!({"cmd": "true"}),
+        policy(&tasks.project, "disabled"),
+    );
+    tasks.terminal("task_done");
+    tasks.wait_files_removed(tetral_tests::tasks::SESSION);
+    let late = tasks.stdin("task_done", json!({"chars": "x", "write_seq": 1}));
+    let late = tasks.reply(&late);
+    assert_eq!(
+        (&late["error"]["code"], &late["result"]),
+        (&json!("result_unavailable"), &Value::Null),
+        "{late:#}"
+    );
+    assert_eq!(
+        tasks.task_directories(tetral_tests::tasks::SESSION),
+        Vec::<std::path::PathBuf>::new()
+    );
+    assert_eq!(
+        tasks.temporary_directories(),
+        Vec::<std::path::PathBuf>::new()
+    );
+    case.observe(
+        "result_unavailable with no result; no task directory and no entry of T came back",
+    );
+}
+
+#[test]
 fn a_cancel_replies_with_the_cumulative_output_and_repeated_cancels_join_one_termination() {
     let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
@@ -317,7 +351,7 @@ fn reads_and_writes_wait_as_long_as_their_bounds_and_never_extend_the_task() {
     let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "a read with wait_ms 0, one that waits for output, one whose wait ends, a write's wait, and reads repeated over a lifetime of 1,000 ms",
+        "a read with wait_ms 0, one that waits for output, one whose wait ends, a write's wait, a write's wait_ms of 40,000, and reads repeated over a lifetime of 1,000 ms",
     );
     let directory = tempfile::tempdir().unwrap();
     let tasks = TaskMachine::start(&mut case, directory.path());
@@ -366,6 +400,18 @@ fn reads_and_writes_wait_as_long_as_their_bounds_and_never_extend_the_task() {
     assert_eq!(summary(&written), running("", json!(1)));
     assert_eq!(written["result"]["result"]["duration_ms"], 5_500);
 
+    let clamped = waiting(
+        &tasks,
+        "task_out",
+        json!({"chars": "y", "write_seq": 2, "wait_ms": 40_000}),
+    );
+    tasks.advance(millis(15_000));
+    advance_reply_timer(&tasks, millis(14_999));
+    seams.advance(millis(1));
+    let clamped = tasks.reply(&clamped);
+    assert_eq!(summary(&clamped), running("", json!(1)));
+    assert_eq!(clamped["result"]["result"]["duration_ms"], 35_500);
+
     // The running report comes 250 ms after the start; three reads of 250 ms
     // reach the lifetime's end, where the third one's reply races the
     // termination.
@@ -387,7 +433,7 @@ fn reads_and_writes_wait_as_long_as_their_bounds_and_never_extend_the_task() {
         (&json!(1_000), &json!(true)),
         "{terminal:#}"
     );
-    case.observe(format!("the immediate read after {elapsed:?}; the waiting read at the first output; the waiting read at 5,000 ms and not at 4,999 (duration_ms 5,250); the write's reply at 250 ms and not at 249 (duration_ms 5,500); three reads of 250 ms, then the terminal report at 1,000 ms with timed_out"));
+    case.observe(format!("the immediate read after {elapsed:?}; the waiting read at the first output; the waiting read at 5,000 ms and not at 4,999 (duration_ms 5,250); the write's reply at 250 ms and not at 249 (duration_ms 5,500); the write with wait_ms 40,000 replied at 30,000 ms and not at 29,999 (duration_ms 35,500); three reads of 250 ms, then the terminal report at 1,000 ms with timed_out"));
 }
 
 #[test]

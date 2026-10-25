@@ -148,8 +148,8 @@ temporary directories. No workspace crate depends on this package.
   task's processes, the metrics and the trace context.
 - `tests/stdin_cancel.rs`: `tool.stdin` and `tool.cancel`: writes recorded
   by `write_seq`, repeated and stale writes and a lost reply sent again,
-  failed controls, the waits of reads and writes and a lifetime they never
-  extend, windows and a lost read reply, a reply and the `terminal` report
+  failed controls, a write after the task's cleanup, the waits of reads and
+  writes, their clamps and a lifetime they never extend, windows and a lost read reply, a reply and the `terminal` report
   of an exit during its wait acknowledged apart, windows, counters and a
   control's `limits` in replies, a full pipe, writes sent together, escaped
   `chars`, U+0003, and cancels: their cumulative output, the one
