@@ -2,6 +2,7 @@
 //! it, Codex's check that it can create the namespaces a sandbox needs, and
 //! the profile that a launch hands to the Codex crates.
 
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
@@ -19,6 +20,12 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::Isolation;
 use crate::policy::TaskPermissions;
+
+/// The program name that Codex's lookup searches `PATH` for.
+const BWRAP: &str = "bwrap";
+
+/// The sticky bit of a directory's mode.
+const STICKY: u32 = 0o1000;
 
 /// The digest of the bundled `bwrap`, built into release builds. A build
 /// without it accepts the bundled `bwrap` unchecked, as Codex does.
@@ -38,15 +45,18 @@ pub(super) async fn check(
     permissions: &TaskPermissions,
     cwd: &Path,
     tetral: &Path,
-) -> Result<(), &'static str> {
+) -> Result<(), Cow<'static, str>> {
+    if let Some(planted) = planted_launcher() {
+        return Err(planted.into());
+    }
     let file_system = permissions.profile().file_system_sandbox_policy();
     let Some(bwrap) = select(isolation, &file_system, cwd, tetral).await else {
         return Err(
-            "no bwrap is available: none on PATH passes the capability probe, and none beside tetral matches its digest",
+            "no bwrap is available: none on PATH passes the capability probe, and none beside tetral matches its digest".into(),
         );
     };
     if is_wsl1() {
-        return Err("WSL1 cannot create the namespaces that bwrap needs");
+        return Err("WSL1 cannot create the namespaces that bwrap needs".into());
     }
     let probe = isolation
         .probe(
@@ -70,7 +80,7 @@ pub(super) async fn check(
                     .iter()
                     .any(|failure| output.stderr.contains(failure)) =>
         {
-            Err("bwrap cannot create user namespaces on this machine")
+            Err("bwrap cannot create user namespaces on this machine".into())
         }
         _ => Ok(()),
     }
@@ -102,6 +112,116 @@ pub(super) fn bwrap_candidates(tetral: &Path, cwd: &Path) -> Vec<PathBuf> {
         codex_linux_sandbox::find_bundled_bwrap_for_exe(tetral, cwd, |name| std::env::var_os(name))
             .and_then(|bundled| bundled.into_path_buf().canonicalize().ok());
     system.chain(bundled).collect()
+}
+
+/// The message that refuses every `bwrap`, when the first `bwrap` on this
+/// process's `PATH` that Codex's lookup could choose is one that this user
+/// can modify, or replace through any directory above it, ahead of every one
+/// that this user can neither modify nor replace. Codex's lookup skips such a
+/// `bwrap` only when the call's own profile could write it, so one that an
+/// earlier call with a broader grant left on `PATH` would run, as the
+/// launcher, outside any sandbox; and since a task runs as this user, no
+/// `bwrap` this user cannot change was planted by one. A later `bwrap` that
+/// this user can change is never chosen and is ignored. The walk resolves
+/// candidates as Codex's lookup does and judges each as Codex's
+/// `current_user_can_modify` and `current_user_can_replace_child` do, whatever
+/// the profile; the availability check runs it before any `bwrap`, and
+/// `tetral` as `codex-linux-sandbox` again before the launch.
+pub(super) fn planted_launcher() -> Option<String> {
+    let search_path = std::env::var_os("PATH")?;
+    let cwd = std::env::current_dir().ok()?;
+    let cwd = cwd.canonicalize().unwrap_or(cwd);
+    let cwd_is_root = cwd.parent().is_none();
+    for directory in std::env::split_paths(&search_path) {
+        let binary = if directory.starts_with("~") {
+            PathBuf::from(BWRAP)
+        } else {
+            cwd.join(&directory).join(BWRAP)
+        };
+        let Ok(found) = which::which_in(binary, Some(&directory), &cwd) else {
+            continue;
+        };
+        if !found.is_absolute() {
+            continue;
+        }
+        let (Some(name), Some(Ok(parent))) =
+            (found.file_name(), found.parent().map(std::fs::canonicalize))
+        else {
+            continue;
+        };
+        let alias = parent.join(name);
+        let Ok(canonical) = found.canonicalize() else {
+            continue;
+        };
+        if !cwd_is_root && (alias.starts_with(&cwd) || canonical.starts_with(&cwd)) {
+            continue;
+        }
+        let changeable = [&found, &alias, &canonical]
+            .into_iter()
+            .any(|path| user_can_modify(path) || user_can_replace(path));
+        return changeable.then(|| {
+            format!(
+                "{} on PATH is a bwrap that this user can modify or replace, so no bwrap is run; remove it, or put a bwrap that this user cannot change ahead of it on PATH",
+                found.display()
+            )
+        });
+    }
+    None
+}
+
+/// Whether this user can write `path` or make it writable: its owner, one
+/// that the kernel grants write with effective credentials and ACLs, or one
+/// whose check fails for any reason but a denial.
+fn user_can_modify(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return true;
+    };
+    if metadata.uid() == rustix::process::geteuid().as_raw() {
+        return true;
+    }
+    match rustix::fs::accessat(
+        rustix::fs::CWD,
+        path,
+        rustix::fs::Access::WRITE_OK,
+        rustix::fs::AtFlags::EACCESS,
+    ) {
+        Ok(()) => true,
+        Err(rustix::io::Errno::ACCESS | rustix::io::Errno::ROFS) => false,
+        Err(_) => true,
+    }
+}
+
+/// Whether this user can rename or remove `path` or any directory above it.
+fn user_can_replace(path: &Path) -> bool {
+    path.ancestors().any(|component| {
+        let (Some(parent), Some(name)) = (component.parent(), component.file_name()) else {
+            return false;
+        };
+        let Ok(parent) = parent.canonicalize() else {
+            return true;
+        };
+        user_can_replace_child(&parent, &parent.join(name))
+    })
+}
+
+/// Whether this user can replace `child` in the directory `parent`: it can
+/// modify `parent` and, when `parent` is sticky and another user's, owns
+/// `child`.
+fn user_can_replace_child(parent: &Path, child: &Path) -> bool {
+    if !user_can_modify(parent) {
+        return false;
+    }
+    let euid = rustix::process::geteuid();
+    if euid.is_root() {
+        return true;
+    }
+    let Ok(metadata) = std::fs::metadata(parent) else {
+        return true;
+    };
+    if metadata.mode() & STICKY == 0 || metadata.uid() == euid.as_raw() {
+        return true;
+    }
+    std::fs::symlink_metadata(child).map_or(true, |metadata| metadata.uid() == euid.as_raw())
 }
 
 /// The system `bwrap` when one on `PATH` passes the capability probe,

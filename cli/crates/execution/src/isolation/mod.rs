@@ -63,6 +63,14 @@ pub enum LaunchError {
     Spawn(io::Error),
 }
 
+/// The refusal of every `bwrap` while one on this process's `PATH` that this
+/// user could have planted comes before every one it cannot change
+/// (`linux.rs`), naming that path.
+#[cfg(target_os = "linux")]
+pub fn planted_launcher() -> Option<String> {
+    linux::planted_launcher()
+}
+
 /// The trusted programs of a call whose working directory is `cwd`: the
 /// running `tetral` and, on Linux, every `bwrap` that its launch could
 /// select, each canonical and found with `stat`, none run. The profile keeps
@@ -116,7 +124,7 @@ impl Isolation {
             .map(|()| Available(()))
             .map_err(|message| PolicyRejection {
                 code: RejectionCode::SandboxUnavailable,
-                message: message.to_owned(),
+                message: message.into(),
             })
     }
 

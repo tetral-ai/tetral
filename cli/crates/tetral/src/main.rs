@@ -16,12 +16,26 @@ fn main() -> ExitCode {
     let arguments: Vec<_> = std::env::args_os().collect();
     let argv0 = arguments.first().map(Path::new);
     // A sandboxed command runs this executable under this name, before any
-    // argument of it is parsed.
+    // argument of it is parsed. The walk covers a `bwrap` planted after the
+    // availability check, before Codex's lookup could choose it. The inner
+    // stage, which `bwrap` starts inside the sandbox, looks up no `bwrap`, and
+    // its root, a directory of the user, would make every candidate look
+    // replaceable.
     if argv0.and_then(Path::file_name)
         == Some(OsStr::new(
             codex_sandboxing::landlock::CODEX_LINUX_SANDBOX_ARG0,
         ))
     {
+        #[cfg(target_os = "linux")]
+        if !arguments[1..]
+            .iter()
+            .take_while(|argument| argument.as_os_str() != "--")
+            .any(|argument| argument == "--apply-seccomp-then-exec")
+            && let Some(planted) = execution::isolation::planted_launcher()
+        {
+            let _ = writeln!(std::io::stderr(), "{planted}");
+            return ExitCode::FAILURE;
+        }
         codex_linux_sandbox::run_main();
     }
     #[cfg(feature = "test-seams")]

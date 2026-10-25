@@ -8,7 +8,7 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// A directory that root already owns and the current user may look up,
@@ -60,4 +60,53 @@ pub fn sudo<'a>(args: impl IntoIterator<Item = &'a OsStr>) -> Result<(), String>
         panic!("{reason}");
     }
     ran
+}
+
+/// A directory of mode `0755` that root owns, directly in `/tmp`, whose
+/// sticky bit keeps this user from renaming it, with the files root
+/// installs in it; removed with them when dropped.
+pub struct RootDirectory {
+    path: PathBuf,
+}
+
+impl RootDirectory {
+    /// `/tmp/<name>-<process ID>`, made by root.
+    pub fn new(name: &str) -> Result<RootDirectory, String> {
+        let path = PathBuf::from(format!("/tmp/{name}-{}", std::process::id()));
+        sudo(
+            ["install", "-d", "-m", "0755", "-o", "0", "-g", "0"]
+                .map(OsStr::new)
+                .into_iter()
+                .chain([path.as_os_str()]),
+        )?;
+        Ok(RootDirectory { path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Installs a copy of `source` as `name`, owned by the user and group IDs
+    /// `owner`, with mode `0555`: no write bit, so that only its owner can
+    /// change it.
+    pub fn install(&self, source: &Path, name: &str, owner: (u32, u32)) -> Result<PathBuf, String> {
+        let target = self.path.join(name);
+        let (user, group) = (owner.0.to_string(), owner.1.to_string());
+        sudo(
+            ["install", "-m", "0555", "-o", &user, "-g", &group]
+                .map(OsStr::new)
+                .into_iter()
+                .chain([source.as_os_str(), target.as_os_str()]),
+        )?;
+        Ok(target)
+    }
+}
+
+impl Drop for RootDirectory {
+    fn drop(&mut self) {
+        let _ = Command::new("sudo")
+            .args(["-n", "rm", "-rf"])
+            .arg(&self.path)
+            .status();
+    }
 }

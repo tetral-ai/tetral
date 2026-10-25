@@ -16,6 +16,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tetral_tests::binaries;
+use tetral_tests::other_user::RootDirectory;
+use tetral_tests::record::Case;
 use tetral_tests::run::Tetral;
 use tetral_tests::seams::Seams;
 
@@ -150,7 +152,7 @@ impl World {
     /// Runs `probes` in one `bash` command and asserts each one's outcome.
     fn probe(
         &self,
-        case: &mut tetral_tests::record::Case,
+        case: &mut Case,
         policy: &Value,
         cwd: &Path,
         probes: &[(&str, String, Expect)],
@@ -233,7 +235,7 @@ fn script(probes: &[(&str, String, Expect)]) -> String {
 }
 
 fn check_probes(
-    case: &mut tetral_tests::record::Case,
+    case: &mut Case,
     policy: &Value,
     outcome: &Value,
     probes: &[(&str, String, Expect)],
@@ -624,20 +626,101 @@ fn fake_bwrap(directory: &Path, body: &str) -> PathBuf {
 }
 
 /// One way of offering a `bwrap` to the isolation: the `tetral` build, the
-/// App Server's `PATH`, and the bytes of a `bwrap` beside `tetral`. A `PATH`
-/// of `None` is the call's `read_write` directory alone, holding a copy of
-/// the host's `bwrap`.
+/// App Server's `PATH`, the bytes of a `bwrap` beside `tetral`, and the
+/// command's own `PATH`, which the launch hands to `tetral` as
+/// `codex-linux-sandbox`.
 struct Offer<'a> {
     name: &'a str,
     tetral: &'a Path,
-    path: Option<&'a str>,
+    path: &'a str,
     beside: Option<Vec<u8>>,
-    available: bool,
+    command_path: &'a str,
+    expected: Expected<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum Expected<'a> {
+    /// The command runs and writes its marker.
+    Runs,
+    /// The check rejects the call `sandbox_unavailable` and nothing starts;
+    /// for a planted `bwrap`, the message names it and it never runs.
+    Unavailable { planted: Option<&'a Path> },
+    /// The launch starts `tetral` as `codex-linux-sandbox`, which ends with
+    /// exit status 1 naming the planted `bwrap` on stderr before it runs it
+    /// or the command.
+    RefusedByTheHelper { planted: &'a Path },
+}
+
+/// The marker that a planted `bwrap` writes when it runs.
+fn ran_marker(planted: &Path) -> PathBuf {
+    planted.with_file_name("ran")
+}
+
+/// Runs a command that writes a marker through `offer` and checks what it
+/// expects.
+fn check_offer(case: &mut Case, offer: Offer) {
+    let Offer {
+        name,
+        tetral,
+        path,
+        beside,
+        command_path,
+        expected,
+    } = offer;
+    let world = World::with_tetral(tetral);
+    if let Some(bytes) = beside {
+        let bwrap = world.tetral.with_file_name("bwrap");
+        fs::write(&bwrap, bytes).unwrap();
+        fs::set_permissions(&bwrap, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let marker = world.project.join("marker");
+    let request = world.request(
+        &read_write(&world.project),
+        &world.project,
+        &["/bin/sh", "-c", &format!("echo > {}", quoted(&marker))],
+        command_path,
+    );
+    let seams = Seams::serve(&world.base, Duration::ZERO);
+    let outcome = harness(&world.tetral, &request, path, Some(&seams));
+    let spawned = seams.count("process.spawn");
+    case.observe(format!(
+        "{name}: {outcome}; process.spawn {spawned}; marker {}",
+        if marker.exists() { "written" } else { "absent" }
+    ));
+    let names = |text: &str, planted: &Path| {
+        assert!(text.contains(planted.to_str().unwrap()), "{name}: {text}");
+        assert!(
+            !ran_marker(planted).exists(),
+            "{name}: the planted bwrap ran"
+        );
+    };
+    match expected {
+        Expected::Runs => {
+            assert_eq!(outcome["exit_code"], 0, "{name}: {outcome}");
+            assert_eq!((spawned, marker.exists()), (1, true), "{name}");
+        }
+        Expected::Unavailable { planted } => {
+            assert_eq!(
+                outcome["rejected"]["code"], "sandbox_unavailable",
+                "{name}: {outcome}"
+            );
+            assert_eq!((spawned, marker.exists()), (0, false), "{name}");
+            if let Some(planted) = planted {
+                names(outcome["rejected"]["message"].as_str().unwrap(), planted);
+            }
+        }
+        Expected::RefusedByTheHelper { planted } => {
+            assert_eq!(outcome["exit_code"], 1, "{name}: {outcome}");
+            assert_eq!((spawned, marker.exists()), (1, false), "{name}");
+            names(outcome["stderr"].as_str().unwrap(), planted);
+        }
+    }
 }
 
 #[test]
 fn an_unusable_bwrap_rejects_the_call_before_any_process_starts() {
-    let mut case = tetral_tests::record!()
+    let record = tetral_tests::record!();
+    let mut case = record
         .case("an unusable bwrap rejects the call sandbox_unavailable before any process starts");
     let host_bwrap_bytes = fs::read(host_bwrap()).unwrap();
     let digest_build = binaries::tetral_with_bwrap_digest(&sha256_hex(&host_bwrap_bytes));
@@ -645,105 +728,162 @@ fn an_unusable_bwrap_rejects_the_call_before_any_process_starts() {
     let scratch = scratch.path().canonicalize().unwrap();
     let empty = scratch.join("empty");
     fs::create_dir_all(&empty).unwrap();
-    let old_help = fake_bwrap(
-        &scratch.join("old-help"),
-        "echo 'usage: bwrap [OPTIONS...] [--] COMMAND [ARGS...]\n    --perms OCTAL'",
-    );
-    let no_namespaces = fake_bwrap(
-        &scratch.join("no-namespaces"),
-        "if [ \"$1\" = --help ]; then echo '--as-pid-1 --perms'; exit 0; fi\necho 'bwrap: No permissions to create a new namespace' >&2\nexit 1",
-    );
-
     let empty = empty.to_str().unwrap();
+    let no_namespaces =
+        b"#!/bin/sh\necho 'bwrap: No permissions to create a new namespace' >&2\nexit 1\n".to_vec();
+
+    // A copy of the host's bwrap that the test user owns, in a PATH directory
+    // ahead of the system one that the call's profile cannot write, as an
+    // earlier call with a broader grant could have left it there.
+    let planted_directory = scratch.join("planted");
+    fs::create_dir_all(&planted_directory).unwrap();
+    let copy = planted_directory.join("bwrap-copy");
+    fs::copy(host_bwrap(), &copy).unwrap();
+    let planted = planted_directory.join("bwrap");
+    fake_bwrap(
+        &planted_directory,
+        &format!(
+            "echo > {}\nexec {} \"$@\"",
+            quoted(&ran_marker(&planted)),
+            quoted(&copy)
+        ),
+    );
+    let planted_path = format!("{}:{SYSTEM_PATH}", planted_directory.display());
+    let planted_last = format!("{SYSTEM_PATH}:{}", planted_directory.display());
+    // A symbolic link to the host's bwrap: root owns the file, but the test
+    // user can replace the link.
+    let link_directory = scratch.join("link");
+    fs::create_dir_all(&link_directory).unwrap();
+    let link = link_directory.join("bwrap");
+    symlink(host_bwrap(), &link).unwrap();
+    let link_path = format!("{}:{SYSTEM_PATH}", link_directory.display());
+
     let rows = [
         Offer {
             name: "no bwrap on PATH and none beside tetral",
             tetral: binaries::tetral(),
-            path: Some(empty),
+            path: empty,
             beside: None,
-            available: false,
-        },
-        Offer {
-            name: "the only bwrap on PATH lacks --as-pid-1",
-            tetral: binaries::tetral(),
-            path: Some(old_help.to_str().unwrap()),
-            beside: None,
-            available: false,
+            command_path: SYSTEM_PATH,
+            expected: Expected::Unavailable { planted: None },
         },
         Offer {
             name: "a bwrap beside a tetral built with a digest that its bytes do not match",
             tetral: digest_build,
-            path: Some(empty),
+            path: empty,
             beside: Some([host_bwrap_bytes.as_slice(), b"\0"].concat()),
-            available: false,
+            command_path: SYSTEM_PATH,
+            expected: Expected::Unavailable { planted: None },
         },
         Offer {
-            name: "the bwrap on PATH cannot create a namespace",
+            name: "no bwrap on PATH and, beside a tetral built without a digest, a bwrap that cannot create a namespace",
             tetral: binaries::tetral(),
-            path: Some(no_namespaces.to_str().unwrap()),
-            beside: None,
-            available: false,
+            path: empty,
+            beside: Some(no_namespaces),
+            command_path: SYSTEM_PATH,
+            expected: Expected::Unavailable { planted: None },
         },
         Offer {
             name: "the host's bwrap on PATH",
             tetral: binaries::tetral(),
-            path: Some(SYSTEM_PATH),
+            path: SYSTEM_PATH,
             beside: None,
-            available: true,
+            command_path: SYSTEM_PATH,
+            expected: Expected::Runs,
         },
         Offer {
-            name: "the host's bwrap copied into the directory that the call may write, alone on PATH",
+            name: "a copy of the host's bwrap that the test user owns, ahead of the system one on PATH, in a directory the call cannot write",
             tetral: binaries::tetral(),
-            path: None,
+            path: &planted_path,
             beside: None,
-            available: true,
+            command_path: SYSTEM_PATH,
+            expected: Expected::Unavailable {
+                planted: Some(&planted),
+            },
+        },
+        Offer {
+            name: "that copy after the system bwrap on PATH",
+            tetral: binaries::tetral(),
+            path: &planted_last,
+            beside: None,
+            command_path: SYSTEM_PATH,
+            expected: Expected::Runs,
+        },
+        Offer {
+            name: "a symbolic link that the test user owns, ahead of the system bwrap on PATH, to the host's bwrap",
+            tetral: binaries::tetral(),
+            path: &link_path,
+            beside: None,
+            command_path: SYSTEM_PATH,
+            expected: Expected::Unavailable {
+                planted: Some(&link),
+            },
+        },
+        Offer {
+            name: "that copy first only on the command's PATH, as if planted after the check",
+            tetral: binaries::tetral(),
+            path: SYSTEM_PATH,
+            beside: None,
+            command_path: &planted_path,
+            expected: Expected::RefusedByTheHelper { planted: &planted },
         },
     ];
-    for Offer {
-        name,
-        tetral,
-        path,
-        beside,
-        available,
-    } in rows
-    {
-        let world = World::with_tetral(tetral);
-        if let Some(bytes) = beside {
-            let bwrap = world.tetral.with_file_name("bwrap");
-            fs::write(&bwrap, bytes).unwrap();
-            fs::set_permissions(&bwrap, fs::Permissions::from_mode(0o755)).unwrap();
+    for offer in rows {
+        check_offer(&mut case, offer);
+    }
+    drop(case);
+
+    let mut case = record.case(
+        "bwrap files in directories that root owns: one root owns whose --help lacks --as-pid-1, alone on PATH, and one the test user owns, ahead of the system bwrap",
+    );
+    if !case.runs_as_non_root("root can modify every file, so it trusts no system bwrap") {
+        return;
+    }
+    let old_help = fake_bwrap(
+        &scratch.join("old-help"),
+        "echo 'usage: bwrap [OPTIONS...] [--] COMMAND [ARGS...]\n    --perms OCTAL'",
+    )
+    .join("bwrap");
+    let user = (
+        rustix::process::getuid().as_raw(),
+        rustix::process::getgid().as_raw(),
+    );
+    let made = (|| {
+        let help_directory = RootDirectory::new("tetral-old-help-bwrap")?;
+        help_directory.install(&old_help, "bwrap", (0, 0))?;
+        let user_directory = RootDirectory::new("tetral-user-bwrap")?;
+        let user_bwrap = user_directory.install(&host_bwrap(), "bwrap", user)?;
+        Ok::<_, String>((help_directory, user_directory, user_bwrap))
+    })();
+    let (help_directory, user_directory, user_bwrap) = match made {
+        Ok(made) => made,
+        Err(reason) => {
+            case.not_run(reason);
+            return;
         }
-        let path = match path {
-            Some(path) => path,
-            None => {
-                fs::copy(host_bwrap(), world.project.join("bwrap")).unwrap();
-                world.project.to_str().unwrap()
-            }
-        };
-        let marker = world.project.join("marker");
-        let request = world.request(
-            &read_write(&world.project),
-            &world.project,
-            &["/bin/sh", "-c", &format!("echo > {}", quoted(&marker))],
-            SYSTEM_PATH,
-        );
-        let seams = Seams::serve(&world.base, Duration::ZERO);
-        let outcome = harness(&world.tetral, &request, path, Some(&seams));
-        let spawned = seams.count("process.spawn");
-        case.observe(format!(
-            "{name}: {outcome}; process.spawn {spawned}; marker {}",
-            if marker.exists() { "written" } else { "absent" }
-        ));
-        if available {
-            assert_eq!(outcome["exit_code"], 0, "{name}: {outcome}");
-            assert_eq!((spawned, marker.exists()), (1, true), "{name}");
-        } else {
-            assert_eq!(
-                outcome["rejected"]["code"], "sandbox_unavailable",
-                "{name}: {outcome}"
-            );
-            assert_eq!((spawned, marker.exists()), (0, false), "{name}");
-        }
+    };
+    let user_path = format!("{}:{SYSTEM_PATH}", user_directory.path().display());
+    for offer in [
+        Offer {
+            name: "the only bwrap on PATH, owned by root, lacks --as-pid-1",
+            tetral: binaries::tetral(),
+            path: help_directory.path().to_str().unwrap(),
+            beside: None,
+            command_path: SYSTEM_PATH,
+            expected: Expected::Unavailable { planted: None },
+        },
+        Offer {
+            name: "a copy of the host's bwrap that the test user owns, in a directory root owns, ahead of the system bwrap on PATH",
+            tetral: binaries::tetral(),
+            path: &user_path,
+            beside: None,
+            command_path: SYSTEM_PATH,
+            expected: Expected::Unavailable {
+                planted: Some(&user_bwrap),
+            },
+        },
+    ] {
+        check_offer(&mut case, offer);
     }
 }
 

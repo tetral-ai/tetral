@@ -31,6 +31,12 @@ which owns that task's process tree; the translation of a call's
   Every `bwrap` it could pick, like the running `tetral`, is a trusted
   program that each task's profile keeps read-only
   (`isolation::trusted_programs`).
+- No `bwrap` that a task could have planted is ever run: while a `bwrap` on
+  `PATH` that this user can modify or replace comes before every one it
+  cannot, the availability check rejects the call `sandbox_unavailable`
+  naming that path, before any probe, and `tetral` as `codex-linux-sandbox`
+  ends the command with that message before the launch
+  (`isolation::planted_launcher`, `isolation/linux.rs`).
 - A missing protected path stays uncreatable. The Codex crates mount an
   empty read-only entry at a missing top-level `.git` of a writable path, and
   at a missing `read` or `deny` path inside one, which `bwrap` must first
@@ -61,9 +67,9 @@ which owns that task's process tree; the translation of a call's
 - `policy/translate.rs`: `TranslationInputs` and the profile's entries.
 - `isolation/mod.rs`: `Isolation`, its `check` and `launch`, `Available`,
   `Command`, `LaunchError` and `trusted_programs`.
-- `isolation/linux.rs`: the choice of `bwrap` and its candidates, the digest
-  check of the bundled one, the WSL1 test, the namespace probe and the
-  launch profile.
+- `isolation/linux.rs`: the choice of `bwrap` and its candidates, the walk
+  for a planted `bwrap`, the digest check of the bundled one, the WSL1 test,
+  the namespace probe and the launch profile.
 - `report.rs`: `Report`, its `Correlation` and `Body`, the error bounds
   (`bounded`) and the size fitting of a process result (`fit`).
 - `store.rs`: a task's name and the paths of `T` and of a task's temporary

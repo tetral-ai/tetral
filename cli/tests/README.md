@@ -45,11 +45,12 @@ temporary directories. No workspace crate depends on this package.
   beside it for as long as it runs, and a test that replaces `S` holds that
   lock exclusively for as long as `S` is replaced and puts `S` back when it
   releases it (`socket_directory::ReplacedSocketDir`).
-- A case that needs `S` owned by another user has root make it with
-  `sudo -n`; where that fails the case is recorded as not run, and under
-  GitHub Actions the test fails instead (`other_user::sudo`). A state root
-  owned by another user needs no privilege: such a case uses a directory
-  that root already owns (`other_user::directory`).
+- A case that needs `S` owned by another user, or a `bwrap` that this user
+  can neither modify nor replace, has root make it with `sudo -n`; where that
+  fails the case is recorded as not run, and under GitHub Actions the test
+  fails instead (`other_user::sudo`, `other_user::RootDirectory`). A state
+  root owned by another user needs no privilege: such a case uses a
+  directory that root already owns (`other_user::directory`).
 
 ## Where things are
 
@@ -68,8 +69,9 @@ temporary directories. No workspace crate depends on this package.
 - `src/snapshot.rs`: `snapshot`, every path under a directory with its kind,
   owner, mode and bytes.
 - `src/socket_directory.rs`: the locks on `S` and its replacements for a case.
-- `src/other_user.rs`: a directory that another user owns, and `sudo -n`
-  under the rule above.
+- `src/other_user.rs`: a directory that another user owns, `sudo -n` under
+  the rule above, and `RootDirectory`, a directory that root makes in
+  `/tmp`.
 - `src/app_server.rs`: `AppServer`, a running `server run`, and `request`, one
   raw HTTP/1.1 request to the local API over a socket whose path it derives
   apart from the code under test (`socket_path`).
@@ -138,6 +140,6 @@ temporary directories. No workspace crate depends on this package.
   `tetral` executable, `.git` and the metadata names, symbolic links, path
   aliases and inherited descriptors, and a missing deny path in a directory
   of another user; `disabled` and `direct` against TCP,
-  UDP and HTTP on the loopback and the LAN address; each unusable `bwrap`
-  rejected before any process starts; and the bundled `bwrap` with its
-  digest.
+  UDP and HTTP on the loopback and the LAN address; each unusable `bwrap`,
+  one that the test user could have planted among them, rejected before any
+  process starts; and the bundled `bwrap` with its digest.

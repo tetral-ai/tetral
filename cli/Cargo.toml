@@ -55,6 +55,7 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 trybuild = "1.0.122"
 unicode-normalization = "0.1.26"
 unicode-properties = { version = "0.1.4", default-features = false, features = ["general-category"] }
+which = "8.0.6"
 
 codex-linux-sandbox = { git = "https://github.com/openai/codex", tag = "rust-v0.164.0" }
 codex-protocol = { git = "https://github.com/openai/codex", tag = "rust-v0.164.0" }

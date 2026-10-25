@@ -16,7 +16,9 @@ runs as child processes of itself.
 - Run with `argv[0]` `codex-linux-sandbox`, it is Codex's sandbox helper
   (`codex_linux_sandbox::run_main`) and nothing else, decided before any
   argument is parsed: every sandboxed command runs this executable under that
-  name (`main`).
+  name. Before it starts `bwrap`, it refuses a `bwrap` on `PATH` that this
+  user could have planted (`execution::isolation::planted_launcher`), with
+  exit status 1 and the reason on stderr (`main`).
 - Run with `argv[0]` `tetral-cwd-probe`, it is the App Server's directory
   probe and nothing else: it reads at most
   `session::probe_child::INPUT_MAX_BYTES` of stdin and writes the probe's one
