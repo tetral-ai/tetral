@@ -672,7 +672,7 @@ func TestPrintLoggingGuardNamesTheFileAndLineOfEachViolation(t *testing.T) {
 	for rel, body := range map[string]string{
 		"services/api/record.go":                     records,
 		"services/api/handler.go":                    "package api\n\nimport logging \"log/slog\"\n\nvar handler = logging.NewJSONHandler(nil, nil)\n",
-		"internal/workload/owner.go":                 "package workload\n\nimport \"log/slog\"\n\nfunc install() { slog.SetDefault(nil) }\n",
+		"internal/workload/owner.go":                 "package workload\n\nimport (\n\t\"fmt\"\n\t\"log/slog\"\n)\n\nfunc install() {\n\tslog.SetDefault(nil)\n\tfmt.Println(\"installed\")\n}\n",
 		"integration/harness.go":                     "package integration\n\nimport (\n\t\"fmt\"\n\t\"log/slog\"\n)\n\nfunc trace() {\n\tslog.Info(\"harness\")\n\tfmt.Println(\"harness\")\n}\n",
 		"services/queue/print.go":                    "package queue\n\nimport \"fmt\"\n\nfunc report() {\n\tfmt.Print(\"a\")\n\tfmt.Printf(\"%s\", \"b\")\n\tfmt.Println(\"done\")\n}\n",
 		"internal/testinfra/cmd/tool/main.go":        "package main\n\nimport (\n\t\"fmt\"\n\t\"log/slog\"\n)\n\nfunc main() {\n\tfmt.Println(\"plan\")\n\tslog.Info(\"plan\")\n}\n",
@@ -695,6 +695,7 @@ func TestPrintLoggingGuardNamesTheFileAndLineOfEachViolation(t *testing.T) {
 	want = append(want,
 		"services/api/handler.go:5 calls slog.NewJSONHandler; record through internal/workload",
 		"integration/harness.go:10 calls fmt.Println; record through internal/workload",
+		"internal/workload/owner.go:10 calls fmt.Println; record through internal/workload",
 		"internal/testinfra/cmd/tool/main.go:10 calls slog.Info; record through internal/workload",
 		"services/gateway/packages/x/src/service.ts:2 calls console; record through @tetral/ts-observability",
 		"services/queue/print.go:6 calls fmt.Print; record through internal/workload",
