@@ -663,8 +663,11 @@ func TestCredentialExpiryIsBoundedAndResolvedOnce(t *testing.T) {
 	beyond := time.Now().UTC().Add(61 * time.Minute).Format(time.RFC3339)
 	status, body := f.do(http.MethodPost, "/v1/instances", []string{"expiry-61"}, `{"name":"laptop","credential":{"expires_at":"`+beyond+`"}}`)
 	requireAPIError(t, status, body, http.StatusBadRequest, "invalid_request_error", "expires_at")
+	comma := strings.Replace(within.Add(500*time.Millisecond).Format(time.RFC3339Nano), ".", ",", 1)
+	status, body = f.do(http.MethodPost, "/v1/instances", []string{"expiry-comma"}, `{"name":"laptop","credential":{"expires_at":"`+comma+`"}}`)
+	requireAPIError(t, status, body, http.StatusBadRequest, "invalid_request_error", "expires_at")
 	if after := f.rowCounts(); after != before {
-		t.Fatalf("rows %v -> %v; the refused expiry wrote", before, after)
+		t.Fatalf("rows %v -> %v; a refused expiry wrote", before, after)
 	}
 	status, omitted := f.createInstance("expiry-omitted", `{"name":"laptop","credential":{}}`)
 	issuedAt, _ := time.Parse(time.RFC3339Nano, omitted.Credential["issued_at"].(string))

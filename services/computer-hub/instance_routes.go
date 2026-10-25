@@ -566,7 +566,9 @@ func requestedExpiry(fields map[string]json.RawMessage) (*time.Time, error) {
 		return nil, nil
 	}
 	var text string
-	if len(raw) == 0 || raw[0] != '"' || json.Unmarshal(raw, &text) != nil || !strings.HasSuffix(text, "Z") {
+	// time.Parse also takes a comma before the fraction, which RFC 3339 does
+	// not allow.
+	if len(raw) == 0 || raw[0] != '"' || json.Unmarshal(raw, &text) != nil || !strings.HasSuffix(text, "Z") || strings.Contains(text, ",") {
 		return nil, &httpapi.ValidationError{Message: "expires_at must be an RFC 3339 UTC time"}
 	}
 	at, err := time.Parse(time.RFC3339Nano, text)
