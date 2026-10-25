@@ -635,7 +635,19 @@ fn eight_probes_held_for_five_seconds_time_out_and_keep_their_slots_until_reaped
     machine.seams.wait_until_waiting(PROBE_STARTED, 8);
     let ninth = prepare(&engine, &payload("sess_9", "bind_1", &project));
     quiesce(&machine, 9);
-    machine.seams.advance(seconds(5.0));
+    // Each Session binding owner acts on its passed probe deadline before
+    // it answers the listing, and the Connection owner has settled on the
+    // clock's time, so the listing shows both the probes and the waiting
+    // preparation as of 4.999 seconds.
+    machine.advance(seconds(4.999));
+    for index in 1..=9 {
+        assert_eq!(
+            state_of(&machine, &format!("sess_{index}")),
+            "preparing",
+            "sess_{index}"
+        );
+    }
+    machine.seams.advance(seconds(0.001));
     assert_eq!(outcome(&engine, &ninth), failed("resource_exhausted"));
     for message_id in &held {
         assert_eq!(outcome(&engine, message_id), failed("cwd_check_timeout"));
@@ -650,7 +662,7 @@ fn eight_probes_held_for_five_seconds_time_out_and_keep_their_slots_until_reaped
         (&started[0]["pressure.point"], &started[0]["pressure.cause"]),
         (&json!("tetral_probes"), &json!("timeout"))
     );
-    case.observe("the ninth failed with resource_exhausted, the eight with cwd_check_timeout, probe.spawn counts 8, and one pressure.rejecting_started names tetral_probes and timeout");
+    case.observe("all nine were preparing at 4.999 seconds; at 5 the ninth failed with resource_exhausted, the eight with cwd_check_timeout, probe.spawn counts 8, and one pressure.rejecting_started names tetral_probes and timeout");
 
     let mut case =
         record.case("a preparation after the timeouts while the eight are still unreaped");
