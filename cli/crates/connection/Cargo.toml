@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+bytes.workspace = true
 drive.workspace = true
 eventsource-stream.workspace = true
 futures-core.workspace = true
@@ -13,9 +14,13 @@ http-body.workspace = true
 observe.workspace = true
 protocol.workspace = true
 rand.workspace = true
-serde = { workspace = true, features = ["derive"] }
 reqwest.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 state.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread"] }

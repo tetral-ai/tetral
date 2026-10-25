@@ -60,6 +60,35 @@ impl ErrorCode {
             RateLimited => 429,
         }
     }
+
+    /// The code as it is written on the wire.
+    pub const fn as_str(self) -> &'static str {
+        use ErrorCode::*;
+        match self {
+            InvalidMessage => "invalid_message",
+            ContentHashMismatch => "content_hash_mismatch",
+            CredentialInvalid => "credential_invalid",
+            CredentialExpired => "credential_expired",
+            CredentialRevoked => "credential_revoked",
+            InstanceUnavailable => "instance_unavailable",
+            CliUpgradeRequired => "cli_upgrade_required",
+            DriveAccessDenied => "drive_access_denied",
+            NotFound => "not_found",
+            ContentNotFound => "content_not_found",
+            ConnectionConflict => "connection_conflict",
+            PreviousConnectionActive => "previous_connection_active",
+            StaleConnection => "stale_connection",
+            StaleBinding => "stale_binding",
+            ContentMissing => "content_missing",
+            MessageConflict => "message_conflict",
+            UnknownInstruction => "unknown_instruction",
+            DriveCursorExpired => "drive_cursor_expired",
+            RequestTooLarge => "request_too_large",
+            FileTooLarge => "file_too_large",
+            RangeNotSatisfiable => "range_not_satisfiable",
+            RateLimited => "rate_limited",
+        }
+    }
 }
 
 /// The hashes one `content_missing` error lists, at most the changes of one
@@ -265,6 +294,42 @@ impl DriveTransferEndpoint {
                     RangeNotSatisfiable,
                 ],
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_code_reads_as_the_name_it_is_written_with() {
+        use ErrorCode::*;
+        for code in [
+            InvalidMessage,
+            ContentHashMismatch,
+            CredentialInvalid,
+            CredentialExpired,
+            CredentialRevoked,
+            InstanceUnavailable,
+            CliUpgradeRequired,
+            DriveAccessDenied,
+            NotFound,
+            ContentNotFound,
+            ConnectionConflict,
+            PreviousConnectionActive,
+            StaleConnection,
+            StaleBinding,
+            ContentMissing,
+            MessageConflict,
+            UnknownInstruction,
+            DriveCursorExpired,
+            RequestTooLarge,
+            FileTooLarge,
+            RangeNotSatisfiable,
+            RateLimited,
+        ] {
+            assert_eq!(serde_json::to_value(code).unwrap(), code.as_str());
         }
     }
 }

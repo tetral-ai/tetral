@@ -360,6 +360,7 @@ dependencies = [
 name = "connection"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "bytes",
  "drive",
  "eventsource-stream",
  "futures-core",
@@ -371,6 +372,7 @@ dependencies = [
  "serde",
  "serde_json",
  "state",
+ "tempfile",
  "thiserror",
  "tokio",
 ]

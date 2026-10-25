@@ -3,13 +3,22 @@
 //! into what the Connection owner acts on. No request is ever recorded with
 //! its headers or body.
 
+use std::convert::Infallible;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
+use bytes::Bytes;
+use http_body::{Frame, SizeHint};
 use protocol::bootstrap::BootstrapKey;
 use protocol::connection::MESSAGE_MAX_BYTES;
 use protocol::errors::{ErrorBody, decode_client_error};
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
-use reqwest::{Response, StatusCode, Url};
+use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
+use reqwest::{Body, Response, StatusCode, Url};
+
+use crate::clock::Clock;
 
 /// The total time of one attempt of an ordinary request.
 pub const REQUEST_TOTAL: Duration = Duration::from_secs(10);
@@ -89,6 +98,61 @@ impl Transport {
         }
     }
 
+    /// `POST <path>` of a frozen report with its exact `Content-Length` and
+    /// the `traceparent` of its instruction. The attempt fails at `deadline`
+    /// on `clock`, and earlier once `stall` passes without progress: before
+    /// the first byte is taken, between bytes, or after the last one without
+    /// an answer.
+    pub async fn post_report(
+        &self,
+        path: &str,
+        key: &BootstrapKey,
+        report: ReportRequest,
+        clock: &Clock,
+    ) -> Answer {
+        let ReportRequest {
+            bytes,
+            traceparent,
+            deadline,
+            stall,
+        } = report;
+        let length = bytes.len();
+        let progress = Arc::new(AtomicU64::new(nanos(clock.now())));
+        let mut request = self
+            .client
+            .post(self.url(path))
+            .header(AUTHORIZATION, format!("Bearer {}", key.expose()))
+            .header(CONTENT_TYPE, "application/json")
+            .header(CONTENT_LENGTH, length);
+        if let Some(traceparent) = traceparent {
+            request = request.header("traceparent", traceparent);
+        }
+        let request = request.body(Body::wrap(Chunks {
+            bytes,
+            taken: 0,
+            clock: clock.clone(),
+            progress: progress.clone(),
+        }));
+        let answer = async {
+            match request.send().await {
+                Ok(response) => read_answer(response).await,
+                Err(_) => Answer::Failed(Failure::Network),
+            }
+        };
+        tokio::pin!(answer);
+        loop {
+            let last = Duration::from_nanos(progress.load(Ordering::Acquire));
+            let until = deadline.min(last + stall);
+            if clock.now() >= until {
+                return Answer::Failed(Failure::Timeout);
+            }
+            tokio::select! {
+                answer = &mut answer => return answer,
+                () = clock.sleep_until(until) => {}
+            }
+        }
+    }
+
     /// `GET /v1/client/events` with `query`: the response once its status is
     /// `200`, or the answer otherwise. Its time is bounded by the caller.
     pub async fn events(
@@ -110,6 +174,63 @@ impl Transport {
         } else {
             Err(read_answer(response).await)
         }
+    }
+}
+
+/// One attempt of a frozen report.
+#[derive(Debug)]
+pub struct ReportRequest {
+    pub bytes: Vec<u8>,
+    pub traceparent: Option<String>,
+    /// The end of the attempt on the outbox's clock.
+    pub deadline: Duration,
+    pub stall: Duration,
+}
+
+/// The bytes of a report handed to the connection one chunk at a time. Each
+/// chunk taken stores the clock's time in `progress`, since a waiter that
+/// noticed progress only when it woke would measure the stall from then.
+struct Chunks {
+    bytes: Vec<u8>,
+    taken: usize,
+    clock: Clock,
+    progress: Arc<AtomicU64>,
+}
+
+fn nanos(time: Duration) -> u64 {
+    u64::try_from(time.as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// The size of each chunk of a report's body.
+const CHUNK_BYTES: usize = 65_536;
+
+impl http_body::Body for Chunks {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+        let this = self.get_mut();
+        let start = this.taken;
+        if start >= this.bytes.len() {
+            return Poll::Ready(None);
+        }
+        let end = (start + CHUNK_BYTES).min(this.bytes.len());
+        let chunk = Bytes::copy_from_slice(&this.bytes[start..end]);
+        this.taken = end;
+        this.progress
+            .store(nanos(this.clock.now()), Ordering::Release);
+        Poll::Ready(Some(Ok(Frame::data(chunk))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.taken >= self.bytes.len()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::with_exact((self.bytes.len() - self.taken) as u64)
     }
 }
 

@@ -3,35 +3,19 @@
 
 pub mod attempt;
 pub mod backoff;
+pub mod clock;
 pub mod heartbeat;
 pub mod http;
 pub mod ledger;
+pub mod outbox;
 pub mod owner;
 pub mod ready;
+pub mod report_deadline;
 pub mod staging;
 pub mod status;
 pub mod stream;
 
-use tokio::sync::mpsc;
-
+pub use outbox::{Outbox, OutboxConfig, OutboxEvent, OutboxTimes};
 pub use owner::{Config, Connection, Credential, Instruction, Times};
 pub use ready::ReadyFields;
 pub use status::ConnectionStatus;
-
-pub enum OutboxMessage {}
-
-pub type OutboxMailbox = mpsc::UnboundedSender<OutboxMessage>;
-
-pub fn spawn_report_outbox() -> OutboxMailbox {
-    let (mailbox, mut messages) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        while let Some(message) = messages.recv().await {
-            handle_outbox_message(message);
-        }
-    });
-    mailbox
-}
-
-fn handle_outbox_message(message: OutboxMessage) {
-    match message {}
-}

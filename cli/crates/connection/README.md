@@ -36,6 +36,12 @@ Server:
   (`stream`).
 - The transport follows no redirect and never records a request's headers or
   body (`http`).
+- A report is frozen under `outbox/` before its first send, and each retry
+  sends that file again, until its matching ACK, a refusal or its
+  connection's end, which cancels its uploads and deletes its directory; no
+  report is sent on another connection (`outbox`). An attempt ends at its
+  total, which grows with the size of a size-scaled report, and earlier
+  after 10 seconds without progress (`report_deadline`, `http`).
 - The replay ledger records a new operation only while its reserve stays
   free after recording it; the rest may use the reserve; it never removes an
   entry to make room, and an entry goes only once its instruction's final
@@ -51,6 +57,10 @@ connection held, which a new connection names as its predecessor, the staged
 instructions and the status fields `connection_state`, `connection_id`,
 `credential_id`, `expires_at` and `last_error`.
 
+The Report outbox owns the current connection's number and identity and its
+pending reports, each with its `r<n>` identity, its frozen file, its backoff
+and its running attempt.
+
 ## Entry points
 
 - `Connection::spawn(Config)` starts the Connection owner; `status()` gives
@@ -58,8 +68,11 @@ instructions and the status fields `connection_state`, `connection_id`,
   `stopped`.
 - `Times` holds the owner's durations and limits, each a constant but for
   tests.
-- `spawn_report_outbox`, `OutboxMessage` and `OutboxMailbox`: the Report
-  outbox.
+- `Outbox::spawn(OutboxConfig)` starts the Report outbox, which implements
+  `protocol::ports::ReportSink`; the Connection owner tells it each
+  connection's start and end, and it answers with `OutboxEvent`s.
+  `OutboxTimes` holds its durations, each a constant but for tests, and its
+  `Clock` is the CLI's clock but for tests.
 
 ## Where things are
 
@@ -72,7 +85,9 @@ instructions and the status fields `connection_state`, `connection_id`,
 | `src/staging.rs` | The staging queue and `STAGING_MAX` |
 | `src/ledger.rs` | The replay ledger, its limits and reserve, and when an entry goes |
 | `src/backoff.rs` | The backoff of reconnects and of each message's retries |
-| `src/http.rs` | `Transport`, the sorting of answers (`Answer`, `Failure`) and `REQUEST_TOTAL` |
+| `src/http.rs` | `Transport`, the sorting of answers (`Answer`, `Failure`), `REQUEST_TOTAL`, and a report's attempt bounded by its progress (`ReportRequest`) |
+| `src/outbox.rs` | The Report outbox: identities `r<n>`, freezing, sending, retries, ACKs and refusals, connection ends, and the record `report.dropped` |
+| `src/report_deadline.rs` | A report attempt's total and `STALL_LIMIT` |
+| `src/clock.rs` | The clock the outbox reads |
 | `src/stream.rs` | The bounded reading of an event stream (`Events`) and `EVENT_MAX_BYTES` |
 | `src/status.rs` | `ConnectionStatus`, the record `connection.state_changed` and the metrics `tetral_connection_state` and `tetral_reconnects_total` |
-| `src/lib.rs` | The Report outbox's skeleton |
