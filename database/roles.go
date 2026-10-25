@@ -73,7 +73,7 @@ func LoadRoleContract() (RoleContract, error) {
 				(function == "tetral_prune_job_runner_jobs(text, timestamptz, integer)" && workload == "queue")
 			if workload == "auth" {
 				switch function {
-				case "tetral_auth_lookup_key(bytea)", "tetral_auth_lookup_token(bytea)", "tetral_auth_lookup_grants(text, text)", "tetral_auth_lock_authority(text, text, text, text)", "tetral_auth_prune_tokens(integer)":
+				case "tetral_auth_lookup_key(bytea)", "tetral_auth_lookup_token(bytea)", "tetral_auth_lookup_grants(text, text)", "tetral_auth_lock_authority(text, text, text, text)", "tetral_auth_prune_tokens(integer)", "tetral_auth_lookup_connection_key(bytea)":
 					allowed = true
 				}
 			}

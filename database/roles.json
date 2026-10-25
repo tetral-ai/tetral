@@ -58,7 +58,8 @@
         "tetral_auth_lookup_token(bytea)",
         "tetral_auth_lookup_grants(text, text)",
         "tetral_auth_lock_authority(text, text, text, text)",
-        "tetral_auth_prune_tokens(integer)"
+        "tetral_auth_prune_tokens(integer)",
+        "tetral_auth_lookup_connection_key(bytea)"
       ]
     },
     "queue": {
@@ -244,6 +245,13 @@
         "runtime_process_liveness": ["SELECT"],
         "session_runtime_handoffs": ["SELECT"],
         "session_runtime_handoff_threads": ["SELECT"],
+        "tetral_schema_migrations": ["SELECT"]
+      }
+    },
+    "computer_hub": {
+      "tables": {
+        "instances": ["SELECT"],
+        "instance_credentials": ["SELECT"],
         "tetral_schema_migrations": ["SELECT"]
       }
     }

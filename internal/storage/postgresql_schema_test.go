@@ -2475,6 +2475,8 @@ func expectedVersionOneControlPlaneTables() []string {
 		"environments",
 		"file_objects",
 		"files",
+		"instance_credentials",
+		"instances",
 		"memories",
 		"memory_stores",
 		"memory_versions",

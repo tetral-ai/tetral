@@ -66,7 +66,7 @@ function readinessSQL(overrides: { role?: unknown; tables?: unknown; policies?: 
 	const responses = [
 		overrides.role ?? [{ is_superuser: false, bypasses_rls: false }],
 		[{ exists: true }],
-		[{ version: 1, checksum: "b29b2862e4a3d7d719594b2defd4f536790a90ae086bf9a02c4bc8266d03c6da" }],
+		[{ version: 1, checksum: "6e0fc8c691bbf990829c06fecb9dc60d034d0d18293758596130d3190d32b374" }],
 		overrides.tables ?? validTables(),
 		overrides.policies ?? validPolicies(),
 	];

@@ -2114,6 +2114,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"create_queue_jobs", createPostgreSQLQueueJobsTable},
 		{"comment_queue_jobs_ready_at", commentPostgreSQLQueueJobsReadyAt},
 	}...)
+	steps = append(steps, postgresqlInstanceTableSteps()...)
 	steps = append(steps, postgresqlCleanupScheduleTableSteps()...)
 	steps = append(steps, []postgresqlSchemaStep{
 		// Current-state trigger that fills the immutable Agent version reference
@@ -2263,6 +2264,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		)
 	}
 	steps = append(steps, postgresqlAuthFunctionSteps()...)
+	steps = append(steps, postgresqlInstanceFunctionSteps()...)
 	steps = append(steps, postgresqlJobRunnerDiscoverySteps()...)
 	steps = append(steps, postgresqlCleanupDiscoverySteps()...)
 	steps = append(steps, postgresqlRetentionMaintenanceSteps()...)

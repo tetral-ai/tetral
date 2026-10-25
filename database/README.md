@@ -19,7 +19,8 @@ contracts.
   `tetral_job_runner_binding_page(text, text, text, text, integer)` for Job
   Runner only; for Auth only, `tetral_auth_lookup_key`,
   `tetral_auth_lookup_token`, `tetral_auth_lookup_grants`,
-  `tetral_auth_lock_authority` and `tetral_auth_prune_tokens`; for Cleanup
+  `tetral_auth_lock_authority`, `tetral_auth_prune_tokens` and
+  `tetral_auth_lookup_connection_key`; for Cleanup
   only, `tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer)`,
   `tetral_prune_event_idempotency` and `tetral_prune_event_changes`; and, for
   Queue only, `tetral_prune_job_runner_jobs`.
@@ -113,6 +114,19 @@ change rows they summarize. Event Stream may only SELECT it; only the change
 retention function writes it. Its `(workspace_id, session_id, pruned_through
 DESC)` index serves Event Stream's shared idle check, which reads a Session's
 highest watermark across its feeds.
+
+`instances` and `instance_credentials` are Workspace-RLS tables of CLI
+registrations and their connection credentials, read by the `computer_hub`
+role. A credential row holds the SHA-256 digest of its key, never the key.
+Auth resolves a connection key before it knows the Workspace through the
+migration-owned security-definer
+`public.tetral_auth_lookup_connection_key(bytea)`, which only Auth executes,
+with a fixed search path, a qualified table and revoked public execution. It
+sets `tetral.auth_lookup`, and the SELECT-only `auth_lookup` policy on
+`instance_credentials` admits a row only when that flag is set and
+`current_user` is the table owner. The function returns the Workspace, instance
+and credential IDs that hold the exact digest, whatever the credential's state,
+and nothing else.
 
 `session_runtime_handoffs` and `session_runtime_handoff_threads` are internal
 Workspace-RLS receipts retained through Session lifetime. They preserve exact

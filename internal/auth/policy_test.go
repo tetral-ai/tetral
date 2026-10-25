@@ -157,7 +157,7 @@ func TestAuthPolicyLookupCatalogMatchesContract(t *testing.T) {
 			continue
 		}
 		var command, using, check string
-		if err := db.QueryRow(`SELECT cmd,qual,with_check FROM pg_policies WHERE schemaname='public' AND tablename=$1 AND policyname=$2`, policy.Table, policy.Name).Scan(&command, &using, &check); err != nil {
+		if err := db.QueryRow(`SELECT cmd,qual,coalesce(with_check,'') FROM pg_policies WHERE schemaname='public' AND tablename=$1 AND policyname=$2`, policy.Table, policy.Name).Scan(&command, &using, &check); err != nil {
 			t.Fatal(err)
 		}
 		if command != policy.Command || normalize(using) != normalize(policy.Using) || normalize(check) != normalize(policy.Check) {
