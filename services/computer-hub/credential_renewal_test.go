@@ -166,16 +166,23 @@ func TestFetchesOfAnyOtherCredentialAnswerNotFound(t *testing.T) {
 	if _, err := f.admin.ExecContext(f.ctx, `UPDATE instance_credentials SET issued_at=clock_timestamp()-interval '2 hours',expires_at=clock_timestamp()-interval '1 hour' WHERE id=$1`, expired); err != nil {
 		t.Fatal(err)
 	}
+	moved, movedStream := f.openOnline()
+	movedPending := f.renewal(moved, movedStream, "renew-e-moved", `{}`)["id"].(string)
+	if _, err := f.admin.ExecContext(f.ctx, `UPDATE instance_connections SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, movedStream.connectionID); err != nil {
+		t.Fatal(err)
+	}
+	movedNext := f.open(moved)
 	for name, tc := range map[string]struct {
 		fetcher                    *enginetest.CLI
 		connectionID, credentialID string
 	}{
-		"unknown":           {cli, stream.connectionID, "ccred_" + strings.Repeat("0", 16)},
-		"another instance":  {cli, stream.connectionID, foreign},
-		"active":            {cli, stream.connectionID, cli.CredentialID},
-		"activated renewal": {renewedCLI, renewedStream.connectionID, activated},
-		"revoked":           {third, thirdStream.connectionID, revoked},
-		"expired":           {third, thirdStream.connectionID, expired},
+		"unknown":            {cli, stream.connectionID, "ccred_" + strings.Repeat("0", 16)},
+		"another instance":   {cli, stream.connectionID, foreign},
+		"active":             {cli, stream.connectionID, cli.CredentialID},
+		"activated renewal":  {renewedCLI, renewedStream.connectionID, activated},
+		"revoked":            {third, thirdStream.connectionID, revoked},
+		"expired":            {third, thirdStream.connectionID, expired},
+		"another connection": {moved, movedNext.connectionID, movedPending},
 	} {
 		response := f.fetch(tc.fetcher, tc.connectionID, "msg_fetch_"+name, tc.credentialID)
 		requireClientError(t, response, nil, protocol.ErrorNotFound)

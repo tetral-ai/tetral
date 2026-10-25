@@ -207,9 +207,10 @@ deleted when the connection ends.
 - `POST /v1/client/credential` fetches a renewal's key once: it generates the
   key, stores its digest and `fetched_at`, and answers `200` with
   `{credential_id, connection_key, expires_at}` and `Cache-Control: no-store`.
-  An unknown credential, another instance's, one delivered in a response, one
-  that is not `pending`, is revoked or expired, or was already fetched answers
-  `404 not_found` and changes nothing. The ledger keeps the fetch's route and
+  An unknown credential, another instance's, one delivered in a response or
+  renewing another connection than the request's (its `renewal_connection_id`),
+  one that is not `pending`, is revoked or expired, or was already fetched
+  answers `404 not_found` and changes nothing. The ledger keeps the fetch's route and
   fingerprint but no answer, so a retry with the same `message_id` and content
   is checked again and answers `404`.
 

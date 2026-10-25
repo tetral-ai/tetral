@@ -15,9 +15,9 @@ import (
 // one fetch of a pending credential delivered on the stream. The key is
 // generated in the fetching transaction, which stores only its digest, and
 // leaves the hub in this answer alone, with Cache-Control: no-store. An
-// unknown credential, another instance's, one delivered in a response, one
-// that is not pending, is revoked or expired, or was already fetched answers
-// 404 not_found and changes nothing. The replay record keeps the request's
+// unknown credential, another instance's, one delivered in a response or
+// renewing another connection, one that is not pending, is revoked or
+// expired, or was already fetched answers 404 not_found and changes nothing. The replay record keeps the request's
 // route and fingerprint, never the answer: a retry with the same message_id
 // and content is checked again and answers 404, the same message_id with
 // other content 409 message_conflict.
@@ -59,7 +59,7 @@ func (h *clientHandler) credential(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		fetched, key, err = instance.FetchCredential(ctx, tx, id.workspace, id.instanceID, request.CredentialID, granted.now)
+		fetched, key, err = instance.FetchCredential(ctx, tx, id.workspace, id.instanceID, request.CredentialID, connection.ID, granted.now)
 		if errors.Is(err, instance.ErrNotFound) {
 			return refuse(protocol.ErrorNotFound, "no pending credential to fetch")
 		}

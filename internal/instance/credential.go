@@ -131,17 +131,18 @@ func PendingRenewals(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, ins
 }
 
 // FetchCredential generates the key of instanceID's credential credentialID,
-// delivered on the stream, and stores its digest and fetched_at (now, the
-// database clock), once. It answers ErrNotFound and changes nothing when the
-// instance holds no such credential, or the credential was delivered in a
-// response, is not pending, is revoked or expired at now, or was already
-// fetched. The returned key is the only copy of its plaintext.
-func FetchCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, credentialID string, now time.Time) (Credential, ConnectionKey, error) {
+// delivered on the stream of connectionID, and stores its digest and
+// fetched_at (now, the database clock), once. It answers ErrNotFound and
+// changes nothing when the instance holds no such credential, or the
+// credential was delivered in a response or renews another connection, is not
+// pending, is revoked or expired at now, or was already fetched. The returned
+// key is the only copy of its plaintext.
+func FetchCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, credentialID, connectionID string, now time.Time) (Credential, ConnectionKey, error) {
 	key := GenerateKey()
 	credential, err := scanCredential(tx.QueryRow(ctx, `UPDATE instance_credentials SET key_digest=$4,fetched_at=$5
-		WHERE workspace_id=$1 AND instance_id=$2 AND id=$3 AND delivery='stream' AND state='pending'
+		WHERE workspace_id=$1 AND instance_id=$2 AND id=$3 AND delivery='stream' AND renewal_connection_id=$6 AND state='pending'
 		AND revoked_at IS NULL AND expires_at>$5 AND fetched_at IS NULL RETURNING `+credentialColumns,
-		string(ws), instanceID, credentialID, key.Digest(), now))
+		string(ws), instanceID, credentialID, key.Digest(), now, connectionID))
 	if err != nil {
 		return Credential{}, ConnectionKey{}, err
 	}
