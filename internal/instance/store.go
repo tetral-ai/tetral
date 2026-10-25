@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
-	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -76,23 +75,6 @@ type Credential struct {
 	StorageSequence int64
 }
 
-// NewInstance describes an instance row to insert. Name is set for a user
-// instance and nil for a cloud instance.
-type NewInstance struct {
-	Kind string
-	Name *string
-}
-
-// NewCredential describes a credential row to insert; only the key's digest
-// is written. A zero IssuedAt is the database clock at the insert.
-type NewCredential struct {
-	InstanceID string
-	State      string
-	Key        ConnectionKey
-	IssuedAt   time.Time
-	ExpiresAt  time.Time
-}
-
 const instanceColumns = `workspace_id,id,kind,name,registration_state,created_at,deregistered_at,cli_version,
  last_credential_reuse_credential_id,last_credential_reuse_at,storage_sequence`
 const credentialColumns = `workspace_id,instance_id,id,state,issued_at,expires_at,revoked_at,revocation_cause,
@@ -101,21 +83,6 @@ const credentialColumns = `workspace_id,instance_id,id,state,issued_at,expires_a
 // The row functions run inside a transaction scoped to ws
 // (dbconnect.Client.WithWorkspaceTx), so Workspace row-level security bounds
 // every statement.
-
-// InsertInstance creates an active instance with a new inst_ ID.
-func InsertInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, row NewInstance) (Instance, error) {
-	return scanInstance(tx.QueryRow(ctx, `INSERT INTO instances (workspace_id,id,kind,name,registration_state)
-		VALUES ($1,$2,$3,$4,'active') RETURNING `+instanceColumns, string(ws), id.New("inst_"), row.Kind, row.Name))
-}
-
-// InsertCredential creates a credential with a new ccred_ ID whose key is
-// delivered in the response. It checks no limit; IssueCredential is the
-// issuing writer.
-func InsertCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, row NewCredential) (Credential, error) {
-	issuedAt := sql.NullTime{Time: row.IssuedAt, Valid: !row.IssuedAt.IsZero()}
-	return scanCredential(tx.QueryRow(ctx, `INSERT INTO instance_credentials (workspace_id,instance_id,id,state,key_digest,issued_at,expires_at,delivery)
-		VALUES ($1,$2,$3,$4,$5,COALESCE($6,clock_timestamp()),$7,'response') RETURNING `+credentialColumns, string(ws), row.InstanceID, id.New("ccred_"), row.State, row.Key.Digest(), issuedAt, row.ExpiresAt))
-}
 
 func ReadInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) (Instance, error) {
 	return scanInstance(tx.QueryRow(ctx, `SELECT `+instanceColumns+` FROM instances WHERE workspace_id=$1 AND id=$2`, string(ws), instanceID))

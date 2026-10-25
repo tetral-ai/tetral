@@ -73,16 +73,18 @@ func CheckCredentialLimit(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID
 	return nil
 }
 
-// IssueCredential creates a credential for instanceID in state, issued at
-// issuedAt, the database clock of tx, after CheckCredentialLimit; at the
-// limit it writes nothing. The returned key is the only copy of its
+// IssueCredential creates a credential with a new ccred_ ID for instanceID
+// in state, issued at issuedAt, the database clock of tx, and delivered in the
+// response, after CheckCredentialLimit; at the limit it writes nothing. Only
+// the key's digest is stored, and the returned key is the only copy of its
 // plaintext.
 func IssueCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, state string, issuedAt, expiresAt time.Time) (Credential, ConnectionKey, error) {
 	if err := CheckCredentialLimit(ctx, tx, ws, instanceID, issuedAt); err != nil {
 		return Credential{}, ConnectionKey{}, err
 	}
 	key := GenerateKey()
-	credential, err := InsertCredential(ctx, tx, ws, NewCredential{InstanceID: instanceID, State: state, Key: key, IssuedAt: issuedAt, ExpiresAt: expiresAt})
+	credential, err := scanCredential(tx.QueryRow(ctx, `INSERT INTO instance_credentials (workspace_id,instance_id,id,state,key_digest,issued_at,expires_at,delivery)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,'response') RETURNING `+credentialColumns, string(ws), instanceID, id.New("ccred_"), state, key.Digest(), issuedAt, expiresAt))
 	if err != nil {
 		return Credential{}, ConnectionKey{}, err
 	}

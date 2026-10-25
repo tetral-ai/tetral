@@ -70,15 +70,21 @@ func TestComputerHubSeparatesConnectionKeysFromWorkspaceCredentials(t *testing.T
 	if _, err := auth.NewAuthorityResolver(authDB, ws, nil).AuthenticateBearer(ctx, accessToken); err != nil {
 		t.Fatalf("seeded access token does not authenticate: %v", err)
 	}
-	connectionKey := instance.GenerateKey()
-	name := "class"
-	var registered instance.Instance
-	var credential instance.Credential
+	var (
+		registered    instance.Instance
+		credential    instance.Credential
+		connectionKey instance.ConnectionKey
+	)
 	if err := dbconnect.NewClientForTesting(admin).WithWorkspaceTx(ctx, string(ws), "integration.class_connection_key", func(tx *dbconnect.Tx) error {
-		if registered, err = instance.InsertInstance(ctx, tx, ws, instance.NewInstance{Kind: instance.KindUser, Name: &name}); err != nil {
+		var err error
+		if registered, err = instance.CreateUserInstance(ctx, tx, ws, "class"); err != nil {
 			return err
 		}
-		credential, err = instance.InsertCredential(ctx, tx, ws, instance.NewCredential{InstanceID: registered.ID, State: instance.CredentialActive, Key: connectionKey, ExpiresAt: time.Now().Add(time.Hour)})
+		now, err := instance.Now(ctx, tx)
+		if err != nil {
+			return err
+		}
+		credential, connectionKey, err = instance.IssueCredential(ctx, tx, ws, registered.ID, instance.CredentialActive, now, now.Add(time.Hour))
 		return err
 	}); err != nil {
 		t.Fatal(err)

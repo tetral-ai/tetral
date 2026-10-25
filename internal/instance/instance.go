@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -62,9 +63,11 @@ func LockInstanceNoKeyUpdate(ctx context.Context, tx *dbconnect.Tx, ws workspace
 	return scanInstance(tx.QueryRow(ctx, `SELECT `+instanceColumns+` FROM instances WHERE workspace_id=$1 AND id=$2 FOR NO KEY UPDATE`, string(ws), instanceID))
 }
 
-// CreateUserInstance creates an active user instance named name.
+// CreateUserInstance creates an active user instance named name with a new
+// inst_ ID.
 func CreateUserInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, name string) (Instance, error) {
-	return InsertInstance(ctx, tx, ws, NewInstance{Kind: KindUser, Name: &name})
+	return scanInstance(tx.QueryRow(ctx, `INSERT INTO instances (workspace_id,id,kind,name,registration_state)
+		VALUES ($1,$2,$3,$4,'active') RETURNING `+instanceColumns, string(ws), id.New("inst_"), KindUser, name))
 }
 
 // Deregister marks an active instance deregistered at the database clock and

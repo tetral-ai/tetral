@@ -655,16 +655,22 @@ func TestPostgreSQLAuthCheckSeparatesConnectionKeysFromOtherCredentials(t *testi
 		t.Fatal(err)
 	}
 	bearer, _ := externalTestBearer(ctx, t, admin, workloadDB.DB)
-	known, unknown := instance.GenerateKey(), instance.GenerateKey()
-	name := "laptop"
-	var registered instance.Instance
-	var credential instance.Credential
+	unknown := instance.GenerateKey()
+	var (
+		registered instance.Instance
+		credential instance.Credential
+		known      instance.ConnectionKey
+	)
 	if err := dbconnect.NewClientForTesting(admin).WithWorkspaceTx(ctx, "ws_auth_test", "auth.test_connection_key", func(tx *dbconnect.Tx) error {
 		var err error
-		if registered, err = instance.InsertInstance(ctx, tx, "ws_auth_test", instance.NewInstance{Kind: instance.KindUser, Name: &name}); err != nil {
+		if registered, err = instance.CreateUserInstance(ctx, tx, "ws_auth_test", "laptop"); err != nil {
 			return err
 		}
-		credential, err = instance.InsertCredential(ctx, tx, "ws_auth_test", instance.NewCredential{InstanceID: registered.ID, State: instance.CredentialActive, Key: known, ExpiresAt: time.Now().Add(time.Hour)})
+		now, err := instance.Now(ctx, tx)
+		if err != nil {
+			return err
+		}
+		credential, known, err = instance.IssueCredential(ctx, tx, "ws_auth_test", registered.ID, instance.CredentialActive, now, now.Add(time.Hour))
 		return err
 	}); err != nil {
 		t.Fatal(err)

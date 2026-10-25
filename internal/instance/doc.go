@@ -64,10 +64,8 @@
 //
 //	Transitions (writer; callers):
 //	  (none) -> active user instance      CreateUserInstance   computer-hub
-//	  (none) -> active instance           InsertInstance       test fixtures
 //	  (none) -> active credential         IssueCredential      computer-hub
 //	  (none) -> pending stream renewal    IssueRenewal         computer-hub
-//	  (none) -> pending/active credential InsertCredential     test fixtures
 //	  renewal unfetched -> fetched        FetchCredential      computer-hub
 //	  pending -> active, the replaced
 //	    credential -> revoked
@@ -108,7 +106,7 @@
 // INVARIANTS:
 //   - The plaintext of a key is never stored, logged or returned except in
 //     the one response that may hold it; ConnectionKey prints a placeholder
-//     under fmt and slog, InsertCredential writes only its digest, and
+//     under fmt and slog, IssueCredential writes only its digest, and
 //     idempotency records and audit records hold no key.
 //   - An instance holds at most CredentialLimit credentials that are pending
 //     or active and expire after the database clock: IssueCredential locks

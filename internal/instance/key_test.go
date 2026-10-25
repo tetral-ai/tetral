@@ -39,49 +39,40 @@ func TestGeneratedKeysAreDistinctAndOnlyTheirDigestsAreStored(t *testing.T) {
 		seen[plaintext] = true
 		keys[index] = key
 	}
-	name := "keys"
-	var credentials []Credential
+	var (
+		credential Credential
+		issued     ConnectionKey
+	)
 	if err := client.WithWorkspaceTx(ctx, string(ws), "instance.test_keys", func(tx *dbconnect.Tx) error {
-		registered, err := InsertInstance(ctx, tx, ws, NewInstance{Kind: KindUser, Name: &name})
+		registered, err := CreateUserInstance(ctx, tx, ws, "keys")
 		if err != nil {
 			return err
 		}
-		for _, key := range keys {
-			credential, err := InsertCredential(ctx, tx, ws, NewCredential{InstanceID: registered.ID, State: CredentialActive, Key: key, ExpiresAt: time.Now().Add(time.Hour)})
-			if err != nil {
-				return err
-			}
-			credentials = append(credentials, credential)
+		now, err := Now(ctx, tx)
+		if err != nil {
+			return err
 		}
-		read, err := ReadCredential(ctx, tx, ws, credentials[0].ID)
-		if err != nil || read != credentials[0] {
-			return fmt.Errorf("read credential = %+v, %v; want %+v", read, err, credentials[0])
+		if credential, issued, err = IssueCredential(ctx, tx, ws, registered.ID, CredentialActive, now, now.Add(time.Hour)); err != nil {
+			return err
+		}
+		read, err := ReadCredential(ctx, tx, ws, credential.ID)
+		if err != nil || read != credential {
+			return fmt.Errorf("read credential = %+v, %v; want %+v", read, err, credential)
 		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := adminDB.Query(`SELECT id,key_digest,row_to_json(c)::text FROM instance_credentials c ORDER BY storage_sequence`)
-	if err != nil {
+	var (
+		digest []byte
+		stored string
+	)
+	if err := adminDB.QueryRow(`SELECT key_digest,row_to_json(c)::text FROM instance_credentials c WHERE id=$1`, credential.ID).Scan(&digest, &stored); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = rows.Close() }()
-	index := 0
-	for rows.Next() {
-		var credentialID, stored string
-		var digest []byte
-		if err := rows.Scan(&credentialID, &digest, &stored); err != nil {
-			t.Fatal(err)
-		}
-		plaintext := keys[index].Reveal()
-		secret := strings.TrimPrefix(plaintext, KeyPrefix)
-		if credentialID != credentials[index].ID || !bytes.Equal(digest, keys[index].Digest()) || strings.Contains(stored, plaintext) || strings.Contains(stored, secret) {
-			t.Fatalf("row %d holds more than its key's digest", index)
-		}
-		index++
-	}
-	if err := rows.Err(); err != nil || index != len(keys) {
-		t.Fatalf("stored rows = %d, %v; want %d", index, err, len(keys))
+	plaintext := issued.Reveal()
+	if !bytes.Equal(digest, issued.Digest()) || strings.Contains(stored, plaintext) || strings.Contains(stored, strings.TrimPrefix(plaintext, KeyPrefix)) {
+		t.Fatal("the issued credential's row holds more than its key's digest")
 	}
 	var logged bytes.Buffer
 	slog.New(slog.NewJSONHandler(&logged, nil)).Info("issued", "key", keys[0])
