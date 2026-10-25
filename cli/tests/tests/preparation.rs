@@ -11,7 +11,9 @@
 //! starts, and each probe waits at the barrier `probe.started` after its
 //! input is written and before its result is read and it is reaped.
 
+use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
@@ -294,6 +296,28 @@ fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepa
         assert_eq!(outcome(&engine, &message_id), failed("cwd_inaccessible"));
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
         case.observe("cwd_inaccessible");
+    }
+    drop(case);
+
+    let mut case = record.case("a link to a directory whose name is not UTF-8");
+    if cfg!(target_os = "linux") {
+        // Their own directory keeps the name out of the later listings of `base`.
+        let holder = base.join("not_utf8");
+        let latin1 = holder.join(OsStr::from_bytes(b"caf\xe9"));
+        fs::create_dir_all(&latin1).unwrap();
+        let link = holder.join("link");
+        symlink(&latin1, &link).unwrap();
+        let message_id = prepare(&engine, &payload("sess_latin1", "bind_1", &link));
+        assert_eq!(outcome(&engine, &message_id), failed("cwd_inaccessible"));
+        let error = json!({
+            "code": "cwd_inaccessible",
+            "message": "the working directory's canonical path is not UTF-8",
+        });
+        assert_eq!(reports_for(&engine, &message_id)[0]["error"], error);
+        assert_eq!(entries(&machine, "sess_latin1")[0]["error"], error);
+        case.observe("cwd_inaccessible with exactly the message the working directory's canonical path is not UTF-8, in the report and in GET /v1/sessions");
+    } else {
+        case.not_run("macOS file systems hold only UTF-8 names");
     }
     drop(case);
 

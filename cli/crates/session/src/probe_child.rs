@@ -17,6 +17,11 @@ use serde::{Deserialize, Serialize};
 /// The `argv[0]` under which `tetral` runs as the probe.
 pub const PROBE_NAME: &str = "tetral-cwd-probe";
 
+/// The whole message of a resolved path that is not UTF-8, which the
+/// report's `cwd` cannot carry and only Linux allows: the fixed text of
+/// `cwd_inaccessible` would report it as denied access.
+const CANONICAL_PATH_NOT_UTF8: &str = "the working directory's canonical path is not UTF-8";
+
 /// The bytes of stdin the probe reads: twice the largest instruction event,
 /// so that any `cwd` one carries fits with the state root. A longer input is
 /// cut and fails to parse.
@@ -59,10 +64,10 @@ pub fn run(input: &[u8]) -> Vec<u8> {
             Ok(cwd) => match cwd.into_os_string().into_string() {
                 Ok(cwd) => Output::Entered { cwd },
                 Err(_) => Output::Failed {
-                    error: PreparationError::new(
-                        PreparationErrorCode::CwdInaccessible,
-                        Some("the canonical path is not UTF-8"),
-                    ),
+                    error: PreparationError {
+                        code: PreparationErrorCode::CwdInaccessible,
+                        message: CANONICAL_PATH_NOT_UTF8.to_owned(),
+                    },
                 },
             },
             Err(error) => Output::Failed { error },

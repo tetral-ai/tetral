@@ -647,7 +647,7 @@ Callers branch on the code, never on the message.
 | `cwd_not_found` | The working directory is missing (and `create_cwd` is not `true`) |
 | `cwd_not_directory` | The working directory is not a directory |
 | `cwd_forbidden` | The working directory lies inside the state root, lexically or after resolving symbolic links |
-| `cwd_inaccessible` | Access to the working directory is denied |
+| `cwd_inaccessible` | Access to the working directory is denied, or its resolved path is not UTF-8 |
 | `cwd_check_timeout` | The directory probe did not end within 5 seconds |
 | `invalid_input` | A missing, empty or relative `cwd`, an unsafe `session_id` or `drive_id`, or any other schema failure of the payload |
 | `stale_connection` | The instruction's `connection_id` is not the CLI's current online connection |
