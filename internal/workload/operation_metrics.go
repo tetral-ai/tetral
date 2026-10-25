@@ -35,7 +35,7 @@ type OperationMetrics struct {
 // its own phases, such as Queue's drain, through SetOperations.
 func NewOperationMetrics(service string, operations ...string) *OperationMetrics {
 	switch service {
-	case "api", "auth", "queue", "bridge", "sandbox", "job-runner", "event-stream", "web-connector", "git-proxy", "cleanup":
+	case "api", "auth", "queue", "bridge", "sandbox", "job-runner", "event-stream", "web-connector", "git-proxy", "cleanup", "computer-hub":
 	default:
 		panic("workload: operation metrics service " + strconv.Quote(service) + " is outside the closed workload domain")
 	}

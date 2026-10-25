@@ -238,6 +238,8 @@ redacted startup record. Shutdown drains both listeners within 10 seconds.
 ## Testing guide
 
 - `config_test.go`: the required settings, overrides and each rejected setting.
+- `run_test.go`: `Run` assembles the service and hands its public and metrics
+  listeners, each answering readiness, to the workload runner.
 - `instance_routes_test.go`, over HTTP as the `computer_hub` role with minted
   principals: a lost creation response replayed without a second instance and
   a changed request refused; the name and `Idempotency-Key` bounds, a refused
