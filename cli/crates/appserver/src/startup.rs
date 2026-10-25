@@ -1,7 +1,8 @@
 //! The start of `server run` after the command's own checks, in this order:
-//! the state-root lock, the removal of interrupted replacements, the
-//! configuration read under it, the socket directory `S`, and the socket. A failure at any step leaves the steps
-//! before it and touches nothing after it; without the lock, nothing in `S`
+//! the state-root lock, the removal of interrupted replacements, an empty
+//! `outbox/`, the configuration read under the lock, the socket directory
+//! `S`, and the socket. A failure at any step leaves the steps before it and
+//! touches nothing after it; without the lock, nothing in `S`
 //! is touched, since the lock is what proves that no other App Server serves
 //! the root's socket.
 
@@ -49,8 +50,9 @@ impl From<CheckError> for StartError {
     }
 }
 
-/// Creates a missing `run/`, takes the lock without waiting and removes the
-/// temporary files of interrupted replacements. A root that does not exist
+/// Creates a missing `run/`, takes the lock without waiting, removes the
+/// temporary files of interrupted replacements and empties `outbox/`, whose
+/// reports belong to connections of an earlier process. A root that does not exist
 /// holds no configuration and is not created, since a failed start leaves the
 /// root as it was.
 pub fn lock(root: &StateRoot) -> Result<RootLock, StartError> {
@@ -69,6 +71,7 @@ pub fn lock(root: &StateRoot) -> Result<RootLock, StartError> {
         LockError::Io(failure) => StartError::Io(failure),
     })?;
     files::remove_interrupted_replacements(root.path())?;
+    state::outbox::reset(&root.join(paths::OUTBOX))?;
     Ok(lock)
 }
 

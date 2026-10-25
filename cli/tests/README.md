@@ -80,7 +80,8 @@ temporary directories. No workspace crate depends on this package.
 - `tests/local_service.rs`: `server run`, `server status` and `server stop`
   and the local API: status while Engine is unreachable, the wrong routes,
   shutdown on request, on each signal and with a handler blocked, one owner
-  per root, restart after SIGKILL, 16 SDK clients at once, the socket's path,
+  per root, restart after SIGKILL with the frozen reports deleted, 16 SDK
+  clients at once, the socket's path,
   modes and hourly modification time, an unsafe `S`, every result and failure
   code with the root unchanged, a log file that cannot be opened, and no key
   in status.

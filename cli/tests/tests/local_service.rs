@@ -1,7 +1,8 @@
 //! `tetral server run`, `server status` and `server stop` as separate
 //! processes, and the local API as the SDK and raw HTTP reach it: status
 //! while Engine is unreachable, shutdown on request, signal and with a
-//! blocked handler, one owner per root, restart after SIGKILL, many clients
+//! blocked handler, one owner per root, restart after SIGKILL with the killed
+//! App Server's frozen reports deleted, many clients
 //! at once, the socket's path, modes and hourly freshness, every result and
 //! failure code of the server commands, no key in status, the log file's
 //! records and a log file that cannot be opened, the removal of interrupted replacements at start, and the
@@ -274,7 +275,7 @@ fn one_app_server_owns_a_root_and_others_disturb_nothing() {
 }
 
 #[test]
-fn a_killed_app_server_leaves_a_socket_that_the_next_start_replaces() {
+fn a_killed_app_server_leaves_a_socket_and_reports_that_the_next_start_replaces() {
     let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
     let mut case = record.case("SIGKILL, then another server run");
@@ -292,12 +293,17 @@ fn a_killed_app_server_leaves_a_socket_that_the_next_start_replaces() {
     );
     assert!(request(&socket, "GET", "/v1/status").is_none());
     case.observe("the killed App Server's socket remains and refuses connections");
+    // A report frozen by the killed App Server and never acknowledged.
+    fs::create_dir_all(root.join("outbox/1")).unwrap();
+    fs::write(root.join("outbox/1/r1.json"), b"{}").unwrap();
     let next = start(&mut case, &root);
     assert_eq!(
         while_unreachable(next.status()),
         expected_status("running", "disconnected")
     );
-    case.observe("the next server run serves status at the same path");
+    assert_eq!(fs::read_dir(root.join("outbox")).unwrap().count(), 0);
+    assert_eq!(mode(&root.join("outbox")), 0o700);
+    case.observe("the next server run serves status at the same path, and its outbox/ is empty with mode 0700");
 }
 
 #[test]
