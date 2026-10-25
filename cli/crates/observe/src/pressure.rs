@@ -88,3 +88,58 @@ impl Episodes {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    use super::*;
+    use crate::Level;
+    use crate::record::tests::record_with;
+
+    #[test]
+    fn an_episode_ends_at_the_first_admission_or_rejection_a_quiet_interval_after_its_last_rejection()
+     {
+        let timeout = Name("timeout");
+        let at = Duration::from_secs_f64;
+        let (stderr, _) = record_with(Level::Info, || {
+            let mut episodes = Episodes::new(Name("tetral_probes"), QUIET_INTERVAL);
+            episodes.rejected(timeout, at(0.0));
+            episodes.rejected(timeout, at(30.0));
+            episodes.admitted(at(89.999));
+            episodes.admitted(at(90.0));
+            episodes.admitted(at(95.0));
+            episodes.rejected(timeout, at(100.0));
+            episodes.rejected(timeout, at(159.999));
+            episodes.rejected(timeout, at(219.999));
+        });
+        let records: Vec<(Value, Value)> = stderr
+            .records()
+            .into_iter()
+            .map(|record| (record["event"].clone(), record["pressure.rejected"].clone()))
+            .collect();
+        let started = (Value::from("pressure.rejecting_started"), Value::Null);
+        let ended = |rejected: u64| {
+            (
+                Value::from("pressure.rejecting_ended"),
+                Value::from(rejected),
+            )
+        };
+        assert_eq!(
+            records,
+            [
+                started.clone(),
+                ended(2),
+                started.clone(),
+                ended(2),
+                started
+            ]
+        );
+        for record in stderr.records() {
+            assert_eq!(
+                (&record["pressure.point"], &record["pressure.cause"]),
+                (&Value::from("tetral_probes"), &Value::from("timeout"))
+            );
+        }
+    }
+}
