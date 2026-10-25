@@ -78,6 +78,7 @@ description, schemas and fixtures are in `protocol/` at the repository root.
   `ConnectionPort`.
 - `tests/fixtures.rs` decodes every fixture of `protocol/`;
   `tests/strict.rs` holds the strict pass's table and, built from edited
-  fixtures, the tables of members sent as `null` and of unknown members in
+  fixtures, the tables of members sent as `null`, refused or, where the
+  schema allows it and no fixture sends it, kept, and of unknown members in
   every closed object; `tests/common/` reads the schema and fixture files and
   decodes a fixture as the type of its schema.

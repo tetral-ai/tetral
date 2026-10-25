@@ -2,7 +2,8 @@
 //! could read two ways, which the strict pass refuses before any type sees it;
 //! a member sent as `null` where its schema refuses `null`; an identity that
 //! is empty or holds U+0000; and an unknown member in an object that the
-//! schemas close.
+//! schemas close. And what they keep that no fixture sends: an optional
+//! member sent as the `null` its schema allows.
 
 mod common;
 
@@ -289,6 +290,61 @@ fn a_member_sent_as_null_where_its_schema_refuses_null_is_refused() {
         assert!(
             refused_naming(&decoded, "null"),
             "{case}: null decoded as {decoded:?}"
+        );
+    }
+}
+
+#[test]
+fn an_optional_member_whose_schema_allows_null_keeps_it_through_a_round_trip() {
+    // The optional members whose schema allows `null` and that no valid
+    // fixture sends as `null`. No fixture sends `limits`, so its rows add it
+    // first.
+    const LIMITS: Edits = &[("/payload/limits", "{}")];
+    #[rustfmt::skip]
+    let rows: [(&str, &str, Edits, &str); 12] = [
+        (TOOL, "execute_exec_command", &[], "/payload/input/cwd"),
+        (TOOL, "execute_exec_command", &[], "/payload/input/env"),
+        (TOOL, "execute_exec_command", &[], "/payload/input/wait_ms"),
+        (TOOL, "execute_exec_command", &[], "/payload/input/on_wait_expiry"),
+        (TOOL, "execute_exec_command", &[], "/payload/input/task_lifetime_ms"),
+        (TOOL, "execute_exec_command", &[], "/payload/input/task_id"),
+        (TOOL, "execute_edit", &[], "/payload/input/new_string"),
+        (TOOL, "execute_edit", &[], "/payload/input/replace_all"),
+        (TOOL, "control_stdin_read", &[], "/payload/wait_ms"),
+        (TOOL, "control_cancel", &[], "/payload/reason"),
+        (TOOL, "control_stdin_read", LIMITS, "/payload/limits/visible_bytes"),
+        (TOOL, "control_stdin_read", LIMITS, "/payload/limits/visible_lines"),
+    ];
+    let mut protocol = Protocol::read();
+    for (file, name, edits, member) in rows {
+        let case = format!("{name} {member}");
+        let (mut value, schema) = protocol.fixture(file, name);
+        for (pointer, edit) in edits {
+            put(
+                &mut value,
+                pointer,
+                serde_json::from_str(edit).expect("an edit is JSON"),
+            );
+        }
+        let mut null = value;
+        put(&mut null, member, Value::Null);
+        let mut without = null.clone();
+        remove(&mut without, member);
+        // Each row is what it claims: the schema allows the null and lets the
+        // member be absent.
+        assert!(
+            protocol.passes(file, &schema, &null),
+            "{case}: the schema refuses null"
+        );
+        assert!(
+            protocol.passes(file, &schema, &without),
+            "{case}: the member is required"
+        );
+        let decoded = protocol.decode(file, name, &null);
+        assert_eq!(
+            decoded.as_ref().ok(),
+            Some(&null),
+            "{case}: re-encoded as {decoded:?}"
         );
     }
 }

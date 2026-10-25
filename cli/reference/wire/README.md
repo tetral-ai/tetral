@@ -53,4 +53,5 @@ own tests.
   `DecodeDriveTransferError`.
 - `fixtures_test.go` decodes every fixture of `protocol/`; `strict_test.go`
   holds the strict pass's table and, built from edited fixtures, the tables
-  of members sent as `null` and of unknown members in every closed object.
+  of members sent as `null`, refused or, where the schema allows it and no
+  fixture sends it, kept, and of unknown members in every closed object.

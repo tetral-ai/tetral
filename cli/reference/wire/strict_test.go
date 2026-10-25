@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -94,14 +95,20 @@ func fixturesByName(t *testing.T) map[string]map[string]fixture {
 // status, endpoint and paired fixtures that name gives.
 func decodeEdited(t *testing.T, files map[string]map[string]fixture, file, name string, tree any) error {
 	t.Helper()
+	_, err := reencodeEdited(t, files, file, name, tree)
+	return err
+}
+
+// reencodeEdited decodes tree as decodeEdited does and gives its encoding.
+func reencodeEdited(t *testing.T, files map[string]map[string]fixture, file, name string, tree any) ([]byte, error) {
+	t.Helper()
 	item := files[file][name]
 	encoded, err := json.Marshal(tree)
 	if err != nil {
 		t.Fatal(err)
 	}
 	item.Value = encoded
-	_, err = decodeFixture(t, file, item, files[file])
-	return err
+	return decodeFixture(t, file, item, files[file])
 }
 
 // put sets the member or item at pointer, adding a member that is not there.
@@ -216,6 +223,49 @@ func TestAMemberSentAsNullWhereItsSchemaRefusesNullIsRefused(t *testing.T) {
 		put(t, tree, row.member, nil)
 		if err := decodeEdited(t, files, row.file, row.name, tree); !refusedNaming(err, "null") {
 			t.Errorf("%s %s, %s: null decoded with %v", row.name, row.member, row.presence, err)
+		}
+	}
+}
+
+// The optional members whose schema allows null and that no valid fixture
+// sends as null. The Rust test of the same name checks each row against the
+// schema.
+func TestAnOptionalMemberWhoseSchemaAllowsNullKeepsItThroughARoundTrip(t *testing.T) {
+	limits := map[string]string{"/payload/limits": "{}"}
+	rows := []struct {
+		name   string
+		edits  map[string]string
+		member string
+	}{
+		{"execute_exec_command", nil, "/payload/input/cwd"},
+		{"execute_exec_command", nil, "/payload/input/env"},
+		{"execute_exec_command", nil, "/payload/input/wait_ms"},
+		{"execute_exec_command", nil, "/payload/input/on_wait_expiry"},
+		{"execute_exec_command", nil, "/payload/input/task_lifetime_ms"},
+		{"execute_exec_command", nil, "/payload/input/task_id"},
+		{"execute_edit", nil, "/payload/input/new_string"},
+		{"execute_edit", nil, "/payload/input/replace_all"},
+		{"control_stdin_read", nil, "/payload/wait_ms"},
+		{"control_cancel", nil, "/payload/reason"},
+		{"control_stdin_read", limits, "/payload/limits/visible_bytes"},
+		{"control_stdin_read", limits, "/payload/limits/visible_lines"},
+	}
+	files := fixturesByName(t)
+	for _, row := range rows {
+		item, ok := files["tool-execution-v1"][row.name]
+		if !ok || !item.Valid {
+			t.Fatalf("no valid fixture %s", row.name)
+		}
+		tree := readTree(t, compact(t, item.Value))
+		for pointer, edit := range row.edits {
+			put(t, tree, pointer, readTree(t, []byte(edit)))
+		}
+		put(t, tree, row.member, nil)
+		got, err := reencodeEdited(t, files, "tool-execution-v1", row.name, tree)
+		if err != nil {
+			t.Errorf("%s %s: %v", row.name, row.member, err)
+		} else if !reflect.DeepEqual(readTree(t, got), tree) {
+			t.Errorf("%s %s: re-encoded as %s", row.name, row.member, got)
 		}
 	}
 }
