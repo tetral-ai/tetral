@@ -308,7 +308,7 @@ describe("ProviderGatewayServiceShell", () => {
     expect(JSON.stringify(logs)).not.toContain(hostileCode);
     expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
       expect.objectContaining({
-        event: "provider_request_streamed",
+        event: "provider_request_streamed_failed",
         "request.outcome": "failed",
         "error.class": "provider_error",
         "error.code": "provider_error",
@@ -352,7 +352,7 @@ describe("ProviderGatewayServiceShell", () => {
     ]);
     expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
       expect.objectContaining({
-        event: "provider_request_streamed",
+        event: "provider_request_streamed_failed",
         "request.outcome": "failed",
         "error.class": "provider_configuration",
         "error.code": "provider_configuration_invalid",
@@ -397,8 +397,8 @@ describe("ProviderGatewayServiceShell", () => {
 
     expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
       expect.objectContaining({
-        event: "provider_request_streamed",
-        "event.kind": "provider_request_streamed",
+        event: "provider_request_streamed_failed",
+        "event.kind": "provider_request_streamed_failed",
         operation: "StreamProviderRequest",
         component: "gateway",
         "request.outcome": "failed",
@@ -542,7 +542,7 @@ describe("ProviderGatewayServiceShell", () => {
     await first;
     expect(service.metricsText()).toContain('tetral_long_operation_duration_seconds_count{service="provider-gateway",operation="StreamProviderRequest",outcome="error"} 1');
     expect(logs.filter((record) =>
-      (record as { readonly event?: unknown }).event === "provider_request_streamed"
+      (record as { readonly event?: unknown }).event === "provider_request_streamed_failed"
       && (record as { readonly "model_request.id"?: unknown })["model_request.id"] === "mreq_2"
     )).toEqual([
       expect.objectContaining({
@@ -652,7 +652,7 @@ describe("ProviderGatewayServiceShell", () => {
         "timeout.inter_event_gap_ms": expect.any(Number),
         "stream.last_event.kind": "text_start",
       }),
-      expect.objectContaining({ event: "provider_request_streamed" }),
+      expect.objectContaining({ event: "provider_request_streamed_failed" }),
     ]);
     expect(JSON.stringify(logs)).not.toContain("Provider stream stalled before the next chunk.");
   });
@@ -851,7 +851,7 @@ describe("ProviderGatewayServiceShell", () => {
     expect(providerClosed).toBe(true);
     expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
       expect.objectContaining({
-        event: "provider_request_streamed",
+        event: "provider_request_streamed_failed",
         "request.outcome": "failed",
         "error.class": "runtime_error",
         "error.code": "stream_incomplete",
@@ -953,7 +953,7 @@ describe("ProviderGatewayServiceShell", () => {
     });
     expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
       expect.objectContaining({
-        event: "provider_request_streamed",
+        event: "provider_request_streamed_failed",
         "error.class": "provider_transport_failure",
         "error.code": "provider_stream_error",
         "provider.id": "anthropic",
@@ -1000,7 +1000,7 @@ describe("ProviderGatewayServiceShell", () => {
       fatal: false,
     });
     expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([expect.objectContaining({
-      event: "provider_request_streamed",
+      event: "provider_request_streamed_failed",
       "error.class": "provider_transport_failure",
       "error.code": "provider_stream_error",
     })]);
@@ -1469,7 +1469,7 @@ describe("ProviderGatewayServiceShell", () => {
     });
     expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
       expect.objectContaining({
-        event: "provider_request_streamed",
+        event: "provider_request_streamed_failed",
         "error.class": "provider_http_rejection",
         "error.code": "provider_request_invalid",
         "provider.status_code": 422,
@@ -1556,7 +1556,7 @@ describe("ProviderGatewayServiceShell", () => {
     }));
     expect(JSON.stringify(failed)).not.toMatch(/anthropic|platform|key|balance|billing|credit|private-billing-canary/i);
     expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([expect.objectContaining({
-      event: "provider_request_streamed",
+      event: "provider_request_streamed_failed",
       "error.class": "provider_http_rejection",
       "error.code": "provider_unavailable",
       "provider.status_code": 400,
@@ -2050,7 +2050,7 @@ describe("ProviderGatewayServiceShell", () => {
     await expectGrpcCode(collectEvents(service.streamProviderRequest(validProviderRequest(), metadata())), status.UNAVAILABLE);
     expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
       expect.objectContaining({
-        event: "provider_request_streamed",
+        event: "provider_request_streamed_failed",
         "request.outcome": "failed",
         "error.class": "grpc_status",
         "error.code": "14",

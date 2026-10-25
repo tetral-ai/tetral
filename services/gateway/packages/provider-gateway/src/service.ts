@@ -345,18 +345,21 @@ export class ProviderGatewayServiceShell {
         if (requestOutcome === "ok") {
           this.options.logger.info(record);
         } else {
-          // Ordinary denial/cancellation is expected control flow; failure meaning is retained.
-          const emit = errorClass === "request_validation" || (errorClass === "grpc_status" && ["1", "3", "7", "16"].includes(errorCode))
-            ? this.options.logger.info : this.options.logger.error;
-          emit.call(this.options.logger, {
-              ...record,
-              ...semanticErrorFields({
-                errorClass,
-                errorCode,
-                messageSafe: "provider request failed",
-              }),
-              ...(providerStatusCode === undefined ? {} : { "provider.status_code": providerStatusCode }),
-            });
+          const failure = {
+            ...semanticErrorFields({
+              errorClass,
+              errorCode,
+              messageSafe: "provider request failed",
+            }),
+            ...(providerStatusCode === undefined ? {} : { "provider.status_code": providerStatusCode }),
+          };
+          // Ordinary denial and cancellation are expected control flow and keep the summary's level, the
+          // failure meaning retained; every other failure has an event of its own.
+          if (errorClass === "request_validation" || (errorClass === "grpc_status" && ["1", "3", "7", "16"].includes(errorCode))) {
+            this.options.logger.info({ ...record, ...failure });
+          } else {
+            this.options.logger.error({ ...record, event: "provider_request_streamed_failed", "event.kind": "provider_request_streamed_failed", ...failure });
+          }
         }
       } catch {
         // Observability must not replace the request's outcome.

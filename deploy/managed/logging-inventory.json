@@ -6069,11 +6069,7 @@
         "provider_request_streamed": {
           "audience": "operators",
           "errors": {
-            "13": {
-              "class": "grpc_status",
-              "message_safe": "provider request failed"
-            },
-            "14": {
+            "1": {
               "class": "grpc_status",
               "message_safe": "provider request failed"
             },
@@ -6081,32 +6077,16 @@
               "class": "grpc_status",
               "message_safe": "provider request failed"
             },
+            "3": {
+              "class": "grpc_status",
+              "message_safe": "provider request failed"
+            },
             "7": {
               "class": "grpc_status",
               "message_safe": "provider request failed"
             },
-            "attachment_unavailable": {
-              "class": "provider_error",
-              "message_safe": "provider request failed"
-            },
-            "context_overflow": {
-              "class": "provider_http_rejection",
-              "message_safe": "provider request failed"
-            },
-            "credential_required": {
-              "class": "provider_error",
-              "message_safe": "provider request failed"
-            },
-            "credential_unavailable": {
-              "class": "provider_error",
-              "message_safe": "provider request failed"
-            },
             "duplicate_attachment": {
               "class": "request_validation",
-              "message_safe": "provider request failed"
-            },
-            "internal": {
-              "class": "runtime_error",
               "message_safe": "provider request failed"
             },
             "invalid_attachment": {
@@ -6145,6 +6125,10 @@
               "class": "request_validation",
               "message_safe": "provider request failed"
             },
+            "invalid_request_shape": {
+              "class": "request_validation",
+              "message_safe": "provider request failed"
+            },
             "invalid_start_event_id": {
               "class": "request_validation",
               "message_safe": "provider request failed"
@@ -6157,12 +6141,84 @@
               "class": "request_validation",
               "message_safe": "provider request failed"
             },
+            "too_many_attachments": {
+              "class": "request_validation",
+              "message_safe": "provider request failed"
+            },
+            "unsupported_model_variant": {
+              "class": "request_validation",
+              "message_safe": "provider request failed"
+            },
+            "unsupported_output_contract": {
+              "class": "request_validation",
+              "message_safe": "provider request failed"
+            }
+          },
+          "fields": {
+            "caller.service_account": "string",
+            "component": "string",
+            "duration.ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "grpc.method": "string",
+            "model.id": "string",
+            "model_request.id": "string",
+            "operation": "string",
+            "provider.id": "string",
+            "provider.status_code": "integer",
+            "request.id": "string",
+            "request.outcome": "string",
+            "session.id": "string",
+            "thread.id": "string",
+            "validation.member": "string",
+            "workspace.id": "string"
+          },
+          "level": "INFO",
+          "log_type": "app"
+        },
+        "provider_request_streamed_failed": {
+          "audience": "operators",
+          "errors": {
+            "13": {
+              "class": "grpc_status",
+              "message_safe": "provider request failed"
+            },
+            "14": {
+              "class": "grpc_status",
+              "message_safe": "provider request failed"
+            },
+            "attachment_unavailable": {
+              "class": "provider_error",
+              "message_safe": "provider request failed"
+            },
+            "context_overflow": {
+              "class": "provider_http_rejection",
+              "message_safe": "provider request failed"
+            },
+            "credential_required": {
+              "class": "provider_error",
+              "message_safe": "provider request failed"
+            },
+            "credential_unavailable": {
+              "class": "provider_error",
+              "message_safe": "provider request failed"
+            },
+            "internal": {
+              "class": "runtime_error",
+              "message_safe": "provider request failed"
+            },
             "provider_cancelled": {
               "class": "provider_transport_failure",
               "message_safe": "provider request failed"
             },
             "provider_configuration_invalid": {
               "class": "provider_configuration",
+              "message_safe": "provider request failed"
+            },
+            "provider_error": {
+              "class": "provider_error",
               "message_safe": "provider request failed"
             },
             "provider_key_unavailable": {
@@ -6211,18 +6267,6 @@
             },
             "stream_incomplete": {
               "class": "runtime_error",
-              "message_safe": "provider request failed"
-            },
-            "too_many_attachments": {
-              "class": "request_validation",
-              "message_safe": "provider request failed"
-            },
-            "unsupported_model_variant": {
-              "class": "request_validation",
-              "message_safe": "provider request failed"
-            },
-            "unsupported_output_contract": {
-              "class": "request_validation",
               "message_safe": "provider request failed"
             }
           },

@@ -1311,7 +1311,10 @@ not evidence of client delivery or a valid Agent turn.
 `providergateway_provider_streams_active` and
 `providergateway_provider_stream_capacity` expose current admitted work and its
 configured admission bound. `providergateway_admission_rejections_total` counts
-only concurrent-turn admission refusal. Provider stream counters, assembly
+only concurrent-turn admission refusal. The turn's `provider_request_streamed`
+summary is `INFO` for a request validation or caller denial and a
+cancellation; every other failed turn writes `ERROR`
+`provider_request_streamed_failed` instead. Provider stream counters, assembly
 gauges and pending-frame bytes keep their meaning. Stage durations are exported
 only through the operation histograms and the raw
 `provider.stage_completed` samples.

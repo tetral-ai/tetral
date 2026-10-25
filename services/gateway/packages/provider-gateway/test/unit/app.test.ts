@@ -111,9 +111,7 @@ describe("ProviderGatewayApp lifecycle", () => {
         typeof record === "object"
         && record !== null
         && "event" in record
-        && record.event === "provider_request_streamed"
-        && "request.outcome" in record
-        && record["request.outcome"] === "failed"
+        && record.event === "provider_request_streamed_failed"
       )).toEqual([
         expect.objectContaining({
           "request.outcome": "failed",
