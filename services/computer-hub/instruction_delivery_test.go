@@ -247,17 +247,40 @@ func TestStreamEndsAtItsMaximumAgeAndTheConnectionResumes(t *testing.T) {
 }
 
 // TestEveryStreamOfAStoppingPodGetsItsDisconnect drains a pod with a window
-// of 0 and stops its streams at once, as Run does once the drain is due:
-// each stream still writes its stream-only disconnect before it closes.
+// of 0 and stops its streams at once, as Run does once the drain is due,
+// while each stream waits in a pass for a row another transaction holds, so
+// that it sees its drain and its close together once the row is free: each
+// stream still writes its stream-only disconnect before it closes.
 func TestEveryStreamOfAStoppingPodGetsItsDisconnect(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
+	const count = 12
 	var streams []*testStream
-	for range 8 {
-		_, stream := f.openOnline()
-		streams = append(streams, stream)
+	holder, err := f.admin.BeginTx(f.ctx, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer func() { _ = holder.Rollback() }()
+	for range count {
+		cli, stream := f.openOnline()
+		streams = append(streams, stream)
+		if _, err := holder.ExecContext(f.ctx, `SELECT 1 FROM instances WHERE id=$1 FOR NO KEY UPDATE`, cli.InstanceID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, stream := range streams {
+		notice, _ := json.Marshal(instance.ConnectionNotice{WorkspaceID: string(f.ws), ConnectionID: stream.connectionID})
+		if _, err := f.admin.ExecContext(f.ctx, `SELECT pg_notify($1,$2)`, instance.ConnectionNoticeChannel(hubTestPod), string(notice)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitUntil(t, func() bool {
+		return f.count(`SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'`) == count
+	})
 	f.streams.Drain(f.ctx, 0)
 	f.streams.closeAll()
+	if err := holder.Rollback(); err != nil {
+		t.Fatal(err)
+	}
 	for i, stream := range streams {
 		events := stream.ended()
 		if len(events) != 1 || events[0].Envelope.Payload != (protocol.DisconnectPayload{Scope: "stream"}) {
