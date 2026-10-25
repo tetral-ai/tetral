@@ -250,8 +250,9 @@
     },
     "computer_hub": {
       "tables": {
-        "instances": ["SELECT"],
-        "instance_credentials": ["SELECT"],
+        "instances": ["SELECT", "INSERT", "UPDATE"],
+        "instance_credentials": ["SELECT", "INSERT", "UPDATE"],
+        "instance_idempotency_records": ["SELECT", "INSERT", "DELETE"],
         "tetral_schema_migrations": ["SELECT"]
       }
     }

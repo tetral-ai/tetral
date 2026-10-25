@@ -32,13 +32,34 @@ const createPostgreSQLInstanceCredentialsTable = `CREATE TABLE instance_credenti
  issued_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
  expires_at TIMESTAMPTZ NOT NULL,
  revoked_at TIMESTAMPTZ,
- revocation_cause TEXT,
+ revocation_cause TEXT CHECK(revocation_cause IN ('delete','deregistration')),
  PRIMARY KEY(id),
  UNIQUE(workspace_id,id),
  FOREIGN KEY(workspace_id,instance_id) REFERENCES instances(workspace_id,id),
  CHECK(expires_at>issued_at),
  CHECK((state='revoked')=(revoked_at IS NOT NULL)),
  CHECK((revoked_at IS NULL)=(revocation_cause IS NULL))
+)`
+
+// One row per issuing request's Idempotency-Key, scoped to the principal's
+// credential and the route (method and concrete path). The fingerprint is the
+// SHA-256 of the canonical request body; the result identity is the instance
+// and credential the request created. The key is stored as bytes because a
+// header value need not be UTF-8.
+const createPostgreSQLInstanceIdempotencyRecordsTable = `CREATE TABLE instance_idempotency_records (
+ storage_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
+ workspace_id TEXT NOT NULL,
+ principal_credential_id TEXT NOT NULL CHECK(char_length(principal_credential_id) BETWEEN 1 AND 256),
+ route TEXT NOT NULL CHECK(char_length(route) BETWEEN 1 AND 512),
+ idempotency_key BYTEA NOT NULL CHECK(octet_length(idempotency_key) BETWEEN 1 AND 255),
+ fingerprint BYTEA NOT NULL CHECK(octet_length(fingerprint)=32),
+ instance_id TEXT NOT NULL,
+ credential_id TEXT NOT NULL,
+ status INTEGER NOT NULL CHECK(status=201),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+ PRIMARY KEY(workspace_id,principal_credential_id,route,idempotency_key),
+ FOREIGN KEY(workspace_id,instance_id) REFERENCES instances(workspace_id,id),
+ FOREIGN KEY(workspace_id,credential_id) REFERENCES instance_credentials(workspace_id,id)
 )`
 
 // Auth resolves a connection key before it knows the Workspace. The function
@@ -59,6 +80,7 @@ func postgresqlInstanceTableSteps() []postgresqlSchemaStep {
 	return []postgresqlSchemaStep{
 		{"create_instances", createPostgreSQLInstancesTable},
 		{"create_instance_credentials", createPostgreSQLInstanceCredentialsTable},
+		{"create_instance_idempotency_records", createPostgreSQLInstanceIdempotencyRecordsTable},
 		{"index_instances_workspace_seq", `CREATE INDEX idx_instances_workspace_seq ON instances(workspace_id,storage_sequence)`},
 		{"index_instance_credentials_instance_seq", `CREATE INDEX idx_instance_credentials_instance_seq ON instance_credentials(workspace_id,instance_id,storage_sequence)`},
 	}

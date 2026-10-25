@@ -116,8 +116,13 @@ DESC)` index serves Event Stream's shared idle check, which reads a Session's
 highest watermark across its feeds.
 
 `instances` and `instance_credentials` are Workspace-RLS tables of CLI
-registrations and their connection credentials, read by the `computer_hub`
-role. A credential row holds the SHA-256 digest of its key, never the key.
+registrations and their connection credentials, which only the `computer_hub`
+role writes. A credential row holds the SHA-256 digest of its key, never the
+key; a revoked one names its cause, `delete` or `deregistration`.
+`instance_idempotency_records`, also Workspace-RLS and the hub's alone, holds
+one row per issuing request's `Idempotency-Key`, scoped to the principal's
+credential and the route, with the request body's fingerprint and the
+instance and credential the request created.
 Auth resolves a connection key before it knows the Workspace through the
 migration-owned security-definer
 `public.tetral_auth_lookup_connection_key(bytea)`, which only Auth executes,

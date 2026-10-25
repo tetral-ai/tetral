@@ -53,7 +53,8 @@
     "auth_workspace_grants",
     "auth_access_tokens",
     "instances",
-    "instance_credentials"
+    "instance_credentials",
+    "instance_idempotency_records"
   ],
   "append_only_workspace_tables": [
     "session_file_attachment_consumptions",
