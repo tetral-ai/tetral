@@ -273,7 +273,7 @@ fn refused_arguments_input_and_root_paths_fail_and_change_nothing() {
 
     let mut case = record.case("a root owned by another user is refused with unsafe_control_path");
     match other_user::directory() {
-        Some(foreign) => {
+        Ok(foreign) => {
             let run = fails_and_changes_nothing(
                 &mut case,
                 foreign,
@@ -283,7 +283,7 @@ fn refused_arguments_input_and_root_paths_fail_and_change_nothing() {
             );
             assert!(run.message().contains("owned by another user"));
         }
-        None => case.not_run("the test runs as root, so no directory is another user's"),
+        Err(reason) => case.not_run(reason),
     }
 }
 
@@ -387,7 +387,7 @@ fn version_needs_no_root_and_touches_nothing() {
 
     let mut case = record.case("tetral --version with a root owned by another user");
     match other_user::directory() {
-        Some(foreign) => {
+        Ok(foreign) => {
             writes_only_the_version(
                 &mut case,
                 &format!("tetral --version with TETRAL_HOME={}", foreign.display()),
@@ -397,7 +397,7 @@ fn version_needs_no_root_and_touches_nothing() {
                 "stdout is exactly {expected:?}, stderr is empty, the root checks did not run"
             ));
         }
-        None => case.not_run("the test runs as root, which owns every directory"),
+        Err(reason) => case.not_run(reason),
     }
     drop(case);
 

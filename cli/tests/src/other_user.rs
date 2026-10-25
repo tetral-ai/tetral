@@ -7,13 +7,24 @@ use std::path::Path;
 
 /// A directory that root already owns and the current user may look up,
 /// `/root` on Linux and `/var/root` on macOS, to stand as a state root owned
-/// by another user; `None` when the test runs as root, which owns it.
-pub fn directory() -> Option<&'static Path> {
+/// by another user; the reason when there is none, such as a test that runs
+/// as root, which owns it.
+pub fn directory() -> Result<&'static Path, String> {
     let path = Path::new(if cfg!(target_os = "macos") {
         "/var/root"
     } else {
         "/root"
     });
-    let metadata = fs::symlink_metadata(path).ok()?;
-    (metadata.is_dir() && metadata.uid() != rustix::process::geteuid().as_raw()).then_some(path)
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!("{} is not a directory", path.display()));
+    }
+    if metadata.uid() == rustix::process::geteuid().as_raw() {
+        return Err(format!(
+            "the test runs as the owner of {}, so it is no other user's",
+            path.display()
+        ));
+    }
+    Ok(path)
 }

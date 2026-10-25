@@ -35,9 +35,9 @@ temporary directories. No workspace crate depends on this package.
   (`snapshot`).
 - `S`, the directory of control sockets, is shared by every App Server of the
   user on the machine. A test that may meet `S` holds a shared lock on a file
-  beside it for as long as it runs, and a test that replaces `S` for a case
-  holds that lock exclusively and puts `S` back when the case ends
-  (`socket_directory`). A case that needs `S` owned by another user makes it as
+  beside it for as long as it runs, and a test that replaces `S` holds that
+  lock exclusively for as long as `S` is replaced and puts `S` back when it
+  releases it (`socket_directory::ReplacedSocketDir`). A case that needs `S` owned by another user makes it as
   root with `sudo -n`; where that fails the case is recorded as not run, and
   under GitHub Actions the test fails instead. A state root owned by another
   user needs no privilege: such a case uses a directory that root already owns

@@ -49,8 +49,8 @@ pub fn shared() -> SharedSocketDir {
     }
 }
 
-/// `S` moved aside for one case, so that the case can put something else at
-/// its path; dropping it removes that and puts `S` back.
+/// `S` moved aside while this is held, so that the test can put something
+/// else at its path; dropping it removes that and puts `S` back.
 pub struct ReplacedSocketDir {
     _lock: File,
     saved: Option<PathBuf>,
