@@ -407,7 +407,44 @@
         }
       }
     },
-    "computer-hub": {},
+    "computer-hub": {
+      "computerhub_connections_started_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "kind": [
+            "new",
+            "resumed"
+          ]
+        }
+      },
+      "computerhub_instructions_in_progress": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "computerhub_instructions_oldest_queued_seconds": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "computerhub_instructions_queue_wait_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {},
+        "buckets": "long"
+      },
+      "computerhub_instructions_queued": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "computerhub_open_streams": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      }
+    },
     "db-prepare": {},
     "event-stream": {
       "event_stream_active_sse_viewers": {

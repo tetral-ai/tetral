@@ -227,6 +227,20 @@ func StartServerSpan(ctx context.Context, name, callerTraceparent string) (conte
 	return ctx, &Span{span}
 }
 
+// StartRemoteChildSpan starts a child span of the span parentTraceparent
+// names, in that trace, for work that continues another process's span.
+// Without a valid traceparent it starts none and returns a nil Span, whose
+// methods do nothing.
+func StartRemoteChildSpan(ctx context.Context, name, parentTraceparent string) (context.Context, *Span) {
+	parent := ParseTraceparent(parentTraceparent)
+	if !parent.IsValid() {
+		return ctx, nil
+	}
+	ctx = trace.ContextWithRemoteSpanContext(ctx, parent)
+	ctx, span := CurrentTelemetry().Tracer().Start(ctx, name, trace.WithSpanKind(trace.SpanKindProducer), trace.WithAttributes(contextAttributes(ctx)...))
+	return ctx, &Span{span}
+}
+
 // StartSpan starts a child span of ctx's span; it records only when its trace
 // is sampled.
 func StartSpan(ctx context.Context, name string) (context.Context, *Span) {

@@ -7,7 +7,15 @@
     "auth": {},
     "bridge": {},
     "cleanup": {},
-    "computer-hub": {},
+    "computer-hub": {
+      "instruction.deliver": {
+        "attributes": [
+          "connection.id",
+          "message.id",
+          "message.type"
+        ]
+      }
+    },
     "db-prepare": {},
     "event-stream": {},
     "git-proxy": {},

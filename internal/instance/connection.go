@@ -209,6 +209,12 @@ func LockLiveConnectionOf(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID
 		string(ws), instanceID, now, credentialID)))
 }
 
+// ShareConnection reads one connection of the Workspace and locks its row
+// FOR SHARE until the transaction ends.
+func ShareConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string) (Connection, error) {
+	return scanConnection(tx.QueryRow(ctx, `SELECT `+connectionColumns+` FROM instance_connections WHERE workspace_id=$1 AND id=$2 FOR SHARE`, string(ws), connectionID))
+}
+
 // ReadConnection reads one connection of the Workspace.
 func ReadConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string) (Connection, error) {
 	return scanConnection(tx.QueryRow(ctx, `SELECT `+connectionColumns+` FROM instance_connections WHERE workspace_id=$1 AND id=$2`, string(ws), connectionID))

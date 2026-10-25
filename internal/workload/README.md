@@ -249,11 +249,13 @@ propagator; the sampler is parent-based with root ratio
 `TETRAL_TRACE_SAMPLE_RATIO`. A developer API request starts a new trace and an
 incoming `traceparent` becomes only its link; an internal gRPC call continues
 its caller's trace from `traceparent` metadata, which every internal dial
-writes; a queued job carries its producer's `traceparent`. No call to a model
-provider, a remote MCP server or GitHub carries trace context. A span holds
-identities, sizes, durations, outcomes and its template's attributes; a failed
-span `error.class` and `error.code`. Only this package imports the tracing
-SDK; others use `Span`, `StartRequestSpan`, `StartServerSpan` and `StartSpan`.
+writes; a queued job carries its producer's `traceparent`, and a CLI's Session
+instruction its issuing work's, which the hub's first write of it continues.
+No call to a model provider, a remote MCP server or GitHub carries trace
+context. A span holds identities, sizes, durations, outcomes and its
+template's attributes; a failed span `error.class` and `error.code`. Only this
+package imports the tracing SDK; others use `Span`, `StartRequestSpan`,
+`StartServerSpan`, `StartRemoteChildSpan` and `StartSpan`.
 
 ## Shutdown phases
 

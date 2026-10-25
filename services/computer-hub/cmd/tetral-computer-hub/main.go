@@ -51,7 +51,7 @@ func run(ctx context.Context, env computerhub.Env) error {
 	if err != nil {
 		return fail(err)
 	}
-	workload.ConfigureProcessShutdown(ctx, computerhub.ShutdownTimeout+5*time.Second, diagnosticOwner)
+	workload.ConfigureProcessShutdown(ctx, cfg.StreamDrainWindow+computerhub.ShutdownTimeout+5*time.Second, diagnosticOwner)
 	coldStart.Advance(ctx)
 	opened, err := openDatabase(ctx, cfg.DatabaseURL, cfg.DatabaseTLSCAPath, cfg.DatabaseTLSServerName)
 	if err != nil {

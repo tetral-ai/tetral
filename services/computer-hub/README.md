@@ -137,14 +137,22 @@ check records nothing. The connection row holds the ready's record and the
 latest heartbeat's; other messages are rows of `connection_upstream_messages`,
 deleted when the connection ends.
 
-- `GET /v1/client/events` with no live connection ends one whose lease passed
-  (`hubflow.EndConnection`, cause `lease_expired`) and creates a connection in
-  the same transaction: `conn_` and 32 hexadecimal characters, the principal's
-  credential, this pod as `hub_pod`, a lease of the earlier of 45 seconds and
-  the credential's expiry. It answers `200`, `Content-Type:
-  text/event-stream`, `Cache-Control: no-store`, and writes `connected` with
-  `resumed: false`. A live connection answers `409 connection_conflict` and is
-  not replaced.
+- `GET /v1/client/events` locks the instance's connection that has not ended
+  `FOR UPDATE` and applies the predecessor rules in one transaction. With no
+  live connection it ends one whose lease passed (`hubflow.EndConnection`,
+  cause `lease_expired`) and creates a connection: `conn_` and 32 hexadecimal
+  characters, the principal's credential, this pod as `hub_pod`, a lease of the
+  earlier of 45 seconds and the credential's expiry; `connected` carries
+  `resumed: false`. A live connection that `previous_connection_id` names with
+  `resume=true` resumes (`instance.ResumeConnection`): `hub_pod` becomes this
+  pod and `stream_count` increases, the lease stays, the previous pod is
+  notified and closes its stream without a `disconnect`, and `connected`
+  carries the same connection and `resumed: true`. With `resume=false` it
+  answers `409 previous_connection_active` with `retry_after_ms`, the
+  remaining lease in milliseconds rounded up; without its ID, `409
+  connection_conflict`. A refusal changes nothing. A `200` has `Content-Type:
+  text/event-stream` and `Cache-Control: no-store`. A draining pod answers
+  `503`.
 - `POST /v1/client/ready` on a connection whose ready is unanswered: a CLI
   older than `TETRAL_COMPUTER_HUB_MIN_CLI_VERSION` by semantic version
   precedence is refused with `403 cli_upgrade_required`, recorded on the
@@ -166,28 +174,65 @@ deleted when the connection ends.
   `error.code` and `request.message.id`, never the report's message.
 
 Streams (`stream.go`): each event is one `data:` line holding one envelope
-and a blank line, flushed at once, with no `event:`, `id:` or comment.
-`connected` and `disconnect` get a new `msg_` ID. Once the connection's ready
-is accepted the stream writes `heartbeat` every 15 seconds, the first one 15
-seconds after it learns of the acceptance, or right after `connected` on a
-resumed stream of an accepted connection; the n-th heartbeat of the stream
-counted s carries `heartbeat_seq` s × 1,048,576 + n and `message_id`
-`hb_<connection_id>_<heartbeat_seq>`. A stream is registered before its
-connection commits.
+and a blank line, flushed at once, with no `event:`, `id:` or comment; a
+write that takes more than 10 seconds breaks the stream. `connected` and
+`disconnect` get a new `msg_` ID. Once the connection's ready is accepted the
+stream writes `heartbeat` every 15 seconds, the first one 15 seconds after it
+learns of the acceptance, or right after `connected` on a resumed stream of an
+accepted connection; the n-th heartbeat of the stream counted s carries
+`heartbeat_seq` s × 1,048,576 + n and `message_id`
+`hb_<connection_id>_<heartbeat_seq>`. A stream is registered after its
+connection commits, and its first pass reads what changed meanwhile. At
+`TETRAL_COMPUTER_HUB_STREAM_MAX_AGE` plus a uniform extra of 0 to a tenth of
+it, drawn per stream and counted from `connected`, the stream writes
+`disconnect` with `scope: "stream"` and closes. On shutdown the pod turns
+unready, refuses new streams, writes that `disconnect` to each of its n
+streams, the i-th at i/n of `TETRAL_COMPUTER_HUB_STREAM_DRAIN_WINDOW`, and
+only then stops; each listener drains within the window plus 10 seconds.
+
+Instruction writes (`dispatch.go`): a stream writes Session instructions in
+passes, one at its start and one each time a notice or the listener's return
+wakes it, inside a transaction that holds the connection row `FOR SHARE`. An
+ended connection writes `disconnect` with `scope: "connection"`, `retryable:
+false` and `code` `credential_revoked` (revoked) or `instance_unavailable`
+(deregistered), none for `lease_expired`, and closes the stream; a
+connection whose `hub_pod` or `stream_count` names another stream closes it
+without one. While the lease has passed, the credential is revoked or
+expired, the instance is deregistered or the ready is unaccepted, the pass
+writes nothing. Otherwise it writes, in issue order and each once per stream,
+the stored envelope of every instruction without `reported_at` whose
+`issue_seq` is at most the stream's bound, and until
+`first_session_report_at` is set only `issue_seq` 1 to 64. The bound is the
+highest `issue_seq` a notice released; a stream start and the listener's
+return release all the connection row counts. A failed pass runs again after
+one second. The first write of an instruction to any stream sets
+`first_written_at`, observes `computerhub_instructions_queue_wait_seconds`
+and, when the instruction has a `trace_context`, is one span
+`instruction.deliver` in that trace with `connection.id`, `message.id` and
+`message.type`.
 
 Connection notices (`notice.go`): each pod listens on `tetral_hub_` and the
 first 16 hexadecimal characters of the SHA-256 of
-`TETRAL_COMPUTER_HUB_POD_NAME`. `hubflow.AcceptReady` and
-`instance.EndConnection` notify the channel of the connection's `hub_pod`
-with `{"workspace_id", "connection_id"}` in their transaction. On a notice for
-a stream it holds, the pod reads the connection row: an accepted ready starts
-the heartbeats; an ended connection writes `disconnect` with `scope:
-"connection"`, `retryable: false` and `code` `credential_revoked` (revoked)
-or `instance_unavailable` (deregistered), none for `lease_expired`, and
-closes the stream. After its listening connection is lost and in place again,
-the pod reads the row of every stream it holds. A listener disconnect writes
-`connection_notices.listener_disconnected`. Delivery of the `disconnect` is
-best effort.
+`TETRAL_COMPUTER_HUB_POD_NAME`. Every writer that changes what a stream must
+write (`instance.IssueInstruction`, `instance.MarkFirstSessionReport`,
+`instance.EndConnection`, `hubflow.AcceptReady`) notifies the channel of the
+connection's `hub_pod` with `{"workspace_id", "connection_id", "issue_seq"}`
+in its transaction, and `instance.ResumeConnection` the previous pod's. A
+notice for a stream the pod holds raises the stream's bound to its
+`issue_seq` and wakes it; after the listening connection is lost and in place
+again, every held stream is woken to write all its unreported instructions.
+A listener disconnect writes `connection_notices.listener_disconnected`.
+Delivery of a `disconnect` is best effort.
+
+Metrics: `computerhub_open_streams`, the streams this pod holds, which the
+autoscaler averages; `computerhub_connections_started_total{kind}`, each
+`connected` written, `new` or `resumed`; the pressure point
+`computerhub_instructions`: `_in_progress` (written, final report not
+stored), `_queued` (stored, never written) and `_oldest_queued_seconds`, read
+at scrape over the unreported instructions of every live connection through
+`tetral_computer_hub_instruction_pressure`, so every pod reports the same
+values, and `_queue_wait_seconds`. The hub refuses no instruction, so the
+point has no rejection counter.
 
 A ready that carries `startup` and is answered for the first time records the
 `cli` cold start: the CLI's `config`, `connect` and `ready` phases with the
@@ -221,7 +266,8 @@ names a workspace.
 
 Startup reads the configuration, opens the database, verifies the schema and
 the serving role, opens the blob store, and then serves; each failure is one
-redacted startup record. Shutdown drains both listeners within 10 seconds.
+redacted startup record. Shutdown drains the streams over the drain window
+and both listeners within the window plus 10 seconds.
 
 ## Seams
 
@@ -266,6 +312,20 @@ redacted startup record. Shutdown drains both listeners within 10 seconds.
   heartbeat schedule and sequences of a first and a resumed stream; a
   revocation or deregistration ending the live connection with its
   disconnect.
+- `instruction_delivery_test.go`, with two hub servers of different pod names
+  on one database: a resume on the other pod writing each unreported
+  instruction once more as stored, the previous pod's stream closed without a
+  disconnect and the lease kept; a resume with 5 seconds of lease left whose
+  first heartbeat's answer renews 45 seconds past it; a resume of another
+  connection and a fresh start refused with nothing replaced;
+  `previous_connection_active` with the remaining lease, then a new connection
+  once it passed; the stream-only disconnect between 10 and 11 minutes of a
+  10-minute age; a notice on the holding pod's channel only, and an
+  instruction whose notice was lost written after a listener restart and a
+  resume; 64 of 70 instructions before the first Session report; a
+  revocation never followed by a write; the stored traceparent on a resend,
+  one `instruction.deliver` span and the started counter; the pressure gauges
+  of a written and a queued instruction whose stream is gone.
 - `client_cold_start_test.go`, with the process telemetry installed: one `cli`
   cold start with the reported phases for the first answered ready, none for a
   replay or a ready without `startup`, and a refused one observing nothing.

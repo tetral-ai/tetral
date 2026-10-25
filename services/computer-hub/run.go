@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/workload"
@@ -23,7 +24,7 @@ type Runtime struct {
 }
 
 // Run serves the public listener and the metrics listener until ctx ends or
-// one of them fails, then drains both.
+// one of them fails, then drains the streams and both listeners.
 func Run(ctx context.Context, cfg Config, runtime Runtime) error {
 	if runtime.Database == nil {
 		return workload.NewConfigError("runtime database client is required")
@@ -40,13 +41,16 @@ func Run(ctx context.Context, cfg Config, runtime Runtime) error {
 	httpMetrics := workload.NewHTTPMetrics(ServiceName)
 	events := NewInstanceEvents(runtime.Database, cfg.RecommendedCLIVersion, logger)
 	instances := InstanceRoutes{Database: runtime.Database, MaxCredentialLifetime: cfg.MaxCredentialLifetime, PageTokenKey: cfg.PageTokenKey, RecommendedCLIVersion: cfg.RecommendedCLIVersion, Events: events}
-	streams := NewStreams(runtime.Database, cfg.PodName, nil, logger)
+	hub := newHubMetrics()
+	streams := NewStreams(runtime.Database, cfg.PodName, cfg.StreamMaxAge, nil, logger, hub)
 	clients := ClientRoutes{Database: runtime.Database, MinCLIVersion: cfg.MinCLIVersion, Streams: streams}
 	public := BuildHTTPHandler(readiness, NewRouter(cfg.PrincipalVerifier, WithLogger(logger), WithRequestMetrics(httpMetrics), WithInstanceRoutes(instances), WithClientRoutes(clients)))
 	metrics := workload.HealthRouter(readiness,
 		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
 		workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", runtime.Database)),
+		workload.WithMetricsCollector("computer_hub", hub.registry.Collector()),
+		workload.WithMetricsCollector("instruction_pressure", instructionPressure(runtime.Database, time.Now)),
 	)
 	tlsOwner, tlsConfig, err := cfg.HTTPTransport.Open(ctx)
 	if err != nil {
@@ -58,10 +62,22 @@ func Run(ctx context.Context, cfg Config, runtime Runtime) error {
 	readiness.MarkReady()
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	eventsDone, streamsDone := make(chan struct{}), make(chan struct{})
+	// The streams outlive runCtx by the drain: once it ends the pod turns
+	// unready, writes each stream's stream-only disconnect over the drain
+	// window, and only then stops the notice listener.
+	streamsCtx, stopStreams := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopStreams()
+	eventsDone, streamsDone, drained := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() { _ = events.Run(runCtx); close(eventsDone) }()
-	go func() { _ = streams.Run(runCtx); close(streamsDone) }()
-	defer func() { <-eventsDone; <-streamsDone }()
+	go func() { _ = streams.Run(streamsCtx); close(streamsDone) }()
+	go func() {
+		defer close(drained)
+		<-runCtx.Done()
+		readiness.BeginShutdown()
+		streams.Drain(streamsCtx, cfg.StreamDrainWindow)
+		stopStreams()
+	}()
+	defer func() { <-eventsDone; <-drained; <-streamsDone }()
 	listener := func(address, key string, handler http.Handler, tls bool) workload.Config {
 		config := workload.Config{
 			Metrics:               httpMetrics.Operations,
@@ -73,7 +89,7 @@ func Run(ctx context.Context, cfg Config, runtime Runtime) error {
 			Listen:                runtime.Listen,
 			Handler:               handler,
 			Readiness:             readiness,
-			ShutdownTimeout:       ShutdownTimeout,
+			ShutdownTimeout:       cfg.StreamDrainWindow + ShutdownTimeout,
 			Logger:                logger,
 		}
 		if tls {

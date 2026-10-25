@@ -34,16 +34,22 @@ import (
 // A database failure at any step answers 503 and changes nothing, so the
 // authority checks fail closed.
 
-// clientFailure is a refusal with its code of the client error table.
+// clientFailure is a refusal with its code of the client error table and,
+// for previous_connection_active, its retry_after_ms.
 type clientFailure struct {
-	code    protocol.ErrorCode
-	message string
+	code         protocol.ErrorCode
+	message      string
+	retryAfterMS protocol.Optional[int64]
 }
 
 func (f *clientFailure) Error() string { return string(f.code) + ": " + f.message }
 
 func refuse(code protocol.ErrorCode, message string) error {
 	return &clientFailure{code: code, message: message}
+}
+
+func refuseRetryAfter(code protocol.ErrorCode, message string, retryAfterMS int64) error {
+	return &clientFailure{code: code, message: message, retryAfterMS: protocol.Some(retryAfterMS)}
 }
 
 // clientAnswer is the status and exact body of a client route's answer, as
@@ -82,7 +88,11 @@ func writeClientFailure(w http.ResponseWriter, r *http.Request, err error) {
 	)
 	switch {
 	case errors.As(err, &failure):
-		writeClientAnswer(w, errorAnswer(failure.code, failure.message))
+		answer := errorAnswer(failure.code, failure.message)
+		if failure.retryAfterMS.Set {
+			answer.body = protocol.Encode(protocol.ErrorBody{Code: failure.code, Message: failure.message, RetryAfterMS: failure.retryAfterMS})
+		}
+		writeClientAnswer(w, answer)
 	case errors.As(err, &decode):
 		writeClientAnswer(w, errorAnswer(decode.Code, decode.Error()))
 	case errors.As(err, &stale):

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"sync"
 	"time"
@@ -19,7 +20,12 @@ import (
 // HeartbeatInterval is the contract's spacing of heartbeats on a stream.
 const HeartbeatInterval = 15 * time.Second
 
-// StreamClock schedules a stream's heartbeats. Tests drive it by hand.
+// streamWriteTimeout bounds one event write, so a client that stops reading
+// breaks its stream instead of holding a write transaction open.
+const streamWriteTimeout = 10 * time.Second
+
+// StreamClock schedules a stream's heartbeats and its age limit. Tests drive
+// it by hand.
 type StreamClock interface {
 	After(d time.Duration) <-chan time.Time
 }
@@ -30,53 +36,83 @@ func (systemClock) After(d time.Duration) <-chan time.Time { return time.After(d
 
 // Streams holds the client streams of this pod, one per connection, and
 // receives the connection notices of the pod's channel (Run). A stream is
-// the only writer of its response: notices reach it as connection rows.
+// the only writer of its response: notices only wake it, and it reads the
+// connection and its instructions itself (dispatch.go).
 type Streams struct {
 	database *dbconnect.Client
 	podName  string
+	maxAge   time.Duration
 	clock    StreamClock
 	logger   *slog.Logger
+	metrics  *hubMetrics
 	// listening is closed once the first LISTEN is in place.
 	listening     chan struct{}
 	listeningOnce sync.Once
 
-	mu      sync.Mutex
-	closed  bool
-	streams map[string]*clientStream
+	mu sync.Mutex
+	// draining refuses new streams and drains each one held from then on;
+	// closed is set once Run has ended.
+	draining bool
+	closed   bool
+	streams  map[string]*clientStream
 }
 
-// clientStream is one held stream. updates carries the latest connection row
-// a notice read; a newer row replaces one the stream has not taken yet.
+// clientStream is one held stream: the connection and the stream count its
+// transaction committed, and the release state notices leave for it.
 type clientStream struct {
 	workspace  workspace.ID
 	connection string
-	updates    chan instance.Connection
-	done       chan struct{}
-	doneOnce   sync.Once
+	count      int64
+
+	mu sync.Mutex
+	// bound is the highest issue_seq a notice released; all asks the next
+	// pass to release every instruction the connection row counts.
+	bound int64
+	all   bool
+	wake  chan struct{}
+
+	drain     chan struct{}
+	drainOnce sync.Once
+	done      chan struct{}
+	doneOnce  sync.Once
 }
 
-// NewStreams returns the streams of the pod named podName over database. A
-// nil clock is the system clock.
-func NewStreams(database *dbconnect.Client, podName string, clock StreamClock, logger *slog.Logger) *Streams {
+// NewStreams returns the streams of the pod named podName over database,
+// each ended by a stream-only disconnect at maxAge plus up to a tenth of it.
+// A nil clock is the system clock.
+func NewStreams(database *dbconnect.Client, podName string, maxAge time.Duration, clock StreamClock, logger *slog.Logger, metrics *hubMetrics) *Streams {
 	if clock == nil {
 		clock = systemClock{}
 	}
 	if logger == nil {
 		logger = workload.ComponentLogger(ServiceName)
 	}
-	return &Streams{database: database, podName: podName, clock: clock, logger: logger, listening: make(chan struct{}), streams: map[string]*clientStream{}}
+	return &Streams{database: database, podName: podName, maxAge: maxAge, clock: clock, logger: logger, metrics: metrics, listening: make(chan struct{}), streams: map[string]*clientStream{}}
 }
 
-// hold registers the stream of connectionID before its connection commits,
-// so a notice sent by any later transaction finds it. It returns nil once
-// Run has ended.
-func (s *Streams) hold(ws workspace.ID, connectionID string) *clientStream {
+// accepting reports whether the pod takes new streams.
+func (s *Streams) accepting() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.draining && !s.closed
+}
+
+// hold registers the stream of connectionID, whose transaction committed it
+// with stream count count, and closes the pod's earlier stream of the
+// connection. It is called after that commit; the stream's first pass reads
+// whatever changed before it was registered. A stream held while the pod
+// drains is drained at once; hold returns nil once Run has ended.
+func (s *Streams) hold(ws workspace.ID, connectionID string, count int64) *clientStream {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil
 	}
-	stream := &clientStream{workspace: ws, connection: connectionID, updates: make(chan instance.Connection, 1), done: make(chan struct{})}
+	stream := &clientStream{workspace: ws, connection: connectionID, count: count, all: true,
+		wake: make(chan struct{}, 1), drain: make(chan struct{}), done: make(chan struct{})}
+	if s.draining {
+		stream.beginDrain()
+	}
 	if previous := s.streams[connectionID]; previous != nil {
 		previous.close()
 	}
@@ -119,43 +155,99 @@ func (s *Streams) closeAll() {
 	}
 }
 
-func (c *clientStream) close() { c.doneOnce.Do(func() { close(c.done) }) }
-
-// offer hands the stream its connection's newest row; only the notice
-// listener calls it, so the replacement below never races another offer.
-func (c *clientStream) offer(connection instance.Connection) {
-	for {
+// Drain refuses new streams, then ends each held stream with a stream-only
+// disconnect, the i-th of n at i/n of window, so their CLIs resume on other
+// pods spread over the window. It returns once every disconnect is due, or
+// when ctx ends.
+func (s *Streams) Drain(ctx context.Context, window time.Duration) {
+	s.mu.Lock()
+	s.draining = true
+	s.mu.Unlock()
+	streams := s.held()
+	started := time.Now()
+	for i, stream := range streams {
+		due := started.Add(window * time.Duration(i) / time.Duration(len(streams)))
+		timer := time.NewTimer(time.Until(due))
 		select {
-		case c.updates <- connection:
+		case <-ctx.Done():
+			timer.Stop()
 			return
-		default:
-			select {
-			case <-c.updates:
-			default:
-			}
+		case <-timer.C:
 		}
+		stream.beginDrain()
 	}
 }
 
-// serve writes the response of stream: the 200 headers and connected, then
-// heartbeats once the connection's ready is accepted, until the client
-// leaves, the pod shuts down or the connection ends. started is the
-// connection as the stream's transaction committed it; on a resumed stream
-// of an accepted connection the first heartbeat follows connected at once.
-// The n-th heartbeat of the stream counted s carries
-// s*instance.HeartbeatSeqStride+n.
+func (c *clientStream) close()      { c.doneOnce.Do(func() { close(c.done) }) }
+func (c *clientStream) beginDrain() { c.drainOnce.Do(func() { close(c.drain) }) }
+
+// release raises the stream's bound to issueSeq, or, with all, asks for
+// every instruction the connection row counts, and wakes the stream.
+func (c *clientStream) release(issueSeq int64, all bool) {
+	c.mu.Lock()
+	c.bound = max(c.bound, issueSeq)
+	c.all = c.all || all
+	c.mu.Unlock()
+	select {
+	case c.wake <- struct{}{}:
+	default:
+	}
+}
+
+// raise raises the stream's bound to issueSeq without waking it.
+func (c *clientStream) raise(issueSeq int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.bound = max(c.bound, issueSeq)
+}
+
+// raiseAll asks the next pass again for every instruction the connection
+// row counts, without waking the stream.
+func (c *clientStream) raiseAll() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.all = true
+}
+
+// take returns the bound and clears the all request.
+func (c *clientStream) take() (int64, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	all := c.all
+	c.all = false
+	return c.bound, all
+}
+
+// ageLimit is a stream's maximum age plus a uniform extra of 0 to a tenth
+// of it.
+func (s *Streams) ageLimit() time.Duration {
+	return s.maxAge + time.Duration(rand.Int64N(int64(s.maxAge/10)+1)) //nolint:gosec // G404: spreads stream ends, not a secret.
+}
+
+// serve writes the response of stream: the 200 headers and connected, the
+// stream's first heartbeat at once when it resumed an accepted connection,
+// then the instructions and heartbeats until the client leaves, the pod
+// drains or shuts down, the stream reaches its age limit, the connection
+// moves to another stream or ends. started is the connection as the
+// stream's transaction committed it. The n-th heartbeat of the stream counted
+// s carries s*instance.HeartbeatSeqStride+n.
 func (s *Streams) serve(ctx context.Context, w http.ResponseWriter, stream *clientStream, started instance.Connection, resumed bool) {
 	writer := sseWriter{w: w, controller: http.NewResponseController(w), connectionID: started.ID}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
+	// The age limit counts from connected; its timer is set first so it is
+	// pending once the client reads connected.
+	age := s.clock.After(s.ageLimit())
 	if writer.write(id.New("msg_"), protocol.ConnectedPayload{Resumed: resumed}) != nil {
 		return
 	}
+	s.metrics.streamStarted(resumed)
+	defer s.metrics.streamEnded()
+	state := &streamState{stream: stream, writer: writer, written: map[string]bool{}, accepted: started.ReadyAcceptedAt != nil}
 	var (
-		next     <-chan time.Time
-		sent     int64
-		accepted = started.ReadyAcceptedAt != nil
+		next <-chan time.Time
+		sent int64
 	)
 	heartbeat := func() bool {
 		sent++
@@ -166,32 +258,38 @@ func (s *Streams) serve(ctx context.Context, w http.ResponseWriter, stream *clie
 		next = s.clock.After(HeartbeatInterval)
 		return true
 	}
-	if accepted {
-		if resumed {
-			if !heartbeat() {
+	if state.accepted && resumed && !heartbeat() {
+		return
+	}
+	var retry <-chan time.Time
+	for pass := true; ; {
+		if pass {
+			switch s.deliver(ctx, state) {
+			case passFailed:
+				retry = s.clock.After(passRetryDelay)
+			case passEnded, passMoved, passBroken:
 				return
 			}
-		} else {
-			next = s.clock.After(HeartbeatInterval)
+			if state.accepted && next == nil {
+				next = s.clock.After(HeartbeatInterval)
+			}
+			pass = false
 		}
-	}
-	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-stream.done:
 			return
-		case connection := <-stream.updates:
-			if connection.EndedAt != nil {
-				if code, ok := disconnectCode(connection); ok {
-					_ = writer.write(id.New("msg_"), protocol.DisconnectPayload{Scope: "connection", Retryable: protocol.Some(false), Code: protocol.Some(string(code))})
-				}
-				return
-			}
-			if !accepted && connection.ReadyAcceptedAt != nil {
-				accepted = true
-				next = s.clock.After(HeartbeatInterval)
-			}
+		case <-stream.drain:
+			_ = writer.write(id.New("msg_"), protocol.DisconnectPayload{Scope: "stream"})
+			return
+		case <-age:
+			_ = writer.write(id.New("msg_"), protocol.DisconnectPayload{Scope: "stream"})
+			return
+		case <-stream.wake:
+			pass = true
+		case <-retry:
+			retry, pass = nil, true
 		case <-next:
 			if !heartbeat() {
 				return
@@ -215,7 +313,7 @@ func disconnectCode(connection instance.Connection) (protocol.ErrorCode, bool) {
 }
 
 // sseWriter writes one envelope per event as a single data line followed by
-// a blank line, and flushes it at once.
+// a blank line, and flushes it at once, within streamWriteTimeout.
 type sseWriter struct {
 	w            http.ResponseWriter
 	controller   *http.ResponseController
@@ -223,13 +321,22 @@ type sseWriter struct {
 }
 
 func (s sseWriter) write(messageID string, payload protocol.DownstreamPayload) error {
-	envelope := protocol.Encode(protocol.Downstream{ConnectionID: s.connectionID, MessageID: messageID, Payload: payload})
+	return s.writeEnvelope(protocol.Encode(protocol.Downstream{ConnectionID: s.connectionID, MessageID: messageID, Payload: payload}))
+}
+
+func (s sseWriter) writeEnvelope(envelope []byte) error {
 	event := make([]byte, 0, len(envelope)+8)
 	event = append(append(append(event, "data: "...), envelope...), "\n\n"...)
+	if err := s.controller.SetWriteDeadline(time.Now().Add(streamWriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return err
+	}
 	if _, err := s.w.Write(event); err != nil {
 		return err
 	}
 	if err := s.controller.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return err
+	}
+	if err := s.controller.SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		return err
 	}
 	return nil

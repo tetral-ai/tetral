@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -67,7 +66,7 @@ func TestReadyAndHeartbeatGrantsAreCappedByTheCredential(t *testing.T) {
 	if grant.ValidForMS <= 0 || grant.ValidForMS > 10_000 || parseTime(t, row["lease_expires_at"]).After(credentialExpiry) {
 		t.Fatalf("grant %d ms, lease %v; want at most 10,000 ms and the lease at most the expiry %v", grant.ValidForMS, row["lease_expires_at"], credentialExpiry)
 	}
-	f.clock.waitTimers(t, 1)
+	f.clock.waitTimers(t, 2)
 	f.clock.Advance(HeartbeatInterval)
 	report := stream.heartbeat("heartbeat_1")
 	time.Sleep(time.Until(credentialExpiry) + 100*time.Millisecond)
@@ -103,7 +102,7 @@ func TestReplayedOrRefusedReadyAndHeartbeatRenewNothing(t *testing.T) {
 	if err != nil || readyAnswer.Status != http.StatusOK {
 		t.Fatalf("ready = %d %s, %v", readyAnswer.Status, readyAnswer.Body, err)
 	}
-	f.clock.waitTimers(t, 1)
+	f.clock.waitTimers(t, 2)
 	f.clock.Advance(HeartbeatInterval)
 	heartbeat := stream.heartbeat("heartbeat_1")
 	heartbeatAnswer, err := cli.Heartbeat(f.ctx, heartbeat)
@@ -333,12 +332,12 @@ func TestHeartbeatsFollowTheAcceptedReadyOnTheStreamClock(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	cli := f.userInstance(time.Time{})
 	stream := f.open(cli)
-	if n := f.clock.waiting(); n != 0 {
-		t.Fatalf("pending timers before the ready = %d; want 0", n)
+	if n := f.clock.waiting(); n != 1 {
+		t.Fatalf("pending timers before the ready = %d; want only the stream's age limit", n)
 	}
 	f.clock.Advance(2 * HeartbeatInterval)
 	f.acceptReady(cli, stream, "ready_1")
-	f.clock.waitTimers(t, 1)
+	f.clock.waitTimers(t, 2)
 	requireNoEvent(t, stream)
 	f.clock.Advance(HeartbeatInterval - time.Second)
 	requireNoEvent(t, stream)
@@ -350,36 +349,15 @@ func TestHeartbeatsFollowTheAcceptedReadyOnTheStreamClock(t *testing.T) {
 			t.Fatalf("heartbeat message_id %s for seq %d", report.RequestMessageID, report.HeartbeatSeq)
 		}
 		seqs = append(seqs, report.HeartbeatSeq)
-		f.clock.waitTimers(t, 1)
+		f.clock.waitTimers(t, 2)
 		f.clock.Advance(HeartbeatInterval - time.Second)
 	}
 	if seqs[0] != instance.HeartbeatSeqStride+1 || seqs[1] != instance.HeartbeatSeqStride+2 {
 		t.Fatalf("first stream heartbeat_seq = %v; want %d and %d", seqs, instance.HeartbeatSeqStride+1, instance.HeartbeatSeqStride+2)
 	}
 
-	// A later stream of the accepted connection, as a resume starts it.
-	now := time.Now()
-	resumed := instance.Connection{WorkspaceID: f.ws, InstanceID: cli.InstanceID, ID: stream.connectionID, StreamCount: 2, ReadyAcceptedAt: &now}
-	server := newStreamServer(t, f.streams, resumed)
-	response, err := http.Get(server) //nolint:gosec // G107: the URL is this test's own stream server.
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = response.Body.Close() }()
-	later := &testStream{t: t, stream: enginetest.NewStream(response.Body), events: make(chan enginetest.Event, 8)}
-	go func() {
-		defer close(later.events)
-		for {
-			event, err := later.stream.Next()
-			if err != nil {
-				return
-			}
-			later.events <- event
-		}
-	}()
-	if connected := later.next(); connected.Envelope.Payload != (protocol.ConnectedPayload{Resumed: true}) {
-		t.Fatalf("first event %s; want connected with resumed true", connected.Data)
-	}
+	// The resumed stream of the accepted connection.
+	later := f.resume(f.url, cli, stream.connectionID)
 	first := later.next()
 	heartbeat, ok := first.Envelope.Payload.(protocol.HeartbeatPayload)
 	if !ok || heartbeat.HeartbeatSeq != 2*instance.HeartbeatSeqStride+1 || heartbeat.HeartbeatSeq <= slices.Max(seqs) {
@@ -511,17 +489,4 @@ func paddedReady(t *testing.T, ready protocol.Ready, size int) []byte {
 		t.Fatalf("padded ready of %d bytes", len(out))
 	}
 	return out
-}
-
-// newStreamServer serves one stream of connection on streams, as a resumed
-// stream, and returns its URL.
-func newStreamServer(t *testing.T, streams *Streams, connection instance.Connection) string {
-	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		stream := streams.hold(connection.WorkspaceID, connection.ID)
-		defer streams.release(stream)
-		streams.serve(r.Context(), w, stream, connection, true)
-	}))
-	t.Cleanup(server.Close)
-	return server.URL
 }

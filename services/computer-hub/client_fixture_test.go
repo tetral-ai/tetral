@@ -3,6 +3,7 @@ package computerhub
 import (
 	"encoding/json"
 	"net/http"
+	neturl "net/url"
 	"sync"
 	"testing"
 	"time"
@@ -121,7 +122,27 @@ type testStream struct {
 // open opens cli's event stream as a new connection and reads connected.
 func (f *hubFixture) open(cli *enginetest.CLI) *testStream {
 	f.t.Helper()
-	stream, response, err := cli.OpenEvents(f.ctx, cli.EventsQuery("", nil))
+	return f.openClientStream(f.url, cli, cli.EventsQuery("", nil), false)
+}
+
+// resume resumes connectionID on the hub server at url and reads connected.
+func (f *hubFixture) resume(url string, cli *enginetest.CLI, connectionID string) *testStream {
+	f.t.Helper()
+	resume := true
+	opened := f.openClientStream(url, cli, cli.EventsQuery(connectionID, &resume), true)
+	if opened.connectionID != connectionID {
+		f.t.Fatalf("resumed connection %s; want %s", opened.connectionID, connectionID)
+	}
+	return opened
+}
+
+// openClientStream opens an event stream with query on the hub server at url and
+// reads connected, which must carry resumed.
+func (f *hubFixture) openClientStream(url string, cli *enginetest.CLI, query neturl.Values, resumed bool) *testStream {
+	f.t.Helper()
+	at := *cli
+	at.BaseURL = url
+	stream, response, err := at.OpenEvents(f.ctx, query)
 	if err != nil || stream == nil {
 		f.t.Fatalf("open events = %d %s, %v", response.Status, response.Body, err)
 	}
@@ -145,8 +166,8 @@ func (f *hubFixture) open(cli *enginetest.CLI) *testStream {
 	}()
 	connected := opened.next()
 	payload, ok := connected.Envelope.Payload.(protocol.ConnectedPayload)
-	if !ok || payload.Resumed {
-		f.t.Fatalf("first event = %s; want connected with resumed false", connected.Data)
+	if !ok || payload.Resumed != resumed {
+		f.t.Fatalf("first event = %s; want connected with resumed %v", connected.Data, resumed)
 	}
 	opened.connectionID = connected.Envelope.ConnectionID
 	return opened

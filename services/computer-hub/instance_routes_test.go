@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -43,8 +44,19 @@ type hubFixture struct {
 	principal auth.Principal
 	logs      *lockedBuffer
 	events    *InstanceEvents
-	streams   *Streams
-	clock     *manualClock
+	// streams, clock and url are pod A's, the first hub server; addPod adds
+	// others on the same database.
+	streams *Streams
+	clock   *manualClock
+	pods    map[string]*hubPod
+	// client is the computer_hub database client every pod serves over.
+	client   *dbconnect.Client
+	logger   *slog.Logger
+	verifier *auth.InternalPrincipalVerifier
+	settings hubOptions
+	// pause, when set, holds the first statement whose SQL contains its
+	// match until the test releases it.
+	pause atomic.Pointer[statementPause]
 	// recordStatements counts the statements that name the idempotency
 	// records table.
 	recordStatements atomic.Int64
@@ -62,6 +74,7 @@ const hubTestPod = "computer-hub-test-0"
 // hubOptions are the fixture's settings beyond the credential lifetime.
 type hubOptions struct {
 	minCLIVersion, recommendedCLIVersion string
+	maxLifetime, streamMaxAge            time.Duration
 }
 
 type hubOption func(*hubOptions)
@@ -70,16 +83,45 @@ func withCLIVersions(minimum, recommended string) hubOption {
 	return func(o *hubOptions) { o.minCLIVersion, o.recommendedCLIVersion = minimum, recommended }
 }
 
+func withStreamMaxAge(maxAge time.Duration) hubOption {
+	return func(o *hubOptions) { o.streamMaxAge = maxAge }
+}
+
+// hubPod is one computer-hub server of the fixture.
+type hubPod struct {
+	name    string
+	url     string
+	streams *Streams
+	clock   *manualClock
+	metrics *hubMetrics
+}
+
+// statementPause holds one statement until release closes; reached closes
+// when the statement arrives.
+type statementPause struct {
+	match   string
+	reached chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+// pauseOn holds the next statement whose SQL contains match.
+func (f *hubFixture) pauseOn(match string) *statementPause {
+	pause := &statementPause{match: match, reached: make(chan struct{}), release: make(chan struct{})}
+	f.pause.Store(pause)
+	return pause
+}
+
 func newHubFixture(t *testing.T, maxLifetime time.Duration, opts ...hubOption) *hubFixture {
 	t.Helper()
-	settings := hubOptions{minCLIVersion: DefaultCLIVersion, recommendedCLIVersion: DefaultCLIVersion}
+	settings := hubOptions{minCLIVersion: DefaultCLIVersion, recommendedCLIVersion: DefaultCLIVersion, maxLifetime: maxLifetime, streamMaxAge: DefaultStreamMaxAge}
 	for _, opt := range opts {
 		opt(&settings)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	t.Cleanup(cancel)
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	f := &hubFixture{t: t, ctx: ctx, admin: admin, ws: workspace.DefaultID, logs: &lockedBuffer{}}
+	f := &hubFixture{t: t, ctx: ctx, admin: admin, ws: workspace.DefaultID, logs: &lockedBuffer{}, pods: map[string]*hubPod{}, settings: settings}
 	if _, err := workspace.NewSeeder(admin).Seed(ctx, f.ws, "hub"); err != nil {
 		t.Fatal(err)
 	}
@@ -92,29 +134,43 @@ func newHubFixture(t *testing.T, maxLifetime time.Duration, opts ...hubOption) *
 	if f.signer, err = auth.NewInternalPrincipalSigner(private); err != nil {
 		t.Fatal(err)
 	}
-	verifier, err := auth.NewInternalPrincipalVerifier(public)
-	if err != nil {
+	if f.verifier, err = auth.NewInternalPrincipalVerifier(public); err != nil {
 		t.Fatal(err)
 	}
-	logger := workload.NewProcessLogger(f.logs, ServiceName, "test", "test", workload.DefaultDiagnosticConfig()).Logger
-	client := dbconnect.NewClientForTesting(hubDB)
-	f.events = NewInstanceEvents(client, settings.recommendedCLIVersion, logger)
+	f.logger = workload.NewProcessLogger(f.logs, ServiceName, "test", "test", workload.DefaultDiagnosticConfig()).Logger
+	f.client = dbconnect.NewClientForTesting(hubDB)
+	f.events = NewInstanceEvents(f.client, settings.recommendedCLIVersion, f.logger)
 	go func() { _ = f.events.Run(ctx) }()
-	f.clock = newManualClock()
-	f.streams = NewStreams(client, hubTestPod, f.clock, logger)
-	go func() { _ = f.streams.Run(ctx) }()
-	router := NewRouter(verifier, WithLogger(logger), WithInstanceRoutes(InstanceRoutes{
-		Database:              client,
-		MaxCredentialLifetime: maxLifetime,
-		PageTokenKey:          bytes.Repeat([]byte{7}, 32),
-		RecommendedCLIVersion: settings.recommendedCLIVersion,
-		Events:                f.events,
-	}), WithClientRoutes(ClientRoutes{Database: client, MinCLIVersion: settings.minCLIVersion, Streams: f.streams}))
-	server := httptest.NewServer(BuildHTTPHandler(workload.NewReadiness(), router))
-	t.Cleanup(server.Close)
-	f.url = server.URL
+	first := f.addPod(hubTestPod)
+	f.url, f.streams, f.clock = first.url, first.streams, first.clock
 	f.principal = auth.IndependentKeyPrincipal(workspace.Workspace{ID: f.ws}, "key_hub_test")
 	return f
+}
+
+// addPod starts another computer-hub server named name on the fixture's
+// database, with its own streams, stream clock and listener.
+func (f *hubFixture) addPod(name string) *hubPod {
+	f.t.Helper()
+	pod := &hubPod{name: name, clock: newManualClock(), metrics: newHubMetrics()}
+	pod.streams = NewStreams(f.client, name, f.settings.streamMaxAge, pod.clock, f.logger, pod.metrics)
+	go func() { _ = pod.streams.Run(f.ctx) }()
+	router := NewRouter(f.verifier, WithLogger(f.logger), WithInstanceRoutes(InstanceRoutes{
+		Database:              f.client,
+		MaxCredentialLifetime: f.settings.maxLifetime,
+		PageTokenKey:          bytes.Repeat([]byte{7}, 32),
+		RecommendedCLIVersion: f.settings.recommendedCLIVersion,
+		Events:                f.events,
+	}), WithClientRoutes(ClientRoutes{Database: f.client, MinCLIVersion: f.settings.minCLIVersion, Streams: pod.streams}))
+	server := httptest.NewServer(BuildHTTPHandler(workload.NewReadiness(), router))
+	f.t.Cleanup(server.Close)
+	pod.url = server.URL
+	select {
+	case <-pod.streams.listening:
+	case <-time.After(10 * time.Second):
+		f.t.Fatalf("pod %s did not listen within 10 seconds", name)
+	}
+	f.pods[name] = pod
+	return pod
 }
 
 type hubTracer struct{ f *hubFixture }
@@ -122,6 +178,10 @@ type hubTracer struct{ f *hubFixture }
 type limitCountKey struct{}
 
 func (h hubTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	if pause := h.f.pause.Load(); pause != nil && strings.Contains(data.SQL, pause.match) && h.f.pause.CompareAndSwap(pause, nil) {
+		pause.once.Do(func() { close(pause.reached) })
+		<-pause.release
+	}
 	if strings.Contains(data.SQL, "instance_idempotency_records") {
 		h.f.recordStatements.Add(1)
 	}
