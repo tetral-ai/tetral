@@ -103,7 +103,7 @@ func (h *clientHandler) events(w http.ResponseWriter, r *http.Request) {
 	)
 	err = h.clientTx(ctx, id.workspace, "computer_hub.client_events", func(tx *dbconnect.Tx) error {
 		activated, replaced = "", ""
-		granted, err := authorize(ctx, tx, id, true, false)
+		granted, err := authorize(ctx, tx, id, true, false, "")
 		if err != nil {
 			return err
 		}

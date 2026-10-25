@@ -158,7 +158,10 @@ its writes need (`internal/instance`):
 
 - a protocol-error report locks the connection `FOR UPDATE`, so a copy in
   flight waits and gets the stored ACK;
-- a credential fetch locks the fetched credential before the connection;
+- a credential fetch reads the credential it names without a lock and, when
+  it is `pending` and the principal is `active`, locks it `FOR UPDATE` before
+  the principal's, the order of the renewal's activation; otherwise it
+  leaves it unlocked;
 - a ready or heartbeat reads the connection without a lock first and, when
   the connection's credential, which caps the grant, is not the principal's,
   locks it `FOR SHARE` after the principal's and before the connection.

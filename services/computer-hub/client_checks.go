@@ -39,7 +39,9 @@ import (
 // A database failure at any step answers 503 and changes nothing, so the
 // authority checks fail closed. Locks follow the order of internal/instance:
 // instance, credentials, connection, each in its final mode at once; of two
-// credentials, the principal's comes before the connection's.
+// credentials, a pending one comes before the other, and the principal's
+// before the connection's; a fetch locks the credential it names only when
+// that credential is pending and the fetch's principal is active.
 
 // clientFailure is a refusal with its code of the client error table and,
 // for previous_connection_active, its retry_after_ms. commit marks a refusal
@@ -197,8 +199,14 @@ var errReuseRaced = errors.New("computer-hub: an activation revoked the credenti
 // transaction records as the instance's credential reuse and whose refusal
 // commits it; otherwise FOR SHARE. With activating, the events request that
 // may activate it, a pending credential passes, locked FOR UPDATE for its
-// activation.
-func authorize(ctx context.Context, tx *dbconnect.Tx, id clientIdentity, activating, updatesInstance bool) (authority, error) {
+// activation. With fetching, the credential a fetch names, an unlocked read
+// of it decides: a pending one is locked FOR UPDATE before an active
+// principal's, the order of its activation. Any other is left unlocked,
+// since it never becomes pending again and the fetch writes only a pending
+// one; so is any credential a fetch by a principal that is not active
+// names, which is refused, so that no transaction locks two pending
+// credentials, as an expired renewal and a later one are.
+func authorize(ctx context.Context, tx *dbconnect.Tx, id clientIdentity, activating, updatesInstance bool, fetching string) (authority, error) {
 	unknown := refuse(protocol.ErrorCredentialInvalid, "the connection key does not authenticate this request")
 	peek, err := instance.ReadInstanceCredential(ctx, tx, id.workspace, id.instanceID, id.credentialID)
 	if err != nil && !errors.Is(err, instance.ErrNotFound) {
@@ -215,6 +223,17 @@ func authorize(ctx context.Context, tx *dbconnect.Tx, id clientIdentity, activat
 	}
 	if err != nil {
 		return authority{}, err
+	}
+	if fetching != "" && fetching != id.credentialID {
+		named, err := instance.ReadInstanceCredential(ctx, tx, id.workspace, id.instanceID, fetching)
+		if err != nil && !errors.Is(err, instance.ErrNotFound) {
+			return authority{}, err
+		}
+		if err == nil && named.State == instance.CredentialPending && peek.State == instance.CredentialActive {
+			if _, err := instance.LockCredential(ctx, tx, id.workspace, id.instanceID, fetching); err != nil && !errors.Is(err, instance.ErrNotFound) {
+				return authority{}, err
+			}
+		}
 	}
 	lockCredential := instance.ShareCredential
 	if activating && peek.State == instance.CredentialPending {

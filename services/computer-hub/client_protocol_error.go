@@ -39,7 +39,7 @@ func (h *clientHandler) protocolError(w http.ResponseWriter, r *http.Request) {
 	)
 	err = h.clientTx(ctx, id.workspace, "computer_hub.client_protocol_error", func(tx *dbconnect.Tx) error {
 		recorded = false
-		granted, err := authorize(ctx, tx, id, false, false)
+		granted, err := authorize(ctx, tx, id, false, false, "")
 		if err != nil {
 			return err
 		}

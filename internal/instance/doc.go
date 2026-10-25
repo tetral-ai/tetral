@@ -138,10 +138,12 @@
 //     locks them in the order instance, credentials, connection, each at its
 //     first lock in the mode the transaction's writes to it need (FOR UPDATE
 //     or FOR NO KEY UPDATE), otherwise FOR SHARE, and never raises a share
-//     lock; of two credentials, a client request's principal comes before
-//     its connection's credential. An UPDATE that finds its row itself takes
-//     that row's lock in the same order. So no two of them wait on each other
-//     in a cycle.
+//     lock; of two credentials, a pending one, such as a renewal, comes
+//     before the other, and a client request's principal before its
+//     connection's credential; a fetch locks the credential it names only
+//     when that credential is pending and the fetch's principal is active.
+//     An UPDATE that finds its row itself takes that row's lock in the same
+//     order. So no two of them wait on each other in a cycle.
 //   - A replay record is written in the transaction that accepts the
 //     message; a message refused by an earlier check records nothing. The
 //     connection row keeps the ready's record and the latest heartbeat's

@@ -245,6 +245,103 @@ func TestResumeWithTheFetchedCredentialActivatesItAndRevokesTheOld(t *testing.T)
 	}
 }
 
+// TestAResumeCommitsWhileAFetchOfItsRenewalIsHeld holds a second fetch of a
+// fetched renewal at its lock of the renewal, while the CLI resumes with the
+// renewal: the resume activates it meanwhile, and the fetch then answers
+// 401 credential_revoked, its principal revoked by that activation.
+func TestAResumeCommitsWhileAFetchOfItsRenewalIsHeld(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	cli, stream := f.openOnline()
+	pending := f.renewal(cli, stream, "renew-held-fetch", `{}`)["id"].(string)
+	renewed := f.fetched(cli, stream.connectionID, pending)
+	pause := f.pauseOn("FROM instance_credentials WHERE workspace_id=$1 AND instance_id=$2 AND id=$3 FOR UPDATE")
+	release := sync.OnceFunc(func() { close(pause.release) })
+	defer release()
+	fetched := make(chan enginetest.Response, 1)
+	go func() { fetched <- f.fetch(cli, stream.connectionID, "msg_fetch_again", pending) }()
+	<-pause.reached
+	resumed := make(chan int, 1)
+	go func() {
+		resume := true
+		opened, response, err := renewed.OpenEvents(f.ctx, renewed.EventsQuery(stream.connectionID, &resume))
+		if opened != nil {
+			t.Cleanup(func() { _ = opened.Close() })
+		}
+		if err != nil {
+			resumed <- 0
+			return
+		}
+		resumed <- response.Status
+	}()
+	select {
+	case status := <-resumed:
+		if status != http.StatusOK {
+			t.Fatalf("resume = %d while the fetch was held", status)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the resume did not commit while the fetch was held at its lock of the renewal")
+	}
+	release()
+	requireClientError(t, <-fetched, nil, protocol.ErrorCredentialRevoked)
+	if f.credentialRow(pending)["state"] != "active" || f.connectionRow(stream.connectionID)["credential_id"] != pending {
+		t.Fatal("the resume did not activate the renewal and move the connection to it")
+	}
+}
+
+// TestFetchesNamingEachOthersCredentialsDoNotWait holds a fetch by one
+// credential of an instance that names another while a fetch by the other
+// names the first, so that each would lock its named credential before its
+// principal: the second answers while the first is held, and the first once
+// released. Two active credentials lock no named one, since neither is
+// pending; an expired renewal and a later one, both pending, lock none
+// either, since neither principal is active.
+func TestFetchesNamingEachOthersCredentialsDoNotWait(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	for _, row := range []struct {
+		name string
+		// hold is the first fetch's statement it is held at, after its
+		// named credential would be locked.
+		hold string
+		// prepare returns the two credentials and the connection.
+		prepare       func(t *testing.T) (first, second *enginetest.CLI, connectionID string)
+		first, second protocol.ErrorCode
+	}{
+		{"two active credentials", "AND lease_expires_at>$4 FOR SHARE", func(t *testing.T) (*enginetest.CLI, *enginetest.CLI, string) {
+			cli, stream := f.openOnline()
+			return f.secondCredential(cli, time.Time{}), cli, stream.connectionID
+		}, protocol.ErrorNotFound, protocol.ErrorNotFound},
+		{"an expired renewal and a later one", "FROM instance_credentials WHERE workspace_id=$1 AND instance_id=$2 AND id=$3 FOR SHARE", func(t *testing.T) (*enginetest.CLI, *enginetest.CLI, string) {
+			cli, stream := f.openOnline()
+			expiresAt := f.dbNow().Add(2 * time.Second)
+			expiring := f.renewal(cli, stream, "renew-expiring", `{"expires_at":"`+expiresAt.UTC().Format(time.RFC3339Nano)+`"}`)["id"].(string)
+			expired := f.fetched(cli, stream.connectionID, expiring)
+			waitUntil(t, func() bool { return f.dbNow().After(expiresAt) })
+			later := f.renewal(cli, stream, "renew-later", `{}`)["id"].(string)
+			return expired, f.fetched(cli, stream.connectionID, later), stream.connectionID
+		}, protocol.ErrorCredentialExpired, protocol.ErrorCredentialInvalid},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			first, second, connectionID := row.prepare(t)
+			pause := f.pauseOn(row.hold)
+			release := sync.OnceFunc(func() { close(pause.release) })
+			defer release()
+			held := make(chan enginetest.Response, 1)
+			go func() { held <- f.fetch(first, connectionID, "msg_fetch_first", second.CredentialID) }()
+			<-pause.reached
+			answered := make(chan enginetest.Response, 1)
+			go func() { answered <- f.fetch(second, connectionID, "msg_fetch_second", first.CredentialID) }()
+			select {
+			case response := <-answered:
+				requireClientError(t, response, nil, row.second)
+			case <-time.After(5 * time.Second):
+				t.Fatal("the second fetch did not answer while the first was held")
+			}
+			release()
+			requireClientError(t, <-held, nil, row.first)
+		})
+	}
+}
+
 // TestNewConnectionWithTheFetchedCredentialActivatesIt opens a new
 // connection with a fetched renewal once the old connection's lease has
 // passed: the renewal becomes active and the new connection's, and the
