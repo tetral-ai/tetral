@@ -351,8 +351,10 @@ pub(crate) mod tests {
     };
 
     static MOVED_BY_TEST: AtomicU64 = AtomicU64::new(0);
+    static MOVED_BY_TEST_READS: AtomicU64 = AtomicU64::new(0);
 
     fn moved_by_test() -> Duration {
+        MOVED_BY_TEST_READS.fetch_add(1, Ordering::SeqCst);
         Duration::from_millis(MOVED_BY_TEST.load(Ordering::SeqCst))
     }
 
@@ -631,8 +633,16 @@ pub(crate) mod tests {
         );
         sinks.write(record(10));
         sinks.end_flushes_within(Duration::from_secs(60));
-        let mover = thread::spawn(|| {
-            thread::sleep(Duration::from_millis(50));
+        // The clock moves only once the flush has read it for its end and
+        // again in its wait, so only a flush that reads it while waiting ends.
+        let reads = MOVED_BY_TEST_READS.load(Ordering::SeqCst);
+        let mover = thread::spawn(move || {
+            let waiting = Instant::now();
+            while MOVED_BY_TEST_READS.load(Ordering::SeqCst) < reads + 2
+                && waiting.elapsed() < Duration::from_secs(10)
+            {
+                thread::sleep(Duration::from_millis(1));
+            }
             MOVED_BY_TEST.fetch_add(60_000, Ordering::SeqCst);
         });
         let flushing = Instant::now();
