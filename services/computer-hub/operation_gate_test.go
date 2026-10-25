@@ -69,3 +69,25 @@ func (f *hubFixture) gateResponse(method, path string, operations []auth.Operati
 	}
 	return response.StatusCode, body
 }
+
+// TestPathsOutsideTheRouteGroupsVerifyThePrincipalFirst sends requests to
+// paths no route group holds: without a signed principal each answers 401,
+// and with a workspace principal 404 not_found_error.
+func TestPathsOutsideTheRouteGroupsVerifyThePrincipalFirst(t *testing.T) {
+	f := newHubFixture(t, time.Hour)
+	for _, path := range []string{"/v1/client", "/v1/other"} {
+		request, err := http.NewRequestWithContext(f.ctx, http.MethodGet, f.url+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		requireAPIError(t, response.StatusCode, body, http.StatusUnauthorized, "authentication_error", "")
+		status, body := f.do(http.MethodGet, path, nil, "")
+		requireAPIError(t, status, body, http.StatusNotFound, "not_found_error", "")
+	}
+}

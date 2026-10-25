@@ -90,8 +90,11 @@ func NewRouter(verifier *auth.InternalPrincipalVerifier, opts ...RouterOption) h
 			(&instanceHandler{InstanceRoutes: *options.instances, logger: options.logger}).register(r)
 		}
 	})
-	router.NotFound(writeManagementNotFound)
-	router.MethodNotAllowed(writeManagementNotFound)
+	// A path outside both groups, such as the bare /v1/client, is still
+	// answered only after the signed principal is verified.
+	unmatched := principalMiddleware(verifier, httpapi.WriteError)(http.HandlerFunc(writeManagementNotFound))
+	router.NotFound(unmatched.ServeHTTP)
+	router.MethodNotAllowed(unmatched.ServeHTTP)
 	return router
 }
 
