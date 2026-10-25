@@ -198,6 +198,12 @@ impl TaskMachine {
         self.issue_control("stdin", task_id, members)
     }
 
+    /// Issues `tool.cancel` of `task_id` with the payload's `members` and
+    /// gives its `message_id`.
+    pub fn cancel(&self, task_id: &str, members: Value) -> String {
+        self.issue_control("cancel", task_id, members)
+    }
+
     fn issue_control(&self, kind: &str, task_id: &str, members: Value) -> String {
         let number = self.controls.fetch_add(1, Ordering::SeqCst);
         let mut payload = json!({

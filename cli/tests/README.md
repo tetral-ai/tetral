@@ -137,13 +137,15 @@ temporary directories. No workspace crate depends on this package.
   never comes within it, a detached command's lifetime, the working
   directory and its errors, the environment, the exit facts, the end of a
   task's processes, the metrics and the trace context.
-- `tests/stdin_cancel.rs`: `tool.stdin`: writes recorded by `write_seq`,
-  repeated and stale writes and a lost reply sent again, failed controls,
-  the waits of reads and writes and a lifetime they never extend, windows
-  and a lost read reply, a reply and the `terminal` report of an exit
-  during its wait acknowledged apart, windows, counters and a control's
-  `limits` in replies, a full pipe, writes sent together, escaped `chars`,
-  and U+0003.
+- `tests/stdin_cancel.rs`: `tool.stdin` and `tool.cancel`: writes recorded
+  by `write_seq`, repeated and stale writes and a lost reply sent again,
+  failed controls, the waits of reads and writes and a lifetime they never
+  extend, windows and a lost read reply, a reply and the `terminal` report
+  of an exit during its wait acknowledged apart, windows, counters and a
+  control's `limits` in replies, a full pipe, writes sent together, escaped
+  `chars`, U+0003, and cancels: their cumulative output, the one
+  termination that repeated cancels join, and a cancel during a blocked
+  write.
 - `tests/task_storage.rs`: a task's output beyond what a stream keeps, files
   that cannot be created and a log that cannot be written, task files that
   no other task reaches, `TMPDIR` with files and Unix sockets, the files'

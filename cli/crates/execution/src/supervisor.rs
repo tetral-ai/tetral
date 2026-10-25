@@ -8,10 +8,10 @@
 //! observed, or given up on, and the `terminal` report has been handed to the
 //! outbox; and `cleaned` once every report of the task is acknowledged or
 //! dropped and the task's files are gone. The supervisor answers the task's
-//! `tool.stdin` in every state but `staged`, where they wait for the start:
-//! each waiting reply is a timer and a waiter of the supervisor, which
-//! meanwhile keeps reading output and handling the exit and other controls.
-//! Every wait reads the seam clock.
+//! controls in every state but `staged`, whose `tool.stdin` wait for the
+//! start or the cancel that prevents it: each waiting reply is a timer and a
+//! waiter of the supervisor, which meanwhile keeps reading output and
+//! handling the exit and other controls. Every wait reads the seam clock.
 
 use std::collections::{HashSet, VecDeque};
 use std::os::fd::OwnedFd;
@@ -24,8 +24,8 @@ use protocol::field::PositiveInt;
 use protocol::id::Id;
 use protocol::ports::{ReportId, ReportListener, ReportOutcome, ReportSink};
 use protocol::tool::{
-    ControlErrorCode, ExecInput, HelperStatus, HelperTool, Metrics, ProtocolError, ReportPhase,
-    StdinPayload, StreamSnapshot, ToolError,
+    CancelPayload, ControlErrorCode, ExecInput, HelperStatus, HelperTool, Metrics, ProtocolError,
+    ReportPhase, StdinPayload, StreamSnapshot, ToolError,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::pipe::Receiver;
@@ -33,6 +33,7 @@ use tokio::process::ChildStdin;
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
+use crate::cancel::Receipt;
 use crate::capture::StreamCapture;
 use crate::exec::{self, ExecCall, ExitFacts, OnExpiry, Outcome};
 use crate::isolation::{Command, Isolation, LaunchError, Process};
@@ -130,6 +131,8 @@ pub enum SupervisorMessage {
     Start,
     /// An admitted `tool.stdin` of the task.
     Stdin(Box<Control<StdinPayload>>),
+    /// An admitted `tool.cancel` of the task.
+    Cancel(Box<Control<CancelPayload>>),
     /// The outbox's outcome of one of the task's reports.
     Outcome(ReportId, ReportOutcome),
 }
@@ -198,6 +201,7 @@ pub fn spawn(spec: TaskSpec, context: Context) -> SupervisorMailbox {
         ended: None,
         cleaned: false,
         kept: (exec::empty_stream(), exec::empty_stream()),
+        cancelled: false,
         records: WriteRecords::default(),
         writes: VecDeque::new(),
         writing: None,
@@ -235,6 +239,7 @@ struct Supervisor {
     cleaned: bool,
     /// The streams' counters once the task is cleaned.
     kept: (StreamSnapshot, StreamSnapshot),
+    cancelled: bool,
     records: WriteRecords,
     /// The writes that wait for the one being written.
     writes: VecDeque<Control<StdinPayload>>,
@@ -259,6 +264,8 @@ enum Expiry {
     Wait,
     /// A detached command's lifetime passed.
     Lifetime,
+    /// A `tool.cancel`.
+    Cancel,
 }
 
 /// A task as a reply reports it.
@@ -292,6 +299,7 @@ struct Waiter {
 /// How the staged state ended.
 enum Staged {
     Started,
+    Cancelled,
     /// The binding owner forgot the task.
     Forgotten,
 }
@@ -300,6 +308,7 @@ impl Supervisor {
     async fn run(mut self) {
         match self.staged().await {
             Staged::Forgotten => return,
+            Staged::Cancelled => {}
             Staged::Started => match self.launch().await {
                 Err(Start::Rejected(rejection)) => {
                     self.submit(
@@ -323,7 +332,8 @@ impl Supervisor {
         self.settle().await;
     }
 
-    /// `staged`: the task's `tool.stdin` wait, until the start.
+    /// `staged`: the task's `tool.stdin` wait, until the start or a cancel
+    /// that prevents it.
     async fn staged(&mut self) -> Staged {
         let mut held = Vec::new();
         let staged = loop {
@@ -332,6 +342,11 @@ impl Supervisor {
                 Some(SupervisorMessage::Start) => {
                     self.left_queue = Some(state::seams::now());
                     break Staged::Started;
+                }
+                Some(SupervisorMessage::Cancel(control)) => {
+                    self.left_queue = Some(state::seams::now());
+                    self.cancel(*control);
+                    break Staged::Cancelled;
                 }
                 Some(SupervisorMessage::Stdin(control)) => held.push(*control),
                 Some(SupervisorMessage::Outcome(report, _)) => {
@@ -358,6 +373,7 @@ impl Supervisor {
                     self.awaited.remove(&report);
                 }
                 Some(SupervisorMessage::Stdin(control)) => self.stdin(*control),
+                Some(SupervisorMessage::Cancel(control)) => self.cancel(*control),
                 Some(SupervisorMessage::Start) => {}
             }
         }
@@ -566,6 +582,7 @@ impl Supervisor {
                 }
                 message = self.messages.recv(), if !forgotten => match message {
                     Some(SupervisorMessage::Stdin(control)) => self.stdin(*control),
+                    Some(SupervisorMessage::Cancel(control)) => self.cancel(*control),
                     Some(SupervisorMessage::Outcome(report, _)) => {
                         self.awaited.remove(&report);
                     }
@@ -608,6 +625,7 @@ impl Supervisor {
         };
         outcome.timed_out = state.timed_out;
         outcome.duration = state.duration;
+        outcome.cancelled = self.cancelled.then_some(true);
         outcome.metrics = Some(self.metrics(state.duration));
         let (out, err) = (
             std::mem::take(&mut self.out.capture),
@@ -678,6 +696,8 @@ impl Supervisor {
             stderr: exec::empty_stream(),
             duration: Duration::ZERO,
             metrics: Some(self.metrics(Duration::ZERO)),
+            cancelled: None,
+            was_running: None,
             written_bytes: None,
         }
     }
@@ -864,7 +884,7 @@ impl Supervisor {
                     "write_seq is at or below the task's highest recorded write and matches none",
                 ),
                 Check::Repeat(record) => self.reply_repeat(&control, record),
-                Check::New if self.state().ended || self.stdin.is_none() => {
+                Check::New if self.state().ended || self.stdin.is_none() || self.cancelled => {
                     self.records
                         .record(write_seq, digest, 0, Some(ControlErrorCode::StdinClosed));
                     self.reply_closed(&control, 0);
@@ -917,6 +937,12 @@ impl Supervisor {
     /// and the write ends `stdin_closed` with the bytes written so far.
     fn write_failed(&mut self) {
         self.stdin = None;
+        self.write_interrupted();
+    }
+
+    /// Ends the write in progress `stdin_closed` with the bytes written so
+    /// far.
+    fn write_interrupted(&mut self) {
         let Some(writing) = self.writing.take() else {
             return;
         };
@@ -928,6 +954,64 @@ impl Supervisor {
             Some(ControlErrorCode::StdinClosed),
         );
         self.reply_closed(&writing.control, written);
+        self.next_write();
+    }
+
+    /// A `tool.cancel`, recorded and answered at once.
+    fn cancel(&mut self, control: Control<CancelPayload>) {
+        let state = self.state();
+        let receipt = if state.ended {
+            Receipt::Ended
+        } else if self.process.is_none() {
+            Receipt::Staged
+        } else if self.ending.is_some() {
+            Receipt::Terminating
+        } else {
+            Receipt::Running
+        };
+        if receipt.cancelled() {
+            self.cancelled = true;
+        }
+        let limits = Visible::requested(control.payload.limits.as_ref());
+        let mut outcome = self.reply_outcome(HelperTool::Cancel, HelperStatus::Success, &state);
+        outcome.cancelled = Some(receipt.cancelled());
+        outcome.was_running = Some(receipt.was_running());
+        let (out, err) = (
+            std::mem::take(&mut self.out.capture),
+            std::mem::take(&mut self.err.capture),
+        );
+        self.reply(&control, outcome, &out, &err, limits, None);
+        self.out.capture = out;
+        self.err.capture = err;
+        if receipt == Receipt::Staged {
+            self.report_cancelled_staged();
+            return;
+        }
+        // Writes stop, but the command's stdin stays open: its end of file
+        // would let the command exit before the termination ends it.
+        if receipt.was_running() {
+            self.write_interrupted();
+        }
+        if receipt == Receipt::Running {
+            let pid = self.process.as_ref().map_or(0, |process| process.pid);
+            self.ending = Some((
+                Termination::begin(pid, self.context.bounds.termination),
+                Expiry::Cancel,
+            ));
+        }
+    }
+
+    /// The `terminal` report of a task cancelled before it started.
+    fn report_cancelled_staged(&mut self) {
+        let mut outcome = self.outcome(HelperStatus::Success, None, ExitFacts::default());
+        outcome.cancelled = Some(true);
+        let empty = StreamCapture::new();
+        self.report(ReportPhase::Terminal, outcome, &empty, &empty);
+        self.ended = Some(State {
+            ended: true,
+            ..State::default()
+        });
+        self.exited();
         self.next_write();
     }
 
@@ -948,6 +1032,8 @@ impl Supervisor {
             stderr: exec::empty_stream(),
             duration: state.duration,
             metrics: None,
+            cancelled: None,
+            was_running: None,
             written_bytes: None,
         }
     }

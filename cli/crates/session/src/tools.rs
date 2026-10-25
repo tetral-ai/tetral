@@ -9,7 +9,7 @@
 //! ([`SessionOwner::start_staged`]). Each admitted task has its Task
 //! supervisor from its admission on, `staged` until the owner starts it. A
 //! control finds its task only in the registry of the binding it names, on
-//! its own connection, and a `tool.stdin` goes to that task's supervisor.
+//! its own connection, and goes to that task's supervisor.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -255,8 +255,8 @@ impl<S: TaskStarter> SessionOwner<S> {
 
     /// The admission of a `tool.stdin` or `tool.cancel`: the ledger's room,
     /// its schema and budgets, then its task in the named binding's registry,
-    /// and for a `tool.stdin` the task's tool. An admitted `tool.stdin` goes
-    /// to the task's supervisor; a cancel of a staged task prevents its
+    /// and for a `tool.stdin` the task's tool. An admitted control goes to
+    /// the task's supervisor; a cancel of a staged task also prevents its
     /// start.
     fn control(&mut self, call: &ToolCall) -> Result<(), Body> {
         let payload = control_checks(call)?;
@@ -287,12 +287,12 @@ impl<S: TaskStarter> SessionOwner<S> {
                 }
                 SupervisorMessage::Stdin(Box::new(control(call, stdin)))
             }
-            DownstreamPayload::ToolCancel(_) => {
+            DownstreamPayload::ToolCancel(cancel) => {
                 if task.state == TaskState::Staged {
                     task.state = TaskState::Prevented;
                     staged.retain(|task_id| *task_id != call.task_id);
                 }
-                return Ok(());
+                SupervisorMessage::Cancel(Box::new(control(call, cancel)))
             }
             _ => return Ok(()),
         };

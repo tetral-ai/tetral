@@ -176,7 +176,7 @@ impl ExitFacts {
 }
 
 /// The result envelope of an `exec_command` report or of its task's
-/// `stdin` reply.
+/// `stdin` or `cancel` reply.
 pub struct Outcome {
     pub tool: HelperTool,
     pub task_id: Id,
@@ -188,6 +188,8 @@ pub struct Outcome {
     pub stderr: StreamSnapshot,
     pub duration: Duration,
     pub metrics: Option<Metrics>,
+    pub cancelled: Option<bool>,
+    pub was_running: Option<bool>,
     pub written_bytes: Option<u64>,
 }
 
@@ -203,8 +205,8 @@ impl Outcome {
                 exit_code: Nullable(self.exit.exit_code),
                 signal: Nullable(self.exit.signal),
                 timed_out: self.timed_out,
-                cancelled: None,
-                was_running: None,
+                cancelled: self.cancelled,
+                was_running: self.was_running,
                 written_bytes: self.written_bytes.map(Count::saturating),
                 stdout: self.stdout,
                 stderr: self.stderr,

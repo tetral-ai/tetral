@@ -1,9 +1,10 @@
-//! `tool.stdin` between `tetral server run`, whose ready advertises
-//! `tool_execution`, and the reference control server as separate
-//! processes, each on its own controlled clock, with real restricted
-//! processes: reads and their waits, writes recorded by `write_seq` and
-//! never repeated, writes to a full pipe, U+0003, the control errors, and
-//! replies and `terminal` reports delivered and acknowledged apart. The test seams these tests use are those
+//! `tool.stdin` and `tool.cancel` between `tetral server run`, whose ready
+//! advertises `tool_execution`, and the reference control server as
+//! separate processes, each on its own controlled clock, with real
+//! restricted processes: reads and their waits, writes recorded by
+//! `write_seq` and never repeated, writes to a full pipe, U+0003, the
+//! control errors, cancels, and replies and `terminal` reports delivered
+//! and acknowledged apart. The test seams these tests use are those
 //! `tetral_tests::tasks` and `tetral_tests::machine` name.
 
 use std::fs;
@@ -248,6 +249,78 @@ fn failed_controls_leave_the_task_and_its_reports_unchanged() {
         "write_conflict, task_not_found and unsupported_control with no result; the read reply under a wrong-identity ACK sent {} times unchanged; f holds x and z; the task's one report is running",
         bodies.len()
     ));
+}
+
+#[test]
+fn a_cancel_replies_with_the_cumulative_output_and_repeated_cancels_join_one_termination() {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "trap '' TERM; printf abcdef; cat > f with its window read: two cancels 1 second apart, the first with visible_bytes 4, and one after the exit",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    let seams = &tasks.machine().seams;
+    let output = seams.count(OUTPUT_READ);
+    detached(
+        &tasks,
+        "task_trap",
+        "trap '' TERM; printf abcdef; cat > f",
+        1_800_000,
+    );
+    seams.wait_for_count(OUTPUT_READ, output + 1);
+    let read = tasks.stdin("task_trap", json!({"chars": "", "wait_ms": 0}));
+    tasks.reply(&read);
+
+    let cancel = |members: Value| {
+        let message_id = tasks.cancel("task_trap", members);
+        tasks.reply(&message_id)
+    };
+    let cancelled = |reply: &Value| {
+        let result = &reply["result"]["result"];
+        json!([
+            reply["result"]["tool"],
+            result["cancelled"],
+            result["was_running"],
+            result["signal"]
+        ])
+    };
+    let first = cancel(json!({"limits": {"visible_bytes": 4}}));
+    assert_eq!(cancelled(&first), json!(["cancel", true, true, null]));
+    assert_eq!(
+        first["result"]["result"]["stdout"],
+        json!({"text": "ab\n[... 2 bytes truncated ...]\nef", "total_bytes": 6, "total_lines": 0, "returned_bytes": 4, "truncated": true}),
+        "{first:#}"
+    );
+    // The second cancel joins the termination that the first began, whose
+    // SIGKILL comes 2 seconds after the first.
+    tasks.advance(seconds(1.0));
+    assert_eq!(
+        cancelled(&cancel(json!({}))),
+        json!(["cancel", true, true, null])
+    );
+    tasks.advance(seconds(1.0));
+    let terminal = tasks.terminal("task_trap");
+    let result = &terminal["result"]["result"];
+    assert_eq!(
+        json!([
+            terminal["report_seq"],
+            result["cancelled"],
+            result["signal"],
+            result["exit_code"]
+        ]),
+        json!([2, true, "killed", null]),
+        "{terminal:#}"
+    );
+    let after = cancel(json!({}));
+    assert_eq!(cancelled(&after), json!(["cancel", false, false, "killed"]));
+    let reports: Vec<Value> = tasks
+        .reports("task_trap")
+        .iter()
+        .map(|report| report["phase"].clone())
+        .collect();
+    assert_eq!(reports, ["running", "terminal"]);
+    case.observe("the first cancel cancelled and running, with 4 of the 6 bytes already read; the second, 1 second later while the TERM was ignored, cancelled and running too; one terminal report killed 2 seconds after the first; a cancel after it cancelled false with signal killed");
 }
 
 #[test]
@@ -615,6 +688,52 @@ fn writes_sent_together_are_written_in_write_seq_order() {
     }
 
     case.observe("f ended with 345 after the 65,536 bytes that filled the pipe");
+}
+
+#[test]
+fn a_cancel_is_answered_during_a_blocked_write_which_ends_stdin_closed() {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let mut case =
+        record.case("sleep 120: two writes that fill its pipe, a third that blocks, then a cancel");
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    let seams = &tasks.machine().seams;
+    detached(&tasks, "task_blocked", "sleep 120", 1_800_000);
+    let waiting_count = seams.count(REPLY_WAITING);
+    for write_seq in 1..=2 {
+        tasks.stdin(
+            "task_blocked",
+            json!({"chars": "a".repeat(32_768), "write_seq": write_seq}),
+        );
+    }
+    seams.wait_for_count(REPLY_WAITING, waiting_count + 2);
+    let started = seams.count(WRITE_STARTED);
+    let blocked = tasks.stdin(
+        "task_blocked",
+        json!({"chars": "b".repeat(32_768), "write_seq": 3}),
+    );
+    seams.wait_for_count(WRITE_STARTED, started + 1);
+    let cancel = tasks.cancel("task_blocked", json!({}));
+    let cancel = tasks.reply(&cancel);
+    assert_eq!(
+        json!([
+            cancel["result"]["result"]["cancelled"],
+            cancel["result"]["result"]["was_running"]
+        ]),
+        json!([true, true])
+    );
+    let blocked = tasks.reply(&blocked);
+    assert_eq!(blocked["error"]["code"], "stdin_closed", "{blocked:#}");
+    let terminal = tasks.terminal("task_blocked");
+    assert_eq!(
+        json!([
+            terminal["result"]["result"]["cancelled"],
+            terminal["result"]["result"]["signal"]
+        ]),
+        json!([true, "terminated"])
+    );
+    case.observe("the cancel was answered while write 3 was blocked, with the clock never moved; write 3 ended stdin_closed; the terminal report said cancelled, terminated");
 }
 
 #[test]

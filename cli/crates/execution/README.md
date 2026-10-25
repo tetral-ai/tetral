@@ -83,8 +83,9 @@ which owns that task's process tree; the translation of a call's
   its streams' counters, its exit facts and its write records. It reads both
   pipes all the time into the capture and the logs, so no command blocks on
   its output, and every wait reads the seam clock (`supervisor`).
-- The supervisor answers the task's `tool.stdin` in every state but
-  `staged`, where they wait for the start; each waiting reply is a timer and a waiter of the
+- The supervisor answers the task's `tool.stdin` and `tool.cancel` in every
+  state but `staged`, whose `tool.stdin` wait for the start or the cancel
+  that prevents it; each waiting reply is a timer and a waiter of the
   supervisor, which meanwhile keeps reading output and handling the exit and
   other controls (`supervisor`).
 - A read replies at once when a window holds output or the task has ended,
@@ -98,6 +99,10 @@ which owns that task's process tree; the translation of a call's
   or outlasts `WRITE_TIMEOUT` closes the task's stdin for good; `chars` of
   exactly U+0003 send SIGINT the way the termination procedure sends SIGTERM
   (`terminate::interrupt`).
+- A cancel is answered at receipt, with the cumulative capture; the task's
+  state decides the reply's `cancelled` and `was_running`
+  (`cancel::Receipt`). Cancelling a running task stops its writes, leaves its
+  stdin open and begins the termination procedure (`supervisor`).
 - `exec_command` runs as `tetral __tetral-task exec <directory> <shell>
   <cmd>` through the restricted path; inside the sandbox the launcher entry
   checks and enters the directory, with no fallback, and executes
@@ -127,6 +132,7 @@ which owns that task's process tree; the translation of a call's
   replies, and the cleanup.
 - `stdin.rs`: `Request`, what a `tool.stdin` asks for with its wait, and
   `WriteRecords`, a task's handled writes.
+- `cancel.rs`: `Receipt`, the state in which a cancel finds its task.
 - `exec.rs`: `ExecCall`, a call's directory, waits and expiry; `shell`;
   `ExitFacts`; `Outcome`, the result envelope of a report.
 - `env.rs`: `command_environment`.
