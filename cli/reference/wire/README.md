@@ -3,7 +3,8 @@
 The reference control server's own types for the protocol between `tetral`
 and Engine belong here, one Go type for each schema definition of
 `protocol/` that a fixture names. They are written apart from the CLI's Rust
-types in `cli/crates/protocol`, import neither those nor any Engine package,
+types in `cli/crates/protocol`, import neither those nor any Engine package
+but `internal/pathvalidation`, the repository's one owner of the NFC check,
 and are tested against the same fixtures, so a drift in either set fails its
 own tests.
 
