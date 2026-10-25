@@ -161,15 +161,17 @@ func (c *canonicalizer) object(out *bytes.Buffer) bool {
 		value []byte
 	}
 	var members []member
+	keys := map[string]bool{}
 	c.pos++
 	c.skipSpace()
 	for c.src[c.pos] != '}' {
 		c.skipSpace()
 		raw := c.str()
 		var key string
-		if json.Unmarshal(raw, &key) != nil || slices.ContainsFunc(members, func(m member) bool { return m.key == key }) {
+		if json.Unmarshal(raw, &key) != nil || keys[key] {
 			return false
 		}
+		keys[key] = true
 		c.skipSpace()
 		c.pos++ // ':'
 		var value bytes.Buffer
