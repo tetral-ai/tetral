@@ -851,6 +851,7 @@ fn a_ready_without_an_ack_for_forty_five_seconds_abandons_the_connection() {
         &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
     );
     wait_for_requests(&engine, "ready", 1);
+    machine.seams.wait_for_count("connection.answered", 1);
     machine.advance(seconds(44.999));
     wait_for_requests(&engine, "ready", 2);
     assert_eq!(machine.state(), "registering");
