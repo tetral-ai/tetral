@@ -2,6 +2,7 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 pub mod capture;
+pub mod env;
 pub mod isolation;
 pub mod limits;
 pub mod policy;

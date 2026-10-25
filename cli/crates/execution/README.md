@@ -74,11 +74,15 @@ which owns that task's process tree; the translation of a call's
 - Each probe of a `bwrap` candidate is bounded by `PROBE_TIMEOUT` and
   `PROBE_OUTPUT_LIMIT_BYTES`, which `Isolation::with_probe_bounds`
   overrides.
+- A command's environment is the App Server's without any `TETRAL_` name,
+  then the call's `env`, then entries that `env` cannot override and
+  `TMPDIR` (`env`).
 
 ## Where things are
 
 - `lib.rs`: `spawn_task_supervisor`, `SupervisorMessage` and
   `SupervisorMailbox`.
+- `env.rs`: `command_environment`.
 - `policy/mod.rs`: `TaskPermissions`, a task's stored permissions, and
   `PolicyRejection`.
 - `policy/validate.rs`: the validation steps, path normalization and the
