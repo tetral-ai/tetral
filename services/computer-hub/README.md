@@ -265,8 +265,9 @@ write (`instance.IssueInstruction`, `instance.MarkFirstSessionReport`,
 connection's `hub_pod` with `{"workspace_id", "connection_id", "issue_seq"}`
 in its transaction, and `instance.ResumeConnection` the previous pod's. A
 notice for a stream the pod holds raises the stream's bound to its
-`issue_seq` and wakes it; after the listening connection is lost and in place
-again, every held stream is woken to write all its unreported instructions.
+`issue_seq` and wakes it; each time the listening connection is in place,
+the first time included, every held stream is woken to write all its
+unreported instructions, since notices sent while none was in place are lost.
 A listener disconnect writes `connection_notices.listener_disconnected`.
 Delivery of a `disconnect` is best effort.
 

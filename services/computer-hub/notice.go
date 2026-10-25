@@ -14,20 +14,18 @@ import (
 // (instance.ConnectionNoticeChannel of the pod name), reconnecting after a
 // failure, until ctx ends; then it closes every stream. Each notice naming a
 // stream the pod holds raises that stream's bound to the notice's issue_seq
-// and wakes it. When the listening connection is in place again after a
-// loss, every held stream is woken to write all its connection's unreported
-// instructions, since notices sent meanwhile are lost.
+// and wakes it. Each time the listening connection is in place, the first
+// time included, every held stream is woken to write all its connection's
+// unreported instructions, since notices sent while none was in place are
+// lost.
 func (s *Streams) Run(ctx context.Context) error {
 	defer s.closeAll()
 	listener := queue.PostgreSQLNotificationListener{Client: s.database, Operation: "computer_hub.connection_notices"}
 	onReady := func() {
-		first := false
-		s.listeningOnce.Do(func() { first = true; close(s.listening) })
-		if !first {
-			for _, stream := range s.held() {
-				stream.release(0, true)
-			}
+		for _, stream := range s.held() {
+			stream.release(0, true)
 		}
+		s.listeningOnce.Do(func() { close(s.listening) })
 	}
 	return queue.RunListener(ctx, listener, instance.ConnectionNoticeChannel(s.podName), onReady, s.notice, func(error) {
 		s.logger.WarnContext(ctx, "connection_notices.listener_disconnected",

@@ -251,6 +251,32 @@ func TestNoticesReachOnlyThePodHoldingTheStream(t *testing.T) {
 	f.requireInstructions(resumed, first, lost)
 }
 
+// TestStreamsHeldBeforeTheFirstListenAreWokenOnceItIsInPlace holds a stream
+// on a pod whose listener has not yet listened, as a request served between
+// readiness and the first LISTEN does: once the LISTEN is in place the
+// stream is woken to write everything its connection holds.
+func TestStreamsHeldBeforeTheFirstListenAreWokenOnceItIsInPlace(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	streams := NewStreams(f.client, "computer-hub-test-early", DefaultStreamMaxAge, newManualClock(), f.logger, newHubMetrics())
+	held := streams.hold(f.ws, "conn_early", 1)
+	// The stream's first pass takes the release its start gives.
+	held.take()
+	go func() { _ = streams.Run(f.ctx) }()
+	select {
+	case <-streams.listening:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the pod did not listen within 10 seconds")
+	}
+	select {
+	case <-held.wake:
+	default:
+		t.Fatal("the first LISTEN woke no held stream")
+	}
+	if _, all := held.take(); !all {
+		t.Fatal("the first LISTEN did not release every instruction of the held stream")
+	}
+}
+
 func TestSixtyFourInstructionsGoOutBeforeTheFirstSessionReport(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	_, stream := f.openOnline()
