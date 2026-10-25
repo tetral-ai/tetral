@@ -44,11 +44,12 @@ temporary directories. No workspace crate depends on this package.
   user on the machine. A test that may meet `S` holds a shared lock on a file
   beside it for as long as it runs, and a test that replaces `S` holds that
   lock exclusively for as long as `S` is replaced and puts `S` back when it
-  releases it (`socket_directory::ReplacedSocketDir`). A case that needs `S` owned by another user makes it as
-  root with `sudo -n`; where that fails the case is recorded as not run, and
-  under GitHub Actions the test fails instead. A state root owned by another
-  user needs no privilege: such a case uses a directory that root already owns
-  (`other_user::directory`).
+  releases it (`socket_directory::ReplacedSocketDir`).
+- A case that needs `S` owned by another user has root make it with
+  `sudo -n`; where that fails the case is recorded as not run, and under
+  GitHub Actions the test fails instead (`other_user::sudo`). A state root
+  owned by another user needs no privilege: such a case uses a directory
+  that root already owns (`other_user::directory`).
 
 ## Where things are
 
@@ -67,7 +68,8 @@ temporary directories. No workspace crate depends on this package.
 - `src/snapshot.rs`: `snapshot`, every path under a directory with its kind,
   owner, mode and bytes.
 - `src/socket_directory.rs`: the locks on `S` and its replacements for a case.
-- `src/other_user.rs`: a directory that another user owns.
+- `src/other_user.rs`: a directory that another user owns, and `sudo -n`
+  under the rule above.
 - `src/app_server.rs`: `AppServer`, a running `server run`, and `request`, one
   raw HTTP/1.1 request to the local API over a socket whose path it derives
   apart from the code under test (`socket_path`).

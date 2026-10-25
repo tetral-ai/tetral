@@ -4,6 +4,7 @@
 //! to use it and exclusive to replace it, so no test sees another's
 //! replacement.
 
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
@@ -92,32 +93,16 @@ impl ReplacedSocketDir {
     }
 
     /// `S` as a directory of mode `0700` owned by root, made with
-    /// `sudo -n`; the reason when that is not possible here. Under GitHub
-    /// Actions (`GITHUB_ACTIONS=true`), whose runners allow `sudo -n`, a
-    /// failure fails the test instead, so the case cannot go unrun there.
+    /// `sudo -n` (`other_user::sudo`); the reason when that is not possible
+    /// here.
     pub fn directory_owned_by_root(&mut self) -> Result<(), String> {
-        let made = self.make_directory_owned_by_root();
-        if let Err(reason) = &made
-            && std::env::var_os("GITHUB_ACTIONS").is_some_and(|value| value == "true")
-        {
-            panic!("{reason}");
-        }
-        made
-    }
-
-    fn make_directory_owned_by_root(&mut self) -> Result<(), String> {
         let path = self.path();
-        let made = Command::new("sudo")
-            .args(["-n", "install", "-d", "-m", "0700", "-o", "0", "-g", "0"])
-            .arg(&path)
-            .output()
-            .map_err(|error| format!("sudo did not start: {error}"))?;
-        if !made.status.success() {
-            return Err(format!(
-                "making a directory owned by root needs passwordless sudo: {}",
-                String::from_utf8_lossy(&made.stderr).trim()
-            ));
-        }
+        crate::other_user::sudo(
+            ["install", "-d", "-m", "0700", "-o", "0", "-g", "0"]
+                .map(OsStr::new)
+                .into_iter()
+                .chain([path.as_os_str()]),
+        )?;
         self.owned_by_root = true;
         Ok(())
     }

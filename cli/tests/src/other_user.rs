@@ -1,9 +1,15 @@
-//! Paths that another user owns, for the cases that need one and no
-//! privilege.
+//! Paths that another user owns: one that root already owns, for the cases
+//! that need no privilege, and those that root makes with `sudo -n`. Where
+//! `sudo -n` fails, a case that needs it is not run, for the reason given;
+//! under GitHub Actions (`GITHUB_ACTIONS=true`), whose runners allow
+//! `sudo -n`, the failure fails the test instead, so such a case cannot go
+//! unrun there.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::process::Command;
 
 /// A directory that root already owns and the current user may look up,
 /// `/root` on Linux and `/var/root` on macOS, to stand as a state root owned
@@ -27,4 +33,31 @@ pub fn directory() -> Result<&'static Path, String> {
         ));
     }
     Ok(path)
+}
+
+/// Runs `sudo -n` with `args`; the reason when that is not possible here.
+pub fn sudo<'a>(args: impl IntoIterator<Item = &'a OsStr>) -> Result<(), String> {
+    let args: Vec<&OsStr> = args.into_iter().collect();
+    let ran = Command::new("sudo")
+        .arg("-n")
+        .args(&args)
+        .output()
+        .map_err(|error| format!("sudo did not start: {error}"));
+    let ran = ran.and_then(|output| {
+        if output.status.success() {
+            return Ok(());
+        }
+        let command: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
+        Err(format!(
+            "`sudo -n {}` needs passwordless sudo: {}",
+            command.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    });
+    if let Err(reason) = &ran
+        && std::env::var_os("GITHUB_ACTIONS").is_some_and(|value| value == "true")
+    {
+        panic!("{reason}");
+    }
+    ran
 }
