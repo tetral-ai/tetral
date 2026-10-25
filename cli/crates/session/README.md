@@ -46,19 +46,19 @@ that is no longer the binding's is discarded.
 
 ## Entry points
 
-- `spawn(starter)`: an owner that only admits commands.
 - `Factory::new(shared, starter)`: the `protocol::ports::SessionFactory` that
   creates an owner per Session, with the state root's paths and the running
   executable (`RootPaths`) and its durations (`Times`).
-- `probe_child::run(input)`: the probe's whole work, from its stdin to its
-  one line of stdout, for `tetral` run as `probe_child::PROBE_NAME`.
+- `probe_child::read_input` and `probe_child::run(input)`: the probe's whole
+  work, from its stdin to its one line of stdout, for `tetral` run as
+  `probe_child::PROBE_NAME`.
 
 ## Where things are
 
-- `owner.rs`: `spawn`, `Factory`, `SessionMessage`, `SessionMailbox`, the
-  owner's loop and state, the admission of commands (`Admission`,
-  `TaskStart`, `TaskStarter`), and a close, a connection's end and the
-  shutdown as they end a preparation.
+- `owner.rs`: `Factory`, `SessionMessage`, `SessionMailbox`, the owner's
+  loop and state, the admission of commands (`Admission`, `TaskStart`,
+  `TaskStarter`, `SessionOwner::admits`), and a close, a connection's end and
+  the shutdown as they end a preparation.
 - `record.rs`: `Record`, `Binding` and the entries of `GET /v1/sessions`.
 - `cases.rs`: the cases of a `session.prepare` (`Case`, `decide`).
 - `prepare.rs`: the steps of a preparation, from the connection check to the
