@@ -3,6 +3,7 @@ package reference
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 
 	"github.com/tetral-ai/tetral/cli/reference/wire"
 )
@@ -56,9 +57,13 @@ type issuedInstruction struct {
 	kind      string
 	sessionID string
 	bindingID string
-	envelope  []byte
-	reported  bool
-	sends     int
+	// toolUseEventID and taskID are a tool instruction's, which its
+	// reports carry.
+	toolUseEventID string
+	taskID         string
+	envelope       []byte
+	reported       bool
+	sends          int
 	// prepares is the binding a session.prepare names; it exists on the
 	// connection only once the prepare is issued, so a queued prepare grants
 	// no Git ticket.
@@ -80,6 +85,9 @@ type instructionSpec struct {
 	Payload     json.RawMessage `json:"payload"`
 	MessageID   string          `json:"message_id"`
 	Traceparent string          `json:"traceparent"`
+	// Extra holds envelope members the instruction carries besides its
+	// own, such as an unknown one that makes its metadata too large.
+	Extra map[string]json.RawMessage `json:"extra"`
 }
 
 // issue issues a Session instruction on conn. The payload is sent as
@@ -88,7 +96,7 @@ type instructionSpec struct {
 // instruction is queued while the connection's ready is not accepted, and
 // beyond the staging limit until the first Session report is stored.
 func (server *Server) issue(conn *connection, spec instructionSpec, bypass bool) (*issuedInstruction, error) {
-	if spec.Type != "session.prepare" && spec.Type != "session.close" {
+	if spec.Type != "session.prepare" && spec.Type != "session.close" && !slices.Contains(toolInstructionTypes, spec.Type) {
 		return nil, errUnsupported(spec.Type)
 	}
 	var payload bytes.Buffer
@@ -96,10 +104,12 @@ func (server *Server) issue(conn *connection, spec instructionSpec, bypass bool)
 		return nil, err
 	}
 	var fields struct {
-		SessionID    any   `json:"session_id"`
-		BindingID    any   `json:"binding_id"`
-		CreateCwd    any   `json:"create_cwd"`
-		Repositories []any `json:"repositories"`
+		SessionID      any   `json:"session_id"`
+		BindingID      any   `json:"binding_id"`
+		ToolUseEventID any   `json:"tool_use_event_id"`
+		TaskID         any   `json:"task_id"`
+		CreateCwd      any   `json:"create_cwd"`
+		Repositories   []any `json:"repositories"`
 	}
 	_ = json.Unmarshal(payload.Bytes(), &fields)
 	messageID := spec.MessageID
@@ -113,9 +123,24 @@ func (server *Server) issue(conn *connection, spec instructionSpec, bypass bool)
 	if err != nil {
 		return nil, err
 	}
+	if len(spec.Extra) > 0 {
+		var members map[string]json.RawMessage
+		_ = json.Unmarshal(encoded, &members)
+		for name, value := range spec.Extra {
+			members[name] = value
+		}
+		if encoded, err = json.Marshal(members); err != nil {
+			return nil, err
+		}
+	}
 	sessionID, _ := fields.SessionID.(string)
 	bindingID, _ := fields.BindingID.(string)
-	instruction := &issuedInstruction{messageID: messageID, kind: spec.Type, sessionID: sessionID, bindingID: bindingID, envelope: encoded}
+	toolUseEventID, _ := fields.ToolUseEventID.(string)
+	taskID, _ := fields.TaskID.(string)
+	instruction := &issuedInstruction{
+		messageID: messageID, kind: spec.Type, sessionID: sessionID, bindingID: bindingID,
+		toolUseEventID: toolUseEventID, taskID: taskID, envelope: encoded,
+	}
 	if spec.Type == "session.prepare" {
 		createCwd, _ := fields.CreateCwd.(bool)
 		instruction.prepares = &binding{

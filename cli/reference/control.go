@@ -23,9 +23,10 @@ type fault struct {
 	// advanced by DelayMs), `drop` (accept, then close the connection
 	// without an answer), `withhold` (accept, then hold the answer until the
 	// answer control releases it), `wrong_identity` (answer for another
-	// message_id), `schema_fail` (answer `200` with Body, `{}` by default)
-	// or `error` (answer Code with Status, by default the status the client
-	// error table gives Code, accepting nothing).
+	// message_id), `without_accepted` (answer the ACK without `accepted`),
+	// `schema_fail` (answer `200` with Body, `{}` by default) or `error`
+	// (answer Code with Status, by default the status the client error table
+	// gives Code, accepting nothing).
 	Action  string          `json:"action"`
 	DelayMs int64           `json:"delay_ms"`
 	Code    string          `json:"code"`
@@ -95,6 +96,9 @@ func (server *Server) ControlHandler() http.Handler {
 		"credential":                server.controlCredential,
 		"prepare":                   server.controlInstruction("session.prepare"),
 		"close":                     server.controlInstruction("session.close"),
+		"execute":                   server.controlInstruction("tool.execute"),
+		"stdin":                     server.controlInstruction("tool.stdin"),
+		"cancel":                    server.controlInstruction("tool.cancel"),
 		"send":                      server.controlSend,
 		"events":                    server.controlEvents,
 		"answer":                    server.controlAnswer,
@@ -177,10 +181,11 @@ func (server *Server) controlCredential(body json.RawMessage) (any, error) {
 func (server *Server) controlInstruction(kind string) func(json.RawMessage) (any, error) {
 	return func(body json.RawMessage) (any, error) {
 		var input struct {
-			InstanceID  string          `json:"instance_id"`
-			Payload     json.RawMessage `json:"payload"`
-			MessageID   string          `json:"message_id"`
-			Traceparent string          `json:"traceparent"`
+			InstanceID  string                     `json:"instance_id"`
+			Payload     json.RawMessage            `json:"payload"`
+			MessageID   string                     `json:"message_id"`
+			Traceparent string                     `json:"traceparent"`
+			Extra       map[string]json.RawMessage `json:"extra"`
 		}
 		if err := decodeControl(body, &input); err != nil {
 			return nil, err
@@ -193,6 +198,7 @@ func (server *Server) controlInstruction(kind string) func(json.RawMessage) (any
 		}
 		instruction, err := server.issue(conn, instructionSpec{
 			Type: kind, Payload: input.Payload, MessageID: input.MessageID, Traceparent: input.Traceparent,
+			Extra: input.Extra,
 		}, false)
 		if err != nil {
 			return nil, err
@@ -288,7 +294,9 @@ func (server *Server) controlEvents(body json.RawMessage) (any, error) {
 }
 
 // controlAnswer sets a fault for the next matching upstream requests, or
-// with action `release` releases every withheld answer.
+// with action `release` releases the withheld answers, those of one
+// endpoint or one message_id when the control names them, so that a test
+// can release answers in another order than their requests.
 func (server *Server) controlAnswer(body json.RawMessage) (any, error) {
 	var input fault
 	if err := decodeControl(body, &input); err != nil {
@@ -298,9 +306,12 @@ func (server *Server) controlAnswer(body json.RawMessage) (any, error) {
 	defer server.mu.Unlock()
 	switch input.Action {
 	case "release":
-		server.releaseHeld(func(hold *heldAnswer) bool { return hold.Until.IsZero() })
+		server.releaseHeld(func(hold *heldAnswer) bool {
+			return hold.Until.IsZero() && (input.Endpoint == "" || hold.Endpoint == input.Endpoint) &&
+				(input.MessageID == "" || hold.MessageID == input.MessageID)
+		})
 		return map[string]any{}, nil
-	case "drop", "withhold", "wrong_identity", "schema_fail":
+	case "drop", "withhold", "wrong_identity", "without_accepted", "schema_fail":
 	case "delay":
 		if input.DelayMs <= 0 {
 			return nil, errors.New("a delay needs delay_ms above 0")
@@ -423,12 +434,14 @@ type ConnectionState struct {
 }
 
 type InstructionState struct {
-	MessageID string `json:"message_id"`
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	BindingID string `json:"binding_id"`
-	Reported  bool   `json:"reported"`
-	Sends     int    `json:"sends"`
+	MessageID      string `json:"message_id"`
+	Type           string `json:"type"`
+	SessionID      string `json:"session_id"`
+	BindingID      string `json:"binding_id"`
+	ToolUseEventID string `json:"tool_use_event_id,omitempty"`
+	TaskID         string `json:"task_id,omitempty"`
+	Reported       bool   `json:"reported"`
+	Sends          int    `json:"sends"`
 }
 
 type BindingState struct {
@@ -467,7 +480,8 @@ func (server *Server) snapshot() Snapshot {
 			instruction := conn.issued[messageID]
 			connState.Issued = append(connState.Issued, InstructionState{
 				MessageID: messageID, Type: instruction.kind, SessionID: instruction.sessionID,
-				BindingID: instruction.bindingID, Reported: instruction.reported, Sends: instruction.sends,
+				BindingID: instruction.bindingID, ToolUseEventID: instruction.toolUseEventID, TaskID: instruction.taskID,
+				Reported: instruction.reported, Sends: instruction.sends,
 			})
 		}
 		for bindingID, prepared := range conn.bindings {

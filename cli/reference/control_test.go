@@ -288,6 +288,38 @@ func TestAnswerControlChangesTheNextAnswer(t *testing.T) {
 		}
 	})
 
+	t.Run("without accepted", func(t *testing.T) {
+		ts, connectionID := readyOn(t)
+		ts.call("answer", map[string]any{"endpoint": "ready", "action": "without_accepted"}, nil)
+		answer := ts.post("ready", "tetral_ck_a", readyBody(connectionID, "ready_1"))
+		if answer.status != http.StatusOK || answer.member("message_id") != "ready_1" || answer.member("accepted") != nil {
+			t.Errorf("answer %d %s", answer.status, answer.body)
+		}
+	})
+
+	t.Run("release of one withheld answer", func(t *testing.T) {
+		ts, connectionID := readyOn(t)
+		ts.call("answer", map[string]any{"endpoint": "ready", "action": "withhold"}, nil)
+		ts.call("answer", map[string]any{"endpoint": "protocol-error", "action": "withhold"}, nil)
+		ready := ts.postAsync("ready", "tetral_ck_a", readyBody(connectionID, "ready_1"))
+		reported := ts.postAsync("protocol-error", "tetral_ck_a", map[string]any{
+			"protocol_version": 1, "connection_id": connectionID, "message_id": "error_1",
+			"error": map[string]any{"code": "invalid_message", "message": "x"},
+		})
+		waitFor(t, func() bool { return len(ts.state().Held) == 2 })
+		ts.call("answer", map[string]any{"action": "release", "message_id": "error_1"}, nil)
+		if answer := receive(t, reported); answer.status != http.StatusOK {
+			t.Errorf("released answer %d %s", answer.status, answer.body)
+		}
+		if held := ts.state().Held; len(held) != 1 || held[0].MessageID != "ready_1" {
+			t.Fatalf("held %+v; want only the ready's answer", held)
+		}
+		ts.call("answer", map[string]any{"action": "release"}, nil)
+		if answer := receive(t, ready); answer.status != http.StatusOK {
+			t.Errorf("released ready %d %s", answer.status, answer.body)
+		}
+	})
+
 	t.Run("schema fail", func(t *testing.T) {
 		ts, connectionID := readyOn(t)
 		ts.call("answer", map[string]any{"endpoint": "ready", "action": "schema_fail", "body": map[string]any{

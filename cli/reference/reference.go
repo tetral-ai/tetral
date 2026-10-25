@@ -126,6 +126,7 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/client/ready", server.ready)
 	mux.HandleFunc("POST /v1/client/heartbeat", server.heartbeat)
 	mux.HandleFunc("POST /v1/client/session-status", server.sessionStatus)
+	mux.HandleFunc("POST /v1/client/tool-status", server.toolStatus)
 	mux.HandleFunc("POST /v1/client/credential", server.credential)
 	mux.HandleFunc("POST /v1/client/git-ticket", server.gitTicket)
 	mux.HandleFunc("POST /v1/client/protocol-error", server.protocolError)

@@ -475,6 +475,8 @@ func (server *Server) deliver(w http.ResponseWriter, request *http.Request, resu
 			panic(http.ErrAbortHandler)
 		case "wrong_identity":
 			result.body = wrongIdentity(result.body)
+		case "without_accepted":
+			result.body = withoutAccepted(result.body)
 		case "schema_fail":
 			result.body = []byte("{}")
 			if len(injected.Body) > 0 {
@@ -501,6 +503,17 @@ func wrongIdentity(body []byte) []byte {
 	} else {
 		members["message_id"] = "other"
 	}
+	changed, _ := json.Marshal(members)
+	return changed
+}
+
+// withoutAccepted is an ACK without its `accepted` member.
+func withoutAccepted(body []byte) []byte {
+	var members map[string]any
+	if json.Unmarshal(body, &members) != nil {
+		return body
+	}
+	delete(members, "accepted")
 	changed, _ := json.Marshal(members)
 	return changed
 }
