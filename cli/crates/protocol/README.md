@@ -80,8 +80,14 @@ description, schemas and fixtures are in `protocol/` at the repository root.
 - `ports.rs`: `ReportSink`, which takes a `Submission`, a report built
   with its identity only once the outbox names it and checked by its own
   decoder, and gives each report's `ReportOutcome` to its `ReportListener`;
-  `Report`, the report types and their `ReportEndpoint`; `SessionFactory`,
-  `SessionHandle` and `ConnectionPort`.
+  `Report`, the report types and their `ReportEndpoint`; `SessionFactory`
+  and `SessionHandle`, through which the Connection owner starts and reaches
+  each Session binding owner with a `Prepare`, a `Close`, the answer to a
+  `ProbeRequest` and the end of a connection; and `ConnectionPort`, through
+  which a Session binding owner asks for and returns probe slots.
+- `connection::PreparationErrorCode::text`: the fixed text of each
+  preparation error, which `PreparationError::new` follows with the
+  operating system's error that caused it.
 - `tests/fixtures.rs` decodes every fixture of `protocol/`;
   `tests/strict.rs` holds the strict pass's table and, built from edited
   fixtures, the tables of members sent as `null`, refused or, where the

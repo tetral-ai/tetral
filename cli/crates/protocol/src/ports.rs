@@ -3,8 +3,9 @@
 
 use std::sync::Arc;
 
-use crate::connection::{McpTools, SessionStatus};
-use crate::id::Id;
+use crate::connection::{McpTools, SessionPreparePayload, SessionStatus};
+use crate::id::{Id, SafeId};
+use crate::local::SessionEntry;
 use crate::tool::{DriveSyncReport, ProtocolErrorReport, ToolStatus};
 use crate::{DecodeError, Message, decode, encode};
 
@@ -124,17 +125,92 @@ pub trait ReportSink: Send + Sync {
     fn cancel(&self, report: ReportId);
 }
 
+/// A `session.prepare` that passed the Connection owner's admission, for the
+/// Session binding owner of its `session_id`.
+#[derive(Debug, Clone)]
+pub struct Prepare {
+    /// The online connection the Connection owner routed it on.
+    pub connection_id: Id,
+    pub message_id: Id,
+    /// The `connection_id` of the instruction's envelope.
+    pub addressed_connection_id: Id,
+    pub payload: SessionPreparePayload,
+    /// The payload's content fingerprint (`fingerprint`).
+    pub fingerprint: String,
+    /// The instruction's `traceparent`, when it is usable.
+    pub traceparent: Option<String>,
+}
+
+/// A `session.close` for the Session binding owner of its `session_id`.
+#[derive(Debug, Clone)]
+pub struct Close {
+    pub connection_id: Id,
+    pub message_id: Id,
+    pub binding_id: Id,
+}
+
+/// One probe-slot request of a Session binding owner, unique within it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProbeRequest(pub u64);
+
+/// The Connection owner's answer to a probe-slot request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeSlot {
+    /// The slot is the requester's until it returns it.
+    Granted,
+    /// No slot came free within the wait.
+    Exhausted,
+    /// The connection ended or the App Server shuts down.
+    Cancelled,
+}
+
+/// Takes one Session binding owner's entries of `GET /v1/sessions`.
+pub type EntriesReply = Box<dyn FnOnce(Vec<SessionEntry>) + Send>;
+
 /// Creates the Session binding owner of a Session for the Connection owner;
 /// its implementation belongs to `session`.
-pub trait SessionFactory: Send + Sync {}
+pub trait SessionFactory: Send + Sync {
+    /// Starts the owner of `session_id`, which reaches the Connection owner
+    /// through `connection` and hands its reports to `reports`.
+    fn create(
+        &self,
+        session_id: SafeId,
+        connection: Arc<dyn ConnectionPort>,
+        reports: Arc<dyn ReportSink>,
+    ) -> Arc<dyn SessionHandle>;
+}
 
 /// The Connection owner's handle on one Session binding owner; its
-/// implementation belongs to `session`.
-pub trait SessionHandle: Send + Sync {}
+/// implementation belongs to `session`. Each call is a message the owner
+/// handles in arrival order.
+pub trait SessionHandle: Send + Sync {
+    fn prepare(&self, prepare: Prepare);
+    fn close(&self, close: Close);
+    /// The answer to the owner's request `request`.
+    fn probe_slot(&self, request: ProbeRequest, answer: ProbeSlot);
+    /// The connection ended: its bindings become `unavailable`.
+    fn connection_ended(&self, connection_id: Id);
+    /// The App Server shuts down: running probes are killed.
+    fn shutdown(&self);
+    /// The owner's bindings as `GET /v1/sessions` lists them, read from its
+    /// state alone.
+    fn entries(&self, reply: EntriesReply);
+}
 
 /// How Session binding owners and Drive sync owners reach the Connection
-/// owner; its implementation belongs to `connection`.
-pub trait ConnectionPort: Send + Sync {}
+/// owner; its implementation belongs to `connection`. The Connection owner
+/// counts the Session records and the running directory probes.
+pub trait ConnectionPort: Send + Sync {
+    /// Asks for a probe slot (`ProbeSlot`); the answer comes through
+    /// [`SessionHandle::probe_slot`].
+    fn probe_slot(&self, session_id: &SafeId, request: ProbeRequest);
+    /// Withdraws a request that may still wait (`ProbeSlotWithdraw`).
+    fn probe_slot_withdraw(&self, session_id: &SafeId, request: ProbeRequest);
+    /// Returns a slot once its probe is reaped, or unused (`ProbeSlotFree`).
+    fn probe_slot_free(&self);
+    /// The Session's record is deleted (`RecordGone`).
+    fn record_gone(&self, session_id: &SafeId);
+}
 
 #[cfg(test)]
 mod tests {

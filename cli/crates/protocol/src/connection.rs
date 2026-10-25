@@ -740,10 +740,61 @@ pub enum PreparationErrorCode {
     RepositoryPathForbidden,
 }
 
+impl PreparationErrorCode {
+    /// The fixed text of an error of this code, which names its class of
+    /// failure.
+    pub fn text(self) -> &'static str {
+        match self {
+            PreparationErrorCode::CwdNotFound => "the working directory does not exist",
+            PreparationErrorCode::CwdNotDirectory => "the working directory is not a directory",
+            PreparationErrorCode::CwdForbidden => {
+                "the working directory lies inside the CLI's state root"
+            }
+            PreparationErrorCode::CwdInaccessible => {
+                "the App Server's user cannot enter the working directory"
+            }
+            PreparationErrorCode::CwdCheckTimeout => {
+                "the check of the working directory did not end within 5 seconds"
+            }
+            PreparationErrorCode::InvalidInput => "the preparation's payload fails its schema",
+            PreparationErrorCode::StaleConnection => {
+                "the instruction names a connection that is not the current online connection"
+            }
+            PreparationErrorCode::BindingConflict => {
+                "the Session holds another binding on this connection, or this binding with other content"
+            }
+            PreparationErrorCode::CleanupPending => {
+                "the Session's earlier execution on this instance is still being cleaned up"
+            }
+            PreparationErrorCode::ResourceExhausted => {
+                "a limit of the CLI is reached: Session records, directory probes or the replay ledger"
+            }
+            PreparationErrorCode::RepositoryPathExists => {
+                "an entry that this Session did not clone exists at a repository path"
+            }
+            PreparationErrorCode::RepositoryPathForbidden => {
+                "a repository path lies inside the CLI's state root"
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct PreparationError {
     pub code: PreparationErrorCode,
     pub message: String,
+}
+
+impl PreparationError {
+    /// An error of `code` with its fixed text, followed by the operating
+    /// system's error when one caused it.
+    pub fn new(code: PreparationErrorCode, cause: Option<&str>) -> PreparationError {
+        let message = match cause {
+            Some(cause) => format!("{}: {cause}", code.text()),
+            None => code.text().to_owned(),
+        };
+        PreparationError { code, message }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
