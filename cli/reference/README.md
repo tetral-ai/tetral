@@ -52,7 +52,9 @@ listen addresses (`127.0.0.1:0` by default), the test instances' credentials
 minimum CLI version, the maximum stream age (30 minutes by default), the git
 proxy origin and the clock's start. It prints one JSON object with the two
 bound addresses (`Addresses`) to stdout and serves until it gets `SIGINT` or
-`SIGTERM`.
+`SIGTERM`. The listener that serves Engine's side keeps a socket receive
+buffer of 65,536 bytes, so that a `throttle` slows the sender as a slow link
+does.
 
 ## Controls
 

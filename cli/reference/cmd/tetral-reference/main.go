@@ -18,6 +18,12 @@ import (
 	"github.com/tetral-ai/tetral/cli/reference"
 )
 
+// receiveBufferBytes is the socket receive buffer of the listener that
+// serves Engine's side. Set before it listens, it holds every accepted
+// connection's buffer at this size, so that a body read at a given rate
+// slows the sender as a slow link does instead of resting in the kernel.
+const receiveBufferBytes = 65_536
+
 func main() {
 	if err := run(); err != nil {
 		slog.New(slog.NewJSONHandler(os.Stderr, nil)).Error("tetral-reference failed", "error", err.Error())
@@ -36,17 +42,17 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	listen := func(address string) (net.Listener, error) {
+	listen := func(address string, listener net.ListenConfig) (net.Listener, error) {
 		if address == "" {
 			address = reference.DefaultListen
 		}
-		return net.Listen("tcp", address)
+		return listener.Listen(context.Background(), "tcp", address)
 	}
-	protocol, err := listen(config.Listen)
+	protocol, err := listen(config.Listen, net.ListenConfig{Control: setReceiveBuffer})
 	if err != nil {
 		return err
 	}
-	control, err := listen(config.ControlListen)
+	control, err := listen(config.ControlListen, net.ListenConfig{})
 	if err != nil {
 		return err
 	}
@@ -73,4 +79,14 @@ func run() error {
 		_ = each.Close()
 	}
 	return nil
+}
+
+func setReceiveBuffer(_, _ string, connection syscall.RawConn) error {
+	var err error
+	if controlErr := connection.Control(func(descriptor uintptr) {
+		err = syscall.SetsockoptInt(int(descriptor), syscall.SOL_SOCKET, syscall.SO_RCVBUF, receiveBufferBytes)
+	}); controlErr != nil {
+		return controlErr
+	}
+	return err
 }
