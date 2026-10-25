@@ -546,8 +546,11 @@ describe("ProviderGatewayServiceShell", () => {
       expect(service.metricsText()).toContain("providergateway_turns_in_progress 0\n");
       // An admitted turn that fails is an error, never a rejection.
       expect(service.metricsText()).toContain('tetral_long_operation_duration_seconds_count{service="provider-gateway",operation="StreamProviderRequest",outcome="error"} 8');
-      now = 60_000;
+      now = 59_000;
       await turn(9);
+      expect(pressure()).toEqual([expect.objectContaining({ event: "pressure.rejecting_started" })]);
+      now = 60_000;
+      await turn(10);
       expect(pressure()).toEqual([
         expect.objectContaining({ event: "pressure.rejecting_started" }),
         expect.objectContaining({ level: "WARN", event: "pressure.rejecting_ended", "pressure.point": "providergateway_turns", "pressure.cause": "capacity", "pressure.rejected": 1 }),
