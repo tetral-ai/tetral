@@ -55,18 +55,21 @@ protocol answers it with: `400 invalid_message`, also for a member over its
 own limit inside a body within its limit, except a request body over its
 complete limit (`413 request_too_large`: an ordinary or media tool-status, a
 drive sync report, a local MCP tool-list report, and the 64 KiB of every other
-request), an upload `Content-Length` above 500,000,000 (`413 file_too_large`),
-a download `Range` naming more than one range (`416 range_not_satisfiable`)
-and a commit body over 16 MiB (`413 request_too_large`), which
-`DecodeCommitRequest` answers before any other rule. A message Engine sends
-or a response it gives that is over its limit fails with `400
-invalid_message`, since no request of Engine's is answered with it.
-`DecodeCommitRequest` leaves the change count to `CheckCommitChanges`,
-which answers more than 10,000 changes with `413 request_too_large` and which
-the hub applies after its connection, binding and drive access checks.
-`DecodeErrorBody` rejects an error code that `ClientErrors` does not pair with
-the response's status, and `DecodeDriveTransferError` a status and code pair
-that `DriveTransferEndpoints` does not list for the endpoint.
+request), a download `Range` naming more than one range (`416
+range_not_satisfiable`) and a commit body over 16 MiB (`413
+request_too_large`), which `DecodeCommitRequest` answers before any other
+rule. A message Engine sends or a response it gives that is over its limit
+fails with `400 invalid_message`, since no request of Engine's is answered
+with it. `DecodeCommitRequest` leaves the change count to
+`CheckCommitChanges`, which answers more than 10,000 changes with `413
+request_too_large`. `DecodeUploadContentRequestHeaders` checks only the
+headers' form and leaves the length to `CheckUploadLength`, which answers a
+missing `Content-Length` with `400 invalid_message` and one above 500,000,000
+with `413 file_too_large`. The hub applies both checks after its connection,
+binding and drive access checks, so a stale connection is answered before any
+size. `DecodeErrorBody` rejects an error code that `ClientErrors` does not
+pair with the response's status, and `DecodeDriveTransferError` a status and
+code pair that `DriveTransferEndpoints` does not list for the endpoint.
 
 ## Encoding
 

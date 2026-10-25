@@ -100,6 +100,19 @@ func TestDecodingRulesBeyondTheFixtures(t *testing.T) {
 			return err
 		}
 	}
+	upload := func(length ...string) func() error {
+		header := http.Header{"Content-Type": {"application/octet-stream"}}
+		if len(length) > 0 {
+			header["Content-Length"] = length
+		}
+		return func() error {
+			h, err := DecodeUploadContentRequestHeaders(header)
+			if err != nil {
+				return errors.New("the headers did not decode: " + err.Error())
+			}
+			return CheckUploadLength(h)
+		}
+	}
 	commit := func(n int) []byte {
 		changes := make([]string, n)
 		for i := range changes {
@@ -286,6 +299,15 @@ func TestDecodingRulesBeyondTheFixtures(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
+		},
+		{name: "an upload without Content-Length decodes and fails the length check", decode: upload()},
+		{name: "an upload of 500,000,000 bytes passes the length check", check: accepted(upload("500000000"))},
+		{
+			name:    "an upload of 500,000,001 bytes decodes and fails the length check",
+			decode:  upload("500000001"),
+			pointer: "/Content-Length",
+			status:  http.StatusRequestEntityTooLarge,
+			code:    ErrorFileTooLarge,
 		},
 		{
 			name: "a commit body over 16 MiB, answered before any other rule",

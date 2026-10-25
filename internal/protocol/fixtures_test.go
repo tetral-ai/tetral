@@ -81,6 +81,17 @@ func values[P ~map[string][]string, T any](decode func(P) (T, error)) func(map[s
 	return func(params map[string]string) (T, error) { return decode(singleValues(params)) }
 }
 
+// uploadHeadersAndLength decodes upload headers and then applies the length
+// rules, as the hub does, so that a fixture answered by a length rule gets
+// that answer.
+func uploadHeadersAndLength(header http.Header) (UploadContentRequestHeaders, error) {
+	h, err := DecodeUploadContentRequestHeaders(header)
+	if err != nil {
+		return h, err
+	}
+	return h, CheckUploadLength(h)
+}
+
 var toolExecutionCodecs = map[string]codec{
 	"Downstream":          jsonCodec(DecodeToolDownstream),
 	"ToolStatus":          jsonCodec(DecodeToolStatus),
@@ -131,7 +142,7 @@ func driveTransferCodecs(fixtures []fixture) map[string]codec {
 		"ContentPathParams": parameterCodec(DecodeContentPathParams, contentPathParams, func(p ContentPathParams) map[string][]string {
 			return singleValues(p.Params())
 		}),
-		"UploadContentRequestHeaders":   parameterCodec(values(DecodeUploadContentRequestHeaders), uploadContentRequestHeaders, UploadContentRequestHeaders.Header),
+		"UploadContentRequestHeaders":   parameterCodec(values(uploadHeadersAndLength), uploadContentRequestHeaders, UploadContentRequestHeaders.Header),
 		"DownloadContentRequestHeaders": parameterCodec(values(DecodeDownloadContentRequestHeaders), downloadContentRequestHeaders, DownloadContentRequestHeaders.Header),
 		"RateLimitedResponseHeaders":    parameterCodec(values(DecodeRateLimitedResponseHeaders), rateLimitedResponseHeaders, RateLimitedResponseHeaders.Header),
 		"DriveChanged":                  jsonCodec(DecodeDriveChanged),

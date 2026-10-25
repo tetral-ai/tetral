@@ -178,7 +178,7 @@ func (p ContentPathParams) Params() map[string]string {
 // UploadContentRequestHeaders are the headers of a content upload, whose body
 // is the raw content.
 type UploadContentRequestHeaders struct {
-	ContentLength int64
+	ContentLength Optional[int64]
 }
 
 func uploadContentRequestHeaders(d *decoder, ptr string, v *value) UploadContentRequestHeaders {
@@ -188,28 +188,28 @@ func uploadContentRequestHeaders(d *decoder, ptr string, v *value) UploadContent
 	var h UploadContentRequestHeaders
 	if length != nil {
 		// A canonical length above the signed 64-bit range is above the file
-		// limit as well, which answers it.
+		// limit as well, so it is kept as the largest int64 for
+		// CheckUploadLength to answer.
 		text := decimalText(d, lengthPtr, length)
 		if n, err := strconv.ParseInt(text, 10, 64); err == nil {
-			h.ContentLength = n
+			h.ContentLength = Some(n)
 		} else {
-			h.ContentLength = math.MaxInt64
+			h.ContentLength = Some(int64(math.MaxInt64))
 		}
-	} else {
-		h.ContentLength = -1
 	}
 	o.open()
 	return h
 }
 
-// checkUploadHeaders applies the upload's length rules, which the hub answers
-// before reading any byte: a missing Content-Length is invalid, and one above
-// the file limit gets 413 file_too_large.
-func checkUploadHeaders(h UploadContentRequestHeaders, _ *value) error {
+// CheckUploadLength applies the upload's length rules, which the hub answers
+// after the connection, binding and drive access checks and before reading
+// any byte: a missing Content-Length gets 400 invalid_message, and one above
+// the file limit 413 file_too_large.
+func CheckUploadLength(h UploadContentRequestHeaders) error {
 	switch {
-	case h.ContentLength < 0:
+	case !h.ContentLength.Set:
 		return invalid("", "missing Content-Length")
-	case h.ContentLength > FileMaxBytes:
+	case h.ContentLength.Value > FileMaxBytes:
 		return &DecodeError{Pointer: "/Content-Length", Status: http.StatusRequestEntityTooLarge, Code: ErrorFileTooLarge,
 			Reason: "Content-Length above 500000000 bytes"}
 	}
@@ -217,10 +217,11 @@ func checkUploadHeaders(h UploadContentRequestHeaders, _ *value) error {
 }
 
 func (h UploadContentRequestHeaders) Header() map[string][]string {
-	return map[string][]string{
-		"Content-Type":   {"application/octet-stream"},
-		"Content-Length": {strconv.FormatInt(h.ContentLength, 10)},
+	header := map[string][]string{"Content-Type": {"application/octet-stream"}}
+	if h.ContentLength.Set {
+		header["Content-Length"] = []string{strconv.FormatInt(h.ContentLength.Value, 10)}
 	}
+	return header
 }
 
 // ByteRange is one RFC 9110 byte range: First-Last, First- to the end, or the
@@ -768,7 +769,7 @@ func checkUploadResponse(ctx UploadContentResponseContext) func(UploadContentRes
 		if ctx.PathParams.Set && r.ContentSHA256 != ctx.PathParams.Value.SHA256 {
 			return invalid("/content_sha256", "hash differs from the URL")
 		}
-		if ctx.RequestHeaders.Set && r.SizeBytes != ctx.RequestHeaders.Value.ContentLength {
+		if ctx.RequestHeaders.Set && ctx.RequestHeaders.Value.ContentLength != Some(r.SizeBytes) {
 			return invalid("/size_bytes", "size differs from Content-Length")
 		}
 		return nil
@@ -1156,9 +1157,11 @@ func DecodeContentPathParams(params map[string]string) (ContentPathParams, error
 	return decodeParameters(singleValues(params), contentPathParams)
 }
 
-// DecodeUploadContentRequestHeaders decodes the headers of a content upload.
+// DecodeUploadContentRequestHeaders decodes the headers of a content upload
+// and checks only their form. The length rules are left to CheckUploadLength,
+// which the hub applies after the connection, binding and drive access checks.
 func DecodeUploadContentRequestHeaders(header http.Header) (UploadContentRequestHeaders, error) {
-	return decodeCheckedParameters(header, uploadContentRequestHeaders, checkUploadHeaders)
+	return decodeCheckedParameters(header, uploadContentRequestHeaders, nil)
 }
 
 // DecodeDownloadContentRequestHeaders decodes the headers of a content
