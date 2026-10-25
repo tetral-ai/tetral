@@ -1,5 +1,7 @@
 //! RFC 3339 times in UTC, the only time form on the wire.
 
+use std::time::{Duration, SystemTime};
+
 use crate::field::{Text, TextRule};
 
 /// `YYYY-MM-DDTHH:MM:SS[.fraction]Z` naming a time that exists: month 1 to
@@ -54,6 +56,43 @@ impl TextRule for Utc {
     }
 }
 
+/// The system time that `time` names; a leap second reads as the first
+/// second of the next minute, and digits of the fraction past nanoseconds
+/// are dropped.
+pub fn system_time(time: &Rfc3339Utc) -> SystemTime {
+    let text = time.as_str();
+    let number = |range: std::ops::Range<usize>| -> i64 {
+        text[range]
+            .parse()
+            .expect("an accepted time has its digits there")
+    };
+    let days = days_from_civil(number(0..4), number(5..7), number(8..10));
+    let seconds = days * 86_400 + number(11..13) * 3_600 + number(14..16) * 60 + number(17..19);
+    let fraction = text[19..text.len() - 1].trim_start_matches('.');
+    let nanos = fraction
+        .bytes()
+        .chain(std::iter::repeat(b'0'))
+        .take(9)
+        .fold(0, |value, digit| value * 10 + u32::from(digit - b'0'));
+    let since_epoch = Duration::new(seconds.unsigned_abs(), 0);
+    let whole = if seconds >= 0 {
+        SystemTime::UNIX_EPOCH + since_epoch
+    } else {
+        SystemTime::UNIX_EPOCH - since_epoch
+    };
+    whole + Duration::from_nanos(u64::from(nanos))
+}
+
+/// The days from 1970-01-01 to a date of the proleptic Gregorian calendar.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
 fn days_in_month(year: u32, month: u32) -> u32 {
     match month {
         2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
@@ -96,5 +135,27 @@ mod tests {
         ] {
             assert!(!Utc::accepts(refused), "{refused}");
         }
+    }
+
+    #[test]
+    fn a_time_reads_as_its_system_time() {
+        let at = |text: &str| system_time(&Rfc3339Utc::new(text).unwrap());
+        let since_epoch =
+            |seconds: u64, nanos: u32| SystemTime::UNIX_EPOCH + Duration::new(seconds, nanos);
+        assert_eq!(at("1970-01-01T00:00:00Z"), SystemTime::UNIX_EPOCH);
+        assert_eq!(at("2000-03-01T00:00:00Z"), since_epoch(951_868_800, 0));
+        assert_eq!(
+            at("2028-02-29T12:30:15.25Z"),
+            since_epoch(1_835_440_215, 250_000_000)
+        );
+        assert_eq!(at("2026-12-31T23:59:60Z"), at("2027-01-01T00:00:00Z"));
+        assert_eq!(
+            at("2026-01-01T00:00:00.1234567891Z"),
+            since_epoch(1_767_225_600, 123_456_789)
+        );
+        assert_eq!(
+            at("1969-12-31T23:59:59.5Z"),
+            SystemTime::UNIX_EPOCH - Duration::from_millis(500)
+        );
     }
 }
