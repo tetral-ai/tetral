@@ -41,7 +41,8 @@ that is no longer the binding's is discarded.
   holds until it is reaped. Its task alone kills its process group, and only
   before reaping it (`probe`). The owner reads the seam clock for the probe's
   `PROBE_LIMIT` whenever it wakes and wakes at least once per recheck interval
-  while a probe runs (`owner`).
+  while a probe runs; it acts on a passed limit before the message it woke
+  for, so a result taken after the limit is discarded (`owner`).
 
 ## Entry points
 

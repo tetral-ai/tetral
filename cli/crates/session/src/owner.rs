@@ -2,7 +2,8 @@
 //!
 //! The owner sets no timer for a probe's deadline: it reads the seam clock
 //! whenever it wakes and, while a probe runs, wakes at least once per
-//! recheck interval, as the Connection owner does. Probe tasks and report
+//! recheck interval, as the Connection owner does, and acts on a passed
+//! deadline before it handles the message it woke for. Probe tasks and report
 //! outcomes come back as messages tagged with their operation or report,
 //! and a result whose operation is no longer current is discarded.
 
@@ -236,9 +237,9 @@ async fn own<S: TaskStarter>(
 ) {
     loop {
         let wake = owner.wake_in();
-        tokio::select! {
+        let message = tokio::select! {
             message = messages.recv() => match message {
-                Some(message) => owner.handle(message),
+                Some(message) => Some(message),
                 None => return,
             },
             () = async {
@@ -246,9 +247,12 @@ async fn own<S: TaskStarter>(
                     Some(wake) => tokio::time::sleep(wake).await,
                     None => std::future::pending().await,
                 }
-            } => {}
-        }
+            } => None,
+        };
         owner.check_deadlines();
+        if let Some(message) = message {
+            owner.handle(message);
+        }
     }
 }
 
@@ -433,7 +437,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use protocol::connection::PreparationErrorCode;
     use protocol::field::AbsolutePath;
+    use protocol::ports::Submission;
     use tokio::sync::oneshot::error::TryRecvError;
     use tokio::sync::{Barrier, oneshot};
 
@@ -444,18 +450,16 @@ mod tests {
         Id::new(value).unwrap()
     }
 
-    /// Starts an owner whose Session's current binding is `bind_1`, prepared.
-    fn owner_with_binding<S: TaskStarter>(starter: S) -> SessionMailbox {
-        let (mailbox, messages) = mpsc::unbounded_channel();
-        let mut owner = SessionOwner::new(None, starter, mailbox.clone());
-        owner.record = Some(Record {
+    /// A record whose current binding is `bind_1` of operation 1.
+    fn record_with(state: SessionState) -> Record {
+        Record {
             current: Some(Binding {
                 binding_id: id("bind_1"),
                 connection_id: id("conn_1"),
                 requested_cwd: AbsolutePath::new("/project").unwrap(),
                 create_cwd: false,
-                cwd: Some(AbsolutePath::new("/project").unwrap()),
-                state: SessionState::Prepared,
+                cwd: None,
+                state,
                 error: None,
                 fingerprint: "a".repeat(64),
                 operation: 1,
@@ -463,9 +467,34 @@ mod tests {
                 reports: Vec::new(),
             }),
             unavailable: None,
-        });
+        }
+    }
+
+    /// Starts an owner whose Session's current binding is `bind_1`, prepared.
+    fn owner_with_binding<S: TaskStarter>(starter: S) -> SessionMailbox {
+        let (mailbox, messages) = mpsc::unbounded_channel();
+        let mut owner = SessionOwner::new(None, starter, mailbox.clone());
+        owner.record = Some(record_with(SessionState::Prepared));
         tokio::spawn(own(owner, messages));
         mailbox
+    }
+
+    struct NoConnection;
+
+    impl ConnectionPort for NoConnection {
+        fn probe_slot(&self, _session_id: &SafeId, _request: ProbeRequest) {}
+        fn probe_slot_withdraw(&self, _session_id: &SafeId, _request: ProbeRequest) {}
+        fn probe_slot_free(&self) {}
+        fn record_gone(&self, _session_id: &SafeId) {}
+    }
+
+    struct NoReports;
+
+    impl ReportSink for NoReports {
+        fn submit(&self, _submission: Submission) -> ReportId {
+            ReportId(0)
+        }
+        fn cancel(&self, _report: ReportId) {}
     }
 
     fn close_of(binding_id: &str) -> Close {
@@ -660,5 +689,54 @@ mod tests {
         let (message, admission) = tool("task-1");
         assert!(mailbox.send(message).is_ok());
         assert_eq!(admission.await.unwrap(), Admission::Started);
+    }
+
+    #[tokio::test]
+    async fn a_probe_result_taken_after_the_probe_deadline_fails_the_preparation_with_the_timeout()
+    {
+        let (mailbox, messages) = mpsc::unbounded_channel();
+        let preparation = Preparation {
+            session_id: SafeId::new("sess_1").unwrap(),
+            connection: Arc::new(NoConnection),
+            reports: Arc::new(NoReports),
+            shared: Shared {
+                paths: Arc::new(RootPaths {
+                    given: "/root".into(),
+                    canonical: "/root".into(),
+                    probe_program: "/probe".into(),
+                }),
+                times: Times::default(),
+            },
+        };
+        let mut owner = SessionOwner::new(Some(preparation), NoTasks, mailbox.clone());
+        owner.record = Some(record_with(SessionState::Preparing));
+        owner.probes.insert(
+            1,
+            Running {
+                probe: Probe::reaped(),
+                deadline: state::seams::now().saturating_sub(Duration::from_millis(1)),
+                killed: false,
+            },
+        );
+        let result = SessionMessage::ProbeDone {
+            operation: 1,
+            output: Some(Output::Entered {
+                cwd: "/project".to_owned(),
+            }),
+        };
+        assert!(mailbox.send(result).is_ok());
+        tokio::spawn(own(owner, messages));
+
+        let (reply, entries) = oneshot::channel();
+        let read = SessionMessage::Entries(Box::new(move |entries| {
+            let _ = reply.send(entries);
+        }));
+        assert!(mailbox.send(read).is_ok());
+        let entries = entries.await.unwrap();
+        assert_eq!(entries[0].state, SessionState::Failed);
+        assert_eq!(
+            entries[0].error.0.as_ref().map(|error| error.code),
+            Some(PreparationErrorCode::CwdCheckTimeout)
+        );
     }
 }

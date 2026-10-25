@@ -34,6 +34,12 @@ pub struct Probe {
 }
 
 impl Probe {
+    /// A probe whose task has already reaped it.
+    #[cfg(test)]
+    pub(crate) fn reaped() -> Probe {
+        Probe { kill: None }
+    }
+
     /// Has the probe's task send SIGKILL to its process group, unless the
     /// task has already reaped it.
     pub fn kill(&mut self) {
