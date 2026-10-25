@@ -59,7 +59,8 @@ description, schemas and fixtures are in `protocol/` at the repository root.
 - `id.rs`: `Id` and `SafeId`. `time.rs`: `Rfc3339Utc` and `system_time`,
   the system time it names. `path.rs`: drive paths and their case folding.
 - `connection.rs`: the messages of `connection-v1.schema.json`: the
-  event-stream query, `Downstream` and its payloads, ready, heartbeats,
+  event-stream query, `Downstream` and its payloads, `Envelope`, a
+  downstream event read before its payload's schema, ready, heartbeats,
   Session reports, the local MCP tool list, credentials and Git tickets; and
   `ToolDownstream`, the envelope of a tool instruction.
 - `tool.rs`: the messages of `tool-execution-v1.schema.json`: tool

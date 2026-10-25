@@ -250,6 +250,30 @@ pub enum DownstreamType {
     McpCall,
 }
 
+impl DownstreamType {
+    /// `session.prepare`, `session.close`, `session.drives` and the tool and
+    /// local MCP instructions.
+    pub fn is_session_instruction(self) -> bool {
+        matches!(
+            self,
+            DownstreamType::SessionPrepare
+                | DownstreamType::SessionClose
+                | DownstreamType::SessionDrives
+        ) || self.is_tool_instruction()
+    }
+
+    /// `tool.execute`, `tool.stdin`, `tool.cancel` and `mcp.call`.
+    pub fn is_tool_instruction(self) -> bool {
+        matches!(
+            self,
+            DownstreamType::ToolExecute
+                | DownstreamType::ToolStdin
+                | DownstreamType::ToolCancel
+                | DownstreamType::McpCall
+        )
+    }
+}
+
 impl DownstreamPayload {
     pub fn kind(&self) -> DownstreamType {
         match self {
@@ -317,7 +341,7 @@ impl DownstreamPayload {
 
 /// One event of the stream: Engine's envelope around a typed payload.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(try_from = "RawDownstream", into = "RawDownstream")]
+#[serde(try_from = "Envelope", into = "Envelope")]
 pub struct Downstream {
     pub connection_id: Id,
     pub message_id: Id,
@@ -326,26 +350,32 @@ pub struct Downstream {
     pub traceparent: Option<String>,
 }
 
-#[derive(Deserialize, Serialize)]
-struct RawDownstream {
-    protocol_version: ProtocolVersion,
-    connection_id: Id,
-    message_id: Id,
+/// A downstream event's envelope with its payload as an object, read before
+/// the payload's own schema.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Envelope {
+    pub protocol_version: ProtocolVersion,
+    pub connection_id: Id,
+    pub message_id: Id,
     #[serde(rename = "type")]
-    kind: DownstreamType,
-    payload: Object,
+    pub kind: DownstreamType,
+    pub payload: Object,
     #[serde(
         default,
         deserialize_with = "field::present",
         skip_serializing_if = "Option::is_none"
     )]
-    traceparent: Option<String>,
+    pub traceparent: Option<String>,
 }
 
-impl TryFrom<RawDownstream> for Downstream {
+impl Message for Envelope {
+    const MAX_BYTES: usize = limits::EXECUTE_SSE_JSON_BYTES;
+}
+
+impl TryFrom<Envelope> for Downstream {
     type Error = String;
 
-    fn try_from(raw: RawDownstream) -> Result<Self, String> {
+    fn try_from(raw: Envelope) -> Result<Self, String> {
         let payload = DownstreamPayload::read(raw.kind, Value::Object(raw.payload))
             .map_err(|error| format!("payload: {error}"))?;
         Ok(Downstream {
@@ -357,13 +387,13 @@ impl TryFrom<RawDownstream> for Downstream {
     }
 }
 
-impl From<Downstream> for RawDownstream {
+impl From<Downstream> for Envelope {
     fn from(downstream: Downstream) -> Self {
         let payload = match downstream.payload.write() {
             Value::Object(payload) => payload,
             _ => Object::new(),
         };
-        RawDownstream {
+        Envelope {
             protocol_version: tool::ProtocolVersion::default(),
             connection_id: downstream.connection_id,
             message_id: downstream.message_id,
@@ -1154,3 +1184,41 @@ pub type Acknowledgement = tool::Acknowledgement;
 pub type ToolStatus = tool::ToolStatus;
 pub type DriveSyncReport = tool::DriveSyncReport;
 pub type ProtocolErrorReport = tool::ProtocolErrorReport;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decode;
+
+    fn event(protocol_version: i64, kind: &str, payload: Value) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "protocol_version": protocol_version,
+            "connection_id": "conn_a",
+            "message_id": "msg_a",
+            "type": kind,
+            "payload": payload,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_envelope_reads_any_payload_object_while_a_downstream_reads_only_its_schema() {
+        let unsafe_close = event(
+            1,
+            "session.close",
+            serde_json::json!({ "session_id": ".." }),
+        );
+        let envelope = decode::<Envelope>(&unsafe_close).unwrap();
+        assert_eq!(envelope.kind, DownstreamType::SessionClose);
+        assert_eq!(envelope.message_id.as_str(), "msg_a");
+        assert!(decode::<Downstream>(&unsafe_close).is_err());
+
+        for refused in [
+            event(2, "session.close", serde_json::json!({})),
+            event(1, "session.open", serde_json::json!({})),
+            event(1, "session.close", serde_json::json!([])),
+        ] {
+            assert!(decode::<Envelope>(&refused).is_err());
+        }
+    }
+}
