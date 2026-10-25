@@ -17,7 +17,9 @@
 //! fixed order: its envelope and identities ([`crate::classify`]), the
 //! connection's replay ledger, its payload's schema, then routing. A failure
 //! is reported as a protocol error through the Report outbox
-//! ([`crate::protocol_error`]); none changes a task, binding or result.
+//! ([`crate::protocol_error`]), except that a `session.prepare` refused at
+//! its admission gets a failed preparation report; none changes a task,
+//! binding or result.
 //!
 //! The owner also admits each `session.prepare` before it reaches a Session
 //! binding owner ([`crate::sessions`]) and holds the probe slots
