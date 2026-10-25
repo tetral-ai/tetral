@@ -123,7 +123,11 @@ temporary directories. No workspace crate depends on this package.
   server: one event of up to 4,259,840 bytes read and a larger one that
   closes the stream unread, and the budgets of `input`, `chars` and metadata
   and the 65,536 bytes of `tool.cancel` and `session.close`, each instruction
-  with its own report or protocol error.
+  with its own report or protocol error; with a prepared Session, an
+  instruction delivered again or its payload issued again, a `task_id`
+  issued again with other content, tasks staged behind a withheld
+  `prepared` ACK, and the replay-ledger entries of tasks, kept until a
+  resume or freed by each ACK.
 - `tests/tool_reports.rs`: the reports of tool instructions: an ACK that
   names another report and one without `accepted` release nothing, and the
   report is sent again byte for byte.
