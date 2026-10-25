@@ -121,6 +121,7 @@ fn a_refused_report_is_never_sent_again_and_a_stale_connection_ends_the_connecti
         (sent[3]["status"].as_i64(), sent[3]["code"].as_str()),
         (Some(409), Some("stale_connection"))
     );
+    machine.wait_for("disconnected");
     machine.advance(seconds(PAST_FIRST_RETRY));
     let events = wait_for_requests(&engine, "events", 2);
     assert_eq!(
@@ -150,6 +151,7 @@ fn a_report_whose_ack_was_lost_is_sent_again_byte_for_byte_and_recorded_once() {
     send_data(&engine, "not json");
     wait_for_requests(&engine, "protocol-error", 1);
     assert_eq!(frozen_reports(&machine.root).len(), 1);
+    machine.seams.wait_for_count("outbox.answered", 1);
     machine.advance(seconds(PAST_FIRST_RETRY));
     let sent = wait_for_requests(&engine, "protocol-error", 2);
     assert_eq!(message_ids(&sent), ["r1", "r1"]);

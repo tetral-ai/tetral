@@ -360,6 +360,8 @@ impl Owner {
         pending.attempt = Some((tag, task));
     }
 
+    /// Applies the answer to a report's current attempt, counted as the test
+    /// seam counter `outbox.answered`.
     async fn answered(&mut self, report: ReportId, attempt: u64, answer: Answer) {
         let Some(current) = self.current.as_mut() else {
             return;
@@ -371,6 +373,7 @@ impl Owner {
             return;
         }
         pending.attempt = None;
+        state::seams::count("outbox.answered");
         let outcome = match answer {
             Answer::Success(body) if acknowledges(&body, &current.id, &pending.message_id) => {
                 ReportOutcome::Acked

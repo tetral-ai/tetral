@@ -131,7 +131,7 @@ and its running attempt.
 | `src/ledger.rs` | The replay ledger, its limits and reserve, and when an entry goes |
 | `src/backoff.rs` | The backoff of reconnects and of each message's retries |
 | `src/http.rs` | `Transport`, the sorting of answers (`Answer`, `Failure`), `REQUEST_TOTAL`, and a report's attempt bounded by its progress (`ReportRequest`) |
-| `src/outbox.rs` | The Report outbox: identities `r<n>`, freezing, sending, retries, ACKs and refusals, connection ends, and the record `report.dropped` |
+| `src/outbox.rs` | The Report outbox: identities `r<n>`, freezing, sending, retries, ACKs and refusals, connection ends, the record `report.dropped`, and the test seam counter `outbox.answered` |
 | `src/report_deadline.rs` | A report attempt's total and `STALL_LIMIT` |
 | `src/clock.rs` | The clock the outbox reads |
 | `src/stream.rs` | The bounded reading of an event stream (`Events`) and `EVENT_MAX_BYTES` |

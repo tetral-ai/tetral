@@ -9,7 +9,8 @@
 //! `connection.answered` for each answer to ready or a heartbeat it takes,
 //! and `route.session` for each Session instruction it hands on; it waits at
 //! the barrier `connection.message` between taking a message and acting on
-//! the times that have passed.
+//! the times that have passed. The Report outbox reports `outbox.answered`
+//! for each answer to a report's current attempt it takes.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
