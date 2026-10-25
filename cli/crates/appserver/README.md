@@ -38,7 +38,8 @@ ones it uses belong here too.
 
 - `startup::lock(root)` and then `startup::serve(root, lock)` start an App
   Server and give `Started`; `lifecycle::run(started, fixed, times)` serves
-  it until the shutdown sequence ends and gives the status as of then.
+  it until the shutdown sequence ends and gives `lifecycle::Ended`: the
+  status as of then and the time left before the shutdown's deadline.
   `lifecycle::Times` holds the durations, each a constant but for tests.
 
 ## Where things are

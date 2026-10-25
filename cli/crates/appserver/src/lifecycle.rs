@@ -50,7 +50,8 @@ enum Message {
     /// A trigger, with the seam clock's time when it arrived.
     Shutdown(Duration),
     ConnectionStopped,
-    Finished,
+    /// The end of the shutdown sequence, with its deadline.
+    Finished(Duration),
 }
 
 /// A handle on the lifecycle task.
@@ -60,8 +61,8 @@ pub struct Lifecycle {
 }
 
 /// Starts the lifecycle task; the receiver resolves once the shutdown
-/// sequence has finished.
-pub fn spawn(parts: ShutdownParts) -> (Lifecycle, oneshot::Receiver<()>) {
+/// sequence has finished, with the sequence's deadline.
+pub fn spawn(parts: ShutdownParts) -> (Lifecycle, oneshot::Receiver<Duration>) {
     let (mailbox, inbox) = mpsc::unbounded_channel();
     let (finished, on_finished) = oneshot::channel();
     let lifecycle = Lifecycle { mailbox };
@@ -73,7 +74,7 @@ async fn own(
     lifecycle: Lifecycle,
     mut inbox: mpsc::UnboundedReceiver<Message>,
     parts: ShutdownParts,
-    finished: oneshot::Sender<()>,
+    finished: oneshot::Sender<Duration>,
 ) {
     let mut states = States {
         server: ServerState::Running,
@@ -102,9 +103,9 @@ async fn own(
                 }
             }
             Message::ConnectionStopped => states.connection = ConnectionState::Stopped,
-            Message::Finished => {
+            Message::Finished(deadline) => {
                 if let Some(finished) = finished.take() {
-                    let _ = finished.send(());
+                    let _ = finished.send(deadline);
                 }
             }
         }
@@ -136,8 +137,8 @@ impl Lifecycle {
         self.send(Message::ConnectionStopped);
     }
 
-    pub(crate) fn finished(&self) {
-        self.send(Message::Finished);
+    pub(crate) fn finished(&self, deadline: Duration) {
+        self.send(Message::Finished(deadline));
     }
 
     fn send(&self, message: Message) {
@@ -163,10 +164,19 @@ impl Default for Times {
     }
 }
 
+/// What a stopped App Server leaves to its process's exit.
+#[derive(Debug)]
+pub struct Ended {
+    /// The status as of the end of the shutdown sequence.
+    pub status: Status,
+    /// The time left then before the shutdown's deadline.
+    pub left: Duration,
+}
+
 /// Serves the local API of a started App Server, keeps its socket fresh and
 /// takes SIGINT and SIGTERM as shutdown triggers, until the shutdown sequence
-/// ends; returns the status as of then.
-pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io::Result<Status> {
+/// ends.
+pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io::Result<Ended> {
     // Read before the local API serves, so that the socket's age never
     // exceeds one interval while a client can reach it.
     let first_touch = state::seams::now() + times.socket_touch_interval;
@@ -206,7 +216,11 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
         first_touch,
         times.socket_touch_interval,
     ));
-    let _ = finished.await;
+    let deadline = finished.await.unwrap_or_else(|_| state::seams::now());
     touching.abort();
-    Ok(local_api::current_status(&lifecycle, &fixed).await)
+    let status = local_api::current_status(&lifecycle, &fixed).await;
+    Ok(Ended {
+        status,
+        left: deadline.saturating_sub(state::seams::now()),
+    })
 }

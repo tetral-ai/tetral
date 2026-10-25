@@ -10,6 +10,9 @@ runs as child processes of itself.
   stdout, and its records to stderr. It exits 0 with its result, or 1 with
   `{"error": {"code", "message"}}`; a message is fixed text, or names a path
   and the operating system's error, and never holds a key (`output`).
+- Every command waits for its records to be written before it exits, at most
+  `observe::EXIT_FLUSH_LIMIT`; after a shutdown, never past the shutdown's
+  deadline, so that `server run` exits within it (`commands`, `server`).
 - `tetral --version` alone answers first, reading no environment variable and
   no file. Every other command runs the checks of `commands` in order (the
   arguments, the root checks of `state::private`, the app recorded in an
@@ -34,9 +37,9 @@ runs as child processes of itself.
   status as of its exit. Its records from the configuration phase on wait for
   the log file, which it opens once the start can no longer fail; one that
   cannot be opened is recorded as `log.file_open_failed`, and the App Server
-  runs on. Every command waits for its records to be written before it exits. The command checks `--idle-exit`'s `<duration>`, a
-  positive integer followed by `s`, `m` or `h`, with its other arguments; the
-  App Server does not act on it.
+  runs on. The command checks `--idle-exit`'s `<duration>`, a positive
+  integer followed by `s`, `m` or `h`, with its other arguments; the App
+  Server does not act on it.
 - `tetral server status --app <app>` and `tetral server stop --app <app>`:
   `GET /v1/status` and `POST /v1/shutdown` through the SDK, writing the status
   or `{}`; `server_not_running` when no App Server answers. `server stop`

@@ -34,5 +34,5 @@ pub(crate) async fn run(sequence: Sequence, lifecycle: Lifecycle) {
     }
     let _ = std::fs::remove_file(&sequence.socket);
     drop(sequence.lock);
-    lifecycle.finished();
+    lifecycle.finished(sequence.deadline);
 }

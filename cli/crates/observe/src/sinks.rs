@@ -154,6 +154,8 @@ pub(crate) fn failures(registry: &Registry, sink: &str) -> Counter {
 pub struct Sinks {
     stderr: Sink,
     file: OnceLock<Sink>,
+    /// The instant at which every flush ends, once one is set.
+    flush_end: OnceLock<Instant>,
 }
 
 impl Sinks {
@@ -161,7 +163,14 @@ impl Sinks {
         Sinks {
             stderr,
             file: OnceLock::new(),
+            flush_end: OnceLock::new(),
         }
+    }
+
+    /// Makes every later flush end by `end` at the latest; a second end is
+    /// ignored.
+    pub fn end_flushes_by(&self, end: Instant) {
+        let _ = self.flush_end.set(end);
     }
 
     /// Attaches the log file's sink; a second one is ignored.
@@ -191,10 +200,14 @@ impl Sinks {
     }
 
     /// Waits until every record written before the call is written or
-    /// dropped, at most `limit` in all; a held log-file sink writes nothing
+    /// dropped, at most `limit` in all and never past the end that
+    /// [`Sinks::end_flushes_by`] set; a held log-file sink writes nothing
     /// before its slot is filled or dropped.
     pub fn flush(&self, limit: Duration) {
-        let deadline = Instant::now() + limit;
+        let mut deadline = Instant::now() + limit;
+        if let Some(end) = self.flush_end.get() {
+            deadline = deadline.min(*end);
+        }
         self.stderr.flush_until(deadline);
         if let Some(file) = self.file.get() {
             file.flush_until(deadline);
@@ -528,5 +541,23 @@ mod tests {
         file_held.wait();
         sinks.flush(FLUSH);
         assert_eq!((stderr_failures.get(), file_failures.get()), (1, 1));
+    }
+    #[test]
+    fn a_flush_ends_by_the_end_set_for_it_while_a_writer_is_held() {
+        let registry = Registry::new(catalogue());
+        let held = Arc::new(Barrier::new(2));
+        let sinks = Sinks::new(Sink::spawn_stderr(
+            Box::new(Held(held.clone(), false)),
+            &registry,
+        ));
+        sinks.write(record(10));
+        sinks.end_flushes_by(Instant::now());
+        let flushing = Instant::now();
+        sinks.flush(Duration::from_secs(60));
+        assert!(
+            flushing.elapsed() < Duration::from_secs(5),
+            "a flush waited past the end set for it"
+        );
+        held.wait();
     }
 }

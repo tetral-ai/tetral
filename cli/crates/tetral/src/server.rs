@@ -15,7 +15,7 @@ use crate::output::{Code, CommandError};
 pub fn run(root: &StateRoot, observer: &observe::Observer) -> Result<Value, CommandError> {
     let runtime = runtime()?;
     let lock = startup::lock(root).map_err(start_failed)?;
-    let status = runtime.block_on(async {
+    let ended = runtime.block_on(async {
         let started = startup::serve(root, lock).map_err(start_failed)?;
         // Opened once the start can no longer fail, so that a refused start
         // leaves the root as it was.
@@ -37,7 +37,10 @@ pub fn run(root: &StateRoot, observer: &observe::Observer) -> Result<Value, Comm
     })?;
     // Handlers still blocked past the shutdown's deadline are left behind.
     runtime.shutdown_background();
-    Ok(serde_json::to_value(status).expect("a status always serializes"))
+    // The exit's wait for the log sinks ends by the shutdown's deadline too,
+    // so that the process exits within it.
+    observer.end_flush_within(ended.left);
+    Ok(serde_json::to_value(ended.status).expect("a status always serializes"))
 }
 
 pub fn status(root: &StateRoot) -> Result<Value, CommandError> {

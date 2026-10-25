@@ -12,7 +12,7 @@ mod trace_context;
 use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracing_subscriber::layer::SubscriberExt;
 
@@ -93,12 +93,18 @@ impl Observer {
         }
     }
 
-    /// Waits, at most `limit`, until every record so far is written or
-    /// dropped; records still held for a log file that never opened are
-    /// discarded.
+    /// Waits, at most `limit` and never past the end that
+    /// [`Observer::end_flush_within`] set, until every record so far is
+    /// written or dropped; records still held for a log file that never
+    /// opened are discarded.
     pub fn flush(&self, limit: Duration) {
         drop(self.held().take());
         self.sinks.flush(limit);
+    }
+
+    /// Makes every later flush end within `left` from now.
+    pub fn end_flush_within(&self, left: Duration) {
+        self.sinks.end_flushes_by(Instant::now() + left);
     }
 
     fn held(&self) -> std::sync::MutexGuard<'_, Option<WriterSlot>> {
