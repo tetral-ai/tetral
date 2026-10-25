@@ -15,8 +15,14 @@
 //! connection's replay ledger, its payload's schema, then routing. A failure
 //! is reported as a protocol error through the Report outbox
 //! ([`crate::protocol_error`]); none changes a task, binding or result.
+//!
+//! The owner also admits each `session.prepare` before it reaches a Session
+//! binding owner ([`crate::sessions`]) and holds the probe slots
+//! ([`crate::probe_slots`]). Its stop is answered once every probe that
+//! holds a slot has been reaped, so that the shutdown waits for them until
+//! its own deadline.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -25,12 +31,14 @@ use observe::{Identity, STARTUP, TraceContext};
 use protocol::bootstrap::BootstrapKey;
 use protocol::connection::{
     DisconnectPayload, Downstream, DownstreamPayload, DownstreamType, Envelope, Heartbeat,
+    PreparationError, PreparationErrorCode, SessionOutcome, SessionStatus,
 };
 use protocol::errors::{ErrorBody, ErrorCode};
-use protocol::field::PositiveInt;
+use protocol::field::{Nullable, PositiveInt};
+use protocol::fingerprint::fingerprint;
 use protocol::id::Id;
-use protocol::local::{ConnectionState, ErrorObject};
-use protocol::ports::ReportSink;
+use protocol::local::{ConnectionState, ErrorObject, SessionEntry, SessionState};
+use protocol::ports::{Close, Prepare, ProbeSlot, ReportSink, SessionFactory, Submission};
 use protocol::time::Rfc3339Utc;
 use protocol::tool::ProtocolVersion;
 use tokio::sync::{mpsc, oneshot};
@@ -44,8 +52,10 @@ use crate::heartbeat::Heartbeats;
 use crate::http::{Answer, REQUEST_TOTAL, Transport};
 use crate::ledger::{self, Entry, EntryState, Ledger, Need, Seen};
 use crate::outbox::{Outbox, OutboxConfig, OutboxEvent, OutboxTimes};
+use crate::probe_slots::{ProbeSlots, SlotLimits};
 use crate::protocol_error::{self, ProtocolErrorKind};
 use crate::ready::{self, ReadyFields};
+use crate::sessions::{Owners, Port, PortMessage, RECORDS_MAX, SessionsView};
 use crate::staging::{Admission, STAGING_MAX, Staging};
 use crate::status::{ConnectionStatus, Reconnect, Reported};
 use crate::stream::EVENT_MAX_BYTES;
@@ -79,6 +89,8 @@ pub struct Times {
     pub event_max_bytes: usize,
     pub ledger: ledger::Limits,
     pub outbox: OutboxTimes,
+    pub records_max: usize,
+    pub probe_slots: SlotLimits,
 }
 
 impl Default for Times {
@@ -95,6 +107,8 @@ impl Default for Times {
             event_max_bytes: EVENT_MAX_BYTES,
             ledger: ledger::Limits::default(),
             outbox: OutboxTimes::default(),
+            records_max: RECORDS_MAX,
+            probe_slots: SlotLimits::default(),
         }
     }
 }
@@ -107,7 +121,7 @@ pub struct Credential {
     pub expires_at: Rfc3339Utc,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     pub server_url: String,
     pub instance_id: Id,
@@ -117,6 +131,8 @@ pub struct Config {
     pub started: Duration,
     /// `outbox/` in the state root, emptied at App Server start.
     pub outbox: PathBuf,
+    /// Creates the Session binding owner of each Session.
+    pub sessions: Arc<dyn SessionFactory>,
     pub times: Times,
 }
 
@@ -130,6 +146,10 @@ pub struct Instruction {
     /// refused by its owner with `resource_exhausted`, or, for a
     /// `session.close` or `session.drives`, handled without an entry.
     pub recorded: bool,
+    /// Whether the ledger took it as a new operation: a `session.prepare` of
+    /// a binding not yet routed on this connection, a `tool.execute` or an
+    /// `mcp.call`.
+    pub new_operation: bool,
     /// The instruction span its work runs in, carrying its identities and,
     /// when its `traceparent` is usable, its `trace_id`.
     pub span: tracing::Span,
@@ -156,6 +176,8 @@ pub(crate) enum Message {
         answer: Answer,
     },
     Outbox(OutboxEvent),
+    Port(PortMessage),
+    Sessions(oneshot::Sender<SessionsView>),
 }
 
 /// A handle on the Connection owner.
@@ -185,7 +207,17 @@ impl Connection {
             clock: Clock::seams(),
             events,
         });
-        let owner = Owner::new(config, transport, outbox, mailbox.clone());
+        let port = Arc::new(Port {
+            mailbox: mailbox.clone(),
+        });
+        let sink: Arc<dyn ReportSink> = Arc::new(outbox.clone());
+        let owners = Owners::new(
+            config.sessions.clone(),
+            port,
+            sink,
+            config.times.records_max,
+        );
+        let owner = Owner::new(config, transport, outbox, owners, mailbox.clone());
         tokio::spawn(own(owner, inbox, reports));
         Connection { mailbox }
     }
@@ -198,8 +230,33 @@ impl Connection {
             .expect("the Connection owner answers every message")
     }
 
-    /// Stops handling downstream messages, closes the stream and cancels
-    /// every request: `stopping`, then `stopped`, which lasts.
+    /// The entries of `GET /v1/sessions`: each Session binding owner's,
+    /// which this caller asks for, since the Connection owner never waits
+    /// for another owner, then each preparation still staged.
+    pub async fn sessions(&self) -> Vec<SessionEntry> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Message::Sessions(reply));
+        let Ok(view) = answer.await else {
+            return Vec::new();
+        };
+        let mut entries = Vec::new();
+        for owner in view.owners {
+            let (reply, answer) = oneshot::channel();
+            owner.entries(Box::new(move |each| {
+                let _ = reply.send(each);
+            }));
+            if let Ok(each) = answer.await {
+                entries.extend(each);
+            }
+        }
+        entries.extend(view.staged);
+        entries
+    }
+
+    /// Stops handling downstream messages, closes the stream, cancels every
+    /// request, waiting probe slot and preparation, and returns once every
+    /// probe that holds a slot has been reaped: `stopping`, then `stopped`,
+    /// which lasts.
     pub async fn stop(&self) {
         let (reply, answer) = oneshot::channel();
         self.send(Message::Stop(reply));
@@ -275,6 +332,9 @@ struct Held {
     /// The latest heartbeat, until it is acknowledged or given up.
     heartbeat: Option<Outgoing>,
     ledger: Ledger,
+    /// The `(session_id, binding_id)` of each `session.prepare` routed on
+    /// this connection; a later one of the same binding is no new operation.
+    routed: HashSet<(String, String)>,
 }
 
 enum Stream {
@@ -342,6 +402,10 @@ struct Owner {
     last_tag: u64,
     requests: HashMap<u64, Pending>,
     reported: Reported,
+    owners: Owners,
+    slots: ProbeSlots,
+    /// The replies to stop, sent once no probe holds a slot.
+    stop_replies: Vec<oneshot::Sender<()>>,
 }
 
 impl Owner {
@@ -349,10 +413,14 @@ impl Owner {
         config: Config,
         transport: Arc<Transport>,
         outbox: Outbox,
+        owners: Owners,
         mailbox: mpsc::UnboundedSender<Message>,
     ) -> Owner {
         let times = config.times;
         Owner {
+            owners,
+            slots: ProbeSlots::new(times.probe_slots),
+            stop_replies: Vec::new(),
             transport,
             outbox,
             instance_id: config.instance_id,
@@ -396,7 +464,16 @@ impl Owner {
             }
             Message::Stop(reply) => {
                 self.stop();
-                let _ = reply.send(());
+                self.stop_replies.push(reply);
+                self.answer_stop();
+                return;
+            }
+            Message::Port(message) => {
+                self.port_message(message);
+                return;
+            }
+            Message::Sessions(reply) => {
+                let _ = reply.send(self.sessions_view());
                 return;
             }
             _ if matches!(self.phase, Phase::Stopped) => return,
@@ -409,7 +486,9 @@ impl Owner {
             Message::StreamEnded { stream } => self.stream_ended(phase, stream, now),
             Message::Answered { request, answer } => self.answered(phase, request, answer, now),
             Message::Outbox(event) => self.outbox_event(phase, event, now),
-            Message::Status(_) | Message::Stop(_) => phase,
+            Message::Status(_) | Message::Stop(_) | Message::Port(_) | Message::Sessions(_) => {
+                phase
+            }
         };
         self.reported.change(self.state());
     }
@@ -451,18 +530,90 @@ impl Owner {
         for (_, pending) in self.requests.drain() {
             pending.task.abort();
         }
+        for requester in self.slots.cancel() {
+            self.owners.answer(&requester, ProbeSlot::Cancelled);
+        }
+        self.owners.shutdown();
         self.reported.change(ConnectionState::Stopped);
+    }
+
+    fn answer_stop(&mut self) {
+        if self.slots.running() == 0 {
+            for reply in self.stop_replies.drain(..) {
+                let _ = reply.send(());
+            }
+        }
+    }
+
+    /// A Session binding owner's call. A slot is asked for only while a
+    /// connection is held; any other time the request is `Cancelled`, as
+    /// the connection's end and the stop cancel the waiting ones.
+    fn port_message(&mut self, message: PortMessage) {
+        match message {
+            PortMessage::Slot(requester) => {
+                if !matches!(self.phase, Phase::Held(_)) {
+                    self.owners.answer(&requester, ProbeSlot::Cancelled);
+                } else if self.slots.request(requester.clone(), state::seams::now()) {
+                    self.owners.answer(&requester, ProbeSlot::Granted);
+                }
+            }
+            PortMessage::Withdraw(requester) => self.slots.withdraw(&requester),
+            PortMessage::Free => {
+                if let Some(next) = self.slots.free() {
+                    self.owners.answer(&next, ProbeSlot::Granted);
+                }
+                self.answer_stop();
+            }
+            PortMessage::RecordGone(session_id) => self.owners.record_gone(&session_id),
+        }
+    }
+
+    /// The staged preparations, each binding once, and the owners.
+    fn sessions_view(&self) -> SessionsView {
+        let mut staged: Vec<SessionEntry> = Vec::new();
+        if let Phase::Held(held) = &self.phase
+            && let Some(registration) = &held.registration
+        {
+            for instruction in registration.staging.iter() {
+                let message = &instruction.message;
+                if message.envelope.kind != DownstreamType::SessionPrepare {
+                    continue;
+                }
+                let (Ok(session_id), Ok(binding_id)) = (
+                    Id::new(message.session_id.as_str()),
+                    Id::new(message.binding_id.as_str()),
+                ) else {
+                    continue;
+                };
+                let entry = SessionEntry {
+                    session_id,
+                    binding_id,
+                    connection_id: held.id.clone(),
+                    cwd: Nullable(None),
+                    state: SessionState::Staged,
+                    error: Nullable(None),
+                };
+                if !staged.contains(&entry) {
+                    staged.push(entry);
+                }
+            }
+        }
+        SessionsView {
+            owners: self.owners.handles(),
+            staged,
+        }
     }
 
     /// The time until the owner must read the clock again, while anything
     /// waits for a time.
     fn wake_in(&self) -> Option<Duration> {
-        let next = match &self.phase {
-            Phase::Waiting { at, .. } => *at,
-            Phase::Connecting(attempt) => attempt.deadline,
-            Phase::Held(held) => held.next_time(),
-            Phase::Blocked | Phase::Stopped => return None,
+        let phase = match &self.phase {
+            Phase::Waiting { at, .. } => Some(*at),
+            Phase::Connecting(attempt) => Some(attempt.deadline),
+            Phase::Held(held) => Some(held.next_time()),
+            Phase::Blocked | Phase::Stopped => None,
         };
+        let next = phase.into_iter().chain(self.slots.next_time()).min()?;
         let recheck = state::seams::recheck_interval();
         Some(next.saturating_sub(state::seams::now()).min(recheck))
     }
@@ -480,6 +631,9 @@ impl Owner {
             Phase::Held(held) => self.check_held(held, now),
             other => other,
         };
+        for requester in self.slots.expire(now) {
+            self.owners.answer(&requester, ProbeSlot::Exhausted);
+        }
         self.reported.change(self.state());
         state::seams::count("connection.checked");
     }
@@ -748,6 +902,7 @@ impl Owner {
             heartbeats: Heartbeats::default(),
             heartbeat: None,
             ledger: Ledger::new(self.times.ledger),
+            routed: HashSet::new(),
         });
         let message_id = held.next_message_id();
         let built = ready::ready(&self.ready, &held.id, message_id.clone(), now);
@@ -806,18 +961,23 @@ impl Owner {
         let span = instruction_span(&held.id, &message, trace.as_ref());
         let entered = span.clone().entered();
         let message_id = message.envelope.message_id.clone();
-        let recorded = match admit(&mut held.ledger, &message, stream) {
-            Admitted::Duplicate => return Phase::Held(held),
-            Admitted::Refused(kind) => {
-                self.protocol_error(&held.id, kind, Some(message_id), trace.as_ref());
-                return Phase::Held(held);
-            }
-            Admitted::Route { recorded } => recorded,
-        };
+        let (recorded, new_operation) =
+            match admit(&mut held.ledger, &held.routed, &message, stream) {
+                Admitted::Duplicate => return Phase::Held(held),
+                Admitted::Refused(kind) => {
+                    self.protocol_error(&held.id, kind, Some(message_id), trace.as_ref());
+                    return Phase::Held(held);
+                }
+                Admitted::Route {
+                    recorded,
+                    new_operation,
+                } => (recorded, new_operation),
+            };
         drop(entered);
         let instruction = Instruction {
             message,
             recorded,
+            new_operation,
             span,
             trace,
         };
@@ -828,7 +988,7 @@ impl Owner {
         match admission {
             Admission::Staged => Phase::Held(held),
             Admission::Route(instruction) => {
-                route(instruction);
+                self.route(&mut held, instruction);
                 Phase::Held(held)
             }
             Admission::Overflow => self.end(Phase::Held(held), now),
@@ -1042,7 +1202,7 @@ impl Owner {
                 let staged = registration.staging.open();
                 held_ref.registration = None;
                 for instruction in staged {
-                    route(instruction);
+                    self.route(held_ref, instruction);
                 }
             }
             None => {
@@ -1110,14 +1270,20 @@ enum Admitted {
     Refused(ProtocolErrorKind),
     Route {
         recorded: bool,
+        new_operation: bool,
     },
 }
 
 /// Looks the instruction up in `ledger` before anything else, checks the
 /// payload of a `session.close` or `session.drives`, and records it, as a
-/// new operation when it is a `session.prepare`, `tool.execute` or
-/// `mcp.call`, since the connection holds no binding or task yet.
-fn admit(ledger: &mut Ledger, message: &SessionMessage, stream: u64) -> Admitted {
+/// new operation when it is a `tool.execute`, an `mcp.call` or a
+/// `session.prepare` whose binding is not in `routed`.
+fn admit(
+    ledger: &mut Ledger,
+    routed: &HashSet<(String, String)>,
+    message: &SessionMessage,
+    stream: u64,
+) -> Admitted {
     let envelope = &message.envelope;
     match ledger.seen(&envelope.message_id, &message.fingerprint, stream) {
         Seen::Duplicate => return Admitted::Duplicate,
@@ -1129,6 +1295,11 @@ fn admit(ledger: &mut Ledger, message: &SessionMessage, stream: u64) -> Admitted
             if protocol::decode::<Downstream>(message.data.as_bytes()).is_err() {
                 return Admitted::Refused(ProtocolErrorKind::InvalidPayload);
             }
+            Need::Reserve
+        }
+        DownstreamType::SessionPrepare
+            if routed.contains(&(message.session_id.clone(), message.binding_id.clone())) =>
+        {
             Need::Reserve
         }
         DownstreamType::SessionPrepare | DownstreamType::ToolExecute | DownstreamType::McpCall => {
@@ -1151,6 +1322,7 @@ fn admit(ledger: &mut Ledger, message: &SessionMessage, stream: u64) -> Admitted
     };
     Admitted::Route {
         recorded: ledger.record(entry, need).is_ok(),
+        new_operation: need == Need::NewOperation,
     }
 }
 
@@ -1175,14 +1347,128 @@ fn instruction_span(
 }
 
 impl Owner {
-    /// Closes the connection's stream; the outbox drops its reports.
-    fn release_held(&self, held: Held) {
+    /// Closes the connection's stream; the outbox drops its reports, the
+    /// waiting probe-slot requests are cancelled and every Session binding
+    /// owner ends the connection's bindings.
+    fn release_held(&mut self, held: Held) {
         match held.stream {
             Stream::Live { task, .. } => task.abort(),
             Stream::Resuming(attempt) => attempt.task.abort(),
             Stream::Waiting { .. } => {}
         }
+        for requester in self.slots.cancel() {
+            self.owners.answer(&requester, ProbeSlot::Cancelled);
+        }
+        self.owners.connection_ended(&held.id);
         self.outbox.connection_ended(held.id);
+    }
+
+    /// Hands a Session instruction on once the ready ACK came, counted as
+    /// the test seam counter `route.session`: a `session.prepare` or a
+    /// `session.close` to the Session binding owner of its `session_id`.
+    fn route(&mut self, held: &mut Held, instruction: Instruction) {
+        state::seams::count("route.session");
+        let _entered = instruction.span.clone().entered();
+        match instruction.message.envelope.kind {
+            DownstreamType::SessionPrepare => self.route_prepare(held, instruction),
+            DownstreamType::SessionClose => self.route_close(held, &instruction),
+            _ => {}
+        }
+    }
+
+    /// Admits a `session.prepare`: one whose payload fails its schema, one
+    /// for a Session without a record while `records_max` exist, and a new
+    /// operation that the replay ledger could not record fail here, with no
+    /// record and no Session binding owner created.
+    fn route_prepare(&mut self, held: &mut Held, instruction: Instruction) {
+        let message = &instruction.message;
+        let payload = match protocol::decode::<Downstream>(message.data.as_bytes()) {
+            Ok(Downstream {
+                payload: DownstreamPayload::SessionPrepare(payload),
+                ..
+            }) => payload,
+            _ => {
+                return self.prepare_failed(held, &instruction, PreparationErrorCode::InvalidInput);
+            }
+        };
+        if self.owners.full_for(&payload.session_id)
+            || (instruction.new_operation && !instruction.recorded)
+        {
+            return self.prepare_failed(
+                held,
+                &instruction,
+                PreparationErrorCode::ResourceExhausted,
+            );
+        }
+        held.routed
+            .insert((message.session_id.clone(), message.binding_id.clone()));
+        let envelope = &message.envelope;
+        let session_id = payload.session_id.clone();
+        let prepare = Prepare {
+            connection_id: held.id.clone(),
+            message_id: envelope.message_id.clone(),
+            addressed_connection_id: envelope.connection_id.clone(),
+            fingerprint: fingerprint(&serde_json::Value::Object(envelope.payload.clone())),
+            payload,
+            traceparent: instruction
+                .trace
+                .as_ref()
+                .map(|trace| trace.header_value().to_owned()),
+        };
+        self.owners.prepare(session_id, prepare);
+    }
+
+    /// A failed report for a `session.prepare` refused at admission. One
+    /// whose identities no report can carry back is a protocol error.
+    fn prepare_failed(&self, held: &Held, instruction: &Instruction, code: PreparationErrorCode) {
+        let message = &instruction.message;
+        let request_message_id = message.envelope.message_id.clone();
+        let (Ok(session_id), Ok(binding_id)) = (
+            Id::new(message.session_id.as_str()),
+            Id::new(message.binding_id.as_str()),
+        ) else {
+            let kind = ProtocolErrorKind::InvalidPayload;
+            let trace = instruction.trace.as_ref();
+            self.protocol_error(&held.id, kind, Some(request_message_id), trace);
+            return;
+        };
+        let error = PreparationError::new(code, None);
+        let answered = request_message_id.clone();
+        let mut report = Submission::new(held.id.clone(), move |connection_id, message_id| {
+            SessionStatus {
+                connection_id,
+                message_id,
+                request_message_id: answered,
+                session_id,
+                binding_id,
+                outcome: SessionOutcome::Failed { error },
+            }
+        });
+        report.final_for = Some(request_message_id);
+        report.traceparent = instruction
+            .trace
+            .as_ref()
+            .map(|trace| trace.header_value().to_owned());
+        self.outbox.submit(report);
+    }
+
+    /// Hands a `session.close`, whose payload admission checked, to its
+    /// Session's owner.
+    fn route_close(&mut self, held: &Held, instruction: &Instruction) {
+        let message = &instruction.message;
+        let Ok(Downstream {
+            payload: DownstreamPayload::SessionClose(close),
+            ..
+        }) = protocol::decode::<Downstream>(message.data.as_bytes())
+        else {
+            return;
+        };
+        let close_message = Close {
+            connection_id: held.id.clone(),
+            message_id: message.envelope.message_id.clone(),
+            binding_id: close.binding_id,
+        };
+        self.owners.close(&close.session_id, close_message);
     }
 }
 
@@ -1216,13 +1502,6 @@ impl Held {
         .min()
         .unwrap_or(Duration::MAX)
     }
-}
-
-/// Hands a Session instruction on once the ready ACK came. Its consumers
-/// are the Session binding owners and the tool path; it is counted as the
-/// test seam counter `route.session`.
-fn route(_instruction: Instruction) {
-    state::seams::count("route.session");
 }
 
 fn error_object(error: &ErrorBody) -> ErrorObject {
@@ -1283,32 +1562,45 @@ mod tests {
         )
     }
 
+    const ROUTED: Admitted = Admitted::Route {
+        recorded: true,
+        new_operation: false,
+    };
+
     #[test]
-    fn with_only_the_reserve_free_a_new_binding_finds_no_room_and_a_close_is_recorded_from_it() {
+    fn with_only_the_reserve_free_a_new_binding_finds_no_room_and_a_close_or_a_routed_binding_is_recorded_from_it()
+     {
         let mut ledger = Ledger::new(ledger::Limits::default());
+        let mut routed = HashSet::new();
         for index in 0..ledger::ENTRIES_MAX - ledger::RESERVE_ENTRIES {
             let filler = close(&format!("msg_{index}"), "bind_a");
-            assert_eq!(
-                admit(&mut ledger, &filler, 1),
-                Admitted::Route { recorded: true }
-            );
+            assert_eq!(admit(&mut ledger, &routed, &filler, 1), ROUTED);
         }
         assert_eq!(ledger.len(), 4_032);
 
         assert_eq!(
-            admit(&mut ledger, &prepare("msg_prepare"), 1),
-            Admitted::Route { recorded: false }
+            admit(&mut ledger, &routed, &prepare("msg_prepare"), 1),
+            Admitted::Route {
+                recorded: false,
+                new_operation: true
+            }
         );
         assert_eq!(ledger.len(), 4_032);
         assert_eq!(
-            admit(&mut ledger, &close("msg_close", "bind_a"), 1),
-            Admitted::Route { recorded: true }
+            admit(&mut ledger, &routed, &close("msg_close", "bind_a"), 1),
+            ROUTED
         );
         assert_eq!(ledger.len(), 4_033);
         assert_eq!(
-            admit(&mut ledger, &close("msg_close", "bind_a"), 1),
+            admit(&mut ledger, &routed, &close("msg_close", "bind_a"), 1),
             Admitted::Duplicate
         );
+        routed.insert(("sess_new".to_owned(), "bind_new".to_owned()));
+        assert_eq!(
+            admit(&mut ledger, &routed, &prepare("msg_prepare_again"), 1),
+            ROUTED
+        );
+        assert_eq!(ledger.len(), 4_034);
     }
 
     #[test]
@@ -1341,11 +1633,7 @@ mod tests {
             }),
         );
         let rows = [
-            (
-                "a close",
-                close("msg_a", "bind_a"),
-                Admitted::Route { recorded: true },
-            ),
+            ("a close", close("msg_a", "bind_a"), ROUTED),
             (
                 "the same close again",
                 close("msg_a", "bind_a"),
@@ -1374,16 +1662,23 @@ mod tests {
             (
                 "a session.prepare without cwd",
                 invalid_prepare,
-                Admitted::Route { recorded: true },
+                Admitted::Route {
+                    recorded: true,
+                    new_operation: true,
+                },
             ),
             (
                 "a tool.execute without input",
                 invalid_execute,
-                Admitted::Route { recorded: true },
+                Admitted::Route {
+                    recorded: true,
+                    new_operation: true,
+                },
             ),
         ];
+        let routed = HashSet::new();
         for (name, message, admitted) in rows {
-            assert_eq!(admit(&mut ledger, &message, 1), admitted, "{name}");
+            assert_eq!(admit(&mut ledger, &routed, &message, 1), admitted, "{name}");
         }
         assert_eq!(ledger.len(), 3);
     }

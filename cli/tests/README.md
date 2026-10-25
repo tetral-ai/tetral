@@ -52,7 +52,8 @@ temporary directories. No workspace crate depends on this package.
 - `src/run.rs`: `Tetral`, a command line of the `tetral` under test, and
   `Run`, its exit status, output and result object.
 - `src/seams.rs`: `Seams`, the harness side of the seam protocol, which
-  `state::seams` defines.
+  `state::seams` defines; a held barrier lets all pass at its release, or one
+  at a time (`Seams::release_one`).
 - `src/record.rs`: `Record`, `Case` and the `record!` macro.
 - `src/snapshot.rs`: `snapshot`, every path under a directory with its kind,
   owner, mode and bytes.
@@ -87,6 +88,15 @@ temporary directories. No workspace crate depends on this package.
   byte for byte and recorded once, a Session instruction delivered again
   routed once and its `message_id` with other content a conflict, and the
   correlation of protocol errors.
+- `tests/preparation.rs`: Session preparation against the reference control
+  server: each failed check and what it creates or never creates, links into
+  the state root and to a project, `create_cwd`, a repeated, held, retargeted
+  and changed preparation and its ACK, two App Servers with the same
+  Sessions, a removed directory and a new connection, a probe result after a
+  new connection and a resumed stream, the probe slots and their timeouts,
+  128 Session records, a held probe under heartbeats and shutdown, reports
+  refused as answering no issued instruction, and a new binding refused by a
+  full replay ledger.
 - `tests/local_service.rs`: `server run`, `server status` and `server stop`
   and the local API: status while Engine is unreachable, the wrong routes,
   shutdown on request, on each signal and with a handler blocked, one owner

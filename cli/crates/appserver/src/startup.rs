@@ -28,6 +28,10 @@ pub struct Started {
     pub socket: PathBuf,
     pub listener: UnixListener,
     pub outbox: PathBuf,
+    /// The state root as `TETRAL_HOME` gives it.
+    pub root: PathBuf,
+    /// The state root's canonical path.
+    pub canonical_root: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -80,6 +84,8 @@ pub fn lock(root: &StateRoot) -> Result<RootLock, StartError> {
 /// with mode `0600` before it accepts a connection.
 pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
     let configuration = configuration::read(root)?;
+    let canonical_root =
+        std::fs::canonicalize(root.path()).map_err(|error| IoFailure::new(root.path(), error))?;
     observe::STARTUP.config_loaded(state::seams::now());
 
     private::create_socket_dir()?;
@@ -100,6 +106,8 @@ pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
         socket,
         listener,
         outbox: root.join(paths::OUTBOX),
+        root: root.path().to_path_buf(),
+        canonical_root,
     })
 }
 

@@ -5,11 +5,13 @@
 //! while the sequence runs, so status stays available until the listener
 //! stops. [`run`] serves a started App Server until the sequence ends.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use connection::{Connection, Credential, ReadyFields};
 use protocol::connection::SemVer;
 use protocol::local::{ServerState, Status};
+use session::{Factory, NoTasks, RootPaths, Shared};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -138,6 +140,7 @@ pub struct Times {
     pub shutdown_deadline: Duration,
     pub socket_touch_interval: Duration,
     pub connection: connection::Times,
+    pub session: session::Times,
 }
 
 impl Default for Times {
@@ -146,6 +149,7 @@ impl Default for Times {
             shutdown_deadline: shutdown::SHUTDOWN_DEADLINE,
             socket_touch_interval: startup::SOCKET_TOUCH_INTERVAL,
             connection: connection::Times::default(),
+            session: session::Times::default(),
         }
     }
 }
@@ -159,9 +163,10 @@ pub struct Ended {
     pub left: Duration,
 }
 
-/// Starts the Connection owner, serves the local API of a started App
-/// Server, keeps its socket fresh and takes SIGINT and SIGTERM as shutdown
-/// triggers, until the shutdown sequence ends.
+/// Starts the Connection owner with the Session binding owners it creates,
+/// serves the local API of a started App Server, keeps its socket fresh and
+/// takes SIGINT and SIGTERM as shutdown triggers, until the shutdown
+/// sequence ends.
 pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io::Result<Ended> {
     // Read before the local API serves, so that the socket's age never
     // exceeds one interval while a client can reach it.
@@ -173,7 +178,20 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
         socket,
         listener,
         outbox,
+        root,
+        canonical_root,
     } = started;
+    let sessions = Factory::new(
+        Shared {
+            paths: Arc::new(RootPaths {
+                given: root,
+                canonical: canonical_root,
+                probe_program: std::env::current_exe()?,
+            }),
+            times: times.session,
+        },
+        NoTasks,
+    );
     let credentials = configuration.credentials;
     let connection = Connection::spawn(connection::Config {
         server_url: credentials.server_url.as_str().to_owned(),
@@ -190,6 +208,7 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
         },
         started: start,
         outbox,
+        sessions: Arc::new(sessions),
         times: times.connection,
     });
     let (lifecycle, finished) = spawn(ShutdownParts {

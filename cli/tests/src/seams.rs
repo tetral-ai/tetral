@@ -36,6 +36,8 @@ struct Shared {
 struct State {
     clock: Duration,
     held: HashSet<String>,
+    /// Per held barrier, how many more processes may pass it.
+    passes: HashMap<String, usize>,
     waiting: HashMap<String, usize>,
     counters: HashMap<String, u64>,
     stopped: bool,
@@ -86,7 +88,22 @@ impl Seams {
 
     /// Lets every waiting and later process pass the barrier `name`.
     pub fn release(&self, name: &str) {
-        self.shared.lock().held.remove(name);
+        let mut state = self.shared.lock();
+        state.held.remove(name);
+        state.passes.remove(name);
+        drop(state);
+        self.shared.changed.notify_all();
+    }
+
+    /// Lets one process pass the held barrier `name`, one that waits there
+    /// or the next to come; it stays held for the others.
+    pub fn release_one(&self, name: &str) {
+        *self
+            .shared
+            .lock()
+            .passes
+            .entry(name.to_owned())
+            .or_default() += 1;
         self.shared.changed.notify_all();
     }
 
@@ -170,6 +187,12 @@ impl Shared {
         *state.waiting.entry(name.to_owned()).or_default() += 1;
         self.changed.notify_all();
         while state.held.contains(name) && !state.stopped {
+            if let Some(passes) = state.passes.get_mut(name)
+                && *passes > 0
+            {
+                *passes -= 1;
+                break;
+            }
             state = self
                 .changed
                 .wait(state)

@@ -5,7 +5,8 @@ Server:
 
 - the **Connection owner**, which owns the connection to Engine, from
   authentication and the event stream to the classification and routing of
-  Session instructions;
+  Session instructions, and also the count of Session records and the
+  **probe slots**, the right to run one directory probe;
 - the **Report outbox**, which owns every report that answers or follows an
   instruction, from the moment it is frozen until Engine acknowledges it.
 
@@ -58,6 +59,21 @@ Server:
   report is sent on another connection (`outbox`). An attempt ends at its
   total, which grows with the size of a size-scaled report, and earlier
   after 10 seconds without progress (`report_deadline`, `http`).
+- A `session.prepare` is admitted before it reaches its Session binding
+  owner: a payload that fails its schema gets `invalid_input`, and a Session
+  without a record while `sessions::RECORDS_MAX` exist or a new operation
+  the ledger could not record gets `resource_exhausted`, each in a `failed`
+  report with no record and no owner created; it is a new operation when
+  its binding was not yet routed on the connection (`owner`). A
+  `session.prepare` creates its Session's owner when it has none
+  (`sessions`).
+- At most `probe_slots::PROBES_MAX` probes hold a slot; a request that finds
+  none free waits in arrival order and is answered `Exhausted` after
+  `probe_slots::PROBE_WAIT`, and every waiting request is `Cancelled` at the
+  connection's end and at the stop. A slot comes back only when its owner
+  returns it after reaping its probe, and the stop is answered only once no
+  probe holds one, so that the shutdown waits for them up to its deadline
+  (`probe_slots`, `owner`).
 - The replay ledger records a new operation only while its reserve stays
   free after recording it; the rest may use the reserve; it never removes an
   entry to make room, and an entry goes only once its instruction's final
@@ -70,8 +86,11 @@ The Connection owner owns the connection's phase (`owner::Phase`: waiting
 for an attempt, connecting, a held connection in `registering`, `online` or
 `resuming`, `blocked` and `stopped`), the reconnect backoff, the last
 connection held, which a new connection names as its predecessor, the staged
-instructions, the held connection's replay ledger and the status fields `connection_state`, `connection_id`,
-`credential_id`, `expires_at` and `last_error`.
+instructions, the held connection's replay ledger and the bindings it routed
+a `session.prepare` for, the handle of each Session binding owner and whether
+it holds a record, the probe slots, and the status fields
+`connection_state`, `connection_id`, `credential_id`, `expires_at` and
+`last_error`.
 
 The Report outbox owns the current connection's number and identity and its
 pending reports, each with its `r<n>` identity, its frozen file, its backoff
@@ -80,10 +99,13 @@ and its running attempt.
 ## Entry points
 
 - `Connection::spawn(Config)` starts the Connection owner and its Report
-  outbox; `status()` gives its `ConnectionStatus` and `stop()` stops it,
+  outbox, with the `protocol::ports::SessionFactory` that creates each
+  Session binding owner; `status()` gives its `ConnectionStatus`,
+  `sessions()` the entries of `GET /v1/sessions`, and `stop()` stops it,
   after which it stays `stopped`. It routes each Session instruction as an
-  `Instruction`: the instruction as read, whether the ledger recorded it,
-  and the span its work runs in.
+  `Instruction`: the instruction as read, whether the ledger recorded it and
+  as a new operation, and the span its work runs in; a `session.prepare` and
+  a `session.close` go to their Session's owner.
 - `Times` holds the owner's durations and limits, each a constant but for
   tests.
 - `Outbox::spawn(OutboxConfig)` starts the Report outbox, which implements
@@ -96,7 +118,9 @@ and its running attempt.
 
 | File | Holds |
 |---|---|
-| `src/owner.rs` | The Connection owner: its phases, timers, the answers to the events request, ready and heartbeats, `disconnect`, the order of an event's handling and the ledger's admission (`admit`), staging and routing, the record `protocol.foreign_connection`, and the test seam counters `connection.attempt`, `connection.checked`, `connection.granted`, `connection.answered` and `route.session` |
+| `src/owner.rs` | The Connection owner: its phases, timers, the answers to the events request, ready and heartbeats, `disconnect`, the order of an event's handling and the ledger's admission (`admit`), staging and routing, the admission of a `session.prepare` and its `failed` report, the record `protocol.foreign_connection`, and the test seam counters `connection.attempt`, `connection.checked`, `connection.granted`, `connection.answered` and `route.session` |
+| `src/sessions.rs` | The Session binding owners as the Connection owner reaches them (`Owners`), `RECORDS_MAX`, and its side of `protocol::ports::ConnectionPort` |
+| `src/probe_slots.rs` | The probe slots, their waiting requests, `PROBES_MAX` and `PROBE_WAIT` |
 | `src/classify.rs` | The reading of an event's envelope and identities, and the content fingerprint |
 | `src/protocol_error.rs` | The classes of protocol errors, their codes and texts, and their reports |
 | `src/attempt.rs` | One attempt's query by its kind, the validity of `connected`, and the task that reads its stream; `ATTEMPT_TOTAL` |

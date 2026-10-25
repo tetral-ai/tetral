@@ -53,9 +53,9 @@ impl Default for Limits {
 /// How an instruction may use the ledger's room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Need {
-    /// A new operation: a `session.prepare` for a binding no Session record
-    /// holds, or a `tool.execute` or `mcp.call` for a task not admitted on
-    /// the connection.
+    /// A new operation: a `session.prepare` for a binding not yet routed on
+    /// the connection, or a `tool.execute` or `mcp.call` for a task not
+    /// admitted on it.
     NewOperation,
     /// Anything else, which may use the reserve.
     Reserve,

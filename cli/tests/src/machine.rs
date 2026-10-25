@@ -86,6 +86,22 @@ pub struct Machine {
 
 impl Machine {
     pub fn start(case: &mut Case, directory: &Path, bootstrap: &Value) -> Machine {
+        Machine::start_in(
+            case,
+            directory,
+            bootstrap,
+            &crate::workspace_dir().join("tests"),
+        )
+    }
+
+    /// [`Machine::start`] with the App Server's working directory
+    /// `working_directory`.
+    pub fn start_in(
+        case: &mut Case,
+        directory: &Path,
+        bootstrap: &Value,
+        working_directory: &Path,
+    ) -> Machine {
         std::fs::create_dir_all(directory).unwrap();
         let root = directory.join("root");
         let run = Tetral::new(["configure", "--app", APP, "--from-stdin"])
@@ -95,7 +111,11 @@ impl Machine {
         case.command("tetral configure --app app_one --from-stdin", &run.exit());
         assert_eq!(run.object(), json!({}));
         let seams = Seams::serve(directory, CLI_START);
-        let app_server = Machine::run(&root, &seams);
+        let server_run = Tetral::new(["server", "run", "--app", APP])
+            .home(&root)
+            .seams(&seams)
+            .current_dir(working_directory);
+        let app_server = AppServer::start(server_run, &root);
         case.command("tetral server run --app app_one", "running");
         Machine {
             app_server,

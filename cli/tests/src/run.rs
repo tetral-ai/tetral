@@ -114,6 +114,11 @@ impl Tetral {
         self
     }
 
+    pub fn current_dir(mut self, directory: &Path) -> Tetral {
+        self.command.current_dir(directory);
+        self
+    }
+
     pub fn stdin(mut self, bytes: impl Into<Vec<u8>>) -> Tetral {
         self.stdin = bytes.into();
         self

@@ -1,7 +1,7 @@
 //! The local API's routes. Each accepted connection is served in its own
 //! task, so any number of clients may connect, and a handler reads only what
-//! the owners report, never waiting for Engine, so local status stays
-//! available while Engine is unreachable. Unknown paths get `404` and known
+//! the owners report, never waiting for Engine or the filesystem, so local
+//! status stays available while Engine is unreachable. Unknown paths get `404` and known
 //! paths with another method `405`, both with an empty body.
 
 use axum::extract::State;
@@ -62,9 +62,9 @@ async fn status(State(sources): State<StatusSources>) -> Json<Status> {
     Json(current_status(&sources).await)
 }
 
-async fn sessions() -> Json<Sessions> {
+async fn sessions(State(sources): State<StatusSources>) -> Json<Sessions> {
     Json(Sessions {
-        sessions: Vec::new(),
+        sessions: sources.connection.sessions().await,
     })
 }
 

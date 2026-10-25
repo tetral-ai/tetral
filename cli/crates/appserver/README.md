@@ -27,7 +27,9 @@ ones it uses belong here too.
 - Only a held lock or an answering socket shows that an App Server runs; a
   lock file, a socket file or a process ID alone shows nothing (`lock`).
 - A local API handler reads only the state the owners report and never waits
-  for Engine (`local_api`).
+  for Engine or touches the filesystem; `GET /v1/sessions` lists what the
+  Session binding owners and the Connection owner's staging hold
+  (`local_api`).
 - The first of `POST /v1/shutdown`, SIGINT and SIGTERM starts the shutdown;
   later ones change nothing. The sequence stops the Connection owner, stops
   the listener, removes the socket and then releases the lock, waiting for
@@ -42,8 +44,10 @@ ones it uses belong here too.
 
 - `startup::lock(root)` and then `startup::serve(root, lock)` start an App
   Server and give `Started`; `lifecycle::run(started, fixed, times)` starts
-  the Connection owner and its Report outbox, serves the App Server until the shutdown sequence
-  ends and gives `lifecycle::Ended`: the status as of then and the time left
+  the Connection owner and its Report outbox with the Session binding
+  owners' factory (`session::Factory`), given the state root as given and
+  canonical and the running executable for the directory probe, serves the
+  App Server until the shutdown sequence ends and gives `lifecycle::Ended`: the status as of then and the time left
   before the shutdown's deadline. `lifecycle::Times` holds the durations,
   each a constant but for tests.
 

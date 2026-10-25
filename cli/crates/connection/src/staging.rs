@@ -58,6 +58,11 @@ impl<T> Staging<T> {
         std::mem::take(&mut self.queue)
     }
 
+    /// The staged instructions in arrival order.
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.queue.iter()
+    }
+
     pub fn len(&self) -> usize {
         self.queue.len()
     }
