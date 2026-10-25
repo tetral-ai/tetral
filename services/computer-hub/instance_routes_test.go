@@ -57,6 +57,8 @@ type hubFixture struct {
 	// pause, when set, holds the first statement whose SQL contains its
 	// match until the test releases it.
 	pause atomic.Pointer[statementPause]
+	// fail, when set, fails the first statement whose SQL contains it.
+	fail atomic.Pointer[string]
 	// recordStatements counts the statements that name the idempotency
 	// records table.
 	recordStatements atomic.Int64
@@ -111,6 +113,10 @@ func (f *hubFixture) pauseOn(match string) *statementPause {
 	f.pause.Store(pause)
 	return pause
 }
+
+// failOn fails the next statement whose SQL contains match, as a lost
+// database connection would.
+func (f *hubFixture) failOn(match string) { f.fail.Store(&match) }
 
 // awaitLockWait waits until a statement on the test database waits for a
 // lock.
@@ -190,6 +196,11 @@ func (h hubTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.Tr
 	if pause := h.f.pause.Load(); pause != nil && strings.Contains(data.SQL, pause.match) && h.f.pause.CompareAndSwap(pause, nil) {
 		pause.once.Do(func() { close(pause.reached) })
 		<-pause.release
+	}
+	if match := h.f.fail.Load(); match != nil && strings.Contains(data.SQL, *match) && h.f.fail.CompareAndSwap(match, nil) {
+		failed, cancel := context.WithCancel(ctx)
+		cancel()
+		return failed
 	}
 	if strings.Contains(data.SQL, "instance_idempotency_records") {
 		h.f.recordStatements.Add(1)

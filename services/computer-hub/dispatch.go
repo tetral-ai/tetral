@@ -40,11 +40,15 @@ import (
 // an instruction never waits for a hint that was lost; an instruction issued
 // later waits for its own notice.
 
-// streamState is what one stream keeps across passes.
+// streamState is what one stream keeps across passes. written holds every
+// message the stream wrote, so none is written twice on it; unmarked holds
+// the instructions among them whose first write (instance.MarkWritten) has
+// not committed yet, which the next pass records without writing them again.
 type streamState struct {
 	stream   *clientStream
 	writer   sseWriter
 	written  map[string]bool
+	unmarked map[string]bool
 	accepted bool
 }
 
@@ -73,9 +77,12 @@ func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
 	stream := state.stream
 	bound, all := stream.take()
 	outcome := passWritten
-	var firsts []firstWrite
+	var (
+		firsts []firstWrite
+		marked []string
+	)
 	err := s.database.WithWorkspaceTx(ctx, string(stream.workspace), "computer_hub.instruction_write", func(tx *dbconnect.Tx) error {
-		outcome, firsts = passWritten, firsts[:0]
+		outcome, firsts, marked = passWritten, firsts[:0], marked[:0]
 		connection, current, credential, err := shareRows(ctx, tx, stream.workspace, stream.connection)
 		if err != nil {
 			return err
@@ -127,24 +134,33 @@ func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
 			return err
 		}
 		for _, instruction := range instructions {
-			if state.written[instruction.MessageID] {
+			if !state.written[instruction.MessageID] {
+				if state.writer.writeEnvelope(instruction.Envelope) != nil {
+					outcome = passBroken
+					return nil
+				}
+				state.written[instruction.MessageID] = true
+				state.unmarked[instruction.MessageID] = true
+			}
+			if !state.unmarked[instruction.MessageID] {
 				continue
 			}
-			if state.writer.writeEnvelope(instruction.Envelope) != nil {
-				outcome = passBroken
-				return nil
-			}
-			state.written[instruction.MessageID] = true
 			first, queued, err := instance.MarkWritten(ctx, tx, stream.workspace, stream.connection, instruction.MessageID)
 			if err != nil {
 				return err
 			}
+			marked = append(marked, instruction.MessageID)
 			if first {
 				firsts = append(firsts, firstWrite{instruction: instruction, queued: queued})
 			}
 		}
 		return nil
 	})
+	if err == nil {
+		for _, messageID := range marked {
+			delete(state.unmarked, messageID)
+		}
+	}
 	if err != nil {
 		// The failed statement is observed under the pass's operation; the
 		// stream keeps its bound and runs the pass again after

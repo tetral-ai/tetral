@@ -244,7 +244,7 @@ func (s *Streams) serve(ctx context.Context, w http.ResponseWriter, stream *clie
 	}
 	s.metrics.streamStarted(resumed)
 	defer s.metrics.streamEnded()
-	state := &streamState{stream: stream, writer: writer, written: map[string]bool{}, accepted: started.ReadyAcceptedAt != nil}
+	state := &streamState{stream: stream, writer: writer, written: map[string]bool{}, unmarked: map[string]bool{}, accepted: started.ReadyAcceptedAt != nil}
 	var (
 		next <-chan time.Time
 		sent int64

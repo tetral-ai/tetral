@@ -250,7 +250,8 @@ one second. The first write of an instruction to any stream sets
 `first_written_at`, observes `computerhub_instructions_queue_wait_seconds`
 and, when the instruction has a `trace_context`, is one span
 `instruction.deliver` in that trace with `connection.id`, `message.id` and
-`message.type`.
+`message.type`, each once its pass commits; when the pass fails, the stream's
+next pass records that write without writing the instruction again.
 
 Connection notices (`notice.go`): each pod listens on `tetral_hub_` and the
 first 16 hexadecimal characters of the SHA-256 of
