@@ -44,7 +44,7 @@ Server:
   as `protocol.foreign_connection` and ignored.
 - An instruction's content fingerprint is the SHA-256 of its envelope with
   object members sorted by name and no whitespace, so member order and
-  whitespace are no change (`classify::fingerprint`). The same `message_id`
+  whitespace are no change (`protocol::fingerprint`). The same `message_id`
   and fingerprint starts nothing; another fingerprint is a `message_conflict`.
 - A protocol error is `message_conflict` or `invalid_message` with a fixed
   text for its class, carries `request_message_id` only when the envelope's

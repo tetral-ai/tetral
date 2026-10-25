@@ -3,9 +3,9 @@
 //! instruction its identities and content fingerprint.
 
 use protocol::connection::Envelope;
+use protocol::fingerprint::fingerprint;
 use protocol::id::Id;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::protocol_error::ProtocolErrorKind;
 
@@ -29,7 +29,7 @@ pub struct SessionMessage {
     pub envelope: Envelope,
     /// The event's data as it arrived.
     pub data: String,
-    /// See [`fingerprint`].
+    /// The envelope's content fingerprint ([`fingerprint`]).
     pub fingerprint: String,
     pub session_id: String,
     pub binding_id: String,
@@ -93,50 +93,6 @@ pub fn read(data: String) -> Read {
 fn readable_message_id(data: &str) -> Option<Id> {
     let value: Value = serde_json::from_str(data).ok()?;
     serde_json::from_value(value.get("message_id")?.clone()).ok()
-}
-
-/// The lowercase hexadecimal SHA-256 of `value` re-encoded with object
-/// members sorted by name and no whitespace, so that member order and
-/// whitespace are no change while an omitted member or another value is.
-/// The sorting is done here, not left to the JSON library, whose maps keep
-/// insertion order when a dependency turns that on.
-pub fn fingerprint(value: &Value) -> String {
-    let mut encoded = Vec::new();
-    canonical(value, &mut encoded);
-    Sha256::digest(&encoded)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn canonical(value: &Value, out: &mut Vec<u8>) {
-    match value {
-        Value::Object(members) => {
-            let mut names: Vec<&String> = members.keys().collect();
-            names.sort();
-            out.push(b'{');
-            for (index, name) in names.into_iter().enumerate() {
-                if index > 0 {
-                    out.push(b',');
-                }
-                serde_json::to_writer(&mut *out, name).expect("a string encodes");
-                out.push(b':');
-                canonical(&members[name], out);
-            }
-            out.push(b'}');
-        }
-        Value::Array(items) => {
-            out.push(b'[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push(b',');
-                }
-                canonical(item, out);
-            }
-            out.push(b']');
-        }
-        scalar => serde_json::to_writer(&mut *out, scalar).expect("a scalar encodes"),
-    }
 }
 
 #[cfg(test)]

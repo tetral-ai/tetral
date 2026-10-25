@@ -56,6 +56,8 @@ description, schemas and fixtures are in `protocol/` at the repository root.
 - `strict.rs`: the strict pass.
 - `field.rs`: member presence, constant members and the checked values that
   members share (`Text` with its rules, `Bounded`, `List`, `Unique`).
+- `fingerprint.rs`: the content fingerprint of a JSON value, which the
+  replay ledger and the cases of a preparation compare.
 - `id.rs`: `Id` and `SafeId`. `time.rs`: `Rfc3339Utc` and `system_time`,
   the system time it names. `path.rs`: drive paths and their case folding.
 - `connection.rs`: the messages of `connection-v1.schema.json`: the

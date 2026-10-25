@@ -6,6 +6,7 @@ pub mod connection;
 pub mod drive_transfer;
 pub mod errors;
 pub mod field;
+pub mod fingerprint;
 pub mod id;
 pub mod local;
 pub mod path;
