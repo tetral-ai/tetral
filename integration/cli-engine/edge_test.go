@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,11 +26,50 @@ import (
 // token exchange first goes to auth's Authorization/Check over gRPC: a
 // denial answers with Check's status, headers and body, and an allowed
 // request goes on, with the signed principal Check returned, to the service
-// that edgeRoute names for its path.
+// that edgeRoute names for its path, round robin over that service's
+// backends that are not down.
 type edge struct {
 	check    authv3.AuthorizationClient
-	services map[string]*url.URL
+	services map[string][]*backend
 	sequence atomic.Int64
+	next     atomic.Uint64
+
+	mu sync.Mutex
+	// delays holds the answer of a request path that long after its backend
+	// answered.
+	delays map[string]time.Duration
+	events []eventsRequest
+}
+
+// backend is one origin of a service, named like its pod.
+type backend struct {
+	name   string
+	origin *url.URL
+	down   atomic.Bool
+}
+
+// eventsRequest is one GET /v1/client/events the edge forwarded: when it
+// arrived, its predecessor query, the backend's status and, once the
+// backend's response ended, when.
+type eventsRequest struct {
+	backend  string
+	instance string
+	previous string
+	resume   string
+	status   int
+	at       time.Time
+	ended    time.Time
+}
+
+// endRecorder calls ended when the proxy closes the response body it copied.
+type endRecorder struct {
+	io.ReadCloser
+	ended func()
+}
+
+func (r endRecorder) Close() error {
+	r.ended()
+	return r.ReadCloser.Close()
 }
 
 var (
@@ -57,22 +97,25 @@ func edgeRoute(method, path string) (service string, checked, ok bool) {
 	return "", false, false
 }
 
-// startEdge serves the edge on a loopback port until t ends and returns its
-// origin and port. services maps a service name to its HTTP origin; a route
-// to a service the test did not start answers 502.
-func startEdge(t *testing.T, authGRPCAddress string, services map[string]string) (string, string) {
+// startEdge serves the edge on a loopback port until t ends and returns it
+// with its origin and port. services maps a service name to its backends'
+// names and HTTP origins; a route to a service the test did not start, or
+// whose backends are all down, answers 502.
+func startEdge(t *testing.T, authGRPCAddress string, services map[string][][2]string) (*edge, string, string) {
 	t.Helper()
 	connection, err := grpc.NewClient(authGRPCAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &edge{check: authv3.NewAuthorizationClient(connection), services: map[string]*url.URL{}}
-	for name, origin := range services {
-		target, err := url.Parse(origin)
-		if err != nil {
-			t.Fatal(err)
+	e := &edge{check: authv3.NewAuthorizationClient(connection), services: map[string][]*backend{}, delays: map[string]time.Duration{}}
+	for name, backends := range services {
+		for _, named := range backends {
+			origin, err := url.Parse(named[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.services[name] = append(e.services[name], &backend{name: named[0], origin: origin})
 		}
-		e.services[name] = target
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -85,7 +128,69 @@ func startEdge(t *testing.T, authGRPCAddress string, services map[string]string)
 		_ = connection.Close()
 	})
 	_, port, _ := net.SplitHostPort(listener.Addr().String())
-	return "http://127.0.0.1:" + port, port
+	return e, "http://127.0.0.1:" + port, port
+}
+
+// pick returns the next backend of service that is not down.
+func (e *edge) pick(service string) *backend {
+	backends := e.services[service]
+	for range backends {
+		candidate := backends[e.next.Add(1)%uint64(len(backends))]
+		if !candidate.down.Load() {
+			return candidate
+		}
+	}
+	return nil
+}
+
+// setDown takes the backend named name out of rotation, as an endpoint
+// controller does for a pod that died, or with down false puts it back.
+func (e *edge) setDown(name string, down bool) {
+	for _, backends := range e.services {
+		for _, candidate := range backends {
+			if candidate.name == name {
+				candidate.down.Store(down)
+			}
+		}
+	}
+}
+
+// delay holds every answer to path that long after its backend answered.
+func (e *edge) delay(path string, d time.Duration) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.delays[path] = d
+}
+
+// eventsRequests returns instanceID's client event requests forwarded so
+// far, in arrival order.
+func (e *edge) eventsRequests(instanceID string) []eventsRequest {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var requests []eventsRequest
+	for _, request := range e.events {
+		if request.instance == instanceID {
+			requests = append(requests, request)
+		}
+	}
+	return requests
+}
+
+// waitEvents waits up to timeout for instanceID's n-th client event request
+// (n counted from 1) to reach the state done accepts, and returns it.
+func (e *edge) waitEvents(t *testing.T, instanceID string, n int, timeout time.Duration, what string, done func(eventsRequest) bool) eventsRequest {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		requests := e.eventsRequests(instanceID)
+		if len(requests) >= n && done(requests[n-1]) {
+			return requests[n-1]
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("instance %s: %s not seen at the edge within %s; its event requests %+v", instanceID, what, timeout, requests)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -94,7 +199,7 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	target := e.services[service]
+	target := e.pick(service)
 	if target == nil {
 		http.Error(w, service+" does not run in this test", http.StatusBadGateway)
 		return
@@ -127,9 +232,13 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		remove = []string{"Authorization", "X-Api-Key"}
 	}
+	arrived := time.Now()
+	e.mu.Lock()
+	delay := e.delays[r.URL.Path]
+	e.mu.Unlock()
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(request *httputil.ProxyRequest) {
-			request.SetURL(target)
+			request.SetURL(target.origin)
 			request.SetXForwarded()
 			for _, name := range remove {
 				request.Out.Header.Del(name)
@@ -137,6 +246,24 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			for name, value := range set {
 				request.Out.Header.Set(name, value)
 			}
+		},
+		ModifyResponse: func(response *http.Response) error {
+			if r.URL.Path == "/v1/client/events" {
+				query := r.URL.Query()
+				e.mu.Lock()
+				index := len(e.events)
+				e.events = append(e.events, eventsRequest{backend: target.name, instance: query.Get("instance_id"), previous: query.Get("previous_connection_id"), resume: query.Get("resume"), status: response.StatusCode, at: arrived})
+				e.mu.Unlock()
+				response.Body = endRecorder{ReadCloser: response.Body, ended: func() {
+					e.mu.Lock()
+					defer e.mu.Unlock()
+					e.events[index].ended = time.Now()
+				}}
+			}
+			if delay > 0 {
+				time.Sleep(delay)
+			}
+			return nil
 		},
 		// Client event streams reach the CLI as each event is written.
 		FlushInterval: -1,

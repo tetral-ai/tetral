@@ -100,13 +100,13 @@ func (i *identity) environment() map[string]string {
 	}
 }
 
-// issue writes a new token of the service account into a file of its own
-// and returns the file's path, which a workload's own token-path setting
-// names.
-func (i *identity) issue(t *testing.T, account string) string {
+// issue writes a new token of the service account into the file of the
+// process label and returns the file's path, which a workload's own
+// token-path setting names.
+func (i *identity) issue(t *testing.T, account, label string) string {
 	t.Helper()
 	token := randomHex(t, 32)
-	path := filepath.Join(i.dir, account+"-token")
+	path := filepath.Join(i.dir, label+"-token")
 	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
 		t.Fatal(err)
 	}

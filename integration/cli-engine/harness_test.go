@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -34,6 +35,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -262,16 +264,23 @@ type engine struct {
 	// nats is the broker of the services that publish or subscribe.
 	nats     testinfra.NATSFixture
 	identity *identity
+	edge     *edge
+	// hubs are the computer-hub processes by pod name.
+	hubs map[string]*serviceProcess
 }
 
-// engineOptions are the settings a test gives the Engine services.
+// engineOptions are the settings a test gives the Engine services. hubPods
+// is the number of computer-hub processes, one when zero; streamMaxAge their
+// stream age setting, the default when empty.
 type engineOptions struct {
 	minCLIVersion, recommendedCLIVersion string
+	hubPods                              int
+	streamMaxAge                         string
 }
 
 const (
 	harnessWorkspace = "harness_workspace"
-	hubPodName       = "computer-hub-0"
+	hubPodPrefix     = "computer-hub"
 	blobBucket       = "tetral-harness"
 	postgresName     = "postgres.transport.test"
 	minioName        = "minio.transport.test"
@@ -330,7 +339,7 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 		"ENGINE_API_KEY":                                 e.apiKey,
 		"ENGINE_BOOTSTRAP_WORKSPACE_ID":                  harnessWorkspace,
 	})
-	e.startService("auth", "tetral-auth", authEnv, authAddresses[0])
+	e.startService("auth", "auth", "tetral-auth", authEnv, authAddresses[0])
 
 	apiAddresses := reserveAddresses(t, 2)
 	dataDir := filepath.Join(t.TempDir(), "api-data")
@@ -346,32 +355,53 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 		"TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64": publicKey,
 		"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF":       "ghcr.io/tetral-ai/sandbox:0.0.0-dev",
 	})
-	e.startService("api", "tetral-api", apiEnv, apiAddresses[0])
+	e.startService("api", "api", "tetral-api", apiEnv, apiAddresses[0])
 
-	hubAddresses := reserveAddresses(t, 2)
-	hubEnv := merge(databaseEnv("computer_hub"), blobEnv, map[string]string{
-		"TETRAL_COMPUTER_HUB_HTTP_ADDR":                 hubAddresses[0],
-		"TETRAL_COMPUTER_HUB_METRICS_ADDR":              hubAddresses[1],
-		"TETRAL_HTTP_TRANSPORT":                         "plaintext",
-		"TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64": publicKey,
-		"TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY":            randomHex(t, 32),
-		"TETRAL_COMPUTER_HUB_POD_NAME":                  hubPodName,
-	})
-	if options.minCLIVersion != "" {
-		hubEnv["TETRAL_COMPUTER_HUB_MIN_CLI_VERSION"] = options.minCLIVersion
+	pageTokenKey := randomHex(t, 32)
+	var hubs [][2]string
+	e.hubs = map[string]*serviceProcess{}
+	for i := range max(options.hubPods, 1) {
+		pod := fmt.Sprintf("%s-%d", hubPodPrefix, i)
+		hubAddresses := reserveAddresses(t, 2)
+		hubEnv := merge(databaseEnv("computer_hub"), blobEnv, map[string]string{
+			"TETRAL_COMPUTER_HUB_HTTP_ADDR":                 hubAddresses[0],
+			"TETRAL_COMPUTER_HUB_METRICS_ADDR":              hubAddresses[1],
+			"TETRAL_HTTP_TRANSPORT":                         "plaintext",
+			"TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64": publicKey,
+			"TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY":            pageTokenKey,
+			"TETRAL_COMPUTER_HUB_POD_NAME":                  pod,
+		})
+		for key, value := range map[string]string{
+			"TETRAL_COMPUTER_HUB_MIN_CLI_VERSION":         options.minCLIVersion,
+			"TETRAL_COMPUTER_HUB_RECOMMENDED_CLI_VERSION": options.recommendedCLIVersion,
+			"TETRAL_COMPUTER_HUB_STREAM_MAX_AGE":          options.streamMaxAge,
+		} {
+			if value != "" {
+				hubEnv[key] = value
+			}
+		}
+		e.hubs[pod] = e.startService("computer-hub", pod, "tetral-computer-hub", hubEnv, hubAddresses[0])
+		hubs = append(hubs, [2]string{pod, "http://" + hubAddresses[0]})
 	}
-	if options.recommendedCLIVersion != "" {
-		hubEnv["TETRAL_COMPUTER_HUB_RECOMMENDED_CLI_VERSION"] = options.recommendedCLIVersion
-	}
-	e.startService("computer-hub", "tetral-computer-hub", hubEnv, hubAddresses[0])
 
-	e.serverURL, e.edgePort = startEdge(t, authAddresses[2], map[string]string{
-		"auth":         "http://" + authAddresses[0],
-		"api":          "http://" + apiAddresses[0],
-		"computer-hub": "http://" + hubAddresses[0],
+	e.edge, e.serverURL, e.edgePort = startEdge(t, authAddresses[2], map[string][][2]string{
+		"auth":         {{"auth", "http://" + authAddresses[0]}},
+		"api":          {{"api", "http://" + apiAddresses[0]}},
+		"computer-hub": hubs,
 	})
-	record.observe("Engine at %s through the public edge: auth, api and computer-hub (pod %s) as processes, PostgreSQL and MinIO containers, NATS", e.serverURL, hubPodName)
+	record.observe("Engine at %s through the public edge: auth, api and computer-hub (%s) as processes, PostgreSQL and MinIO containers, NATS", e.serverURL, strings.Join(slices.Sorted(maps.Keys(e.hubs)), ", "))
 	return e
+}
+
+// killHub takes pod out of the edge's rotation and kills its computer-hub
+// process at once, with no drain.
+func (e *engine) killHub(pod string) {
+	e.t.Helper()
+	process := e.hubs[pod]
+	e.edge.setDown(pod, true)
+	process.killed.Store(true)
+	_ = process.command.Process.Kill()
+	<-process.exited
 }
 
 // controller is the test Controller client of the workspace.
@@ -482,21 +512,24 @@ type serviceProcess struct {
 	// tokenPath is the file holding the process's own workload token, which
 	// a service that makes internal gRPC calls names in its token setting.
 	tokenPath string
+	// killed marks a process the test killed on purpose.
+	killed atomic.Bool
 }
 
-// startService starts the build name as service with env, gives it its own
-// workload token and the TokenReview endpoint, and waits until its /ready on
-// httpAddress answers 200. It stops with SIGTERM when t ends.
-func (e *engine) startService(service, name string, env map[string]string, httpAddress string) {
+// startService starts the build name as the process label of service with
+// env, gives it its own workload token of the service's account and the
+// TokenReview endpoint, and waits until its /ready on httpAddress answers
+// 200. It stops with SIGTERM when t ends.
+func (e *engine) startService(service, label, name string, env map[string]string, httpAddress string) *serviceProcess {
 	t := e.t
 	t.Helper()
 	env = merge(env, e.identity.environment(), map[string]string{"TETRAL_DEPLOYMENT_ENVIRONMENT": "test", "TETRAL_SERVICE_VERSION": e.record.engineCommit})
-	process := &serviceProcess{name: service, log: &lockedBuffer{}, exited: make(chan struct{}), tokenPath: e.identity.issue(t, service)}
+	process := &serviceProcess{name: label, log: &lockedBuffer{}, exited: make(chan struct{}), tokenPath: e.identity.issue(t, service, label)}
 	process.command = exec.Command(builds.path(t, name)) //nolint:gosec // the harness's own build
 	process.command.Env = childEnvironment(env)
 	process.command.Stdout, process.command.Stderr = process.log, process.log
 	if err := process.command.Start(); err != nil {
-		t.Fatalf("start %s: %v", service, err)
+		t.Fatalf("start %s: %v", label, err)
 	}
 	go func() {
 		process.err = process.command.Wait()
@@ -510,22 +543,25 @@ func (e *engine) startService(service, name string, env map[string]string, httpA
 		if err == nil {
 			_ = response.Body.Close()
 			if response.StatusCode == http.StatusOK {
-				return
+				return process
 			}
 		}
 		select {
 		case <-process.exited:
-			t.Fatalf("%s exited before it was ready: %v\n%s", service, process.err, process.log.tail(40))
+			t.Fatalf("%s exited before it was ready: %v\n%s", label, process.err, process.log.tail(40))
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%s was not ready within 60s\n%s", service, process.log.tail(40))
+			t.Fatalf("%s was not ready within 60s\n%s", label, process.log.tail(40))
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 }
 
 func (p *serviceProcess) stop(t *testing.T) {
+	if p.killed.Load() {
+		return
+	}
 	select {
 	case <-p.exited:
 		t.Errorf("%s exited during the test: %v\n%s", p.name, p.err, p.log.tail(40))
