@@ -78,10 +78,10 @@ recovery record and resets its window.
 
 The shared boundary normalizes event names and protects resource metadata. It
 admits the scalar field vocabulary in
-[`fields.json`](../ts-observability/src/fields.json), bounds strings to 1024 Go bytes or TypeScript UTF-16 code units
+[`fields.json`](../ts-observability/src/fields.json), bounds strings to 1024 UTF-8 bytes
 and inspects at most 64 caller fields per record, removes controls, redacts credentials,
 content fields and full URLs, and drops records exceeding the byte ceiling.
-Resource values are sanitized once and bounded to 253 Go bytes or TypeScript UTF-16 code units for diagnostics;
+Resource values are sanitized once and bounded to 253 UTF-8 bytes for diagnostics;
 this does not change their owning configuration validation. Existing safe builders
 remain responsible for turning arbitrary errors and content into fixed public
 messages or approved bounded classifications. Adding a field requires reviewing
@@ -127,9 +127,10 @@ service tests cover real Queue poll/heartbeat and authenticated gRPC caller nois
 
 ## Recording rules
 
-Every Go Engine service records through this library; `integration/static`
-fails any other `slog` package-level call or TypeScript `console` call in
-service code.
+Every Engine service records through this library in Go and
+[`@tetral/ts-observability`](../ts-observability/README.md) in TypeScript, with
+the same names and semantics; `integration/static` fails any other `slog`
+package-level call or TypeScript `console` call in service code.
 
 - **Records.** One JSON object per line on stderr with the fields above. A
   failure adds `error.class`, `error.code` and `error.message_safe`, the fixed

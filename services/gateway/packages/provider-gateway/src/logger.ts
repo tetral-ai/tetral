@@ -10,8 +10,12 @@
  * reduced to a fixed public diagnostic.
  */
 
-import { createTetralJsonLogger, semanticErrorFields } from "@tetral/ts-observability";
-import type { DiagnosticConfig, TetralDiagnosticLogger, TetralJsonLogger, TetralLogRecord } from "@tetral/ts-observability";
+import { createTetralJsonLogger, semanticErrorFields, serviceDeclarations } from "@tetral/ts-observability";
+import type { DiagnosticConfig, TetralDiagnosticLogger, TetralJsonLogger, TetralLogRecord, UndeclaredNamePolicy } from "@tetral/ts-observability";
+import observabilityTable from "../observability.json";
+
+/** Every event, operation, metric family and span this process writes. */
+export const providerGatewayDeclarations = serviceDeclarations(observabilityTable);
 
 /** Extends shared structured records with provider-gateway event classification fields. */
 export type GatewayLogRecord = TetralLogRecord & {
@@ -26,7 +30,7 @@ export type GatewayStartupCauseCategory = "configuration" | "schema" | "listener
 /** Defines the shared JSON logger specialized for provider-gateway records. */
 export type GatewayLogger = TetralJsonLogger<GatewayLogRecord>;
 
-/** Creates a structured logger whose default service identity is `provider-gateway`. */
+/** Creates a structured logger whose default service identity is `provider-gateway`; it refuses events its table does not declare. */
 export function createJsonLogger(options: {
   readonly write: (line: string) => unknown;
   readonly sinkFailures?: (() => number) | undefined;
@@ -35,6 +39,7 @@ export function createJsonLogger(options: {
   readonly deploymentEnvironment?: string;
   readonly serviceVersion?: string;
   readonly clock?: (() => Date) | undefined;
+  readonly undeclared?: UndeclaredNamePolicy;
 }): TetralDiagnosticLogger<GatewayLogRecord> {
   return createTetralJsonLogger<GatewayLogRecord>({
     write: options.write,
@@ -44,12 +49,16 @@ export function createJsonLogger(options: {
     deploymentEnvironment: options.deploymentEnvironment,
     serviceVersion: options.serviceVersion,
     clock: options.clock,
+    declarations: providerGatewayDeclarations,
+    undeclared: options.undeclared,
   });
 }
 
 /**
- * Builds a structured startup-failure record, retaining configuration messages
- * and replacing other failure details with a fixed bounded message.
+ * Builds a structured startup-failure record. A configuration failure carries
+ * the fixed safe message and names the problem, which never holds a supplied
+ * value, in `startup.config_problem`; other failure details become a fixed
+ * bounded message.
  */
 export function startupFailureLogRecord(input: {
   readonly kind: "config_error" | "startup_error";
@@ -66,7 +75,8 @@ export function startupFailureLogRecord(input: {
     kind: input.kind,
     message: safeMessage,
     "startup.cause_category": causeCategory,
-    ...semanticErrorFields({ errorClass: input.kind, errorCode: input.kind, messageSafe: safeMessage }),
+    ...(input.kind === "config_error" ? { "startup.config_problem": input.message } : {}),
+    ...semanticErrorFields({ errorClass: input.kind, errorCode: input.kind, messageSafe: input.kind === "config_error" ? "configuration invalid" : safeMessage }),
   };
 }
 

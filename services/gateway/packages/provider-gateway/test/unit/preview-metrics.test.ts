@@ -26,7 +26,7 @@ test("actual publisher instruments distinguish local admission, flush and previe
 });
 test("healthy preview flood has no per-fragment logs; repeated failures retain first bounded summary and recovery without content", async () => {
   const records: string[] = [];
-  const logger = createJsonLogger({ write: line => records.push(line), diagnostics: { level: "info", maxRecordBytes: 4096, summaryIntervalMs: 30000, burst: 1 } });
+  const logger = createJsonLogger({ write: line => records.push(line), diagnostics: { level: "info", maxRecordBytes: 4096, summaryIntervalMs: 30000, burst: 1, traceSampleRatio: 1, dbSlowQueryMs: 250 } });
   const connection = new ObservedPreviewConnection();
   const publisher = new PreviewPublisher({ connect: async () => connection, logger, policy: { ...PreviewPublisherDefaults, queueFrames: 2048 } });
   publisher.start(); await observed(() => publisher.metrics.connected);

@@ -727,7 +727,7 @@ export function mcpDiscoveryPaginationFailureLogRecord(
     ...semanticErrorFields({
       errorClass: "mcp_connection_failed",
       errorCode: "mcp_connection_failed",
-      messageSafe: `mcp discovery pagination failed: ${reason}`,
+      messageSafe: "mcp discovery pagination failed",
     }),
   };
 }

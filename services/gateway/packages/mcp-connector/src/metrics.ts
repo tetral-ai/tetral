@@ -1,4 +1,5 @@
-import { OperationMetricsRegistry } from "@tetral/ts-observability";
+import { OperationMetricsRegistry, operationMetricsText } from "@tetral/ts-observability";
+import { mcpConnectorDeclarations } from "./logger.js";
 /**
  * @packageDocumentation
  *
@@ -36,7 +37,7 @@ type RunToolBucket = {
 
 /** Aggregates connector metrics in memory and renders their Prometheus form. */
 export class McpConnectorMetricsRegistry {
-  readonly operations = new OperationMetricsRegistry("mcp-connector", ["RunMcpTool", "ListMcpTools", "shutdown_drain", "shutdown_cancel_join"]);
+  readonly operations = new OperationMetricsRegistry("mcp-connector", ["RunMcpTool", "ListMcpTools", "shutdown_drain", "shutdown_cancel_join"], mcpConnectorDeclarations);
   readonly #runToolBuckets = new Map<string, RunToolBucket>();
   #sessionsActive = 0;
   #manifestRefreshes = 0;
@@ -105,7 +106,7 @@ export class McpConnectorMetricsRegistry {
       `mcpconnector_refresh_attempts_total{outcome="success"} ${this.#refreshAttempts.success}`,
       `mcpconnector_refresh_attempts_total{outcome="failed"} ${this.#refreshAttempts.failed}`,
     );
-    return `${lines.join("\n")}\n${this.operations.render()}`;
+    return `${lines.join("\n")}\n${operationMetricsText(this.operations)}`;
   }
 }
 

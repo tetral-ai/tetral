@@ -33,14 +33,13 @@ describe("Provider stage completion samples", () => {
     now=27;writer.callback!();await Promise.resolve();expect(writer.writes).toBe(1);expect(metrics.render({ready:true})).not.toContain("providergateway_complete_frame_pending_bytes 0\n");
     now=40;writer.emit("drain");await operation;
     expect(metrics.render({ready:true})).toContain("providergateway_complete_frame_pending_bytes 0\n");
-    // The 5/15/7 ms stage durations land in independent histogram buckets;
-    // the recording sink below keeps their exact millisecond values.
-    const stageSeries=(stage:string)=>`service="provider-gateway",operation="${stage}",outcome="success"`;
+    // The 5/15/7 ms stage durations come from independent clocks, so each
+    // stage's histogram sum holds its own duration.
+    const stageSeries=(stage:string)=>`service="provider-gateway",operation="${stage}",outcome="ok"`;
     const histogram=metrics.render({ready:true});
-    for(const [stage,inside,outside] of [["provider_first_fragment","0.005","0.001"],["provider_first_complete","0.025","0.01"],["complete_frame_write","0.01","0.005"]] as const){
-      expect(histogram).toContain(`tetral_operation_duration_seconds_count{${stageSeries(stage)}} 1\n`);
-      expect(histogram).toContain(`tetral_operation_duration_seconds_bucket{${stageSeries(stage)},le="${inside}"} 1\n`);
-      expect(histogram).toContain(`tetral_operation_duration_seconds_bucket{${stageSeries(stage)},le="${outside}"} 0\n`);
+    for(const [family,stage,seconds] of [["tetral_long_operation_duration_seconds","provider_first_fragment","0.005"],["tetral_long_operation_duration_seconds","provider_first_complete","0.015"],["tetral_operation_duration_seconds","complete_frame_write","0.007"]] as const){
+      expect(histogram).toContain(`${family}_count{${stageSeries(stage)}} 1\n`);
+      expect(histogram).toContain(`${family}_sum{${stageSeries(stage)}} ${seconds}\n`);
     }
     if(sink==="recording"){
       const stageSamples=samples.filter(record=>record.event==="provider.stage_completed");

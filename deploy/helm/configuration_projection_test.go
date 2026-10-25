@@ -260,6 +260,8 @@ func checkTypeScriptProjection(t *testing.T, envs map[string]projectionEnv, conf
 		Diagnostics struct {
 			Level                                    string
 			MaxRecordBytes, SummaryIntervalMs, Burst int
+			TraceSampleRatio                         float64
+			TraceEndpoint                            string
 		}
 		DeploymentEnvironment, ServiceVersion string
 		DatabasePool                          map[string]int
@@ -280,13 +282,17 @@ func checkTypeScriptProjection(t *testing.T, envs map[string]projectionEnv, conf
 		want := struct {
 			Level                                    string
 			MaxRecordBytes, SummaryIntervalMs, Burst int
-		}{"info", 16384, 30000, 1}
+			TraceSampleRatio                         float64
+			TraceEndpoint                            string
+		}{"info", 16384, 30000, 1, 1, ""}
 		environment, version := "local", "dev"
 		if configured {
 			want = struct {
 				Level                                    string
 				MaxRecordBytes, SummaryIntervalMs, Burst int
-			}{"warn", 8192, 7000, 3}
+				TraceSampleRatio                         float64
+				TraceEndpoint                            string
+			}{"warn", 8192, 7000, 3, 1, ""}
 			environment, version = "projection-test", "projection-version"
 		}
 		if err := requireProjection(result.Diagnostics, want); err != nil {

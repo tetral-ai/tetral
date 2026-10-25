@@ -1234,8 +1234,23 @@ transport-profile setting.
 Provider Gateway and MCP Connector use the shared
 [TypeScript diagnostic contract](../../internal/ts-observability/README.md).
 `TETRAL_LOG_LEVEL`, `TETRAL_LOG_MAX_RECORD_BYTES`,
-`TETRAL_LOG_SUMMARY_INTERVAL_MS`, and `TETRAL_LOG_BURST` are restart-only controls.
-The default level is Info. Safe builders retain fixed classifications and bounded
+`TETRAL_LOG_SUMMARY_INTERVAL_MS`, `TETRAL_LOG_BURST`,
+`TETRAL_TRACE_SAMPLE_RATIO`, `TETRAL_DB_SLOW_QUERY_MS` and
+`OTEL_EXPORTER_OTLP_ENDPOINT` are restart-only controls.
+The default level is Info. Each package declares the events, operations and
+metric families it records in its `observability.json`
+(`packages/provider-gateway/observability.json`,
+`packages/mcp-connector/observability.json`); its logger refuses any other
+event.
+
+Each process records one `service_pod` cold start. Provider Gateway ends
+`dependencies` once its dependency graph is built (SQL owner, schema
+verification, credential and provider clients) and its preview publisher has
+started, and `ready` when both listeners are bound and readiness opens. MCP Connector ends `dependencies` after its SQL
+owner, schema verification and TokenReview reviewer material are ready, and
+`ready` when both listeners are bound. Both gRPC servers continue the caller's
+trace from `traceparent` metadata, and both write it on their Bridge calls;
+calls to model providers and remote MCP servers carry no trace context. Safe builders retain fixed classifications and bounded
 identities; repeated degradation emits bounded summaries. Existing metrics expose
 drops and asynchronous stderr failures. Startup and shutdown finally blocks
 release diagnostic timers/listeners without waiting for stream flush.
@@ -1278,12 +1293,15 @@ Go's independently owned pool policy remains distinct.
 
 ## Operation measurement
 
-Both metrics listeners export the additive seconds histogram
-`tetral_operation_duration_seconds{service,operation,outcome}` with the
-[shared fixed bounds](../../internal/workload/README.md#operation-durations).
-Provider Gateway operations are `StreamProviderRequest`,
+Both metrics listeners export the additive seconds histograms
+`tetral_operation_duration_seconds{service,operation,outcome}` and, for the
+operations a table marks long, `tetral_long_operation_duration_seconds`, with the
+[shared bucket sets](../../internal/workload/README.md#metrics); a success
+records as `ok`, and `cancelled` and `timeout` are codes the operations that
+produce them declare. Provider Gateway operations are `StreamProviderRequest`,
 `provider_first_fragment`, `provider_first_complete`, `complete_frame_write`,
-`shutdown_drain` and `shutdown_cancel_join`. Request duration covers the actual
+`shutdown_drain` and `shutdown_cancel_join`; all but `complete_frame_write`
+are long. Request duration covers the actual
 service entry through owned cleanup, including authentication, validation and
 capacity rejection. Stage durations retain their existing dispatch/fragment/
 complete/write-callback boundaries and success/error/cancelled populations;
@@ -1295,12 +1313,12 @@ not evidence of client delivery or a valid Agent turn.
 configured admission bound. `providergateway_admission_rejections_total` counts
 only concurrent-turn admission refusal. Provider stream counters, assembly
 gauges and pending-frame bytes keep their meaning. Stage durations are exported
-only through `tetral_operation_duration_seconds` and the raw
+only through the operation histograms and the raw
 `provider.stage_completed` samples.
 
 MCP operations are `RunMcpTool`, `ListMcpTools`, `shutdown_drain` and
-`shutdown_cancel_join`. Execution records one owning duration across claim,
-credential/SDK work and settlement, with success/error/rejected/timeout/cancelled
+`shutdown_cancel_join`, all long. Execution records one owning duration across claim,
+credential/SDK work and settlement, with ok/error/rejected/timeout/cancelled
 outcomes. Tool names remain only in the existing legacy MCP series; the new
 histogram aggregates them under the fixed RPC operation. Discovery records its
 actual complete-list duration, including non-success. Shutdown records actual

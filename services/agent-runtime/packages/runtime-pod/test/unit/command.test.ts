@@ -413,6 +413,8 @@ describe("Runtime Pod command entrypoint", () => {
 			[
 				"time",
 				"level",
+				"msg",
+				"log.type",
 				"service.name",
                 "service.instance.id",
                 "process.pid",
@@ -437,8 +439,8 @@ describe("Runtime Pod command entrypoint", () => {
 			].sort(),
 		);
 		expect(record).toMatchObject({
-			time: "2026-08-25T12:34:56.789Z",
-			level: "error",
+			time: "2026-08-25T12:34:56.789000Z",
+			level: "ERROR",
 			"service.name": "agent-runtime",
 			"service.version": "unit",
 			"deployment.environment": "test",
@@ -685,7 +687,11 @@ describe("Runtime Pod command entrypoint", () => {
 			approvalReviewer: { providerId: "anthropic", modelId: "claude-opus-4-8" },
 		});
 		expect(capturedLogger).toBeDefined();
+		// The fake app never registers with Bridge, so the cold start stays in dependencies.
 		expect(records).toEqual([
+			"info:cold_start.phase_started",
+			"info:cold_start.phase_completed",
+			"info:cold_start.phase_started",
 			"dependencyBuilder",
 			"app.start",
 			"info:workload.started",

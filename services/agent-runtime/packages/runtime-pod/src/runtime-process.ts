@@ -1,6 +1,7 @@
 /** Bridge-backed registration and immutable binding-release receipts for one process boot. */
 import { credentials, status } from "@grpc/grpc-js";
 import type { Metadata } from "@grpc/grpc-js";
+import { traceparentClientInterceptor } from "@tetral/ts-observability";
 import {
   AgentRuntimeBridgeServiceClient,
   RuntimeProcessPhase,
@@ -57,6 +58,7 @@ export class BridgeRuntimeProcess implements RuntimeProcessPort {
         new AgentRuntimeBridgeServiceClient(
           options.address,
           credentials.createInsecure(),
+          { interceptors: [traceparentClientInterceptor] },
         ),
       options.policies,
     );

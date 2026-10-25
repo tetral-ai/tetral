@@ -14,7 +14,7 @@
  * Gateway.
  */
 import { credentials, status } from "@grpc/grpc-js";
-import type { CallOptions, ChannelOptions, ClientReadableStream, Metadata, ServiceError } from "@grpc/grpc-js";
+import type { CallOptions, ClientOptions, ClientReadableStream, Metadata, ServiceError } from "@grpc/grpc-js";
 import { Readable } from "node:stream";
 import {
   ProviderRequest as ProviderRequestMessage,
@@ -49,8 +49,8 @@ export interface RuntimePodGatewayClientOptions {
   readonly metadataFactory?: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
   /** Reuses an existing generated client instead of constructing a channel. */
   readonly client?: ProviderGatewayServiceClient;
-  /** Supplies transport fuses; load distribution belongs to the scoped routing proxy. */
-  readonly channelOptions?: ChannelOptions;
+  /** Supplies transport fuses and interceptors; load distribution belongs to the scoped routing proxy. */
+  readonly channelOptions?: ClientOptions;
   /** Receives bounded identity-only transport diagnostics. */
   readonly logger?: RuntimePodLogger;
   /** Supplies the call-start clock for deterministic transport-deadline tests. */

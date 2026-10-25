@@ -17,7 +17,7 @@ import {
 describe("Runtime Pod JSON logger", () => {
 	test("approval raw samples preserve closed source and omit unavailable latency", () => {
 		const lines: string[] = [];
-		const logger = createJsonLogger({ write: line => lines.push(line), diagnostics: { level: "debug", burst: 10, maxRecordBytes: 16384, summaryIntervalMs: 30000 } });
+		const logger = createJsonLogger({ write: line => lines.push(line), diagnostics: { level: "debug", burst: 10, maxRecordBytes: 16384, summaryIntervalMs: 30000, traceSampleRatio: 1, dbSlowQueryMs: 250 } });
 		for (const approvalSource of ["user", "auto_reviewer"] as const) {
 			logger.debug(runtimeOperationLogRecord({ workspaceId: "workspace", sessionId: "session", sessionThreadId: "thread",
 				requestKind: "agent_provider_request", operation: "approval_wait", approvalSource, outcome: "cancelled", durationMs: 37 }));
@@ -147,8 +147,9 @@ describe("Runtime Pod JSON logger", () => {
 
 		const record = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
 		expect(record).toMatchObject({
-			level: "info",
-			time: "2026-08-08T12:34:56.789Z",
+			level: "INFO",
+			msg: "runtime_command_accepted",
+			time: "2026-08-08T12:34:56.789000Z",
 			"service.name": "agent-runtime",
 			"deployment.environment": "test",
 			"service.version": "unit",
@@ -173,9 +174,9 @@ describe("Runtime Pod JSON logger", () => {
 			write: (line) => lines.push(line),
 			clock: () => new Date("2026-08-08T00:00:00.000Z"),
 		});
-		logger.info({ event: "clock_test", time: "2000-01-01T00:00:00.000Z" });
+		logger.info({ event: "runtime_command_accepted", time: "2000-01-01T00:00:00.000Z" });
 		expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({
-			time: "2026-08-08T00:00:00.000Z",
+			time: "2026-08-08T00:00:00.000000Z",
 		});
 	});
 
@@ -193,9 +194,10 @@ describe("Runtime Pod JSON logger", () => {
 			kind: "config_error",
 			message: "invalid runtime pod identity",
 			"startup.cause_category": "configuration",
+			"startup.config_problem": "invalid runtime pod identity",
 			"error.class": "config_error",
 			"error.code": "config_error",
-			"error.message_safe": "invalid runtime pod identity",
+			"error.message_safe": "configuration invalid",
 		});
 
 		expect(
@@ -334,8 +336,10 @@ describe("Runtime Pod JSON logger", () => {
 		expect(record).toEqual({
 			"process.pid": process.pid,
 			"service.instance.id": expect.stringMatching(/^[0-9a-f-]{36}$/),
-			time: "2026-08-25T12:34:56.789Z",
-			level: "error",
+			time: "2026-08-25T12:34:56.789000Z",
+			level: "ERROR",
+			msg: "runtime_terminal_settlement",
+			"log.type": "app",
 			"service.name": "agent-runtime",
 			"service.version": "unit",
 			"deployment.environment": "test",
@@ -370,7 +374,7 @@ test("healthy content commit diagnostics stay silent at Info and expose a bounde
  const record=runtimeContentCommitLogRecord({workspaceId:"workspace",sessionId:"session",sessionThreadId:"thread",modelRequestId:"request",kind:"text",phase:"content_apply",durationMs:3,outcome:"committed",requestKind:"agent_provider_request",canonicalJsonBytes:123});
  for(let n=0;n<1000;n++)logger.debug(record);
  expect(lines).toEqual([]);
- const debug=createJsonLogger({write:line=>lines.push(line),diagnostics:{level:"debug",maxRecordBytes:16384,summaryIntervalMs:30000,burst:1}});
+ const debug=createJsonLogger({write:line=>lines.push(line),diagnostics:{level:"debug",maxRecordBytes:16384,summaryIntervalMs:30000,burst:1,traceSampleRatio:1,dbSlowQueryMs:250}});
  debug.debug(record);
  expect(lines).toHaveLength(1);
  const actual=JSON.parse(lines[0]!);

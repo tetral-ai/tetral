@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -130,6 +131,40 @@ func TestObservationEndHandledWritesOneFailureRecordAndEndWritesNone(t *testing.
 	}
 	if got := histogramCount(t, telemetry, "tetral_operation_duration_seconds", "lease.renew", "lease_expired"); got != 2 {
 		t.Fatalf("lease_expired samples = %v; want 2", got)
+	}
+}
+
+// The TypeScript library's test reads the same list, so a handled failure has
+// the same field names in both languages.
+func TestHandledFailureRecordHasTheSharedFieldNames(t *testing.T) {
+	RegisterDeclarations("record-shape-test", []byte(`{"service": "record-shape-test",
+	  "events": {"lookup.failed": {"level": "ERROR", "log_type": "app", "audience": "operators", "fields": {},
+	    "errors": {"not_found": {"class": "lookup", "message_safe": "item not found"}}}},
+	  "operations": {"lookup": {"long": false, "errors": ["not_found"]}}, "metrics": {}, "spans": {}}`))
+	lines := &recordedLines{}
+	t.Cleanup(InstallTelemetry(NewTelemetry(TelemetryOptions{Service: "record-shape-test", Logger: NewLogger(lines, "record-shape-test", "test", "unit"), SampleRatio: 1})))
+	_, observation := Observe(WithFields(context.Background(), "request.id", "req_1"), "lookup")
+	observation.EndHandled(codedTestError("not_found"))
+	var shared struct {
+		Fields []string
+		Values map[string]any
+	}
+	data, err := os.ReadFile("../ts-observability/test-support/handled-failure-record.json")
+	if err != nil || json.Unmarshal(data, &shared) != nil {
+		t.Fatalf("read shared record shape: %v", err)
+	}
+	records := lines.records(t)
+	if len(records) != 1 {
+		t.Fatalf("records = %v; want one failure record", records)
+	}
+	fields := slices.Sorted(maps.Keys(records[0]))
+	if !slices.Equal(fields, shared.Fields) {
+		t.Fatalf("failure record fields = %v; want %v", fields, shared.Fields)
+	}
+	for name, want := range shared.Values {
+		if records[0][name] != want {
+			t.Fatalf("failure record %s = %v; want %v", name, records[0][name], want)
+		}
 	}
 }
 

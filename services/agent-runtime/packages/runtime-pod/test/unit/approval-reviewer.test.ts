@@ -473,7 +473,8 @@ describe("Runtime approval reviewer", () => {
 					"session.id": "sesn_1",
 					"thread.id": "thrd_parent",
 					"approval.failure_kind": "runtime_failure",
-					"error.message_safe": "approval reviewer trunk creation failed",
+					message: "approval reviewer trunk creation failed",
+					"error.message_safe": "approval reviewer failed",
 				}),
 			]);
 			expect(JSON.stringify(logger.records)).not.toContain("secret");

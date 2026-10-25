@@ -74,7 +74,7 @@ describe("RuntimePod command failure ownership", () => {
 			const logger = mode === "disabled" ? { info: () => undefined, error: () => undefined }
 				: mode === "throw" ? { info: () => { throw new Error(failureSentinel); }, error: () => { throw new Error(failureSentinel); }, flush: () => { throw new Error(failureSentinel); } }
 					: createJsonLogger({ write: sink.write });
-			if (mode === "backpressure") logger.error({ event: "command_backpressure_probe" });
+			if (mode === "backpressure") logger.error({ event: "runtime_terminal_settlement" });
 			const fixture = commandFixture("wait", (event) => events.push(event));
 			const before = performance.now();
 			try {
@@ -184,8 +184,9 @@ describe("RuntimePod command failure ownership", () => {
 		expect(result.stderr).not.toContain(failureSentinel);
 		expect(result.stderr).not.toContain("Bun v");
 		const records = result.stderr.trim().split("\n").map((line) => JSON.parse(line));
-		expect(records).toHaveLength(1);
-		expect(records[0]).toMatchObject({ level: "error", kind: "config_error" });
+		expect(records.map((record) => record.event)).toEqual(["startup_failed", "cold_start.phase_started", "cold_start.completed"]);
+		expect(records[0]).toMatchObject({ level: "ERROR", kind: "config_error" });
+		expect(records[2]).toMatchObject({ "cold_start.kind": "service_pod", outcome: "config_error" });
 	});
 
 	test("the shared signal entry contains a synchronous callback failure before returning", () => {

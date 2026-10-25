@@ -19,7 +19,10 @@ import type {
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { Effect, Stream } from "effect";
 import { createLLMService } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
-import { MaxGatewayRequestGrpcMessageBytes, MaxGatewayStreamEventGrpcMessageBytes } from "../../src/bounds.js";
+import { activeTraceparent, continueGrpcTraces, formatTraceparent } from "@tetral/ts-observability";
+import { recordingTelemetry } from "@tetral/ts-observability/test-support/recording-telemetry";
+import { gatewayGrpcChannelOptions, MaxGatewayRequestGrpcMessageBytes, MaxGatewayStreamEventGrpcMessageBytes } from "../../src/bounds.js";
+import { runtimePodDeclarations } from "../../src/logger.js";
 import { RuntimeGatewayTransportCompletionAllowanceMs, RuntimeGatewayTransportDeadlineGuardMs, RuntimePodGatewayClient, runtimeProviderStreamObserver } from "../../src/gateway-client.js";
 
 describe("Runtime Pod Gateway client", () => {
@@ -418,6 +421,62 @@ describe("Runtime Pod Gateway client", () => {
     } finally {
       await client.close();
       await new Promise<void>((resolve) => server.tryShutdown(() => resolve()));
+    }
+  });
+
+  test("a provider stream continues the caller's trace in the Gateway's server span", async () => {
+    const recording = recordingTelemetry({ serviceName: "agent-runtime", declarations: runtimePodDeclarations });
+    let handlerTraceparent: string | undefined;
+    const implementation: ProviderGatewayServiceServer = {
+      streamProviderRequest(call) {
+        handlerTraceparent = activeTraceparent();
+        call.write({
+          frameSequence: 1,
+          type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+          finish: {
+            reason: 1,
+            usage: { inputTotalTokens: 1, inputUncachedTokens: 1, outputTotalTokens: 1, totalTokens: 2, providerUsageJson: "{}" },
+            metadataJson: "{}",
+            contextWindowTokens: 128_000,
+            outputTokenLimit: 8_192,
+          },
+        });
+        call.end();
+      },
+      runWeb(_call, callback) {
+        callback(new Error("not implemented"));
+      },
+    };
+    const server = new Server();
+    server.addService(ProviderGatewayServiceService, continueGrpcTraces(ProviderGatewayServiceService, implementation));
+    const port = await new Promise<number>((resolve, reject) => {
+      server.bindAsync("127.0.0.1:0", ServerCredentials.createInsecure(), (error, boundPort) => {
+        if (error !== null) reject(error);
+        else resolve(boundPort);
+      });
+    });
+    const client = new RuntimePodGatewayClient({
+      address: `127.0.0.1:${port}`,
+      tokenPath: "/unused",
+      channelOptions: gatewayGrpcChannelOptions(),
+      metadataFactory: async () => new Metadata(),
+    });
+    try {
+      const observation = recording.telemetry.observe("agent_provider_request");
+      const handle = await observation.run(() => client.streamProviderRequest(providerRequest()));
+      for await (const _event of Stream.toAsyncIterable(handle.events)) { /* drain */ }
+      expect(await handle.completion).toEqual({ outcome: "eof" });
+      observation.end();
+      const caller = recording.spans().find((span) => span.name === "agent_provider_request");
+      const served = recording.spans().find((span) => span.name === "/tetral.provider_gateway.v1.ProviderGatewayService/StreamProviderRequest");
+      expect(served?.spanContext().traceId).toBe(caller!.spanContext().traceId);
+      expect(served?.parentSpanContext?.spanId).toBe(caller!.spanContext().spanId);
+      expect(served?.attributes).toEqual({ "workspace.id": "wksp_1", "session.id": "sesn_1", "rpc.grpc.status_name": "OK" });
+      expect(handlerTraceparent).toBe(formatTraceparent(served!.spanContext()));
+    } finally {
+      await client.close();
+      await new Promise<void>((resolve) => server.tryShutdown(() => resolve()));
+      recording.restore();
     }
   });
 

@@ -1,0 +1,754 @@
+{
+  "events": {
+    "gateway_provider_timeout": {
+      "audience": "operators",
+      "errors": {
+        "provider_stream_error": {
+          "class": "provider_transport_failure",
+          "message_safe": "provider stream made no semantic progress"
+        },
+        "provider_timeout": {
+          "class": "provider_timeout",
+          "message_safe": "provider stream watchdog expired"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "model.id": "string",
+        "model_request.id": "string",
+        "operation": "string",
+        "provider.id": "string",
+        "request.id": "string",
+        "session.id": "string",
+        "stream.last_event.kind": "string",
+        "thread.id": "string",
+        "timeout.elapsed_ms": "integer",
+        "timeout.inter_event_gap_ms": "integer",
+        "timeout.kind": "string",
+        "workspace.id": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "gateway_web_misrouted": {
+      "audience": "operators",
+      "errors": {
+        "web_not_served_here": {
+          "class": "runtime_error",
+          "message_safe": "web execution is served by the web-connector port"
+        }
+      },
+      "fields": {
+        "caller.service_account": "string",
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "grpc.method": "string",
+        "operation": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "platform_provider_key_quarantined": {
+      "audience": "operators",
+      "errors": {
+        "provider_key_unavailable": {
+          "class": "provider_error",
+          "message_safe": "platform provider key quarantined"
+        },
+        "provider_plan_required": {
+          "class": "provider_error",
+          "message_safe": "platform provider key quarantined"
+        },
+        "provider_quota_exhausted": {
+          "class": "provider_error",
+          "message_safe": "platform provider key quarantined"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "credential.origin": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "provider.id": "string",
+        "provider.status_code": "integer"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "preview.credential_reload_failed": {
+      "audience": "operators",
+      "errors": {
+        "credential_reload": {
+          "class": "preview_unavailable",
+          "message_safe": "preview credential reload failed"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "transport.outcome": "string",
+        "transport.stage": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "preview.credential_reload_recovered": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "transport.outcome": "string",
+        "transport.stage": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "preview.disconnected": {
+      "audience": "operators",
+      "errors": {
+        "connection_lost": {
+          "class": "preview_unavailable",
+          "message_safe": "best-effort preview stopped"
+        },
+        "credential_reload": {
+          "class": "preview_unavailable",
+          "message_safe": "best-effort preview stopped"
+        },
+        "flush_failed": {
+          "class": "preview_unavailable",
+          "message_safe": "best-effort preview stopped"
+        },
+        "shutdown": {
+          "class": "preview_unavailable",
+          "message_safe": "best-effort preview stopped"
+        },
+        "unavailable": {
+          "class": "preview_unavailable",
+          "message_safe": "best-effort preview stopped"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "reason": "string",
+        "transport.outcome": "string",
+        "transport.stage": "string"
+      },
+      "level": "WARN",
+      "log_type": "app"
+    },
+    "preview.recovered": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "reason": "string",
+        "transport.outcome": "string",
+        "transport.stage": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "preview.stopped": {
+      "audience": "operators",
+      "errors": {
+        "connection_lost": {
+          "class": "preview_unavailable",
+          "message_safe": "best-effort preview stopped"
+        },
+        "credential_reload": {
+          "class": "preview_unavailable",
+          "message_safe": "best-effort preview stopped"
+        },
+        "encoding": {
+          "class": "preview_unavailable",
+          "message_safe": "best-effort preview stopped"
+        },
+        "event_identities": {
+          "class": "preview_unavailable",
+          "message_safe": "best-effort preview stopped"
+        },
+        "flush_failed": {
+          "class": "preview_unavailable",
+          "message_safe": "best-effort preview stopped"
+        },
+        "frame_bytes": {
+          "class": "preview_unavailable",
+          "message_safe": "best-effort preview stopped"
+        },
+        "queue_bytes": {
+          "class": "preview_unavailable",
+          "message_safe": "best-effort preview stopped"
+        },
+        "queue_frames": {
+          "class": "preview_unavailable",
+          "message_safe": "best-effort preview stopped"
+        },
+        "shutdown": {
+          "class": "preview_unavailable",
+          "message_safe": "best-effort preview stopped"
+        },
+        "unavailable": {
+          "class": "preview_unavailable",
+          "message_safe": "best-effort preview stopped"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "model_request.id": "string",
+        "operation": "string",
+        "reason": "string",
+        "session.id": "string",
+        "thread.id": "string",
+        "transport.outcome": "string",
+        "transport.stage": "string",
+        "workspace.id": "string"
+      },
+      "level": "WARN",
+      "log_type": "app"
+    },
+    "provider.model_warnings": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "model.id": "string",
+        "operation": "string",
+        "provider.id": "string",
+        "reason": "string",
+        "warning.count": "integer",
+        "warning.features": "string"
+      },
+      "level": "WARN",
+      "log_type": "app"
+    },
+    "provider.stage_completed": {
+      "audience": "operators",
+      "fields": {
+        "bytes_in": "integer",
+        "bytes_out": "integer",
+        "component": "string",
+        "duration_ms": "number",
+        "event.kind": "string",
+        "kind": "string",
+        "operation": "string",
+        "outcome": "string",
+        "request.id": "string",
+        "stage": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "provider_request_streamed": {
+      "audience": "operators",
+      "errors": {
+        "13": {
+          "class": "grpc_status",
+          "message_safe": "provider request failed"
+        },
+        "14": {
+          "class": "grpc_status",
+          "message_safe": "provider request failed"
+        },
+        "16": {
+          "class": "grpc_status",
+          "message_safe": "provider request failed"
+        },
+        "7": {
+          "class": "grpc_status",
+          "message_safe": "provider request failed"
+        },
+        "attachment_unavailable": {
+          "class": "provider_error",
+          "message_safe": "provider request failed"
+        },
+        "context_overflow": {
+          "class": "provider_http_rejection",
+          "message_safe": "provider request failed"
+        },
+        "credential_required": {
+          "class": "provider_error",
+          "message_safe": "provider request failed"
+        },
+        "credential_unavailable": {
+          "class": "provider_error",
+          "message_safe": "provider request failed"
+        },
+        "duplicate_attachment": {
+          "class": "request_validation",
+          "message_safe": "provider request failed"
+        },
+        "internal": {
+          "class": "runtime_error",
+          "message_safe": "provider request failed"
+        },
+        "invalid_attachment": {
+          "class": "request_validation",
+          "message_safe": "provider request failed"
+        },
+        "invalid_binding": {
+          "class": "request_validation",
+          "message_safe": "provider request failed"
+        },
+        "invalid_identifier": {
+          "class": "request_validation",
+          "message_safe": "provider request failed"
+        },
+        "invalid_limits": {
+          "class": "request_validation",
+          "message_safe": "provider request failed"
+        },
+        "invalid_model": {
+          "class": "request_validation",
+          "message_safe": "provider request failed"
+        },
+        "invalid_output_schema": {
+          "class": "request_validation",
+          "message_safe": "provider request failed"
+        },
+        "invalid_provider_context": {
+          "class": "request_validation",
+          "message_safe": "provider request failed"
+        },
+        "invalid_provider_context_item": {
+          "class": "request_validation",
+          "message_safe": "provider request failed"
+        },
+        "invalid_request_kind": {
+          "class": "request_validation",
+          "message_safe": "provider request failed"
+        },
+        "invalid_start_event_id": {
+          "class": "request_validation",
+          "message_safe": "provider request failed"
+        },
+        "invalid_system_segment": {
+          "class": "request_validation",
+          "message_safe": "provider request failed"
+        },
+        "invalid_tool_definition": {
+          "class": "request_validation",
+          "message_safe": "provider request failed"
+        },
+        "provider_cancelled": {
+          "class": "provider_transport_failure",
+          "message_safe": "provider request failed"
+        },
+        "provider_configuration_invalid": {
+          "class": "provider_configuration",
+          "message_safe": "provider request failed"
+        },
+        "provider_key_unavailable": {
+          "class": "provider_http_rejection",
+          "message_safe": "provider request failed"
+        },
+        "provider_metadata_limit_exceeded": {
+          "class": "provider_error",
+          "message_safe": "provider request failed"
+        },
+        "provider_plan_required": {
+          "class": "provider_http_rejection",
+          "message_safe": "provider request failed"
+        },
+        "provider_quota_exhausted": {
+          "class": "provider_http_rejection",
+          "message_safe": "provider request failed"
+        },
+        "provider_rate_limited": {
+          "class": "provider_http_rejection",
+          "message_safe": "provider request failed"
+        },
+        "provider_request_failed": {
+          "class": "provider_http_rejection",
+          "message_safe": "provider request failed"
+        },
+        "provider_request_invalid": {
+          "class": "provider_error",
+          "message_safe": "provider request failed"
+        },
+        "provider_stream_error": {
+          "class": "provider_transport_failure",
+          "message_safe": "provider request failed"
+        },
+        "provider_stream_limit_exceeded": {
+          "class": "provider_error",
+          "message_safe": "provider request failed"
+        },
+        "provider_timeout": {
+          "class": "provider_transport_failure",
+          "message_safe": "provider request failed"
+        },
+        "provider_unavailable": {
+          "class": "provider_error",
+          "message_safe": "provider request failed"
+        },
+        "stream_incomplete": {
+          "class": "runtime_error",
+          "message_safe": "provider request failed"
+        },
+        "too_many_attachments": {
+          "class": "request_validation",
+          "message_safe": "provider request failed"
+        },
+        "unsupported_model_variant": {
+          "class": "request_validation",
+          "message_safe": "provider request failed"
+        },
+        "unsupported_output_contract": {
+          "class": "request_validation",
+          "message_safe": "provider request failed"
+        }
+      },
+      "fields": {
+        "caller.service_account": "string",
+        "component": "string",
+        "duration.ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "grpc.method": "string",
+        "model.id": "string",
+        "model_request.id": "string",
+        "operation": "string",
+        "provider.id": "string",
+        "provider.status_code": "integer",
+        "request.id": "string",
+        "request.outcome": "string",
+        "session.id": "string",
+        "thread.id": "string",
+        "validation.member": "string",
+        "workspace.id": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "provider_stream_incomplete": {
+      "audience": "operators",
+      "errors": {
+        "provider_stream_incomplete": {
+          "class": "provider_stream",
+          "message_safe": "provider stream ended with incomplete fragments"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "model.id": "string",
+        "model_request.id": "string",
+        "operation": "string",
+        "provider.id": "string",
+        "request.id": "string",
+        "session.id": "string",
+        "stream.open_reasoning_count": "integer",
+        "stream.open_text_count": "integer",
+        "stream.open_tool_input_count": "integer",
+        "stream.terminal_category": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "startup_failed": {
+      "audience": "operators",
+      "errors": {
+        "config_error": {
+          "class": "config_error",
+          "message_safe": "configuration invalid"
+        },
+        "startup_error": {
+          "class": "startup_error",
+          "message_safe": "gateway service startup failed"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "kind": "string",
+        "message": "string",
+        "operation": "string",
+        "startup.cause_category": "string",
+        "startup.config_problem": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "transport.credential_reload_failed": {
+      "audience": "operators",
+      "errors": {
+        "operation_failed": {
+          "class": "operation_failed",
+          "message_safe": "operation failed"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "failed.count": "integer",
+        "transport.outcome": "string",
+        "transport.stage": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "transport.credential_reload_recovered": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "failed.count": "integer",
+        "transport.outcome": "string",
+        "transport.stage": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "workload.started": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "listener.transport": "string",
+        "operation": "string",
+        "readiness.state": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    }
+  },
+  "metrics": {
+    "process_heap_used_bytes": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "process_rss_bytes": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "providergateway_admission_rejections_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "providergateway_complete_frame_pending_bytes": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "providergateway_content_cumulative_content_bytes": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "providergateway_content_identities": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "providergateway_content_open_blocks": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "providergateway_content_retained_bytes": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "providergateway_content_segments": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "providergateway_preview_accepted_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "providergateway_preview_attempted_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "providergateway_preview_client_pending_bytes": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "providergateway_preview_connected": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "providergateway_preview_disabled_events_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "providergateway_preview_disabled_requests_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "providergateway_preview_dropped_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "providergateway_preview_encoded_bytes_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "providergateway_preview_encoded_frames_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "providergateway_preview_failures_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "providergateway_preview_flushed_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "providergateway_preview_pending_bytes": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "providergateway_preview_pending_frames": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "providergateway_preview_stops_total": {
+      "audience": "operators",
+      "labels": {
+        "reason": [
+          "connection_lost",
+          "credential_reload",
+          "encoding",
+          "event_identities",
+          "flush_failed",
+          "frame_bytes",
+          "queue_bytes",
+          "queue_frames",
+          "shutdown",
+          "unavailable"
+        ]
+      },
+      "type": "counter"
+    },
+    "providergateway_provider_stream_capacity": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "providergateway_provider_stream_duration_ms_sum": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "providergateway_provider_stream_failures_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "providergateway_provider_streams_active": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "providergateway_provider_streams_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "providergateway_ready": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    }
+  },
+  "operations": {
+    "StreamProviderRequest": {
+      "long": true,
+      "errors": [
+        "cancelled",
+        "timeout"
+      ]
+    },
+    "complete_frame_write": {
+      "long": false,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "provider_first_complete": {
+      "long": true,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "provider_first_fragment": {
+      "long": true,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "shutdown_cancel_join": {
+      "long": true,
+      "errors": [
+        "timeout"
+      ]
+    },
+    "shutdown_drain": {
+      "long": true,
+      "errors": [
+        "timeout"
+      ]
+    }
+  },
+  "service": "provider-gateway",
+  "spans": {}
+}

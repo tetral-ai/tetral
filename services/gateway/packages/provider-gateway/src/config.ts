@@ -16,7 +16,7 @@ import {
  */
 
 import { z } from "zod/v4";
-import { diagnosticEnvKeys, parseDiagnosticConfig, parseWorkloadResourceConfig, workloadResourceEnvKeys } from "@tetral/ts-observability";
+import { diagnosticEnvKeys, parseDiagnosticConfigResult, parseWorkloadResourceConfig, workloadResourceEnvKeys } from "@tetral/ts-observability";
 import type { DiagnosticConfig } from "@tetral/ts-observability";
 import { parseDatabasePoolConfig } from "@tetral/ts-dbconnect";
 import type { DatabasePoolConfig } from "@tetral/ts-dbconnect";
@@ -78,6 +78,9 @@ const ConfigSchema = z.strictObject({
   TETRAL_LOG_MAX_RECORD_BYTES: z.string().optional(),
   TETRAL_LOG_SUMMARY_INTERVAL_MS: z.string().optional(),
   TETRAL_LOG_BURST: z.string().optional(),
+  TETRAL_TRACE_SAMPLE_RATIO: z.string().optional(),
+  TETRAL_DB_SLOW_QUERY_MS: z.string().optional(),
+  OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
   TETRAL_PROVIDER_GATEWAY_GRPC_ADDR: AddressSchema,
   TETRAL_PROVIDER_GATEWAY_HTTP_ADDR: AddressSchema,
   TETRAL_DEPLOYMENT_ENVIRONMENT: IdentityFieldSchema,
@@ -143,9 +146,11 @@ export function loadProviderGatewayConfig(env: Record<string, string | undefined
   try { previewNats = parsePreviewNatsConfig(env); }
   catch { return { ok: false, error: { kind: "config_error", message: "invalid gateway preview config" } }; }
   const resource = parseWorkloadResourceConfig(env, 253);
-  const diagnostics = parseDiagnosticConfig(env);
+  const diagnosticResult = parseDiagnosticConfigResult(env);
+  if (!diagnosticResult.ok) return { ok: false, error: { kind: "config_error", message: diagnosticResult.problem } };
+  const diagnostics = diagnosticResult.config;
   const parsed = ConfigSchema.safeParse(env);
-  if (!parsed.success || diagnostics === undefined || resource === undefined) {
+  if (!parsed.success || resource === undefined) {
     return { ok: false, error: { kind: "config_error", message: "invalid gateway config" } };
   }
   const allowedRuntimePod = parseSingleServiceAccount(parsed.data.TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS);

@@ -1300,7 +1300,7 @@ function logApprovalReviewFailure(
 			...semanticErrorFields({
 				errorClass: "approval_review_failure",
 				errorCode: failureKind,
-				messageSafe: safeMessage,
+				messageSafe: "approval reviewer failed",
 			}),
 		});
 	} catch {

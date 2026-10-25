@@ -1,5 +1,6 @@
 import type { ExecutableProcessBoundary } from "@tetral/ts-observability";
-import { createDiagnosticStreamSink, processFailureLogRecord, processShutdownFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
+import { beginServiceColdStart, createDiagnosticStreamSink, createTelemetry, endServiceColdStartPhase, failServiceColdStart, failServiceColdStartAtConfig, installTelemetry, processFailureLogRecord, processShutdownFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
+import type { Telemetry } from "@tetral/ts-observability";
 /**
  * @packageDocumentation
  * Boots the Runtime Pod process and composes its Runtime Core, Bridge, Gateway, tool, authentication,
@@ -86,6 +87,7 @@ import {
 	runtimeTerminalSettlementLogRecord,
 	runtimeContentCommitLogRecord,
 	runtimeOperationLogRecord,
+	runtimePodDeclarations,
 	startupFailureLogRecord,
 } from "./logger.js";
 import type { RuntimePodMetricsSource } from "./metrics.js";
@@ -169,6 +171,8 @@ export async function runRuntimePodCommand(options: RuntimePodCommandOptions = {
 		try { if ("flush" in owner && typeof owner.flush === "function") diagnosticReleases.push(owner.flush.bind(owner)); } catch { /* best effort */ }
 	};
 	let logger: RuntimePodLogger | undefined;
+	let telemetry: Telemetry | undefined;
+	let restoreTelemetry: (() => void) | undefined;
 	const report = (record: RuntimePodLogRecord): void => { try { logger?.error(record); } catch { /* observability does not own lifecycle */ } };
 	const closes: { phase: ProcessFailurePhase; close: () => void | Promise<void> }[] = [];
 	let applicationShutdownBudgetMs: number | undefined;
@@ -196,6 +200,8 @@ export async function runRuntimePodCommand(options: RuntimePodCommandOptions = {
 				}
 			} finally {
 				disarmExit?.();
+				await telemetry?.shutdown();
+				restoreTelemetry?.();
 				for (const release of diagnosticReleases) { try { release(); } catch { /* best effort */ } }
 				diagnosticSink?.close();
 			}
@@ -211,10 +217,15 @@ export async function runRuntimePodCommand(options: RuntimePodCommandOptions = {
 		const config = loadRuntimePodConfigFromProcessEnv();
 		if (!config.ok) {
 			failureReported = true; report(startupFailureLogRecord(config.error));
+			failServiceColdStartAtConfig("agent-runtime", logger);
 			throw new Error("runtime pod config error");
 		}
 		logger = options.logger ?? createJsonLogger({ write: (line) => diagnosticSink?.write(line), sinkFailures: () => diagnosticSink?.stats().failures ?? 0, deploymentEnvironment: config.config.deploymentEnvironment, diagnostics: config.config.diagnostics, serviceVersion: config.config.serviceVersion });
 		registerDiagnosticCleanup(logger);
+		telemetry = createTelemetry({ serviceName: "agent-runtime", serviceVersion: config.config.serviceVersion, deploymentEnvironment: config.config.deploymentEnvironment, logger, declarations: runtimePodDeclarations, diagnostics: config.config.diagnostics });
+		restoreTelemetry = installTelemetry(telemetry);
+		beginServiceColdStart(telemetry);
+		endServiceColdStartPhase("config");
 		applicationShutdownBudgetMs =
 			config.config.lifecycle.currentStepTimeoutMs +
 			config.config.lifecycle.settlementTimeoutMs +
@@ -243,6 +254,7 @@ export async function runRuntimePodCommand(options: RuntimePodCommandOptions = {
 			]));
 	} catch (error) {
 		failed = true;
+		failServiceColdStart("startup_error");
 		if (!failureReported) report(processFailureLogRecord(phase));
 		throw error;
 	} finally {

@@ -26,7 +26,7 @@ const host: RuntimeSessionRunHost = {
 };
 const config: RuntimePodConfig = {
   ownPod: { namespace: "tetral-agent-runtime", name: input.podUid, uid: input.podUid, ip: "127.0.0.1" },
-  deploymentEnvironment: "test", diagnostics: { level: "info", maxRecordBytes: 16384, summaryIntervalMs: 30000, burst: 1 },
+  deploymentEnvironment: "test", diagnostics: { level: "info", maxRecordBytes: 16384, summaryIntervalMs: 30000, burst: 1, traceSampleRatio: 1, dbSlowQueryMs: 250 },
   serviceVersion: "test", jobRunner: { namespace: "tetral-system", serviceAccount: "job-runner" },
   grpcBindAddress: input.profile === "hardened" ? "127.0.0.1:9090" : "0.0.0.0:19090", httpBindAddress: "127.0.0.1:8080",
   kubernetesApiServerUrl: "https://kubernetes.default.svc", kubernetesApiCaCertPath: "/unused",

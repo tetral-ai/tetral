@@ -36,14 +36,14 @@ describe("RuntimePodApp production composition", () => {
       acceptGate.resolve();
       await expect(inFlight).resolves.toEqual({ accepted: {} });
       await shutdown;
-      expect(fixture.metrics.operations.render()).toContain('operation="shutdown_listeners",outcome="success"} 2');
+      expect(fixture.metrics.operations.render()).toContain('operation="shutdown_listeners",outcome="ok"} 2');
       expect(fixture.metrics.operations.render()).not.toContain('operation="shutdown_clients"');
       const records = fixture.lines.map(line => JSON.parse(line)).filter(record => record.event === "workload.shutdown.phase_completed" && record.operation === "shutdown_listeners");
       expect(records).toHaveLength(2);
       expect(records.map(record => record["metric.observation.count"]).sort()).toEqual([1,2]);
       expect(new Set(records.map(record => record["service.instance.id"])).size).toBe(1);
       const seconds = records.reduce((sum,record) => sum + record["duration.seconds"],0);
-      expect(fixture.metrics.operations.render()).toContain(`tetral_operation_duration_seconds_sum{service="agent-runtime",operation="shutdown_listeners",outcome="success"} ${seconds}`);
+      expect(fixture.metrics.operations.render()).toContain(`tetral_long_operation_duration_seconds_sum{service="agent-runtime",operation="shutdown_listeners",outcome="ok"} ${seconds}`);
     } finally {
       await fixture.stop();
     }
@@ -152,7 +152,7 @@ function validConfig(): RuntimePodConfig {
       ip: "10.0.0.1",
     },
     deploymentEnvironment: "test",
- diagnostics: {level:"info",maxRecordBytes:16384,summaryIntervalMs:30000,burst:1},
+ diagnostics: {level:"info",maxRecordBytes:16384,summaryIntervalMs:30000,burst:1,traceSampleRatio:1,dbSlowQueryMs:250},
     serviceVersion: "test",
     jobRunner: {
       namespace: "engine",

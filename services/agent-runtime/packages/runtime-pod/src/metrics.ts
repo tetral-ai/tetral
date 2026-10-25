@@ -5,7 +5,7 @@
  * normalized to finite non-negative numbers, snapshots copy mutable maps, and metrics remain a
  * read-only observability side channel that does not affect command or lifecycle decisions.
  */
-import { OperationMetricsRegistry } from "@tetral/ts-observability";
+import { OperationMetricsRegistry, operationMetricsText } from "@tetral/ts-observability";
 import type { ShutdownPhaseLogger } from "@tetral/ts-observability";
 import { readFileSync } from "node:fs";
 import type {
@@ -24,6 +24,7 @@ import type {
 } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
 import type { RuntimeCloseoutEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { RuntimePodLifecycle } from "./lifecycle.js";
+import { runtimePodDeclarations } from "./logger.js";
 
 /** Container values share one cgroup scope; an unlimited/unknown limit cannot advertise headroom. */
 export interface ContainerMemoryObservation {
@@ -109,7 +110,7 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
   "content_commit", "content_apply", "request_end_commit", "request_end_apply",
   "member_barrier_wait", "permit_wait", "binding_refresh", "approval_wait", "tool_accept", "tool_settle", "context_reconstruct", "cleanup_join",
   "shutdown_quiesce", "shutdown_report", "shutdown_release", "shutdown_local_join", "shutdown_clients", "shutdown_listeners",
- ]);
+ ], runtimePodDeclarations);
  observeShutdownPhase(phase: RuntimeShutdownPhase, durationMs: number, outcome: "success" | "error" | "timeout", logger?: ShutdownPhaseLogger): void { this.operations.observeShutdown(phase,outcome,durationMs/1000,logger); }
 	private hotState: RuntimeHotStateMetrics = {
 		activeSessions: 0,
@@ -142,7 +143,7 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
   this.pendingContentBytes=nonNegative(this.pendingContentBytes+bytes);
  }
  observeContentCommitLatency(kind:RuntimeContentKind,phase:RuntimeContentCommitPhase,durationMs:number,outcome:RuntimeContentCommitOutcome,requestKind:RuntimeProviderStreamKind="agent_provider_request"):void {
-  this.operations.observe(phase,outcome,durationMs/1000);
+  this.operations.observe(phase,outcome === "committed" ? "ok" : outcome,durationMs/1000);
   addObservation(this.contentCommitLatencyMs,labelledKey({kind,phase,outcome,request_kind:requestKind}),durationMs);
  }
 
@@ -251,7 +252,7 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
 		return {
 			...this.hotState,
 			activeToolFibers: this.activeToolFibers,
-   operationDurationText:this.operations.render(),
+   operationDurationText:operationMetricsText(this.operations),
    pendingContentEntries:this.pendingContentEntries,
    pendingContentBytes:this.pendingContentBytes,
    contentCommitLatencyMs:new Map(this.contentCommitLatencyMs),

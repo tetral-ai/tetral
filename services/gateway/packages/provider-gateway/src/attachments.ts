@@ -19,6 +19,7 @@
  * ownership of them.
  */
 import { credentials, status } from "@grpc/grpc-js";
+import { traceparentClientInterceptor } from "@tetral/ts-observability";
 import type {
   CallOptions,
   ClientUnaryCall,
@@ -138,7 +139,7 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
   private readonly metadataFactory: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
 
   constructor(private readonly options: BridgeAPIAttachmentResolverOptions) {
-    this.client = options.client ?? new AgentRuntimeBridgeServiceClient(options.address, credentials.createInsecure(), bridgeAttachmentGrpcChannelOptions());
+    this.client = options.client ?? new AgentRuntimeBridgeServiceClient(options.address, credentials.createInsecure(), { ...bridgeAttachmentGrpcChannelOptions(), interceptors: [traceparentClientInterceptor] });
     this.metadataFactory = options.metadataFactory ?? buildOutboundBearerMetadata;
   }
 

@@ -12,20 +12,20 @@ describe("MCP Connector logger", () => {
     });
 
     logger.info({
-      event: "mcp_connector_ready",
-      "event.kind": "mcp_connector_ready",
+      event: "mcp_readiness_completed",
+      "event.kind": "mcp_readiness_completed",
       operation: "startup",
       component: "mcp-connector",
     });
 
     const record = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
     expect(record).toMatchObject({
-      level: "info",
+      level: "INFO",
       "service.name": "mcp-connector",
       "deployment.environment": "test",
       "service.version": "unit",
-      event: "mcp_connector_ready",
-      "event.kind": "mcp_connector_ready",
+      event: "mcp_readiness_completed",
+      "event.kind": "mcp_readiness_completed",
       operation: "startup",
       component: "mcp-connector",
     });
@@ -36,7 +36,7 @@ describe("MCP Connector logger", () => {
     const logger = createJsonLogger({ write: (line) => lines.push(line) });
 
     logger.error({
-      event: "mcp_call_failed",
+      event: "mcp_discovery_pagination_failed",
       authorization: "Bearer ghp_livegithubtoken",
       refresh_token: "refresh-token-secret",
       apiKey: "standalone-api-key-secret",
@@ -70,7 +70,7 @@ describe("MCP Connector logger", () => {
     const logger = createJsonLogger({ write: (line) => lines.push(line) });
 
     logger.info({
-      event: "mcp_call_failed",
+      event: "mcpconnector.call",
       [semanticErrorOutcome]: true,
       "error.class": "runtime_error",
       "error.code": "mcp_connection_failed",
@@ -78,7 +78,7 @@ describe("MCP Connector logger", () => {
     });
 
     expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({
-      level: "info",
+      level: "INFO",
       "error.class": "runtime_error",
       "error.code": "mcp_connection_failed",
       "error.message_safe": "MCP connector call failed.",
@@ -89,7 +89,7 @@ describe("MCP Connector logger", () => {
     const logger = createJsonLogger({ write: () => undefined });
     if (false) {
       // @ts-expect-error Semantic error records require class, code, and safe message together.
-      logger.info({ event: "mcp_call_failed", [semanticErrorOutcome]: true });
+      logger.info({ event: "mcpconnector.call", [semanticErrorOutcome]: true });
     }
     expect(logger).toBeDefined();
   });
@@ -102,9 +102,10 @@ describe("MCP Connector logger", () => {
       component: "mcp-connector",
       kind: "config_error",
       message: "invalid mcp config",
+      "startup.config_problem": "invalid mcp config",
       "error.class": "config_error",
       "error.code": "config_error",
-      "error.message_safe": "invalid mcp config",
+      "error.message_safe": "configuration invalid",
     });
   });
 

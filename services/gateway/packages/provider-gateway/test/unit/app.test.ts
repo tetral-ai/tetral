@@ -156,7 +156,7 @@ describe("ProviderGatewayApp lifecycle", () => {
 function validConfig(): ProviderGatewayConfig {
   return {
     deploymentEnvironment: "test",
-    diagnostics: { level: "info", maxRecordBytes: 16384, summaryIntervalMs: 30000, burst: 1 },
+    diagnostics: { level: "info", maxRecordBytes: 16384, summaryIntervalMs: 30000, burst: 1, traceSampleRatio: 1, dbSlowQueryMs: 250 },
     serviceVersion: "test",
     grpcBindAddress: "127.0.0.1:0",
     httpBindAddress: "127.0.0.1:0",

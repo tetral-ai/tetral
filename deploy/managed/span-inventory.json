@@ -2,6 +2,7 @@
   "schema_version": 1,
   "purpose": "Every span name template each Engine component starts and the attributes it may carry. Spans hold identities, sizes, durations and outcomes, never content, paths, queries, client addresses or error messages.",
   "services": {
+    "agent-runtime": {},
     "api": {},
     "auth": {},
     "bridge": {},
@@ -18,8 +19,20 @@
         ]
       }
     },
+    "mcp-connector": {},
+    "provider-gateway": {},
     "queue": {},
     "sandbox": {},
+    "ts-observability": {
+      "{grpc.method}": {
+        "attributes": [
+          "rpc.grpc.status_name"
+        ]
+      },
+      "{operation}": {
+        "attributes": []
+      }
+    },
     "web-connector": {},
     "workload": {
       "{http.request.method} {http.route}": {

@@ -1,7 +1,8 @@
 import type { ExecutableProcessBoundary } from "@tetral/ts-observability";
 import { ServiceLifecycleDefaults } from "@tetral/gateway-protocol/src/service-lifecycle.js";
 import { openPostgresSQLOwner } from "@tetral/ts-dbconnect";
-import { createDiagnosticStreamSink, diagnosticMetricsText, processFailureLogRecord, processShutdownFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
+import { beginServiceColdStart, completeServiceColdStart, createDiagnosticStreamSink, createTelemetry, diagnosticMetricsText, endServiceColdStartPhase, failServiceColdStart, failServiceColdStartAtConfig, installTelemetry, processFailureLogRecord, processShutdownFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
+import type { Telemetry } from "@tetral/ts-observability";
 /**
  * @packageDocumentation
  *
@@ -22,7 +23,7 @@ import { loadMcpConnectorConfigFromProcessEnv } from "./config.js";
 import { SQLMcpServerResolver } from "./server-resolver.js";
 import { SQLMcpCredentialResolver } from "./credential.js";
 import { createMcpConnectorHttpServer } from "./http-server.js";
-import { createJsonLogger, logWorkloadStarted, recordMcpOAuthRefreshCompleted, startupFailureLogRecord } from "./logger.js";
+import { createJsonLogger, logWorkloadStarted, mcpConnectorDeclarations, recordMcpOAuthRefreshCompleted, startupFailureLogRecord } from "./logger.js";
 import { McpConnectorMetricsRegistry } from "./metrics.js";
 import { createMcpConnectorGrpcServer } from "./server.js";
 import { McpConnectorServiceShell } from "./service.js";
@@ -72,6 +73,8 @@ export async function runMcpConnectorCommand(options: {
     try { if ("flush" in owner && typeof owner.flush === "function") diagnosticReleases.push(owner.flush.bind(owner)); } catch { /* best effort */ }
   };
   let logger: McpConnectorLogger | undefined;
+  let telemetry: Telemetry | undefined;
+  let restoreTelemetry: (() => void) | undefined;
   const report = (record: McpConnectorLogRecord): void => {
     try {
       logger?.error(record);
@@ -114,6 +117,8 @@ export async function runMcpConnectorCommand(options: {
         }
       } finally {
         disarmExit?.();
+        await telemetry?.shutdown();
+        restoreTelemetry?.();
         for (const release of diagnosticReleases) { try { release(); } catch { /* best effort */ } }
         diagnosticSink?.close();
       }
@@ -129,10 +134,15 @@ export async function runMcpConnectorCommand(options: {
     const config = loadMcpConnectorConfigFromProcessEnv();
     if (!config.ok) {
       failureReported = true; report(startupFailureLogRecord(config.error));
+      failServiceColdStartAtConfig("mcp-connector", logger);
       throw new Error("mcp connector config error");
     }
     logger = options.logger ?? createJsonLogger({ write: (line) => diagnosticSink?.write(line), sinkFailures: () => diagnosticSink?.stats().failures ?? 0, deploymentEnvironment: config.config.deploymentEnvironment, diagnostics: config.config.diagnostics, serviceVersion: config.config.serviceVersion });
     registerDiagnosticCleanup(logger);
+    telemetry = createTelemetry({ serviceName: "mcp-connector", serviceVersion: config.config.serviceVersion, deploymentEnvironment: config.config.deploymentEnvironment, logger, declarations: mcpConnectorDeclarations, diagnostics: config.config.diagnostics });
+    restoreTelemetry = installTelemetry(telemetry);
+    beginServiceColdStart(telemetry);
+    endServiceColdStartPhase("config");
     phase = "dependency";
     const metrics = new McpConnectorMetricsRegistry();
     const configuredLogger = logger;
@@ -310,6 +320,7 @@ export async function runMcpConnectorCommand(options: {
       reviewerTokenPath: config.config.tokenReviewReviewerTokenPath,
       apiServerCaCertPath: config.config.kubernetesApiCaCertPath,
     });
+    endServiceColdStartPhase("dependencies");
     phase = "listener";
     await server.bind(options.bindAddress ?? config.config.grpcBindAddress);
     httpServer = (options.httpServerFactory ?? createMcpConnectorHttpServer)(options.httpBindAddress ?? config.config.httpBindAddress, {
@@ -330,12 +341,14 @@ export async function runMcpConnectorCommand(options: {
       },
     });
     ready = true;
+    completeServiceColdStart();
     logWorkloadStarted(logger);
     releaseSignals = options.registerSignalHandlers === undefined ? registerProcessSignalHandlers(shutdown) : options.registerSignalHandlers(shutdown);
     phase = "wait";
     await (options.waitForever ?? waitForever)();
   } catch (error) {
     failed = true;
+    failServiceColdStart("startup_error");
     if (!failureReported) report(processFailureLogRecord(phase));
     throw error;
   } finally {

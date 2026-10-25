@@ -113,7 +113,7 @@ describe("mcp-connector schema startup", () => {
       logger: {
         info: (record) => {
           events.push(`log:${record.event}`);
-          logs.push(record);
+          if (!String(record.event).startsWith("cold_start.")) logs.push(record);
         },
         error: (record) => logs.push(record),
       },
@@ -143,10 +143,17 @@ describe("mcp-connector schema startup", () => {
     });
 
     expect(events).toEqual([
+      "log:cold_start.phase_started",
+      "log:cold_start.phase_completed",
+      "log:cold_start.phase_started",
       "schema.verify",
       "reviewer.validate",
+      "log:cold_start.phase_completed",
+      "log:cold_start.phase_started",
       "grpc.bind",
       "http.bind",
+      "log:cold_start.phase_completed",
+      "log:cold_start.completed",
       "log:workload.started",
       "signals.register",
       "wait",
@@ -166,7 +173,7 @@ describe("mcp-connector schema startup", () => {
         event: "workload.shutdown.phase_completed",
         component: "workload",
         operation: "shutdown_drain",
-        outcome: "success",
+        outcome: "ok",
         "duration.seconds": expect.any(Number),
         "metric.observation.count": 1,
       },
@@ -174,9 +181,10 @@ describe("mcp-connector schema startup", () => {
     const duration = (logs[1] as { readonly "duration.seconds": number })["duration.seconds"];
     expect(Number.isFinite(duration)).toBe(true);
     expect(duration).toBeGreaterThanOrEqual(0);
-    const labels = 'service="mcp-connector",operation="shutdown_drain",outcome="success"';
-    expect(shutdownMetrics).toContain(`tetral_operation_duration_seconds_count{${labels}} 1\n`);
-    expect(shutdownMetrics).toContain(`tetral_operation_duration_seconds_sum{${labels}} ${duration}\n`);
+    const labels = 'service="mcp-connector",operation="shutdown_drain",outcome="ok"';
+    expect(shutdownMetrics).toContain(`tetral_long_operation_duration_seconds_count{${labels}} 1\n`);
+    expect(shutdownMetrics).toContain(`tetral_long_operation_duration_seconds_sum{${labels}} ${duration}\n`);
+    expect(shutdownMetrics).toContain('cold_start_seconds_count{service="mcp-connector",kind="service_pod",scope="total"} 1\n');
   });
 });
 

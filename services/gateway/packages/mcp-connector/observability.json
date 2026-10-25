@@ -1,0 +1,725 @@
+{
+  "events": {
+    "mcp_claim_completed": {
+      "audience": "operators",
+      "fields": {
+        "attempt": "integer",
+        "component": "string",
+        "duration.ms": "number",
+        "event.kind": "string",
+        "mcp.tool_use_event_id": "string",
+        "operation": "string",
+        "outcome": "string",
+        "phase": "string",
+        "request.id": "string",
+        "session.id": "string",
+        "timeout.elapsed_ms": "number",
+        "timeout.remaining_ms": "number",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "mcp_connect_completed": {
+      "audience": "operators",
+      "fields": {
+        "attempt": "integer",
+        "component": "string",
+        "duration.ms": "number",
+        "event.kind": "string",
+        "mcp.server.name": "string",
+        "mcp.tool_use_event_id": "string",
+        "operation": "string",
+        "outcome": "string",
+        "phase": "string",
+        "request.id": "string",
+        "session.id": "string",
+        "timeout.elapsed_ms": "number",
+        "timeout.remaining_ms": "number",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "mcp_credential_refresh_completed": {
+      "audience": "operators",
+      "fields": {
+        "attempt": "integer",
+        "component": "string",
+        "duration.ms": "number",
+        "event.kind": "string",
+        "mcp.server.name": "string",
+        "mcp.tool_use_event_id": "string",
+        "operation": "string",
+        "outcome": "string",
+        "phase": "string",
+        "request.id": "string",
+        "session.id": "string",
+        "timeout.elapsed_ms": "number",
+        "timeout.remaining_ms": "number",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "mcp_credential_resolution_completed": {
+      "audience": "operators",
+      "fields": {
+        "attempt": "integer",
+        "component": "string",
+        "duration.ms": "number",
+        "event.kind": "string",
+        "mcp.server.name": "string",
+        "mcp.tool_use_event_id": "string",
+        "operation": "string",
+        "outcome": "string",
+        "phase": "string",
+        "request.id": "string",
+        "session.id": "string",
+        "timeout.elapsed_ms": "number",
+        "timeout.remaining_ms": "number",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "mcp_discovery_completed": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "duration.ms": "number",
+        "event.kind": "string",
+        "mcp.server.name": "string",
+        "operation": "string",
+        "outcome": "string",
+        "phase": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "mcp_discovery_pagination_failed": {
+      "audience": "operators",
+      "errors": {
+        "mcp_connection_failed": {
+          "class": "mcp_connection_failed",
+          "message_safe": "mcp discovery pagination failed"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "mcp.discovery.failure_reason": "string",
+        "mcp.discovery.pages": "integer",
+        "mcp.discovery.tool_count": "integer",
+        "mcp.server.name": "string",
+        "operation": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "mcp_execution_completed": {
+      "audience": "operators",
+      "fields": {
+        "attempt": "integer",
+        "component": "string",
+        "duration.ms": "number",
+        "event.kind": "string",
+        "mcp.tool_use_event_id": "string",
+        "operation": "string",
+        "outcome": "string",
+        "phase": "string",
+        "request.id": "string",
+        "session.id": "string",
+        "timeout.elapsed_ms": "number",
+        "timeout.remaining_ms": "number",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "mcp_first_commit_completed": {
+      "audience": "operators",
+      "fields": {
+        "attempt": "integer",
+        "component": "string",
+        "duration.ms": "number",
+        "event.kind": "string",
+        "mcp.tool_use_event_id": "string",
+        "operation": "string",
+        "outcome": "string",
+        "phase": "string",
+        "request.id": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "mcp_manifest_changed_notified": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "mcp.manifest_etag": "string",
+        "mcp.notification_duplicate": "boolean",
+        "mcp.server.name": "string",
+        "operation": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "mcp_manifest_discovery_failed": {
+      "audience": "operators",
+      "errors": {
+        "credential_unavailable": {
+          "class": "mcp_manifest_discovery_failure",
+          "message_safe": "MCP manifest discovery failed."
+        },
+        "discovery_timeout": {
+          "class": "mcp_manifest_discovery_failure",
+          "message_safe": "MCP manifest discovery failed."
+        },
+        "internal": {
+          "class": "mcp_manifest_discovery_failure",
+          "message_safe": "MCP manifest discovery failed."
+        },
+        "manifest_invalid": {
+          "class": "mcp_manifest_discovery_failure",
+          "message_safe": "MCP manifest discovery failed."
+        },
+        "server_unavailable": {
+          "class": "mcp_manifest_discovery_failure",
+          "message_safe": "MCP manifest discovery failed."
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "mcp.failure.kind": "string",
+        "mcp.server.name": "string",
+        "operation": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "mcp_manifest_listed": {
+      "audience": "operators",
+      "fields": {
+        "caller.service_account": "string",
+        "component": "string",
+        "event.kind": "string",
+        "grpc.method": "string",
+        "mcp.manifest_etag": "string",
+        "mcp.server.name": "string",
+        "mcp.tool_count": "integer",
+        "operation": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "mcp_manifest_notify_exhausted": {
+      "audience": "operators",
+      "errors": {
+        "bridge_token_unavailable": {
+          "class": "mcp_manifest_notify_failed",
+          "message_safe": "mcp manifest Bridge notification retries exhausted"
+        },
+        "bridge_unavailable": {
+          "class": "mcp_manifest_notify_failed",
+          "message_safe": "mcp manifest Bridge notification retries exhausted"
+        },
+        "grpc_14": {
+          "class": "mcp_manifest_notify_failed",
+          "message_safe": "mcp manifest Bridge notification retries exhausted"
+        },
+        "grpc_4": {
+          "class": "mcp_manifest_notify_failed",
+          "message_safe": "mcp manifest Bridge notification retries exhausted"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "mcp.manifest_etag": "string",
+        "mcp.notification_attempts": "integer",
+        "mcp.server.name": "string",
+        "operation": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "mcp_manifest_preparation_completed": {
+      "audience": "operators",
+      "fields": {
+        "attempt": "integer",
+        "component": "string",
+        "duration.ms": "number",
+        "event.kind": "string",
+        "mcp.server.name": "string",
+        "mcp.tool_use_event_id": "string",
+        "operation": "string",
+        "outcome": "string",
+        "phase": "string",
+        "request.id": "string",
+        "session.id": "string",
+        "timeout.elapsed_ms": "number",
+        "timeout.remaining_ms": "number",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "mcp_manifest_tool_omitted": {
+      "audience": "operators",
+      "fields": {
+        "caller.service_account": "string",
+        "component": "string",
+        "event.kind": "string",
+        "grpc.method": "string",
+        "mcp.omission.reason": "string",
+        "mcp.server.name": "string",
+        "mcp.tool.name": "string",
+        "operation": "string",
+        "reason": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "WARN",
+      "log_type": "app"
+    },
+    "mcp_oauth_refresh_completed": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "credential.id": "string",
+        "durable_write.disposition": "string",
+        "duration.ms": "integer",
+        "event.kind": "string",
+        "failure.kind": "string",
+        "http.status_class": "string",
+        "mcp.server.name": "string",
+        "message": "string",
+        "operation": "string",
+        "outcome": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "mcp_readiness_completed": {
+      "audience": "operators",
+      "fields": {
+        "attempt": "integer",
+        "component": "string",
+        "duration.ms": "number",
+        "event.kind": "string",
+        "mcp.server.name": "string",
+        "mcp.tool_use_event_id": "string",
+        "operation": "string",
+        "outcome": "string",
+        "phase": "string",
+        "request.id": "string",
+        "session.id": "string",
+        "timeout.elapsed_ms": "number",
+        "timeout.remaining_ms": "number",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "mcp_receipt_recovery_completed": {
+      "audience": "operators",
+      "fields": {
+        "attempt": "integer",
+        "component": "string",
+        "duration.ms": "number",
+        "event.kind": "string",
+        "mcp.tool_use_event_id": "string",
+        "operation": "string",
+        "outcome": "string",
+        "phase": "string",
+        "request.id": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "mcp_server_resolution_completed": {
+      "audience": "operators",
+      "fields": {
+        "attempt": "integer",
+        "component": "string",
+        "duration.ms": "number",
+        "event.kind": "string",
+        "mcp.server.name": "string",
+        "mcp.tool_use_event_id": "string",
+        "operation": "string",
+        "outcome": "string",
+        "phase": "string",
+        "request.id": "string",
+        "session.id": "string",
+        "timeout.elapsed_ms": "number",
+        "timeout.remaining_ms": "number",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "mcp_tool_call_completed": {
+      "audience": "operators",
+      "fields": {
+        "attempt": "integer",
+        "component": "string",
+        "duration.ms": "number",
+        "event.kind": "string",
+        "mcp.server.name": "string",
+        "mcp.tool_use_event_id": "string",
+        "operation": "string",
+        "outcome": "string",
+        "phase": "string",
+        "request.id": "string",
+        "session.id": "string",
+        "timeout.elapsed_ms": "number",
+        "timeout.remaining_ms": "number",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "mcp_tools_list_changed_notify_failed": {
+      "audience": "operators",
+      "errors": {
+        "mcp_connection_failed": {
+          "class": "mcp_connection_failed",
+          "message_safe": "mcp tools/list_changed notify failed"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "mcp.server.name": "string",
+        "operation": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "mcp_tools_list_changed_refresh_failed": {
+      "audience": "operators",
+      "errors": {
+        "mcp_connection_failed": {
+          "class": "mcp_connection_failed",
+          "message_safe": "mcp tools/list_changed refresh failed"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "mcp.server.name": "string",
+        "operation": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "mcpconnector.call": {
+      "audience": "operators",
+      "errors": {
+        "mcp_authentication_failed": {
+          "class": "mcp_authentication_failed",
+          "message_safe": "MCP connector call failed."
+        },
+        "mcp_claim_conflict": {
+          "class": "mcp_claim_conflict",
+          "message_safe": "MCP connector call failed."
+        },
+        "mcp_commit_failed": {
+          "class": "mcp_commit_failed",
+          "message_safe": "MCP connector call failed."
+        },
+        "mcp_connection_failed": {
+          "class": "mcp_connection_failed",
+          "message_safe": "MCP connector call failed."
+        },
+        "mcp_credential_required": {
+          "class": "mcp_credential_required",
+          "message_safe": "MCP connector call failed."
+        },
+        "mcp_custody_lost": {
+          "class": "mcp_custody_lost",
+          "message_safe": "MCP connector call failed."
+        },
+        "mcp_in_flight": {
+          "class": "mcp_in_flight",
+          "message_safe": "MCP connector call failed."
+        },
+        "mcp_internal_error": {
+          "class": "mcp_internal_error",
+          "message_safe": "MCP connector call failed."
+        },
+        "mcp_invalid_input": {
+          "class": "mcp_invalid_input",
+          "message_safe": "MCP connector call failed."
+        },
+        "mcp_not_ready": {
+          "class": "mcp_not_ready",
+          "message_safe": "MCP connector call failed."
+        },
+        "mcp_timeout": {
+          "class": "mcp_timeout",
+          "message_safe": "MCP connector call failed."
+        },
+        "mcp_tool_error": {
+          "class": "mcp_tool_error",
+          "message_safe": "MCP connector call failed."
+        },
+        "mcp_transport_failed": {
+          "class": "mcp_transport_failed",
+          "message_safe": "MCP connector call failed."
+        },
+        "mcp_unauthenticated": {
+          "class": "mcp_unauthenticated",
+          "message_safe": "MCP connector call failed."
+        },
+        "runtime_binding_token_rejected": {
+          "class": "runtime_binding_token_rejected",
+          "message_safe": "MCP connector call failed."
+        }
+      },
+      "fields": {
+        "component": "string",
+        "duration.ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "mcp.credential.refresh_triggered": "boolean",
+        "mcp.result.attachment_count": "integer",
+        "mcp.result.content_count": "integer",
+        "mcp.server.name": "string",
+        "mcp.tool.name": "string",
+        "operation": "string",
+        "request.id": "string",
+        "session.id": "string",
+        "status": "string",
+        "thread.id": "string",
+        "tool.use.event.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "startup_failed": {
+      "audience": "operators",
+      "errors": {
+        "config_error": {
+          "class": "config_error",
+          "message_safe": "configuration invalid"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "kind": "string",
+        "message": "string",
+        "operation": "string",
+        "startup.config_problem": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "transport.credential_reload_failed": {
+      "audience": "operators",
+      "errors": {
+        "operation_failed": {
+          "class": "operation_failed",
+          "message_safe": "operation failed"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "failed.count": "integer",
+        "transport.outcome": "string",
+        "transport.stage": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "transport.credential_reload_recovered": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "failed.count": "integer",
+        "transport.outcome": "string",
+        "transport.stage": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "workload.started": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "listener.transport": "string",
+        "operation": "string",
+        "readiness.state": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    }
+  },
+  "metrics": {
+    "mcpconnector_call_latency_seconds": {
+      "audience": "operators",
+      "labels": {
+        "error_kind": [
+          "",
+          "mcp_authentication_failed",
+          "mcp_claim_conflict",
+          "mcp_commit_failed",
+          "mcp_connection_failed",
+          "mcp_credential_required",
+          "mcp_custody_lost",
+          "mcp_in_flight",
+          "mcp_internal_error",
+          "mcp_invalid_input",
+          "mcp_not_ready",
+          "mcp_timeout",
+          "mcp_tool_error",
+          "mcp_transport_failed",
+          "mcp_unauthenticated",
+          "runtime_binding_token_rejected"
+        ],
+        "status": [
+          "completed",
+          "runtime_error",
+          "tool_error",
+          "unspecified"
+        ],
+        "tool": "MCP tool name from the Bridge-returned executor payload (any name an installed MCP server exposes, up to the shared ID byte bound); empty string when the call settled before an executor was resolved"
+      },
+      "type": "summary"
+    },
+    "mcpconnector_calls_total": {
+      "audience": "operators",
+      "labels": {
+        "error_kind": [
+          "",
+          "mcp_authentication_failed",
+          "mcp_claim_conflict",
+          "mcp_commit_failed",
+          "mcp_connection_failed",
+          "mcp_credential_required",
+          "mcp_custody_lost",
+          "mcp_in_flight",
+          "mcp_internal_error",
+          "mcp_invalid_input",
+          "mcp_not_ready",
+          "mcp_timeout",
+          "mcp_tool_error",
+          "mcp_transport_failed",
+          "mcp_unauthenticated",
+          "runtime_binding_token_rejected"
+        ],
+        "status": [
+          "completed",
+          "runtime_error",
+          "tool_error",
+          "unspecified"
+        ],
+        "tool": "MCP tool name from the Bridge-returned executor payload (any name an installed MCP server exposes, up to the shared ID byte bound); empty string when the call settled before an executor was resolved"
+      },
+      "type": "counter"
+    },
+    "mcpconnector_manifest_refreshes_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "mcpconnector_refresh_attempts_total": {
+      "audience": "operators",
+      "labels": {
+        "outcome": [
+          "failed",
+          "success"
+        ]
+      },
+      "type": "counter"
+    },
+    "mcpconnector_sessions_active": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    }
+  },
+  "operations": {
+    "ListMcpTools": {
+      "long": true,
+      "errors": [
+        "cancelled",
+        "timeout"
+      ]
+    },
+    "RunMcpTool": {
+      "long": true,
+      "errors": [
+        "cancelled",
+        "timeout"
+      ]
+    },
+    "shutdown_cancel_join": {
+      "long": true,
+      "errors": [
+        "timeout"
+      ]
+    },
+    "shutdown_drain": {
+      "long": true,
+      "errors": [
+        "timeout"
+      ]
+    }
+  },
+  "service": "mcp-connector",
+  "spans": {}
+}

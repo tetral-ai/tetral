@@ -709,8 +709,20 @@ folder, it updates the matching section here.
 
 The Runtime command uses the shared
 [TypeScript diagnostic contract](../../internal/ts-observability/README.md).
-Diagnostic level, record byte ceiling, summary interval and burst controls are
-read once at startup. The default level is Info. Existing safe admission,
+Diagnostic level, record byte ceiling, summary interval, burst, trace sample
+ratio, slow-statement threshold and OTLP endpoint controls are read once at
+startup. The default level is Info. The Runtime pod declares the events,
+operations and metric families it records in
+`packages/runtime-pod/observability.json`; its logger refuses any other event.
+
+The process records one `service_pod` cold start: `dependencies` ends once the
+Runtime, Runtime Core, gRPC listener and TokenReview client are ready, and
+`ready` at the first accepting registration with Bridge; a failed bootstrap
+ends it as `startup_error`. The command server continues the caller's trace
+from `traceparent` metadata, and every client to Bridge, Provider Gateway,
+MCP Connector and the Web service writes it; calls to model providers carry no
+trace context. `@tetral/ts-observability/effect` provides the Effect layer
+that turns Runtime Core logs and spans into the same records and spans. Existing safe admission,
 provider transport, reviewer, closeout and committed-settlement builders retain
 bounded operator classifications and identities. Stream backpressure and
 asynchronous stderr failures appear through the existing HTTP metrics endpoint.
@@ -754,15 +766,20 @@ settings remain owned by the lifecycle.
 
 ## Operation measurement
 
-The existing owning duration hooks also expose the additive seconds histogram
+The existing owning duration hooks also expose the additive seconds histograms
 `tetral_operation_duration_seconds{service="agent-runtime",operation,outcome}`
-with the [shared fixed bounds](../../internal/workload/README.md#operation-durations).
+and, for the operations the table marks long (provider requests, waits,
+reviewer and compaction work, cleanup joins and shutdown phases),
+`tetral_long_operation_duration_seconds`, with the
+[shared bucket sets](../../internal/workload/README.md#metrics).
 Operations are the closed provider-request classes, event/context operations,
 content commit/application phases and continuation stages described above.
-Content outcomes retain `committed`, `duplicate`, `stale` and `failed`;
-continuation/provider/context outcomes retain `success`, `error`, `cancelled`
-and `rejected`. Existing millisecond summaries and their class labels remain
-available. This common family aggregates content/request classes at each
+In these families a content commit or application is `ok` (committed),
+`duplicate`, `stale` or `error` (failed), and continuation/provider/context
+outcomes are `ok`, `error`, `cancelled` and `rejected`; shutdown phases add
+`timeout`. Each non-`ok` outcome other than `error` and `rejected` is a code the
+table declares on its operations. Existing millisecond summaries keep their
+class labels, `committed` and `failed` included. This common family aggregates content/request classes at each
 operation; use the existing class-specific summaries and scoped raw observations
 when defining a homogeneous cohort.
 

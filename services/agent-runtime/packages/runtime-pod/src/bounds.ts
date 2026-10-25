@@ -3,9 +3,12 @@
 // The command server, Bridge clients, Gateway client composition, and compatibility
 // checks call these factories. Each factory pins both send and receive ceilings for
 // its own traffic class so widening one internal carrier does not widen another.
+// Every client factory also carries the caller's trace context, because each of
+// these channels reaches an Engine service.
 
 import { MaxProviderResponseFrameBytes } from "@tetral/gateway-protocol/src/bounds.js";
-import type { ChannelOptions, ServerOptions } from "@grpc/grpc-js";
+import { traceparentClientInterceptor } from "@tetral/ts-observability";
+import type { ClientOptions, ServerOptions } from "@grpc/grpc-js";
 
 /** Maximum inbound Runtime Pod command message size, including its protobuf envelope. */
 export const MaxGrpcInboundMessageBytes = 4 * 1024 * 1024;
@@ -34,11 +37,12 @@ export const GrpcKeepaliveTimeMs = 30 * 1000;
 /** Time allowed for an internal keepalive acknowledgement before closing the channel. */
 export const GrpcKeepaliveTimeoutMs = 10 * 1000;
 
-function grpcClientKeepaliveOptions(): ChannelOptions {
+function engineClientOptions(): ClientOptions {
   return {
     "grpc.keepalive_time_ms": GrpcKeepaliveTimeMs,
     "grpc.keepalive_timeout_ms": GrpcKeepaliveTimeoutMs,
     "grpc.keepalive_permit_without_calls": 0,
+    interceptors: [traceparentClientInterceptor],
   };
 }
 
@@ -59,46 +63,46 @@ export function grpcServerOptions(): ServerOptions {
 }
 
 /** Returns symmetric command-channel ceilings for Runtime Pod gRPC client compatibility. */
-export function grpcClientChannelOptions(): ChannelOptions {
+export function grpcClientChannelOptions(): ClientOptions {
   return {
     "grpc.max_receive_message_length": MaxGrpcInboundMessageBytes,
     "grpc.max_send_message_length": MaxGrpcOutboundMessageBytes,
-    ...grpcClientKeepaliveOptions(),
+    ...engineClientOptions(),
   };
 }
 
 /** Returns the symmetric Bridge API channel ceilings used by Runtime-to-Bridge clients. */
-export function bridgeAttachmentGrpcChannelOptions(): ChannelOptions {
+export function bridgeAttachmentGrpcChannelOptions(): ClientOptions {
   return {
     "grpc.max_receive_message_length": MaxAttachmentGrpcMessageBytes,
     "grpc.max_send_message_length": MaxAttachmentGrpcMessageBytes,
-    ...grpcClientKeepaliveOptions(),
+    ...engineClientOptions(),
   };
 }
 
 /** Returns the Bridge channel ceilings for durable declarations and complete cold context. */
-export function bridgeDurableContextGrpcChannelOptions(): ChannelOptions {
+export function bridgeDurableContextGrpcChannelOptions(): ClientOptions {
   return {
     "grpc.max_receive_message_length": MaxBridgeDurableContextGrpcMessageBytes,
     "grpc.max_send_message_length": MaxBridgeDurableContextGrpcMessageBytes,
-    ...grpcClientKeepaliveOptions(),
+    ...engineClientOptions(),
   };
 }
 
 /** Returns the asymmetric Gateway channel ceilings for large requests and bounded stream events. */
-export function gatewayGrpcChannelOptions(): ChannelOptions {
+export function gatewayGrpcChannelOptions(): ClientOptions {
   return {
     "grpc.max_receive_message_length": MaxGatewayStreamEventGrpcMessageBytes,
     "grpc.max_send_message_length": MaxGatewayRequestGrpcMessageBytes,
-    ...grpcClientKeepaliveOptions(),
+    ...engineClientOptions(),
   };
 }
 
 /** Returns the paired Web request and response ceilings used by Runtime's Web client. */
-export function webGrpcChannelOptions(): ChannelOptions {
+export function webGrpcChannelOptions(): ClientOptions {
   return {
     "grpc.max_receive_message_length": MaxWebResponseGrpcMessageBytes,
     "grpc.max_send_message_length": MaxWebRequestGrpcMessageBytes,
-    ...grpcClientKeepaliveOptions(),
+    ...engineClientOptions(),
   };
 }

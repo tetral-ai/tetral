@@ -1,6 +1,7 @@
-import { OperationMetricsRegistry } from "@tetral/ts-observability";
+import { OperationMetricsRegistry, operationMetricsText } from "@tetral/ts-observability";
 import type { OperationOutcome } from "@tetral/ts-observability";
 import type { ProviderAssemblyResources } from "./providers/block-assembler.js";
+import { providerGatewayDeclarations } from "./logger.js";
 /**
  * @packageDocumentation
  *
@@ -16,7 +17,7 @@ import type { ProviderAssemblyResources } from "./providers/block-assembler.js";
 
 /** Aggregates process-local admitted-turn observations for operations exposition. */
 export class ProviderGatewayMetricsRegistry {
-  readonly operations = new OperationMetricsRegistry("provider-gateway", ["StreamProviderRequest", "provider_first_fragment", "provider_first_complete", "complete_frame_write", "shutdown_drain", "shutdown_cancel_join"]);
+  readonly operations = new OperationMetricsRegistry("provider-gateway", ["StreamProviderRequest", "provider_first_fragment", "provider_first_complete", "complete_frame_write", "shutdown_drain", "shutdown_cancel_join"], providerGatewayDeclarations);
   #capacity = 0;
   #admissionRejections = 0;
   setCapacity(capacity: number): void { this.#capacity = Math.max(0, capacity); }
@@ -73,7 +74,7 @@ export class ProviderGatewayMetricsRegistry {
   render(input: { readonly ready: boolean }): string {
     const memory = process.memoryUsage();
     return [
-      this.operations.render(),
+      operationMetricsText(this.operations),
       metric("providergateway_provider_stream_capacity", "Configured concurrent provider stream admission capacity.", "gauge", this.#capacity),
       metric("providergateway_admission_rejections_total", "Provider streams rejected by concurrent admission capacity.", "counter", this.#admissionRejections),
       metric("providergateway_ready", "Provider Gateway readiness state.", "gauge", input.ready ? 1 : 0),

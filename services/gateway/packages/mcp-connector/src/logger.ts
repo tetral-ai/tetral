@@ -10,9 +10,13 @@
  * TypeScript observability package.
  */
 
-import { createTetralJsonLogger, semanticErrorFields } from "@tetral/ts-observability";
-import type { DiagnosticConfig, TetralDiagnosticLogger, TetralJsonLogger, TetralLogRecord } from "@tetral/ts-observability";
+import { createTetralJsonLogger, semanticErrorFields, serviceDeclarations } from "@tetral/ts-observability";
+import type { DiagnosticConfig, TetralDiagnosticLogger, TetralJsonLogger, TetralLogRecord, UndeclaredNamePolicy } from "@tetral/ts-observability";
+import observabilityTable from "../observability.json";
 import type { McpOAuthRefreshCompletedEvent } from "./credential-update-path.js";
+
+/** Every event, operation, metric family and span this process writes. */
+export const mcpConnectorDeclarations = serviceDeclarations(observabilityTable);
 
 /** Defines the structured record shape accepted by the connector logger. */
 export type McpConnectorLogRecord = TetralLogRecord;
@@ -23,13 +27,14 @@ export type McpConnectorLogRecord = TetralLogRecord;
  */
 export type McpConnectorLogger = TetralJsonLogger<McpConnectorLogRecord> & Partial<Pick<TetralDiagnosticLogger<McpConnectorLogRecord>, "warn">>;
 
-/** Creates a structured logger whose service identity is always `mcp-connector`. */
+/** Creates a structured logger whose service identity is always `mcp-connector`; it refuses events its table does not declare. */
 export function createJsonLogger(options: {
   readonly write: (line: string) => unknown;
   readonly sinkFailures?: (() => number) | undefined;
   readonly diagnostics?: DiagnosticConfig;
   readonly deploymentEnvironment?: string | undefined;
   readonly serviceVersion?: string | undefined;
+  readonly undeclared?: UndeclaredNamePolicy;
 }): TetralDiagnosticLogger<McpConnectorLogRecord> {
   return createTetralJsonLogger<McpConnectorLogRecord>({
     write: options.write,
@@ -38,10 +43,16 @@ export function createJsonLogger(options: {
     serviceName: "mcp-connector",
     deploymentEnvironment: options.deploymentEnvironment,
     serviceVersion: options.serviceVersion,
+    declarations: mcpConnectorDeclarations,
+    undeclared: options.undeclared,
   });
 }
 
-/** Builds the safe structured record emitted when startup configuration fails. */
+/**
+ * Builds the safe structured record emitted when startup configuration fails:
+ * the fixed safe message, and the problem, which never holds a supplied value,
+ * in `startup.config_problem`.
+ */
 export function startupFailureLogRecord(input: { readonly kind: "config_error"; readonly message: string }): McpConnectorLogRecord {
   return {
     event: "startup_failed",
@@ -50,7 +61,8 @@ export function startupFailureLogRecord(input: { readonly kind: "config_error"; 
     component: "mcp-connector",
     kind: input.kind,
     message: input.message,
-    ...semanticErrorFields({ errorClass: input.kind, errorCode: input.kind, messageSafe: input.message }),
+    "startup.config_problem": input.message,
+    ...semanticErrorFields({ errorClass: input.kind, errorCode: input.kind, messageSafe: "configuration invalid" }),
   };
 }
 

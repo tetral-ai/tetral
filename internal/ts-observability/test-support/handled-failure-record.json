@@ -1,0 +1,32 @@
+{
+  "description": "The record a handled failure writes in both libraries: operation lookup observed under the context field request.id ends with a declared error code. The Go and TypeScript library tests each compare their record's field names with fields and its fixed values with values.",
+  "fields": [
+    "deployment.environment",
+    "duration_ms",
+    "error.class",
+    "error.code",
+    "error.message_safe",
+    "event",
+    "level",
+    "log.type",
+    "msg",
+    "operation",
+    "process.pid",
+    "request.id",
+    "service.instance.id",
+    "service.name",
+    "service.version",
+    "span_id",
+    "time",
+    "trace_id"
+  ],
+  "values": {
+    "level": "ERROR",
+    "event": "lookup.failed",
+    "msg": "lookup.failed",
+    "log.type": "app",
+    "operation": "lookup",
+    "error.code": "not_found",
+    "request.id": "req_1"
+  }
+}

@@ -2,6 +2,7 @@
 // protocol validation is covered by the protocol package's bounds tests.
 
 import { describe, expect, test } from "bun:test";
+import { traceparentClientInterceptor } from "@tetral/ts-observability";
 import { RunWebRequest as RunWebRequestMessage } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import {
 	bridgeAttachmentGrpcChannelOptions,
@@ -42,6 +43,7 @@ describe("Runtime Pod transport bounds", () => {
 			"grpc.keepalive_time_ms": GrpcKeepaliveTimeMs,
 			"grpc.keepalive_timeout_ms": GrpcKeepaliveTimeoutMs,
 			"grpc.keepalive_permit_without_calls": 0,
+			interceptors: [traceparentClientInterceptor],
 		});
 		expect(bridgeAttachmentGrpcChannelOptions()).toEqual({
 			"grpc.max_receive_message_length": MaxAttachmentGrpcMessageBytes,
@@ -49,6 +51,7 @@ describe("Runtime Pod transport bounds", () => {
 			"grpc.keepalive_time_ms": GrpcKeepaliveTimeMs,
 			"grpc.keepalive_timeout_ms": GrpcKeepaliveTimeoutMs,
 			"grpc.keepalive_permit_without_calls": 0,
+			interceptors: [traceparentClientInterceptor],
 		});
 		expect(bridgeDurableContextGrpcChannelOptions()).toEqual({
 			"grpc.max_receive_message_length":
@@ -57,6 +60,7 @@ describe("Runtime Pod transport bounds", () => {
 			"grpc.keepalive_time_ms": GrpcKeepaliveTimeMs,
 			"grpc.keepalive_timeout_ms": GrpcKeepaliveTimeoutMs,
 			"grpc.keepalive_permit_without_calls": 0,
+			interceptors: [traceparentClientInterceptor],
 		});
 		expect(gatewayGrpcChannelOptions()).toEqual({
 			"grpc.max_receive_message_length": MaxGatewayStreamEventGrpcMessageBytes,
@@ -64,6 +68,7 @@ describe("Runtime Pod transport bounds", () => {
 			"grpc.keepalive_time_ms": GrpcKeepaliveTimeMs,
 			"grpc.keepalive_timeout_ms": GrpcKeepaliveTimeoutMs,
 			"grpc.keepalive_permit_without_calls": 0,
+			interceptors: [traceparentClientInterceptor],
 		});
 		expect(webGrpcChannelOptions()).toEqual({
 			"grpc.max_receive_message_length": MaxWebResponseGrpcMessageBytes,
@@ -71,6 +76,7 @@ describe("Runtime Pod transport bounds", () => {
 			"grpc.keepalive_time_ms": GrpcKeepaliveTimeMs,
 			"grpc.keepalive_timeout_ms": GrpcKeepaliveTimeoutMs,
 			"grpc.keepalive_permit_without_calls": 0,
+			interceptors: [traceparentClientInterceptor],
 		});
 		expect(MaxGatewayRequestGrpcMessageBytes).toBe(64 * 1024 * 1024);
 		expect(MaxGatewayStreamEventGrpcMessageBytes).toBe(32 * 1024 * 1024);

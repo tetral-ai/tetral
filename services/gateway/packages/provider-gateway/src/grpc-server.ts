@@ -34,6 +34,7 @@ import type {
   RunWebRequest,
   RunWebResponse,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { continueGrpcTraces } from "@tetral/ts-observability";
 import { grpcServerOptions } from "./bounds.js";
 import { GrpcStatusError } from "./errors.js";
 import type { ProviderGatewayServiceShell } from "./service.js";
@@ -64,7 +65,7 @@ export function createGatewayGrpcServer(service: ProviderGatewayServiceShell): G
     },
     runWeb: unaryHandler((request, metadata) => service.runWeb(request, metadata)),
   };
-  server.addService(ProviderGatewayServiceService, implementation);
+  server.addService(ProviderGatewayServiceService, continueGrpcTraces(ProviderGatewayServiceService, implementation));
   return {
     server,
     bind: async (address) =>
