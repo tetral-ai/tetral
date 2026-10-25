@@ -382,11 +382,12 @@ func (r *EnvironmentBuildJobRunner) logEnvironmentBuild(job EnvironmentBuildJob,
 	if r.Logger == nil {
 		return
 	}
-	level := slog.LevelInfo
+	// An overdue or failed build is a WARN event of its own.
+	level, event := slog.LevelInfo, "sandbox.environment_build.observed"
 	if phase == "waiting_overdue" || phase == "observation_failed" || phase == "provider_failed" || phase == "timed_out" {
-		level = slog.LevelWarn
+		level, event = slog.LevelWarn, "sandbox.environment_build.degraded"
 	}
-	r.Logger.Log(context.Background(), level, "sandbox.environment_build.observed",
+	r.Logger.Log(context.Background(), level, event,
 		slog.String("operation", "sandbox.environment_build"), slog.String("outcome", phase),
 		slog.String("queue.job.id", job.JobID), slog.String("workspace.id", job.WorkspaceID),
 		slog.String("environment.id", job.EnvironmentID), slog.Int64("environment.generation", job.Generation),

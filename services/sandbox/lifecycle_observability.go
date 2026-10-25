@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -98,17 +99,21 @@ func logSandboxActivationAttemptCompleted(ctx context.Context, logger *slog.Logg
 	if logger == nil {
 		return
 	}
+	// A terminal failure has an event of its own, so each event keeps one level.
+	event, level := "sandbox.activation.attempt_completed", slog.LevelInfo
+	if outcome == "terminal_failure" {
+		event, level = "sandbox.activation.attempt_failed", slog.LevelError
+	}
 	attrs := activationIdentityAttrs(job)
 	attrs = append(attrs,
-		slog.String("event", "sandbox_activation_attempt_completed"),
-		slog.String("event.kind", "sandbox_activation_attempt_completed"),
+		slog.String("event", strings.ReplaceAll(event, ".", "_")),
+		slog.String("event.kind", strings.ReplaceAll(event, ".", "_")),
 		slog.String("provider.name", "daytona"),
 		slog.String("outcome", outcome),
 		slog.Int("queue.attempt.count", job.AttemptCount),
 		slog.Int("queue.attempt.max", job.MaxAttempts),
 		slog.Int64("duration.ms", activationAttemptDuration(ctx).Milliseconds()),
 	)
-	level := slog.LevelInfo
 	if errorCode != "" {
 		attrs = append(attrs,
 			slog.String("error.class", "sandbox_activation_error"),
@@ -116,8 +121,5 @@ func logSandboxActivationAttemptCompleted(ctx context.Context, logger *slog.Logg
 			slog.String("error.message_safe", boundedProviderLogMessage(safeMessage)),
 		)
 	}
-	if outcome == "terminal_failure" {
-		level = slog.LevelError
-	}
-	logger.LogAttrs(context.Background(), level, "sandbox.activation.attempt_completed", attrs...)
+	logger.LogAttrs(context.Background(), level, event, attrs...)
 }

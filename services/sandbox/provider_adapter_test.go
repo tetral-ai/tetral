@@ -42,7 +42,8 @@ func TestProviderCompletionLogsDurableIdentityAndRedactsUnsafeFailureDetail(t *t
 		`"operation.id":"slop_log"`, `"outcome":"success"`,
 		`"operation":"sandbox.provider.inspect_execution"`, `"duration.ms":1500`,
 		`"provider.status_code":401`, `"error.class":"sandbox_provider_error"`, `"error.code":"auth_failed"`,
-		`"error.message_safe":"sandbox provider failure detail redacted"`,
+		`"error.message_safe":"sandbox provider operation failed"`,
+		`"provider.failure_detail":"sandbox provider failure detail redacted"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("provider log missing %s: %s", want, got)
@@ -399,7 +400,8 @@ func TestDaytonaAdapterLogsProviderExecutionFailureDetailWithoutChangingDurableR
 		`"operation":"sandbox.provider.execute_tool"`,
 		`"outcome":"error"`,
 		`"provider.status_code":503`,
-		`"error.message_safe":"daytona tool service unavailable"`,
+		`"error.message_safe":"sandbox provider operation failed"`,
+		`"provider.failure_detail":"daytona tool service unavailable"`,
 		`"provider.operation":"execute_helper"`,
 		`"provider.error_detail":"toolbox upstream unavailable"`,
 	} {

@@ -432,7 +432,7 @@ func TestAuthMiddlewareInternalAuthenticatorErrorReturnsSafeAPIErrorAndLog(t *te
 		fields["event.kind"] != "auth_error" ||
 		fields["component"] != "http-api" ||
 		fields["error.class"] != "auth_error" ||
-		fields["error.code"] == "" ||
+		fields["error.code"] != "authentication_backend_error" ||
 		fields["error.message_safe"] != "authentication backend error" {
 		t.Fatalf("auth error log fields = %#v", fields)
 	}

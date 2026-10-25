@@ -141,6 +141,7 @@ func forceStopAndJoin(server *grpc.Server, cfg Config) error {
 		cfg.Logger.Error("internal.grpc.cancellation_join_timeout",
 			"operation", "internal.grpc.shutdown", "event.kind", "shutdown", "component", "internal-grpc",
 			"error.class", "shutdown_error", "error.code", "cancellation_join_timeout",
+			"error.message_safe", "gRPC handlers outlived the cancellation budget",
 			"duration.ms", time.Since(started).Milliseconds())
 		<-stopped
 		if cfg.Metrics != nil {

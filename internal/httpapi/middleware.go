@@ -235,7 +235,7 @@ func (r authLogRecorder) RecordAuthEvent(ctx context.Context, event auth.AuditEv
 	if event.ErrorType != "" {
 		attrs = append(attrs,
 			slog.String("error.class", "auth_error"),
-			slog.String("error.code", event.ErrorType),
+			slog.String("error.code", "authentication_backend_error"),
 			slog.String("error.message_safe", "authentication backend error"),
 		)
 	} else {

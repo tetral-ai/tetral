@@ -162,13 +162,15 @@ func logJobRunnerRetentionResult(logger *slog.Logger, result queue.JobRunnerTerm
 	if result.Deleted == 0 && result.Malformed == 0 && !budgetExhausted {
 		return
 	}
-	level := slog.LevelInfo
+	// Malformed rows are an integrity finding, so that run's summary is a
+	// WARN event of its own.
+	level, event := slog.LevelInfo, operation+".completed"
 	if result.Malformed > 0 {
-		level = slog.LevelWarn
+		level, event = slog.LevelWarn, operation+".found_malformed"
 	}
-	logger.Log(context.Background(), level, operation+".completed", append([]any{
+	logger.Log(context.Background(), level, event, append([]any{
 		slog.String("operation", operation),
-		slog.String("event.kind", operation+".completed"),
+		slog.String("event.kind", event),
 		slog.String("component", "queue"),
 		slog.Int64("duration.ms", duration.Milliseconds()),
 	}, counts...)...)

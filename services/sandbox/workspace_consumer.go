@@ -152,6 +152,8 @@ func runWorkspaceConsumerLoop(
 					slog.String("event.kind", "queue_consume_failed"),
 					slog.String("component", "sandbox"),
 					slog.String("error.class", workspaceConsumerErrorClass(err)),
+					slog.String("error.code", workspaceConsumerErrorClass(err)),
+					slog.String("error.message_safe", "sandbox queue consume failed"),
 					slog.Bool("retryable", true),
 					slog.Int64("retry.delay.ms", delay.Milliseconds()),
 				)

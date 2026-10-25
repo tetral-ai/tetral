@@ -63,7 +63,8 @@ func runWithConnection(ctx context.Context, getenv func(string) string, input io
 	logger.Info("database.prepare.started")
 	defer func() {
 		if result != nil {
-			logger.Error("database.prepare.failed", "step", step, "error.message_safe", safeFailureMessage(result))
+			logger.Error("database.prepare.failed", "step", step, "error.class", "database_prepare_error", "error.code", "prepare_failed",
+				"error.message_safe", "PostgreSQL database preparation failed", "prepare.problem", safeFailureMessage(result))
 		} else {
 			logger.Info("database.prepare.completed")
 		}
