@@ -303,10 +303,12 @@ fn every_grant_reaches_only_what_its_rules_allow_and_never_the_protected_paths()
         .case("every grant reaches only what its rules allow and never the protected paths");
     let world = World::new();
     let p = &world.project;
-    let outside = PathBuf::from(format!(
+    // Outside every grant, and removed even when a probe wrongly writes it.
+    let outside = tempfile::TempPath::try_from_path(format!(
         "/tmp/tetral-isolation-probe-{}",
         std::process::id()
-    ));
+    ))
+    .unwrap();
     let tetral_inode = fs::metadata(&world.tetral).unwrap().ino();
 
     let mut probes = vec![
@@ -907,10 +909,12 @@ fn the_bundled_bwrap_with_its_digest_runs_tools_where_no_system_bwrap_exists() {
     }
     let path = tools.to_str().unwrap();
     let p = &world.project;
-    let outside = PathBuf::from(format!(
+    // Outside every grant, and removed even when a probe wrongly writes it.
+    let outside = tempfile::TempPath::try_from_path(format!(
         "/tmp/tetral-isolation-probe-{}-bundled",
         std::process::id()
-    ));
+    ))
+    .unwrap();
     let probes = [
         (
             "read /etc/hostname",
