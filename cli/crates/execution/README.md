@@ -87,6 +87,9 @@ which owns that task's process tree; the translation of a call's
 - A call's waits take their defaults and clamps from `exec::ExecCall`. On
   Linux an exit status from 129 to 192 is a death by signal `status - 128`,
   which the sandbox's stages report that way (`exec::ExitFacts::observed`).
+- The termination procedure sends a task SIGTERM, on Linux to its PID
+  namespace's first process, which passes it on to the command's process
+  group, and SIGKILL after a grace (`terminate`).
 
 ## Where things are
 
@@ -97,6 +100,8 @@ which owns that task's process tree; the translation of a call's
 - `env.rs`: `command_environment`.
 - `child/mod.rs`, `child/exec.rs`: the launcher entry `__tetral-task` and its
   `exec` kind.
+- `terminate.rs`: `Termination`, its `Steps`, and on Linux the PID
+  namespace's first process.
 - `policy/mod.rs`: `TaskPermissions`, a task's stored permissions, and
   `PolicyRejection`.
 - `policy/validate.rs`: the validation steps, path normalization and the

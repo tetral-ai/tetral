@@ -10,6 +10,7 @@ pub mod limits;
 pub mod policy;
 pub mod report;
 pub mod store;
+pub mod terminate;
 
 use tokio::sync::mpsc;
 
