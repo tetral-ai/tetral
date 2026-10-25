@@ -10,8 +10,10 @@ const AuditEvent = "instance_credential_audit"
 
 // The credential operations an audit record names.
 const (
-	AuditIssue  = "issue"
-	AuditRevoke = "revoke"
+	AuditIssue    = "issue"
+	AuditRevoke   = "revoke"
+	AuditFetch    = "fetch"
+	AuditActivate = "activate"
 )
 
 // Actor is the principal credential that performed a credential operation.

@@ -209,6 +209,15 @@ func LockLiveConnectionOf(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID
 		string(ws), instanceID, now, credentialID)))
 }
 
+// ShareOnlineConnection reads instanceID's connection that is online at now
+// (not ended, its lease later than now and its ready accepted) and holds its
+// row FOR SHARE, so it cannot end before the transaction does.
+func ShareOnlineConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string, now time.Time) (Connection, bool, error) {
+	return optionalConnection(scanConnection(tx.QueryRow(ctx, `SELECT `+connectionColumns+` FROM instance_connections
+		WHERE workspace_id=$1 AND instance_id=$2 AND ended_at IS NULL AND lease_expires_at>$3 AND ready_accepted_at IS NOT NULL FOR SHARE`,
+		string(ws), instanceID, now)))
+}
+
 // ShareConnection reads one connection of the Workspace and locks its row
 // FOR SHARE until the transaction ends.
 func ShareConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string) (Connection, error) {
@@ -295,12 +304,15 @@ func EndConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, conne
 }
 
 // ResumeConnection moves connection's lease to the stream of pod without
-// renewing it: hub_pod becomes pod and stream_count increases. It notifies
-// the pod that held the previous stream, which then closes it, and returns
-// the moved row. The caller holds the connection's row lock FOR UPDATE.
-func ResumeConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connection Connection, pod string) (Connection, error) {
-	moved, err := scanConnection(tx.QueryRow(ctx, `UPDATE instance_connections SET hub_pod=$3,stream_count=stream_count+1
-		WHERE workspace_id=$1 AND id=$2 RETURNING `+connectionColumns, string(ws), connection.ID, pod))
+// renewing it: hub_pod becomes pod, stream_count increases and the
+// connection's credential becomes credentialID, the one the resuming request
+// authenticated with (a renewal's, once ActivateCredential activated it). It
+// notifies the pod that held the previous stream, which then closes it, and
+// returns the moved row. The caller holds the connection's row lock FOR
+// UPDATE.
+func ResumeConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connection Connection, pod, credentialID string) (Connection, error) {
+	moved, err := scanConnection(tx.QueryRow(ctx, `UPDATE instance_connections SET hub_pod=$3,stream_count=stream_count+1,credential_id=$4
+		WHERE workspace_id=$1 AND id=$2 RETURNING `+connectionColumns, string(ws), connection.ID, pod, credentialID))
 	if err != nil {
 		return Connection{}, err
 	}

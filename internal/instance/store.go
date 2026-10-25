@@ -39,8 +39,17 @@ type Instance struct {
 	CreatedAt         time.Time
 	DeregisteredAt    *time.Time
 	// CLIVersion is the cli_version of the instance's latest ready.
-	CLIVersion      *string
+	CLIVersion *string
+	// LastReuse is the latest use of a credential that a pending
+	// credential's activation revoked, nil before the first.
+	LastReuse       *Reuse
 	StorageSequence int64
+}
+
+// Reuse is one recorded use of a credential that an activation revoked.
+type Reuse struct {
+	CredentialID string
+	DetectedAt   time.Time
 }
 
 // Credential is one instance_credentials row without its digest, which no
@@ -54,6 +63,16 @@ type Credential struct {
 	ExpiresAt       time.Time
 	RevokedAt       *time.Time
 	RevocationCause *string
+	// Delivery is DeliveryResponse or DeliveryStream. A stream delivery
+	// renews the connection RenewalConnectionID, replacing
+	// ReplacesCredentialID; FetchedAt is when its key was fetched.
+	Delivery             string
+	RenewalConnectionID  *string
+	ReplacesCredentialID *string
+	FetchedAt            *time.Time
+	// UsedAt is the first authenticated use of a pending credential, which
+	// activated it.
+	UsedAt          *time.Time
 	StorageSequence int64
 }
 
@@ -74,8 +93,10 @@ type NewCredential struct {
 	ExpiresAt  time.Time
 }
 
-const instanceColumns = `workspace_id,id,kind,name,registration_state,created_at,deregistered_at,cli_version,storage_sequence`
-const credentialColumns = `workspace_id,instance_id,id,state,issued_at,expires_at,revoked_at,revocation_cause,storage_sequence`
+const instanceColumns = `workspace_id,id,kind,name,registration_state,created_at,deregistered_at,cli_version,
+ last_credential_reuse_credential_id,last_credential_reuse_at,storage_sequence`
+const credentialColumns = `workspace_id,instance_id,id,state,issued_at,expires_at,revoked_at,revocation_cause,
+ delivery,renewal_connection_id,replaces_credential_id,fetched_at,used_at,storage_sequence`
 
 // The row functions run inside a transaction scoped to ws
 // (dbconnect.Client.WithWorkspaceTx), so Workspace row-level security bounds
@@ -108,9 +129,9 @@ type scanner interface{ Scan(dest ...any) error }
 
 func scanInstance(row scanner) (Instance, error) {
 	var value Instance
-	var name, cliVersion sql.NullString
-	var deregistered sql.NullTime
-	err := row.Scan(&value.WorkspaceID, &value.ID, &value.Kind, &name, &value.RegistrationState, &value.CreatedAt, &deregistered, &cliVersion, &value.StorageSequence)
+	var name, cliVersion, reused sql.NullString
+	var deregistered, reusedAt sql.NullTime
+	err := row.Scan(&value.WorkspaceID, &value.ID, &value.Kind, &name, &value.RegistrationState, &value.CreatedAt, &deregistered, &cliVersion, &reused, &reusedAt, &value.StorageSequence)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Instance{}, ErrNotFound
 	}
@@ -125,15 +146,19 @@ func scanInstance(row scanner) (Instance, error) {
 		value.DeregisteredAt = &at
 	}
 	value.CLIVersion = stringOrNil(cliVersion)
+	if reused.Valid {
+		value.LastReuse = &Reuse{CredentialID: reused.String, DetectedAt: reusedAt.Time.UTC()}
+	}
 	value.CreatedAt = value.CreatedAt.UTC()
 	return value, nil
 }
 
 func scanCredential(row scanner) (Credential, error) {
 	var value Credential
-	var revoked sql.NullTime
-	var cause sql.NullString
-	err := row.Scan(&value.WorkspaceID, &value.InstanceID, &value.ID, &value.State, &value.IssuedAt, &value.ExpiresAt, &revoked, &cause, &value.StorageSequence)
+	var revoked, fetched, used sql.NullTime
+	var cause, renewal, replaces sql.NullString
+	err := row.Scan(&value.WorkspaceID, &value.InstanceID, &value.ID, &value.State, &value.IssuedAt, &value.ExpiresAt, &revoked, &cause,
+		&value.Delivery, &renewal, &replaces, &fetched, &used, &value.StorageSequence)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Credential{}, ErrNotFound
 	}
@@ -147,6 +172,8 @@ func scanCredential(row scanner) (Credential, error) {
 	if cause.Valid {
 		value.RevocationCause = &cause.String
 	}
+	value.RenewalConnectionID, value.ReplacesCredentialID = stringOrNil(renewal), stringOrNil(replaces)
+	value.FetchedAt, value.UsedAt = timeOrNil(fetched), timeOrNil(used)
 	value.IssuedAt, value.ExpiresAt = value.IssuedAt.UTC(), value.ExpiresAt.UTC()
 	return value, nil
 }

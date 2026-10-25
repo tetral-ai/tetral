@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -19,6 +20,11 @@ const (
 	DeliveryStream   = "stream"
 	DeliveryResponse = "response"
 )
+
+// CausePendingActivation is the revocation cause of a credential that a
+// pending credential's activation replaced. Only a use of a credential
+// revoked with this cause is recorded as a reuse (RecordCredentialReuse).
+const CausePendingActivation = "pending_activation"
 
 // CredentialLimitError answers an issuance on an instance that already holds
 // CredentialLimit usable credentials. No credential is revoked to make room.
@@ -83,6 +89,99 @@ func IssueCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, ins
 	return credential, key, nil
 }
 
+// IssueRenewal creates, after CheckCredentialLimit, a pending credential of
+// connection's instance issued at issuedAt that renews connection: delivered
+// on the stream, without a key until FetchCredential, and replacing the
+// connection's credential. It notifies the pod holding the connection's
+// stream, which writes credential.renew. At the limit it writes nothing.
+func IssueRenewal(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connection Connection, issuedAt, expiresAt time.Time) (Credential, error) {
+	if err := CheckCredentialLimit(ctx, tx, ws, connection.InstanceID, issuedAt); err != nil {
+		return Credential{}, err
+	}
+	credential, err := scanCredential(tx.QueryRow(ctx, `INSERT INTO instance_credentials
+		(workspace_id,instance_id,id,state,issued_at,expires_at,delivery,renewal_connection_id,replaces_credential_id)
+		VALUES ($1,$2,$3,'pending',$4,$5,'stream',$6,$7) RETURNING `+credentialColumns,
+		string(ws), connection.InstanceID, id.New("ccred_"), issuedAt, expiresAt, connection.ID, connection.CredentialID))
+	if err != nil {
+		return Credential{}, err
+	}
+	return credential, NotifyConnection(ctx, tx, ws, connection.ID)
+}
+
+// PendingRenewals returns the IDs of instanceID's credentials that renew
+// connectionID and are pending, unrevoked and unexpired at now, in issue
+// order. Every write pass reads them, through the instance's credential
+// index.
+func PendingRenewals(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, connectionID string, now time.Time) ([]string, error) {
+	rows, err := tx.Query(ctx, `SELECT id FROM instance_credentials WHERE workspace_id=$1 AND instance_id=$2 AND renewal_connection_id=$3
+		AND state='pending' AND revoked_at IS NULL AND expires_at>$4 ORDER BY storage_sequence`, string(ws), instanceID, connectionID, now)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var credentialID string
+		if err := rows.Scan(&credentialID); err != nil {
+			return nil, err
+		}
+		ids = append(ids, credentialID)
+	}
+	return ids, rows.Err()
+}
+
+// FetchCredential generates the key of instanceID's credential credentialID,
+// delivered on the stream, and stores its digest and fetched_at (now, the
+// database clock), once. It answers ErrNotFound and changes nothing when the
+// instance holds no such credential, or the credential was delivered in a
+// response, is not pending, is revoked or expired at now, or was already
+// fetched. The returned key is the only copy of its plaintext.
+func FetchCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, credentialID string, now time.Time) (Credential, ConnectionKey, error) {
+	key := GenerateKey()
+	credential, err := scanCredential(tx.QueryRow(ctx, `UPDATE instance_credentials SET key_digest=$4,fetched_at=$5
+		WHERE workspace_id=$1 AND instance_id=$2 AND id=$3 AND delivery='stream' AND state='pending'
+		AND revoked_at IS NULL AND expires_at>$5 AND fetched_at IS NULL RETURNING `+credentialColumns,
+		string(ws), instanceID, credentialID, key.Digest(), now))
+	if err != nil {
+		return Credential{}, ConnectionKey{}, err
+	}
+	return credential, key, nil
+}
+
+// ActivateCredential makes credential, pending and authenticating its first
+// request, active with used_at now, and revokes at now with cause
+// CausePendingActivation the credential it replaces, unless that one is
+// already revoked. It returns the ID it revoked, or "". The caller holds both
+// rows' locks (LockCredential) and moves or creates the connection under
+// credential in the same transaction.
+func ActivateCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, credential Credential, now time.Time) (string, error) {
+	if _, err := tx.Exec(ctx, `UPDATE instance_credentials SET state='active',used_at=$3 WHERE workspace_id=$1 AND id=$2 AND state='pending'`,
+		string(ws), credential.ID, now); err != nil {
+		return "", err
+	}
+	if credential.ReplacesCredentialID == nil {
+		return "", nil
+	}
+	var revoked string
+	err := tx.QueryRow(ctx, `UPDATE instance_credentials SET state='revoked',revoked_at=$3,revocation_cause='pending_activation'
+		WHERE workspace_id=$1 AND id=$2 AND revoked_at IS NULL RETURNING id`, string(ws), *credential.ReplacesCredentialID, now).Scan(&revoked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return revoked, err
+}
+
+// RecordCredentialReuse records, at the database clock, a use of
+// credentialID, which an activation revoked, as instanceID's latest
+// credential reuse, and queues the credential_reused instance event.
+func RecordCredentialReuse(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, credentialID string) error {
+	if _, err := tx.Exec(ctx, `UPDATE instances SET last_credential_reuse_credential_id=$3,last_credential_reuse_at=clock_timestamp()
+		WHERE workspace_id=$1 AND id=$2`, string(ws), instanceID, credentialID); err != nil {
+		return err
+	}
+	return NotifyInstanceEvent(ctx, tx, ws, instanceID, EventCredentialReused)
+}
+
 // RevokeCredential revokes credentialID of instanceID at the database clock
 // with cause delete. It reports false and changes nothing when the
 // credential is already revoked or expired, and answers ErrNotFound when the
@@ -113,6 +212,12 @@ func ReadInstanceCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.
 // its row until the transaction ends, so a revocation waits for the request.
 func ShareCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, credentialID string) (Credential, error) {
 	return scanCredential(tx.QueryRow(ctx, `SELECT `+credentialColumns+` FROM instance_credentials WHERE workspace_id=$1 AND instance_id=$2 AND id=$3 FOR SHARE`, string(ws), instanceID, credentialID))
+}
+
+// LockCredential reads credentialID of instanceID and holds its row lock
+// until the transaction ends, for a writer of that row.
+func LockCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, credentialID string) (Credential, error) {
+	return scanCredential(tx.QueryRow(ctx, `SELECT `+credentialColumns+` FROM instance_credentials WHERE workspace_id=$1 AND instance_id=$2 AND id=$3 FOR UPDATE`, string(ws), instanceID, credentialID))
 }
 
 // ListCredentials returns up to limit of instanceID's credentials after

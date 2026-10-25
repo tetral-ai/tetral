@@ -109,7 +109,7 @@ func (h *clientHandler) events(w http.ResponseWriter, r *http.Request) {
 				remaining := (previous.LeaseExpiresAt.Sub(granted.now) + time.Millisecond - 1) / time.Millisecond
 				return refuseRetryAfter(protocol.ErrorPreviousConnectionActive, "the previous connection's lease is still active", int64(remaining))
 			}
-			started, err = instance.ResumeConnection(ctx, tx, id.workspace, previous, h.Streams.podName)
+			started, err = instance.ResumeConnection(ctx, tx, id.workspace, previous, h.Streams.podName, previous.CredentialID)
 			resumed = true
 			return err
 		}

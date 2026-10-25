@@ -7,10 +7,15 @@
 //   - Table instances: one row per registration of a CLI with a Workspace.
 //     kind is user (name is its display label) or cloud (name is NULL). The
 //     row stays after deregistration as a tombstone, so an instance ID is
-//     never issued again.
+//     never issued again. last_credential_reuse_* is the latest use of a
+//     credential that an activation revoked.
 //   - Table instance_credentials: one row per connection credential of an
 //     instance. A row stores only key_digest, the SHA-256 digest of its key,
-//     unique across every Workspace.
+//     unique across every Workspace. delivery is response (the key is in the
+//     issuing response) or stream (a live renewal of renewal_connection_id,
+//     replacing replaces_credential_id, whose key_digest stays NULL until
+//     its one fetch at fetched_at); used_at is a pending credential's first
+//     authenticated use, which activated it.
 //   - Table instance_idempotency_records: one row per (principal credential,
 //     route, Idempotency-Key) of an issuing request, holding the canonical
 //     request fingerprint and the instance and credential it created.
@@ -44,8 +49,9 @@
 //
 //	instances.registration_state: active, deregistered (deregistered_at set).
 //	instance_credentials.state:   pending, active, revoked (revoked_at and
-//	                              revocation_cause delete or deregistration
-//	                              set). Expiry is never stored: a credential
+//	                              revocation_cause delete, deregistration or
+//	                              pending_activation set). Expiry is never
+//	                              stored: a credential
 //	                              whose expires_at is not later than the
 //	                              database clock reads as expired
 //	                              (CredentialState).
@@ -60,7 +66,13 @@
 //	  (none) -> active user instance      CreateUserInstance   computer-hub
 //	  (none) -> active instance           InsertInstance       test fixtures
 //	  (none) -> active credential         IssueCredential      computer-hub
+//	  (none) -> pending stream renewal    IssueRenewal         computer-hub
 //	  (none) -> pending/active credential InsertCredential     test fixtures
+//	  renewal unfetched -> fetched        FetchCredential      computer-hub
+//	  pending -> active, the replaced
+//	    credential -> revoked
+//	    (pending_activation)              ActivateCredential   computer-hub
+//	  latest reuse -> newer one           RecordCredentialReuse computer-hub
 //	  pending/active -> revoked (delete)  RevokeCredential     computer-hub
 //	  active -> deregistered instance,
 //	    unrevoked -> revoked (deregistration) Deregister       computer-hub
@@ -86,10 +98,11 @@
 //	                                                           reports
 //
 //	Readers: ReadInstance, LockInstance, ListInstances, ReadObjects,
-//	ReadCredential, ReadInstanceCredential, ListCredentials,
-//	LiveCredentialID, FindIdempotencyRecord, LockUnendedConnection,
-//	LockLiveConnection, LockLiveConnectionOf, ReadConnection,
-//	FindUpstreamMessage, UnreportedInstructions, ReadInstructionPressure.
+//	ReadCredential, ReadInstanceCredential, ShareCredential, LockCredential,
+//	ListCredentials, LiveCredentialID, PendingRenewals, FindIdempotencyRecord,
+//	LockUnendedConnection, LockLiveConnection, LockLiveConnectionOf,
+//	ShareOnlineConnection, ReadConnection, FindUpstreamMessage,
+//	UnreportedInstructions, ReadInstructionPressure.
 //
 // INVARIANTS:
 //   - The plaintext of a key is never stored, logged or returned except in
@@ -114,9 +127,14 @@
 //     identity; computer-hub checks the credential's state, the registration
 //     and the connection on every request.
 //   - Every row function runs in a transaction scoped to the row's Workspace.
-//   - AuditCredentialOperation writes one record per issued or revoked
-//     credential after the commit; a revocation that changes nothing writes
-//     none.
+//   - AuditCredentialOperation writes one record per issued, fetched,
+//     activated or revoked credential after the commit; a revocation that
+//     changes nothing writes none.
+//   - A stream renewal's key exists only from FetchCredential's one
+//     successful call; a pending credential never authenticates anything but
+//     the request that activates it, and only a use of a credential revoked
+//     with CausePendingActivation is recorded as a reuse. A renewal whose
+//     connection ends stays pending until it expires or is revoked.
 //   - An instance has at most one connection that has not ended (a partial
 //     unique index; IsConnectionRace reports the loser of two concurrent
 //     creations). Every lease and grant is the database clock plus at most

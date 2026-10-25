@@ -176,6 +176,9 @@ func ReadObjects(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, values 
 		if connection, ok := connections[value.ID]; ok {
 			objects[i].Connection = connectionObjectOf(connection, capabilities[value.ID], now)
 		}
+		if value.LastReuse != nil {
+			objects[i].LastCredentialReuse = &CredentialReuse{CredentialID: value.LastReuse.CredentialID, DetectedAt: FormatTime(value.LastReuse.DetectedAt)}
+		}
 	}
 	return objects, nil
 }
