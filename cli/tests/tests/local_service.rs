@@ -761,7 +761,10 @@ fn shutdown_ends_the_process_while_a_handler_is_blocked() {
     // Moved once the Connection owner has stopped, so that only the blocked
     // handler meets the deadline.
     seams.wait_for_count("shutdown.waiting", 1);
-    seams.advance(Duration::from_secs(5));
+    seams.advance(Duration::from_millis(4_999));
+    seams.wait_for_more("shutdown.checked", 2);
+    assert!(fs::symlink_metadata(socket_path(&root)).is_ok());
+    seams.advance(Duration::from_millis(1));
     let (run, _) = app_server.exited();
     let took = posted.elapsed();
     case.command("tetral server run --app app_one", &run.exit());
@@ -770,7 +773,7 @@ fn shutdown_ends_the_process_while_a_handler_is_blocked() {
     assert!(fs::symlink_metadata(socket_path(&root)).is_err());
     assert!(lock_is_free(&root));
     case.observe(format!(
-        "the process exited 0 {took:?} after the POST, its controlled clock moved five seconds; the socket is gone and the lock is free"
+        "the socket was still there once the shutdown had read 4.999 seconds on its controlled clock; at 5 seconds the process exited 0, {took:?} after the POST; the socket is gone and the lock is free"
     ));
     drop(half);
 }

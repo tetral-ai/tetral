@@ -50,8 +50,22 @@ pub const HARNESS_RECHECK_INTERVAL: Duration = Duration::from_millis(10);
 /// set for the whole wait: the runtime's timers do not count the machine's
 /// sleep, so it reads the clock again after each recheck interval.
 pub async fn sleep_until(deadline: Duration) {
+    wait_until(deadline, None).await;
+}
+
+/// As [`sleep_until`], reporting the counter `counter` after each reading
+/// of the clock, so that a test can tell that the wait has read a time it
+/// moved the clock to.
+pub async fn sleep_until_counted(deadline: Duration, counter: &'static str) {
+    wait_until(deadline, Some(counter)).await;
+}
+
+async fn wait_until(deadline: Duration, counter: Option<&'static str>) {
     loop {
         let remaining = deadline.saturating_sub(now());
+        if let Some(counter) = counter {
+            count(counter);
+        }
         if remaining.is_zero() {
             return;
         }

@@ -748,7 +748,10 @@ fn a_held_probe_blocks_neither_heartbeats_nor_the_shutdown() {
     wait_until("the connection stopped", || machine.state() == "stopped");
     machine.settle();
     assert_eq!(machine.seams.count("shutdown.waiting"), 0);
-    machine.seams.advance(seconds(5.0));
+    machine.seams.advance(seconds(4.999));
+    machine.seams.wait_for_more("shutdown.checked", 2);
+    assert_eq!(machine.seams.count("shutdown.waiting"), 0);
+    machine.seams.advance(seconds(0.001));
     let Machine {
         app_server, seams, ..
     } = machine;
@@ -756,7 +759,7 @@ fn a_held_probe_blocks_neither_heartbeats_nor_the_shutdown() {
     case.command("tetral server run --app app_one", &run.exit());
     assert_eq!(run.object()["connection_state"], "stopped");
     assert_eq!(seams.count("shutdown.waiting"), 1);
-    case.observe("the shutdown waited for the unreaped probe until its deadline and the process exited 0 once the controlled clock moved five seconds");
+    case.observe("the shutdown still waited for the unreaped probe once it had read 4.999 seconds on the controlled clock, and the process exited 0 at 5 seconds");
     seams.release(PROBE_STARTED);
 }
 

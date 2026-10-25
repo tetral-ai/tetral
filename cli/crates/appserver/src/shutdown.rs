@@ -4,7 +4,9 @@
 //! reaches a socket whose root another App Server may already own. The
 //! sequence waits for the Connection owner and the local API's handlers only
 //! until its deadline; past it, it still removes the socket and releases the
-//! lock.
+//! lock. Each reading of the clock for the deadline is the test seam counter
+//! `shutdown.checked`, and the end of the wait for the Connection owner is
+//! `shutdown.waiting`.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -29,7 +31,7 @@ pub(crate) struct Sequence {
 pub(crate) async fn run(sequence: Sequence, lifecycle: Lifecycle) {
     tokio::select! {
         () = sequence.connection.stop() => {}
-        () = state::seams::sleep_until(sequence.deadline) => {}
+        () = state::seams::sleep_until_counted(sequence.deadline, "shutdown.checked") => {}
     }
 
     if let Some(listener) = sequence.listener {
@@ -37,7 +39,7 @@ pub(crate) async fn run(sequence: Sequence, lifecycle: Lifecycle) {
         state::seams::count("shutdown.waiting");
         tokio::select! {
             _ = listener.served => {}
-            () = state::seams::sleep_until(sequence.deadline) => {}
+            () = state::seams::sleep_until_counted(sequence.deadline, "shutdown.checked") => {}
         }
     }
     let _ = std::fs::remove_file(&sequence.socket);
