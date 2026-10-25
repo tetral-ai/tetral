@@ -50,6 +50,7 @@ pub enum Failure {
 pub struct Transport {
     client: reqwest::Client,
     server_url: String,
+    chunk_bytes: usize,
 }
 
 impl Transport {
@@ -63,6 +64,7 @@ impl Transport {
         Transport {
             client,
             server_url: server_url.to_owned(),
+            chunk_bytes: CHUNK_BYTES,
         }
     }
 
@@ -130,6 +132,7 @@ impl Transport {
         let request = request.body(Body::wrap(Chunks {
             bytes,
             taken: 0,
+            chunk_bytes: self.chunk_bytes,
             clock: clock.clone(),
             progress: progress.clone(),
         }));
@@ -193,6 +196,8 @@ pub struct ReportRequest {
 struct Chunks {
     bytes: Vec<u8>,
     taken: usize,
+    /// [`CHUNK_BYTES`] but for tests.
+    chunk_bytes: usize,
     clock: Clock,
     progress: Arc<AtomicU64>,
 }
@@ -217,7 +222,7 @@ impl http_body::Body for Chunks {
         if start >= this.bytes.len() {
             return Poll::Ready(None);
         }
-        let end = (start + CHUNK_BYTES).min(this.bytes.len());
+        let end = (start + this.chunk_bytes).min(this.bytes.len());
         let chunk = Bytes::copy_from_slice(&this.bytes[start..end]);
         this.taken = end;
         this.progress
@@ -270,4 +275,35 @@ async fn read_bounded(mut response: Response, limit: usize) -> Option<Vec<u8>> {
         body.extend_from_slice(&chunk);
     }
     Some(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::task::Waker;
+
+    use http_body::Body as _;
+
+    use super::*;
+
+    #[test]
+    fn a_report_body_is_handed_over_in_chunks_of_the_chunk_size_each_marking_progress() {
+        let progress = Arc::new(AtomicU64::new(0));
+        let mut chunks = Chunks {
+            bytes: b"0123456789".to_vec(),
+            taken: 0,
+            chunk_bytes: 4,
+            clock: Clock::new(|| Duration::from_secs(7), Duration::from_millis(10)),
+            progress: progress.clone(),
+        };
+        let mut context = Context::from_waker(Waker::noop());
+        let mut sizes = Vec::new();
+        while let Poll::Ready(Some(Ok(frame))) = Pin::new(&mut chunks).poll_frame(&mut context) {
+            sizes.push(frame.into_data().unwrap().len());
+        }
+        assert_eq!(sizes, [4, 4, 2]);
+        assert_eq!(
+            progress.load(Ordering::Acquire),
+            nanos(Duration::from_secs(7))
+        );
+    }
 }
