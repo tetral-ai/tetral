@@ -21,6 +21,6 @@ type ProtocolErrorRecord struct {
 // RecordProtocolError stores report for connectionID.
 func RecordProtocolError(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string, report ProtocolErrorRecord) error {
 	_, err := tx.Exec(ctx, `INSERT INTO connection_protocol_errors (workspace_id,connection_id,message_id,code,message,request_message_id,created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)`, string(ws), connectionID, report.MessageID, report.Code, report.Message, report.RequestMessageID, report.At)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)`, string(ws), connectionID, report.MessageID, report.Code, []byte(report.Message), report.RequestMessageID, report.At)
 	return err
 }

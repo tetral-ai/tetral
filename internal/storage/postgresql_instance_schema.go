@@ -13,7 +13,7 @@ const createPostgreSQLInstancesTable = `CREATE TABLE instances (
  registration_state TEXT NOT NULL CHECK(registration_state IN ('active','deregistered')),
  created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
  deregistered_at TIMESTAMPTZ,
- cli_version TEXT CHECK(char_length(cli_version) BETWEEN 1 AND 256),
+ cli_version TEXT CHECK(char_length(cli_version)>=1),
  last_credential_reuse_credential_id TEXT,
  last_credential_reuse_at TIMESTAMPTZ,
  PRIMARY KEY(id),
@@ -106,7 +106,7 @@ const createPostgreSQLInstanceConnectionsTable = `CREATE TABLE instance_connecti
  ready_valid_for_ms INTEGER CHECK(ready_valid_for_ms BETWEEN 1 AND 45000),
  os TEXT CHECK(os IN ('linux','macos')),
  arch TEXT CHECK(arch IN ('x86_64','aarch64')),
- cli_version TEXT CHECK(char_length(cli_version) BETWEEN 1 AND 256),
+ cli_version TEXT CHECK(char_length(cli_version)>=1),
  capabilities JSONB CHECK(jsonb_typeof(capabilities)='object'),
  ready_refused_code TEXT CHECK(ready_refused_code IN ('cli_upgrade_required')),
  ready_refused_message TEXT,
@@ -180,14 +180,16 @@ const createPostgreSQLConnectionInstructionsTable = `CREATE TABLE connection_ins
 )`
 
 // One row per accepted protocol-error report. request_message_id is stored as
-// the CLI gave it, whether or not it names a message Engine sent.
+// the CLI gave it, whether or not it names a message Engine sent. message is
+// the report's UTF-8 bytes, since a JSON string may hold U+0000, which TEXT
+// cannot.
 const createPostgreSQLConnectionProtocolErrorsTable = `CREATE TABLE connection_protocol_errors (
  storage_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
  workspace_id TEXT NOT NULL,
  connection_id TEXT NOT NULL,
  message_id TEXT NOT NULL CHECK(char_length(message_id)>=1),
  code TEXT NOT NULL CHECK(code IN ('message_conflict','invalid_message')),
- message TEXT NOT NULL,
+ message BYTEA NOT NULL,
  request_message_id TEXT CHECK(char_length(request_message_id)>=1),
  created_at TIMESTAMPTZ NOT NULL,
  PRIMARY KEY(storage_sequence),

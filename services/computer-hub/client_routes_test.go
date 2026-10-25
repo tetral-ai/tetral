@@ -218,6 +218,14 @@ func TestProtocolErrorReportReplaysAndConflicts(t *testing.T) {
 		!strings.Contains(logs, `"request.message.id":"msg_never_sent"`) || !strings.Contains(logs, `"message.id":"report_1"`) {
 		t.Fatalf("logs hold %d client.protocol_error records or the report's message", strings.Count(logs, `"event":"client.protocol_error"`))
 	}
+	withNUL := protocol.ProtocolErrorReport{ConnectionID: stream.connectionID, MessageID: "report_nul", Error: protocol.ProtocolError{Code: "invalid_message", Message: "a\u0000b"}}
+	if response, err := cli.ProtocolError(f.ctx, withNUL); err != nil || response.Status != http.StatusOK {
+		t.Fatalf("report holding U+0000 = %d %s, %v; want its ACK", response.Status, response.Body, err)
+	}
+	var message []byte
+	if err := f.admin.QueryRowContext(f.ctx, `SELECT message FROM connection_protocol_errors WHERE message_id='report_nul'`).Scan(&message); err != nil || string(message) != "a\u0000b" {
+		t.Fatalf("stored message %q, %v; want the report's bytes", message, err)
+	}
 }
 
 // TestHeartbeatsRecordNothingAndEventStreamsStartNoSpan proves the hub's
@@ -350,6 +358,22 @@ func TestReadyBelowTheMinimumVersionIsRefusedAndShownOffline(t *testing.T) {
 	}
 	if after := f.connectionRow(stream.connectionID); after["lease_expires_at"] != before["lease_expires_at"] {
 		t.Fatalf("lease %v -> %v; the refusal renewed it", before["lease_expires_at"], after["lease_expires_at"])
+	}
+}
+
+// TestReadyAcceptsACLIVersionOfAnyLength sends a ready whose version, a
+// SemVer with 300 characters of build metadata, has no length bound.
+func TestReadyAcceptsACLIVersionOfAnyLength(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	cli := f.userInstance(time.Time{})
+	stream := f.open(cli)
+	version := "1.0.0+" + strings.Repeat("a", 300)
+	response, err := cli.Ready(f.ctx, readyOf(stream.connectionID, "ready_long_version", version))
+	if _, decodeErr := response.Grant(); err != nil || decodeErr != nil {
+		t.Fatalf("ready = %d %s, %v; want its grant", response.Status, response.Body, err)
+	}
+	if got := f.instanceRead(cli.InstanceID)["cli_version"]; got != version {
+		t.Fatalf("cli_version = %v; want the ready's", got)
 	}
 }
 

@@ -137,7 +137,8 @@ partial unique index allows one connection per instance that has not ended.
 upstream messages other than ready and heartbeat, keyed by the SHA-256 of the
 `message_id`, with the request fingerprint and the exact answer; ending the
 connection deletes its rows. `connection_protocol_errors` keeps each accepted
-protocol-error report. `connection_instructions` holds one row per Session
+protocol-error report, its message as UTF-8 bytes, since a JSON string may hold
+U+0000. `connection_instructions` holds one row per Session
 instruction issued on a connection: its `message_id`, unique over all
 connections, its issue sequence on the connection, the exact envelope every
 write sends with the issuing work's trace context, and the times of its first
