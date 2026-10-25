@@ -13,9 +13,10 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::ExitCode;
 
-use rustix::io::{Errno, FdFlags};
+use rustix::io::FdFlags;
 use serde_json::json;
 
+use super::DirectoryError;
 use crate::isolation::PASSED_DESCRIPTOR;
 
 /// The entry's kind, after [`super::ENTRY`].
@@ -51,43 +52,26 @@ pub(super) fn run(arguments: &[OsString]) -> ExitCode {
 
 /// Enters `directory` and executes the shell; returns only the failure.
 fn launch(status: &OwnedFd, directory: &Path, shell: &OsStr, cmd: &OsStr) -> serde_json::Value {
-    let directory_failure = |errno: Errno| match errno {
-        Errno::NOENT | Errno::NOTDIR => failure(
-            "cwd_not_found",
-            "working directory does not exist",
-            Some(directory),
-        ),
-        Errno::ACCESS | Errno::PERM => failure(
-            "cwd_inaccessible",
-            "working directory is not accessible",
-            Some(directory),
-        ),
-        _ => failure("exec_spawn_failed", NOT_STARTED, None),
+    let directory_failure = |error: DirectoryError| match error {
+        DirectoryError::Other => not_started(),
+        error => serde_json::to_value(error.tool_error(directory)).unwrap_or_default(),
     };
-    match rustix::fs::stat(directory) {
-        Err(errno) => return directory_failure(errno),
-        Ok(stat) if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_dir() => {
-            return failure(
-                "cwd_not_directory",
-                "working directory is not a directory",
-                Some(directory),
-            );
-        }
-        Ok(_) => {}
+    if let Err(error) = super::check_directory(directory) {
+        return directory_failure(error);
     }
     state::seams::barrier_blocking("task.launch");
-    if let Err(errno) = rustix::process::chdir(directory) {
-        return directory_failure(errno);
+    if let Err(error) = super::enter_directory(directory) {
+        return directory_failure(error);
     }
     // The PID namespace's first process passes the signals it receives on
     // to this process's group, which then holds the shell and every process
     // it leaves behind.
     #[cfg(target_os = "linux")]
     if rustix::process::setpgid(None, None).is_err() {
-        return failure("exec_spawn_failed", NOT_STARTED, None);
+        return not_started();
     }
     if rustix::io::fcntl_setfd(status, FdFlags::CLOEXEC).is_err() {
-        return failure("exec_spawn_failed", NOT_STARTED, None);
+        return not_started();
     }
     let mut command = std::process::Command::new(shell);
     command.arg("-c").arg(cmd);
@@ -95,12 +79,12 @@ fn launch(status: &OwnedFd, directory: &Path, shell: &OsStr, cmd: &OsStr) -> ser
         command.env_remove(name);
     }
     if rustix::io::write(status, super::STARTED).is_err() {
-        return failure("exec_spawn_failed", NOT_STARTED, None);
+        return not_started();
     }
     let _ = command.exec();
-    failure("exec_spawn_failed", NOT_STARTED, None)
+    not_started()
 }
 
-fn failure(kind: &str, message: &str, path: Option<&Path>) -> serde_json::Value {
-    json!({"kind": kind, "message": message, "path": path.map(|path| path.display().to_string())})
+fn not_started() -> serde_json::Value {
+    json!({"kind": "exec_spawn_failed", "message": NOT_STARTED, "path": null})
 }

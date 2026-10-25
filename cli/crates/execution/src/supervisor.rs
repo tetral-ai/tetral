@@ -12,6 +12,11 @@
 //! start or the cancel that prevents it: each waiting reply is a timer and a
 //! waiter of the supervisor, which meanwhile keeps reading output and
 //! handling the exit and other controls. Every wait reads the seam clock.
+//! A file tool's task runs its child instead of a command
+//! ([`crate::file_tools`]): `running` from the spawn, its `terminal` report
+//! is made once the child's result is received, or once its child is gone
+//! without one, and a cancel ends the child through the termination
+//! procedure.
 //!
 //! Once the task's first process inside its sandbox exists, the supervisor
 //! writes the task's record ([`cleanup::Record`]) and tells its binding
@@ -33,8 +38,8 @@ use protocol::field::PositiveInt;
 use protocol::id::Id;
 use protocol::ports::{ReportId, ReportListener, ReportOutcome, ReportSink};
 use protocol::tool::{
-    CancelPayload, ControlErrorCode, ExecInput, HelperStatus, HelperTool, Metrics, ProtocolError,
-    ReportPhase, StdinPayload, StreamSnapshot, ToolError,
+    CancelPayload, ControlErrorCode, HelperEnvelope, HelperStatus, HelperTool, Metrics,
+    ProtocolError, ReportPhase, StdinPayload, StreamSnapshot, ToolError, ToolInput,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::pipe::Receiver;
@@ -46,6 +51,7 @@ use crate::cancel::Receipt;
 use crate::capture::StreamCapture;
 use crate::cleanup;
 use crate::exec::{self, ExecCall, ExitFacts, OnExpiry, Outcome};
+use crate::file_tools::{self, FileCall, Pipes};
 use crate::isolation::{Command, Isolation, LaunchError, Process};
 use crate::limits::Visible;
 use crate::policy::{PolicyRejection, TaskPermissions};
@@ -98,11 +104,11 @@ const NOT_STARTED_IN_WAIT: &str = "process did not start within the wait";
 
 const STDIN_CLOSED: &str = "task stdin is closed or not accepting input";
 
-/// One admitted `exec_command` task, as its supervisor starts it.
+/// One admitted task, as its supervisor starts it.
 pub struct TaskSpec {
     pub connection_id: Id,
     pub correlation: Correlation,
-    pub input: ExecInput,
+    pub tool: ToolInput,
     pub permissions: TaskPermissions,
     pub limits: Visible,
     /// The binding's canonical working directory.
@@ -299,6 +305,22 @@ struct Supervisor {
     checked: Duration,
 }
 
+/// What a task runs.
+enum Work {
+    Exec(ExecCall),
+    File(FileCall),
+}
+
+impl Work {
+    fn of(tool: &ToolInput, cwd: &std::path::Path) -> Work {
+        match (tool, FileCall::of(tool)) {
+            (ToolInput::ExecCommand(input), _) => Work::Exec(ExecCall::new(input, cwd)),
+            (_, Some(call)) => Work::File(call),
+            (_, None) => unreachable!("every tool but exec_command is a file tool"),
+        }
+    }
+}
+
 /// Why a task did not reach `running`.
 enum Start {
     /// The check or the transform refused the call; no process started.
@@ -369,7 +391,7 @@ impl Supervisor {
                 return;
             }
             Staged::Cancelled => {}
-            Staged::Started => match self.launch().await {
+            Staged::Started => match self.launch(Work::of(&self.spec.tool, &self.spec.cwd)).await {
                 Err(Start::Rejected(rejection)) => {
                     self.submit(
                         self.spec.correlation.clone(),
@@ -386,7 +408,8 @@ impl Supervisor {
                     });
                 }
                 Err(Start::Failed(error)) => self.report_start_failure(error),
-                Ok((call, status)) => self.running(call, status).await,
+                Ok((Work::Exec(call), status)) => self.running(call, status).await,
+                Ok((Work::File(call), status)) => self.file_running(call, status).await,
             },
         }
         self.settle().await;
@@ -519,11 +542,12 @@ impl Supervisor {
     }
 
     /// `starting`: the availability check, the task's files, the
-    /// environment and the launch; gives the call and the launch-status
+    /// environment and the launch; gives the work and the launch-status
     /// pipe.
-    async fn launch(&mut self) -> Result<(ExecCall, Receiver), Start> {
+    async fn launch(&mut self, work: Work) -> Result<(Work, Receiver), Start> {
         let context = &self.context;
         let spec = &self.spec;
+        let failed = |message: &str| Start::Failed(start_error(&work, message));
         let available = context
             .isolation
             .check(&spec.permissions, &spec.cwd, &context.tetral)
@@ -531,14 +555,14 @@ impl Supervisor {
             .map_err(Start::Rejected)?;
         spec.files
             .create()
-            .map_err(|failure| spawn_failed(&failure.to_string()))?;
-        let call = ExecCall::new(&spec.input, &spec.cwd);
-        let mut env = crate::env::command_environment(
-            std::env::vars_os(),
-            call.env.as_ref(),
-            spec.files.temporary(),
-        )
-        .map_err(|_| spawn_failed(NOT_STARTED))?;
+            .map_err(|failure| failed(&failure.to_string()))?;
+        let call_env = match &work {
+            Work::Exec(call) => call.env.as_ref(),
+            Work::File(_) => None,
+        };
+        let mut env =
+            crate::env::command_environment(std::env::vars_os(), call_env, spec.files.temporary())
+                .map_err(|_| failed(NOT_STARTED))?;
         // A launcher entry without network cannot reach the test harness,
         // since Codex's seccomp refuses its `connect`; it gets none.
         if spec
@@ -550,13 +574,16 @@ impl Supervisor {
         {
             env.insert(name.to_owned(), value.to_string_lossy().into_owned());
         }
-        let (status, status_writer) = std::io::pipe().map_err(|_| spawn_failed(NOT_STARTED))?;
+        let (status, status_writer) = std::io::pipe().map_err(|_| failed(NOT_STARTED))?;
         let mut argv = vec![context.tetral.display().to_string()];
-        argv.extend(
-            crate::child::exec::arguments(&call.directory, exec::shell(), &call.cmd)
-                .into_iter()
-                .map(|argument| argument.to_string_lossy().into_owned()),
-        );
+        match &work {
+            Work::Exec(call) => argv.extend(
+                crate::child::exec::arguments(&call.directory, exec::shell(), &call.cmd)
+                    .into_iter()
+                    .map(|argument| argument.to_string_lossy().into_owned()),
+            ),
+            Work::File(call) => argv.extend(call.arguments()),
+        }
         let command = Command {
             argv,
             env,
@@ -575,29 +602,36 @@ impl Supervisor {
             .await
             .map_err(|error| match error {
                 LaunchError::Rejected(rejection) => Start::Rejected(rejection),
-                LaunchError::Spawn(_) => spawn_failed(NOT_STARTED),
+                LaunchError::Spawn(_) => failed(NOT_STARTED),
             })?;
         self.spawned = state::seams::now();
-        let status = Receiver::from_owned_fd(OwnedFd::from(status))
-            .map_err(|_| spawn_failed(NOT_STARTED))?;
-        self.stdin = process.child.stdin.take();
-        self.out.reader = process
-            .child
-            .stdout
-            .take()
-            .map(|reader| Box::new(reader) as _);
-        self.err.reader = process
-            .child
-            .stderr
-            .take()
-            .map(|reader| Box::new(reader) as _);
+        let status =
+            Receiver::from_owned_fd(OwnedFd::from(status)).map_err(|_| failed(NOT_STARTED))?;
+        if let Work::Exec(_) = work {
+            self.stdin = process.child.stdin.take();
+            self.out.reader = process
+                .child
+                .stdout
+                .take()
+                .map(|reader| Box::new(reader) as _);
+            self.err.reader = process
+                .child
+                .stderr
+                .take()
+                .map(|reader| Box::new(reader) as _);
+        }
         self.process = Some(process);
-        Ok((call, status))
+        Ok((work, status))
     }
 
     /// The `terminal` report of a command that never started: `status:
-    /// error`, null exit facts and empty streams.
+    /// error`, null exit facts and empty streams; of a file tool, its
+    /// error.
     fn report_start_failure(&mut self, error: ToolError) {
+        if let Some(call) = FileCall::of(&self.spec.tool) {
+            self.report_file(crate::child::failed(call.tool(), error), Duration::ZERO);
+            return;
+        }
         let outcome = self.outcome(HelperStatus::Error, Some(error), ExitFacts::default());
         let empty = StreamCapture::new();
         self.report(ReportPhase::Terminal, outcome, &empty, &empty);
@@ -782,6 +816,118 @@ impl Supervisor {
         self.out.capture = out;
         self.err.capture = err;
         self.ended = Some(state);
+    }
+
+    /// From the spawn of a file tool's child until its `terminal` report:
+    /// the request goes to the child's stdin and its result is read from
+    /// its stdout, while cancels and the ends of the connection are
+    /// handled. A result that is all there before a cancel is handled
+    /// stands; a cancel ends the child through the termination procedure,
+    /// and its call then ends `cancelled`.
+    async fn file_running(&mut self, call: FileCall, status: Receiver) {
+        let bounds = self.context.bounds;
+        let (pid, mut pipes) = {
+            let process = self.process.as_mut().expect("a launched child");
+            let child = &mut process.child;
+            let pipes = Pipes::new(
+                child.stdin.take(),
+                call.request(&self.spec.cwd),
+                child.stdout.take(),
+                child.stderr.take(),
+            );
+            (process.pid, pipes)
+        };
+        let mut status = Some(status);
+        let mut forgotten = false;
+        while !pipes.received() {
+            let ending_due = self
+                .ending
+                .map_or(Duration::MAX, |(termination, _)| termination.due());
+            let drain_ends = self.exit.as_ref().map_or(Duration::MAX, |(_, at)| {
+                let drained = *at + bounds.output_drain;
+                match self.ending {
+                    Some((termination, _)) if termination.killed() => {
+                        drained.min(termination.due())
+                    }
+                    _ => drained,
+                }
+            });
+            if self.ending.is_some() {
+                self.find_leader(pid);
+            }
+            tokio::select! {
+                () = pipes.step() => {}
+                read = read_some(status.as_mut()), if status.is_some() => match read {
+                    Some(bytes) => {
+                        if self.start.is_none() && bytes.starts_with(crate::child::STARTED) {
+                            self.start = Some(state::seams::now());
+                            self.find_leader(pid);
+                        }
+                    }
+                    None => status = None,
+                },
+                _ = wait_child(self.process.as_mut()), if self.exit.is_none() => {
+                    self.exit = Some((ExitFacts::default(), state::seams::now()));
+                }
+                () = state::seams::sleep_until(drain_ends), if self.exit.is_some() => break,
+                () = state::seams::sleep_until(ending_due), if self.exit.is_none() && self.ending.is_some() => {
+                    let Some((termination, expiry)) = self.ending else { break };
+                    match termination.step() {
+                        Some(next) => self.ending = Some((next, expiry)),
+                        None => break,
+                    }
+                }
+                message = self.messages.recv(), if !forgotten => match message {
+                    Some(SupervisorMessage::Cancel(control)) => self.cancel(*control),
+                    Some(SupervisorMessage::Outcome(report, _)) => {
+                        self.awaited.remove(&report);
+                    }
+                    Some(SupervisorMessage::ConnectionEnded) => self.stop(pid, Expiry::ConnectionEnded),
+                    Some(SupervisorMessage::Shutdown) => self.stop(pid, Expiry::Shutdown),
+                    // The binding owner refuses a `tool.stdin` of a file
+                    // tool's task.
+                    Some(SupervisorMessage::Stdin(_) | SupervisorMessage::Start) => {}
+                    None => forgotten = true,
+                },
+            }
+        }
+        let now = state::seams::now();
+        let run = self
+            .start
+            .map_or(Duration::ZERO, |start| now.saturating_sub(start));
+        let envelope = if self.cancelled {
+            call.cancelled(self.start.is_some())
+        } else {
+            pipes
+                .result()
+                .and_then(|bytes| call.result(bytes))
+                .unwrap_or_else(|| call.failure(file_tools::NO_VALID_RESULT))
+        };
+        pipes.close();
+        self.report_file(envelope, run);
+    }
+
+    /// Hands a file tool's `terminal` report, with its `metrics` for work
+    /// that ran for `run`, to the outbox; the task has then ended.
+    fn report_file(&mut self, mut envelope: HelperEnvelope, run: Duration) {
+        envelope.metrics = Some(self.metrics(run));
+        self.report_seq += 1;
+        let body = Body::Result {
+            phase: ReportPhase::Terminal,
+            report_seq: PositiveInt::new(self.report_seq).expect("a report_seq from 1"),
+            result: Box::new(report::bounded(envelope, ErrorBounds::default())),
+        };
+        self.submit(
+            self.spec.correlation.clone(),
+            &self.spec.connection_id.clone(),
+            self.spec.traceparent.clone(),
+            body,
+        );
+        self.ended = Some(State {
+            ended: true,
+            duration: run,
+            ..State::default()
+        });
     }
 
     /// The task as a reply reports it now.
@@ -1178,6 +1324,10 @@ impl Supervisor {
 
     /// The `terminal` report of a task cancelled before it started.
     fn report_cancelled_staged(&mut self) {
+        if let Some(call) = FileCall::of(&self.spec.tool) {
+            self.report_file(call.cancelled(false), Duration::ZERO);
+            return;
+        }
         let mut outcome = self.outcome(HelperStatus::Success, None, ExitFacts::default());
         outcome.cancelled = Some(true);
         let empty = StreamCapture::new();
@@ -1369,8 +1519,14 @@ impl StreamOutput for Counters {
     }
 }
 
-fn spawn_failed(message: &str) -> Start {
-    Start::Failed(exec::tool_error("exec_spawn_failed", message, None))
+/// The error of a start of `work` that failed for `message`: a command's
+/// `exec_spawn_failed`, a file tool's `helper_failure`.
+fn start_error(work: &Work, message: &str) -> ToolError {
+    let kind = match work {
+        Work::Exec(_) => "exec_spawn_failed",
+        Work::File(_) => "helper_failure",
+    };
+    exec::tool_error(kind, message, None)
 }
 
 /// The error of the failure object that the launcher entry wrote on the

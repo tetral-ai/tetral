@@ -7,6 +7,7 @@ pub mod child;
 pub mod cleanup;
 pub mod env;
 pub mod exec;
+pub mod file_tools;
 pub mod isolation;
 pub mod limits;
 pub mod policy;

@@ -1,5 +1,5 @@
 //! The Session binding owners' task starter: one Task supervisor for each
-//! admitted `exec_command` task.
+//! admitted `exec_command` or `edit` task.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,13 +30,13 @@ impl TaskStarter for Supervisors {
         reports: Arc<dyn ReportSink>,
         listener: Arc<dyn TaskListener>,
     ) -> Option<SupervisorMailbox> {
-        let ToolInput::ExecCommand(input) = task.tool else {
+        if let ToolInput::ViewImage(_) = task.tool {
             return None;
-        };
+        }
         let spec = TaskSpec {
             connection_id: task.connection_id,
             correlation: task.correlation,
-            input,
+            tool: task.tool,
             permissions: task.permissions,
             limits: Visible::requested(task.limits.as_ref()),
             cwd: task.cwd,

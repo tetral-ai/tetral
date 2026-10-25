@@ -218,6 +218,8 @@ fn failed_controls_leave_the_task_and_its_reports_unchanged() {
         tasks.reply(&unsupported)["error"]["code"],
         "unsupported_control"
     );
+    // The edit's own report, so that the fault below meets the read's reply.
+    tasks.terminal("task_edit");
 
     let answered = answers_settled(&tasks);
     answer_fault(

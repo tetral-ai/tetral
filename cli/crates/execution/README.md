@@ -110,9 +110,26 @@ which owns that task's process tree; the translation of a call's
   descriptor 3: `child::STARTED` right before the exec, whose arrival is the
   task's actual start, or a failure object. The pipe's end tells nothing,
   since the sandbox's own stages hold it open (`child`).
+- `edit` runs only as the restricted child `tetral __tetral-task edit`,
+  through the same launch as a command and never in the App Server. The
+  child writes `child::STARTED` at its own start, reads one request
+  `{cwd, input}` from stdin, joins a relative path to `cwd` only after the
+  checks of a command's directory, and writes one result envelope to
+  stdout (`child`). The supervisor takes a result once the child's stdout
+  has ended, within `file_tools::RESULT_MAX_BYTES`, and only a finished,
+  untruncated envelope of the call's tool; anything else is
+  `helper_failure` (`file_tools`). A cancel ends the child through the
+  termination procedure and the call ends `cancelled`, after the call
+  started once the child wrote its start; a result received first stands
+  (`supervisor`).
+- An edit reads at most `child::edit::MAX_BYTES` and one byte more, finds
+  `old_string` exactly or, only when that finds nothing, with curly quotes
+  mapped to ASCII, which locates spans and changes no written byte, and
+  writes through a new file beside the target, renamed over it with the
+  target's mode (`child/edit.rs`).
 - A command's environment is the App Server's without any `TETRAL_` name,
   then the call's `env`, then entries that `env` cannot override and
-  `TMPDIR` (`env`).
+  `TMPDIR`; a file tool's child gets the same without `env` (`env`).
 - A call's waits take their defaults and clamps from `exec::ExecCall`. On
   Linux an exit status from 129 to 192 is a death by signal `status - 128`,
   which the sandbox's stages report that way (`exec::ExitFacts::observed`).
@@ -160,8 +177,12 @@ which owns that task's process tree; the translation of a call's
 - `exec.rs`: `ExecCall`, a call's directory, waits and expiry; `shell`;
   `ExitFacts`; `Outcome`, the result envelope of a report.
 - `env.rs`: `command_environment`.
-- `child/mod.rs`, `child/exec.rs`: the launcher entry `__tetral-task` and its
-  `exec` kind.
+- `child/mod.rs`: the launcher entry `__tetral-task`, a file tool's
+  `FileRequest` and its envelope, and the directory checks; `child/exec.rs`
+  and `child/edit.rs`: its `exec` and `edit` kinds.
+- `file_tools.rs`: `FileCall`, a file tool's child arguments, request,
+  result and the envelopes of its failure and its cancel; `Pipes`, the
+  child's stdin and stdout as the supervisor drives them.
 - `terminate.rs`: `Termination`, its `Steps` and `interrupt`.
 - `process/mod.rs`, `process/linux.rs`: a task's `Leader`, its PID
   namespace and whether the namespace is empty, start times and the boot ID.
