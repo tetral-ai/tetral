@@ -60,7 +60,8 @@ func TestComputerHubSeparatesConnectionKeysFromWorkspaceCredentials(t *testing.T
 	if _, err := workspace.NewSeeder(admin).Seed(ctx, ws, "class"); err != nil {
 		t.Fatal(err)
 	}
-	authDB := storagetest.OpenWorkloadDB(t, admin, "auth").DB
+	workloads := storagetest.OpenWorkloadDB(t, admin, "auth")
+	authDB := workloads.DB
 	apiKey, err := authtest.SeedIndependentKey(ctx, authDB, ws, "class")
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +96,8 @@ func TestComputerHubSeparatesConnectionKeysFromWorkspaceCredentials(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	hub := httptest.NewServer(computerhub.BuildHTTPHandler(workload.NewReadiness(), computerhub.NewRouter(verifier)))
+	instances := computerhub.InstanceRoutes{Database: dbconnect.NewClientForTesting(workloads.OpenWorkload(t, "computer_hub", nil)), MaxCredentialLifetime: time.Hour, PageTokenKey: make([]byte, 32)}
+	hub := httptest.NewServer(computerhub.BuildHTTPHandler(workload.NewReadiness(), computerhub.NewRouter(verifier, computerhub.WithInstanceRoutes(instances))))
 	t.Cleanup(hub.Close)
 	edge := httptest.NewServer(classEdge{checkAddress: startSDKAuthorization(t, authDB, signer, time.Minute), hubURL: hub.URL})
 	t.Cleanup(edge.Close)

@@ -3819,6 +3819,21 @@
             }
           }
         },
+        "instance_credential_audit": {
+          "level": "INFO",
+          "log_type": "audit",
+          "audience": "operators",
+          "fields": {
+            "actor.credential.id": "string",
+            "actor.credential.kind": "string",
+            "credential.id": "string",
+            "edge.request.id": "string",
+            "instance.id": "string",
+            "operation": "string",
+            "request.id": "string",
+            "workspace.id": "string"
+          }
+        },
         "schema.migration.completed": {
           "level": "INFO",
           "log_type": "app",

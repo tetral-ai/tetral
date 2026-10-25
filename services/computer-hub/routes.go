@@ -19,8 +19,9 @@ const ClientRoutePrefix = "/v1/client/"
 var ManagementRoutePrefixes = []string{"/v1/instance_requests", "/v1/instances"}
 
 type routerOptions struct {
-	logger  *slog.Logger
-	metrics httpapi.RequestMetricsRecorder
+	logger    *slog.Logger
+	metrics   httpapi.RequestMetricsRecorder
+	instances *InstanceRoutes
 }
 
 type RouterOption func(*routerOptions)
@@ -31,6 +32,12 @@ func WithLogger(logger *slog.Logger) RouterOption {
 
 func WithRequestMetrics(metrics httpapi.RequestMetricsRecorder) RouterOption {
 	return func(o *routerOptions) { o.metrics = metrics }
+}
+
+// WithInstanceRoutes serves the instance and instance credential routes over
+// the given database client.
+func WithInstanceRoutes(routes InstanceRoutes) RouterOption {
+	return func(o *routerOptions) { o.instances = &routes }
 }
 
 // NewRouter returns the public handler. Every route first verifies the
@@ -62,6 +69,9 @@ func NewRouter(verifier *auth.InternalPrincipalVerifier, opts ...RouterOption) h
 		for _, prefix := range ManagementRoutePrefixes {
 			r.Handle(prefix, http.HandlerFunc(writeManagementNotFound))
 			r.Handle(prefix+"/*", http.HandlerFunc(writeManagementNotFound))
+		}
+		if options.instances != nil {
+			(&instanceHandler{InstanceRoutes: *options.instances, logger: options.logger}).register(r)
 		}
 	})
 	router.NotFound(writeManagementNotFound)

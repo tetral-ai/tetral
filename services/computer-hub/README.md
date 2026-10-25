@@ -9,7 +9,8 @@ Controller and developer routes under `/v1/instance_requests` and
 three prefixes here after `auth`'s Check.
 
 The service owns no table. It reads and writes through `internal/instance`
-(instances and their connection credentials). It connects to PostgreSQL as the
+(instances, their connection credentials and the idempotency records of the
+issuing routes). It connects to PostgreSQL as the
 serving role `computer_hub` and holds the blob store open through
 `internal/blob` for drive content and images.
 
@@ -37,6 +38,51 @@ Error bodies:
   no body for a `5xx`, which keeps the API envelope.
 - Management routes answer the API error envelope through
   `httpapi.WriteError`.
+
+## Instance routes
+
+`POST /v1/instances`, `GET /v1/instances`, `GET /v1/instances/{instance_id}`,
+`DELETE /v1/instances/{instance_id}`, and
+`POST|GET /v1/instances/{instance_id}/credentials` and
+`DELETE /v1/instances/{instance_id}/credentials/{credential_id}` run under the
+operations `instances.*` and `instance_credentials.*`.
+
+- Bodies are read by `httpapi.ReadJSONBody` (at most 1 MiB, else `413
+  request_too_large`; U+0000 refused) and must be one JSON object without
+  repeated or unknown keys.
+- The issuing routes require `Idempotency-Key` once, 1 to 255 bytes after
+  trimming, checked before any idempotency record is read. Creation checks the
+  key, the record, then the body; issuance checks that the instance exists, the
+  key, the record, a deregistered instance (`403 instance_unavailable_error`),
+  `delivery`, `expires_at`, then the credential limit (`409
+  credential_limit_error`). A replay with an equal canonical fingerprint
+  answers the stored status with the current objects and `connection_key:
+  null`; a different request with the key answers `409
+  idempotency_conflict_error`. A record is written with the effect, and a
+  transaction that loses the record's unique key to a concurrent identical
+  request runs once more and replays.
+- `expires_at` is absent (issuance plus `TETRAL_COMPUTER_HUB_MAX_CREDENTIAL_LIFETIME`)
+  or an RFC 3339 time ending in `Z`, later than issuance and at most the
+  maximum lifetime after it, stored to the microsecond; issuance time is the
+  database clock of the transaction.
+- `delivery: stream`, also when `delivery` is absent, answers `409
+  instance_offline_error` after these checks and writes nothing: no CLI
+  connection is online yet.
+- Revocation and deregistration answer `204` and change nothing when
+  repeated; deregistration revokes every credential not yet revoked with cause
+  `deregistration` and keeps the instance as a tombstone.
+- Lists take `limit` (default 20, at most 100, a positive integer given once)
+  and `page`, a token signed with `TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY` that
+  binds the workspace, the route, the filters and the order; items come in
+  creation order and `next_page` is `null` after the last page.
+- A missing or other-workspace object answers `404 not_found_error`; any other
+  failure than the ones above is a database failure, `503` with nothing
+  changed. The key appears only in the first successful issuance response;
+  nothing logs a request or response body.
+- Each issued or revoked credential writes one `instance_credential_audit`
+  record (`log.type` `audit`) after the commit, with the actor's credential
+  kind and ID, `instance.id`, `credential.id` and `operation` `issue` or
+  `revoke`.
 
 Controllers authenticate with the workspace API key; there is no
 Controller-specific credential. Every management route acts only in the
@@ -66,6 +112,7 @@ redacted startup record. Shutdown drains both listeners within 10 seconds.
 - `ConfigFromEnv` parses every `TETRAL_COMPUTER_HUB_*` setting and the
   principal key.
 - `NewRouter(verifier, ...)` is the public route table with its class checks;
+  `WithInstanceRoutes` serves the instance routes over a database client;
   `BuildHTTPHandler` adds health and readiness. Tests mint principals with
   `auth.InternalPrincipalSigner` and send them here directly.
 - `Run(ctx, cfg, Runtime)` serves the two listeners over a verified database
@@ -74,6 +121,14 @@ redacted startup record. Shutdown drains both listeners within 10 seconds.
 ## Testing guide
 
 - `config_test.go`: the required settings, overrides and each rejected setting.
+- `instance_routes_test.go`, over HTTP as the `computer_hub` role with minted
+  principals: a lost creation response replayed without a second instance and
+  a changed request refused; the name and `Idempotency-Key` bounds, a refused
+  key reading no record; ten concurrent issuances against the credential
+  limit; no key outside its issuance response, in reads, lists, error bodies,
+  idempotency rows, logs or audit records; the states and fields of instance
+  and credential reads; repeated revocation and deregistration; expiry bounds
+  and an omitted expiry resolved once; paging 101 instances.
 - `integration/computer_hub_credential_class_test.go`: each credential class on
   the other class's routes, through `auth`'s Check and a Go edge with the
   production route rules, and straight at the hub with principals Check never
@@ -86,5 +141,6 @@ redacted startup record. Shutdown drains both listeners within 10 seconds.
 
 The service records through `internal/workload` with the shared HTTP request
 records and metrics, the cold start of a service pod, and the `auth.*`
-decision records of the signed principal and the operation gate declared in
+decision records of the signed principal and the operation gate, and the
+`instance_credential_audit` record, declared in
 [`observability.json`](observability.json).

@@ -38,7 +38,8 @@ func Run(ctx context.Context, cfg Config, runtime Runtime) error {
 	}
 	readiness := workload.NewReadiness()
 	httpMetrics := workload.NewHTTPMetrics(ServiceName)
-	public := BuildHTTPHandler(readiness, NewRouter(cfg.PrincipalVerifier, WithLogger(logger), WithRequestMetrics(httpMetrics)))
+	instances := InstanceRoutes{Database: runtime.Database, MaxCredentialLifetime: cfg.MaxCredentialLifetime, PageTokenKey: cfg.PageTokenKey}
+	public := BuildHTTPHandler(readiness, NewRouter(cfg.PrincipalVerifier, WithLogger(logger), WithRequestMetrics(httpMetrics), WithInstanceRoutes(instances)))
 	metrics := workload.HealthRouter(readiness,
 		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
