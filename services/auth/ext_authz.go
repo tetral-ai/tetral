@@ -25,6 +25,9 @@ import (
 const ExternalAuthorizationTimeout = 5 * time.Second
 const internalPrincipalHeader = "x-tetral-internal-principal"
 
+// clientRoutePrefix holds the routes a CLI calls with its connection key.
+const clientRoutePrefix = "/v1/client/"
+
 // ExternalAuthorizationConfig borrows the Auth application's domain owners.
 // It performs no bootstrap mutation, transport construction, or database opening.
 type ExternalAuthorizationConfig struct {
@@ -76,12 +79,28 @@ func (a *ExternalAuthorization) Check(ctx context.Context, req *authv3.CheckRequ
 	}
 	requestID = metadata.requestID
 	ctx = auth.WithAuditRecorder(ctx, externalAuditRecorder{logger: a.cfg.Logger, requestID: requestID})
-	principal, err := a.cfg.Authenticator.AuthenticateRequest(ctx, auth.CredentialRequest{
+	credentials := auth.CredentialRequest{
 		Method: metadata.method, Path: metadata.path, APIKey: metadata.headers.Get("X-Api-Key"),
 		Authorization: metadata.headers.Get("Authorization"), AuthorizationValues: metadata.headers.Values("Authorization"),
-	})
-	if err != nil {
+	}
+	// Connection keys and every other credential are separate classes: the
+	// client routes admit only a connection key, and every other route
+	// rejects one before any lookup.
+	var principal auth.Principal
+	if strings.HasPrefix(metadata.path, clientRoutePrefix) {
+		principal, err = a.cfg.Authenticator.AuthenticateConnection(ctx, credentials)
+		if err != nil {
+			return deniedClientAuthorization(err, requestID), nil
+		}
+	} else if auth.HasConnectionKey(credentials) {
+		err = &auth.AuthenticationError{Message: "connection key outside the client routes"}
+		auth.RecordDecision(ctx, "admission", err, auth.AuditEvent{})
 		return deniedExternalAuthorization(err, requestID), nil
+	} else {
+		principal, err = a.cfg.Authenticator.AuthenticateRequest(ctx, credentials)
+		if err != nil {
+			return deniedExternalAuthorization(err, requestID), nil
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return deniedExternalAuthorization(err, requestID), nil
@@ -196,6 +215,25 @@ func deniedExternalAuthorization(err error, requestID string) *authv3.CheckRespo
 	return &authv3.CheckResponse{Status: &statuspb.Status{Code: int32(codes.PermissionDenied)}, HttpResponse: &authv3.CheckResponse_DeniedResponse{DeniedResponse: &authv3.DeniedHttpResponse{
 		Status: &typev3.HttpStatus{Code: typev3.StatusCode(status)}, Headers: []*corev3.HeaderValueOption{externalHeader("content-type", "application/json")}, Body: string(body) + "\n",
 	}}}
+}
+
+// deniedClientAuthorization answers a client route with the client error body.
+// A credential failure is 401 credential_invalid; any other failure keeps the
+// API envelope, since the client protocol defines no body for it.
+func deniedClientAuthorization(err error, requestID string) *authv3.CheckResponse {
+	var invalid *auth.AuthenticationError
+	if !errors.As(err, &invalid) {
+		return deniedExternalAuthorization(err, requestID)
+	}
+	body, _ := json.Marshal(clientErrorBody{Code: "credential_invalid", Message: "the connection key does not authenticate this request"})
+	return &authv3.CheckResponse{Status: &statuspb.Status{Code: int32(codes.PermissionDenied)}, HttpResponse: &authv3.CheckResponse_DeniedResponse{DeniedResponse: &authv3.DeniedHttpResponse{
+		Status: &typev3.HttpStatus{Code: typev3.StatusCode_Unauthorized}, Headers: []*corev3.HeaderValueOption{externalHeader("content-type", "application/json")}, Body: string(body) + "\n",
+	}}}
+}
+
+type clientErrorBody struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 type externalAuditRecorder struct {

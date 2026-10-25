@@ -476,6 +476,7 @@ func TestPublicOperationRejectsUnstorableRequestTarget(t *testing.T) {
 	full := identityAdmissionFixture(auth.IdentityHuman)
 	restricted := identityAdmissionFixture(auth.IdentityHuman)
 	restricted.Authority.Operations = []auth.Operation{auth.OperationModelsList}
+	connection := auth.ConnectionKeyPrincipal(full.Workspace, "inst_gate", "ccred_gate")
 	for _, test := range []struct {
 		name             string
 		target           string
@@ -494,6 +495,8 @@ func TestPublicOperationRejectsUnstorableRequestTarget(t *testing.T) {
 		{"different workspace header", "/v1/sessions/sesn_ok?beta=true&agent_id=agent_ok", full, []string{"other-workspace"}, http.StatusForbidden, "permission denied"},
 		{"empty workspace header", "/v1/sessions/sesn_ok?beta=true&agent_id=agent_ok", full, []string{""}, http.StatusForbidden, "permission denied"},
 		{"duplicate matching workspace headers", "/v1/sessions/sesn_ok?beta=true&agent_id=agent_ok", full, []string{string(full.Workspace.ID), string(full.Workspace.ID)}, http.StatusForbidden, "permission denied"},
+		{"connection key fails as a credential", "/v1/sessions/sesn_ok", connection, nil, http.StatusUnauthorized, "connection keys authenticate only client connection routes"},
+		{"connection key fails as a credential before the workspace header", "/v1/sessions/sesn_ok", connection, []string{"other-workspace"}, http.StatusUnauthorized, "connection keys authenticate only client connection routes"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			reached := false
@@ -516,12 +519,16 @@ func TestPublicOperationRejectsUnstorableRequestTarget(t *testing.T) {
 			if reached != (test.wantStatus == http.StatusNoContent) {
 				t.Fatalf("handler reached=%t for status %d", reached, response.Code)
 			}
-			if test.wantStatus == http.StatusForbidden {
-				if !strings.Contains(response.Body.String(), `"type":"permission_error"`) {
-					t.Fatalf("denial body = %s; want permission_error", response.Body.String())
+			if test.wantStatus == http.StatusForbidden || test.wantStatus == http.StatusUnauthorized {
+				errorType, code := "permission_error", "auth_operation_denied"
+				if test.wantStatus == http.StatusUnauthorized {
+					errorType, code = "authentication_error", "auth_operation_invalid"
 				}
-				if len(audit.events) != 1 || audit.events[0].Code != "auth_operation_denied" || audit.events[0].Operation != auth.OperationSessionsRead {
-					t.Fatalf("denial audit = %+v; want one operation denial", audit.events)
+				if !strings.Contains(response.Body.String(), `"type":"`+errorType+`"`) {
+					t.Fatalf("denial body = %s; want %s", response.Body.String(), errorType)
+				}
+				if len(audit.events) != 1 || audit.events[0].Code != code || audit.events[0].Operation != auth.OperationSessionsRead {
+					t.Fatalf("denial audit = %+v; want one %s", audit.events, code)
 				}
 			} else if len(audit.events) != 0 {
 				t.Fatalf("unexpected denial audit = %+v", audit.events)

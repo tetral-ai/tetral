@@ -88,6 +88,10 @@ const (
 	OperationVaultsUpdate                Operation = "vaults.update"
 )
 
+// OperationClientConnect is the one operation of a connection key principal.
+// It is not registered, so no role, API key or access token carries it.
+const OperationClientConnect Operation = "client.connect"
+
 var registeredOperations = []Operation{
 	OperationAgentVersionsList,
 	OperationAgentsArchive,
