@@ -14,6 +14,7 @@ type RuntimePlacementMetrics struct {
 	mutex            sync.Mutex
 	probes, attempts map[string]float64
 	operations       *workload.OperationMetrics
+	pressure         *workload.PressurePoint
 }
 
 // The zero value is used by owning resolvers and tests. Every access, including
@@ -53,17 +54,31 @@ func (m *RuntimePlacementMetrics) observeProbe(outcome string, elapsed time.Dura
 	m.probes[outcome]++
 	m.operationMetricsLocked().Observe("runtime_placement_probe", runtimePlacementMetricOutcome(outcome), elapsed)
 }
-func (m *RuntimePlacementMetrics) observeAttempt(outcome string, elapsed time.Duration) {
+
+// observeAttempt also feeds the jobrunner_placement pressure point: an
+// attempt that found no candidate or exhausted its probes is a refusal with
+// that cause, and a selection is an admission.
+func (m *RuntimePlacementMetrics) observeAttempt(ctx context.Context, outcome string, elapsed time.Duration) {
 	if m == nil {
 		return
 	}
 	m.mutex.Lock()
-	defer m.mutex.Unlock()
 	if m.attempts == nil {
 		m.attempts = map[string]float64{}
 	}
 	m.attempts[outcome]++
 	m.operationMetricsLocked().Observe("runtime_placement", runtimePlacementMetricOutcome(outcome), elapsed)
+	if m.pressure == nil {
+		m.pressure = workload.NewPressurePoint(workload.CurrentTelemetry().Registry(), "jobrunner_placement", "no_candidates", "exhausted")
+	}
+	pressure := m.pressure
+	m.mutex.Unlock()
+	switch outcome {
+	case "no_candidates", "exhausted":
+		_ = pressure.Reject(ctx, outcome)
+	case "selected":
+		pressure.Admit(ctx)
+	}
 }
 func (m *RuntimePlacementMetrics) Collector() workload.MetricsCollector {
 	return func(ctx context.Context) ([]workload.Metric, error) {

@@ -232,7 +232,7 @@ type runtimePlacementChoice struct {
 func (r KubernetesRuntimeTargetResolver) sampleRuntimePlacement(ctx context.Context, client *dbconnect.Client, job RuntimeJob) (choice runtimePlacementChoice, resultErr error) {
 	started := time.Now()
 	choice = runtimePlacementChoice{WorkspaceID: job.WorkspaceID, SessionID: job.SessionID, Reason: "exhausted"}
-	defer func() { r.PlacementMetrics.observeAttempt(choice.Reason, time.Since(started)) }()
+	defer func() { r.PlacementMetrics.observeAttempt(ctx, choice.Reason, time.Since(started)) }()
 	policy := r.PlacementPolicy
 	if policy == (RuntimePlacementPolicy{}) {
 		policy = DefaultRuntimePlacementPolicy()
@@ -305,33 +305,42 @@ func (r KubernetesRuntimeTargetResolver) sampleRuntimePlacement(ctx context.Cont
 			}(index, candidate)
 		}
 		joined.Wait()
-		choice.Observations = append(choice.Observations, results...)
-		var valid []runtimePlacementObservation
-		for _, result := range results {
+		var valid []int
+		for index, result := range results {
 			if result.Reason == "eligible" {
-				valid = append(valid, result)
+				valid = append(valid, index)
 			}
 		}
 		if len(valid) > 0 {
 			selected := valid[0]
 			if len(valid) == 2 {
+				other := valid[1]
+				tied := results[other].Report.ActiveSessions == results[selected].Report.ActiveSessions
 				tie := 0
-				if valid[1].Report.ActiveSessions == selected.Report.ActiveSessions {
+				if tied {
 					var err error
 					tie, err = r.placementRandomIndex(2)
 					if err != nil || tie < 0 || tie > 1 {
+						choice.Observations = append(choice.Observations, results...)
 						choice.Reason = "random_unavailable"
 						return choice, fmt.Errorf("placement randomness is unavailable")
 					}
 				}
-				if valid[1].Report.ActiveSessions < selected.Report.ActiveSessions || (valid[1].Report.ActiveSessions == selected.Report.ActiveSessions && tie == 1) {
-					selected = valid[1]
+				if results[other].Report.ActiveSessions < results[selected].Report.ActiveSessions || (tied && tie == 1) {
+					selected, other = other, selected
+				}
+				results[other].Reason = "more_active_sessions"
+				if tied {
+					results[other].Reason = "tie_lost"
 				}
 			}
-			choice.ProcessID, choice.Candidate, choice.Report = selected.ProcessID, selected.Candidate, selected.Report
+			results[selected].Reason = "selected"
+			choice.Observations = append(choice.Observations, results...)
+			choice.ProcessID, choice.Candidate, choice.Report = results[selected].ProcessID, results[selected].Candidate, results[selected].Report
 			choice.Reason = "selected"
 			return choice, nil
 		}
+		choice.Observations = append(choice.Observations, results...)
 		if ctx.Err() != nil {
 			choice.Reason = runtimeLoadFailureReason(ctx.Err())
 			break

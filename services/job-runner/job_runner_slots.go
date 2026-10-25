@@ -58,16 +58,23 @@ type jobRunnerSlots struct {
 	closed      bool
 	closedCh    chan struct{}
 	completed   chan error
+	// inProgress is jobrunner_slots_in_progress, the ACTIVE slots.
+	inProgress *workload.Gauge
 }
 
 var jobRunnerSlotsInit sync.Mutex
 
 func newJobRunnerSlots(capacity int) *jobRunnerSlots {
+	registry := workload.CurrentTelemetry().Registry()
+	registry.Gauge("jobrunner_slots_limit", "Job Runner execution slots.").Set(float64(capacity))
+	inProgress := registry.Gauge("jobrunner_slots_in_progress", "Job Runner slots running a leased job.")
+	inProgress.Set(0)
 	return &jobRunnerSlots{
-		capacity:  capacity,
-		free:      capacity,
-		closedCh:  make(chan struct{}),
-		completed: make(chan error, capacity),
+		capacity:   capacity,
+		free:       capacity,
+		closedCh:   make(chan struct{}),
+		completed:  make(chan error, capacity),
+		inProgress: inProgress,
 	}
 }
 
@@ -142,6 +149,7 @@ func (s *jobRunnerSlots) dispatch(reserved int, count int) bool {
 	}
 	s.active += count
 	s.free += reserved - count
+	s.inProgress.Set(float64(s.active))
 	return true
 }
 
@@ -157,6 +165,7 @@ func (s *jobRunnerSlots) finish(err error) {
 	s.mu.Lock()
 	s.active--
 	s.joining++
+	s.inProgress.Set(float64(s.active))
 	s.mu.Unlock()
 	s.completed <- err
 }

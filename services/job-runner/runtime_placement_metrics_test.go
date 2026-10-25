@@ -16,7 +16,7 @@ func TestRuntimePlacementZeroValueMetricsConcurrentCollectorAndHooks(t *testing.
 			defer joined.Done()
 			for range 100 {
 				metrics.observeProbe("eligible", 250*time.Millisecond)
-				metrics.observeAttempt("selected", 250*time.Millisecond)
+				metrics.observeAttempt(context.Background(), "selected", 250*time.Millisecond)
 				if _, err := metrics.Collector()(context.Background()); err != nil {
 					t.Error(err)
 				}

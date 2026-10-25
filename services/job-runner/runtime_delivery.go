@@ -804,7 +804,7 @@ const maxRuntimePreparationReentries = 2
 func (s *PostgreSQLRuntimeDeliveryStore) PrepareRuntimeCommand(ctx context.Context, job RuntimeJob) (RuntimeCommandPlan, error) {
 	started := time.Now()
 	plan, err := s.prepareRuntimeCommand(ctx, job, 0)
-	s.logRuntimePlacement(job, plan, err, started)
+	s.logRuntimePlacement(ctx, job, plan, err, started)
 	return plan, err
 }
 
@@ -2970,7 +2970,7 @@ func validateRuntimeRecoveryAuthorityTx(ctx context.Context, tx *dbconnect.Tx, j
 func (s *PostgreSQLRuntimeDeliveryStore) ActivateRuntimeRecovery(ctx context.Context, job RuntimeJob) (RuntimeCommandPlan, error) {
 	started := time.Now()
 	plan, err := s.activateRuntimeRecovery(ctx, job, 0)
-	s.logRuntimePlacement(job, plan, err, started)
+	s.logRuntimePlacement(ctx, job, plan, err, started)
 	return plan, err
 }
 func (s *PostgreSQLRuntimeDeliveryStore) activateRuntimeRecovery(ctx context.Context, job RuntimeJob, reentries int) (RuntimeCommandPlan, error) {
@@ -3672,7 +3672,11 @@ func runtimeScopeFromAttempt(job RuntimeJob, attempt RuntimeAttemptedBinding) *b
 	}
 }
 
-func (s *PostgreSQLRuntimeDeliveryStore) logRuntimePlacement(job RuntimeJob, plan RuntimeCommandPlan, err error, started time.Time) {
+// logRuntimePlacement writes the one runtime_placement record of an attempt.
+// Each probed candidate, at most four (two per round, two rounds), is the
+// scalar field set runtime.placement.candidate.<n>.*, n counting from 1 in
+// probe order.
+func (s *PostgreSQLRuntimeDeliveryStore) logRuntimePlacement(ctx context.Context, job RuntimeJob, plan RuntimeCommandPlan, err error, started time.Time) {
 	if s == nil || s.Logger == nil {
 		return
 	}
@@ -3698,13 +3702,14 @@ func (s *PostgreSQLRuntimeDeliveryStore) logRuntimePlacement(job RuntimeJob, pla
 			}
 			fields := []any{slog.String("kubernetes.uid", observation.Candidate.PodUID), slog.String("runtime.process.id", observation.ProcessID), slog.String("reason", observation.Reason)}
 			if observation.Report.Capacity > 0 && observation.Report.MemoryLimit > 0 {
-				fields = append(fields, slog.Float64("runtime.load.active_sessions", observation.Report.ActiveSessions), slog.Float64("runtime.load.session_capacity", observation.Report.Capacity), slog.Float64("runtime.load.memory_ratio", observation.Report.MemoryUsage/observation.Report.MemoryLimit))
+				fields = append(fields, runtimeLoadAttrs(observation.Report)...)
+				fields = append(fields, slog.Int64("runtime.load.memory_usage_bytes", int64(observation.Report.MemoryUsage)), slog.Int64("runtime.load.memory_limit_bytes", int64(observation.Report.MemoryLimit)))
 			}
 			attrs = append(attrs, slog.Group(fmt.Sprintf("runtime.placement.candidate.%d", index+1), fields...))
 		}
 		attrs = append(attrs, slog.Int("runtime.placement.rounds", choice.Rounds), slog.Int("runtime.placement.probes", choice.Probes), slog.String("runtime.placement.sampled_pod_uid", choice.Candidate.PodUID))
 		if choice.Report.MemoryLimit > 0 {
-			attrs = append(attrs, slog.Float64("runtime.load.active_sessions", choice.Report.ActiveSessions), slog.Float64("runtime.load.session_capacity", choice.Report.Capacity), slog.Float64("runtime.load.memory_ratio", choice.Report.MemoryUsage/choice.Report.MemoryLimit))
+			attrs = append(attrs, runtimeLoadAttrs(choice.Report)...)
 		}
 	}
 	if err != nil {
@@ -3715,7 +3720,11 @@ func (s *PostgreSQLRuntimeDeliveryStore) logRuntimePlacement(job RuntimeJob, pla
 		}
 		attrs = append(attrs, slog.String("error.class", "runtime_placement"), slog.String("error.code", kind), slog.Bool("retryable", true))
 	}
-	s.Logger.Info("runtime_placement", attrs...)
+	s.Logger.InfoContext(ctx, "runtime_placement", attrs...)
+}
+
+func runtimeLoadAttrs(report RuntimeLoadReport) []any {
+	return []any{slog.Int64("runtime.load.active_sessions", int64(report.ActiveSessions)), slog.Int64("runtime.load.session_capacity", int64(report.Capacity)), slog.Float64("runtime.load.memory_ratio", report.MemoryUsage/report.MemoryLimit)}
 }
 
 type KubernetesRuntimeTargetResolver struct {
