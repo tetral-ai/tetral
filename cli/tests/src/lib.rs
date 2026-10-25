@@ -2,6 +2,7 @@
 
 pub mod app_server;
 pub mod binaries;
+pub mod machine;
 pub mod other_user;
 pub mod record;
 pub mod reference;

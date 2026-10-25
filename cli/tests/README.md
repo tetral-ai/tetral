@@ -61,6 +61,10 @@ temporary directories. No workspace crate depends on this package.
 - `src/app_server.rs`: `AppServer`, a running `server run`, and `request`, one
   raw HTTP/1.1 request to the local API over a socket whose path it derives
   apart from the code under test (`socket_path`).
+- `src/machine.rs`: `Machine`, a configured root and its App Server on its
+  own seam clock against a reference control server that knows the test
+  credential, the helpers that drive and read that server, and the seam
+  counters of the Connection owner.
 - `tests/configure.rs`: `tetral configure` and `tetral --version`: the refused
   arguments, bootstraps, apps and control paths with the root unchanged, the
   size limit and private modes of a new root, each failure code, configure

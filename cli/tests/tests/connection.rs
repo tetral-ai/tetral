@@ -6,185 +6,26 @@
 //! before that ACK, grants measured from first sends, conflicts and the
 //! predecessor rules, a clock that jumps past the deadline, answers of an
 //! ended connection, the event size limit and the protocol version, the
-//! startup phases in ready, and a redirect that is never followed.
-//!
-//! The Connection owner reports the test seam counters `connection.attempt`
-//! at each attempt, `connection.checked` after each check of its times,
-//! `connection.granted` for each ACK that sets the connection deadline,
-//! `connection.answered` for each answer to ready or a heartbeat it takes,
-//! and `route.session` for each Session instruction it hands on.
+//! startup phases in ready, and a redirect that is never followed. The seam
+//! counters these tests read are those `tetral_tests::machine` names.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::{Value, json};
-use tetral_tests::app_server::{AppServer, wait_until};
+use tetral_tests::app_server::wait_until;
+use tetral_tests::machine::{
+    APP, CLI_START, CREDENTIAL, FIRST_CONNECTION, INSTANCE, KEY, Machine, answer_fault, bootstrap,
+    credential, engine, one_credential_engine, seconds, send, wait_for_received, wait_for_requests,
+};
 use tetral_tests::record::Case;
-use tetral_tests::reference::ReferenceServer;
 use tetral_tests::run::Tetral;
 use tetral_tests::seams::Seams;
 use tetral_tests::socket_directory;
-
-const APP: &str = "app_one";
-const INSTANCE: &str = "inst_one";
-const CREDENTIAL: &str = "ccred_one";
-const KEY: &str = "tetral_ck_connection_one";
-/// Past every clock of these tests.
-const EXPIRES_AT: &str = "2099-01-01T00:00:00Z";
-/// The reference control server's clock at its start.
-const ENGINE_START: &str = "2030-01-01T00:00:00Z";
-/// The CLI's seam clock at its start.
-const CLI_START: Duration = Duration::from_secs(1_000);
-/// The first connection of a reference control server that just started.
-const FIRST_CONNECTION: &str = "conn_1";
-
-fn seconds(value: f64) -> Duration {
-    Duration::from_secs_f64(value)
-}
-
-fn credential(instance: &str, credential: &str, key: &str, state: &str) -> Value {
-    json!({
-        "instance_id": instance,
-        "credential_id": credential,
-        "connection_key": key,
-        "expires_at": EXPIRES_AT,
-        "state": state,
-    })
-}
-
-/// A reference control server that knows `credentials`, with `more` of its
-/// startup input.
-fn engine(credentials: &[Value], more: Value) -> ReferenceServer {
-    let mut input = json!({ "credentials": credentials, "clock_start": ENGINE_START });
-    if let (Some(input), Value::Object(more)) = (input.as_object_mut(), more) {
-        input.extend(more);
-    }
-    ReferenceServer::start(&input)
-}
-
-/// A reference control server that knows the one test credential.
-fn one_credential_engine() -> ReferenceServer {
-    engine(
-        &[credential(INSTANCE, CREDENTIAL, KEY, "active")],
-        json!({}),
-    )
-}
-
-fn bootstrap(server_url: &str, instance: &str, credential: &str, key: &str) -> Value {
-    json!({
-        "server_url": server_url,
-        "instance_id": instance,
-        "credential_id": credential,
-        "connection_key": key,
-        "expires_at": EXPIRES_AT,
-    })
-}
-
-/// One machine: a state root that `configure` installed and the App Server
-/// running on it, on its own seam clock.
-struct Machine {
-    // Killed before its seams stop answering.
-    app_server: AppServer,
-    seams: Seams,
-    root: PathBuf,
-}
-
-impl Machine {
-    fn start(case: &mut Case, directory: &Path, bootstrap: &Value) -> Machine {
-        std::fs::create_dir_all(directory).unwrap();
-        let root = directory.join("root");
-        let run = Tetral::new(["configure", "--app", APP, "--from-stdin"])
-            .home(&root)
-            .stdin(serde_json::to_vec(bootstrap).unwrap())
-            .run();
-        case.command("tetral configure --app app_one --from-stdin", &run.exit());
-        assert_eq!(run.object(), json!({}));
-        let seams = Seams::serve(directory, CLI_START);
-        let app_server = Machine::run(&root, &seams);
-        case.command("tetral server run --app app_one", "running");
-        Machine {
-            app_server,
-            seams,
-            root,
-        }
-    }
-
-    fn run(root: &Path, seams: &Seams) -> AppServer {
-        let server_run = Tetral::new(["server", "run", "--app", APP])
-            .home(root)
-            .seams(seams);
-        AppServer::start(server_run, root)
-    }
-
-    fn status(&self) -> Value {
-        self.app_server.status()
-    }
-
-    /// Waits until the connection is in `state` and gives the status then.
-    fn wait_for(&self, state: &str) -> Value {
-        let mut seen = Value::Null;
-        wait_until(&format!("connection_state {state}"), || {
-            seen = self.status();
-            seen["connection_state"] == state
-        });
-        seen
-    }
-
-    /// Waits until the Connection owner has checked its times at the
-    /// clock's current time: of two checks, the second starts after this
-    /// call. The owner checks after each message it takes, so the status
-    /// requests made meanwhile bring checks also when no time is pending.
-    fn settle(&self) {
-        let start = self.seams.count("connection.checked");
-        wait_until("two checks of the Connection owner", || {
-            self.status();
-            self.seams.count("connection.checked") >= start + 2
-        });
-    }
-
-    fn advance(&self, step: Duration) {
-        self.seams.advance(step);
-        self.settle();
-    }
-
-    fn attempts(&self) -> u64 {
-        self.seams.count("connection.attempt")
-    }
-
-    fn routed(&self) -> u64 {
-        self.seams.count("route.session")
-    }
-
-    fn state(&self) -> Value {
-        self.status()["connection_state"].clone()
-    }
-}
-
-/// Waits until the reference control server has `count` requests of
-/// `endpoint` and gives them.
-fn wait_for_requests(engine: &ReferenceServer, endpoint: &str, count: usize) -> Vec<Value> {
-    let mut seen = Vec::new();
-    wait_until(&format!("{count} {endpoint} requests"), || {
-        seen = engine.requests(endpoint);
-        seen.len() >= count
-    });
-    seen
-}
-
-/// Waits until the reference control server has accepted `count` messages
-/// of `endpoint` and gives them.
-fn wait_for_received(engine: &ReferenceServer, endpoint: &str, count: usize) -> Vec<Value> {
-    let mut seen = Vec::new();
-    wait_until(&format!("{count} accepted {endpoint} messages"), || {
-        seen = engine.received(endpoint);
-        seen.len() >= count
-    });
-    seen
-}
 
 fn prepare(index: usize) -> Value {
     json!({
@@ -205,15 +46,6 @@ fn session_close(message_id: &str, protocol_version: i64) -> Value {
         "type": "session.close",
         "payload": { "session_id": "sess_closed", "binding_id": "bind_closed" },
     })
-}
-
-/// Writes `event` on the instance's stream as given.
-fn send(engine: &ReferenceServer, event: Value) {
-    engine.control("send", json!({ "instance_id": INSTANCE, "event": event }));
-}
-
-fn answer_fault(engine: &ReferenceServer, fault: Value) {
-    engine.control("answer", fault);
 }
 
 #[test]
