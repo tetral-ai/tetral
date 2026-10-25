@@ -11,12 +11,11 @@ use std::fmt;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::field::{NonEmpty, Text, TextRule};
+use crate::field::{NonEmpty, NulFree, Text, TextRule};
 use crate::id::Id;
 use crate::strict::{self, StrictError};
-use crate::time::Rfc3339Utc;
+use crate::time::{Rfc3339Utc, Utc};
 
-/// The largest bootstrap, in bytes.
 pub const BOOTSTRAP_MAX_BYTES: usize = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -36,7 +35,8 @@ pub type ServerUrl = Text<ServerUrlRule>;
 pub enum ServerUrlRule {}
 
 impl TextRule for ServerUrlRule {
-    const NAME: &'static str = "server URL";
+    const NAME: &'static str = "https URL, or http URL to an IP address in 127.0.0.0/8 or [::1], \
+        without user information, query or fragment";
     fn accepts(text: &str) -> bool {
         server_url_holds(text)
     }
@@ -71,8 +71,8 @@ impl fmt::Display for BootstrapKey {
 /// value.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BootstrapError {
-    #[error("the bootstrap is larger than 65,536 bytes")]
-    TooLarge,
+    #[error("the bootstrap is larger than {} bytes", grouped(*.limit))]
+    TooLarge { limit: usize },
     #[error("the bootstrap is not valid JSON: {0}")]
     Strict(#[from] StrictError),
     #[error("the bootstrap is not a JSON object")]
@@ -83,11 +83,24 @@ pub enum BootstrapError {
     Null { member: &'static str },
     #[error("{member} is not a string")]
     NotAString { member: &'static str },
-    #[error("{member} must be {rule}")]
+    #[error("{member} is not a valid {rule}")]
     Invalid {
         member: &'static str,
         rule: &'static str,
     },
+}
+
+/// `65536` as `65,536`.
+fn grouped(bytes: usize) -> String {
+    let digits = bytes.to_string();
+    let mut out = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 impl Bootstrap {
@@ -98,7 +111,7 @@ impl Bootstrap {
     /// `decode` with another size limit, for tests.
     pub fn decode_with_limit(input: &[u8], max_bytes: usize) -> Result<Bootstrap, BootstrapError> {
         if input.len() > max_bytes {
-            return Err(BootstrapError::TooLarge);
+            return Err(BootstrapError::TooLarge { limit: max_bytes });
         }
         strict::check(input)?;
         let value: Value = serde_json::from_slice(input)
@@ -107,22 +120,21 @@ impl Bootstrap {
             return Err(BootstrapError::NotAnObject);
         };
         Ok(Bootstrap {
-            server_url: member(&members, "server_url", SERVER_URL_RULE, |text| {
+            server_url: member(&members, "server_url", ServerUrlRule::NAME, |text| {
                 ServerUrl::new(text.trim_end_matches('/')).ok()
             })?,
-            instance_id: member(&members, "instance_id", ID_RULE, |text| Id::new(text).ok())?,
-            credential_id: member(&members, "credential_id", ID_RULE, |text| {
+            instance_id: member(&members, "instance_id", NulFree::NAME, |text| {
                 Id::new(text).ok()
             })?,
-            connection_key: member(&members, "connection_key", "nonempty", |text| {
+            credential_id: member(&members, "credential_id", NulFree::NAME, |text| {
+                Id::new(text).ok()
+            })?,
+            connection_key: member(&members, "connection_key", NonEmpty::NAME, |text| {
                 Text::new(text).ok().map(BootstrapKey)
             })?,
-            expires_at: member(
-                &members,
-                "expires_at",
-                "a calendar-valid RFC 3339 UTC time",
-                |text| Rfc3339Utc::new(text).ok(),
-            )?,
+            expires_at: member(&members, "expires_at", Utc::NAME, |text| {
+                Rfc3339Utc::new(text).ok()
+            })?,
         })
     }
 
@@ -132,10 +144,6 @@ impl Bootstrap {
         crate::encode(self)
     }
 }
-
-const SERVER_URL_RULE: &str = "an https URL, or http to an IP address in 127.0.0.0/8 or [::1], \
-    without user information, query or fragment";
-const ID_RULE: &str = "a nonempty string without U+0000";
 
 fn member<T>(
     members: &Map<String, Value>,
@@ -282,7 +290,7 @@ mod tests {
             (
                 "larger than 65,536 bytes",
                 padded_to(65_537),
-                BootstrapError::TooLarge,
+                BootstrapError::TooLarge { limit: 65_536 },
             ),
             (
                 "not JSON",
@@ -300,72 +308,72 @@ mod tests {
             (
                 "plain http to another host",
                 with("server_url", json!("http://10.0.0.1")),
-                invalid("server_url", SERVER_URL_RULE),
+                invalid("server_url", ServerUrlRule::NAME),
             ),
             (
                 "plain http to an IPv6 address that is not loopback",
                 with("server_url", json!("http://[2001:db8::1]:8080")),
-                invalid("server_url", SERVER_URL_RULE),
+                invalid("server_url", ServerUrlRule::NAME),
             ),
             (
                 "plain http to a host name",
                 with("server_url", json!("http://localhost:8080")),
-                invalid("server_url", SERVER_URL_RULE),
+                invalid("server_url", ServerUrlRule::NAME),
             ),
             (
                 "another scheme",
                 with("server_url", json!("ftp://engine.example.com")),
-                invalid("server_url", SERVER_URL_RULE),
+                invalid("server_url", ServerUrlRule::NAME),
             ),
             (
                 "no scheme",
                 with("server_url", json!("engine.example.com")),
-                invalid("server_url", SERVER_URL_RULE),
+                invalid("server_url", ServerUrlRule::NAME),
             ),
             (
                 "user information",
                 with("server_url", json!("https://user@engine.example.com")),
-                invalid("server_url", SERVER_URL_RULE),
+                invalid("server_url", ServerUrlRule::NAME),
             ),
             (
                 "a query",
                 with("server_url", json!("https://engine.example.com/?a=b")),
-                invalid("server_url", SERVER_URL_RULE),
+                invalid("server_url", ServerUrlRule::NAME),
             ),
             (
                 "a fragment",
                 with("server_url", json!("https://engine.example.com/#a")),
-                invalid("server_url", SERVER_URL_RULE),
+                invalid("server_url", ServerUrlRule::NAME),
             ),
             (
                 "port 0",
                 with("server_url", json!("https://engine.example.com:0")),
-                invalid("server_url", SERVER_URL_RULE),
+                invalid("server_url", ServerUrlRule::NAME),
             ),
             (
                 "an empty instance_id",
                 with("instance_id", json!("")),
-                invalid("instance_id", ID_RULE),
+                invalid("instance_id", NulFree::NAME),
             ),
             (
                 "a credential_id holding U+0000",
                 with("credential_id", json!("c\u{0}")),
-                invalid("credential_id", ID_RULE),
+                invalid("credential_id", NulFree::NAME),
             ),
             (
                 "an empty connection_key",
                 with("connection_key", json!("")),
-                invalid("connection_key", "nonempty"),
+                invalid("connection_key", NonEmpty::NAME),
             ),
             (
                 "a day that does not exist",
                 with("expires_at", json!("2026-02-30T00:00:00Z")),
-                invalid("expires_at", "a calendar-valid RFC 3339 UTC time"),
+                invalid("expires_at", Utc::NAME),
             ),
             (
                 "a time with an offset",
                 with("expires_at", json!("2026-12-31T23:59:59+01:00")),
-                invalid("expires_at", "a calendar-valid RFC 3339 UTC time"),
+                invalid("expires_at", Utc::NAME),
             ),
             (
                 "expires_at null",
