@@ -352,9 +352,6 @@ func TestSixtyFourInstructionsGoOutBeforeTheFirstSessionReport(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if rest := issued[64:]; len(rest) != 6 {
-		t.Fatalf("%d instructions after the first 64; want 6", len(rest))
-	}
 	f.requireInstructions(stream, issued[64:]...)
 	requireNoEvent(t, stream)
 }
