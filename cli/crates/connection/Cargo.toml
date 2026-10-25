@@ -7,5 +7,10 @@ publish.workspace = true
 
 [dependencies]
 drive.workspace = true
+eventsource-stream.workspace = true
+futures-core.workspace = true
+http-body.workspace = true
 protocol.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
