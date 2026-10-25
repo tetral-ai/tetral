@@ -109,6 +109,15 @@ impl AppServer {
         self.child.as_ref().expect("the process runs").id()
     }
 
+    /// Whether the process has not exited.
+    pub fn running(&mut self) -> bool {
+        let child = self.child.as_mut().expect("the process was started");
+        child
+            .try_wait()
+            .expect("the process can be waited for")
+            .is_none()
+    }
+
     /// Waits for the process to exit by itself, within [`WAIT_LIMIT`], and
     /// gives its run and how long the exit took.
     pub fn exited(mut self) -> (Run, Duration) {

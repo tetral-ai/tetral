@@ -750,7 +750,7 @@ fn shutdown_ends_the_process_while_a_handler_is_blocked() {
     let directory = tempfile::tempdir().unwrap();
     let root = configured_root(&mut case, directory.path());
     let seams = Seams::serve(directory.path(), Duration::from_secs(1_000));
-    let app_server = AppServer::start(server("run", &root).seams(&seams), &root);
+    let mut app_server = AppServer::start(server("run", &root).seams(&seams), &root);
     case.command("tetral server run --app app_one", "running");
     let mut half = UnixStream::connect(&app_server.socket).unwrap();
     half.write_all(b"GET /v1/status HTTP/1.1\r\nHost: local")
@@ -763,6 +763,7 @@ fn shutdown_ends_the_process_while_a_handler_is_blocked() {
     seams.wait_for_count("shutdown.waiting", 1);
     seams.advance(Duration::from_millis(4_999));
     seams.wait_for_more("shutdown.checked", 2);
+    assert!(app_server.running());
     assert!(fs::symlink_metadata(socket_path(&root)).is_ok());
     seams.advance(Duration::from_millis(1));
     let (run, _) = app_server.exited();
@@ -773,7 +774,7 @@ fn shutdown_ends_the_process_while_a_handler_is_blocked() {
     assert!(fs::symlink_metadata(socket_path(&root)).is_err());
     assert!(lock_is_free(&root));
     case.observe(format!(
-        "the socket was still there once the shutdown had read 4.999 seconds on its controlled clock; at 5 seconds the process exited 0, {took:?} after the POST; the socket is gone and the lock is free"
+        "the process still ran with its socket once the shutdown had read 4.999 seconds after the POST on its controlled clock; at 5 seconds it exited 0, {took:?} after the POST; the socket is gone and the lock is free"
     ));
     drop(half);
 }
