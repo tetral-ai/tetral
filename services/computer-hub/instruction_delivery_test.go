@@ -537,6 +537,55 @@ func TestFailedPassesWaitLongerUntilAPassCommits(t *testing.T) {
 	nextRetry(time.Second)
 }
 
+// TestAPassHeldPastItsDeadlineFailsAndRetries holds an online instance's row
+// in another transaction while an instruction is issued: the pass gives up
+// passDeadline after it began, while the row is still held, asks to retry
+// after the first wait, and delivers the instruction once the row is free.
+func TestAPassHeldPastItsDeadlineFailsAndRetries(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	cli, stream := f.openOnline()
+	f.clock.waitTimers(t, 2)
+	holder, err := f.admin.BeginTx(f.ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback() }()
+	// FOR NO KEY UPDATE holds back the pass's FOR SHARE, not the issuing
+	// transaction's foreign key checks.
+	if _, err := holder.ExecContext(f.ctx, `SELECT 1 FROM instances WHERE id=$1 FOR NO KEY UPDATE`, cli.InstanceID); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	instruction := f.issueInstruction(f.ctx, stream.connectionID, "sess_held")
+	// The first wait the stream asks for after the age limit and the
+	// heartbeat.
+	retry := func() (time.Duration, bool) {
+		f.clock.mu.Lock()
+		defer f.clock.mu.Unlock()
+		for _, wait := range f.clock.requested[2:] {
+			if wait != HeartbeatInterval {
+				return wait, true
+			}
+		}
+		return 0, false
+	}
+	wait, asked := retry()
+	for ; !asked; wait, asked = retry() {
+		if time.Since(started) > passDeadline+10*time.Second {
+			t.Fatalf("the held pass asked for no retry within %v", passDeadline+10*time.Second)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if elapsed := time.Since(started); elapsed < passDeadline || elapsed > passDeadline+3*time.Second || wait < passRetryFirst || wait > passRetryFirst+passRetryFirst/5 {
+		t.Fatalf("retry of %v asked %v after the issue; want the first wait, asked at the pass deadline %v", wait, elapsed, passDeadline)
+	}
+	if err := holder.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	f.clock.Advance(wait)
+	f.requireInstructions(stream, instruction)
+}
+
 // TestFirstWriteOfAFailedPassIsRecordedWithoutAResend fails a pass after it
 // wrote an instruction: the stream's next pass records that first write and
 // does not write the instruction again.
