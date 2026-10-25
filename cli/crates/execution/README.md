@@ -84,11 +84,16 @@ which owns that task's process tree; the translation of a call's
 - A command's environment is the App Server's without any `TETRAL_` name,
   then the call's `env`, then entries that `env` cannot override and
   `TMPDIR` (`env`).
+- A call's waits take their defaults and clamps from `exec::ExecCall`. On
+  Linux an exit status from 129 to 192 is a death by signal `status - 128`,
+  which the sandbox's stages report that way (`exec::ExitFacts::observed`).
 
 ## Where things are
 
 - `lib.rs`: `spawn_task_supervisor`, `SupervisorMessage` and
   `SupervisorMailbox`.
+- `exec.rs`: `ExecCall`, a call's directory, waits and expiry; `shell`;
+  `ExitFacts`; `Outcome`, the result envelope of a report.
 - `env.rs`: `command_environment`.
 - `child/mod.rs`, `child/exec.rs`: the launcher entry `__tetral-task` and its
   `exec` kind.

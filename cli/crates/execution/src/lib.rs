@@ -4,6 +4,7 @@
 pub mod capture;
 pub mod child;
 pub mod env;
+pub mod exec;
 pub mod isolation;
 pub mod limits;
 pub mod policy;
