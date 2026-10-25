@@ -3,6 +3,7 @@ package workload
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -94,17 +95,19 @@ func (m *OperationMetrics) record(operation, outcome string, duration time.Durat
 	if !m.operations[operation] {
 		operation = "unknown_method"
 	}
-	switch outcome {
-	case "success":
+	declared, _ := lookupOperation(m.service, operation)
+	// The outcome domain is Observe's: any other outcome must be a code the
+	// operation declares.
+	switch {
+	case outcome == "success":
 		outcome = "ok"
-	case "ok", "error", "cancelled", "rejected", "timeout":
+	case outcome == "ok", outcome == "error", outcome == "rejected", slices.Contains(declared.Errors, outcome):
 	default:
 		outcome = "error"
 	}
 	key := operationKey{operation, outcome}
 	value, seen := m.records[key]
 	if !seen {
-		declared, _ := lookupOperation(m.service, operation)
 		value.long = declared.Long
 		value.buckets = make([]uint64, len(operationBuckets(value.long)))
 	}

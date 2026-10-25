@@ -167,7 +167,9 @@ and diagnostics; a service table never repeats them. A Go service embeds its
 table and calls `RegisterDeclarations` from an `init` function. A logger of a
 registered service refuses an undeclared event and `Observe` an undeclared
 operation: a test binary fails at once, production writes
-`diagnostic.invalid_event`.
+`diagnostic.invalid_event`. `deploy/managed/logging-inventory.json`,
+`metrics-inventory.json` and `span-inventory.json` catalogue the same
+declarations; `TestObservationInventory` fails on any difference.
 
 ### Observations
 
@@ -178,7 +180,10 @@ operation its table marks long in `tetral_long_operation_duration_seconds`,
 with outcome `ok`, `rejected` (a `*Rejection` from a pressure point, which no
 error rate counts), the error's `ErrorCode()` when the operation declares it,
 or `error`. `EndHandled(err)` also writes the declared `<operation>.failed`
-record, for the component that handles the failure.
+record, for the component that handles the failure. `OperationMetrics`, the
+per-owner recorder of shutdown phases and service-named operations, records in
+the same families under the same rule: `success` is `ok`, and an outcome such as
+`timeout` is kept only when the operation declares it as a code.
 
 ### Metrics
 

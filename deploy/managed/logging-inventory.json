@@ -477,6 +477,5198 @@
     }
   ],
   "service_events": {
+    "api": {
+      "source": "services/api/observability.json",
+      "events": {
+        "auth.api_key_usage.failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "failed.count": "integer",
+            "phase": "string"
+          },
+          "errors": {
+            "auth_api_key_usage_unavailable": {
+              "class": "dependency_unavailable",
+              "message_safe": "api key usage update unavailable"
+            }
+          }
+        },
+        "auth.operation.denied": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_operation_denied": {
+              "class": "permission_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.operation.invalid": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_operation_invalid": {
+              "class": "authentication_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.operation.unavailable": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_operation_unavailable": {
+              "class": "dependency_unavailable",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.signed_principal.denied": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_signed_principal_denied": {
+              "class": "permission_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.signed_principal.invalid": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_signed_principal_invalid": {
+              "class": "authentication_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.signed_principal.unavailable": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_signed_principal_unavailable": {
+              "class": "dependency_unavailable",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.token_prune.failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "phase": "string"
+          },
+          "errors": {
+            "auth_token_prune_unavailable": {
+              "class": "dependency_unavailable",
+              "message_safe": "expired token cleanup unavailable"
+            }
+          }
+        },
+        "auth.token_prune.recovered": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "phase": "string",
+            "recovery.event": "string"
+          }
+        },
+        "http.auth": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.result": "string",
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "http.request.method": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "authentication_backend_error": {
+              "class": "auth_error",
+              "message_safe": "authentication backend error"
+            },
+            "authentication_error": {
+              "class": "authentication_error",
+              "message_safe": "authentication failed"
+            }
+          }
+        },
+        "provider_credential_rejected": {
+          "level": "DEBUG",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "provider.id": "string",
+            "validation.member": "string"
+          },
+          "errors": {
+            "invalid_provider_oauth": {
+              "class": "validation",
+              "message_safe": "provider credential rejected"
+            }
+          }
+        },
+        "queue.notification_listener.disconnected": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "consumer.class": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "notification_listener_authentication": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_endpoint_transport": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_permission": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_timeout": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_unknown": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            }
+          }
+        },
+        "queue.notification_listener.recovered": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "consumer.class": "string",
+            "operation": "string",
+            "outcome": "string",
+            "recovery.event": "string"
+          }
+        },
+        "schema.migration.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        },
+        "schema.migration.failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "db.sqlstate": "string",
+            "duration_ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          },
+          "errors": {
+            "schema_ahead": {
+              "class": "schema_ahead",
+              "message_safe": "postgresql schema is ahead of this binary"
+            },
+            "schema_apply_failed": {
+              "class": "schema_apply_failed",
+              "message_safe": "postgresql schema migration failed"
+            },
+            "schema_behind": {
+              "class": "schema_behind",
+              "message_safe": "postgresql schema is behind this binary"
+            },
+            "schema_checksum_drift": {
+              "class": "schema_checksum_drift",
+              "message_safe": "postgresql schema checksum does not match this binary"
+            },
+            "schema_history_duplicate": {
+              "class": "schema_history_duplicate",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_gap": {
+              "class": "schema_history_gap",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_malformed": {
+              "class": "schema_history_malformed",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_lock_failed": {
+              "class": "schema_lock_failed",
+              "message_safe": "postgresql schema migration lock failed"
+            },
+            "schema_missing": {
+              "class": "schema_missing",
+              "message_safe": "postgresql schema registry is missing"
+            },
+            "schema_operation_canceled": {
+              "class": "schema_operation_canceled",
+              "message_safe": "postgresql schema operation was canceled"
+            },
+            "schema_rls_drift": {
+              "class": "schema_rls_drift",
+              "message_safe": "postgresql workspace isolation contract does not match this binary"
+            },
+            "schema_unexpected_state": {
+              "class": "schema_unexpected_state",
+              "message_safe": "postgresql schema is not empty and has no current identity"
+            }
+          }
+        },
+        "schema.migration.started": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        }
+      }
+    },
+    "auth": {
+      "source": "services/auth/observability.json",
+      "events": {
+        "auth.admission.denied": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_admission_denied": {
+              "class": "permission_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.admission.invalid": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_admission_invalid": {
+              "class": "authentication_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.admission.success": {
+          "level": "DEBUG",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "operation": "string",
+            "request.id": "string"
+          }
+        },
+        "auth.admission.unavailable": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_store_unavailable": {
+              "class": "dependency_unavailable",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.api_key_usage.failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "failed.count": "integer",
+            "phase": "string"
+          },
+          "errors": {
+            "auth_api_key_usage_unavailable": {
+              "class": "dependency_unavailable",
+              "message_safe": "api key usage update unavailable"
+            }
+          }
+        },
+        "auth.assertion.denied": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_assertion_denied": {
+              "class": "permission_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.assertion.invalid": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_assertion_invalid": {
+              "class": "authentication_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.assertion.unavailable": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_jwks_unavailable": {
+              "class": "dependency_unavailable",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.exchange.success": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "operation": "string",
+            "request.id": "string"
+          }
+        },
+        "auth.external_authorization.panic": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string"
+          },
+          "errors": {
+            "internal_error": {
+              "class": "panic",
+              "message_safe": "internal error"
+            }
+          }
+        },
+        "auth.grant.denied": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_grant_denied": {
+              "class": "permission_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.grant.unavailable": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_store_unavailable": {
+              "class": "dependency_unavailable",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.grpc.failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "listener.transport": "string",
+            "operation": "string",
+            "startup.cause": "string",
+            "startup.config_problem": "string"
+          },
+          "errors": {
+            "config_error": {
+              "class": "config_error",
+              "message_safe": "configuration invalid"
+            },
+            "startup_error": {
+              "class": "startup_error",
+              "message_safe": "startup failed"
+            }
+          }
+        },
+        "auth.grpc.shutdown.complete": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "listener.transport": "string",
+            "operation": "string"
+          }
+        },
+        "auth.grpc.started": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "listener.transport": "string",
+            "operation": "string"
+          }
+        },
+        "auth.input.denied": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_input_denied": {
+              "class": "permission_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.input.invalid": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_input_invalid": {
+              "class": "authentication_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.input.unavailable": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_input_unavailable": {
+              "class": "dependency_unavailable",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.issuance.denied": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_issuance_denied": {
+              "class": "permission_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.issuance.invalid": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_issuance_invalid": {
+              "class": "authentication_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.issuance.success": {
+          "level": "DEBUG",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "operation": "string",
+            "request.id": "string"
+          }
+        },
+        "auth.issuance.unavailable": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_store_unavailable": {
+              "class": "dependency_unavailable",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.limiter.limited": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_limiter_limited": {
+              "class": "rate_limit_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.operation.denied": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_operation_denied": {
+              "class": "permission_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.operation.invalid": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_operation_invalid": {
+              "class": "authentication_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.operation.unavailable": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_operation_unavailable": {
+              "class": "dependency_unavailable",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.rule.denied": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_rule_denied": {
+              "class": "permission_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.rule.invalid": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_rule_invalid": {
+              "class": "authentication_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.rule.unavailable": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_store_unavailable": {
+              "class": "dependency_unavailable",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.signed_principal.denied": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_signed_principal_denied": {
+              "class": "permission_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.signed_principal.invalid": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_signed_principal_invalid": {
+              "class": "authentication_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.signed_principal.unavailable": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_signed_principal_unavailable": {
+              "class": "dependency_unavailable",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.token_prune.failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "phase": "string"
+          },
+          "errors": {
+            "auth_token_prune_unavailable": {
+              "class": "dependency_unavailable",
+              "message_safe": "expired token cleanup unavailable"
+            }
+          }
+        },
+        "auth.token_prune.recovered": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "phase": "string",
+            "recovery.event": "string"
+          }
+        },
+        "http.auth": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.result": "string",
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "http.request.method": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "authentication_backend_error": {
+              "class": "auth_error",
+              "message_safe": "authentication backend error"
+            },
+            "authentication_error": {
+              "class": "authentication_error",
+              "message_safe": "authentication failed"
+            }
+          }
+        },
+        "provider_credential_rejected": {
+          "level": "DEBUG",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "provider.id": "string",
+            "validation.member": "string"
+          },
+          "errors": {
+            "invalid_provider_oauth": {
+              "class": "validation",
+              "message_safe": "provider credential rejected"
+            }
+          }
+        },
+        "queue.notification_listener.disconnected": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "consumer.class": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "notification_listener_authentication": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_endpoint_transport": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_permission": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_timeout": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_unknown": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            }
+          }
+        },
+        "queue.notification_listener.recovered": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "consumer.class": "string",
+            "operation": "string",
+            "outcome": "string",
+            "recovery.event": "string"
+          }
+        },
+        "schema.migration.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        },
+        "schema.migration.failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "db.sqlstate": "string",
+            "duration_ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          },
+          "errors": {
+            "schema_ahead": {
+              "class": "schema_ahead",
+              "message_safe": "postgresql schema is ahead of this binary"
+            },
+            "schema_apply_failed": {
+              "class": "schema_apply_failed",
+              "message_safe": "postgresql schema migration failed"
+            },
+            "schema_behind": {
+              "class": "schema_behind",
+              "message_safe": "postgresql schema is behind this binary"
+            },
+            "schema_checksum_drift": {
+              "class": "schema_checksum_drift",
+              "message_safe": "postgresql schema checksum does not match this binary"
+            },
+            "schema_history_duplicate": {
+              "class": "schema_history_duplicate",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_gap": {
+              "class": "schema_history_gap",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_malformed": {
+              "class": "schema_history_malformed",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_lock_failed": {
+              "class": "schema_lock_failed",
+              "message_safe": "postgresql schema migration lock failed"
+            },
+            "schema_missing": {
+              "class": "schema_missing",
+              "message_safe": "postgresql schema registry is missing"
+            },
+            "schema_operation_canceled": {
+              "class": "schema_operation_canceled",
+              "message_safe": "postgresql schema operation was canceled"
+            },
+            "schema_rls_drift": {
+              "class": "schema_rls_drift",
+              "message_safe": "postgresql workspace isolation contract does not match this binary"
+            },
+            "schema_unexpected_state": {
+              "class": "schema_unexpected_state",
+              "message_safe": "postgresql schema is not empty and has no current identity"
+            }
+          }
+        },
+        "schema.migration.started": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        }
+      }
+    },
+    "bridge": {
+      "source": "services/bridge/observability.json",
+      "events": {
+        "actor_boundary_rejected": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "event.kind": "string",
+            "operation": "string",
+            "operation.id": "string",
+            "phase": "string",
+            "reason": "string",
+            "session.id": "string",
+            "thread.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "bridge.execution_result_listener.disconnected": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "notification_listener_authentication": {
+              "class": "bridge_execution_result_listener_error",
+              "message_safe": "sandbox execution result listener disconnected"
+            },
+            "notification_listener_endpoint_transport": {
+              "class": "bridge_execution_result_listener_error",
+              "message_safe": "sandbox execution result listener disconnected"
+            },
+            "notification_listener_permission": {
+              "class": "bridge_execution_result_listener_error",
+              "message_safe": "sandbox execution result listener disconnected"
+            },
+            "notification_listener_timeout": {
+              "class": "bridge_execution_result_listener_error",
+              "message_safe": "sandbox execution result listener disconnected"
+            },
+            "notification_listener_unknown": {
+              "class": "bridge_execution_result_listener_error",
+              "message_safe": "sandbox execution result listener disconnected"
+            }
+          }
+        },
+        "bridge.execution_result_listener.stopped": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "operation_failed": {
+              "class": "bridge_execution_result_listener_error",
+              "message_safe": "sandbox execution result listener stopped"
+            }
+          }
+        },
+        "bridge.mcp_manifest.tool_omitted": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "event.kind": "string",
+            "mcp.omission.reason": "string",
+            "mcp.server.name": "string",
+            "mcp.tool.family": "string",
+            "mcp.tool.name": "string",
+            "operation": "string",
+            "session.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "bridge.mcp_manifest.transition_committed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "event.kind": "string",
+            "mcp.manifest.diagnostic": "string",
+            "mcp.manifest.generation": "integer",
+            "mcp.manifest.previous_generation": "integer",
+            "mcp.manifest.readiness": "string",
+            "mcp.server.name": "string",
+            "operation": "string",
+            "queue.custody": "string",
+            "runtime.input.continued": "boolean",
+            "session.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "bridge.mcp_result_consumed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "event.kind": "string",
+            "mcp.server.name": "string",
+            "mcp.tool.name": "string",
+            "mcp.tool_use_event_id": "string",
+            "operation": "string",
+            "outcome": "string",
+            "session.id": "string",
+            "thread.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "bridge.output_capture.file_skipped": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "output.path": "string",
+            "output.size_bytes": "integer",
+            "output.skip.reason": "string",
+            "session.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "bridge.output_capture.scan_record": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "output.parent_path": "string",
+            "output.scan.count": "integer",
+            "output.scan.reason": "string",
+            "session.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "bridge.transient_attachment.gc_completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "attachment.deleted": "integer",
+            "attachment.failed": "integer",
+            "attachment.marked": "integer",
+            "component": "string",
+            "event.kind": "string",
+            "operation": "string"
+          }
+        },
+        "bridge.transient_attachment.gc_failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "attachment.deleted": "integer",
+            "attachment.failed": "integer",
+            "attachment.marked": "integer",
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "scan_failed": {
+              "class": "transient_attachment_gc_error",
+              "message_safe": "transient attachment GC scan failed"
+            }
+          }
+        },
+        "bridge.transient_attachment.gc_partial": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "attachment.deleted": "integer",
+            "attachment.failed": "integer",
+            "attachment.marked": "integer",
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "delete_failed": {
+              "class": "transient_attachment_gc_error",
+              "message_safe": "one or more transient attachment deletes failed"
+            }
+          }
+        },
+        "queue.notification_listener.disconnected": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "consumer.class": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "notification_listener_authentication": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_endpoint_transport": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_permission": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_timeout": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_unknown": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            }
+          }
+        },
+        "queue.notification_listener.recovered": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "consumer.class": "string",
+            "operation": "string",
+            "outcome": "string",
+            "recovery.event": "string"
+          }
+        },
+        "runtime.binding.release_rejected": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "binding.generation": "integer",
+            "binding.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "grpc.code": "string",
+            "operation": "string",
+            "operation.id": "string",
+            "runtime.process.id": "string",
+            "session.id": "string",
+            "workspace.id": "string"
+          },
+          "errors": {
+            "operation_failed": {
+              "class": "operation_failed",
+              "message_safe": "operation failed"
+            }
+          }
+        },
+        "runtime.binding.released": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "binding.generation": "integer",
+            "binding.id": "string",
+            "handoff.id": "string",
+            "input.count": "integer",
+            "operation": "string",
+            "operation.id": "string",
+            "runtime.process.id": "string",
+            "session.id": "string",
+            "target.count": "integer",
+            "workspace.id": "string"
+          }
+        },
+        "runtime_context_load_rejected": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "phase": "string",
+            "reason": "string",
+            "session.id": "string",
+            "thread.id": "string",
+            "workspace.id": "string"
+          },
+          "errors": {
+            "operation_failed": {
+              "class": "operation_failed",
+              "message_safe": "operation failed"
+            }
+          }
+        },
+        "runtime_declaration_committed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "binding.generation": "integer",
+            "binding.id": "string",
+            "component": "string",
+            "declaration.digest": "string",
+            "declaration.source.kind": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "operation.id": "string",
+            "outcome": "string",
+            "runtime.binding.current": "boolean",
+            "session.id": "string",
+            "thread.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "runtime_declaration_rejected": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "declaration.kind": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "operation.id": "string",
+            "phase": "string",
+            "reason": "string",
+            "rejection.kind": "string",
+            "rpc.grpc.status_name": "string",
+            "session.id": "string",
+            "thread.id": "string",
+            "thread.role": "string",
+            "workspace.id": "string"
+          },
+          "errors": {
+            "operation_failed": {
+              "class": "operation_failed",
+              "message_safe": "operation failed"
+            }
+          }
+        },
+        "runtime_declaration_replayed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "binding.generation": "integer",
+            "binding.id": "string",
+            "component": "string",
+            "declaration.digest": "string",
+            "declaration.source.kind": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "operation.id": "string",
+            "outcome": "string",
+            "runtime.binding.current": "boolean",
+            "session.id": "string",
+            "thread.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "runtime_input_custody_transition": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "event.kind": "string",
+            "input.count": "integer",
+            "operation": "string",
+            "outcome": "string",
+            "session.id": "string",
+            "thread.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "schema.migration.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        },
+        "schema.migration.failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "db.sqlstate": "string",
+            "duration_ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          },
+          "errors": {
+            "schema_ahead": {
+              "class": "schema_ahead",
+              "message_safe": "postgresql schema is ahead of this binary"
+            },
+            "schema_apply_failed": {
+              "class": "schema_apply_failed",
+              "message_safe": "postgresql schema migration failed"
+            },
+            "schema_behind": {
+              "class": "schema_behind",
+              "message_safe": "postgresql schema is behind this binary"
+            },
+            "schema_checksum_drift": {
+              "class": "schema_checksum_drift",
+              "message_safe": "postgresql schema checksum does not match this binary"
+            },
+            "schema_history_duplicate": {
+              "class": "schema_history_duplicate",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_gap": {
+              "class": "schema_history_gap",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_malformed": {
+              "class": "schema_history_malformed",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_lock_failed": {
+              "class": "schema_lock_failed",
+              "message_safe": "postgresql schema migration lock failed"
+            },
+            "schema_missing": {
+              "class": "schema_missing",
+              "message_safe": "postgresql schema registry is missing"
+            },
+            "schema_operation_canceled": {
+              "class": "schema_operation_canceled",
+              "message_safe": "postgresql schema operation was canceled"
+            },
+            "schema_rls_drift": {
+              "class": "schema_rls_drift",
+              "message_safe": "postgresql workspace isolation contract does not match this binary"
+            },
+            "schema_unexpected_state": {
+              "class": "schema_unexpected_state",
+              "message_safe": "postgresql schema is not empty and has no current identity"
+            }
+          }
+        },
+        "schema.migration.started": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        },
+        "shutdown.resource_close_failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string"
+          },
+          "errors": {
+            "blob_store_close_failed": {
+              "class": "resource_shutdown",
+              "message_safe": "operation failed"
+            },
+            "mcp_manifest_channel_close_failed": {
+              "class": "resource_shutdown",
+              "message_safe": "operation failed"
+            }
+          }
+        },
+        "thread_control_failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "operation.id": "string",
+            "session.id": "string",
+            "stage": "string",
+            "thread.id": "string",
+            "workspace.id": "string"
+          },
+          "errors": {
+            "Aborted": {
+              "class": "thread_control",
+              "message_safe": "thread control failed"
+            },
+            "AlreadyExists": {
+              "class": "thread_control",
+              "message_safe": "thread control failed"
+            },
+            "Canceled": {
+              "class": "thread_control",
+              "message_safe": "thread control failed"
+            },
+            "DataLoss": {
+              "class": "thread_control",
+              "message_safe": "thread control failed"
+            },
+            "DeadlineExceeded": {
+              "class": "thread_control",
+              "message_safe": "thread control failed"
+            },
+            "FailedPrecondition": {
+              "class": "thread_control",
+              "message_safe": "thread control failed"
+            },
+            "Internal": {
+              "class": "thread_control",
+              "message_safe": "thread control failed"
+            },
+            "InvalidArgument": {
+              "class": "thread_control",
+              "message_safe": "thread control failed"
+            },
+            "NotFound": {
+              "class": "thread_control",
+              "message_safe": "thread control failed"
+            },
+            "OutOfRange": {
+              "class": "thread_control",
+              "message_safe": "thread control failed"
+            },
+            "PermissionDenied": {
+              "class": "thread_control",
+              "message_safe": "thread control failed"
+            },
+            "ResourceExhausted": {
+              "class": "thread_control",
+              "message_safe": "thread control failed"
+            },
+            "Unauthenticated": {
+              "class": "thread_control",
+              "message_safe": "thread control failed"
+            },
+            "Unavailable": {
+              "class": "thread_control",
+              "message_safe": "thread control failed"
+            },
+            "Unimplemented": {
+              "class": "thread_control",
+              "message_safe": "thread control failed"
+            },
+            "Unknown": {
+              "class": "thread_control",
+              "message_safe": "thread control failed"
+            }
+          }
+        },
+        "thread_interrupt_admitted": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "event.kind": "string",
+            "operation": "string",
+            "operation.id": "string",
+            "session.id": "string",
+            "target.count": "integer",
+            "thread.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "thread_interrupt_completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration.ms": "integer",
+            "event.kind": "string",
+            "operation": "string",
+            "operation.id": "string",
+            "outcome": "string",
+            "projection.count": "integer",
+            "session.id": "string",
+            "target.count": "integer",
+            "thread.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "thread_interrupt_stale": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "event.kind": "string",
+            "operation": "string",
+            "operation.id": "string",
+            "session.id": "string",
+            "stale.reason": "string",
+            "target.count": "integer",
+            "thread.id": "string",
+            "workspace.id": "string"
+          }
+        }
+      }
+    },
+    "cleanup": {
+      "source": "services/cleanup/observability.json",
+      "events": {
+        "cleanup.claim_due.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "candidate.count": "integer",
+            "cleanup.claim.limit": "integer",
+            "cleanup.jobs.claimed": "integer",
+            "component": "string",
+            "duration.ms": "integer",
+            "event.kind": "string",
+            "failed.count": "integer",
+            "operation": "string",
+            "outcome": "string"
+          }
+        },
+        "cleanup.metrics_export.failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "duration.ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "cleanup_metrics_export_failed": {
+              "class": "metrics_export_error",
+              "message_safe": "cleanup metrics export failed"
+            }
+          }
+        },
+        "cleanup.retention.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "candidate.count": "integer",
+            "component": "string",
+            "deleted.count": "integer",
+            "duration.ms": "integer",
+            "event.kind": "string",
+            "operation": "string",
+            "outcome": "string",
+            "page.count": "integer",
+            "phase": "string"
+          }
+        },
+        "queue.notification_listener.disconnected": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "consumer.class": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "notification_listener_authentication": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_endpoint_transport": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_permission": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_timeout": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_unknown": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            }
+          }
+        },
+        "queue.notification_listener.recovered": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "consumer.class": "string",
+            "operation": "string",
+            "outcome": "string",
+            "recovery.event": "string"
+          }
+        },
+        "schema.migration.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        },
+        "schema.migration.failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "db.sqlstate": "string",
+            "duration_ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          },
+          "errors": {
+            "schema_ahead": {
+              "class": "schema_ahead",
+              "message_safe": "postgresql schema is ahead of this binary"
+            },
+            "schema_apply_failed": {
+              "class": "schema_apply_failed",
+              "message_safe": "postgresql schema migration failed"
+            },
+            "schema_behind": {
+              "class": "schema_behind",
+              "message_safe": "postgresql schema is behind this binary"
+            },
+            "schema_checksum_drift": {
+              "class": "schema_checksum_drift",
+              "message_safe": "postgresql schema checksum does not match this binary"
+            },
+            "schema_history_duplicate": {
+              "class": "schema_history_duplicate",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_gap": {
+              "class": "schema_history_gap",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_malformed": {
+              "class": "schema_history_malformed",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_lock_failed": {
+              "class": "schema_lock_failed",
+              "message_safe": "postgresql schema migration lock failed"
+            },
+            "schema_missing": {
+              "class": "schema_missing",
+              "message_safe": "postgresql schema registry is missing"
+            },
+            "schema_operation_canceled": {
+              "class": "schema_operation_canceled",
+              "message_safe": "postgresql schema operation was canceled"
+            },
+            "schema_rls_drift": {
+              "class": "schema_rls_drift",
+              "message_safe": "postgresql workspace isolation contract does not match this binary"
+            },
+            "schema_unexpected_state": {
+              "class": "schema_unexpected_state",
+              "message_safe": "postgresql schema is not empty and has no current identity"
+            }
+          }
+        },
+        "schema.migration.started": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        }
+      }
+    },
+    "db-prepare": {
+      "source": "cmd/tetral-db-prepare/observability.json",
+      "events": {
+        "database.prepare.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {}
+        },
+        "database.prepare.failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "prepare.problem": "string",
+            "step": "string"
+          },
+          "errors": {
+            "prepare_failed": {
+              "class": "database_prepare_error",
+              "message_safe": "PostgreSQL database preparation failed"
+            }
+          }
+        },
+        "database.prepare.started": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {}
+        },
+        "schema.migration.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        },
+        "schema.migration.failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "db.sqlstate": "string",
+            "duration_ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          },
+          "errors": {
+            "schema_ahead": {
+              "class": "schema_ahead",
+              "message_safe": "postgresql schema is ahead of this binary"
+            },
+            "schema_apply_failed": {
+              "class": "schema_apply_failed",
+              "message_safe": "postgresql schema migration failed"
+            },
+            "schema_behind": {
+              "class": "schema_behind",
+              "message_safe": "postgresql schema is behind this binary"
+            },
+            "schema_checksum_drift": {
+              "class": "schema_checksum_drift",
+              "message_safe": "postgresql schema checksum does not match this binary"
+            },
+            "schema_history_duplicate": {
+              "class": "schema_history_duplicate",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_gap": {
+              "class": "schema_history_gap",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_malformed": {
+              "class": "schema_history_malformed",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_lock_failed": {
+              "class": "schema_lock_failed",
+              "message_safe": "postgresql schema migration lock failed"
+            },
+            "schema_missing": {
+              "class": "schema_missing",
+              "message_safe": "postgresql schema registry is missing"
+            },
+            "schema_operation_canceled": {
+              "class": "schema_operation_canceled",
+              "message_safe": "postgresql schema operation was canceled"
+            },
+            "schema_rls_drift": {
+              "class": "schema_rls_drift",
+              "message_safe": "postgresql workspace isolation contract does not match this binary"
+            },
+            "schema_unexpected_state": {
+              "class": "schema_unexpected_state",
+              "message_safe": "postgresql schema is not empty and has no current identity"
+            }
+          }
+        },
+        "schema.migration.started": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        }
+      }
+    },
+    "event-stream": {
+      "source": "services/event-stream/observability.json",
+      "events": {
+        "auth.api_key_usage.failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "failed.count": "integer",
+            "phase": "string"
+          },
+          "errors": {
+            "auth_api_key_usage_unavailable": {
+              "class": "dependency_unavailable",
+              "message_safe": "api key usage update unavailable"
+            }
+          }
+        },
+        "auth.operation.denied": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_operation_denied": {
+              "class": "permission_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.operation.invalid": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_operation_invalid": {
+              "class": "authentication_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.operation.unavailable": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_operation_unavailable": {
+              "class": "dependency_unavailable",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.signed_principal.denied": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_signed_principal_denied": {
+              "class": "permission_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.signed_principal.invalid": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_signed_principal_invalid": {
+              "class": "authentication_error",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.signed_principal.unavailable": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.grant.revision": "string",
+            "auth.identity.kind": "string",
+            "auth.identity.revision": "string",
+            "auth.operation": "string",
+            "auth.result": "string",
+            "auth.rule.revision": "string",
+            "auth.stage": "string",
+            "component": "string",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "auth_signed_principal_unavailable": {
+              "class": "dependency_unavailable",
+              "message_safe": "authentication decision failed"
+            }
+          }
+        },
+        "auth.token_prune.failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "phase": "string"
+          },
+          "errors": {
+            "auth_token_prune_unavailable": {
+              "class": "dependency_unavailable",
+              "message_safe": "expired token cleanup unavailable"
+            }
+          }
+        },
+        "auth.token_prune.recovered": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "phase": "string",
+            "recovery.event": "string"
+          }
+        },
+        "event_stream.feed_closed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "operation": "string",
+            "outcome": "string",
+            "reason": "string",
+            "session.id": "string",
+            "thread.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "event_stream.idle_check_failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "failed.count": "integer",
+            "operation": "string",
+            "outcome": "string",
+            "reason": "string",
+            "workspace.id": "string"
+          }
+        },
+        "http.auth": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "auth.result": "string",
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "http.request.method": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "authentication_backend_error": {
+              "class": "auth_error",
+              "message_safe": "authentication backend error"
+            },
+            "authentication_error": {
+              "class": "authentication_error",
+              "message_safe": "authentication failed"
+            }
+          }
+        },
+        "preview_stopped": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "model_request.id": "string",
+            "operation": "string",
+            "outcome": "string",
+            "reason": "string",
+            "session.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "preview_subscriber_disconnected": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "operation": "string",
+            "outcome": "string",
+            "reason": "string"
+          }
+        },
+        "preview_subscriber_recovered": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "operation": "string",
+            "outcome": "string"
+          }
+        },
+        "preview_subscriber_unavailable": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "operation": "string",
+            "outcome": "string",
+            "reason": "string"
+          }
+        },
+        "provider_credential_rejected": {
+          "level": "DEBUG",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "provider.id": "string",
+            "validation.member": "string"
+          },
+          "errors": {
+            "invalid_provider_oauth": {
+              "class": "validation",
+              "message_safe": "provider credential rejected"
+            }
+          }
+        },
+        "queue.notification_listener.disconnected": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "consumer.class": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "notification_listener_authentication": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_endpoint_transport": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_permission": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_timeout": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_unknown": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            }
+          }
+        },
+        "queue.notification_listener.recovered": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "consumer.class": "string",
+            "operation": "string",
+            "outcome": "string",
+            "recovery.event": "string"
+          }
+        },
+        "schema.migration.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        },
+        "schema.migration.failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "db.sqlstate": "string",
+            "duration_ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          },
+          "errors": {
+            "schema_ahead": {
+              "class": "schema_ahead",
+              "message_safe": "postgresql schema is ahead of this binary"
+            },
+            "schema_apply_failed": {
+              "class": "schema_apply_failed",
+              "message_safe": "postgresql schema migration failed"
+            },
+            "schema_behind": {
+              "class": "schema_behind",
+              "message_safe": "postgresql schema is behind this binary"
+            },
+            "schema_checksum_drift": {
+              "class": "schema_checksum_drift",
+              "message_safe": "postgresql schema checksum does not match this binary"
+            },
+            "schema_history_duplicate": {
+              "class": "schema_history_duplicate",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_gap": {
+              "class": "schema_history_gap",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_malformed": {
+              "class": "schema_history_malformed",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_lock_failed": {
+              "class": "schema_lock_failed",
+              "message_safe": "postgresql schema migration lock failed"
+            },
+            "schema_missing": {
+              "class": "schema_missing",
+              "message_safe": "postgresql schema registry is missing"
+            },
+            "schema_operation_canceled": {
+              "class": "schema_operation_canceled",
+              "message_safe": "postgresql schema operation was canceled"
+            },
+            "schema_rls_drift": {
+              "class": "schema_rls_drift",
+              "message_safe": "postgresql workspace isolation contract does not match this binary"
+            },
+            "schema_unexpected_state": {
+              "class": "schema_unexpected_state",
+              "message_safe": "postgresql schema is not empty and has no current identity"
+            }
+          }
+        },
+        "schema.migration.started": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        }
+      }
+    },
+    "git-proxy": {
+      "source": "services/git-proxy/observability.json",
+      "events": {
+        "gitproxy.access": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "bytes_in": "integer",
+            "bytes_out": "integer",
+            "component": "string",
+            "decision": "string",
+            "deployment.environment": "string",
+            "duration.ms": "integer",
+            "event.kind": "string",
+            "operation": "string",
+            "owner_repo": "string",
+            "request.id": "string",
+            "service.name": "string",
+            "service.version": "string",
+            "session.id": "string",
+            "ticket_id": "string",
+            "upstream_status": "integer",
+            "workspace.id": "string"
+          }
+        },
+        "provider_credential_rejected": {
+          "level": "DEBUG",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "provider.id": "string",
+            "validation.member": "string"
+          },
+          "errors": {
+            "invalid_provider_oauth": {
+              "class": "validation",
+              "message_safe": "provider credential rejected"
+            }
+          }
+        },
+        "schema.migration.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        },
+        "schema.migration.failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "db.sqlstate": "string",
+            "duration_ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          },
+          "errors": {
+            "schema_ahead": {
+              "class": "schema_ahead",
+              "message_safe": "postgresql schema is ahead of this binary"
+            },
+            "schema_apply_failed": {
+              "class": "schema_apply_failed",
+              "message_safe": "postgresql schema migration failed"
+            },
+            "schema_behind": {
+              "class": "schema_behind",
+              "message_safe": "postgresql schema is behind this binary"
+            },
+            "schema_checksum_drift": {
+              "class": "schema_checksum_drift",
+              "message_safe": "postgresql schema checksum does not match this binary"
+            },
+            "schema_history_duplicate": {
+              "class": "schema_history_duplicate",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_gap": {
+              "class": "schema_history_gap",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_malformed": {
+              "class": "schema_history_malformed",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_lock_failed": {
+              "class": "schema_lock_failed",
+              "message_safe": "postgresql schema migration lock failed"
+            },
+            "schema_missing": {
+              "class": "schema_missing",
+              "message_safe": "postgresql schema registry is missing"
+            },
+            "schema_operation_canceled": {
+              "class": "schema_operation_canceled",
+              "message_safe": "postgresql schema operation was canceled"
+            },
+            "schema_rls_drift": {
+              "class": "schema_rls_drift",
+              "message_safe": "postgresql workspace isolation contract does not match this binary"
+            },
+            "schema_unexpected_state": {
+              "class": "schema_unexpected_state",
+              "message_safe": "postgresql schema is not empty and has no current identity"
+            }
+          }
+        },
+        "schema.migration.started": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        }
+      }
+    },
+    "job-runner": {
+      "source": "services/job-runner/observability.json",
+      "events": {
+        "bridge.mcp_manifest.tool_omitted": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "event.kind": "string",
+            "mcp.omission.reason": "string",
+            "mcp.server.name": "string",
+            "mcp.tool.family": "string",
+            "mcp.tool.name": "string",
+            "operation": "string",
+            "session.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "bridge.mcp_manifest.transition_committed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "event.kind": "string",
+            "mcp.manifest.diagnostic": "string",
+            "mcp.manifest.generation": "integer",
+            "mcp.manifest.previous_generation": "integer",
+            "mcp.manifest.readiness": "string",
+            "mcp.server.name": "string",
+            "operation": "string",
+            "queue.custody": "string",
+            "runtime.input.continued": "boolean",
+            "session.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "job_runner.acquisition_failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "acquisition_failed": {
+              "class": "job_runner_error",
+              "message_safe": "job runner queue acquisition failed"
+            }
+          }
+        },
+        "job_runner.release_unstarted.failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "queue.job.id": "string",
+            "retryable": "boolean",
+            "terminal": "boolean",
+            "workspace.id": "string"
+          },
+          "errors": {
+            "release_unstarted_failed": {
+              "class": "job_runner_error",
+              "message_safe": "undispatched queue lease was left to expire"
+            }
+          }
+        },
+        "job_runner.runtime_delivery.attempt": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "event.kind": "string",
+            "finalization.disposition": "string",
+            "operation": "string",
+            "preparation.error_kind": "string",
+            "queue.attempt": "integer",
+            "queue.job.id": "string",
+            "queue.max_attempts": "integer",
+            "runtime.input.id": "string",
+            "runtime.input.kind": "string",
+            "session.id": "string",
+            "thread.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "job_runner.runtime_job.failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "queue.job.id": "string",
+            "queue.job.kind": "string",
+            "retryable": "boolean",
+            "terminal": "boolean",
+            "workspace.id": "string"
+          },
+          "errors": {
+            "runtime_job_failed": {
+              "class": "job_runner_error",
+              "message_safe": "job runner runtime job failed"
+            }
+          }
+        },
+        "job_runner.shutdown.join_timeout": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string"
+          },
+          "errors": {
+            "operation_failed": {
+              "class": "operation_failed",
+              "message_safe": "operation failed"
+            }
+          }
+        },
+        "kubernetes.watch.failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "kubernetes.name": "string",
+            "kubernetes.namespace": "string",
+            "kubernetes.resource": "string",
+            "kubernetes.status": "string",
+            "kubernetes.uid": "string",
+            "operation": "string"
+          },
+          "errors": {
+            "list_failed": {
+              "class": "kubernetes_error",
+              "message_safe": "kubernetes watch failed"
+            },
+            "malformed_event": {
+              "class": "kubernetes_error",
+              "message_safe": "kubernetes watch failed"
+            },
+            "unknown_event": {
+              "class": "kubernetes_watch_failure",
+              "message_safe": "kubernetes watch failed"
+            },
+            "watch_closed": {
+              "class": "kubernetes_watch_failure",
+              "message_safe": "kubernetes watch failed"
+            },
+            "watch_error": {
+              "class": "kubernetes_error",
+              "message_safe": "kubernetes watch failed"
+            },
+            "watch_failed": {
+              "class": "kubernetes_error",
+              "message_safe": "kubernetes watch failed"
+            }
+          }
+        },
+        "kubernetes.watch.recovered": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "kubernetes.resource": "string",
+            "operation": "string",
+            "outcome": "string",
+            "recovery.event": "string",
+            "recovery.resource": "string"
+          }
+        },
+        "mcp_input_discovery_exhausted": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "mcp.failure.kind": "string",
+            "mcp.server.name": "string",
+            "runtime_input.id": "string",
+            "session.id": "string",
+            "workspace.id": "string"
+          },
+          "errors": {
+            "operation_failed": {
+              "class": "operation_failed",
+              "message_safe": "operation failed"
+            }
+          }
+        },
+        "mcp_input_discovery_failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "attempt": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "mcp.failure.kind": "string",
+            "mcp.server.name": "string",
+            "runtime_input.id": "string",
+            "session.id": "string",
+            "workspace.id": "string"
+          },
+          "errors": {
+            "operation_failed": {
+              "class": "operation_failed",
+              "message_safe": "operation failed"
+            }
+          }
+        },
+        "queue.notification_listener.disconnected": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "consumer.class": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "notification_listener_authentication": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_endpoint_transport": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_permission": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_timeout": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_unknown": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            }
+          }
+        },
+        "queue.notification_listener.recovered": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "consumer.class": "string",
+            "operation": "string",
+            "outcome": "string",
+            "recovery.event": "string"
+          }
+        },
+        "runtime_input_custody_transition": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "event.kind": "string",
+            "input.count": "integer",
+            "operation": "string",
+            "outcome": "string",
+            "session.id": "string",
+            "thread.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "runtime_placement": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "duration.ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "job.id": "string",
+            "kubernetes.uid": "string",
+            "outcome": "string",
+            "reason": "string",
+            "retryable": "boolean",
+            "runtime.load.active_sessions": "integer",
+            "runtime.load.memory_ratio": "number",
+            "runtime.load.session_capacity": "integer",
+            "runtime.placement.candidate.1.kubernetes.uid": "string",
+            "runtime.placement.candidate.1.reason": "string",
+            "runtime.placement.candidate.1.runtime.load.active_sessions": "string",
+            "runtime.placement.candidate.1.runtime.load.memory_limit_bytes": "integer",
+            "runtime.placement.candidate.1.runtime.load.memory_ratio": "string",
+            "runtime.placement.candidate.1.runtime.load.memory_usage_bytes": "integer",
+            "runtime.placement.candidate.1.runtime.load.session_capacity": "string",
+            "runtime.placement.candidate.1.runtime.process.id": "string",
+            "runtime.placement.candidate.2.kubernetes.uid": "string",
+            "runtime.placement.candidate.2.reason": "string",
+            "runtime.placement.candidate.2.runtime.load.active_sessions": "string",
+            "runtime.placement.candidate.2.runtime.load.memory_limit_bytes": "integer",
+            "runtime.placement.candidate.2.runtime.load.memory_ratio": "string",
+            "runtime.placement.candidate.2.runtime.load.memory_usage_bytes": "integer",
+            "runtime.placement.candidate.2.runtime.load.session_capacity": "string",
+            "runtime.placement.candidate.2.runtime.process.id": "string",
+            "runtime.placement.candidate.3.kubernetes.uid": "string",
+            "runtime.placement.candidate.3.reason": "string",
+            "runtime.placement.candidate.3.runtime.load.active_sessions": "string",
+            "runtime.placement.candidate.3.runtime.load.memory_limit_bytes": "integer",
+            "runtime.placement.candidate.3.runtime.load.memory_ratio": "string",
+            "runtime.placement.candidate.3.runtime.load.memory_usage_bytes": "integer",
+            "runtime.placement.candidate.3.runtime.load.session_capacity": "string",
+            "runtime.placement.candidate.3.runtime.process.id": "string",
+            "runtime.placement.candidate.4.kubernetes.uid": "string",
+            "runtime.placement.candidate.4.reason": "string",
+            "runtime.placement.candidate.4.runtime.load.active_sessions": "string",
+            "runtime.placement.candidate.4.runtime.load.memory_limit_bytes": "integer",
+            "runtime.placement.candidate.4.runtime.load.memory_ratio": "string",
+            "runtime.placement.candidate.4.runtime.load.memory_usage_bytes": "integer",
+            "runtime.placement.candidate.4.runtime.load.session_capacity": "string",
+            "runtime.placement.candidate.4.runtime.process.id": "string",
+            "runtime.placement.probes": "integer",
+            "runtime.placement.rounds": "integer",
+            "runtime.placement.sampled_pod_uid": "string",
+            "runtime.process.id": "string",
+            "session.id": "string",
+            "workspace.id": "string"
+          },
+          "errors": {
+            "cleanup_busy_reschedule_stale": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "cleanup_exhaustion_invalid": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "cleanup_exhaustion_stale": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "cleanup_finalize_stale": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "cleanup_idle_fence_invalid": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "invalid_runtime_job_payload": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "invalid_runtime_response": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "invalid_session_agent_config": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "mcp_manifest_discovery_failed": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "mcp_manifest_discovery_unavailable": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "queue_authority_lost": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_binding_candidate_unavailable": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_binding_invalid": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_binding_not_available": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_binding_unavailable": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_confirmation_failed": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_confirmation_unavailable": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_inbox_accept_missing": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_inbox_binding_changed": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_inbox_custody_invalid": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_inbox_custody_missing": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_inbox_invariant": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_inbox_payload_conflict": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_inbox_rejection_missing": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_inbox_status_invalid": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_inbox_terminal_missing": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_cancelled": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_capacity_excluded": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_eligible": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_exhausted": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_http_error": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_invalid_metrics": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_invalid_policy": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_more_active_sessions": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_no_candidates": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_not_accepting": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_random_unavailable": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_registry_unavailable": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_response_too_large": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_selected": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_tie_lost": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_timeout": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_transport_error": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_unavailable": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_placement_visibility_not_ready": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_pod_lost_claim_stale": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_queue_lease_stale": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_reconcile_invariant": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_reconcile_unavailable": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_recovery_authority_lost": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_session_unavailable": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_thread_unavailable": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_visibility_not_ready": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "runtime_visibility_unavailable": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "task_notification_defer_missing": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "task_notification_identity_invalid": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "task_notification_not_terminal": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            },
+            "task_notification_result_invalid": {
+              "class": "runtime_placement",
+              "message_safe": "operation failed"
+            }
+          }
+        },
+        "runtime_pod_loss_detected": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "binding.generation": "integer",
+            "binding.id": "string",
+            "component": "string",
+            "event": "string",
+            "event.kind": "string",
+            "session.id": "string",
+            "visibility.state": "string",
+            "workspace.id": "string"
+          }
+        },
+        "runtime_pod_loss_repair_failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "binding.generation": "integer",
+            "binding.id": "string",
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event": "string",
+            "event.kind": "string",
+            "session.id": "string",
+            "stage": "string",
+            "workspace.id": "string"
+          },
+          "errors": {
+            "candidate_mutation_failed": {
+              "class": "runtime_pod_loss_repair",
+              "message_safe": "runtime pod-loss candidate repair failed"
+            }
+          }
+        },
+        "runtime_pod_loss_repair_run_completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "candidate.count": "integer",
+            "component": "string",
+            "duration.ms": "integer",
+            "event": "string",
+            "event.kind": "string",
+            "failed.count": "integer",
+            "outcome": "string",
+            "page.count": "integer",
+            "repaired.count": "integer",
+            "stale.count": "integer"
+          }
+        },
+        "runtime_pod_loss_repair_run_failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "candidate.count": "integer",
+            "component": "string",
+            "duration.ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event": "string",
+            "event.kind": "string",
+            "failed.count": "integer",
+            "outcome": "string",
+            "page.count": "integer",
+            "repaired.count": "integer",
+            "stale.count": "integer"
+          },
+          "errors": {
+            "repair_run_failed": {
+              "class": "runtime_pod_loss_repair",
+              "message_safe": "runtime pod-loss repair run completed with failures"
+            }
+          }
+        },
+        "runtime_pod_loss_repaired": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "binding.generation": "integer",
+            "binding.id": "string",
+            "component": "string",
+            "duration.ms": "integer",
+            "event": "string",
+            "event.kind": "string",
+            "outcome": "string",
+            "session.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "runtime_pod_loss_stale": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "binding.generation": "integer",
+            "binding.id": "string",
+            "component": "string",
+            "event": "string",
+            "event.kind": "string",
+            "session.id": "string",
+            "stale.reason": "string",
+            "workspace.id": "string"
+          }
+        },
+        "schema.migration.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        },
+        "schema.migration.failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "db.sqlstate": "string",
+            "duration_ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          },
+          "errors": {
+            "schema_ahead": {
+              "class": "schema_ahead",
+              "message_safe": "postgresql schema is ahead of this binary"
+            },
+            "schema_apply_failed": {
+              "class": "schema_apply_failed",
+              "message_safe": "postgresql schema migration failed"
+            },
+            "schema_behind": {
+              "class": "schema_behind",
+              "message_safe": "postgresql schema is behind this binary"
+            },
+            "schema_checksum_drift": {
+              "class": "schema_checksum_drift",
+              "message_safe": "postgresql schema checksum does not match this binary"
+            },
+            "schema_history_duplicate": {
+              "class": "schema_history_duplicate",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_gap": {
+              "class": "schema_history_gap",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_malformed": {
+              "class": "schema_history_malformed",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_lock_failed": {
+              "class": "schema_lock_failed",
+              "message_safe": "postgresql schema migration lock failed"
+            },
+            "schema_missing": {
+              "class": "schema_missing",
+              "message_safe": "postgresql schema registry is missing"
+            },
+            "schema_operation_canceled": {
+              "class": "schema_operation_canceled",
+              "message_safe": "postgresql schema operation was canceled"
+            },
+            "schema_rls_drift": {
+              "class": "schema_rls_drift",
+              "message_safe": "postgresql workspace isolation contract does not match this binary"
+            },
+            "schema_unexpected_state": {
+              "class": "schema_unexpected_state",
+              "message_safe": "postgresql schema is not empty and has no current identity"
+            }
+          }
+        },
+        "schema.migration.started": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        },
+        "shutdown.resource_close_failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string"
+          },
+          "errors": {
+            "blob_store_close_failed": {
+              "class": "resource_shutdown",
+              "message_safe": "operation failed"
+            },
+            "mcp_manifest_channel_close_failed": {
+              "class": "resource_shutdown",
+              "message_safe": "operation failed"
+            },
+            "runtime_command_channels_close_failed": {
+              "class": "resource_shutdown",
+              "message_safe": "operation failed"
+            },
+            "runtime_direct_tls_close_failed": {
+              "class": "resource_shutdown",
+              "message_safe": "operation failed"
+            }
+          }
+        }
+      }
+    },
+    "queue": {
+      "source": "services/queue/observability.json",
+      "events": {
+        "queue.job.leased": {
+          "level": "DEBUG",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration.ms": "integer",
+            "event.kind": "string",
+            "operation": "string",
+            "queue.job.id": "string",
+            "queue.job.kind": "string",
+            "queue.partition.key": "string",
+            "queue.ready_wait.ms": "integer",
+            "workspace.id": "string"
+          }
+        },
+        "queue.job_runner_lease.candidate_timeout": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "event.kind": "string",
+            "failed.count": "integer",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean",
+            "timeout.kind": "string"
+          }
+        },
+        "queue.job_runner_lease.discovery_timeout": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "phase": "string",
+            "retryable": "boolean",
+            "terminal": "boolean",
+            "timeout.kind": "string"
+          }
+        },
+        "queue.job_runner_lease.partial_failure": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "candidate.count": "integer",
+            "component": "string",
+            "db.sqlstate": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "job_runner_lease_stopped": {
+              "class": "queue_lease_error",
+              "message_safe": "queue job runner lease stopped after committed leases"
+            }
+          }
+        },
+        "queue.job_runner_retention.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "budget.exhausted": "boolean",
+            "component": "string",
+            "deleted.count": "integer",
+            "duration.ms": "integer",
+            "event.kind": "string",
+            "malformed.count": "integer",
+            "operation": "string",
+            "target.count": "integer"
+          }
+        },
+        "queue.job_runner_retention.failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "budget.exhausted": "boolean",
+            "component": "string",
+            "deleted.count": "integer",
+            "duration.ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "malformed.count": "integer",
+            "operation": "string",
+            "retryable": "boolean",
+            "target.count": "integer",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "queue_retention_failed": {
+              "class": "queue_maintenance_error",
+              "message_safe": "queue retention failed"
+            }
+          }
+        },
+        "queue.job_runner_retention.found_malformed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "budget.exhausted": "boolean",
+            "component": "string",
+            "deleted.count": "integer",
+            "duration.ms": "integer",
+            "event.kind": "string",
+            "malformed.count": "integer",
+            "operation": "string",
+            "target.count": "integer"
+          }
+        },
+        "queue.lease_reclaim.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "duration.ms": "integer",
+            "event.kind": "string",
+            "operation": "string",
+            "queue.jobs.reclaimed": "integer"
+          }
+        },
+        "queue.lease_reclaim.failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "duration.ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "lease_reclaim_failed": {
+              "class": "queue_maintenance_error",
+              "message_safe": "queue lease reclaim failed"
+            }
+          }
+        },
+        "queue.notification_listener.disconnected": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "consumer.class": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "notification_listener_authentication": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_endpoint_transport": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_permission": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_timeout": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_unknown": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            }
+          }
+        },
+        "queue.notification_listener.recovered": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "consumer.class": "string",
+            "operation": "string",
+            "outcome": "string",
+            "recovery.event": "string"
+          }
+        },
+        "queue.partition_counter_retention.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "duration.ms": "integer",
+            "event.kind": "string",
+            "operation": "string",
+            "queue.partition_counters.deleted": "integer"
+          }
+        },
+        "queue.partition_counter_retention.failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "duration.ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "queue_retention_failed": {
+              "class": "queue_maintenance_error",
+              "message_safe": "queue retention failed"
+            }
+          }
+        },
+        "queue.sandbox_job_retention.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "duration.ms": "integer",
+            "event.kind": "string",
+            "operation": "string",
+            "queue.jobs.deleted": "integer"
+          }
+        },
+        "queue.sandbox_job_retention.failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "duration.ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "queue_retention_failed": {
+              "class": "queue_maintenance_error",
+              "message_safe": "queue retention failed"
+            }
+          }
+        },
+        "schema.migration.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        },
+        "schema.migration.failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "db.sqlstate": "string",
+            "duration_ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          },
+          "errors": {
+            "schema_ahead": {
+              "class": "schema_ahead",
+              "message_safe": "postgresql schema is ahead of this binary"
+            },
+            "schema_apply_failed": {
+              "class": "schema_apply_failed",
+              "message_safe": "postgresql schema migration failed"
+            },
+            "schema_behind": {
+              "class": "schema_behind",
+              "message_safe": "postgresql schema is behind this binary"
+            },
+            "schema_checksum_drift": {
+              "class": "schema_checksum_drift",
+              "message_safe": "postgresql schema checksum does not match this binary"
+            },
+            "schema_history_duplicate": {
+              "class": "schema_history_duplicate",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_gap": {
+              "class": "schema_history_gap",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_malformed": {
+              "class": "schema_history_malformed",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_lock_failed": {
+              "class": "schema_lock_failed",
+              "message_safe": "postgresql schema migration lock failed"
+            },
+            "schema_missing": {
+              "class": "schema_missing",
+              "message_safe": "postgresql schema registry is missing"
+            },
+            "schema_operation_canceled": {
+              "class": "schema_operation_canceled",
+              "message_safe": "postgresql schema operation was canceled"
+            },
+            "schema_rls_drift": {
+              "class": "schema_rls_drift",
+              "message_safe": "postgresql workspace isolation contract does not match this binary"
+            },
+            "schema_unexpected_state": {
+              "class": "schema_unexpected_state",
+              "message_safe": "postgresql schema is not empty and has no current identity"
+            }
+          }
+        },
+        "schema.migration.started": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        }
+      }
+    },
+    "sandbox": {
+      "source": "services/sandbox/observability.json",
+      "events": {
+        "queue.notification_listener.disconnected": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "consumer.class": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "notification_listener_authentication": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_endpoint_transport": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_permission": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_timeout": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            },
+            "notification_listener_unknown": {
+              "class": "queue_notification_listener_error",
+              "message_safe": "queue notification listener disconnected"
+            }
+          }
+        },
+        "queue.notification_listener.recovered": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "consumer.class": "string",
+            "operation": "string",
+            "outcome": "string",
+            "recovery.event": "string"
+          }
+        },
+        "sandbox.activation.attempt_completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration.ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event": "string",
+            "event.kind": "string",
+            "job.id": "string",
+            "operation.id": "string",
+            "outcome": "string",
+            "provider.name": "string",
+            "queue.attempt.count": "integer",
+            "queue.attempt.max": "integer",
+            "sandbox.id": "string",
+            "session.id": "string",
+            "workspace.id": "string"
+          },
+          "errors": {
+            "activation_observation_not_visible": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "auth_failed": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "config_invalid": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "conflict": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "filesystem_access_denied": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "filesystem_read_only": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "invalid_request": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "malformed_response": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "not_found": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "output_capture_scan_capture_failed": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "output_capture_scan_changed_during_capture": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "output_capture_scan_invalid_input": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "output_capture_scan_not_found": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "output_capture_scan_path_escape": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "output_capture_scan_permission_denied": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "output_capture_scan_root_unavailable": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "output_capture_scan_unsafe_path": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "provider_configuration_invalid": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "provider_not_registered": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "provider_observation_unavailable": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "provider_request_invalid": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "provider_response_malformed": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "provider_transition_in_progress": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "quota_exceeded": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "resource_credential_unavailable": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "sandbox_activation_not_ready": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "sandbox_activation_store_error": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "sandbox_execution_outcome_unknown": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "sandbox_identity_mismatch": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "storage_full": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "timeout": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "unavailable": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            },
+            "unknown": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation will be retried"
+            }
+          }
+        },
+        "sandbox.activation.attempt_failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration.ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event": "string",
+            "event.kind": "string",
+            "job.id": "string",
+            "operation.id": "string",
+            "outcome": "string",
+            "provider.name": "string",
+            "queue.attempt.count": "integer",
+            "queue.attempt.max": "integer",
+            "sandbox.id": "string",
+            "session.id": "string",
+            "workspace.id": "string"
+          },
+          "errors": {
+            "activation_observation_not_visible": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "auth_failed": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "config_invalid": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "conflict": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "filesystem_access_denied": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "filesystem_read_only": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "invalid_request": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "invalid_sandbox_activate_payload": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation queue payload is invalid"
+            },
+            "malformed_response": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "not_found": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "output_capture_scan_capture_failed": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "output_capture_scan_changed_during_capture": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "output_capture_scan_invalid_input": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "output_capture_scan_not_found": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "output_capture_scan_path_escape": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "output_capture_scan_permission_denied": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "output_capture_scan_root_unavailable": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "output_capture_scan_unsafe_path": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "provider_configuration_invalid": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "provider_not_registered": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "provider_observation_unavailable": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "provider_request_invalid": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "provider_response_malformed": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "provider_transition_in_progress": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "quota_exceeded": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "resource_credential_unavailable": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "sandbox_activation_attempts_exhausted": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation attempt budget exhausted"
+            },
+            "sandbox_activation_not_ready": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "sandbox_activation_store_error": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "sandbox_execution_outcome_unknown": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "sandbox_identity_mismatch": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "sandbox_queue_integrity_error": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation job has no attempt budget"
+            },
+            "storage_full": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "timeout": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "unavailable": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            },
+            "unknown": {
+              "class": "sandbox_activation_error",
+              "message_safe": "sandbox activation failed"
+            }
+          }
+        },
+        "sandbox.activation.resolved": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "event": "string",
+            "event.kind": "string",
+            "job.id": "string",
+            "operation.id": "string",
+            "provider.name": "string",
+            "provider.state": "string",
+            "resolution": "string",
+            "sandbox.id": "string",
+            "session.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "sandbox.environment_build.degraded": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "build.deadline_at": "string",
+            "build.started_at": "string",
+            "environment.generation": "integer",
+            "environment.id": "string",
+            "operation": "string",
+            "outcome": "string",
+            "provider.build.ref": "string",
+            "provider.build.state": "string",
+            "queue.job.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "sandbox.environment_build.observed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "build.deadline_at": "string",
+            "build.started_at": "string",
+            "environment.generation": "integer",
+            "environment.id": "string",
+            "operation": "string",
+            "outcome": "string",
+            "provider.build.ref": "string",
+            "provider.build.state": "string",
+            "queue.job.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "sandbox.output_capture.scan_failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "alert.family": "string",
+            "component": "string",
+            "error.capture_detail": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "session.id": "string",
+            "workspace.id": "string"
+          },
+          "errors": {
+            "auth_failed": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "config_invalid": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "conflict": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "filesystem_access_denied": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "filesystem_read_only": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "invalid_request": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "malformed_response": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "normalize_scan": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "not_found": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "output_capture_scan_capture_failed": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "output_capture_scan_changed_during_capture": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "output_capture_scan_invalid_input": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "output_capture_scan_not_found": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "output_capture_scan_path_escape": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "output_capture_scan_permission_denied": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "output_capture_scan_root_unavailable": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "output_capture_scan_unsafe_path": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "provider_configuration_invalid": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "provider_not_registered": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "provider_observation_unavailable": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "provider_request_invalid": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "provider_response_malformed": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "provider_transition_in_progress": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "quota_exceeded": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "resource_credential_unavailable": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "sandbox_execution_outcome_unknown": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "sandbox_identity_mismatch": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "storage_full": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "timeout": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "unavailable": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            },
+            "unknown": {
+              "class": "output_capture_scan_error",
+              "message_safe": "sandbox output capture scan failed"
+            }
+          }
+        },
+        "sandbox.provider.operation_completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration.ms": "integer",
+            "environment.id": "string",
+            "event": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "operation.id": "string",
+            "outcome": "string",
+            "provider.name": "string",
+            "provider.resource.id": "string",
+            "session.id": "string",
+            "thread.id": "string",
+            "tool.use.event.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "sandbox.provider.operation_failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration.ms": "integer",
+            "environment.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "operation.id": "string",
+            "outcome": "string",
+            "provider.error_detail": "string",
+            "provider.failure_detail": "string",
+            "provider.name": "string",
+            "provider.operation": "string",
+            "provider.resource.id": "string",
+            "provider.status_code": "integer",
+            "session.id": "string",
+            "thread.id": "string",
+            "tool.use.event.id": "string",
+            "workspace.id": "string"
+          },
+          "errors": {
+            "artifact_build_failed": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox environment artifact build failed"
+            },
+            "auth_failed": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "config_invalid": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "conflict": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "filesystem_access_denied": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "filesystem_read_only": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "invalid_request": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "malformed_response": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "not_found": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "output_capture_scan_capture_failed": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "output_capture_scan_changed_during_capture": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "output_capture_scan_invalid_input": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "output_capture_scan_not_found": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "output_capture_scan_path_escape": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "output_capture_scan_permission_denied": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "output_capture_scan_root_unavailable": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "output_capture_scan_unsafe_path": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "provider_configuration_invalid": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "provider_not_registered": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "provider_observation_unavailable": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "provider_request_invalid": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "provider_response_malformed": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "provider_transition_in_progress": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "provider_unknown": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "quota_exceeded": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "resource_credential_unavailable": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "sandbox_execution_outcome_unknown": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "sandbox_identity_mismatch": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "storage_full": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "timeout": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "unavailable": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            },
+            "unknown": {
+              "class": "sandbox_provider_error",
+              "message_safe": "sandbox provider operation failed"
+            }
+          }
+        },
+        "sandbox.queue.authority_lost": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "event": "string",
+            "event.kind": "string",
+            "job.id": "string",
+            "operation.id": "string",
+            "queue.kind": "string",
+            "sandbox.id": "string",
+            "session.id": "string",
+            "workspace.id": "string",
+            "writer": "string"
+          }
+        },
+        "sandbox.queue.consume.failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retry.delay.ms": "integer",
+            "retryable": "boolean"
+          },
+          "errors": {
+            "consumer_error": {
+              "class": "consumer_error",
+              "message_safe": "sandbox queue consume failed"
+            },
+            "database_error": {
+              "class": "database_error",
+              "message_safe": "sandbox queue consume failed"
+            },
+            "database_permission_denied": {
+              "class": "database_permission_denied",
+              "message_safe": "sandbox queue consume failed"
+            },
+            "deadline_exceeded": {
+              "class": "deadline_exceeded",
+              "message_safe": "sandbox queue consume failed"
+            }
+          }
+        },
+        "sandbox.queue.wait": {
+          "level": "DEBUG",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration.ms": "integer",
+            "event.kind": "string",
+            "notification.enabled": "boolean",
+            "operation": "string",
+            "poll.had_work": "boolean"
+          }
+        },
+        "sandbox.queue_over_limit.candidate_failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "queue.job.id": "string",
+            "queue.job.kind": "string",
+            "retryable": "boolean",
+            "terminal": "boolean",
+            "workspace.id": "string"
+          },
+          "errors": {
+            "sandbox_queue_candidate_finalize_failed": {
+              "class": "sandbox_queue_reconciliation_error",
+              "message_safe": "sandbox queue candidate finalization failed"
+            }
+          }
+        },
+        "schema.migration.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        },
+        "schema.migration.failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "db.sqlstate": "string",
+            "duration_ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          },
+          "errors": {
+            "schema_ahead": {
+              "class": "schema_ahead",
+              "message_safe": "postgresql schema is ahead of this binary"
+            },
+            "schema_apply_failed": {
+              "class": "schema_apply_failed",
+              "message_safe": "postgresql schema migration failed"
+            },
+            "schema_behind": {
+              "class": "schema_behind",
+              "message_safe": "postgresql schema is behind this binary"
+            },
+            "schema_checksum_drift": {
+              "class": "schema_checksum_drift",
+              "message_safe": "postgresql schema checksum does not match this binary"
+            },
+            "schema_history_duplicate": {
+              "class": "schema_history_duplicate",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_gap": {
+              "class": "schema_history_gap",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_history_malformed": {
+              "class": "schema_history_malformed",
+              "message_safe": "postgresql schema history is malformed"
+            },
+            "schema_lock_failed": {
+              "class": "schema_lock_failed",
+              "message_safe": "postgresql schema migration lock failed"
+            },
+            "schema_missing": {
+              "class": "schema_missing",
+              "message_safe": "postgresql schema registry is missing"
+            },
+            "schema_operation_canceled": {
+              "class": "schema_operation_canceled",
+              "message_safe": "postgresql schema operation was canceled"
+            },
+            "schema_rls_drift": {
+              "class": "schema_rls_drift",
+              "message_safe": "postgresql workspace isolation contract does not match this binary"
+            },
+            "schema_unexpected_state": {
+              "class": "schema_unexpected_state",
+              "message_safe": "postgresql schema is not empty and has no current identity"
+            }
+          }
+        },
+        "schema.migration.started": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string",
+            "schema.step": "string",
+            "schema.version": "integer",
+            "transaction.outcome": "string"
+          }
+        },
+        "shutdown.resource_close_failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string"
+          },
+          "errors": {
+            "blob_store_close_failed": {
+              "class": "resource_shutdown",
+              "message_safe": "operation failed"
+            }
+          }
+        }
+      }
+    },
+    "web-connector": {
+      "source": "services/web-connector/observability.json",
+      "events": {
+        "web.backend.unmatched_client_error": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "backend.api": "string",
+            "backend.error.name": "string",
+            "backend.error.status": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string"
+          },
+          "errors": {
+            "unmatched_client_error": {
+              "class": "backend_error",
+              "message_safe": "web backend rejected the request"
+            }
+          }
+        },
+        "web.drain.joined": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "closeout.active_count": "integer",
+            "operation": "string",
+            "shutdown.phase": "string"
+          }
+        },
+        "web.drain.started": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "closeout.active_count": "integer",
+            "operation": "string",
+            "shutdown.phase": "string"
+          }
+        },
+        "web.idempotency.conflict": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string"
+          },
+          "errors": {
+            "idempotency_conflict": {
+              "class": "idempotency_error",
+              "message_safe": "web tool delivery conflict"
+            }
+          }
+        },
+        "web.idempotency.lookup_failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string"
+          },
+          "errors": {
+            "cache_unavailable": {
+              "class": "storage_error",
+              "message_safe": "web idempotency lookup unavailable"
+            }
+          }
+        }
+      }
+    },
     "workload": {
       "source": "internal/workload/observability.json",
       "events": {

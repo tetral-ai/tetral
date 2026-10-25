@@ -1,0 +1,213 @@
+{
+  "service": "git-proxy",
+  "events": {
+    "gitproxy.access": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "bytes_in": "integer",
+        "bytes_out": "integer",
+        "component": "string",
+        "decision": "string",
+        "deployment.environment": "string",
+        "duration.ms": "integer",
+        "event.kind": "string",
+        "operation": "string",
+        "owner_repo": "string",
+        "request.id": "string",
+        "service.name": "string",
+        "service.version": "string",
+        "session.id": "string",
+        "ticket_id": "string",
+        "upstream_status": "integer",
+        "workspace.id": "string"
+      }
+    },
+    "provider_credential_rejected": {
+      "level": "DEBUG",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "provider.id": "string",
+        "validation.member": "string"
+      },
+      "errors": {
+        "invalid_provider_oauth": {
+          "class": "validation",
+          "message_safe": "provider credential rejected"
+        }
+      }
+    },
+    "schema.migration.completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      }
+    },
+    "schema.migration.failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "db.sqlstate": "string",
+        "duration_ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      },
+      "errors": {
+        "schema_ahead": {
+          "class": "schema_ahead",
+          "message_safe": "postgresql schema is ahead of this binary"
+        },
+        "schema_apply_failed": {
+          "class": "schema_apply_failed",
+          "message_safe": "postgresql schema migration failed"
+        },
+        "schema_behind": {
+          "class": "schema_behind",
+          "message_safe": "postgresql schema is behind this binary"
+        },
+        "schema_checksum_drift": {
+          "class": "schema_checksum_drift",
+          "message_safe": "postgresql schema checksum does not match this binary"
+        },
+        "schema_history_duplicate": {
+          "class": "schema_history_duplicate",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_history_gap": {
+          "class": "schema_history_gap",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_history_malformed": {
+          "class": "schema_history_malformed",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_lock_failed": {
+          "class": "schema_lock_failed",
+          "message_safe": "postgresql schema migration lock failed"
+        },
+        "schema_missing": {
+          "class": "schema_missing",
+          "message_safe": "postgresql schema registry is missing"
+        },
+        "schema_operation_canceled": {
+          "class": "schema_operation_canceled",
+          "message_safe": "postgresql schema operation was canceled"
+        },
+        "schema_rls_drift": {
+          "class": "schema_rls_drift",
+          "message_safe": "postgresql workspace isolation contract does not match this binary"
+        },
+        "schema_unexpected_state": {
+          "class": "schema_unexpected_state",
+          "message_safe": "postgresql schema is not empty and has no current identity"
+        }
+      }
+    },
+    "schema.migration.started": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      }
+    }
+  },
+  "operations": {
+    "receive-pack": {
+      "long": true
+    },
+    "refs-receive": {
+      "long": false
+    },
+    "refs-upload": {
+      "long": false
+    },
+    "upload-pack": {
+      "long": true
+    }
+  },
+  "metrics": {
+    "gitproxy_active_connections": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "gitproxy_bytes_relayed_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "direction": [
+          "in",
+          "out"
+        ]
+      }
+    },
+    "gitproxy_requests_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "decision": [
+          "",
+          "rejected:invalid_route",
+          "rejected:malformed",
+          "rejected:unauthorized",
+          "rejected:request_body_too_large",
+          "rejected:max_conns",
+          "rejected:authorizer_unavailable",
+          "rejected:credential_required",
+          "rejected:credential_error",
+          "injected",
+          "anonymous"
+        ],
+        "endpoint": [
+          "",
+          "refs-upload",
+          "refs-receive",
+          "upload-pack",
+          "receive-pack"
+        ],
+        "upstream_status": "HTTP status code written to the client (integer as text; \"0\" only in the empty placeholder sample)"
+      }
+    },
+    "gitproxy_ticket_rejections_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "reason": [
+          "malformed",
+          "unauthorized"
+        ]
+      }
+    },
+    "gitproxy_upstream_latency_seconds": {
+      "type": "histogram",
+      "audience": "operators",
+      "labels": {},
+      "buckets": "request"
+    }
+  },
+  "spans": {}
+}

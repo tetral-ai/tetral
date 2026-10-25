@@ -35,7 +35,7 @@ func TestPreviewMetricsReportBalancedOwnershipAndBoundedLabels(t *testing.T) {
 			allowed := (sample.Name == "event_stream_formal_delivery_latency_seconds_bucket" || sample.Name == "event_stream_preview_delivery_latency_seconds_bucket") && len(sample.Labels) == 1 && sample.Labels[0].Name == "le"
 			if allowed {
 				allowed = false
-				for _, value := range []string{"0.001", "0.01", "0.1", "1", "10", "+Inf"} {
+				for _, value := range []string{"0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "2.5", "5", "10", "+Inf"} {
 					if sample.Labels[0].Value == value {
 						allowed = true
 					}
@@ -85,7 +85,7 @@ func TestPreviewMetricsMonotonicLatencyBucketsAndRequestOwnership(t *testing.T) 
 	for key, want := range map[string]float64{
 		"event_stream_formal_delivery_latency_seconds_count":        2,
 		"event_stream_formal_delivery_latency_seconds_sum":          0.253,
-		"event_stream_formal_delivery_latency_seconds_bucket/0.001": 0,
+		"event_stream_formal_delivery_latency_seconds_bucket/0.005": 1,
 		"event_stream_formal_delivery_latency_seconds_bucket/0.01":  1,
 		"event_stream_formal_delivery_latency_seconds_bucket/0.1":   1,
 		"event_stream_formal_delivery_latency_seconds_bucket/1":     2,
@@ -194,16 +194,16 @@ func TestPreviewMetricsCollectorReadsCoherentLatencySnapshotsDuringObservation(t
 // observation is exactly 10ms.
 func coherentTenMillisecondHistogram(buckets map[string]float64, count, sum float64) error {
 	previous := 0.0
-	for _, le := range []string{"0.001", "0.01", "0.1", "1", "10", "+Inf"} {
+	for _, le := range []string{"0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "2.5", "5", "10", "+Inf"} {
 		if buckets[le] < previous {
 			return fmt.Errorf("bucket %s=%g below previous %g", le, buckets[le], previous)
 		}
 		previous = buckets[le]
 	}
-	if buckets["0.001"] != 0 {
-		return fmt.Errorf("1ms bucket=%g for 10ms observations", buckets["0.001"])
+	if buckets["0.005"] != 0 {
+		return fmt.Errorf("5ms bucket=%g for 10ms observations", buckets["0.005"])
 	}
-	for _, le := range []string{"0.01", "0.1", "1", "10", "+Inf"} {
+	for _, le := range []string{"0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "2.5", "5", "10", "+Inf"} {
 		if buckets[le] != count {
 			return fmt.Errorf("bucket %s=%g with count=%g", le, buckets[le], count)
 		}
@@ -226,7 +226,7 @@ func TestPreviewMetricsLatencyClampsNegativeDurationsAndCountsExactBoundaries(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	for le, want := range map[string]float64{"0.001": 2, "0.01": 3, "0.1": 4, "1": 5, "10": 6, "+Inf": 7} {
+	for le, want := range map[string]float64{"0.005": 2, "0.01": 3, "0.025": 3, "0.05": 3, "0.1": 4, "0.25": 4, "0.5": 4, "1": 5, "2.5": 5, "5": 5, "10": 6, "+Inf": 7} {
 		if buckets[le] != want {
 			t.Fatalf("bucket %s=%g want %g", le, buckets[le], want)
 		}

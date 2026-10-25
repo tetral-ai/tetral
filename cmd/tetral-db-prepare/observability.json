@@ -1,0 +1,128 @@
+{
+  "service": "db-prepare",
+  "events": {
+    "database.prepare.completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {}
+    },
+    "database.prepare.failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "prepare.problem": "string",
+        "step": "string"
+      },
+      "errors": {
+        "prepare_failed": {
+          "class": "database_prepare_error",
+          "message_safe": "PostgreSQL database preparation failed"
+        }
+      }
+    },
+    "database.prepare.started": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {}
+    },
+    "schema.migration.completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      }
+    },
+    "schema.migration.failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "db.sqlstate": "string",
+        "duration_ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      },
+      "errors": {
+        "schema_ahead": {
+          "class": "schema_ahead",
+          "message_safe": "postgresql schema is ahead of this binary"
+        },
+        "schema_apply_failed": {
+          "class": "schema_apply_failed",
+          "message_safe": "postgresql schema migration failed"
+        },
+        "schema_behind": {
+          "class": "schema_behind",
+          "message_safe": "postgresql schema is behind this binary"
+        },
+        "schema_checksum_drift": {
+          "class": "schema_checksum_drift",
+          "message_safe": "postgresql schema checksum does not match this binary"
+        },
+        "schema_history_duplicate": {
+          "class": "schema_history_duplicate",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_history_gap": {
+          "class": "schema_history_gap",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_history_malformed": {
+          "class": "schema_history_malformed",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_lock_failed": {
+          "class": "schema_lock_failed",
+          "message_safe": "postgresql schema migration lock failed"
+        },
+        "schema_missing": {
+          "class": "schema_missing",
+          "message_safe": "postgresql schema registry is missing"
+        },
+        "schema_operation_canceled": {
+          "class": "schema_operation_canceled",
+          "message_safe": "postgresql schema operation was canceled"
+        },
+        "schema_rls_drift": {
+          "class": "schema_rls_drift",
+          "message_safe": "postgresql workspace isolation contract does not match this binary"
+        },
+        "schema_unexpected_state": {
+          "class": "schema_unexpected_state",
+          "message_safe": "postgresql schema is not empty and has no current identity"
+        }
+      }
+    },
+    "schema.migration.started": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      }
+    }
+  },
+  "operations": {},
+  "metrics": {},
+  "spans": {}
+}

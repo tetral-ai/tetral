@@ -2,6 +2,8 @@ package eventstream
 
 import (
 	"context"
+	"math"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,19 +18,32 @@ type nativePreviewMetrics struct {
 }
 
 // Local elapsed observations use time.Since's monotonic clock. Each latency is
-// one fixed-bucket histogram family through the shared exposition, with only
-// constant le labels and no identity labels. One mutex covers the whole
-// histogram so a scrape copies count, sum and buckets from the same set of
-// observations.
+// one histogram family with the request buckets through the shared exposition,
+// with only constant le labels and no identity labels. One mutex covers the
+// whole histogram so a scrape copies count, sum and buckets from the same set
+// of observations.
 type deliveryLatency struct {
 	mu           sync.Mutex
 	count, nanos uint64
-	buckets      [6]uint64
+	buckets      [len(deliveryLatencyBounds) + 1]uint64
 }
 
 type deliveryLatencySnapshot struct {
 	count, nanos uint64
-	buckets      [6]uint64
+	buckets      [len(deliveryLatencyBounds) + 1]uint64
+}
+
+// deliveryLatencyBounds are workload.RequestDurationBuckets as durations, so
+// an observation on a bound counts in that bound's bucket exactly.
+var deliveryLatencyBounds = [11]time.Duration{}
+
+func init() {
+	if len(workload.RequestDurationBuckets) != len(deliveryLatencyBounds) {
+		panic("eventstream: delivery latency bounds differ from the request buckets")
+	}
+	for i, bound := range workload.RequestDurationBuckets {
+		deliveryLatencyBounds[i] = time.Duration(math.Round(bound * float64(time.Second)))
+	}
 }
 
 func (l *deliveryLatency) observe(elapsed time.Duration) {
@@ -39,11 +54,12 @@ func (l *deliveryLatency) observe(elapsed time.Duration) {
 	defer l.mu.Unlock()
 	l.count++
 	l.nanos += uint64(elapsed)
-	for i, upper := range [...]time.Duration{time.Millisecond, 10 * time.Millisecond, 100 * time.Millisecond, time.Second, 10 * time.Second, time.Duration(1<<63 - 1)} {
+	for i, upper := range deliveryLatencyBounds {
 		if elapsed <= upper {
 			l.buckets[i]++
 		}
 	}
+	l.buckets[len(deliveryLatencyBounds)]++
 }
 
 func (l *deliveryLatency) snapshot() deliveryLatencySnapshot {
@@ -57,8 +73,12 @@ func (l *deliveryLatency) samples(prefix, help string) []workload.Metric {
 	help += " latency in local elapsed seconds."
 	snapshot := l.snapshot()
 	var result []workload.Metric
-	for i, upper := range [...]string{"0.001", "0.01", "0.1", "1", "10", "+Inf"} {
-		result = append(result, workload.Metric{Name: family + "_bucket", Family: family, Help: help, Type: "histogram", Labels: []workload.MetricLabel{{Name: "le", Value: upper}}, Value: float64(snapshot.buckets[i])})
+	for i, count := range snapshot.buckets {
+		upper := "+Inf"
+		if i < len(workload.RequestDurationBuckets) {
+			upper = strconv.FormatFloat(workload.RequestDurationBuckets[i], 'f', -1, 64)
+		}
+		result = append(result, workload.Metric{Name: family + "_bucket", Family: family, Help: help, Type: "histogram", Labels: []workload.MetricLabel{{Name: "le", Value: upper}}, Value: float64(count)})
 	}
 	return append(result,
 		workload.Metric{Name: family + "_count", Family: family, Help: help, Type: "histogram", Value: float64(snapshot.count)},

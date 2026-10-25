@@ -207,10 +207,10 @@ func TestPostgreSQLSeparatedOwnersResourceLifecycle(t *testing.T) {
 			f.bridge.Logger = owners[1].Logger
 			if sink == "backpressured" {
 				for i, owner := range owners {
-					owner.Logger.Info("sink barrier", "event.kind", "sink_barrier")
+					owner.Logger.Info("workload.started", "event.kind", "sink_barrier")
 					separatedWait(f.ctx, t, writers[i].entered)
 					for record := 0; record < 100; record++ {
-						owner.Logger.Info("bounded diagnostic fill", "event.kind", "sink_fill", "operation", fmt.Sprintf("fill.%d", record))
+						owner.Logger.Info("workload.listener.starting", "event.kind", "sink_fill", "operation", fmt.Sprintf("fill.%d", record))
 					}
 				}
 			}

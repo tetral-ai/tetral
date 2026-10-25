@@ -2,6 +2,25 @@
   "schema_version": 1,
   "purpose": "Every span name template each Engine component starts and the attributes it may carry. Spans hold identities, sizes, durations and outcomes, never content, paths, queries, client addresses or error messages.",
   "services": {
+    "api": {},
+    "auth": {},
+    "bridge": {},
+    "cleanup": {},
+    "db-prepare": {},
+    "event-stream": {},
+    "git-proxy": {},
+    "job-runner": {
+      "job_runner.run_job": {
+        "attributes": [
+          "queue.job.id",
+          "queue.job.kind",
+          "workspace.id"
+        ]
+      }
+    },
+    "queue": {},
+    "sandbox": {},
+    "web-connector": {},
     "workload": {
       "{http.request.method} {http.route}": {
         "attributes": [

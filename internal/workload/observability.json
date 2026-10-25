@@ -519,16 +519,28 @@
   },
   "operations": {
     "shutdown_grpc_cancel_join": {
-      "long": true
+      "long": true,
+      "errors": [
+        "timeout"
+      ]
     },
     "shutdown_grpc_drain": {
-      "long": true
+      "long": true,
+      "errors": [
+        "timeout"
+      ]
     },
     "shutdown_http_drain": {
-      "long": true
+      "long": true,
+      "errors": [
+        "timeout"
+      ]
     },
     "shutdown_http_join": {
-      "long": true
+      "long": true,
+      "errors": [
+        "timeout"
+      ]
     }
   },
   "metrics": {

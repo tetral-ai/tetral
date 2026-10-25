@@ -557,14 +557,15 @@ Debug.
 
 ## Operation measurement
 
-The process metrics listener exposes the additive
-`tetral_operation_duration_seconds` histogram with `service="sandbox"`.
+The process metrics listener exposes
+`tetral_long_operation_duration_seconds` with `service="sandbox"`; the table
+declares every Sandbox operation long.
 A process registry travels with admitted work contexts. The existing provider
 and materialization completion boundaries record their actual durations even
 without a log sink; operations are the fixed source names listed in
-`operation_metrics.go`. Outcomes distinguish success, error, cancellation and
-deadline expiry; a failed artifact build is an error even when the SDK call
-returned normally. Provider/resource/Session/Queue identities stay outside
+`operation_metrics.go`. Outcomes are `ok`, `error` and the declared codes
+`cancelled` and `timeout`; a failed artifact build is an error even when the SDK
+call returned normally. Provider/resource/Session/Queue identities stay outside
 labels. The family also observes actual `shutdown_workers_drain`, forced
 `shutdown_workers_cancel_join`, `shutdown_http_drain` and
 `shutdown_http_join` boundaries. It does not equate an accepted provider

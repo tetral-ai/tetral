@@ -106,7 +106,7 @@ func TestPreviewWriterDeliversOnlyContinuousPrefixes(t *testing.T) {
 				t.Fatalf("preview starts=%d text=%q want%d %q", starts, text, test.starts, test.text)
 			}
 			latency := h.options.previewMetrics.previewLatency.snapshot()
-			if got := latency.count; got != test.latencySamples || latency.buckets[5] != got {
+			if got := latency.count; got != test.latencySamples || latency.buckets[len(deliveryLatencyBounds)] != got {
 				t.Fatalf("actual successful preview latency samples=%d want%d", got, test.latencySamples)
 			}
 			if test.latencySamples > 0 && latency.nanos == 0 {

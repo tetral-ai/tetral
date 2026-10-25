@@ -25,6 +25,9 @@ func TestOperationDurationExpositionAndClosedMethods(t *testing.T) {
 	ownedMetrics := NewOperationMetrics("git-proxy", "refs-upload")
 	ownedMetrics.Observe("refs-upload", "success", 20*time.Millisecond)
 	ownedMetrics.ObserveShutdown(nil, "shutdown_grpc_drain", "success", 40*time.Second)
+	// shutdown_grpc_drain declares timeout; refs-upload declares no code.
+	ownedMetrics.ObserveShutdown(nil, "shutdown_grpc_drain", "timeout", 40*time.Second)
+	ownedMetrics.Observe("refs-upload", "timeout", 20*time.Millisecond)
 	httpMetrics.Operations.ObserveShutdown(nil, "shutdown_http_drain", "ok", time.Second)
 	response := httptest.NewRecorder()
 	HealthRouter(NewReadiness(),
@@ -46,6 +49,8 @@ func TestOperationDurationExpositionAndClosedMethods(t *testing.T) {
 		`http_server_stream_duration_seconds_bucket{le="60",method="GET",route="GET /v1/client/events",service="queue",status_class="2xx"} 1`,
 		`tetral_operation_duration_seconds_count{operation="refs-upload",outcome="ok",service="git-proxy"} 1`,
 		`tetral_long_operation_duration_seconds_bucket{le="60",operation="shutdown_grpc_drain",outcome="ok",service="git-proxy"} 1`,
+		`tetral_long_operation_duration_seconds_count{operation="shutdown_grpc_drain",outcome="timeout",service="git-proxy"} 1`,
+		`tetral_operation_duration_seconds_count{operation="refs-upload",outcome="error",service="git-proxy"} 1`,
 		`queue_ready_jobs 3`,
 	} {
 		if !strings.Contains(body, expected) {

@@ -77,7 +77,7 @@ func TestSandboxConsumerAcquisitionAndJoinedDrain(t *testing.T) {
 			if force {
 				outcome = "timeout"
 			}
-			if !strings.Contains(metrics.Text(), `operation="shutdown_workers_drain",outcome="`+outcome+`",service="sandbox"} 1`) {
+			if !strings.Contains(metrics.Text(), `tetral_long_operation_duration_seconds_count{operation="shutdown_workers_drain",outcome="`+outcome+`",service="sandbox"} 1`) {
 				t.Fatalf("missing joined owner metrics: %s", metrics.Text())
 			}
 			if calls.Load() != 1 {

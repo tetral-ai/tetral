@@ -220,7 +220,7 @@ func appendProviderIdentityAttrs(attrs []slog.Attr, identity providerOperationId
 		{key: "environment.id", value: identity.environmentID},
 		{key: "operation.id", value: identity.lifecycleOperationID},
 		{key: "provider.resource.id", value: identity.providerResourceID},
-		{key: "tool_use.event.id", value: identity.toolUseEventID},
+		{key: "tool.use.event.id", value: identity.toolUseEventID},
 	} {
 		if item.value != "" {
 			attrs = append(attrs, slog.String(item.key, item.value))

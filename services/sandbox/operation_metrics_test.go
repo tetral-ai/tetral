@@ -16,7 +16,7 @@ func TestSandboxOperationDurationsObserveProviderWithoutLogSink(t *testing.T) {
 		t.Fatalf("changed provider outcome: %v %d %v", called, value, err)
 	}
 	body := metrics.Text()
-	if !strings.Contains(body, `tetral_operation_duration_seconds_count{operation="sandbox.provider.inspect_execution",outcome="timeout",service="sandbox"} 1`) {
+	if !strings.Contains(body, `tetral_long_operation_duration_seconds_count{operation="sandbox.provider.inspect_execution",outcome="timeout",service="sandbox"} 1`) {
 		t.Fatalf("missing actual provider boundary: %s", body)
 	}
 	if strings.Contains(body, "session-must-not-label") {

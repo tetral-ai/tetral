@@ -1,0 +1,916 @@
+{
+  "service": "job-runner",
+  "events": {
+    "bridge.mcp_manifest.tool_omitted": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "mcp.omission.reason": "string",
+        "mcp.server.name": "string",
+        "mcp.tool.family": "string",
+        "mcp.tool.name": "string",
+        "operation": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      }
+    },
+    "bridge.mcp_manifest.transition_committed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "mcp.manifest.diagnostic": "string",
+        "mcp.manifest.generation": "integer",
+        "mcp.manifest.previous_generation": "integer",
+        "mcp.manifest.readiness": "string",
+        "mcp.server.name": "string",
+        "operation": "string",
+        "queue.custody": "string",
+        "runtime.input.continued": "boolean",
+        "session.id": "string",
+        "workspace.id": "string"
+      }
+    },
+    "job_runner.acquisition_failed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "retryable": "boolean",
+        "terminal": "boolean"
+      },
+      "errors": {
+        "acquisition_failed": {
+          "class": "job_runner_error",
+          "message_safe": "job runner queue acquisition failed"
+        }
+      }
+    },
+    "job_runner.release_unstarted.failed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "queue.job.id": "string",
+        "retryable": "boolean",
+        "terminal": "boolean",
+        "workspace.id": "string"
+      },
+      "errors": {
+        "release_unstarted_failed": {
+          "class": "job_runner_error",
+          "message_safe": "undispatched queue lease was left to expire"
+        }
+      }
+    },
+    "job_runner.runtime_delivery.attempt": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "finalization.disposition": "string",
+        "operation": "string",
+        "preparation.error_kind": "string",
+        "queue.attempt": "integer",
+        "queue.job.id": "string",
+        "queue.max_attempts": "integer",
+        "runtime.input.id": "string",
+        "runtime.input.kind": "string",
+        "session.id": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      }
+    },
+    "job_runner.runtime_job.failed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "queue.job.id": "string",
+        "queue.job.kind": "string",
+        "retryable": "boolean",
+        "terminal": "boolean",
+        "workspace.id": "string"
+      },
+      "errors": {
+        "runtime_job_failed": {
+          "class": "job_runner_error",
+          "message_safe": "job runner runtime job failed"
+        }
+      }
+    },
+    "job_runner.shutdown.join_timeout": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string"
+      },
+      "errors": {
+        "operation_failed": {
+          "class": "operation_failed",
+          "message_safe": "operation failed"
+        }
+      }
+    },
+    "kubernetes.watch.failed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "kubernetes.name": "string",
+        "kubernetes.namespace": "string",
+        "kubernetes.resource": "string",
+        "kubernetes.status": "string",
+        "kubernetes.uid": "string",
+        "operation": "string"
+      },
+      "errors": {
+        "list_failed": {
+          "class": "kubernetes_error",
+          "message_safe": "kubernetes watch failed"
+        },
+        "malformed_event": {
+          "class": "kubernetes_error",
+          "message_safe": "kubernetes watch failed"
+        },
+        "unknown_event": {
+          "class": "kubernetes_watch_failure",
+          "message_safe": "kubernetes watch failed"
+        },
+        "watch_closed": {
+          "class": "kubernetes_watch_failure",
+          "message_safe": "kubernetes watch failed"
+        },
+        "watch_error": {
+          "class": "kubernetes_error",
+          "message_safe": "kubernetes watch failed"
+        },
+        "watch_failed": {
+          "class": "kubernetes_error",
+          "message_safe": "kubernetes watch failed"
+        }
+      }
+    },
+    "kubernetes.watch.recovered": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "kubernetes.resource": "string",
+        "operation": "string",
+        "outcome": "string",
+        "recovery.event": "string",
+        "recovery.resource": "string"
+      }
+    },
+    "mcp_input_discovery_exhausted": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "mcp.failure.kind": "string",
+        "mcp.server.name": "string",
+        "runtime_input.id": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      },
+      "errors": {
+        "operation_failed": {
+          "class": "operation_failed",
+          "message_safe": "operation failed"
+        }
+      }
+    },
+    "mcp_input_discovery_failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "attempt": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "mcp.failure.kind": "string",
+        "mcp.server.name": "string",
+        "runtime_input.id": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      },
+      "errors": {
+        "operation_failed": {
+          "class": "operation_failed",
+          "message_safe": "operation failed"
+        }
+      }
+    },
+    "queue.notification_listener.disconnected": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "consumer.class": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "retryable": "boolean",
+        "terminal": "boolean"
+      },
+      "errors": {
+        "notification_listener_authentication": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_endpoint_transport": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_permission": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_timeout": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_unknown": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        }
+      }
+    },
+    "queue.notification_listener.recovered": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "consumer.class": "string",
+        "operation": "string",
+        "outcome": "string",
+        "recovery.event": "string"
+      }
+    },
+    "runtime_input_custody_transition": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "input.count": "integer",
+        "operation": "string",
+        "outcome": "string",
+        "session.id": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      }
+    },
+    "runtime_placement": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "duration.ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "job.id": "string",
+        "kubernetes.uid": "string",
+        "outcome": "string",
+        "reason": "string",
+        "retryable": "boolean",
+        "runtime.load.active_sessions": "integer",
+        "runtime.load.memory_ratio": "number",
+        "runtime.load.session_capacity": "integer",
+        "runtime.placement.candidate.1.kubernetes.uid": "string",
+        "runtime.placement.candidate.1.reason": "string",
+        "runtime.placement.candidate.1.runtime.load.active_sessions": "string",
+        "runtime.placement.candidate.1.runtime.load.memory_limit_bytes": "integer",
+        "runtime.placement.candidate.1.runtime.load.memory_ratio": "string",
+        "runtime.placement.candidate.1.runtime.load.memory_usage_bytes": "integer",
+        "runtime.placement.candidate.1.runtime.load.session_capacity": "string",
+        "runtime.placement.candidate.1.runtime.process.id": "string",
+        "runtime.placement.candidate.2.kubernetes.uid": "string",
+        "runtime.placement.candidate.2.reason": "string",
+        "runtime.placement.candidate.2.runtime.load.active_sessions": "string",
+        "runtime.placement.candidate.2.runtime.load.memory_limit_bytes": "integer",
+        "runtime.placement.candidate.2.runtime.load.memory_ratio": "string",
+        "runtime.placement.candidate.2.runtime.load.memory_usage_bytes": "integer",
+        "runtime.placement.candidate.2.runtime.load.session_capacity": "string",
+        "runtime.placement.candidate.2.runtime.process.id": "string",
+        "runtime.placement.candidate.3.kubernetes.uid": "string",
+        "runtime.placement.candidate.3.reason": "string",
+        "runtime.placement.candidate.3.runtime.load.active_sessions": "string",
+        "runtime.placement.candidate.3.runtime.load.memory_limit_bytes": "integer",
+        "runtime.placement.candidate.3.runtime.load.memory_ratio": "string",
+        "runtime.placement.candidate.3.runtime.load.memory_usage_bytes": "integer",
+        "runtime.placement.candidate.3.runtime.load.session_capacity": "string",
+        "runtime.placement.candidate.3.runtime.process.id": "string",
+        "runtime.placement.candidate.4.kubernetes.uid": "string",
+        "runtime.placement.candidate.4.reason": "string",
+        "runtime.placement.candidate.4.runtime.load.active_sessions": "string",
+        "runtime.placement.candidate.4.runtime.load.memory_limit_bytes": "integer",
+        "runtime.placement.candidate.4.runtime.load.memory_ratio": "string",
+        "runtime.placement.candidate.4.runtime.load.memory_usage_bytes": "integer",
+        "runtime.placement.candidate.4.runtime.load.session_capacity": "string",
+        "runtime.placement.candidate.4.runtime.process.id": "string",
+        "runtime.placement.probes": "integer",
+        "runtime.placement.rounds": "integer",
+        "runtime.placement.sampled_pod_uid": "string",
+        "runtime.process.id": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      },
+      "errors": {
+        "cleanup_busy_reschedule_stale": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "cleanup_exhaustion_invalid": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "cleanup_exhaustion_stale": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "cleanup_finalize_stale": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "cleanup_idle_fence_invalid": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "invalid_runtime_job_payload": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "invalid_runtime_response": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "invalid_session_agent_config": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "mcp_manifest_discovery_failed": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "mcp_manifest_discovery_unavailable": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "queue_authority_lost": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_binding_candidate_unavailable": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_binding_invalid": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_binding_not_available": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_binding_unavailable": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_confirmation_failed": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_confirmation_unavailable": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_inbox_accept_missing": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_inbox_binding_changed": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_inbox_custody_invalid": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_inbox_custody_missing": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_inbox_invariant": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_inbox_payload_conflict": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_inbox_rejection_missing": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_inbox_status_invalid": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_inbox_terminal_missing": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_cancelled": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_capacity_excluded": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_eligible": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_exhausted": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_http_error": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_invalid_metrics": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_invalid_policy": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_more_active_sessions": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_no_candidates": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_not_accepting": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_random_unavailable": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_registry_unavailable": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_response_too_large": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_selected": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_tie_lost": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_timeout": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_transport_error": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_unavailable": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_placement_visibility_not_ready": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_pod_lost_claim_stale": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_queue_lease_stale": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_reconcile_invariant": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_reconcile_unavailable": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_recovery_authority_lost": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_session_unavailable": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_thread_unavailable": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_visibility_not_ready": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "runtime_visibility_unavailable": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "task_notification_defer_missing": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "task_notification_identity_invalid": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "task_notification_not_terminal": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        },
+        "task_notification_result_invalid": {
+          "class": "runtime_placement",
+          "message_safe": "operation failed"
+        }
+      }
+    },
+    "runtime_pod_loss_detected": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "binding.generation": "integer",
+        "binding.id": "string",
+        "component": "string",
+        "event": "string",
+        "event.kind": "string",
+        "session.id": "string",
+        "visibility.state": "string",
+        "workspace.id": "string"
+      }
+    },
+    "runtime_pod_loss_repair_failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "binding.generation": "integer",
+        "binding.id": "string",
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event": "string",
+        "event.kind": "string",
+        "session.id": "string",
+        "stage": "string",
+        "workspace.id": "string"
+      },
+      "errors": {
+        "candidate_mutation_failed": {
+          "class": "runtime_pod_loss_repair",
+          "message_safe": "runtime pod-loss candidate repair failed"
+        }
+      }
+    },
+    "runtime_pod_loss_repair_run_completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "candidate.count": "integer",
+        "component": "string",
+        "duration.ms": "integer",
+        "event": "string",
+        "event.kind": "string",
+        "failed.count": "integer",
+        "outcome": "string",
+        "page.count": "integer",
+        "repaired.count": "integer",
+        "stale.count": "integer"
+      }
+    },
+    "runtime_pod_loss_repair_run_failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "candidate.count": "integer",
+        "component": "string",
+        "duration.ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event": "string",
+        "event.kind": "string",
+        "failed.count": "integer",
+        "outcome": "string",
+        "page.count": "integer",
+        "repaired.count": "integer",
+        "stale.count": "integer"
+      },
+      "errors": {
+        "repair_run_failed": {
+          "class": "runtime_pod_loss_repair",
+          "message_safe": "runtime pod-loss repair run completed with failures"
+        }
+      }
+    },
+    "runtime_pod_loss_repaired": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "binding.generation": "integer",
+        "binding.id": "string",
+        "component": "string",
+        "duration.ms": "integer",
+        "event": "string",
+        "event.kind": "string",
+        "outcome": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      }
+    },
+    "runtime_pod_loss_stale": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "binding.generation": "integer",
+        "binding.id": "string",
+        "component": "string",
+        "event": "string",
+        "event.kind": "string",
+        "session.id": "string",
+        "stale.reason": "string",
+        "workspace.id": "string"
+      }
+    },
+    "schema.migration.completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      }
+    },
+    "schema.migration.failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "db.sqlstate": "string",
+        "duration_ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      },
+      "errors": {
+        "schema_ahead": {
+          "class": "schema_ahead",
+          "message_safe": "postgresql schema is ahead of this binary"
+        },
+        "schema_apply_failed": {
+          "class": "schema_apply_failed",
+          "message_safe": "postgresql schema migration failed"
+        },
+        "schema_behind": {
+          "class": "schema_behind",
+          "message_safe": "postgresql schema is behind this binary"
+        },
+        "schema_checksum_drift": {
+          "class": "schema_checksum_drift",
+          "message_safe": "postgresql schema checksum does not match this binary"
+        },
+        "schema_history_duplicate": {
+          "class": "schema_history_duplicate",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_history_gap": {
+          "class": "schema_history_gap",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_history_malformed": {
+          "class": "schema_history_malformed",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_lock_failed": {
+          "class": "schema_lock_failed",
+          "message_safe": "postgresql schema migration lock failed"
+        },
+        "schema_missing": {
+          "class": "schema_missing",
+          "message_safe": "postgresql schema registry is missing"
+        },
+        "schema_operation_canceled": {
+          "class": "schema_operation_canceled",
+          "message_safe": "postgresql schema operation was canceled"
+        },
+        "schema_rls_drift": {
+          "class": "schema_rls_drift",
+          "message_safe": "postgresql workspace isolation contract does not match this binary"
+        },
+        "schema_unexpected_state": {
+          "class": "schema_unexpected_state",
+          "message_safe": "postgresql schema is not empty and has no current identity"
+        }
+      }
+    },
+    "schema.migration.started": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      }
+    },
+    "shutdown.resource_close_failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string"
+      },
+      "errors": {
+        "blob_store_close_failed": {
+          "class": "resource_shutdown",
+          "message_safe": "operation failed"
+        },
+        "mcp_manifest_channel_close_failed": {
+          "class": "resource_shutdown",
+          "message_safe": "operation failed"
+        },
+        "runtime_command_channels_close_failed": {
+          "class": "resource_shutdown",
+          "message_safe": "operation failed"
+        },
+        "runtime_direct_tls_close_failed": {
+          "class": "resource_shutdown",
+          "message_safe": "operation failed"
+        }
+      }
+    }
+  },
+  "operations": {
+    "runtime_placement": {
+      "long": false,
+      "errors": [
+        "cancelled",
+        "timeout"
+      ]
+    },
+    "runtime_placement_probe": {
+      "long": false,
+      "errors": [
+        "cancelled",
+        "timeout"
+      ]
+    }
+  },
+  "metrics": {
+    "jobrunner_placement_rejected_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "cause": [
+          "no_candidates",
+          "exhausted"
+        ]
+      }
+    },
+    "jobrunner_slots_in_progress": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "jobrunner_slots_limit": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "runtime_placement_probe_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "outcome": [
+          "eligible",
+          "registry_unavailable",
+          "timeout",
+          "cancelled",
+          "transport_error",
+          "http_error",
+          "invalid_metrics",
+          "not_accepting",
+          "capacity_excluded",
+          "response_too_large"
+        ]
+      }
+    },
+    "runtime_placement_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "outcome": [
+          "selected",
+          "exhausted",
+          "no_candidates",
+          "visibility_not_ready",
+          "timeout",
+          "cancelled",
+          "invalid_policy",
+          "random_unavailable"
+        ]
+      }
+    }
+  },
+  "spans": {
+    "job_runner.run_job": {
+      "attributes": [
+        "queue.job.id",
+        "queue.job.kind",
+        "workspace.id"
+      ]
+    }
+  }
+}

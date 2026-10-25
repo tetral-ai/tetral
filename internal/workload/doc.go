@@ -21,7 +21,8 @@
 //   - Records: diagnostics.go (ProcessLogger, the JSON handler, limiter,
 //     redaction, sink failures), config_error.go (startup failures),
 //     http_server_diagnostics.go (net/http server errors).
-//   - Declarations: declarations.go and observability.json.
+//   - Declarations: declarations.go and observability.json; inventory_test.go
+//     compares every table with deploy/managed's inventories.
 //   - Metrics: metric_registry.go (Registry and its families),
 //     operation_metrics.go (OperationMetrics: service operations and shutdown
 //     phases), workload.go (HealthRouter, HTTPMetrics, GRPCMetrics, process
