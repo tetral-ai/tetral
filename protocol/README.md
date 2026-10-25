@@ -257,6 +257,7 @@ disconnected -> connecting -> registering -> online
       +------------ retryable failure ----------+
 
 online -> resuming -> online        stream lost, then connected with resumed=true
+registering -> resuming -> registering   stream lost before the ready ACK, then connected with resumed=true (online once the ACK arrived)
 resuming -> disconnected            deadline passed, or connected with resumed=false
 credential failure or connection conflict -> blocked
 shutdown -> stopping -> stopped
@@ -267,7 +268,9 @@ shutdown -> stopping -> stopped
 - `registering`: it checks its capabilities, submits ready and waits for the
   matching ACK. It enters `online` only after that ACK.
 - `resuming`: the connection, its bindings and its tasks stay valid until the
-  connection deadline; the CLI does not repeat ready.
+  connection deadline; the CLI does not repeat ready. Entered from
+  `registering`, the deadline is the registration deadline, a ready not yet
+  acknowledged keeps its retries and the staged instructions stay.
 - `blocked`: the CLI makes no automatic connection attempt. Its local status
   stays available to the launcher.
 
@@ -347,9 +350,13 @@ rules](#stream-resume-and-predecessors).
 
 When the stream fails before the connection deadline, the CLI cancels the old
 stream's reads and opens a new stream with `previous_connection_id` set to its
-connection and `resume=true`. After the deadline it ends its tasks
+connection and `resume=true` (`connection-v1.schema.json#/$defs/EventsQuery`).
+After the deadline it ends its tasks
 ([disconnection](#disconnection-and-task-lifecycle)) and connects with the same
-`previous_connection_id` and `resume=false`.
+`previous_connection_id` and `resume=false`. The stream's `connected` carries
+`resumed` (`connection-v1.schema.json#/$defs/ConnectedPayload`), and a refusal
+is `connection-v1.schema.json#/$defs/ErrorBody`, which adds `retry_after_ms`
+for `409 previous_connection_active`.
 
 Engine authenticates the instance and credential, then applies one of these
 atomically:
@@ -789,8 +796,9 @@ new drive bindings, each `drive_id` once.
   whose change was abandoned. A mount that `session.drives` removes or remounts
   is detached lazily: later I/O under it by a background command still running
   fails with `EIO` and is not uploaded.
-- **Report.** `POST /v1/client/session-status` with `request_message_id` set to
-  that message, the addressed `session_id` and `binding_id`, `status:
+- **Report.** `POST /v1/client/session-status`
+  (`connection-v1.schema.json#/$defs/SessionStatus`) with `request_message_id`
+  set to that message, the addressed `session_id` and `binding_id`, `status:
   "applied"`, `drive_mount_failures` for each new mount failure and
   `lost_changes` when a change was abandoned.
 - **Drive set.** A binding's drive set, which authorizes its [drive
@@ -936,7 +944,7 @@ hashes), and `429 rate_limited` comes with the `Retry-After` header.
 | `409 message_conflict` | `message_id` was used on this connection with different content | Never retries it automatically |
 | `409 unknown_instruction` | A report answers an instruction, binding or task that was not issued on this connection; a git-ticket fetch for a `binding_id` that names no such preparation; a drive sync report's `task_id` follows [drive sync report](#drive-sync-report) | Never retries it automatically |
 | `410 drive_cursor_expired` | A change listing whose cursor is below the drive's newest removed change record | Lists the drive again as at a first mount, keeping its pending changes and content cache ([catch-up rules](#catch-up-rules)) |
-| `413 request_too_large` | The body exceeds its limit, or a commit exceeds its limits; Engine sends no ACK | Never retries it automatically |
+| `413 request_too_large` | The body exceeds its limit or its complete limit of [message sizes](#message-sizes-and-encoding), or a commit exceeds its limits; a member over its own limit inside a body within its limit is `400 invalid_message`. Engine sends no ACK | Never retries it automatically |
 | `413 file_too_large` | A content upload whose `Content-Length` exceeds 500,000,000 | Turns it into a `limit` rejection of that file, with the message as `rule` |
 | `416 range_not_satisfiable` | A content download whose `Range` selects no byte or names more than one range | Permanent ([download content](#download-content)) |
 | `429 rate_limited` | A content upload over the workspace's [upload budget](#drive-limits-and-the-upload-budget) | Temporary: sends the request again no sooner than its `Retry-After` seconds |
@@ -1247,11 +1255,22 @@ Intentionally shared project directories are not Session-private;
   is `{kind: "host", value}` or `{kind: "cidr", value}`; `transport` is `tcp` or
   `udp`; `ports` is a nonempty array of inclusive `{from, to}` ranges within
   1–65,535 with `from` not greater than `to`.
-- A host is a normalized DNS name, `*.example.com` or `*`. IDNA, case and a
-  trailing dot are normalized before matching. `*.example.com` matches
-  subdomains, not `example.com`. URLs, credentials, paths and regular
-  expressions are not hosts. An IP destination is a CIDR, `/32` or `/128` for
-  one address.
+- A host is `*`, a name, or `*.` followed by a name. A name is converted as a
+  whole with UTS #46 ToASCII (nontransitional processing, UseSTD3ASCIIRules,
+  CheckHyphens, CheckBidi and CheckJoiners), which also lowercases it and maps
+  the full stops U+3002, U+FF0E and U+FF61 to `.`; then one trailing dot is
+  removed. A value holding `/`, `:`, `@`, `?` or `#`, a name that the
+  conversion rejects, and a result longer than 253 characters, with a label
+  outside 1 to 63 letters, digits and hyphens or beginning or ending with a
+  hyphen, or in the form of an IPv4 address, are not hosts. `*.example.com`
+  matches subdomains, not `example.com`. URLs, credentials, paths and regular
+  expressions are not hosts.
+- An IP destination is a CIDR: an IPv4 address in dotted decimal without
+  leading zeros or an IPv6 address in RFC 4291 text without a zone, then `/`
+  and a decimal prefix length without leading zeros, at most 32 or 128, with
+  no host bits set; `/32` or `/128` names one address. The netmask form, such
+  as `10.0.0.0/255.0.0.0`, is not a CIDR. A `listen` `address` is an IPv4 or
+  IPv6 address in the same text, without a prefix or a zone.
 - Host rules match the requested name; CIDR rules match the actual connection
   address. Any `deny` match rejects; otherwise an `allow` match is required. An
   alias domain is not the same host. The proxy resolves DNS itself and checks
@@ -1607,8 +1626,10 @@ A task belongs to the connection and binding that admitted it.
 
 ### Message sizes and encoding
 
-Sizes are bytes of complete compact UTF-8 JSON, escaping included, with `input`
-and `result` embedded as objects, never as JSON strings. Base64 uses the
+Sizes are bytes of complete compact UTF-8 JSON: the JSON text without
+insignificant whitespace, every string and number token counted as written,
+escapes included, with `input` and `result` embedded as objects, never as JSON
+strings. Base64 uses the
 standard alphabet without line breaks. A message's metadata is its JSON after
 replacing large content with an empty value of the same type (`input` and an
 `mcp.call`'s `arguments` with `{}`, `chars` with `""`, a report's `result` with
@@ -1630,6 +1651,13 @@ at most 64 KiB (`metadata_json_bytes`).
 | Decoded `view_image` image; all decoded media of one `mcp` result | 10 MiB = 10,485,760 | `view_image_decoded_bytes` |
 | Complete media tool-status | 14 MiB = 14,680,064 | `media_tool_status_json_bytes` |
 
+- A route's read limit counts raw bytes, whitespace included; every other limit
+  counts compact JSON. Engine answers a request body over its complete limit (a
+  complete ordinary or media tool-status, a complete drive sync report, a local
+  MCP tool-list report, and the 64 KiB of every other message) with `413
+  request_too_large`, and a member over its own limit inside a body within its
+  limit (a result envelope, `drive_sync`, decoded media, metadata) with `400
+  invalid_message`; neither gets an ACK.
 - Media is identified by the original tool and result type; no field can enlarge
   a bound. The receiver validates the Base64, the decoded byte count,
   `size_bytes`, the MIME type and the correspondence to the original task; a
@@ -2048,8 +2076,9 @@ CLI (one drive sync per Session and machine)          computer-hub (any hub pod)
   check that fails answers it:
   1. **Shape.** Query and path parameters, headers and the JSON body follow the
      schema: a missing `connection_id` or `binding_id`, a malformed hash, a
-     wrong `Content-Type`, a malformed `Content-Length` and a malformed `Range`
-     included, apart from the size limits of step 5. An integer in a query or
+     wrong `Content-Type`, a malformed `Content-Length`, a malformed `Range` and
+     a path that appears twice in a commit's `changes` included, apart from the
+     size limits of step 5. An integer in a query or
      header value (`drive-transfer-v1.schema.json#/$defs/Decimal`) is a
      canonical decimal no greater than 9223372036854775807. Otherwise: `400
      invalid_message`.
@@ -2393,8 +2422,9 @@ it.
 Every write, through the developer API or from a machine, checks its path:
 
 1. Relative to the drive root, with no leading `/`; at most 1,024 bytes; valid
-   UTF-8 in NFC; no control or format characters; no empty, `.` or `..`
-   segments.
+   UTF-8 in NFC and in the Stream-Safe Text Format of UAX #15 (no run of more
+   than 30 non-starters in its NFKD form); no control or format characters; no
+   empty, `.` or `..` segments.
 2. At most 255 bytes per segment.
 3. No two paths in one drive that are equal under Unicode full case folding,
    such as `report.md` and `Report.md`, or `Straße.md` and `STRASSE.md`.
@@ -2402,8 +2432,8 @@ Every write, through the developer API or from a machine, checks its path:
    created, and while `a/b/c` exists, `a/b` cannot be created as a file.
 
 On a machine, creating or renaming a file or folder fails with `EINVAL` when its
-name is not valid UTF-8 or its path breaks rule 1 or 2, NFC aside: the CLI
-converts names to NFC before upload. A path that breaks rule 3 or 4 is a
+name is not valid UTF-8 or its path breaks rule 1 or 2, NFC aside (the
+stream-safe limit still applies): the CLI converts names to NFC before upload. A path that breaks rule 3 or 4 is a
 `path_rule` rejection. Within one commit, deletions apply before creations, so a
 rename that changes only case succeeds.
 `connection-v1.schema.json#/$defs/DrivePath`,
