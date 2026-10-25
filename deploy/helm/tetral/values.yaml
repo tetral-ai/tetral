@@ -53,7 +53,7 @@ network:
         k8s:io.kubernetes.pod.namespace: kube-system
         k8s:k8s-app: kube-dns
   # Outbound HTTPS for the workloads that call operator-selected endpoints:
-  # API, Bridge, Job Runner and Web Connector blob storage; the Sandbox
+  # API, Bridge, Job Runner, computer-hub and Web Connector blob storage; the Sandbox
   # provider and blob storage; Provider Gateway model providers; MCP
   # Connector remote MCP servers; Web Connector search and reader; and the
   # git-proxy upstream. The default is unrestricted because those endpoints are
@@ -97,6 +97,7 @@ edge:
     api: tetral-api-edge-tls
     event-stream: tetral-event-stream-edge-tls
     git-proxy: tetral-git-proxy-edge-tls
+    computer-hub: tetral-computer-hub-edge-tls
 
 image:
   registry: ghcr.io/tetral-ai
@@ -181,6 +182,10 @@ jobRunner:
   heartbeatIntervalMs: 10000
   maxJobs: 8
 
+# computer-hub runs at least two replicas, so a CLI keeps a hub while one restarts.
+computerHub:
+  replicas: 2
+
 resources:
   agentRuntime:
     requests:
@@ -237,6 +242,15 @@ resources:
       memory: 256Mi
       ephemeral-storage: 512Mi
   eventStream:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+      ephemeral-storage: 64Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+      ephemeral-storage: 512Mi
+  computerHub:
     requests:
       cpu: 50m
       memory: 128Mi

@@ -87,7 +87,7 @@ workloads.
 | `sandbox-daytona` | `DAYTONA_API_KEY` |
 | `sandbox-r2-parent` | `TETRAL_R2_PARENT_API_TOKEN`, `TETRAL_R2_PARENT_ACCESS_KEY` |
 | `tetral-blob` | `endpoint`, `region`, `bucket`, `access-key`, `secret-key` |
-| `tetral-database` | `bridge-url`, `cleanup-url`, `git-proxy-url`, `job-runner-url`, `mcp-connector-url`, `provider-gateway-url`, `TETRAL_POSTGRES_DSN` |
+| `tetral-database` | `bridge-url`, `cleanup-url`, `computer-hub-url`, `git-proxy-url`, `job-runner-url`, `mcp-connector-url`, `provider-gateway-url`, `TETRAL_POSTGRES_DSN` |
 | `tetral-event-stream-database` | `url` |
 
 When `edge.enabled=true`, supply separate public API and Git TLS Secrets selected

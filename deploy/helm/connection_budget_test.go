@@ -170,23 +170,23 @@ func TestAggregatePostgreSQLConnectionBudget(t *testing.T) {
 	if err != nil || sandboxSlots != 100 {
 		t.Fatalf("Sandbox percentage surge=%d err=%v", sandboxSlots, err)
 	}
-	if sandbox["v1|ConfigMap|tetral-system|tetral-database-connection-budget"]["data"].(map[string]any)["maximumOwnedPoolSlots"] != "820" {
+	if sandbox["v1|ConfigMap|tetral-system|tetral-database-connection-budget"]["data"].(map[string]any)["maximumOwnedPoolSlots"] != "880" {
 		t.Fatal("Sandbox scale was omitted from full ledger")
 	}
-	if sandboxPercent["v1|ConfigMap|tetral-system|tetral-database-connection-budget"]["data"].(map[string]any)["maximumOwnedPoolSlots"] != "960" {
+	if sandboxPercent["v1|ConfigMap|tetral-system|tetral-database-connection-budget"]["data"].(map[string]any)["maximumOwnedPoolSlots"] != "1020" {
 		t.Fatal("Sandbox scale and percentage surge were omitted from full ledger")
 	}
 	for _, invalid := range []string{"replicas.sandbox=0", "replicas.sandbox=-1", "replicas.sandbox=1.5", "replicas.sandbox=unbounded"} {
 		requireRenderError(t, helm, chart, []string{invalid})
 	}
-	requireRenderError(t, helm, chart, []string{"transport.databaseCapacity=748", "transport.externalDatabaseConnections=0"})
+	requireRenderError(t, helm, chart, []string{"transport.databaseCapacity=808", "transport.externalDatabaseConnections=0"})
 	// Resolve every counted owner and enforce the actual full-chart inequality.
-	resolved := uniqueObjects(t, renderChart(t, helm, chart, "transport.databaseCapacity=788", "transport.externalDatabaseConnections=0"))
+	resolved := uniqueObjects(t, renderChart(t, helm, chart, "transport.databaseCapacity=848", "transport.externalDatabaseConnections=0"))
 	data := resolved["v1|ConfigMap|tetral-system|tetral-database-connection-budget"]["data"].(map[string]any)
-	if data["status"] != "resolved" || data["maximumOwnedPoolSlots"] != "780" {
+	if data["status"] != "resolved" || data["maximumOwnedPoolSlots"] != "840" {
 		t.Fatalf("actual deployed inventory budget differs: %v", data)
 	}
-	requireRenderError(t, helm, chart, []string{"transport.databaseCapacity=787", "transport.externalDatabaseConnections=0"})
+	requireRenderError(t, helm, chart, []string{"transport.databaseCapacity=847", "transport.externalDatabaseConnections=0"})
 }
 func requireRenderError(t *testing.T, helm, chart string, values []string, expectedReason ...string) {
 	t.Helper()
@@ -248,7 +248,7 @@ func TestProviderGatewayAutoscalingBounds(t *testing.T) {
 // one nonoverlapping pool is read from its actual CronJob, not from the ledger.
 func renderedDefaultPoolLedger(t *testing.T, objects map[string]map[string]any) (int, error) {
 	t.Helper()
-	roles := map[string]int{"api": 1, "auth": 1, "bridge": 1, "job-runner": 1, "sandbox": 1, "queue": 1, "event-stream": 1, "git-proxy": 1, "provider-gateway": 2, "mcp-connector": 2}
+	roles := map[string]int{"api": 1, "auth": 1, "computer-hub": 1, "bridge": 1, "job-runner": 1, "sandbox": 1, "queue": 1, "event-stream": 1, "git-proxy": 1, "provider-gateway": 2, "mcp-connector": 2}
 	slots, err := renderedPoolSlots(objects, roles)
 	if err != nil {
 		return 0, err
@@ -291,12 +291,12 @@ func TestProviderGatewayConnectionBudgetBounds(t *testing.T) {
 		surge                     string
 		owned, provider, capacity int
 	}{
-		{"enabled minimum", 1, 2, true, "1", 620, 60, 628},
-		{"initial exceeds HPA", 10, 2, true, "1", 780, 220, 788},
-		{"HPA exceeds initial", 1, 10, true, "1", 780, 220, 788},
-		{"disabled ten initial", 10, 2, false, "1", 780, 220, 788},
-		{"disabled one initial", 1, 1, false, "1", 600, 40, 608},
-		{"percentage initial exceeds HPA", 10, 2, true, "34%", 900, 280, 908},
+		{"enabled minimum", 1, 2, true, "1", 680, 60, 688},
+		{"initial exceeds HPA", 10, 2, true, "1", 840, 220, 848},
+		{"HPA exceeds initial", 1, 10, true, "1", 840, 220, 848},
+		{"disabled ten initial", 10, 2, false, "1", 840, 220, 848},
+		{"disabled one initial", 1, 1, false, "1", 660, 40, 668},
+		{"percentage initial exceeds HPA", 10, 2, true, "34%", 960, 280, 968},
 	}
 	for _, profile := range []string{"standard-routed", "hardened"} {
 		t.Run(profile, func(t *testing.T) {
@@ -334,7 +334,7 @@ func TestProviderGatewayConnectionBudgetBounds(t *testing.T) {
 				})
 			}
 			t.Run("previous falsely resolved capacity", func(t *testing.T) {
-				requireRenderError(t, helm, chart, []string{"transport.profile=" + profile, "replicas.providerGateway=10", "autoscaling.providerGateway.maxReplicas=2", "transport.databaseCapacity=628", "transport.externalDatabaseConnections=0"}, "aggregate connection budget 788")
+				requireRenderError(t, helm, chart, []string{"transport.profile=" + profile, "replicas.providerGateway=10", "autoscaling.providerGateway.maxReplicas=2", "transport.databaseCapacity=688", "transport.externalDatabaseConnections=0"}, "aggregate connection budget 848")
 			})
 			t.Run("independent oracle controls", func(t *testing.T) {
 				objects := uniqueObjects(t, renderChart(t, helm, chart, "transport.profile="+profile, "replicas.providerGateway=10"))

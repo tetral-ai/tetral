@@ -89,6 +89,8 @@ alternative DSN environment names; neither can be inferred from DATABASE_URL. */
 {{- $replicas := int (get $.Values.replicas $key) -}}
 {{- $goProcesses = add $goProcesses $replicas (int (include "tetral.surge" (dict "root" $ "replicas" $replicas))) -}}
 {{- end -}}
+{{- $computerHub := int .Values.computerHub.replicas -}}
+{{- $goProcesses = add $goProcesses $computerHub (int (include "tetral.surge" (dict "root" . "replicas" $computerHub))) -}}
 {{- $eventStream := int .Values.replicas.eventStream -}}
 {{- $goProcesses = add $goProcesses $eventStream (int (include "tetral.surge" (dict "root" . "replicas" $eventStream))) -}}
 {{/* Queue remains fixed at one replica. */}}

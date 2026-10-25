@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -263,6 +264,18 @@ var workloadManifests = []workloadManifest{
 		publicFacing:    true,
 		requiredEnvVar:  []string{"TETRAL_EVENT_STREAM_DATABASE_URL", "TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64"},
 	},
+	{
+		file:            "computer-hub.yaml",
+		name:            "computer-hub",
+		namespace:       "tetral-system",
+		binary:          "tetral-computer-hub",
+		httpEnv:         "TETRAL_COMPUTER_HUB_HTTP_ADDR",
+		httpPortName:    "http",
+		metricsEnv:      "TETRAL_COMPUTER_HUB_METRICS_ADDR",
+		metricsPortName: "metrics",
+		publicFacing:    true,
+		requiredEnvVar:  []string{"TETRAL_DATABASE_URL", "TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64", "TETRAL_BLOB_ENDPOINT", "TETRAL_BLOB_BUCKET"},
+	},
 }
 
 func expectedWorkloadDocumentCount(workload workloadManifest) int {
@@ -276,7 +289,7 @@ func expectedWorkloadDocumentCount(workload workloadManifest) int {
 	if workload.ciliumPolicy {
 		count++
 	}
-	if workload.name == "api" || workload.name == "event-stream" || workload.name == "auth" {
+	if workload.name == "api" || workload.name == "event-stream" || workload.name == "auth" || workload.name == "computer-hub" {
 		count++
 	}
 	return count
@@ -774,7 +787,7 @@ func TestKubernetesManifestServicePortsAndProbePortsMatchWorkloadConfig(t *testi
 			requireContains(t, deployment, "containerPort: 8081")
 			requireContains(t, deployment, "name: "+workload.metricsPortName)
 			metricsService := service
-			if workload.name == "api" || workload.name == "event-stream" || workload.name == "auth" {
+			if workload.name == "api" || workload.name == "event-stream" || workload.name == "auth" || workload.name == "computer-hub" {
 				requireNotContains(t, service, "name: "+workload.metricsPortName+"\n      port: 8081\n      targetPort: "+workload.metricsPortName)
 				metricsService = requireDocument(t, documents, workload.file, "Service", workload.name+"-metrics")
 				requireContains(t, metricsService, "selector:\n    app.kubernetes.io/name: "+workload.name)
@@ -918,32 +931,7 @@ func TestKubernetesEdgeGatewayEnvoyExternalAuthBoundary(t *testing.T) {
 	for _, required := range []string{`gatewayClassName: "tetral-envoy-gateway"`, `hostname: "api.tetral.example"`, `hostname: "git.tetral.example"`, `name: "tetral-api-public-tls"`, `name: "tetral-git-public-tls"`, "name: http", "name: api-https", "name: git-https"} {
 		requireContains(t, gateway, required)
 	}
-	api := requireDocument(t, documents, "edge-gateway/envoy-gateway.yaml", "HTTPRoute", "tetral-public-api")
-	routes := map[string]string{}
-	rules := strings.Split(api.text, "    - matches:\n")[1:]
-	for _, rule := range rules {
-		split := strings.Split(rule, "      backendRefs:\n")
-		if len(split) != 2 {
-			t.Fatal("route must have one backend list")
-		}
-		matches := regexp.MustCompile(`(?m)^            value: (.+)$`).FindAllStringSubmatch(split[0], -1)
-		backends := regexp.MustCompile(`(?m)^        - name: (.+)$`).FindAllStringSubmatch(split[1], -1)
-		if len(backends) != 1 || !strings.Contains(split[1], "          port: 8080") {
-			t.Fatal("route requires exactly one owning HTTP backend")
-		}
-		for _, match := range matches {
-			path := cleanManifestListValue(match[1])
-			if _, duplicate := routes[path]; duplicate {
-				t.Fatal("duplicate route")
-			}
-			routes[path] = backends[0][1]
-		}
-	}
-
-	want := map[string]string{`^/v1/sessions/[^/]+/events/stream$`: "event-stream", `^/v1/sessions/[^/]+/threads/[^/]+/stream$`: "event-stream", "/v1/api_keys": "auth", "/v1": "api"}
-	if !reflect.DeepEqual(routes, want) {
-		t.Fatalf("API backend routes=%v want %v", routes, want)
-	}
+	requirePublicAPIRoutes(t, documents, "edge-gateway/envoy-gateway.yaml")
 	exchange := requireDocument(t, documents, "edge-gateway/envoy-gateway.yaml", "HTTPRoute", "tetral-token-exchange")
 	for _, required := range []string{"method: POST", "type: Exact", "value: /v1/oauth/token", "name: auth", "port: 8080", "Authorization", "X-Api-Key"} {
 		requireContains(t, exchange, required)
@@ -994,6 +982,116 @@ func TestKubernetesEdgeGatewayEnvoyExternalAuthBoundary(t *testing.T) {
 			requireNotContains(t, &documents[index], forbidden)
 		}
 	}
+}
+
+func TestKubernetesHardenedEdgeRoutesComputerHubUnderExternalAuth(t *testing.T) {
+	path := filepath.Join(topLevelManifestRoot(), "profiles", "hardened", "edge-gateway.yaml")
+	documents := readManifestDocumentsFromFile(t, path, "profiles/hardened/edge-gateway.yaml")
+	requirePublicAPIRoutes(t, documents, "profiles/hardened/edge-gateway.yaml")
+	for _, name := range []string{"auth", "api", "event-stream", "git-proxy", "computer-hub"} {
+		policy := requireDocument(t, documents, "profiles/hardened/edge-gateway.yaml", "BackendTLSPolicy", name+"-edge")
+		requireContains(t, policy, "name: "+name+"\n")
+		requireContains(t, policy, "hostname: "+name+".tetral-system.svc.cluster.local")
+	}
+}
+
+// edgeRouteRule is one rule of an HTTPRoute: its path matches in order and
+// its single backend.
+type edgeRouteRule struct {
+	prefixes []string
+	regexes  []string
+	backend  string
+}
+
+func parseEdgeRouteRules(t *testing.T, route *manifestDocument) []edgeRouteRule {
+	t.Helper()
+	var rules []edgeRouteRule
+	for _, rule := range strings.Split(route.text, "    - matches:\n")[1:] {
+		split := strings.Split(rule, "      backendRefs:\n")
+		if len(split) != 2 {
+			t.Fatal("route must have one backend list")
+		}
+		backends := regexp.MustCompile(`(?m)^        - name: (.+)$`).FindAllStringSubmatch(split[1], -1)
+		if len(backends) != 1 || !strings.Contains(split[1], "          port: 8080") {
+			t.Fatal("route requires exactly one owning HTTP backend")
+		}
+		parsed := edgeRouteRule{backend: backends[0][1]}
+		for _, match := range regexp.MustCompile(`(?m)^            type: (\S+)\n            value: (.+)$`).FindAllStringSubmatch(split[0], -1) {
+			switch value := cleanManifestListValue(match[2]); match[1] {
+			case "PathPrefix":
+				parsed.prefixes = append(parsed.prefixes, value)
+			case "RegularExpression":
+				parsed.regexes = append(parsed.regexes, value)
+			default:
+				t.Fatalf("unexpected path match type %s", match[1])
+			}
+		}
+		rules = append(rules, parsed)
+	}
+	return rules
+}
+
+// edgeBackendFor applies Gateway API path precedence to the PathPrefix rules:
+// a prefix matches whole path elements and the longest match wins.
+func edgeBackendFor(rules []edgeRouteRule, path string) string {
+	backend, longest := "", -1
+	for _, rule := range rules {
+		for _, prefix := range rule.prefixes {
+			if (path == prefix || strings.HasPrefix(path, strings.TrimSuffix(prefix, "/")+"/")) && len(prefix) > longest {
+				backend, longest = rule.backend, len(prefix)
+			}
+		}
+	}
+	return backend
+}
+
+// requirePublicAPIRoutes checks the public API route of one edge rendering:
+// each path match's backend, the computer-hub prefixes in a rule ahead of the
+// /v1 rule, path precedence that keeps every instance and client path off api,
+// and the ext_authz SecurityPolicy targeting that route.
+func requirePublicAPIRoutes(t *testing.T, documents manifestDocuments, file string) {
+	t.Helper()
+	rules := parseEdgeRouteRules(t, requireDocument(t, documents, file, "HTTPRoute", "tetral-public-api"))
+	routes := map[string]string{}
+	hubRule, apiRule := -1, -1
+	for index, rule := range rules {
+		for _, path := range append(append([]string{}, rule.prefixes...), rule.regexes...) {
+			if _, duplicate := routes[path]; duplicate {
+				t.Fatal("duplicate route")
+			}
+			routes[path] = rule.backend
+		}
+		if slices.Equal(rule.prefixes, []string{"/v1/client", "/v1/instance_requests", "/v1/instances"}) && rule.backend == "computer-hub" {
+			hubRule = index
+		}
+		if slices.Equal(rule.prefixes, []string{"/v1"}) {
+			apiRule = index
+		}
+	}
+	want := map[string]string{`^/v1/sessions/[^/]+/events/stream$`: "event-stream", `^/v1/sessions/[^/]+/threads/[^/]+/stream$`: "event-stream", "/v1/api_keys": "auth", "/v1/client": "computer-hub", "/v1/instance_requests": "computer-hub", "/v1/instances": "computer-hub", "/v1": "api"}
+	if !reflect.DeepEqual(routes, want) {
+		t.Fatalf("%s API backend routes=%v want %v", file, routes, want)
+	}
+	if hubRule < 0 || apiRule < 0 || hubRule > apiRule {
+		t.Fatalf("%s computer-hub rule %d must precede the /v1 rule %d", file, hubRule, apiRule)
+	}
+	for path, backend := range map[string]string{
+		"/v1/client/events":                  "computer-hub",
+		"/v1/client/ready":                   "computer-hub",
+		"/v1/instances":                      "computer-hub",
+		"/v1/instances/inst_a":               "computer-hub",
+		"/v1/instances/inst_a/credentials":   "computer-hub",
+		"/v1/instance_requests":              "computer-hub",
+		"/v1/instance_requests/ireq_a/claim": "computer-hub",
+		"/v1/instancesx":                     "api",
+		"/v1/sessions":                       "api",
+	} {
+		if got := edgeBackendFor(rules, path); got != backend {
+			t.Fatalf("%s routes %s to %s; want %s", file, path, got, backend)
+		}
+	}
+	policy := requireDocument(t, documents, file, "SecurityPolicy", "tetral-public-api")
+	requireContains(t, policy, "kind: HTTPRoute\n      name: tetral-public-api")
 }
 
 func TestKubernetesManifestTopLevelDeploymentsDeclareResourceBounds(t *testing.T) {
@@ -1983,6 +2081,15 @@ func TestKubernetesManifestTetralAuthIsComposedFromServiceLocalManifests(t *test
 
 func TestKubernetesManifestEventStreamIsComposedFromServiceLocalManifests(t *testing.T) {
 	requireServiceLocalManifestComposition(t, "event-stream", "event-stream.yaml", []string{
+		"serviceaccount.yaml",
+		"deployment.yaml",
+		"service.yaml",
+		"networkpolicy.yaml",
+	})
+}
+
+func TestKubernetesManifestComputerHubIsComposedFromServiceLocalManifests(t *testing.T) {
+	requireServiceLocalManifestComposition(t, "computer-hub", "computer-hub.yaml", []string{
 		"serviceaccount.yaml",
 		"deployment.yaml",
 		"service.yaml",
@@ -3742,6 +3849,7 @@ func readManifestDocuments(t *testing.T) manifestDocuments {
 		"bridge.yaml",
 		"job-runner-rbac.yaml",
 		"event-stream.yaml",
+		"computer-hub.yaml",
 		"provider-gateway.yaml",
 		"mcp-connector.yaml",
 		"web-connector.yaml",
@@ -3792,6 +3900,26 @@ func readManifestDocuments(t *testing.T) manifestDocuments {
 				text: text,
 			})
 		}
+	}
+	return documents
+}
+
+// readManifestDocumentsFromFile reads one rendered multi-document file and
+// records its documents under name.
+func readManifestDocumentsFromFile(t *testing.T, path string, name string) manifestDocuments {
+	t.Helper()
+	// #nosec G304 -- path is a rendered manifest under the manifest root.
+	source, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var documents manifestDocuments
+	for _, rawDocument := range strings.Split(string(source), "\n---") {
+		text := strings.TrimSpace(rawDocument)
+		if text == "" {
+			continue
+		}
+		documents = append(documents, manifestDocument{file: name, kind: requireScalar(t, path, text, "kind"), name: requireMetadataName(t, path, text), text: text})
 	}
 	return documents
 }

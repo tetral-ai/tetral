@@ -134,6 +134,19 @@ spec:
     - matches:
         - path:
             type: PathPrefix
+            value: /v1/client
+        - path:
+            type: PathPrefix
+            value: /v1/instance_requests
+        - path:
+            type: PathPrefix
+            value: /v1/instances
+      backendRefs:
+        - name: computer-hub
+          port: 8080
+    - matches:
+        - path:
+            type: PathPrefix
             value: /v1
       backendRefs:
         - name: api
@@ -267,7 +280,7 @@ spec:
         value: true
 {{- end }}
 {{- if eq .Values.transport.profile "hardened" }}
-{{- range $name := list "auth" "api" "event-stream" "git-proxy" }}
+{{- range $name := list "auth" "api" "event-stream" "git-proxy" "computer-hub" }}
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: BackendTLSPolicy

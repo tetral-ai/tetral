@@ -15,9 +15,10 @@ step described in [database preparation and compatible rollout](../helm/tetral/R
 Every serving process verifies readiness; applying API first no longer migrates
 the database. The former `rollout-schema-ordered.sh` is removed for that reason.
 
-Bridge, Job Runner, Provider Gateway, MCP Connector and Web Connector are
-independent workloads with separate ServiceAccounts and access grants. Their
-source-owned fragments live under their service `k8s/` directories; the Gateway
+Bridge, Job Runner, Computer Hub, Provider Gateway, MCP Connector and Web
+Connector are independent workloads with separate ServiceAccounts and access
+grants. Their source-owned fragments live under their service `k8s/`
+directories; the Gateway
 workspace holds `k8s/provider-gateway/` and `k8s/mcp-connector/`. The aggregate
 files here compose those fragments exactly. `job-runner-rbac.yaml` grants only
 Runner Runtime visibility. TokenReview bindings cover receiving workloads only.

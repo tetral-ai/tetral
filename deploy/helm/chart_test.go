@@ -27,8 +27,8 @@ func TestHelmChartDefaultAndTogglesMatchCanonicalManifests(t *testing.T) {
 	chart := filepath.Join(engineRoot, "deploy", "helm", "tetral")
 
 	canonical := readManifestObjects(t, canonicalManifestPaths(t, engineRoot))
-	if len(canonical) != 109 {
-		t.Fatalf("canonical object count = %d; want 109 including two preview-client egress policies", len(canonical))
+	if len(canonical) != 114 {
+		t.Fatalf("canonical object count = %d; want 114 including two preview-client egress policies", len(canonical))
 	}
 
 	rendered := renderChart(t, helm, chart)
@@ -369,12 +369,12 @@ func TestHelmChartNetworkPeersAreOverridable(t *testing.T) {
 	}
 	want := map[string]int{
 		"172.20.0.1/32":         6,
-		"10.7.0.0/16":           11,
-		"edge-override-fixture": 4,
-		"dns-override-fixture":  13,
-		"203.0.113.0/24":        8,
-		"port: 25060":           11,
-		"port: 8443":            8,
+		"10.7.0.0/16":           12,
+		"edge-override-fixture": 5,
+		"dns-override-fixture":  14,
+		"203.0.113.0/24":        9,
+		"port: 25060":           12,
+		"port: 8443":            9,
 	}
 	for needle, expected := range want {
 		if overrides[needle] != expected {
@@ -492,8 +492,8 @@ func TestHelmChartStringValuesRemainStringsForBooleanShapedOverrides(t *testing.
 			}
 		}
 	}
-	if blobSecretRefs != 15 {
-		t.Fatalf("custom Blob Secret references = %d; want 15 across API and both Bridge containers", blobSecretRefs)
+	if blobSecretRefs != 20 {
+		t.Fatalf("custom Blob Secret references = %d; want 20 across API, both Bridge containers and computer-hub", blobSecretRefs)
 	}
 
 	wantImages := map[string]bool{
@@ -607,6 +607,7 @@ func TestHelmChartRenderedManifestsPassInvariantSuites(t *testing.T) {
 		"agent-runtime.yaml",
 		"api.yaml",
 		"auth.yaml",
+		"computer-hub.yaml",
 		"job-runner-rbac.yaml",
 		"bridge.yaml",
 		"cleanup.yaml",
@@ -626,9 +627,11 @@ func TestHelmChartRenderedManifestsPassInvariantSuites(t *testing.T) {
 	// test: Namespace is outside the invariant suite's closed kind and file set.
 	skip := exactTestPattern([]string{
 		"TestKubernetesEdgeGatewayEnvoyExternalAuthBoundary",
+		"TestKubernetesHardenedEdgeRoutesComputerHubUnderExternalAuth",
 		"TestKubernetesManifestQueueIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestTetralAPIIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestTetralAuthIsComposedFromServiceLocalManifests",
+		"TestKubernetesManifestComputerHubIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestEventStreamIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestGatewayWorkloadsAreComposedFromServiceLocalManifests",
 		"TestKubernetesManifestJobRunnerIsComposedFromServiceLocalManifests",
@@ -655,6 +658,17 @@ func TestHelmChartRenderedManifestsPassInvariantSuites(t *testing.T) {
 	runGoTest(t, root, []string{
 		"TETRAL_KUBERNETES_MANIFEST_ROOT=" + edgeRoot,
 	}, "./deploy/kubernetes", "-run", "^TestKubernetesEdgeGatewayEnvoyExternalAuthBoundary$")
+
+	hardenedEdgeOutput := renderChartToDirectory(t, helm, chart, "edge.enabled=true", "transport.profile=hardened")
+	hardenedEdgeRoot := t.TempDir()
+	hardenedEdgeDir := filepath.Join(hardenedEdgeRoot, "profiles", "hardened")
+	if err := os.MkdirAll(hardenedEdgeDir, 0o755); err != nil {
+		t.Fatalf("create hardened edge manifest root: %v", err)
+	}
+	copyTestFile(t, filepath.Join(hardenedEdgeOutput, "edge.yaml"), filepath.Join(hardenedEdgeDir, "edge-gateway.yaml"))
+	runGoTest(t, root, []string{
+		"TETRAL_KUBERNETES_MANIFEST_ROOT=" + hardenedEdgeRoot,
+	}, "./deploy/kubernetes", "-run", "^TestKubernetesHardenedEdgeRoutesComputerHubUnderExternalAuth$")
 
 	runGoTest(t, root, []string{
 		"TETRAL_SCHEMA_OWNERSHIP_TOP_MANIFESTS_ROOT=" + renderedRoot,
@@ -1040,6 +1054,20 @@ func runGoTest(t *testing.T, root string, environment []string, arguments ...str
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("go %s: %v\n%s", strings.Join(args, " "), err, output)
+	}
+}
+
+// A single computer-hub would leave every connected CLI without a hub while
+// its Pod restarts, so the chart starts two and refuses fewer.
+func TestHelmChartRunsAtLeastTwoComputerHubReplicas(t *testing.T) {
+	helm := requireHelm(t)
+	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
+	objects := uniqueObjects(t, renderChart(t, helm, chart))
+	if got := transportAt(t, objects["apps/v1|Deployment|tetral-system|computer-hub"], "spec", "replicas"); got != 2 {
+		t.Fatalf("default computer-hub replicas = %v; want 2", got)
+	}
+	for _, value := range []string{"computerHub.replicas=1", "computerHub.replicas=0"} {
+		requireRenderError(t, helm, chart, []string{value}, "computerHub.replicas must be an integer of at least 2")
 	}
 }
 

@@ -281,6 +281,19 @@ spec:
     - matches:
         - path:
             type: PathPrefix
+            value: /v1/client
+        - path:
+            type: PathPrefix
+            value: /v1/instance_requests
+        - path:
+            type: PathPrefix
+            value: /v1/instances
+      backendRefs:
+        - name: computer-hub
+          port: 8080
+    - matches:
+        - path:
+            type: PathPrefix
             value: /v1
       backendRefs:
         - name: api

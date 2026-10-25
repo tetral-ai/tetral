@@ -18,6 +18,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/ \
       ./services/job-runner/cmd/job-runner \
       ./services/cleanup/cmd/tetral-cleanup \
       ./services/event-stream/cmd/event-stream \
+      ./services/computer-hub/cmd/tetral-computer-hub \
       ./services/git-proxy/cmd/git-proxy \
       ./services/queue/cmd/tetral-queue \
       ./services/sandbox/cmd/tetral-sandbox \

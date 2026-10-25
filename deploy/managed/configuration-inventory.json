@@ -508,6 +508,36 @@
       ]
     },
     {
+      "id": "computer-hub",
+      "owner": "services/computer-hub",
+      "sources": [
+        "services/computer-hub/config.go",
+        "services/computer-hub/cmd/tetral-computer-hub/main.go"
+      ],
+      "environment_keys": [
+        "TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64",
+        "TETRAL_COMPUTER_HUB_HTTP_ADDR",
+        "TETRAL_COMPUTER_HUB_METRICS_ADDR",
+        "TETRAL_DATABASE_TLS_CA_PATH",
+        "TETRAL_DATABASE_TLS_SERVER_NAME",
+        "TETRAL_DATABASE_URL"
+      ],
+      "defaults": {
+        "http_addr": ":8080",
+        "metrics_addr": ":8081",
+        "shutdown_timeout": "10s"
+      },
+      "units": "listen addresses, Go duration",
+      "unset_zero": "Whitespace empty addresses default; database DSN and principal key required.",
+      "constraints": "Metrics address differs from the public address; the principal key is a base64 Ed25519 public key; blob settings pass blob production readiness.",
+      "projection": "Fixed ports 8080/8081, computer-hub-url DSN key of the database Secret, blob Secret keys, and at least two replicas; no other hub setting is chart-owned.",
+      "proofs": [
+        "services/computer-hub/config_test.go",
+        "deploy/helm/configuration_projection_test.go",
+        "deploy/kubernetes/manifest_test.go"
+      ]
+    },
+    {
       "id": "blob-transport",
       "owner": "internal/blob",
       "sources": [

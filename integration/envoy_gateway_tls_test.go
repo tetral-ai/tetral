@@ -137,7 +137,7 @@ func requireOnlyEdgeTLSMaterialDelta(t *testing.T, fixture *envoyGatewayTranslat
 			}
 		}
 	}
-	if len(changedRoles) != len(material.Leaves) || changedSecrets == 0 || (material.Trust != nil && changedTrust != 4) {
+	if len(changedRoles) != len(material.Leaves) || changedSecrets == 0 || (material.Trust != nil && changedTrust != 5) {
 		t.Fatal("TLS generation did not change exactly its referenced material")
 	}
 	t.Logf("envoy_gateway_tls_graph_delta certificate_roles=%d trust_secrets=%d changed_secrets=%d policy_equal=true", len(changedRoles), changedTrust, changedSecrets)

@@ -66,6 +66,23 @@ spec:
         kind: ConfigMap
         name: "tetral-edge-native-trust"
 ---
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: computer-hub-edge
+  namespace: tetral-system
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: computer-hub
+  validation:
+    hostname: computer-hub.tetral-system.svc.cluster.local
+    caCertificateRefs:
+      - group: ""
+        kind: ConfigMap
+        name: "tetral-edge-native-trust"
+---
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: BackendTrafficPolicy
 metadata:
@@ -350,6 +367,19 @@ spec:
             value: /v1/api_keys
       backendRefs:
         - name: auth
+          port: 8080
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1/client
+        - path:
+            type: PathPrefix
+            value: /v1/instance_requests
+        - path:
+            type: PathPrefix
+            value: /v1/instances
+      backendRefs:
+        - name: computer-hub
           port: 8080
     - matches:
         - path:

@@ -9,6 +9,7 @@ Engine metrics carry instead of renaming it under the Operator's own label.
   (dict "name" "api" "namespace" "tetral-system" "port" "metrics")
   (dict "name" "auth" "namespace" "tetral-system" "port" "metrics")
   (dict "name" "bridge" "namespace" "tetral-system" "port" "http")
+  (dict "name" "computer-hub" "namespace" "tetral-system" "port" "metrics")
   (dict "name" "event-stream" "namespace" "tetral-system" "port" "metrics")
   (dict "name" "git-proxy" "namespace" "tetral-system" "port" "metrics")
   (dict "name" "job-runner" "namespace" "tetral-system" "port" "metrics-job")

@@ -239,7 +239,7 @@ The chart parameterizes only axes already present in the canonical manifests:
   `observability` values are described in
   [Operational configuration and diagnostics](#operational-configuration-and-diagnostics)
   and [Observability exports](#observability-exports).
-- `resources.*` carries the thirteen workload-container request/limit blocks.
+- `resources.*` carries the fourteen workload-container request/limit blocks.
   The remaining `resources:` mappings in the canonical YAML are fixed RBAC
   resource-name lists, not container budgets, so the chart has no values for
   them.
@@ -342,7 +342,7 @@ Two follow-ups are intentionally outside this chart:
 
 ## Independent workload replicas and access
 
-Bridge, Job Runner, Sandbox, Provider Gateway, MCP Connector and Web Connector each own
+Bridge, Job Runner, Sandbox, Computer Hub, Provider Gateway, MCP Connector and Web Connector each own
 one Deployment, ServiceAccount, Service and metrics/probe port. The chart
 removes the former combined Gateway resources and the shared `gateway`
 ServiceAccount; the database role contract likewise has no shared `gateway`
@@ -350,6 +350,8 @@ role.
 Their declared Deployment replica defaults are one. Set `replicas.api`, `replicas.auth`, `replicas.bridge`,
 `replicas.jobRunner`, `replicas.sandbox`, `replicas.providerGateway`, `replicas.mcpConnector` or
 `replicas.webConnector` independently to a positive integer.
+`computerHub.replicas` defaults to two and rejects fewer, so a CLI keeps a
+serving hub while one Pod restarts.
 
 `autoscaling.providerGateway.enabled` defaults to true and retains the existing
 HPA: minimum two, maximum ten, CPU utilization target 70 percent. An enabled
@@ -499,11 +501,11 @@ HPA maximum, then resolves absolute or percentage `rollout.maxSurge` against
 that bound. Disabled autoscaling counts only initial replicas. Go processes
 count one pool; Provider Gateway and MCP count
 two generations throughout simultaneous rollout and trust replacement. API,
-Auth, Sandbox, Queue and Event Stream each count their replica plus surge; Git Proxy
+Auth, Computer Hub, Sandbox, Queue and Event Stream each count their replica plus surge; Git Proxy
 uses its existing HPA maximum of ten plus surge. Cleanup counts one nonoverlapping job. Pool-backed listeners and worker
 concurrency do not add another pool. Separately configured old/new release
 cohorts require a combined ledger for both settings. A fully bound capacity
-below the total is rejected at render time. The default owned maximum is 780
+below the total is rejected at render time. The default owned maximum is 840
 slots, before reserve and external consumers. Rendered subset fixtures prove
 128/127 and 368/367 boundaries without claiming eagerly opened connections.
 
@@ -556,8 +558,11 @@ publisher policy variables; formal Event Stream bounds remain configured.
 ## Public edge transport and issuer access
 
 The API edge calls the Auth-owned gRPC Check listener on 9095 before forwarding
-protected routes. Only exact `POST /v1/oauth/token` bypasses Check. Credential
-selection remains Auth's common API-key/Bearer domain; the proxy preserves raw
+protected routes. Only exact `POST /v1/oauth/token` bypasses Check. The API
+route sends the path prefixes `/v1/client`, `/v1/instance_requests` and
+`/v1/instances` to `computer-hub` in a rule ahead of the `/v1` rule for `api`,
+under the same Check; connection keys authenticate only under `/v1/client/`.
+Credential selection remains Auth's common API-key/Bearer domain; the proxy preserves raw
 duplicate headers, generates a new request ID, removes caller identity and
 forwarding metadata before authorization, and removes credentials afterward.
 Git uses its own hostname and backend ticket boundary. Every other `X-Tetral-`
@@ -568,7 +573,7 @@ escaped slash/backslash requests are rejected before redirect or Check.
 Standard routing uses plaintext edge-to-service HTTP and gRPC inside the
 explicit network boundary. Hardened routing replaces those same business
 listeners with native TLS; it opens no additional plaintext business port.
-API/Auth/Event Stream/Git Proxy require `TETRAL_HTTP_TRANSPORT=native-mtls` and
+API/Auth/Event Stream/Git Proxy/Computer Hub require `TETRAL_HTTP_TRANSPORT=native-mtls` and
 complete CA/leaf/key/exact edge URI configuration. Auth Check uses the separate
 `TETRAL_AUTH_GRPC_*` configuration. Health and metrics remain restricted separate
 listeners. The shared Go loader validates complete mounted generations and
@@ -670,6 +675,7 @@ port.
 | `api` | `tetral-system` | 8081 | `api-metrics`, `metrics` |
 | `auth` | `tetral-system` | 8081 | `auth-metrics`, `metrics` |
 | `bridge` | `tetral-system` | 8080 | `bridge`, `http` |
+| `computer-hub` | `tetral-system` | 8081 | `computer-hub-metrics`, `metrics` |
 | `event-stream` | `tetral-system` | 8081 | `event-stream-metrics`, `metrics` |
 | `git-proxy` | `tetral-system` | 8081 | `git-proxy`, `metrics` |
 | `job-runner` | `tetral-system` | 8081 | `job-runner`, `metrics-job` |
@@ -702,7 +708,7 @@ scrape_configs:
     relabel_configs:
       # Keep each workload's metrics port and no other container port.
       - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_container_port_number]
-        regex: (agent-runtime|bridge|provider-gateway|queue|sandbox);8080|(api|auth|event-stream|git-proxy|job-runner|mcp-connector);8081|web-connector;9464
+        regex: (agent-runtime|bridge|provider-gateway|queue|sandbox);8080|(api|auth|computer-hub|event-stream|git-proxy|job-runner|mcp-connector);8081|web-connector;9464
         action: keep
       - source_labels: [__meta_kubernetes_namespace]
         target_label: namespace
