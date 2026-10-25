@@ -10,6 +10,7 @@
 
 pub mod edit;
 pub mod exec;
+pub mod view_image;
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -46,6 +47,9 @@ pub fn run(arguments: &[OsString]) -> ExitCode {
     match arguments.split_first() {
         Some((kind, rest)) if kind == exec::KIND => exec::run(rest),
         Some((kind, [])) if kind == edit::KIND => run_file_tool(HelperTool::Edit, edit::run),
+        Some((kind, [])) if kind == view_image::KIND => {
+            run_file_tool(HelperTool::ViewImage, view_image::run)
+        }
         _ => ExitCode::FAILURE,
     }
 }

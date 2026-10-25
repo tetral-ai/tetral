@@ -3,13 +3,21 @@
 //! the child's stdin, the result it reads from the child's stdout, and the
 //! result envelopes of a child that gave no valid result and of a cancelled
 //! call. A result is valid when it is one result envelope of the call's
-//! tool, finished, untruncated and without `metrics`, which the report adds;
-//! anything else, more than [`RESULT_MAX_BYTES`] included, is
+//! tool, finished, untruncated and without `metrics`, which the report adds,
+//! and, for `view_image`, holds one image that image acceptance takes, its
+//! Base64 canonical and its `size_bytes` and `mime` those of the decoded
+//! bytes, so that no report of an image Engine or a model would refuse is
+//! made; anything else, more than [`RESULT_MAX_BYTES`] included, is
 //! `helper_failure`.
 
 use std::path::Path;
 
-use protocol::tool::{EditInput, HelperEnvelope, HelperStatus, HelperTool, ToolInput, limits};
+use base64::Engine;
+use protocol::image::{Acceptance, Format, HEADER_MAX_BYTES};
+use protocol::tool::{
+    EditInput, HelperEnvelope, HelperStatus, HelperTool, MediaResult, ToolInput, ToolResult,
+    ViewImageInput, limits,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 
@@ -29,6 +37,7 @@ pub const NO_VALID_RESULT: &str = "the tool's process gave no valid result";
 #[derive(Debug, Clone)]
 pub enum FileCall {
     Edit(EditInput),
+    ViewImage(ViewImageInput),
 }
 
 impl FileCall {
@@ -36,13 +45,15 @@ impl FileCall {
     pub fn of(tool: &ToolInput) -> Option<FileCall> {
         match tool {
             ToolInput::Edit(input) => Some(FileCall::Edit(input.clone())),
-            _ => None,
+            ToolInput::ViewImage(input) => Some(FileCall::ViewImage(input.clone())),
+            ToolInput::ExecCommand(_) => None,
         }
     }
 
     pub fn tool(&self) -> HelperTool {
         match self {
             FileCall::Edit(_) => HelperTool::Edit,
+            FileCall::ViewImage(_) => HelperTool::ViewImage,
         }
     }
 
@@ -50,6 +61,7 @@ impl FileCall {
     pub fn arguments(&self) -> Vec<String> {
         let kind = match self {
             FileCall::Edit(_) => child::edit::KIND,
+            FileCall::ViewImage(_) => child::view_image::KIND,
         };
         child::file_tool_arguments(kind)
             .into_iter()
@@ -62,6 +74,7 @@ impl FileCall {
     pub fn request(&self, cwd: &Path) -> Vec<u8> {
         let input = match self {
             FileCall::Edit(input) => serde_json::to_value(input),
+            FileCall::ViewImage(input) => serde_json::to_value(input),
         };
         protocol::encode(&FileRequest {
             cwd: cwd.to_path_buf(),
@@ -78,7 +91,11 @@ impl FileCall {
             && finished
             && !envelope.truncated
             && envelope.metrics.is_none()
-            && envelope.drive_sync.is_none();
+            && envelope.drive_sync.is_none()
+            && match &envelope.result {
+                ToolResult::Media(media) => accepted(media),
+                _ => true,
+            };
         valid.then_some(envelope)
     }
 
@@ -190,6 +207,25 @@ impl Pipes {
         self.stdout = None;
         self.stderr = None;
     }
+}
+
+/// Whether `media` holds one image that image acceptance takes, in
+/// canonical Base64, with the `size_bytes` and `mime` of its decoded bytes.
+fn accepted(media: &MediaResult) -> bool {
+    let Ok(image) = base64::engine::general_purpose::STANDARD.decode(&media.data_base64) else {
+        return false;
+    };
+    let Some(format) = Format::of(&image) else {
+        return false;
+    };
+    let header = &image[..image.len().min(HEADER_MAX_BYTES)];
+    format.mime() == media.mime
+        && u64::try_from(media.size_bytes.get()) == Ok(image.len() as u64)
+        && format.dimensions(header).is_some_and(|dimensions| {
+            Acceptance::default()
+                .check(image.len() as u64, dimensions)
+                .is_ok()
+        })
 }
 
 async fn write_some(stdin: Option<&mut ChildStdin>, bytes: &[u8]) -> std::io::Result<usize> {

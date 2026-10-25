@@ -9,6 +9,7 @@ publish.workspace = true
 test-seams = ["state/test-seams"]
 
 [dependencies]
+base64.workspace = true
 codex-linux-sandbox.workspace = true
 codex-protocol.workspace = true
 codex-sandboxing.workspace = true

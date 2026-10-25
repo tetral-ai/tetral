@@ -2046,6 +2046,7 @@ dependencies = [
 name = "execution"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "base64 0.23.1",
  "codex-linux-sandbox",
  "codex-protocol",
  "codex-sandboxing",
@@ -6473,6 +6474,7 @@ dependencies = [
 name = "tetral-tests"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "base64 0.23.1",
  "fuser",
  "protocol",
  "reqwest 0.13.5",
