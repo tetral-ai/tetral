@@ -673,9 +673,9 @@ func TestPrintLoggingGuardNamesTheFileAndLineOfEachViolation(t *testing.T) {
 		"services/api/record.go":                     records,
 		"services/api/handler.go":                    "package api\n\nimport logging \"log/slog\"\n\nvar handler = logging.NewJSONHandler(nil, nil)\n",
 		"internal/workload/owner.go":                 "package workload\n\nimport \"log/slog\"\n\nfunc install() { slog.SetDefault(nil) }\n",
-		"integration/harness.go":                     "package integration\n\nimport \"log/slog\"\n\nfunc trace() { slog.Info(\"harness\") }\n",
+		"integration/harness.go":                     "package integration\n\nimport (\n\t\"fmt\"\n\t\"log/slog\"\n)\n\nfunc trace() {\n\tslog.Info(\"harness\")\n\tfmt.Println(\"harness\")\n}\n",
 		"services/queue/print.go":                    "package queue\n\nimport \"fmt\"\n\nfunc report() {\n\tfmt.Print(\"a\")\n\tfmt.Printf(\"%s\", \"b\")\n\tfmt.Println(\"done\")\n}\n",
-		"internal/testinfra/cmd/tool/main.go":        "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"plan\") }\n",
+		"internal/testinfra/cmd/tool/main.go":        "package main\n\nimport (\n\t\"fmt\"\n\t\"log/slog\"\n)\n\nfunc main() {\n\tfmt.Println(\"plan\")\n\tslog.Info(\"plan\")\n}\n",
 		"services/gateway/packages/x/src/service.ts": "export function run(): void {\n  console.error(\"failed\");\n}\n",
 		"services/gateway/packages/x/test/a.test.ts": "console.log(\"test output\");\n",
 		"internal/ts-observability/src/sink.ts":      "console.warn(\"library\");\n",
@@ -694,6 +694,8 @@ func TestPrintLoggingGuardNamesTheFileAndLineOfEachViolation(t *testing.T) {
 	}
 	want = append(want,
 		"services/api/handler.go:5 calls slog.NewJSONHandler; record through internal/workload",
+		"integration/harness.go:10 calls fmt.Println; record through internal/workload",
+		"internal/testinfra/cmd/tool/main.go:10 calls slog.Info; record through internal/workload",
 		"services/gateway/packages/x/src/service.ts:2 calls console; record through @tetral/ts-observability",
 		"services/queue/print.go:6 calls fmt.Print; record through internal/workload",
 		"services/queue/print.go:7 calls fmt.Printf; record through internal/workload",
@@ -739,20 +741,22 @@ func printLoggingViolations(engineRoot string) ([]string, error) {
 					violations = append(violations, rel+" contains forbidden production logging token "+strconv.Quote(call))
 				}
 			}
-			if strings.HasPrefix(rel, "internal/workload/") || strings.HasPrefix(rel, "integration/") {
-				return nil
+			// internal/workload owns slog and integration/ is test support; the
+			// commands under internal/testinfra are developer tools whose stdout
+			// is their interface, not service records.
+			checked := map[string]bool{
+				"log/slog": !strings.HasPrefix(rel, "internal/workload/") && !strings.HasPrefix(rel, "integration/"),
+				"fmt":      !strings.HasPrefix(rel, "internal/testinfra/"),
 			}
 			fileSet := token.NewFileSet()
 			file, err := parser.ParseFile(fileSet, path, body, 0)
 			if err != nil {
 				return err
 			}
-			// internal/testinfra's commands are developer tools whose stdout is
-			// their interface, not service records.
 			importNames := map[string]string{}
 			for _, imported := range file.Imports {
 				importPath := strings.Trim(imported.Path.Value, `"`)
-				if importPath != "log/slog" && (importPath != "fmt" || strings.HasPrefix(rel, "internal/testinfra/")) {
+				if !checked[importPath] {
 					continue
 				}
 				name := filepath.Base(importPath)
