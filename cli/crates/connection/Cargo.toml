@@ -10,16 +10,25 @@ bytes.workspace = true
 drive.workspace = true
 eventsource-stream.workspace = true
 futures-core.workspace = true
+http.workspace = true
 http-body.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-rustls.workspace = true
+hyper-util = { workspace = true, features = ["client-legacy", "client-proxy", "http1", "tokio"] }
 observe.workspace = true
 protocol.workspace = true
 rand.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
+rustls-platform-verifier.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 state.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-rustls.workspace = true
+tower-service.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
