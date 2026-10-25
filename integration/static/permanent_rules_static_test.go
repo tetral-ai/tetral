@@ -674,7 +674,7 @@ func TestPrintLoggingGuardNamesTheFileAndLineOfEachViolation(t *testing.T) {
 		"services/api/handler.go":                    "package api\n\nimport logging \"log/slog\"\n\nvar handler = logging.NewJSONHandler(nil, nil)\n",
 		"internal/workload/owner.go":                 "package workload\n\nimport \"log/slog\"\n\nfunc install() { slog.SetDefault(nil) }\n",
 		"integration/harness.go":                     "package integration\n\nimport \"log/slog\"\n\nfunc trace() { slog.Info(\"harness\") }\n",
-		"services/queue/print.go":                    "package queue\n\nimport \"fmt\"\n\nfunc report() {\n\tfmt.Println(\"done\")\n}\n",
+		"services/queue/print.go":                    "package queue\n\nimport \"fmt\"\n\nfunc report() {\n\tfmt.Print(\"a\")\n\tfmt.Printf(\"%s\", \"b\")\n\tfmt.Println(\"done\")\n}\n",
 		"internal/testinfra/cmd/tool/main.go":        "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"plan\") }\n",
 		"services/gateway/packages/x/src/service.ts": "export function run(): void {\n  console.error(\"failed\");\n}\n",
 		"services/gateway/packages/x/test/a.test.ts": "console.log(\"test output\");\n",
@@ -695,7 +695,9 @@ func TestPrintLoggingGuardNamesTheFileAndLineOfEachViolation(t *testing.T) {
 	want = append(want,
 		"services/api/handler.go:5 calls slog.NewJSONHandler; record through internal/workload",
 		"services/gateway/packages/x/src/service.ts:2 calls console; record through @tetral/ts-observability",
-		"services/queue/print.go:6 calls fmt.Println; record through internal/workload",
+		"services/queue/print.go:6 calls fmt.Print; record through internal/workload",
+		"services/queue/print.go:7 calls fmt.Printf; record through internal/workload",
+		"services/queue/print.go:8 calls fmt.Println; record through internal/workload",
 	)
 	slices.Sort(violations)
 	slices.Sort(want)
