@@ -74,11 +74,12 @@ which owns that task's process tree; the translation of a call's
 - Each probe of a `bwrap` candidate is bounded by `PROBE_TIMEOUT` and
   `PROBE_OUTPUT_LIMIT_BYTES`, which `Isolation::with_probe_bounds`
   overrides.
-- A task's supervisor owns it from its start to its cleanup: `starting`
-  while it checks the isolation, creates the task's files and launches the
-  command, `running` from the command's actual start, `ended` with its
-  `terminal` report and `cleaned` once that report is acknowledged or
-  dropped and the files are gone. It reads both pipes all the time into the
+- A task's supervisor owns it from its admission to its cleanup: `staged`
+  until its Session binding owner starts it, `starting` while it checks the
+  isolation, creates the task's files and launches the command, `running`
+  from the command's actual start, `ended` with its `terminal` report and
+  `cleaned` once that report is acknowledged or dropped and the files are
+  gone. It reads both pipes all the time into the
   capture and the logs, so no command blocks on its output, and every wait
   reads the seam clock (`supervisor`).
 - `exec_command` runs as `tetral __tetral-task exec <directory> <shell>

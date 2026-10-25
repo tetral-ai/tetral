@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use execution::supervisor::{SupervisorMailbox, SupervisorMessage};
 use protocol::id::{Id, SafeId};
 use protocol::local::SessionState;
 use protocol::ports::{
@@ -55,9 +56,21 @@ pub enum SessionMessage {
 
 pub type SessionMailbox = mpsc::UnboundedSender<SessionMessage>;
 
-/// Starts the task of an admitted command, whose reports go to `reports`.
+/// Supervises the tasks of admitted commands.
 pub trait TaskStarter: Send + 'static {
-    fn start(&mut self, task: TaskStart, reports: Arc<dyn ReportSink>);
+    /// The supervisor of an admitted task, `staged` until [`TaskStarter::start`],
+    /// whose reports go to `reports`; `None` for a tool that no supervisor
+    /// runs here.
+    fn supervise(
+        &mut self,
+        task: TaskStart,
+        reports: Arc<dyn ReportSink>,
+    ) -> Option<SupervisorMailbox>;
+
+    /// Starts a staged task's supervisor.
+    fn start(&mut self, supervisor: &SupervisorMailbox) {
+        let _ = supervisor.send(SupervisorMessage::Start);
+    }
 }
 
 /// The starter of an App Server that executes no tool: its ready advertises
@@ -66,7 +79,13 @@ pub trait TaskStarter: Send + 'static {
 pub struct NoTasks;
 
 impl TaskStarter for NoTasks {
-    fn start(&mut self, _task: TaskStart, _reports: Arc<dyn ReportSink>) {}
+    fn supervise(
+        &mut self,
+        _task: TaskStart,
+        _reports: Arc<dyn ReportSink>,
+    ) -> Option<SupervisorMailbox> {
+        None
+    }
 }
 
 /// The paths a preparation checks against and runs.
@@ -592,10 +611,21 @@ mod tests {
         starts: Arc<AtomicUsize>,
         starts_after_close: Arc<AtomicUsize>,
         close: CloseAdmitted,
+        supervisors: Vec<mpsc::UnboundedReceiver<SupervisorMessage>>,
     }
 
     impl TaskStarter for CountingStarter {
-        fn start(&mut self, _task: TaskStart, _reports: Arc<dyn ReportSink>) {
+        fn supervise(
+            &mut self,
+            _task: TaskStart,
+            _reports: Arc<dyn ReportSink>,
+        ) -> Option<SupervisorMailbox> {
+            let (mailbox, messages) = mpsc::unbounded_channel();
+            self.supervisors.push(messages);
+            Some(mailbox)
+        }
+
+        fn start(&mut self, _supervisor: &SupervisorMailbox) {
             self.starts.fetch_add(1, Ordering::SeqCst);
             if self.close.check() {
                 self.starts_after_close.fetch_add(1, Ordering::SeqCst);
@@ -693,6 +723,7 @@ mod tests {
             starts: starts.clone(),
             starts_after_close: starts_after_close.clone(),
             close: close.clone(),
+            supervisors: Vec::new(),
         });
         let barrier = Arc::new(Barrier::new(2));
         let (close_turn, tool_turn) = Turn::pair(close_first);
@@ -770,6 +801,7 @@ mod tests {
             starts: starts.clone(),
             starts_after_close: Arc::new(AtomicUsize::new(0)),
             close: CloseAdmitted::new(never),
+            supervisors: Vec::new(),
         });
         let (reply, admitted) = oneshot::channel();
         let message = SessionMessage::Close {

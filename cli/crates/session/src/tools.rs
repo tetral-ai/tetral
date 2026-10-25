@@ -6,8 +6,10 @@
 //! enters its binding's registry and starts, or waits in the binding's
 //! staging queue while the binding waits for the ACK of its `prepared`
 //! report; that ACK starts the queue in arrival order
-//! ([`SessionOwner::start_staged`]). A control finds its task only in the
-//! registry of the binding it names, on its own connection.
+//! ([`SessionOwner::start_staged`]). Each admitted task has its Task
+//! supervisor from its admission on, `staged` until the owner starts it. A
+//! control finds its task only in the registry of the binding it names, on
+//! its own connection.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -15,6 +17,7 @@ use std::time::Duration;
 
 use execution::policy::{TaskPermissions, TranslationInputs, validate};
 use execution::report::{Body, Correlation, Report};
+use execution::supervisor::SupervisorMailbox;
 use execution::{isolation, store};
 use protocol::connection::{Downstream, DownstreamPayload, DownstreamType};
 use protocol::id::Id;
@@ -70,15 +73,24 @@ pub struct Tasks {
     staged: VecDeque<Id>,
 }
 
-#[derive(Debug)]
 struct Task {
     /// Its `tool.execute` payload's content fingerprint.
     fingerprint: String,
     /// The `message_id`s of the instructions it answers: the one that
     /// registered it and each identical one that joined it.
     instructions: Vec<Id>,
-    start: TaskStart,
+    supervisor: Option<SupervisorMailbox>,
     state: TaskState,
+}
+
+impl std::fmt::Debug for Task {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Task")
+            .field("instructions", &self.instructions)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,14 +112,15 @@ impl Tasks {
         }
     }
 
-    /// The staged tasks in arrival order, each now started.
-    fn start_staged(&mut self) -> Vec<TaskStart> {
+    /// The supervisors of the staged tasks in arrival order, each task now
+    /// started.
+    fn start_staged(&mut self) -> Vec<SupervisorMailbox> {
         std::mem::take(&mut self.staged)
             .into_iter()
             .filter_map(|task_id| {
                 let task = self.registry.get_mut(&task_id)?;
                 task.state = TaskState::Started;
-                Some(task.start.clone())
+                task.supervisor.clone()
             })
             .collect()
     }
@@ -213,12 +226,16 @@ impl<S: TaskStarter> SessionOwner<S> {
             received: call.received,
         };
         let staged = binding.state == SessionState::PreparedPendingAck;
+        let supervisor = self.starter.supervise(start, preparation.reports.clone());
+        if !staged && let Some(supervisor) = &supervisor {
+            self.starter.start(supervisor);
+        }
         binding.tasks.registry.insert(
             call.task_id.clone(),
             Task {
                 fingerprint: call.fingerprint.clone(),
                 instructions: vec![call.message_id.clone()],
-                start: start.clone(),
+                supervisor,
                 state: if staged {
                     TaskState::Staged
                 } else {
@@ -228,8 +245,6 @@ impl<S: TaskStarter> SessionOwner<S> {
         );
         if staged {
             binding.tasks.staged.push_back(call.task_id.clone());
-        } else {
-            self.starter.start(start, preparation.reports.clone());
         }
         Ok(())
     }
@@ -267,9 +282,6 @@ impl<S: TaskStarter> SessionOwner<S> {
     /// its `prepared` report has made it `prepared`, before any later
     /// instruction of the binding.
     pub(crate) fn start_staged(&mut self) {
-        let Some(preparation) = &self.preparation else {
-            return;
-        };
         let Some(binding) = self
             .record
             .as_mut()
@@ -278,8 +290,8 @@ impl<S: TaskStarter> SessionOwner<S> {
         else {
             return;
         };
-        for start in binding.tasks.start_staged() {
-            self.starter.start(start, preparation.reports.clone());
+        for supervisor in binding.tasks.start_staged() {
+            self.starter.start(&supervisor);
         }
     }
 }

@@ -37,10 +37,12 @@ that is no longer the binding's is discarded.
 - A control finds its task only in the registry of the binding it names on
   its own connection; an absent task is `task_not_found` (`tools`).
 - An owner starts admitted commands only from its handler, through the
-  `TaskStarter` it is given, so a start never races its binding's close. A
-  start carries the task's directory under its Session and its temporary
-  directory, both named from the task's name chosen at admission, and the
-  Session's Report outbox port (`tools::TaskStart`).
+  `TaskStarter` it is given, so a start never races its binding's close: the
+  starter gives each admitted task its supervisor at admission, `staged`,
+  and the owner starts it once its binding is `prepared`. A task carries
+  its directory under its Session and its temporary directory, both named
+  from the task's name chosen at admission, and the Session's Report outbox
+  port (`tools::TaskStart`).
 - Owners follow the owner rules of `cli/README.md`. An owner reaches the
   Connection owner only through `protocol::ports::ConnectionPort` and hands
   its reports to `protocol::ports::ReportSink`.

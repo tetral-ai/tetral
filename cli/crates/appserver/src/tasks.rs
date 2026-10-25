@@ -1,5 +1,5 @@
 //! The Session binding owners' task starter: one Task supervisor for each
-//! started `exec_command` task.
+//! admitted `exec_command` task.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -7,7 +7,7 @@ use std::sync::Arc;
 use execution::isolation::Isolation;
 use execution::limits::Visible;
 use execution::store::{LOG_HEAD_BYTES, TaskFiles};
-use execution::supervisor::{self, Bounds, Context, TaskSpec};
+use execution::supervisor::{self, Bounds, Context, SupervisorMailbox, TaskSpec};
 use protocol::ports::ReportSink;
 use protocol::tool::ToolInput;
 use session::{TaskStart, TaskStarter};
@@ -22,9 +22,13 @@ pub struct Supervisors {
 }
 
 impl TaskStarter for Supervisors {
-    fn start(&mut self, task: TaskStart, reports: Arc<dyn ReportSink>) {
+    fn supervise(
+        &mut self,
+        task: TaskStart,
+        reports: Arc<dyn ReportSink>,
+    ) -> Option<SupervisorMailbox> {
         let ToolInput::ExecCommand(input) = task.tool else {
-            return;
+            return None;
         };
         let spec = TaskSpec {
             connection_id: task.connection_id,
@@ -41,7 +45,7 @@ impl TaskStarter for Supervisors {
             traceparent: task.traceparent,
             received: task.received,
         };
-        supervisor::spawn(
+        Some(supervisor::spawn(
             spec,
             Context {
                 tetral: self.tetral.clone(),
@@ -49,6 +53,6 @@ impl TaskStarter for Supervisors {
                 reports,
                 bounds: self.bounds,
             },
-        );
+        ))
     }
 }

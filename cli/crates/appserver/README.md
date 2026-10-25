@@ -52,8 +52,8 @@ ones it uses belong here too.
   the Connection owner and its Report outbox with the Session binding
   owners' factory (`session::Factory`), given the state root as given and
   canonical and the running executable for the directory probe, and with
-  `tasks::Supervisors`, which starts a Task supervisor for each started
-  `exec_command` task, serves the App Server until the shutdown sequence
+  `tasks::Supervisors`, which gives each admitted `exec_command` task its
+  Task supervisor, serves the App Server until the shutdown sequence
   ends and gives `lifecycle::Ended`: the status as of then and the time left
   before the shutdown's deadline. `lifecycle::Times` holds the durations,
   each a constant but for tests.

@@ -1,7 +1,9 @@
-//! The Task supervisor: the one owner of a task and its process tree. A task
-//! is `staged` in its binding's staging queue until the Session binding owner
-//! starts it with [`spawn`]; it is then `starting` while its supervisor checks
-//! the isolation, creates the task's files and launches the command;
+//! The Task supervisor: the one owner of a task and its process tree, from
+//! the task's admission until its Session binding owner forgets it. A task
+//! is `staged` until the binding owner starts it
+//! ([`SupervisorMessage::Start`]); it is then `starting` while its
+//! supervisor checks the isolation, creates the task's files and launches
+//! the command;
 //! `running` from the command's actual start, while the supervisor reads both
 //! pipes into the task's capture; `ended` once the shell's exit has been
 //! observed, or given up on, and the `terminal` report has been handed to the
@@ -97,21 +99,28 @@ impl Default for Bounds {
 }
 
 pub enum SupervisorMessage {
+    /// The binding owner starts the staged task.
+    Start,
     /// The outbox's outcome of one of the task's reports.
     Outcome(ReportId, ReportOutcome),
 }
 
 pub type SupervisorMailbox = mpsc::UnboundedSender<SupervisorMessage>;
 
-struct Listener(SupervisorMailbox);
+/// Posts report outcomes to a supervisor without keeping its mailbox open:
+/// a supervisor ends once its binding owner drops the task's mailbox.
+struct Listener(mpsc::WeakUnboundedSender<SupervisorMessage>);
 
 impl ReportListener for Listener {
     fn outcome(&self, report: ReportId, outcome: ReportOutcome) {
-        let _ = self.0.send(SupervisorMessage::Outcome(report, outcome));
+        if let Some(mailbox) = self.0.upgrade() {
+            let _ = mailbox.send(SupervisorMessage::Outcome(report, outcome));
+        }
     }
 }
 
-/// Starts the supervisor of the task `spec`, which runs inside its
+/// Starts the supervisor of the admitted task `spec`, `staged` until its
+/// mailbox gets [`SupervisorMessage::Start`]; it runs inside its
 /// instruction's span.
 pub fn spawn(spec: TaskSpec, context: Context) -> SupervisorMailbox {
     let (mailbox, messages) = mpsc::unbounded_channel();
@@ -134,11 +143,11 @@ pub fn spawn(spec: TaskSpec, context: Context) -> SupervisorMailbox {
     let supervisor = Supervisor {
         spec,
         context,
-        listener: Arc::new(Listener(mailbox.clone())),
+        listener: Arc::new(Listener(mailbox.downgrade())),
         messages,
         awaited: HashSet::new(),
         report_seq: 0,
-        left_queue: state::seams::now(),
+        left_queue: Duration::ZERO,
     };
     tokio::spawn(supervisor.run().instrument(span));
     mailbox
@@ -188,6 +197,15 @@ enum Expiry {
 
 impl Supervisor {
     async fn run(mut self) {
+        // `staged`
+        loop {
+            match self.messages.recv().await {
+                None => return,
+                Some(SupervisorMessage::Start) => break,
+                Some(SupervisorMessage::Outcome(..)) => {}
+            }
+        }
+        self.left_queue = state::seams::now();
         match self.start().await {
             Err(Start::Rejected(rejection)) => {
                 self.submit(Body::Rejected(ProtocolError {
@@ -204,6 +222,7 @@ impl Supervisor {
                 Some(SupervisorMessage::Outcome(report, _)) => {
                     self.awaited.remove(&report);
                 }
+                Some(SupervisorMessage::Start) => {}
                 None => break,
             }
         }
@@ -309,6 +328,7 @@ impl Supervisor {
         let mut failure = Vec::new();
         let wait_ends = spawned + call.wait;
         let mut waited = false;
+        let mut forgotten = false;
         let mut ending: Option<(Termination, Expiry)> = None;
         let mut exit: Option<(ExitFacts, Duration)> = None;
         loop {
@@ -364,11 +384,13 @@ impl Supervisor {
                     }
                 }
                 () = state::seams::sleep_until(exit.as_ref().map_or(Duration::MAX, |(_, at)| *at + bounds.output_drain)), if exit.is_some() => break,
-                message = self.messages.recv() => {
-                    if let Some(SupervisorMessage::Outcome(report, _)) = message {
+                message = self.messages.recv(), if !forgotten => match message {
+                    Some(SupervisorMessage::Outcome(report, _)) => {
                         self.awaited.remove(&report);
                     }
-                }
+                    Some(SupervisorMessage::Start) => {}
+                    None => forgotten = true,
+                },
             }
         }
         drop((out.reader.take(), err.reader.take()));
