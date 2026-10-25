@@ -421,8 +421,8 @@ func TestOnlyUsesOfACredentialAnActivationRevokedAreRecorded(t *testing.T) {
 }
 
 // TestEachUseOfACredentialAnActivationRevokedIsRecorded sends two uses of a
-// credential an activation revoked at once, and one use that took its first
-// read before the activation and its locks after: each answers 401
+// credential an activation revoked at once, and two uses that took their
+// first read before the activation and their locks after: each answers 401
 // credential_revoked and sends its own credential_reused.
 func TestEachUseOfACredentialAnActivationRevokedIsRecorded(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
@@ -480,19 +480,33 @@ func TestEachUseOfACredentialAnActivationRevokedIsRecorded(t *testing.T) {
 		requireReuses(cli, 2)
 	})
 
-	t.Run("a use the activation overtook", func(t *testing.T) {
+	// Both uses read the credential active and then lock the instance
+	// after the activation: each must lock it in its final mode, so neither
+	// raises a share lock the other holds.
+	t.Run("two uses the activation overtook", func(t *testing.T) {
 		cli, stream := f.openOnline()
 		pending := f.renewal(cli, stream, "renew-overtaken", `{}`)["id"].(string)
 		renewed := f.fetched(cli, stream.connectionID, pending)
-		pause := f.pauseOn("FROM instances WHERE workspace_id=$1 AND id=$2 FOR SHARE")
-		release := sync.OnceFunc(func() { close(pause.release) })
-		defer release()
-		overtaken := use(cli, stream.connectionID)
-		<-pause.reached
+		var releases []func()
+		defer func() {
+			for _, release := range releases {
+				release()
+			}
+		}()
+		var overtaken []<-chan enginetest.Response
+		for range 2 {
+			pause := f.pauseOn("FROM instances WHERE workspace_id=$1 AND id=$2 FOR SHARE")
+			releases = append(releases, sync.OnceFunc(func() { close(pause.release) }))
+			overtaken = append(overtaken, use(cli, stream.connectionID))
+			<-pause.reached
+		}
 		f.resume(f.url, renewed, stream.connectionID)
-		release()
-		requireRevoked(<-overtaken)
-		requireReuses(cli, 1)
+		for _, release := range releases {
+			release()
+		}
+		requireRevoked(<-overtaken[0])
+		requireRevoked(<-overtaken[1])
+		requireReuses(cli, 2)
 	})
 }
 
