@@ -269,17 +269,23 @@ type eventsMode struct {
 	// until is the clock's time before which a `delay_connected` request
 	// does not connect.
 	until time.Time
+	// dataBytes is the size that a `pad_connected` request's `connected`
+	// is padded to.
+	dataBytes int
 }
 
 // controlEvents makes the next events requests hold their headers
 // (`hold_headers`), send headers and no event (`headers_only`), send
-// comments only (`comments_only`) or connect only once the clock has
-// advanced by delay_ms from this control (`delay_connected`).
+// comments only (`comments_only`), connect only once the clock has
+// advanced by delay_ms from this control (`delay_connected`), or send a
+// `connected` whose JSON is padded with spaces to data_bytes
+// (`pad_connected`).
 func (server *Server) controlEvents(body json.RawMessage) (any, error) {
 	var input struct {
-		Mode    string `json:"mode"`
-		Count   int    `json:"count"`
-		DelayMs int64  `json:"delay_ms"`
+		Mode      string `json:"mode"`
+		Count     int    `json:"count"`
+		DelayMs   int64  `json:"delay_ms"`
+		DataBytes int    `json:"data_bytes"`
 	}
 	if err := decodeControl(body, &input); err != nil {
 		return nil, err
@@ -287,12 +293,17 @@ func (server *Server) controlEvents(body json.RawMessage) (any, error) {
 	switch {
 	case input.Mode == "delay_connected" && input.DelayMs <= 0:
 		return nil, errors.New("delay_connected needs delay_ms above 0")
-	case input.Mode != "delay_connected" && !slices.Contains([]string{"hold_headers", "headers_only", "comments_only"}, input.Mode):
+	case input.Mode == "pad_connected" && input.DataBytes <= 0:
+		return nil, errors.New("pad_connected needs data_bytes above 0")
+	case !slices.Contains([]string{"hold_headers", "headers_only", "comments_only", "delay_connected", "pad_connected"}, input.Mode):
 		return nil, fmt.Errorf("unknown events mode %q", input.Mode)
 	}
 	// Counted from this control, so that a request arriving after an
 	// advance still connects at the time the control named.
-	mode := eventsMode{name: input.Mode, until: server.clock.Now().Add(time.Duration(input.DelayMs) * time.Millisecond)}
+	mode := eventsMode{
+		name: input.Mode, until: server.clock.Now().Add(time.Duration(input.DelayMs) * time.Millisecond),
+		dataBytes: input.DataBytes,
+	}
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	for range max(input.Count, 1) {

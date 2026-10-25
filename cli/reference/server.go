@@ -1,6 +1,7 @@
 package reference
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -184,21 +185,26 @@ func (server *Server) events(w http.ResponseWriter, request *http.Request) {
 		server.refused(w, &entry, refusal)
 		return
 	}
+	padTo := 0
 	if len(server.eventsModes) > 0 {
 		mode := server.eventsModes[0]
 		server.eventsModes = server.eventsModes[1:]
-		if mode.name != "delay_connected" {
+		switch mode.name {
+		case "delay_connected":
+			server.mu.Unlock()
+			if !server.waitUntil(request.Context(), mode.until) {
+				return
+			}
+			server.mu.Lock()
+		case "pad_connected":
+			padTo = mode.dataBytes
+		default:
 			entry.Status, entry.Code = http.StatusOK, mode.name
 			server.log.requests = append(server.log.requests, entry)
 			server.mu.Unlock()
 			server.silent(w, request, mode.name)
 			return
 		}
-		server.mu.Unlock()
-		if !server.waitUntil(request.Context(), mode.until) {
-			return
-		}
-		server.mu.Lock()
 	}
 	conn, resumed, refusal := server.connect(cred, string(decoded.PreviousConnectionID.Value), decoded.Resume.Value == "true")
 	if refusal != nil {
@@ -208,6 +214,8 @@ func (server *Server) events(w http.ResponseWriter, request *http.Request) {
 	}
 	st := server.openStream(conn)
 	data, messageID := server.event(conn, "connected", wire.ConnectedPayload{Resumed: resumed})
+	// Spaces after the object keep it one valid JSON value.
+	data = append(data, bytes.Repeat([]byte(" "), max(padTo-len(data), 0))...)
 	st.send(data, messageID, "connected")
 	if resumed {
 		if conn.readyAccepted {

@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -168,6 +170,9 @@ type eventStream struct {
 	comments chan string
 	ended    chan struct{}
 	cancel   context.CancelFunc
+	// mu guards sizes, the data bytes of each event in arrival order.
+	mu    sync.Mutex
+	sizes []int
 }
 
 // open sends GET /v1/client/events and returns the stream, or the
@@ -210,6 +215,9 @@ func (ts *testServer) open(key, instanceID, credentialID string, extra url.Value
 			if !isData {
 				continue
 			}
+			stream.mu.Lock()
+			stream.sizes = append(stream.sizes, len(data))
+			stream.mu.Unlock()
 			var event map[string]any
 			if err := json.Unmarshal([]byte(data), &event); err != nil {
 				event = map[string]any{"raw": data}
@@ -251,6 +259,13 @@ func (stream *eventStream) comment() string {
 		stream.t.Fatal("no comment arrived")
 		return ""
 	}
+}
+
+// dataBytes is the size of each event's data received so far.
+func (stream *eventStream) dataBytes() []int {
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	return slices.Clone(stream.sizes)
 }
 
 func (stream *eventStream) expect(kind string) map[string]any {

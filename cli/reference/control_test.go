@@ -170,6 +170,19 @@ func TestEventsControlMakesEventsRequestsSilent(t *testing.T) {
 	})
 }
 
+func TestEventsControlPadsConnectedToTheGivenDataBytes(t *testing.T) {
+	ts := startServer(t)
+	if status, body := ts.callStatus("events", map[string]any{"mode": "pad_connected"}); status != http.StatusBadRequest {
+		t.Errorf("pad_connected without data_bytes: %d %s", status, body)
+	}
+	ts.call("events", map[string]any{"mode": "pad_connected", "data_bytes": 65537}, nil)
+	padded := ts.mustOpen("tetral_ck_a", "inst_a", "cred_a", nil)
+	padded.expect("connected")
+	if sizes := padded.dataBytes(); len(sizes) != 1 || sizes[0] != 65537 {
+		t.Errorf("connected data bytes %v; want 65537", sizes)
+	}
+}
+
 func TestEventsControlDelaysConnectedFromTheControl(t *testing.T) {
 	ts := startServer(t)
 	if status, body := ts.callStatus("events", map[string]any{"mode": "delay_connected"}); status != http.StatusBadRequest {
