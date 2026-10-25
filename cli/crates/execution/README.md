@@ -46,8 +46,9 @@ which owns that task's process tree; the translation of a call's
   leaves the protection to the operating system instead
   (`isolation/linux.rs`, `launch_profile`).
 - No report is handed to the Report outbox that Engine could never accept:
-  an error's `message` is cut to `ERROR_MESSAGE_MAX_BYTES` on UTF-8
-  boundaries and its `detail` rebuilt within `ERROR_DETAIL_MAX_BYTES`, and a
+  an error's `message` and `path` are cut to `ERROR_MESSAGE_MAX_BYTES` and
+  `ERROR_PATH_MAX_BYTES` on UTF-8 boundaries and its `detail` rebuilt within
+  `ERROR_DETAIL_MAX_BYTES`, and a
   process result over the ordinary limits is rendered again from its stored
   output with half the visible byte budget until it fits, its counters and
   exit facts unchanged (`report`).

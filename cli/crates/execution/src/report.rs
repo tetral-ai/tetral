@@ -16,6 +16,10 @@ use serde_json::Value;
 /// The most bytes of an error's `message`.
 pub const ERROR_MESSAGE_MAX_BYTES: usize = 4_096;
 
+/// The most bytes of an error's `path`. Linux and macOS refuse a longer
+/// path, so the cut never shortens the path of a file that exists.
+pub const ERROR_PATH_MAX_BYTES: usize = 4_096;
+
 /// The most bytes of the compact JSON of an error's `detail`.
 pub const ERROR_DETAIL_MAX_BYTES: usize = 32_768;
 
@@ -33,6 +37,7 @@ const DETAIL_STEPS: [(usize, usize); 4] = [(4_096, 50), (1_024, 20), (256, 10), 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ErrorBounds {
     pub message_max_bytes: usize,
+    pub path_max_bytes: usize,
     pub detail_max_bytes: usize,
 }
 
@@ -40,6 +45,7 @@ impl Default for ErrorBounds {
     fn default() -> ErrorBounds {
         ErrorBounds {
             message_max_bytes: ERROR_MESSAGE_MAX_BYTES,
+            path_max_bytes: ERROR_PATH_MAX_BYTES,
             detail_max_bytes: ERROR_DETAIL_MAX_BYTES,
         }
     }
@@ -175,11 +181,15 @@ pub fn bounded(mut envelope: HelperEnvelope, bounds: ErrorBounds) -> HelperEnvel
     envelope
 }
 
-/// An error with its `message` cut to `message_max_bytes` on UTF-8
-/// boundaries, keeping its head and tail around the seam, and its `detail`
-/// rebuilt smaller while its compact JSON exceeds `detail_max_bytes`.
+/// An error with its `message` cut to `message_max_bytes` and its `path` to
+/// `path_max_bytes` on UTF-8 boundaries, each keeping its head and tail
+/// around the seam, and its `detail` rebuilt smaller while its compact JSON
+/// exceeds `detail_max_bytes`.
 pub fn bounded_error(mut error: ToolError, bounds: ErrorBounds) -> ToolError {
     error.message = cut_bytes(&error.message, bounds.message_max_bytes);
+    error.path = error
+        .path
+        .map(|path| cut_bytes(&path, bounds.path_max_bytes));
     error.detail = error
         .detail
         .map(|detail| bounded_detail(detail, bounds.detail_max_bytes));

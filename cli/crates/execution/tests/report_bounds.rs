@@ -177,14 +177,14 @@ fn object(value: Value) -> Object {
 }
 
 #[test]
-fn an_error_message_is_cut_to_its_bound_on_utf8_boundaries_around_the_seam() {
+fn an_error_message_and_path_are_cut_to_their_bounds_on_utf8_boundaries_around_the_seam() {
     // Two-byte characters cut the head inside a character, three-byte ones
     // the tail.
-    for message in ["m".repeat(8_192), "é".repeat(4_096), "界".repeat(4_096)] {
+    for text in ["m".repeat(8_192), "é".repeat(4_096), "界".repeat(4_096)] {
         let envelope = error_envelope(ToolError {
             kind: NonEmptyString::new("write_failed").unwrap(),
-            message: message.clone(),
-            path: None,
+            message: text.clone(),
+            path: Some(text.clone()),
             detail: None,
         });
         let (_, decoded) = saved(&terminal(envelope));
@@ -192,11 +192,13 @@ fn an_error_message_is_cut_to_its_bound_on_utf8_boundaries_around_the_seam() {
         else {
             panic!("a result report");
         };
-        let cut = result.error.expect("an error").message;
-        assert!(cut.len() <= 4_096, "{} bytes", cut.len());
-        assert!(cut.contains("\n[... truncated ...]\n"));
-        let first = message.chars().next().unwrap();
-        assert!(cut.starts_with(first) && cut.ends_with(first));
+        let error = result.error.expect("an error");
+        let first = text.chars().next().unwrap();
+        for cut in [error.message, error.path.expect("a path")] {
+            assert!(cut.len() <= 4_096, "{} bytes", cut.len());
+            assert!(cut.contains("\n[... truncated ...]\n"));
+            assert!(cut.starts_with(first) && cut.ends_with(first));
+        }
     }
 }
 
