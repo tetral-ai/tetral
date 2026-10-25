@@ -27,6 +27,10 @@ use tetral_tests::run::Tetral;
 use tetral_tests::seams::Seams;
 use tetral_tests::socket_directory;
 
+/// The test seam barrier between the Connection owner taking a message and
+/// acting on the times that have passed.
+const CONNECTION_MESSAGE: &str = "connection.message";
+
 fn prepare(index: usize) -> Value {
     json!({
         "session_id": format!("sess_{index}"),
@@ -837,6 +841,38 @@ fn a_ready_without_an_ack_for_forty_five_seconds_abandons_the_connection() {
     let status = machine.wait_for("online");
     assert_ne!(status["connection_id"], FIRST_CONNECTION);
     case.observe("the retry got 409 previous_connection_active, and after the lease a new connection is online");
+}
+
+#[test]
+fn a_heartbeat_ack_taken_only_after_the_connection_deadline_renews_nothing() {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "a heartbeat first sent 15 seconds after the ready, its ACK taken by the Connection owner once the connection deadline has passed",
+    );
+    let engine = one_credential_engine();
+    let directory = tempfile::tempdir().unwrap();
+    let machine = Machine::start(
+        &mut case,
+        directory.path(),
+        &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+    );
+    machine.wait_for("online");
+    machine.advance(seconds(15.0));
+    answer_fault(
+        &engine,
+        json!({ "endpoint": "heartbeat", "action": "withhold" }),
+    );
+    engine.advance(seconds(15.0));
+    wait_for_received(&engine, "heartbeat", 1);
+    machine.seams.hold(CONNECTION_MESSAGE);
+    engine.control("answer", json!({ "action": "release" }));
+    machine.seams.wait_until_waiting(CONNECTION_MESSAGE, 1);
+    machine.seams.advance(seconds(30.0));
+    machine.seams.release(CONNECTION_MESSAGE);
+    assert_ne!(machine.state(), "online");
+    assert_eq!(machine.seams.count("connection.granted"), 1);
+    case.observe("the connection ended at the ready's first send plus 45 seconds; the heartbeat's ACK, valid to 60 seconds, set no deadline");
 }
 
 /// The startup records of the App Server's log file, as

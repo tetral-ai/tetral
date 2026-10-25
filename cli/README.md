@@ -78,7 +78,9 @@ Every piece of App Server state has exactly one owner: one of the owners in the
 table below, or the lifecycle task of `appserver`, which holds whether the App
 Server is running or stopping, the shutdown sequence and the idle timer. An
 owner is one tokio task with one unbounded mailbox; it handles its messages one
-at a time, in arrival order, and no state is shared behind a lock. A handler
+at a time, in arrival order, and no state is shared behind a lock. An owner
+that keeps deadlines acts on every one that has passed before it handles the
+message it woke for, so a message taken late never undoes a deadline. A handler
 never awaits another owner's reply: it sends its request with a reply channel,
 and a spawned task awaits the reply and posts it to the owner's mailbox as a
 new message. Stream readers, request tasks and local API handlers are not

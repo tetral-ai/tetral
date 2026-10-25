@@ -8,7 +8,10 @@
 //! owner sets no timer for a deadline: it reads the seam clock whenever it
 //! wakes, and while any deadline or wait is pending it wakes at least once
 //! per recheck interval, so a deadline that passed while the machine slept
-//! is acted on within that interval of waking.
+//! is acted on within that interval of waking. It acts on every passed time
+//! before it handles the message it woke for, so an answer taken after a
+//! deadline never undoes it; the test seam barrier `connection.message`
+//! stands between taking a message and that check.
 //!
 //! Each event after a stream's first valid `connected` is handled in a
 //! fixed order: its envelope and identities ([`crate::classify`]), the
@@ -280,13 +283,18 @@ async fn own(
     owner.start();
     loop {
         let wake = owner.wake_in();
-        tokio::select! {
+        let message = tokio::select! {
             message = inbox.recv() => match message {
-                Some(message) => owner.handle(message),
+                Some(message) => Some(message),
                 None => return,
             },
-            Some(event) = reports.recv() => owner.handle(Message::Outbox(event)),
-            () = sleep_or_wait(wake) => {}
+            Some(event) = reports.recv() => Some(Message::Outbox(event)),
+            () = sleep_or_wait(wake) => None,
+        };
+        if let Some(message) = message {
+            state::seams::barrier("connection.message").await;
+            owner.check();
+            owner.handle(message);
         }
         owner.check();
     }

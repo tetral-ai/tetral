@@ -7,7 +7,9 @@
 //! at each attempt, `connection.checked` after each check of its times,
 //! `connection.granted` for each ACK that sets the connection deadline,
 //! `connection.answered` for each answer to ready or a heartbeat it takes,
-//! and `route.session` for each Session instruction it hands on.
+//! and `route.session` for each Session instruction it hands on; it waits at
+//! the barrier `connection.message` between taking a message and acting on
+//! the times that have passed.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -147,8 +149,9 @@ impl Machine {
 
     /// Waits until the Connection owner has checked its times at the
     /// clock's current time: of two checks, the second starts after this
-    /// call. The owner checks after each message it takes, so the status
-    /// requests made meanwhile bring checks also when no time is pending.
+    /// call. The owner checks before and after each message it takes, so the
+    /// status requests made meanwhile bring checks also when no time is
+    /// pending.
     pub fn settle(&self) {
         let start = self.seams.count("connection.checked");
         wait_until("two checks of the Connection owner", || {
