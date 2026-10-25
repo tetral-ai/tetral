@@ -6,6 +6,8 @@
  * SessionManager, ThreadLoop, and runtime command handlers call the sink; concrete observability
  * wiring implements it, while the fallback calls no external service.
  */
+import { Effect } from "effect";
+
 /** Current in-process ownership counts reported by session orchestration. */
 export interface RuntimeHotStateMetrics {
 	readonly activeSessions: number;
@@ -31,6 +33,8 @@ export type RuntimeContentCommitOutcome = "committed" | "duplicate" | "stale" | 
 /** Local owner stages; remote execution time is deliberately a separate observation. */
 export type RuntimeContinuationOperation = "member_barrier_wait" | "permit_wait" | "binding_refresh" | "approval_wait" | "tool_accept" | "tool_settle" | "context_reconstruct" | "cleanup_join";
 export type RuntimeApprovalSource = "user" | "auto_reviewer";
+/** A tool call queues for one of its Session's permits, starts once it holds one and ends when it leaves either state. */
+export type RuntimeToolPermitState = "queued" | "started" | "ended";
 interface RuntimeOperationScope {
 	readonly workspaceId: string;
 	readonly sessionId: string;
@@ -58,6 +62,8 @@ export interface RuntimeMetricsSink {
 	readonly observeContinuationLatency?: (operation: RuntimeContinuationOperation, durationMs: number, outcome: RuntimeMetricOutcome, requestKind: RuntimeProviderStreamKind, approvalSource?: RuntimeApprovalSource) => void;
 	readonly recordApprovalWaitDelta?: (delta: 1 | -1, requestKind: RuntimeProviderStreamKind, source: RuntimeApprovalSource) => void;
 	readonly recordApprovalWaitUnavailable?: (requestKind: RuntimeProviderStreamKind, source: RuntimeApprovalSource) => void;
+	/** toolCall identifies one call across its states and carries no identity of its own. */
+	readonly recordToolPermit?: (toolCall: symbol, state: RuntimeToolPermitState) => Effect.Effect<void>;
 	readonly recordContentSubmissionDelta?: (entries: number, bytes: number) => void;
 	readonly observeContentCommitLatency?: (kind: RuntimeContentKind, phase: RuntimeContentCommitPhase, durationMs: number, outcome: RuntimeContentCommitOutcome, requestKind?: RuntimeProviderStreamKind) => void;
 	readonly recordHotState: (snapshot: RuntimeHotStateMetrics) => void;
@@ -172,6 +178,7 @@ export function safeRuntimeMetricsSink(sink: RuntimeMetricsSink | undefined): Ru
 			catch {
 			}
 		},
+		recordToolPermit: (...args) => Effect.suspend(() => sink.recordToolPermit?.(...args) ?? Effect.void).pipe(Effect.ignoreCause),
 	};
 	safeSinks.set(sink, safe);
 	return safe;

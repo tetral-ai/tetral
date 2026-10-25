@@ -1158,6 +1158,27 @@
       "audience": "operators",
       "labels": {},
       "type": "gauge"
+    },
+    "runtimepod_tools_in_progress": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "runtimepod_tools_oldest_queued_seconds": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "runtimepod_tools_queue_wait_seconds": {
+      "audience": "operators",
+      "buckets": "long",
+      "labels": {},
+      "type": "histogram"
+    },
+    "runtimepod_tools_queued": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
     }
   },
   "operations": {

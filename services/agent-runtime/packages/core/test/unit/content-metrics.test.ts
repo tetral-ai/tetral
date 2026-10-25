@@ -43,6 +43,7 @@ for (const observer of ["recording", "throwing", "disabled"] as const) {
    observeEventWriteLatency: throwObserver, observeContextLoadLatency: throwObserver,
    recordCleanupCommandOutcome: throwObserver, recordContentSubmissionDelta: throwObserver,
    observeContentCommitLatency: throwObserver, observeContinuationLatency: throwObserver,
+   recordToolPermit: throwObserver,
   };
   const session = new ThreadRuntime("sesn_content_metrics");
   const applyFact = session.state.applyThreadTurnFact.bind(session.state);
@@ -115,6 +116,11 @@ for (const observer of ["recording", "throwing", "disabled"] as const) {
    expect(registry.snapshot().pendingContentBytes).toBe(0);
    expect(registry.snapshot().activeToolFibers).toBe(0);
    expect(registry.snapshot().continuationLatencyMs?.size).toBe(5);
+   // The one Tool call waited for a Session permit once and released it.
+   const tools = registry.snapshot().toolsText ?? "";
+   expect(tools).toContain("runtimepod_tools_queue_wait_seconds_count 1\n");
+   expect(tools).toContain("runtimepod_tools_in_progress 0\n");
+   expect(tools).toContain("runtimepod_tools_queued 0\n");
   }
  });
 }

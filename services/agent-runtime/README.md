@@ -790,6 +790,17 @@ latency buckets. `runtimepod_approval_wait_started_total` and
 `runtimepod_active_sessions`, `runtimepod_session_capacity`, active Thread/fiber/
 tool gauges and command-in-flight gauges retain their existing ownership.
 
+Tool calls that wait for one of their Session's permits are the pressure point
+`runtimepod_tools`: `runtimepod_tools_in_progress` counts the calls holding a
+permit and `runtimepod_tools_queued` those waiting for one,
+`runtimepod_tools_oldest_queued_seconds` is the longest current wait (0 when
+none waits) and `runtimepod_tools_queue_wait_seconds`, with the long-operation
+buckets, observes each call's wait from queued to holding a permit. The limit
+is per Session, so the point has no limit gauge, and it refuses nothing, so it
+has no rejection counter. Waits are timed on the metrics registry's own
+monotonic clock; each call's queue time, or that it runs, lives in one Effect
+`Ref` that only these series read and that controls no tool call.
+
 Shutdown operations are actual `shutdown_quiesce`, `shutdown_report`,
 `shutdown_release`, `shutdown_local_join`, `shutdown_clients` and
 `shutdown_listeners` boundaries. Session checkpoints and release can overlap;
