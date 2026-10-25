@@ -133,7 +133,10 @@ temporary directories. No workspace crate depends on this package.
   report are recorded.
 - `tests/tool_reports.rs`: the reports of tool instructions: an ACK that
   names another report and one without `accepted` release nothing, and the
-  report is sent again byte for byte.
+  report is sent again byte for byte; a media report that the server reads
+  slowly completes past 10 seconds within its total while heartbeats keep
+  their timing, and one whose answer is withheld fails 10 seconds after its
+  body and is sent again unchanged.
 - `tests/exec_command.rs`: `exec_command`: its reports and their sequence,
   the initial wait under `kill` and `detach`, its clamp and a start that
   never comes within it, a detached command's lifetime, the working
