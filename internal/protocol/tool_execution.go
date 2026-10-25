@@ -2104,11 +2104,16 @@ func checkReadyExtension(r ReadyExtension, v *value) error {
 
 var toolDownstream = downstream(toolPayloads)
 
-// toolChecked decodes a tool execution message with f and check, requiring
-// protocol_version and report_seq to be integer tokens wherever the message
-// carries them.
+// toolTokens runs check after requiring protocol_version and report_seq to be
+// integer tokens wherever a tool execution message carries them.
+func toolTokens[T any](check func(T, *value) error) func(T, *value) error {
+	return integerTokens(check, "protocol_version", "report_seq")
+}
+
+// toolChecked decodes a tool execution message with f and check under
+// toolTokens.
 func toolChecked[T any](data []byte, f decodeFunc[T], check func(T, *value) error) (T, error) {
-	return decodeChecked(data, f, integerTokens(check, "protocol_version", "report_seq"))
+	return decodeChecked(data, f, toolTokens(check))
 }
 
 // DecodeToolDownstream decodes a tool or local MCP instruction, the

@@ -56,6 +56,12 @@ func TestDecodingRulesBeyondTheFixtures(t *testing.T) {
 			return err
 		}
 	}
+	envelope := func(data []byte) func() error {
+		return func() error {
+			_, err := DecodeDownstream(data)
+			return err
+		}
+	}
 	events := func(query url.Values) func() error {
 		return func() error {
 			_, err := DecodeEventsQuery(query)
@@ -163,6 +169,7 @@ func TestDecodingRulesBeyondTheFixtures(t *testing.T) {
 			pointer: "/protocol_version",
 		},
 		{name: "a report_seq fraction where the definition does not model the member", decode: tool(execute("", "", `,"report_seq":1.0`)), pointer: "/report_seq"},
+		{name: "a report_seq string in a tool instruction decoded as any SSE envelope", decode: envelope(execute("", "", `,"report_seq":"x"`)), pointer: "/report_seq"},
 		{
 			name:   "an ordinary report over 320 KiB, whose envelope is also over its own limit",
 			decode: func() error { _, err := DecodeToolStatus(ordinaryReport(OrdinaryToolStatusJSONBytes + 1)); return err },

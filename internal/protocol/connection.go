@@ -463,12 +463,13 @@ var connectionPayloads = func() map[string]decodeFunc[DownstreamPayload] {
 var connectionDownstream = downstream(connectionPayloads)
 
 // checkDownstream applies the relations of an SSE envelope: a tool
-// instruction's own budgets, and otherwise at most 64 KiB, each drive once in
-// a drive set, each repository path once, excluded paths under the path
-// rules, and no connection key in a credential.renew.
+// instruction's integer tokens and own budgets, as DecodeToolDownstream does,
+// and otherwise at most 64 KiB, each drive once in a drive set, each
+// repository path once, excluded paths under the path rules, and no
+// connection key in a credential.renew.
 func checkDownstream(m Downstream, v *value) error {
 	if _, ok := toolPayloads[m.Payload.MessageType()]; ok {
-		return checkToolDownstream(m, v)
+		return toolTokens(checkToolDownstream)(m, v)
 	}
 	if compactSize(v) > DefaultMessageJSONBytes {
 		return invalid("", "SSE event over 64 KiB")
