@@ -151,9 +151,10 @@ func FetchCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, ins
 // ActivateCredential makes credential, pending and authenticating its first
 // request, active with used_at now, and revokes at now with cause
 // CausePendingActivation the credential it replaces, unless that one is
-// already revoked. It returns the ID it revoked, or "". The caller holds both
-// rows' locks (LockCredential) and moves or creates the connection under
-// credential in the same transaction.
+// already revoked or expired, so a later use of an expired one stays
+// credential_expired and is no reuse. It returns the ID it revoked, or "".
+// The caller holds both rows' locks (LockCredential) and moves or creates the
+// connection under credential in the same transaction.
 func ActivateCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, credential Credential, now time.Time) (string, error) {
 	if _, err := tx.Exec(ctx, `UPDATE instance_credentials SET state='active',used_at=$3 WHERE workspace_id=$1 AND id=$2 AND state='pending'`,
 		string(ws), credential.ID, now); err != nil {
@@ -164,7 +165,7 @@ func ActivateCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, 
 	}
 	var revoked string
 	err := tx.QueryRow(ctx, `UPDATE instance_credentials SET state='revoked',revoked_at=$3,revocation_cause='pending_activation'
-		WHERE workspace_id=$1 AND id=$2 AND revoked_at IS NULL RETURNING id`, string(ws), *credential.ReplacesCredentialID, now).Scan(&revoked)
+		WHERE workspace_id=$1 AND id=$2 AND revoked_at IS NULL AND expires_at>$3 RETURNING id`, string(ws), *credential.ReplacesCredentialID, now).Scan(&revoked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}

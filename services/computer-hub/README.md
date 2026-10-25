@@ -180,7 +180,9 @@ deleted when the connection ends.
   resumes the connection or creates the new one: it becomes `active`
   (`used_at`), the connection's credential, so later grants are capped at its
   expiry, and the credential it replaces is revoked with cause
-  `pending_activation`; a refused request activates nothing. A `200` has
+  `pending_activation` unless it has expired, so a later use of an expired one
+  answers `401 credential_expired` and records no reuse; a refused request
+  activates nothing. A `200` has
   `Content-Type: text/event-stream` and `Cache-Control: no-store`. A
   draining pod answers `503`.
 - `POST /v1/client/ready` on a connection whose ready is unanswered: a CLI
@@ -395,8 +397,10 @@ termination grace period carry the drain, which is why Helm refuses a
   was lost, `409 message_conflict` for its `message_id` with other content; a
   heartbeat with the fetched credential refused, then the resume that
   activates it and revokes the old one in one commit, with grants capped by
-  the new expiry; a use of the revoked old credential recorded with one
-  `credential_reused` event, a use of a deleted one not.
+  the new expiry; a new connection with it after the old lease passed
+  activates it too, revoking the old credential unless it has expired; a use
+  of the revoked old credential recorded with one `credential_reused` event,
+  a use of a deleted or an expired one not.
 - `client_cold_start_test.go`, with the process telemetry installed: one `cli`
   cold start with the reported phases for the first answered ready, none for a
   replay or a ready without `startup`, and a refused one observing nothing.

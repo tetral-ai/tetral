@@ -75,7 +75,8 @@ func (h *clientHandler) register(r chi.Router) {
 // credential, a renewal whose key was fetched, activates it in the
 // transaction that moves the lease or creates the connection: the credential
 // becomes active and the connection's, and the credential it replaces is
-// revoked (instance.ActivateCredential); a refused request activates
+// revoked unless it has expired (instance.ActivateCredential); a refused
+// request activates
 // nothing. A draining pod answers 503 before the transaction; a stream
 // registered after its commit while the pod began to drain writes connected
 // and then its stream-only disconnect, so the CLI resumes elsewhere.

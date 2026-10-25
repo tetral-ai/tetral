@@ -238,6 +238,49 @@ func TestResumeWithTheFetchedCredentialActivatesItAndRevokesTheOld(t *testing.T)
 	}
 }
 
+// TestNewConnectionWithTheFetchedCredentialActivatesIt opens a new
+// connection with a fetched renewal once the old connection's lease has
+// passed: the renewal becomes active and the new connection's, and the
+// activation revokes the old credential unless it has already expired, when a
+// later use of it answers 401 credential_expired and records no reuse.
+func TestNewConnectionWithTheFetchedCredentialActivatesIt(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	for _, tc := range []struct {
+		name    string
+		expired bool
+		answer  protocol.ErrorCode
+	}{
+		{"old credential live", false, protocol.ErrorCredentialRevoked},
+		{"old credential expired", true, protocol.ErrorCredentialExpired},
+	} {
+		cli, stream := f.openOnline()
+		pending := f.renewal(cli, stream, "renew-new-connection-"+tc.name, `{}`)["id"].(string)
+		renewed := f.fetched(cli, stream.connectionID, pending)
+		if _, err := f.admin.ExecContext(f.ctx, `UPDATE instance_connections SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, stream.connectionID); err != nil {
+			t.Fatal(err)
+		}
+		if tc.expired {
+			if _, err := f.admin.ExecContext(f.ctx, `UPDATE instance_credentials SET issued_at=clock_timestamp()-interval '2 hours',expires_at=clock_timestamp()-interval '1 hour' WHERE id=$1`, cli.CredentialID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		next := f.open(renewed)
+		old, activated := f.credentialRow(cli.CredentialID), f.credentialRow(pending)
+		if activated["state"] != "active" || f.connectionRow(next.connectionID)["credential_id"] != pending || !f.credentialInUse(cli.InstanceID, pending) {
+			t.Fatalf("%s: renewal %v on connection %v; want it active and the new connection's", tc.name, activated, f.connectionRow(next.connectionID))
+		}
+		revoked := old["state"] == "revoked" && old["revocation_cause"] == "pending_activation" && old["revoked_at"] == activated["used_at"]
+		if revoked == tc.expired || tc.expired && old["revoked_at"] != nil {
+			t.Fatalf("%s: old credential %v after the activation", tc.name, old)
+		}
+		response, err := cli.Heartbeat(f.ctx, protocol.Heartbeat{ConnectionID: stream.connectionID, MessageID: "msg_old_beat", RequestMessageID: instance.HeartbeatMessageID(stream.connectionID, 1), HeartbeatSeq: 1})
+		requireClientError(t, response, err, tc.answer)
+		if reuse := f.instanceRead(cli.InstanceID)["last_credential_reuse"]; (reuse != nil) == tc.expired {
+			t.Fatalf("%s: last_credential_reuse %v after a use of the old credential", tc.name, reuse)
+		}
+	}
+}
+
 func TestOnlyUsesOfACredentialAnActivationRevokedAreRecorded(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	select {
