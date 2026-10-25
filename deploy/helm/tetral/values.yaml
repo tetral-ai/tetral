@@ -197,6 +197,11 @@ computerHub:
   # is never lower than the minimum.
   minCLIVersion: "0.0.0"
   recommendedCLIVersion: "0.0.0"
+  # Go durations: a stream lasts streamMaxAge plus up to a tenth of it before
+  # a stream-only disconnect; a stopping Pod spreads its streams' disconnects
+  # over streamDrainWindow, at most 15s.
+  streamMaxAge: 30m
+  streamDrainWindow: 10s
 
 resources:
   agentRuntime:

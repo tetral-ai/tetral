@@ -523,6 +523,8 @@
         "TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY",
         "TETRAL_COMPUTER_HUB_POD_NAME",
         "TETRAL_COMPUTER_HUB_RECOMMENDED_CLI_VERSION",
+        "TETRAL_COMPUTER_HUB_STREAM_DRAIN_WINDOW",
+        "TETRAL_COMPUTER_HUB_STREAM_MAX_AGE",
         "TETRAL_DATABASE_TLS_CA_PATH",
         "TETRAL_DATABASE_TLS_SERVER_NAME",
         "TETRAL_DATABASE_URL"
@@ -533,12 +535,14 @@
         "shutdown_timeout": "10s",
         "max_credential_lifetime": "720h",
         "min_cli_version": "0.0.0",
-        "recommended_cli_version": "0.0.0"
+        "recommended_cli_version": "0.0.0",
+        "stream_max_age": "30m",
+        "stream_drain_window": "10s"
       },
-      "units": "listen addresses, Go duration, semantic versions",
-      "unset_zero": "Whitespace empty addresses, an empty maximum credential lifetime and empty CLI versions default; database DSN, principal key, page token key and pod name required.",
-      "constraints": "Metrics address differs from the public address; the principal key is a base64 Ed25519 public key; the maximum credential lifetime is a positive Go duration; the page token key is 32 bytes as 64 hexadecimal characters; both CLI versions are full semantic versions without a v prefix and the recommended one is not lower than the minimum; the pod name has 1 to 253 characters; blob settings pass blob production readiness.",
-      "projection": "Fixed ports 8080/8081, computer-hub-url DSN key of the database Secret, blob Secret keys, the page-token-key of the Secret secrets.computerHubPageToken names, computerHub.replicas (default two), computerHub.maxCredentialLifetime (default 720h), computerHub.minCLIVersion and computerHub.recommendedCLIVersion (default 0.0.0 each), and the pod name from the downward API; no other hub setting is chart-owned.",
+      "units": "listen addresses, Go durations, semantic versions",
+      "unset_zero": "Whitespace empty addresses, an empty maximum credential lifetime, empty CLI versions and an empty stream age or drain window default; database DSN, principal key, page token key and pod name required.",
+      "constraints": "Metrics address differs from the public address; the principal key is a base64 Ed25519 public key; the maximum credential lifetime is a positive Go duration; the page token key is 32 bytes as 64 hexadecimal characters; both CLI versions are full semantic versions without a v prefix and the recommended one is not lower than the minimum; the pod name has 1 to 253 characters; the stream age is a positive Go duration and the drain window one of at most 15s; blob settings pass blob production readiness.",
+      "projection": "Fixed ports 8080/8081, computer-hub-url DSN key of the database Secret, blob Secret keys, the page-token-key of the Secret secrets.computerHubPageToken names, computerHub.replicas (default two), computerHub.maxCredentialLifetime (default 720h), computerHub.minCLIVersion and computerHub.recommendedCLIVersion (default 0.0.0 each), computerHub.streamMaxAge (default 30m) and computerHub.streamDrainWindow (default 10s), and the pod name from the downward API; no other hub setting is chart-owned.",
       "proofs": [
         "services/computer-hub/config_test.go",
         "deploy/helm/configuration_projection_test.go",

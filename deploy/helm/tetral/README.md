@@ -357,6 +357,11 @@ Pod restarts.
 versions defaulting to `0.0.0`, set the oldest CLI whose ready the hub accepts
 and the version below which instance reads report `cli_update_available`; the
 recommended version must not be lower than the minimum.
+`computerHub.streamMaxAge` (default `30m`) is a stream's age limit before a
+stream-only disconnect, plus up to a tenth of it drawn per stream, and
+`computerHub.streamDrainWindow` (default `10s`, at most `15s`) the time over
+which a stopping hub Pod spreads its streams' disconnects; both are Go
+durations.
 
 `autoscaling.providerGateway.enabled` defaults to true and retains the existing
 HPA: minimum two, maximum ten, CPU utilization target 70 percent. An enabled

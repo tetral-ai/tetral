@@ -2,6 +2,7 @@ package computerhub
 
 import (
 	"encoding/hex"
+	"errors"
 	"strings"
 	"time"
 
@@ -27,11 +28,19 @@ const (
 	EnvMinCLIVersion              = "TETRAL_COMPUTER_HUB_MIN_CLI_VERSION"
 	EnvRecommendedCLIVersion      = "TETRAL_COMPUTER_HUB_RECOMMENDED_CLI_VERSION"
 	EnvPodName                    = "TETRAL_COMPUTER_HUB_POD_NAME"
+	EnvStreamMaxAge               = "TETRAL_COMPUTER_HUB_STREAM_MAX_AGE"
+	EnvStreamDrainWindow          = "TETRAL_COMPUTER_HUB_STREAM_DRAIN_WINDOW"
 
 	DefaultHTTPAddress           = ":8080"
 	DefaultMetricsAddress        = ":8081"
 	DefaultMaxCredentialLifetime = 720 * time.Hour
 	DefaultCLIVersion            = "0.0.0"
+	DefaultStreamMaxAge          = 30 * time.Minute
+	DefaultStreamDrainWindow     = 10 * time.Second
+
+	// MaxStreamDrainWindow keeps the stream drain, the listeners' drain and
+	// the process exit margin inside the 30-second termination grace period.
+	MaxStreamDrainWindow = 15 * time.Second
 
 	// maxPodNameLength is the longest Kubernetes object name.
 	maxPodNameLength = 253
@@ -71,6 +80,12 @@ type Config struct {
 	// PodName names this pod: the hub_pod of the connections whose streams
 	// it holds, and the name its connection notice channel is derived from.
 	PodName string
+	// StreamMaxAge, plus a random extra of up to a tenth of it drawn per
+	// stream, is how long a stream lasts before a stream-only disconnect.
+	StreamMaxAge time.Duration
+	// StreamDrainWindow is the time over which a stopping pod spreads the
+	// stream-only disconnects of its streams.
+	StreamDrainWindow time.Duration
 }
 
 func ConfigFromEnv(env Env) (Config, error) {
@@ -131,7 +146,27 @@ func ConfigFromEnv(env Env) (Config, error) {
 	if cfg.PodName == "" || len(cfg.PodName) > maxPodNameLength {
 		return Config{}, workload.NewConfigError(EnvPodName + " must be the pod name, 1 to 253 characters")
 	}
+	if cfg.StreamMaxAge, err = durationOrDefault(env.Getenv(EnvStreamMaxAge), DefaultStreamMaxAge); err != nil {
+		return Config{}, workload.NewConfigError(EnvStreamMaxAge + " must be a positive duration")
+	}
+	cfg.StreamDrainWindow, err = durationOrDefault(env.Getenv(EnvStreamDrainWindow), DefaultStreamDrainWindow)
+	if err != nil || cfg.StreamDrainWindow > MaxStreamDrainWindow {
+		return Config{}, workload.NewConfigError(EnvStreamDrainWindow + " must be a positive duration of at most 15s")
+	}
 	return cfg, nil
+}
+
+// durationOrDefault parses a positive Go duration, or returns fallback for
+// an empty value.
+func durationOrDefault(raw string, fallback time.Duration) (time.Duration, error) {
+	if raw = strings.TrimSpace(raw); raw == "" {
+		return fallback, nil
+	}
+	value, err := time.ParseDuration(raw)
+	if err == nil && value <= 0 {
+		err = errors.New("not positive")
+	}
+	return value, err
 }
 
 // semanticVersion reports whether version is a full semantic version

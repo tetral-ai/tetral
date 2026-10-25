@@ -2853,6 +2853,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            - name: TETRAL_COMPUTER_HUB_STREAM_MAX_AGE
+              value: "30m"
+            - name: TETRAL_COMPUTER_HUB_STREAM_DRAIN_WINDOW
+              value: "10s"
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT
               value: "local"
             - name: TETRAL_SERVICE_VERSION

@@ -60,6 +60,12 @@ func TestConfigFromEnv(t *testing.T) {
 			e[EnvMinCLIVersion], e[EnvRecommendedCLIVersion] = "1.10.0", "1.9.0"
 		}, reject: EnvRecommendedCLIVersion},
 		{name: "no pod name", change: func(e mapEnv) { delete(e, EnvPodName) }, reject: EnvPodName},
+		{name: "stream age and drain window", change: func(e mapEnv) { e[EnvStreamMaxAge], e[EnvStreamDrainWindow] = "10m", "15s" }, check: func(c Config) bool {
+			return c.StreamMaxAge == 10*time.Minute && c.StreamDrainWindow == 15*time.Second
+		}},
+		{name: "stream age zero", change: func(e mapEnv) { e[EnvStreamMaxAge] = "0s" }, reject: EnvStreamMaxAge},
+		{name: "drain window not a duration", change: func(e mapEnv) { e[EnvStreamDrainWindow] = "10" }, reject: EnvStreamDrainWindow},
+		{name: "drain window past the grace period's share", change: func(e mapEnv) { e[EnvStreamDrainWindow] = "15001ms" }, reject: EnvStreamDrainWindow},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := valid()

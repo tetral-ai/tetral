@@ -214,6 +214,8 @@ names a workspace.
 | `TETRAL_COMPUTER_HUB_MIN_CLI_VERSION` | `0.0.0` | a ready from a CLI older than this semantic version is refused with `cli_upgrade_required`; Helm `computerHub.minCLIVersion` |
 | `TETRAL_COMPUTER_HUB_RECOMMENDED_CLI_VERSION` | `0.0.0` | an instance whose CLI is older than this semantic version reads `cli_update_available: true`; never lower than the minimum; Helm `computerHub.recommendedCLIVersion` |
 | `TETRAL_COMPUTER_HUB_POD_NAME` | required | this pod's name, from the downward API: the `hub_pod` of the connections whose streams it holds and the source of its connection notice channel |
+| `TETRAL_COMPUTER_HUB_STREAM_MAX_AGE` | `30m` | a stream's age limit before its stream-only `disconnect`, plus a random extra of up to a tenth of it drawn per stream; a positive Go duration, Helm `computerHub.streamMaxAge` |
+| `TETRAL_COMPUTER_HUB_STREAM_DRAIN_WINDOW` | `10s` | the time over which a stopping pod spreads the stream-only `disconnect`s of its streams; a positive Go duration of at most `15s`, so the drain fits the 30-second termination grace period; Helm `computerHub.streamDrainWindow` |
 | `TETRAL_BLOB_*` | | the blob store settings `api` and Bridge use (`internal/blob`) |
 | `TETRAL_HTTP_TRANSPORT`, `TETRAL_HTTP_TLS_*` | | the public listener's native TLS from the edge (`internal/transportsecurity`) |
 
