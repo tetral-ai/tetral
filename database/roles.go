@@ -70,7 +70,8 @@ func LoadRoleContract() (RoleContract, error) {
 				(function == "tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer)" && workload == "cleanup") ||
 				(function == "tetral_prune_event_idempotency(timestamptz, timestamptz, text, text, bytea, integer)" && workload == "cleanup") ||
 				(function == "tetral_prune_event_changes(timestamptz, timestamptz, text, text, bigint, integer)" && workload == "cleanup") ||
-				(function == "tetral_prune_job_runner_jobs(text, timestamptz, integer)" && workload == "queue")
+				(function == "tetral_prune_job_runner_jobs(text, timestamptz, integer)" && workload == "queue") ||
+				(function == "tetral_computer_hub_instruction_pressure(timestamptz)" && workload == "computer_hub")
 			if workload == "auth" {
 				switch function {
 				case "tetral_auth_lookup_key(bytea)", "tetral_auth_lookup_token(bytea)", "tetral_auth_lookup_grants(text, text)", "tetral_auth_lock_authority(text, text, text, text)", "tetral_auth_prune_tokens(integer)", "tetral_auth_lookup_connection_key(bytea)":

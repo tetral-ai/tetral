@@ -70,7 +70,9 @@ const createPostgreSQLInstanceIdempotencyRecordsTable = `CREATE TABLE instance_i
 // and its fingerprint are its replay record, as last_heartbeat_message_id and
 // its fingerprint are the latest accepted heartbeat's. ended_at and end_cause
 // are written once, by the end step. At most one connection of an instance
-// has not ended.
+// has not ended. last_issue_seq is the issue sequence of the connection's
+// latest Session instruction, and first_session_report_at the time its first
+// Session report was stored.
 const createPostgreSQLInstanceConnectionsTable = `CREATE TABLE instance_connections (
  storage_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
  workspace_id TEXT NOT NULL,
@@ -98,6 +100,8 @@ const createPostgreSQLInstanceConnectionsTable = `CREATE TABLE instance_connecti
  last_heartbeat_valid_for_ms INTEGER CHECK(last_heartbeat_valid_for_ms BETWEEN 1 AND 45000),
  ended_at TIMESTAMPTZ,
  end_cause TEXT CHECK(end_cause IN ('lease_expired','revoked','deregistered')),
+ last_issue_seq BIGINT NOT NULL DEFAULT 0 CHECK(last_issue_seq>=0),
+ first_session_report_at TIMESTAMPTZ,
  PRIMARY KEY(id),
  UNIQUE(workspace_id,id),
  FOREIGN KEY(workspace_id,instance_id) REFERENCES instances(workspace_id,id),
@@ -134,6 +138,30 @@ const createPostgreSQLConnectionUpstreamMessagesTable = `CREATE TABLE connection
  FOREIGN KEY(workspace_id,connection_id) REFERENCES instance_connections(workspace_id,id)
 )`
 
+// One row per Session instruction issued on a connection, unique by
+// message_id over all connections. issue_seq numbers a connection's
+// instructions from 1 in the commit order of their issuing transactions.
+// envelope is the exact SSE envelope every write sends, trace_context the
+// traceparent of the work that issued it; first_written_at is set by the first
+// write to any stream and reported_at once the instruction's final report is
+// stored.
+const createPostgreSQLConnectionInstructionsTable = `CREATE TABLE connection_instructions (
+ storage_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
+ workspace_id TEXT NOT NULL,
+ connection_id TEXT NOT NULL,
+ message_id TEXT NOT NULL CHECK(char_length(message_id)>=1),
+ issue_seq BIGINT NOT NULL CHECK(issue_seq>0),
+ type TEXT NOT NULL CHECK(type IN ('session.prepare','session.close','session.drives','tool.execute','tool.stdin','tool.cancel','mcp.call')),
+ envelope BYTEA NOT NULL,
+ trace_context TEXT CHECK(trace_context ~ '^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$'),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+ first_written_at TIMESTAMPTZ,
+ reported_at TIMESTAMPTZ,
+ PRIMARY KEY(message_id),
+ UNIQUE(workspace_id,connection_id,issue_seq),
+ FOREIGN KEY(workspace_id,connection_id) REFERENCES instance_connections(workspace_id,id)
+)`
+
 // One row per accepted protocol-error report. request_message_id is stored as
 // the CLI gave it, whether or not it names a message Engine sent.
 const createPostgreSQLConnectionProtocolErrorsTable = `CREATE TABLE connection_protocol_errors (
@@ -161,6 +189,28 @@ AS $$ BEGIN
  RETURN QUERY SELECT c.workspace_id,c.instance_id,c.id FROM public.instance_credentials c WHERE c.key_digest=$1;
 END $$`
 
+// The hub's instruction pressure gauges count the unreported instructions of
+// every connection that has not ended, across Workspaces: in_progress those
+// written to a stream, queued the others, and the age at $1 of the oldest
+// queued one. The function sets tetral.instruction_pressure, and the
+// SELECT-only instruction_pressure policies admit a row only when that flag is
+// set and current_user is the table owner.
+const createPostgreSQLComputerHubInstructionPressure = `CREATE FUNCTION public.tetral_computer_hub_instruction_pressure(timestamptz)
+RETURNS TABLE(in_progress bigint,queued bigint,oldest_queued_seconds double precision)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog
+AS $$ BEGIN
+ PERFORM pg_catalog.set_config('tetral.instruction_pressure','true',true);
+ RETURN QUERY SELECT count(*) FILTER (WHERE i.first_written_at IS NOT NULL),
+   count(*) FILTER (WHERE i.first_written_at IS NULL),
+   COALESCE(GREATEST(0,EXTRACT(EPOCH FROM $1-min(i.created_at) FILTER (WHERE i.first_written_at IS NULL)))::double precision,0)
+  FROM public.instance_connections c JOIN public.connection_instructions i ON i.workspace_id=c.workspace_id AND i.connection_id=c.id
+  WHERE c.ended_at IS NULL AND i.reported_at IS NULL;
+END $$`
+
+func instructionPressurePolicy(table string) string {
+	return `CREATE POLICY instruction_pressure ON ` + table + ` FOR SELECT USING (current_setting('tetral.instruction_pressure', true) = 'true' AND current_user = (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'public.` + table + `'::regclass))`
+}
+
 const postgresqlInstanceCredentialsAuthLookupPredicate = `current_setting('tetral.auth_lookup', true) = 'true' AND current_user = (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'public.instance_credentials'::regclass)`
 
 func postgresqlInstanceTableSteps() []postgresqlSchemaStep {
@@ -171,12 +221,14 @@ func postgresqlInstanceTableSteps() []postgresqlSchemaStep {
 		{"create_instance_connections", createPostgreSQLInstanceConnectionsTable},
 		{"create_connection_upstream_messages", createPostgreSQLConnectionUpstreamMessagesTable},
 		{"create_connection_protocol_errors", createPostgreSQLConnectionProtocolErrorsTable},
+		{"create_connection_instructions", createPostgreSQLConnectionInstructionsTable},
 		{"index_instances_workspace_seq", `CREATE INDEX idx_instances_workspace_seq ON instances(workspace_id,storage_sequence)`},
 		{"index_instance_credentials_instance_seq", `CREATE INDEX idx_instance_credentials_instance_seq ON instance_credentials(workspace_id,instance_id,storage_sequence)`},
 		{"index_instance_connections_instance_seq", `CREATE INDEX idx_instance_connections_instance_seq ON instance_connections(workspace_id,instance_id,storage_sequence)`},
 		{"index_instance_connections_unended", `CREATE UNIQUE INDEX idx_instance_connections_unended ON instance_connections(workspace_id,instance_id) WHERE ended_at IS NULL`},
 		{"index_instance_connections_lease", `CREATE INDEX idx_instance_connections_lease ON instance_connections(lease_expires_at) WHERE ended_at IS NULL`},
 		{"index_connection_protocol_errors_connection", `CREATE INDEX idx_connection_protocol_errors_connection ON connection_protocol_errors(workspace_id,connection_id,storage_sequence)`},
+		{"index_connection_instructions_unreported", `CREATE INDEX idx_connection_instructions_unreported ON connection_instructions(workspace_id,connection_id,issue_seq) WHERE reported_at IS NULL`},
 	}
 }
 
@@ -185,5 +237,9 @@ func postgresqlInstanceFunctionSteps() []postgresqlSchemaStep {
 		{"rls_policy_auth_lookup_instance_credentials", `CREATE POLICY auth_lookup ON instance_credentials FOR SELECT USING (` + postgresqlInstanceCredentialsAuthLookupPredicate + `)`},
 		{"create_auth_lookup_connection_key", createPostgreSQLAuthLookupConnectionKey},
 		{"revoke_auth_lookup_connection_key_public", `REVOKE ALL ON FUNCTION public.tetral_auth_lookup_connection_key(bytea) FROM PUBLIC`},
+		{"rls_policy_instruction_pressure_instance_connections", instructionPressurePolicy("instance_connections")},
+		{"rls_policy_instruction_pressure_connection_instructions", instructionPressurePolicy("connection_instructions")},
+		{"create_computer_hub_instruction_pressure", createPostgreSQLComputerHubInstructionPressure},
+		{"revoke_computer_hub_instruction_pressure_public", `REVOKE ALL ON FUNCTION public.tetral_computer_hub_instruction_pressure(timestamptz) FROM PUBLIC`},
 	}
 }

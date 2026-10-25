@@ -2470,6 +2470,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"auth_identities",
 		"auth_workspace_grants",
 		"cleanup_schedule_cursor",
+		"connection_instructions",
 		"connection_protocol_errors",
 		"connection_upstream_messages",
 		"credentials",

@@ -126,6 +126,7 @@ func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
 		seedRLSRows(t, admin)
 		assertAPIAndBridgeDurableOperations(t, databaseName, admin, declarations)
 		assertAuthLookupBoundary(t, databaseName, admin, declarations)
+		assertInstructionPressureBoundary(t, databaseName, admin, declarations)
 		auth := openManagedRole(t, databaseName, declarations.Roles["auth"])
 		defer func() { _ = auth.Close(context.Background()) }()
 		tx, err := auth.Begin(context.Background())
@@ -827,5 +828,59 @@ func assertAuthLookupBoundary(t *testing.T, databaseName string, admin *sql.DB, 
 	}
 	if unsafe != 0 {
 		t.Fatalf("unsafe Auth function catalog=%d", unsafe)
+	}
+}
+
+// The pressure function counts the instructions of every Workspace for
+// Computer Hub alone; the flag set by the serving role itself admits nothing
+// outside its Workspace.
+func assertInstructionPressureBoundary(t *testing.T, databaseName string, admin *sql.DB, declarations database.RoleDeclarations) {
+	t.Helper()
+	ctx := context.Background()
+	for _, suffix := range []string{"a", "b"} {
+		connection := "conn_" + strings.Repeat(suffix, 32)
+		ws, instanceID, credentialID, messageID := "ws_contract_"+suffix, "inst_pressure_"+suffix, "ccred_pressure_"+suffix, "msg_pressure_"+suffix
+		for _, row := range []struct {
+			statement string
+			args      []any
+		}{
+			{`INSERT INTO instances (workspace_id,id,kind,name,registration_state) VALUES ($1,$2,'user','pressure','active')`, []any{ws, instanceID}},
+			{`INSERT INTO instance_credentials (workspace_id,instance_id,id,state,key_digest,expires_at) VALUES ($1,$2,$3,'active',sha256(convert_to($3,'UTF8')),clock_timestamp()+interval '1 day')`, []any{ws, instanceID, credentialID}},
+			{`INSERT INTO instance_connections (workspace_id,instance_id,id,credential_id,hub_pod,connected_at,lease_expires_at,stream_count) VALUES ($1,$2,$3,$4,'pod',clock_timestamp(),clock_timestamp()+interval '45 seconds',1)`, []any{ws, instanceID, connection, credentialID}},
+			{`INSERT INTO connection_instructions (workspace_id,connection_id,message_id,issue_seq,type,envelope) VALUES ($1,$2,$3,1,'session.close','{}')`, []any{ws, connection, messageID}},
+		} {
+			if _, err := admin.Exec(row.statement, row.args...); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	hub := openManagedRole(t, databaseName, declarations.Roles["computer_hub"])
+	defer func() { _ = hub.Close(ctx) }()
+	tx, err := hub.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT set_config('tetral.workspace_id','ws_contract_a',true),set_config('tetral.instruction_pressure','true',true)`); err != nil {
+		t.Fatal(err)
+	}
+	var visible, queued int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM connection_instructions WHERE message_id LIKE 'msg_pressure_%'`).Scan(&visible); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.QueryRow(ctx, `SELECT queued FROM public.tetral_computer_hub_instruction_pressure(clock_timestamp())`).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if visible != 1 || queued != 2 {
+		t.Fatalf("visible instructions=%d queued=%d; want 1 in the Workspace and 2 counted", visible, queued)
+	}
+	_ = tx.Rollback(ctx)
+	assertWorkloadPrivilegeDenied(t, databaseName, declarations.Roles["api"], `SELECT * FROM public.tetral_computer_hub_instruction_pressure(clock_timestamp())`)
+	var unsafe int
+	if err := admin.QueryRow(`SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname='tetral_computer_hub_instruction_pressure' AND (NOT p.prosecdef OR NOT ('search_path=pg_catalog'=ANY(p.proconfig)) OR EXISTS(SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE'))`).Scan(&unsafe); err != nil {
+		t.Fatal(err)
+	}
+	if unsafe != 0 {
+		t.Fatalf("unsafe pressure function catalog=%d", unsafe)
 	}
 }

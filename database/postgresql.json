@@ -57,7 +57,8 @@
     "instance_idempotency_records",
     "instance_connections",
     "connection_upstream_messages",
-    "connection_protocol_errors"
+    "connection_protocol_errors",
+    "connection_instructions"
   ],
   "append_only_workspace_tables": [
     "session_file_attachment_consumptions",
@@ -150,6 +151,20 @@
       "name": "auth_lookup",
       "command": "SELECT",
       "using": "((current_setting('tetral.auth_lookup'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('instance_credentials'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "instance_connections",
+      "name": "instruction_pressure",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.instruction_pressure'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('instance_connections'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "connection_instructions",
+      "name": "instruction_pressure",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.instruction_pressure'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('connection_instructions'::regclass)::oid))))",
       "check": ""
     },
     {

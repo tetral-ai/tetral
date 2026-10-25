@@ -256,8 +256,10 @@
         "instance_connections": ["SELECT", "INSERT", "UPDATE"],
         "connection_upstream_messages": ["SELECT", "INSERT", "DELETE"],
         "connection_protocol_errors": ["INSERT"],
+        "connection_instructions": ["SELECT", "INSERT", "UPDATE"],
         "tetral_schema_migrations": ["SELECT"]
-      }
+      },
+      "functions": ["tetral_computer_hub_instruction_pressure(timestamptz)"]
     }
   }
 }
