@@ -73,8 +73,11 @@ Server:
   `probe_slots::PROBE_WAIT`, and every waiting request is `Cancelled` at the
   connection's end and at the stop. A slot comes back only when its owner
   returns it after reaping its probe, and the stop is answered only once no
-  probe holds one, so that the shutdown waits for them up to its deadline
-  (`probe_slots`, `owner`).
+  probe holds one and every Session binding owner has reported its tasks'
+  processes confirmed gone, so that the shutdown waits for them up to its
+  deadline (`probe_slots`, `owner`). The stop has the owners end their tasks
+  before it ends the connection, so that the tasks get the termination
+  procedure's grace (`owner`).
 - A stream reads one event of up to `stream::EVENT_MAX_BYTES` until the CLI
   starts submitting a ready that advertises `tool_execution`, and of up to
   `stream::TOOL_EVENT_MAX_BYTES` from then on, a resumed stream of that

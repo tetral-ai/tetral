@@ -52,7 +52,10 @@ that is no longer the binding's is discarded.
   processes are not yet confirmed gone; while one is kept, or a record an
   earlier App Server left for the Session is unconfirmed
   (`execution::cleanup::Leftovers`), a preparation of the Session fails with
-  `cleanup_pending`, checked right after the connection it names (`tools`).
+  `cleanup_pending`, checked right after the connection it names. The
+  shutdown sends every task the end through the termination procedure, and
+  once each started task's processes are confirmed gone the owner tells the
+  Connection owner (`ConnectionPort::tasks_gone`, `tools`).
 - Owners follow the owner rules of `cli/README.md`. An owner reaches the
   Connection owner only through `protocol::ports::ConnectionPort` and hands
   its reports to `protocol::ports::ReportSink`.

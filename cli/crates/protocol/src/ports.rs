@@ -230,7 +230,9 @@ pub trait SessionHandle: Send + Sync {
     fn probe_slot(&self, request: ProbeRequest, answer: ProbeSlot);
     /// The connection ended: its bindings become `unavailable`.
     fn connection_ended(&self, connection_id: Id);
-    /// The App Server shuts down: running probes are killed.
+    /// The App Server shuts down: running probes are killed and every task
+    /// ends; once each task's processes are confirmed gone, the owner tells
+    /// the Connection owner ([`ConnectionPort::tasks_gone`]).
     fn shutdown(&self);
     /// The owner's bindings as `GET /v1/sessions` lists them, read from its
     /// state alone.
@@ -250,6 +252,9 @@ pub trait ConnectionPort: Send + Sync {
     fn probe_slot_free(&self);
     /// The Session's record is deleted (`RecordGone`).
     fn record_gone(&self, session_id: &SafeId);
+    /// After the shutdown, every task of the Session is confirmed gone
+    /// (`TasksGone`).
+    fn tasks_gone(&self, session_id: &SafeId);
 }
 
 #[cfg(test)]

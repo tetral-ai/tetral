@@ -3,7 +3,7 @@
 //! routed, which also creates its Session record; the record counts until
 //! its owner reports it gone. At most `RECORDS_MAX` records exist.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use protocol::id::{Id, SafeId};
@@ -27,6 +27,7 @@ pub(crate) enum PortMessage {
     Withdraw(Requester),
     Free,
     RecordGone(SafeId),
+    TasksGone(SafeId),
 }
 
 /// The Connection owner's side of `ConnectionPort`: each call is a message
@@ -56,6 +57,10 @@ impl ConnectionPort for Port {
 
     fn record_gone(&self, session_id: &SafeId) {
         self.send(PortMessage::RecordGone(session_id.clone()));
+    }
+
+    fn tasks_gone(&self, session_id: &SafeId) {
+        self.send(PortMessage::TasksGone(session_id.clone()));
     }
 }
 
@@ -153,10 +158,13 @@ impl Owners {
         }
     }
 
-    pub fn shutdown(&self) {
+    /// Has every owner end its tasks, and gives the Sessions whose tasks
+    /// are not yet confirmed gone.
+    pub fn shutdown(&self) -> BTreeSet<SafeId> {
         for owned in self.owners.values() {
             owned.handle.shutdown();
         }
+        self.owners.keys().cloned().collect()
     }
 
     pub fn record_gone(&mut self, session_id: &SafeId) {

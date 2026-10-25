@@ -39,9 +39,11 @@ ones it uses belong here too.
   Session binding owners and the Connection owner's staging hold
   (`local_api`).
 - The first of `POST /v1/shutdown`, SIGINT and SIGTERM starts the shutdown;
-  later ones change nothing. The sequence stops the Connection owner, stops
-  the listener, removes the socket and then releases the lock, waiting for
-  the Connection owner and the handlers only until `SHUTDOWN_DEADLINE` after
+  later ones change nothing. The sequence stops the Connection owner, which
+  ends every task and answers once each task's processes are confirmed
+  gone, stops the listener, removes the socket and then releases the lock,
+  waiting for the Connection owner and the handlers only until
+  `SHUTDOWN_DEADLINE` after
   the trigger on the seam clock; it counts the start of its wait for the
   handlers as the test seam counter `shutdown.waiting` (`shutdown`).
 - While it runs, the App Server sets the socket's modification time to now

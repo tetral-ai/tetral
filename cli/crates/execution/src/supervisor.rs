@@ -19,7 +19,8 @@
 //! [`cleanup::CHECK_INTERVAL`] until they are confirmed gone; only then do
 //! the record and, once every report has its outcome, the task's files go.
 //! A connection's end discards a staged task without a report and ends a
-//! running one with SIGKILL at once.
+//! running one with SIGKILL at once; the App Server's shutdown ends it
+//! through the termination procedure.
 
 use std::collections::{HashSet, VecDeque};
 use std::os::fd::OwnedFd;
@@ -164,6 +165,8 @@ pub enum SupervisorMessage {
     Outcome(ReportId, ReportOutcome),
     /// The task's connection ended.
     ConnectionEnded,
+    /// The App Server shuts down.
+    Shutdown,
 }
 
 /// A control of the task, admitted by its binding owner on the task's
@@ -236,6 +239,7 @@ pub fn spawn(spec: TaskSpec, context: Context) -> SupervisorMailbox {
         writing: None,
         waiters: Vec::new(),
         stopped: false,
+        shutting_down: false,
         leader: None,
         gone: false,
         checked: Duration::ZERO,
@@ -278,8 +282,12 @@ struct Supervisor {
     writes: VecDeque<Control<StdinPayload>>,
     writing: Option<Writing>,
     waiters: Vec<Waiter>,
-    /// A connection's end stopped the task's writes.
+    /// A connection's end or the shutdown stopped the task's writes.
     stopped: bool,
+    /// The App Server's shutdown has begun: the end of the connection that
+    /// it brings ends the task through the termination procedure, with its
+    /// grace.
+    shutting_down: bool,
     /// The task's first process inside its sandbox, once seen.
     leader: Option<Leader>,
     /// Whether the task's processes are confirmed gone.
@@ -309,6 +317,8 @@ enum Expiry {
     Cancel,
     /// The task's connection ended.
     ConnectionEnded,
+    /// The App Server shuts down.
+    Shutdown,
 }
 
 /// A task as a reply reports it.
@@ -343,8 +353,8 @@ struct Waiter {
 enum Staged {
     Started,
     Cancelled,
-    /// The binding owner forgot the task or its connection ended: it ends
-    /// without a report.
+    /// The binding owner forgot the task, its connection ended or the App
+    /// Server shuts down: it ends without a report.
     Discarded,
 }
 
@@ -385,7 +395,9 @@ impl Supervisor {
         let mut held = Vec::new();
         let staged = loop {
             match self.messages.recv().await {
-                None | Some(SupervisorMessage::ConnectionEnded) => return Staged::Discarded,
+                None
+                | Some(SupervisorMessage::ConnectionEnded)
+                | Some(SupervisorMessage::Shutdown) => return Staged::Discarded,
                 Some(SupervisorMessage::Start) => {
                     self.left_queue = Some(state::seams::now());
                     break Staged::Started;
@@ -430,7 +442,11 @@ impl Supervisor {
                     }
                     Some(SupervisorMessage::Stdin(control)) => self.stdin(*control),
                     Some(SupervisorMessage::Cancel(control)) => self.cancel(*control),
-                    Some(SupervisorMessage::Start | SupervisorMessage::ConnectionEnded) => {}
+                    Some(
+                        SupervisorMessage::Start
+                        | SupervisorMessage::ConnectionEnded
+                        | SupervisorMessage::Shutdown,
+                    ) => {}
                 },
                 () = state::seams::sleep_until(next_check), if !self.gone => {
                     self.check_gone();
@@ -703,7 +719,8 @@ impl Supervisor {
                     Some(SupervisorMessage::Outcome(report, _)) => {
                         self.awaited.remove(&report);
                     }
-                    Some(SupervisorMessage::ConnectionEnded) => self.connection_ended(pid),
+                    Some(SupervisorMessage::ConnectionEnded) => self.stop(pid, Expiry::ConnectionEnded),
+                    Some(SupervisorMessage::Shutdown) => self.stop(pid, Expiry::Shutdown),
                     Some(SupervisorMessage::Start) => {}
                     None => forgotten = true,
                 },
@@ -1124,20 +1141,34 @@ impl Supervisor {
         }
     }
 
-    /// The task's connection ended: writes stop as at a cancel, and the
-    /// termination procedure ends the task with SIGKILL at once, also one
-    /// already in its grace.
-    fn connection_ended(&mut self, pid: u32) {
+    /// The task's connection ended or the App Server shuts down: writes stop
+    /// as at a cancel, and the termination procedure ends the task, at a
+    /// connection's end with SIGKILL at once, also one already in its grace.
+    /// Once the shutdown has begun, the end of the connection that it brings
+    /// counts as the shutdown.
+    fn stop(&mut self, pid: u32, expiry: Expiry) {
+        let expiry = match expiry {
+            Expiry::ConnectionEnded if self.shutting_down => Expiry::Shutdown,
+            Expiry::Shutdown => {
+                self.shutting_down = true;
+                expiry
+            }
+            expiry => expiry,
+        };
         self.stopped = true;
         self.write_interrupted();
         if self.exit.is_some() {
             return;
         }
         let steps = self.context.bounds.termination;
-        self.ending = match self.ending {
-            Some((termination, _)) if termination.killed() => self.ending,
-            Some((_, current)) => Some((Termination::kill(pid, steps), current)),
-            None => Some((Termination::kill(pid, steps), Expiry::ConnectionEnded)),
+        self.ending = match (self.ending, expiry) {
+            (Some((termination, _)), _) if termination.killed() => self.ending,
+            (Some((_, current)), Expiry::ConnectionEnded) => {
+                Some((Termination::kill(pid, steps), current))
+            }
+            (None, Expiry::ConnectionEnded) => Some((Termination::kill(pid, steps), expiry)),
+            (None, _) => Some((Termination::begin(pid, steps), expiry)),
+            (ending, _) => ending,
         };
     }
 

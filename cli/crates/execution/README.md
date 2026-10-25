@@ -139,7 +139,9 @@ which owns that task's process tree; the translation of a call's
   Sessions they keep `cleanup_pending`; readers see what it last published
   (`cleanup::Check`, `cleanup::Leftovers`).
 - A connection's end discards a staged task without a report and ends a
-  running one (`supervisor`).
+  running one; the shutdown ends every task through the termination
+  procedure, and once it has begun, the end of the connection that it
+  brings counts as the shutdown (`supervisor`).
 - The initial wait runs from the spawn. One that ends before the command's
   start, whatever `on_wait_expiry` says, one under `kill`, and a detached
   command's lifetime end the command through the termination procedure

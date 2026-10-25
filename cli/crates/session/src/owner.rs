@@ -254,6 +254,10 @@ pub(crate) struct SessionOwner<S> {
     /// The tasks of ended connections, by connection and `task_id`, whose
     /// processes are not yet confirmed gone.
     pub unconfirmed: HashSet<(Id, Id)>,
+    /// The App Server's shutdown has ended every task.
+    pub shutting_down: bool,
+    /// The Connection owner was told that every task is confirmed gone.
+    pub shutdown_answered: bool,
 }
 
 async fn own<S: TaskStarter>(
@@ -297,6 +301,8 @@ impl<S: TaskStarter> SessionOwner<S> {
             requests: HashMap::new(),
             probes: HashMap::new(),
             unconfirmed: HashSet::new(),
+            shutting_down: false,
+            shutdown_answered: false,
         }
     }
 
@@ -320,7 +326,10 @@ impl<S: TaskStarter> SessionOwner<S> {
                 };
                 reply(entries);
             }
-            SessionMessage::Task { task, event } => self.task_event(task, event),
+            SessionMessage::Task { task, event } => {
+                self.task_event(task, event);
+                self.answer_shutdown();
+            }
         }
     }
 
@@ -407,6 +416,12 @@ impl<S: TaskStarter> SessionOwner<S> {
     }
 
     fn shutdown(&mut self) {
+        self.shutting_down = true;
+        if let Some(record) = &self.record {
+            for binding in [&record.current, &record.unavailable].into_iter().flatten() {
+                binding.tasks.shutdown();
+            }
+        }
         let operations: Vec<u64> = self
             .requests
             .values()
@@ -416,6 +431,7 @@ impl<S: TaskStarter> SessionOwner<S> {
         for operation in operations {
             self.end_operation(operation);
         }
+        self.answer_shutdown();
     }
 
     /// Ends `operation`: a slot request it still has is withdrawn and its
@@ -582,6 +598,7 @@ mod tests {
         fn probe_slot_withdraw(&self, _session_id: &SafeId, _request: ProbeRequest) {}
         fn probe_slot_free(&self) {}
         fn record_gone(&self, _session_id: &SafeId) {}
+        fn tasks_gone(&self, _session_id: &SafeId) {}
     }
 
     struct NoReports;

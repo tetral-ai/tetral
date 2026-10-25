@@ -134,6 +134,16 @@ impl Tasks {
         self.unconfirmed().cloned().collect()
     }
 
+    /// The App Server shuts down: every task's supervisor ends its task.
+    pub fn shutdown(&self) {
+        self.send_all(|| SupervisorMessage::Shutdown);
+    }
+
+    /// Whether every started task's processes are confirmed gone.
+    pub fn all_gone(&self) -> bool {
+        self.unconfirmed().next().is_none()
+    }
+
     /// The started tasks whose processes are not yet confirmed gone.
     fn unconfirmed(&self) -> impl Iterator<Item = &Id> {
         self.registry
@@ -387,6 +397,27 @@ impl<S: TaskStarter> SessionOwner<S> {
             return;
         };
         entry.gone = true;
+    }
+
+    /// After the shutdown has ended every task, tells the Connection owner
+    /// once that each of this Session's tasks is confirmed gone.
+    pub(crate) fn answer_shutdown(&mut self) {
+        if !self.shutting_down || self.shutdown_answered || !self.unconfirmed.is_empty() {
+            return;
+        }
+        let running = self.record.as_ref().is_some_and(|record| {
+            [record.current.as_ref(), record.unavailable.as_ref()]
+                .into_iter()
+                .flatten()
+                .any(|binding| !binding.tasks.all_gone())
+        });
+        if running {
+            return;
+        }
+        self.shutdown_answered = true;
+        if let Some(preparation) = &self.preparation {
+            preparation.connection.tasks_gone(&preparation.session_id);
+        }
     }
 
     /// Whether an earlier execution of this Session may still run: a task

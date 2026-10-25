@@ -24,10 +24,11 @@
 //! The owner also admits each `session.prepare` before it reaches a Session
 //! binding owner ([`crate::sessions`]) and holds the probe slots
 //! ([`crate::probe_slots`]). Its stop is answered once every probe that
-//! holds a slot has been reaped, so that the shutdown waits for them until
-//! its own deadline.
+//! holds a slot has been reaped and every Session binding owner has
+//! reported its tasks' processes gone, so that the shutdown waits for them
+//! until its own deadline.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -41,7 +42,7 @@ use protocol::connection::{
 use protocol::errors::{ErrorBody, ErrorCode};
 use protocol::field::{Nullable, PositiveInt};
 use protocol::fingerprint::fingerprint;
-use protocol::id::Id;
+use protocol::id::{Id, SafeId};
 use protocol::local::{ConnectionState, ErrorObject, SessionEntry, SessionState};
 use protocol::ports::{
     Close, Prepare, ProbeSlot, ReportSink, SessionFactory, Submission, ToolCall,
@@ -429,8 +430,11 @@ struct Owner {
     reported: Reported,
     owners: Owners,
     slots: ProbeSlots,
-    /// The replies to stop, sent once no probe holds a slot.
+    /// The replies to stop, sent once no probe holds a slot and every
+    /// Session's tasks are confirmed gone.
     stop_replies: Vec<oneshot::Sender<()>>,
+    /// The Sessions whose tasks the stop still waits for.
+    tasks_pending: BTreeSet<SafeId>,
 }
 
 impl Owner {
@@ -446,6 +450,7 @@ impl Owner {
             owners,
             slots: ProbeSlots::new(times.probe_slots),
             stop_replies: Vec::new(),
+            tasks_pending: BTreeSet::new(),
             transport,
             outbox,
             instance_id: config.instance_id,
@@ -551,6 +556,8 @@ impl Owner {
             return;
         }
         self.reported.change(ConnectionState::Stopping);
+        // Before the connection's end, so that tasks end with their grace.
+        self.tasks_pending = self.owners.shutdown();
         let phase = std::mem::replace(&mut self.phase, Phase::Stopped);
         self.release(phase);
         for (_, pending) in self.requests.drain() {
@@ -559,12 +566,11 @@ impl Owner {
         for requester in self.slots.cancel(state::seams::now()) {
             self.owners.answer(&requester, ProbeSlot::Cancelled);
         }
-        self.owners.shutdown();
         self.reported.change(ConnectionState::Stopped);
     }
 
     fn answer_stop(&mut self) {
-        if self.slots.running() == 0 {
+        if self.slots.running() == 0 && self.tasks_pending.is_empty() {
             for reply in self.stop_replies.drain(..) {
                 let _ = reply.send(());
             }
@@ -593,6 +599,10 @@ impl Owner {
                 self.answer_stop();
             }
             PortMessage::RecordGone(session_id) => self.owners.record_gone(&session_id),
+            PortMessage::TasksGone(session_id) => {
+                self.tasks_pending.remove(&session_id);
+                self.answer_stop();
+            }
         }
     }
 
