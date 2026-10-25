@@ -2,7 +2,7 @@
 
 This separate test-only module imports the Envoy Gateway 1.9.2 internal
 translator. Its upstream dependency requires Go 1.26.8 or later; the module
-builds with Go 1.26.9, the same toolchain as the Engine module.
+builds with Go 1.26.10, the same toolchain as the Engine module.
 
 The unmodified matching `egctl` emits Gateway status, xDS ConfigDump and IR, but
 omits policy SecretType resources from ConfigDump. This helper accepts that
