@@ -32,6 +32,11 @@ pub enum Error {
     Io(io::Error),
 }
 
+/// The body of an accepted shutdown, the empty object.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Accepted {}
+
 /// The client of one state root's App Server.
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -70,10 +75,10 @@ impl Client {
         self.call(Method::GET, "/v1/sessions", StatusCode::OK).await
     }
 
-    /// Starts the App Server's shutdown; it returns on the `202`, before the
-    /// App Server has exited.
+    /// Starts the App Server's shutdown; it returns on the `202` with the
+    /// body `{}`, before the App Server has exited.
     pub async fn shutdown(&self) -> Result<(), Error> {
-        let _: serde_json::Value = self
+        let Accepted {} = self
             .call(Method::POST, "/v1/shutdown", StatusCode::ACCEPTED)
             .await?;
         Ok(())
