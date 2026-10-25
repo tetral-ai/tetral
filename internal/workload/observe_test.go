@@ -442,22 +442,31 @@ func TestStartupFailureEndsTheServiceColdStartWithItsCodeAndObservesNoSample(t *
 	}
 }
 
+// TestPressurePointRecordsOneEpisodePerQuietGap rejects three times, one
+// second apart: an admission 59 seconds after the last rejection keeps the
+// episode, and one 60 seconds after it ends the episode with its count.
 func TestPressurePointRecordsOneEpisodePerQuietGap(t *testing.T) {
+	RegisterDeclarations("observe-test", []byte(observeTestTable))
 	lines := &recordedLines{}
 	telemetry := NewTelemetry(TelemetryOptions{Service: "pressure-test", Logger: NewLogger(lines, "pressure-test", "test", "unit")})
 	t.Cleanup(InstallTelemetry(telemetry))
 	now := time.Unix(0, 0)
 	point := NewPressurePoint(telemetry.Registry(), "pressure_test", "capacity").WithClock(func() time.Time { return now })
 	ctx := context.Background()
-	for range 3 {
+	for i := range 3 {
+		if i > 0 {
+			now = now.Add(time.Second)
+		}
 		var rejection *Rejection
 		if err := point.Reject(ctx, "capacity"); !errors.As(err, &rejection) {
 			t.Fatalf("Reject returned %v", err)
 		}
-		now = now.Add(time.Second)
 	}
 	now = now.Add(59 * time.Second)
 	point.Admit(ctx)
+	if records := lines.records(t); len(records) != 1 || records[0]["event"] != "pressure.rejecting_started" {
+		t.Fatalf("records 59 seconds after the last rejection = %v; want only rejecting_started", records)
+	}
 	now = now.Add(time.Second)
 	point.Admit(ctx)
 	records := lines.records(t)
