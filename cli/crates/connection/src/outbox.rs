@@ -362,19 +362,26 @@ impl Owner {
     }
 
     /// Applies the answer to a report's current attempt, counted as the test
-    /// seam counter `outbox.answered`.
+    /// seam counter `outbox.answered` once it is applied, so that a test
+    /// that waits for the count finds a retry already scheduled.
     async fn answered(&mut self, report: ReportId, attempt: u64, answer: Answer) {
+        if self.apply_answer(report, attempt, answer).await {
+            state::seams::count("outbox.answered");
+        }
+    }
+
+    /// Whether the answer was to the report's current attempt.
+    async fn apply_answer(&mut self, report: ReportId, attempt: u64, answer: Answer) -> bool {
         let Some(current) = self.current.as_mut() else {
-            return;
+            return false;
         };
         let Some(pending) = current.reports.get_mut(&report) else {
-            return;
+            return false;
         };
         if pending.attempt.as_ref().map(|(tag, _)| *tag) != Some(attempt) {
-            return;
+            return false;
         }
         pending.attempt = None;
-        state::seams::count("outbox.answered");
         let outcome = match answer {
             Answer::Success(body) if acknowledges(&body, &current.id, &pending.message_id) => {
                 ReportOutcome::Acked
@@ -387,7 +394,7 @@ impl Owner {
                     connection: current.id.clone(),
                     error,
                 });
-                return;
+                return true;
             }
             Answer::Refused(error) => {
                 observe::error!(
@@ -401,12 +408,12 @@ impl Owner {
             }
             Answer::Success(_) | Answer::Failed(_) => {
                 pending.retry_at = Some(self.config.clock.now() + pending.backoff.next_wait());
-                return;
+                return true;
             }
         };
         let connection = current.id.clone();
         let Some(pending) = self.remove(report).await else {
-            return;
+            return true;
         };
         tell(&pending.listener, report, outcome);
         if outcome == ReportOutcome::Acked
@@ -417,6 +424,7 @@ impl Owner {
                 instruction,
             });
         }
+        true
     }
 
     async fn cancel(&mut self, report: ReportId) {
