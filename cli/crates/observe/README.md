@@ -36,7 +36,8 @@ registry, trace context and stopwatches.
   to them.
 - A pressure point is a place where work waits or is refused; its series carry
   the point's name as their prefix, and the catalogue checks that each has its
-  siblings (`check_pressure_point`).
+  siblings (`check_pressure_point`). Its owner records its rejections by
+  episode, one per cause (`pressure::Episodes`).
 
 ## Entry points
 
@@ -68,6 +69,7 @@ registry, trace context and stopwatches.
 | `src/metrics.rs` | `Counter`, `Gauge`, `Histogram`, `Registry` and the text format |
 | `src/level.rs` | `Level` and `TETRAL_LOG_LEVEL` |
 | `src/trace_context.rs` | `TraceContext` |
+| `src/pressure.rs` | `Episodes`, the rejection episodes of a pressure point, and `QUIET_INTERVAL` |
 | `src/stopwatch.rs` | `Stopwatch`, `Ms` and `Startup`, which records the `cold_start` events |
 | `tests/string_fields.rs` | The compile-fail cases of `tests/ui/`: a `String` or a `&str` field does not compile |
 | `tests/level_variable.rs` | `Level::from_env` reading `TETRAL_LOG_LEVEL` |

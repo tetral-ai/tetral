@@ -93,10 +93,10 @@ temporary directories. No workspace crate depends on this package.
   the state root and to a project, `create_cwd`, a repeated, held, retargeted
   and changed preparation and its ACK, two App Servers with the same
   Sessions, a removed directory and a new connection, a probe result after a
-  new connection and a resumed stream, the probe slots and their timeouts,
-  128 Session records, a held probe under heartbeats and shutdown, reports
-  refused as answering no issued instruction, and a new binding refused by a
-  full replay ledger.
+  new connection and a resumed stream, the probe slots, their timeouts and
+  the rejection episode they record, 128 Session records, a held probe under
+  heartbeats and shutdown, reports refused as answering no issued
+  instruction, and a new binding refused by a full replay ledger.
 - `tests/local_service.rs`: `server run`, `server status` and `server stop`
   and the local API: status while Engine is unreachable, the wrong routes,
   shutdown on request, on each signal and with a handler blocked, one owner

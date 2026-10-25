@@ -530,7 +530,7 @@ impl Owner {
         for (_, pending) in self.requests.drain() {
             pending.task.abort();
         }
-        for requester in self.slots.cancel() {
+        for requester in self.slots.cancel(state::seams::now()) {
             self.owners.answer(&requester, ProbeSlot::Cancelled);
         }
         self.owners.shutdown();
@@ -557,9 +557,11 @@ impl Owner {
                     self.owners.answer(&requester, ProbeSlot::Granted);
                 }
             }
-            PortMessage::Withdraw(requester) => self.slots.withdraw(&requester),
+            PortMessage::Withdraw(requester) => {
+                self.slots.withdraw(&requester, state::seams::now());
+            }
             PortMessage::Free => {
-                if let Some(next) = self.slots.free() {
+                if let Some(next) = self.slots.free(state::seams::now()) {
                     self.owners.answer(&next, ProbeSlot::Granted);
                 }
                 self.answer_stop();
@@ -1356,7 +1358,7 @@ impl Owner {
             Stream::Resuming(attempt) => attempt.task.abort(),
             Stream::Waiting { .. } => {}
         }
-        for requester in self.slots.cancel() {
+        for requester in self.slots.cancel(state::seams::now()) {
             self.owners.answer(&requester, ProbeSlot::Cancelled);
         }
         self.owners.connection_ended(&held.id);

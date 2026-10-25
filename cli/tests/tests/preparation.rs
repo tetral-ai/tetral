@@ -625,7 +625,16 @@ fn eight_probes_held_for_five_seconds_time_out_and_keep_their_slots_until_reaped
         assert_eq!(outcome(&engine, message_id), failed("cwd_check_timeout"));
     }
     assert_eq!(machine.seams.count(PROBE_SPAWN), 8);
-    case.observe("the ninth failed with resource_exhausted, the eight with cwd_check_timeout, and probe.spawn counts 8");
+    wait_until("a pressure.rejecting_started record", || {
+        !records(&machine.root, "pressure.rejecting_started").is_empty()
+    });
+    let started = records(&machine.root, "pressure.rejecting_started");
+    assert_eq!(started.len(), 1);
+    assert_eq!(
+        (&started[0]["pressure.point"], &started[0]["pressure.cause"]),
+        (&json!("tetral_probes"), &json!("timeout"))
+    );
+    case.observe("the ninth failed with resource_exhausted, the eight with cwd_check_timeout, probe.spawn counts 8, and one pressure.rejecting_started names tetral_probes and timeout");
 
     let mut case =
         record.case("a preparation after the timeouts while the eight are still unreaped");

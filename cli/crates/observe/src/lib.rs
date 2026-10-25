@@ -4,6 +4,7 @@
 mod catalogue;
 mod level;
 mod metrics;
+pub mod pressure;
 mod record;
 mod sinks;
 mod stopwatch;
