@@ -519,6 +519,66 @@ func TestRevocationAndDeregistrationEndTheLiveConnection(t *testing.T) {
 	}
 }
 
+// TestRevocationWaitsForAGrantUnderTheConnectionsCredential holds a ready
+// and a heartbeat that the instance's second active credential sends on the
+// connection, at their connection lock, while the connection's credential is
+// revoked: the revocation waits for the credential the request already
+// locked, the grant commits, then the revocation ends the connection.
+func TestRevocationWaitsForAGrantUnderTheConnectionsCredential(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	type answer struct {
+		response enginetest.Response
+		err      error
+	}
+	for _, row := range []struct {
+		name  string
+		ready bool
+		send  func(other *enginetest.CLI, connectionID string) (enginetest.Response, error)
+	}{
+		{"ready", false, func(other *enginetest.CLI, connectionID string) (enginetest.Response, error) {
+			return other.Ready(f.ctx, readyOf(connectionID, "ready_other", "1.0.0"))
+		}},
+		{"heartbeat", true, func(other *enginetest.CLI, connectionID string) (enginetest.Response, error) {
+			return other.Heartbeat(f.ctx, protocol.Heartbeat{ConnectionID: connectionID, MessageID: "heartbeat_other",
+				RequestMessageID: instance.HeartbeatMessageID(connectionID, 1), HeartbeatSeq: 1})
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			cli := f.userInstance(time.Time{})
+			other := f.secondCredential(cli, time.Time{})
+			stream := f.open(cli)
+			if row.ready {
+				f.acceptReady(cli, stream, "ready_1")
+			}
+			pause := f.pauseOn("AND lease_expires_at>$4 FOR UPDATE")
+			release := sync.OnceFunc(func() { close(pause.release) })
+			defer release()
+			granted := make(chan answer, 1)
+			go func() {
+				response, err := row.send(other, stream.connectionID)
+				granted <- answer{response, err}
+			}()
+			<-pause.reached
+			revoked := make(chan int, 1)
+			go func() {
+				status, _ := f.do(http.MethodDelete, "/v1/instances/"+cli.InstanceID+"/credentials/"+cli.CredentialID, nil, "")
+				revoked <- status
+			}()
+			f.awaitLockWait()
+			release()
+			if a := <-granted; a.err != nil || a.response.Status != http.StatusOK {
+				t.Fatalf("%s of the second credential = %d %s, %v; want its grant", row.name, a.response.Status, a.response.Body, a.err)
+			}
+			if status := <-revoked; status != http.StatusNoContent {
+				t.Fatalf("revocation of the connection's credential = %d; want 204", status)
+			}
+			if connection := f.connectionRow(stream.connectionID); connection["end_cause"] != instance.EndRevoked {
+				t.Fatalf("connection after the revocation = %v; want ended with %s", connection, instance.EndRevoked)
+			}
+		})
+	}
+}
+
 func requireNoEvent(t *testing.T, stream *testStream) {
 	t.Helper()
 	select {

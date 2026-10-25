@@ -52,7 +52,7 @@ func (h *clientHandler) ready(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		connection, err := instance.LockLiveConnection(ctx, tx, id.workspace, id.instanceID, ready.ConnectionID, granted.now, true)
+		connection, credential, err := lockGrantedConnection(ctx, tx, id, granted, ready.ConnectionID)
 		if err != nil {
 			return err
 		}
@@ -70,7 +70,7 @@ func (h *clientHandler) ready(w http.ResponseWriter, r *http.Request) {
 				MessageID: ready.MessageID, Fingerprint: fingerprint, Code: instance.RefusedCLIUpgradeRequired, Message: message, CLIVersion: ready.CLIVersion,
 			})
 		}
-		leaseExpiresAt, validForMS, err := grantFor(ctx, tx, connection, granted.now)
+		leaseExpiresAt, validForMS, err := grantFor(credential, granted.now)
 		if err != nil {
 			return err
 		}

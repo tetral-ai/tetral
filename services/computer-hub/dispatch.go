@@ -209,10 +209,11 @@ func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
 	return outcome
 }
 
-// errCredentialMoved is a connection whose credential changed between the
-// pass's unlocked read and its locks; only a resume, which also moves the
-// stream, changes it, so the next pass finds the stream moved.
-var errCredentialMoved = errors.New("computer-hub: the connection's credential changed during the pass")
+// errCredentialMoved is a connection whose credential changed between a
+// transaction's unlocked read of the connection and its locks; only a
+// resume, which also moves the stream, changes it, so the next pass finds the
+// stream moved.
+var errCredentialMoved = errors.New("computer-hub: the connection's credential changed during the transaction")
 
 // shareRows reads connectionID without a lock, then locks its instance, its
 // credential and the connection FOR SHARE in that order, and returns them as

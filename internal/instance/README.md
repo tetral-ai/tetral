@@ -24,7 +24,8 @@ transition, with the package's invariants.
   instance, credentials, connection, each in its final mode at its first lock
   (`LockInstance`, `LockInstanceNoKeyUpdate`, `ShareInstance`,
   `LockCredential`, `ShareCredential`, `LockLiveConnection`,
-  `ShareConnection`).
+  `ShareConnection`). Of two credentials, a client request's principal comes
+  before its connection's credential.
 - A writer that changes what a connection's stream must write notifies the
   pod that holds the stream in its transaction (`NotifyConnection`); the pod
   reads the rows itself.

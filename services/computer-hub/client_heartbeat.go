@@ -33,7 +33,7 @@ func (h *clientHandler) heartbeat(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		connection, err := instance.LockLiveConnection(ctx, tx, id.workspace, id.instanceID, heartbeat.ConnectionID, granted.now, true)
+		connection, credential, err := lockGrantedConnection(ctx, tx, id, granted, heartbeat.ConnectionID)
 		if err != nil {
 			return err
 		}
@@ -49,7 +49,7 @@ func (h *clientHandler) heartbeat(w http.ResponseWriter, r *http.Request) {
 		case connection.Heartbeat != nil && heartbeat.HeartbeatSeq <= connection.Heartbeat.Seq:
 			return refuse(protocol.ErrorInvalidMessage, "heartbeat_seq is not above the last accepted heartbeat's")
 		}
-		leaseExpiresAt, validForMS, err := grantFor(ctx, tx, connection, granted.now)
+		leaseExpiresAt, validForMS, err := grantFor(credential, granted.now)
 		if err != nil {
 			return err
 		}

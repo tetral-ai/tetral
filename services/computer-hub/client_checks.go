@@ -30,14 +30,16 @@ import (
 //     instance FOR NO KEY UPDATE, and an activating credential is locked
 //     FOR UPDATE;
 //  5. connection, on every POST: the instance's live connection
-//     (instance.LockLiveConnection), else 409 stale_connection;
+//     (instance.LockLiveConnection), else 409 stale_connection; a ready and
+//     a heartbeat lock it after its credential (lockGrantedConnection);
 //  6. the replay ledger (replayOf);
 //  7. the route's own checks.
 //
 // A refusal changes nothing, except one that records a credential reuse.
 // A database failure at any step answers 503 and changes nothing, so the
 // authority checks fail closed. Locks follow the order of internal/instance:
-// instance, credentials, connection, each in its final mode at once.
+// instance, credentials, connection, each in its final mode at once; of two
+// credentials, the principal's comes before the connection's.
 
 // clientFailure is a refusal with its code of the client error table and,
 // for previous_connection_active, its retry_after_ms. commit marks a refusal
@@ -259,14 +261,39 @@ func revokedByActivation(credential instance.Credential) bool {
 	return credential.RevokedAt != nil && credential.RevocationCause != nil && *credential.RevocationCause == instance.CausePendingActivation
 }
 
-// grantFor locks the connection's credential FOR SHARE and returns the lease
-// a grant at now gives under its expiry, refusing 401 credential_expired when
-// no positive grant remains.
-func grantFor(ctx context.Context, tx *dbconnect.Tx, connection instance.Connection, now time.Time) (time.Time, int64, error) {
-	credential, err := instance.ShareCredential(ctx, tx, connection.WorkspaceID, connection.InstanceID, connection.CredentialID)
-	if err != nil {
-		return time.Time{}, 0, err
+// lockGrantedConnection locks the instance's live connection connectionID
+// FOR UPDATE for a ready or heartbeat, whose grant is capped by the
+// connection's credential, and returns that credential. The connection is
+// read without a lock first; when its credential is not the principal's,
+// which authorize locked, that credential is locked FOR SHARE before the
+// connection. A credential_id changed in between fails the request
+// (errCredentialMoved): only an activation changes it, and the credential
+// limit leaves no room for a renewal beside a principal that is not the
+// connection's credential.
+func lockGrantedConnection(ctx context.Context, tx *dbconnect.Tx, id clientIdentity, granted authority, connectionID string) (instance.Connection, instance.Credential, error) {
+	credential := granted.credential
+	unlocked, err := instance.ReadConnection(ctx, tx, id.workspace, connectionID)
+	if err != nil && !errors.Is(err, instance.ErrNotFound) {
+		return instance.Connection{}, instance.Credential{}, err
 	}
+	if err == nil && unlocked.InstanceID == id.instanceID && unlocked.CredentialID != credential.ID {
+		if credential, err = instance.ShareCredential(ctx, tx, id.workspace, id.instanceID, unlocked.CredentialID); err != nil {
+			return instance.Connection{}, instance.Credential{}, err
+		}
+	}
+	connection, err := instance.LockLiveConnection(ctx, tx, id.workspace, id.instanceID, connectionID, granted.now, true)
+	if err != nil {
+		return instance.Connection{}, instance.Credential{}, err
+	}
+	if connection.CredentialID != credential.ID {
+		return instance.Connection{}, instance.Credential{}, errCredentialMoved
+	}
+	return connection, credential, nil
+}
+
+// grantFor returns the lease a grant at now gives under credential's expiry,
+// refusing 401 credential_expired when no positive grant remains.
+func grantFor(credential instance.Credential, now time.Time) (time.Time, int64, error) {
 	leaseExpiresAt, validForMS, ok := instance.Grant(now, credential.ExpiresAt)
 	if !ok {
 		return time.Time{}, 0, refuse(protocol.ErrorCredentialExpired, "no lease grant remains before the credential expires")

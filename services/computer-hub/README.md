@@ -154,13 +154,19 @@ request in this order, the first failing check answering (`client_checks.go`):
 
 A database failure answers `503` and changes nothing. Every transaction locks
 the instance, then credentials, then the connection, each at once in the mode
-its writes need (`internal/instance`): a protocol-error report locks the
-connection `FOR UPDATE`, so a copy in flight waits and gets the stored ACK, and
-a credential fetch locks the fetched credential before the connection. The ledger records the
-messages Engine accepts and the refused ready; a message refused by an earlier
-check records nothing. The connection row holds the ready's record and the
-latest heartbeat's; other messages are rows of `connection_upstream_messages`,
-deleted when the connection ends.
+its writes need (`internal/instance`):
+
+- a protocol-error report locks the connection `FOR UPDATE`, so a copy in
+  flight waits and gets the stored ACK;
+- a credential fetch locks the fetched credential before the connection;
+- a ready or heartbeat reads the connection without a lock first and, when
+  the connection's credential, which caps the grant, is not the principal's,
+  locks it `FOR SHARE` after the principal's and before the connection.
+
+The ledger records the messages Engine accepts and the refused ready; a
+message refused by an earlier check records nothing. The connection row holds
+the ready's record and the latest heartbeat's; other messages are rows of
+`connection_upstream_messages`, deleted when the connection ends.
 
 - `GET /v1/client/events` locks the instance's connection that has not ended
   `FOR UPDATE` and applies the predecessor rules in one transaction. With no
