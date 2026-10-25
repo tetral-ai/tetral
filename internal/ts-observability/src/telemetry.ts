@@ -8,7 +8,7 @@ import { defaultUndeclaredNamePolicy, UndeclaredNameError } from "./declarations
 import type { Declarations, UndeclaredNamePolicy } from "./declarations.js";
 import type { TetralDiagnosticLogger, TetralJsonLogger, TetralLogRecord } from "./index.js";
 import { processInstanceId } from "./instance.js";
-import { longOperationDurationBuckets, MetricRegistry, renderMetrics, requestDurationBuckets } from "./metric-registry.js";
+import { MetricRegistry, renderMetrics } from "./metric-registry.js";
 import type { Histogram, MetricSample } from "./metric-registry.js";
 import { startObservation } from "./observe.js";
 import type { Observation } from "./observe.js";
@@ -47,7 +47,7 @@ export class Telemetry {
   readonly service: string;
   readonly declarations: Declarations | undefined;
   readonly undeclared: UndeclaredNamePolicy;
-  readonly registry = new MetricRegistry();
+  readonly registry: MetricRegistry;
   readonly tracer: Tracer;
   readonly monotonicClock: () => number;
   readonly operations: Histogram;
@@ -63,6 +63,7 @@ export class Telemetry {
     this.service = options.serviceName;
     this.declarations = options.declarations;
     this.undeclared = options.undeclared ?? defaultUndeclaredNamePolicy();
+    this.registry = new MetricRegistry(options.declarations, this.undeclared);
     this.monotonicClock = options.monotonicClock ?? (() => performance.now());
     this.#logger = options.logger;
     const endpoint = options.diagnostics?.traceEndpoint;
@@ -77,11 +78,11 @@ export class Telemetry {
     });
     this.tracer = this.#tracing.tracer;
     const labels = ["service", "operation", "outcome"];
-    this.operations = this.registry.histogram("tetral_operation_duration_seconds", "Duration of a completed operation.", requestDurationBuckets, labels);
-    this.longOperations = this.registry.histogram("tetral_long_operation_duration_seconds", "Duration of a completed long operation.", longOperationDurationBuckets, labels);
-    this.coldStartPhases = this.registry.histogram("cold_start_phase_seconds", "Duration of one completed cold start phase.", longOperationDurationBuckets, ["service", "kind", "phase"]);
-    this.coldStarts = this.registry.histogram("cold_start_seconds", "Duration of a completed cold start, in total and Engine's part.", longOperationDurationBuckets, ["service", "kind", "scope"]);
-    this.grpcRequests = this.registry.histogram("grpc_server_request_duration_seconds", "Duration of one internal gRPC call.", requestDurationBuckets, ["service", "method", "code"]);
+    this.operations = this.registry.histogram("tetral_operation_duration_seconds", "Duration of a completed operation.", labels);
+    this.longOperations = this.registry.histogram("tetral_long_operation_duration_seconds", "Duration of a completed long operation.", labels);
+    this.coldStartPhases = this.registry.histogram("cold_start_phase_seconds", "Duration of one completed cold start phase.", ["service", "kind", "phase"]);
+    this.coldStarts = this.registry.histogram("cold_start_seconds", "Duration of a completed cold start, in total and Engine's part.", ["service", "kind", "scope"]);
+    this.grpcRequests = this.registry.histogram("grpc_server_request_duration_seconds", "Duration of one internal gRPC call.", ["service", "method", "code"]);
   }
 
   /** Starts operation, which the service's table must declare. */

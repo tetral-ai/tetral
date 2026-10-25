@@ -5,7 +5,7 @@
  * normalized to finite non-negative numbers, snapshots copy mutable maps, and metrics remain a
  * read-only observability side channel that does not affect command or lifecycle decisions.
  */
-import { longOperationDurationBuckets, MetricRegistry, OperationMetricsRegistry, operationMetricsText, renderMetrics } from "@tetral/ts-observability";
+import { MetricRegistry, OperationMetricsRegistry, operationMetricsText, renderMetrics } from "@tetral/ts-observability";
 import type { ShutdownPhaseLogger } from "@tetral/ts-observability";
 import { Effect, Ref } from "effect";
 import { readFileSync } from "node:fs";
@@ -119,11 +119,11 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
  ], runtimePodDeclarations);
  observeShutdownPhase(phase: RuntimeShutdownPhase, durationMs: number, outcome: "success" | "error" | "timeout", logger?: ShutdownPhaseLogger): void { this.operations.observeShutdown(phase,outcome,durationMs/1000,logger); }
 	readonly #monotonicMs: () => number;
-	readonly #tools = new MetricRegistry();
+	readonly #tools = new MetricRegistry(runtimePodDeclarations);
 	readonly #toolsInProgress = this.#tools.gauge("runtimepod_tools_in_progress", "Tool calls holding one of their Session's permits.");
 	readonly #toolsQueued = this.#tools.gauge("runtimepod_tools_queued", "Tool calls waiting for one of their Session's permits.");
 	readonly #toolsOldestQueued = this.#tools.gauge("runtimepod_tools_oldest_queued_seconds", "Age of the longest waiting tool call, 0 when none waits.");
-	readonly #toolsQueueWait = this.#tools.histogram("runtimepod_tools_queue_wait_seconds", "Tool call wait from queued to holding a permit.", longOperationDurationBuckets);
+	readonly #toolsQueueWait = this.#tools.histogram("runtimepod_tools_queue_wait_seconds", "Tool call wait from queued to holding a permit.");
 	/** Each tool call between queued and ended: its queue time while it waits, then "running". */
 	readonly #toolPermits = Ref.makeUnsafe<ReadonlyMap<symbol, number | "running">>(new Map());
 

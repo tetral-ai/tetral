@@ -79,8 +79,17 @@ export function parseDeclarations(value: unknown): Declarations {
     const metric = object(raw, `metric ${name}`, ["type", "audience", "labels", "buckets"]);
     if (!metricTypes.has(metric.type as string)) throw new Error(`metric ${name} has an invalid type`);
     if (!audiences.has(metric.audience as string)) throw new Error(`metric ${name} has an invalid audience`);
-    object(metric.labels, `metric ${name} labels`);
+    for (const [label, values] of Object.entries(object(metric.labels, `metric ${name} labels`))) {
+      if (typeof values !== "string" && (!Array.isArray(values) || values.length === 0 || values.some((value) => typeof value !== "string"))) {
+        throw new Error(`metric ${name} label ${label}: labels list values or name a domain`);
+      }
+    }
     if ((metric.type === "histogram") !== (metric.buckets !== undefined)) throw new Error(`metric ${name}: only a histogram declares buckets`);
+    const buckets = metric.buckets;
+    if (buckets !== undefined && buckets !== "request" && buckets !== "long" && (!Array.isArray(buckets) || buckets.length === 0
+      || buckets.some((bound, i) => typeof bound !== "number" || (i > 0 && bound < (buckets[i - 1] as number))))) {
+      throw new Error(`metric ${name}: buckets are request, long or an ascending list`);
+    }
   }
   for (const [name, raw] of Object.entries(object(table.spans, "spans"))) {
     const span = object(raw, `span ${name}`, ["attributes"]);
@@ -125,6 +134,11 @@ export function lookupOperation(table: Declarations | undefined, operation: stri
   return table !== undefined && Object.hasOwn(table.operations, operation) ? table.operations[operation] : undefined;
 }
 
+export function lookupMetric(table: Declarations | undefined, name: string): MetricDeclaration | undefined {
+  if (Object.hasOwn(libraryDeclarations.metrics, name)) return libraryDeclarations.metrics[name];
+  return table !== undefined && Object.hasOwn(table.metrics, name) ? table.metrics[name] : undefined;
+}
+
 /** How a recorder treats a name its table does not declare. */
 export type UndeclaredNamePolicy = "throw" | "record";
 
@@ -135,7 +149,7 @@ export function defaultUndeclaredNamePolicy(): UndeclaredNamePolicy {
 
 /** Thrown for a name missing from its table; the logger lets it escape its own containment. */
 export class UndeclaredNameError extends Error {
-  constructor(kind: "event" | "operation", name: string) {
+  constructor(kind: "event" | "operation" | "metric family", name: string) {
     super(`undeclared ${kind} ${JSON.stringify(name)}; declare it in the service's observability.json`);
     this.name = "UndeclaredNameError";
   }

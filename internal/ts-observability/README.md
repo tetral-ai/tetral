@@ -126,6 +126,14 @@ failures cannot hide it from the test run; otherwise the record becomes
 `diagnostic.invalid_event` with `event.original`, and the operation records as
 `unknown_operation`. The `undeclared` option selects either policy explicitly.
 
+`MetricRegistry`, built with a table and a policy, creates a metric family only
+from its declaration, as the Go `Registry` does: the type, label names and
+buckets come from the table, the code gives the name, help text and label
+order, and a sample whose label value is outside a declared values list is
+dropped. An undeclared name, or one declared with another type or other
+labels, throws under `throw` and under `record` gives a handle that records
+nothing.
+
 ## Telemetry
 
 `createTelemetry` builds one process's recording owner: its logger, table,
@@ -151,8 +159,9 @@ none. A failed span carries `error.class` and `error.code` only.
 A duration histogram uses the request buckets `0.005, 0.01, 0.025, 0.05, 0.1,
 0.25, 0.5, 1, 2.5, 5, 10` or the long-operation buckets `0.1, 0.5, 1, 2.5, 5,
 10, 30, 60, 120, 300, 600, 1800` (`requestDurationBuckets`,
-`longOperationDurationBuckets`). `MetricRegistry` holds a family's one shape per
-process; registering a name with another shape throws.
+`longOperationDurationBuckets`), which a table names `request` and `long`. A
+`MetricRegistry` family has one label order per process; registering its name
+with another order throws.
 
 ### Pressure points and cold starts
 

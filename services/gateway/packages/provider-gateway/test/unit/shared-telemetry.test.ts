@@ -19,6 +19,7 @@ import {
   Rejection,
   renderMetrics,
   traceparentClientInterceptor,
+  UndeclaredNameError,
 } from "@tetral/ts-observability";
 import type { TelemetryOptions } from "@tetral/ts-observability";
 import handledFailureRecord from "@tetral/ts-observability/test-support/handled-failure-record.json";
@@ -31,7 +32,10 @@ const declarations = parseDeclarations({
     "lookup.failed": { level: "ERROR", log_type: "app", audience: "operators", fields: {}, errors: { not_found: { class: "lookup", message_safe: "item not found" } } },
   },
   operations: { lookup: { long: false, errors: ["not_found"] }, transfer: { long: true } },
-  metrics: {},
+  metrics: {
+    provider_admission_rejected_total: { type: "counter", audience: "operators", labels: { cause: ["capacity"] } },
+    lookup_wait_seconds: { type: "histogram", audience: "operators", labels: { kind: ["lease"], service: "service names" }, buckets: [1, 2] },
+  },
   spans: {},
 });
 
@@ -276,11 +280,34 @@ describe("shared telemetry", () => {
     } finally { recording.restore(); }
   });
 
+  test("the registry creates only declared families, with the declared type, labels and buckets", () => {
+    const registry = new MetricRegistry(declarations);
+    expect(() => registry.counter("lookup_undeclared_total", "Undeclared.", ["cause"])).toThrow(UndeclaredNameError);
+    expect(() => registry.gauge("provider_admission_rejected_total", "Wrong type.", ["cause"])).toThrow();
+    expect(() => registry.counter("provider_admission_rejected_total", "Wrong label.", ["reason"])).toThrow();
+    expect(() => registry.histogram("lookup_wait_seconds", "Missing label.", ["kind"])).toThrow();
+    const production = new MetricRegistry(declarations, "record");
+    production.counter("lookup_undeclared_total", "Undeclared.", ["cause"]).add(1, "capacity");
+    const wait = production.histogram("lookup_wait_seconds", "Declared.", ["service", "kind"]);
+    wait.observe(1.5, "provider-gateway", "lease");
+    wait.observe(1.5, "provider-gateway", "renew");
+    expect(renderMetrics(production.collect())).toBe([
+      "# HELP lookup_wait_seconds Declared.",
+      "# TYPE lookup_wait_seconds histogram",
+      'lookup_wait_seconds_bucket{service="provider-gateway",kind="lease",le="1"} 0',
+      'lookup_wait_seconds_bucket{service="provider-gateway",kind="lease",le="2"} 1',
+      'lookup_wait_seconds_bucket{service="provider-gateway",kind="lease",le="+Inf"} 1',
+      'lookup_wait_seconds_count{service="provider-gateway",kind="lease"} 1',
+      'lookup_wait_seconds_sum{service="provider-gateway",kind="lease"} 1.5',
+      "",
+    ].join("\n"));
+  });
+
   test("a pressure point counts every refusal and records one episode per run of refusals 60 s apart at most", () => {
     let now = 0;
     const recording = recordingTelemetry({ serviceName: "provider-gateway", monotonicClock: () => now });
     try {
-      const registry = new MetricRegistry();
+      const registry = new MetricRegistry(declarations);
       const point = new PressurePoint(registry, "provider_admission", ["capacity"], { telemetry: recording.telemetry });
       expect(point.reject("capacity")).toBeInstanceOf(Rejection);
       now = 30_000; point.reject("capacity");

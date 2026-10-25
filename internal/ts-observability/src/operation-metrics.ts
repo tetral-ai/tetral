@@ -1,6 +1,6 @@
 import { lookupOperation } from "./declarations.js";
 import type { Declarations } from "./declarations.js";
-import { longOperationDurationBuckets, MetricRegistry, renderMetrics, requestDurationBuckets } from "./metric-registry.js";
+import { MetricRegistry, renderMetrics } from "./metric-registry.js";
 import type { Histogram, MetricSample } from "./metric-registry.js";
 
 /** Minimal scalar record emitted at the completed owning shutdown boundary. */
@@ -31,7 +31,7 @@ export type OperationOutcome = "ok" | "success" | "error" | "cancelled" | "rejec
  * `unknown_method`.
  */
 export class OperationMetricsRegistry {
-  readonly #registry = new MetricRegistry();
+  readonly #registry: MetricRegistry;
   readonly #request: Histogram;
   readonly #long: Histogram;
   readonly #operations: ReadonlySet<string>;
@@ -41,8 +41,9 @@ export class OperationMetricsRegistry {
   constructor(readonly service: OperationService, operations: readonly string[], declarations?: Declarations) {
     this.#operations = new Set(operations);
     this.#declarations = declarations;
-    this.#request = this.#registry.histogram("tetral_operation_duration_seconds", "Duration of a completed operation.", requestDurationBuckets, ["service", "operation", "outcome"]);
-    this.#long = this.#registry.histogram("tetral_long_operation_duration_seconds", "Duration of a completed long operation.", longOperationDurationBuckets, ["service", "operation", "outcome"]);
+    this.#registry = new MetricRegistry(declarations);
+    this.#request = this.#registry.histogram("tetral_operation_duration_seconds", "Duration of a completed operation.", ["service", "operation", "outcome"]);
+    this.#long = this.#registry.histogram("tetral_long_operation_duration_seconds", "Duration of a completed long operation.", ["service", "operation", "outcome"]);
   }
 
   observe(operation: string, outcome: OperationOutcome, durationSeconds: number): void {

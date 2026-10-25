@@ -1,3 +1,6 @@
+import { defaultUndeclaredNamePolicy, lookupMetric, UndeclaredNameError } from "./declarations.js";
+import type { Declarations, UndeclaredNamePolicy } from "./declarations.js";
+
 /** The only two bucket sets a duration histogram may use, in seconds. */
 export const requestDurationBuckets: readonly number[] = Object.freeze([0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]);
 export const longOperationDurationBuckets: readonly number[] = Object.freeze([0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800]);
@@ -17,27 +20,38 @@ interface Family {
   readonly help: string;
   readonly type: "counter" | "gauge" | "histogram";
   readonly labels: readonly string[];
+  /** Each label's declared values; undefined admits any value of a closed domain fixed in code. */
+  readonly allowed: readonly (ReadonlySet<string> | undefined)[];
   readonly buckets: readonly number[];
   readonly series: Map<string, Series>;
 }
 interface Series { readonly labels: readonly string[]; value: number; count: number; sum: number; readonly buckets: number[] }
 
 /**
- * Metric families whose label values come from sets fixed in code.
- * Registering a name twice returns the first family when its shape is the
- * same and throws otherwise: one name has one meaning per process.
+ * One service's metric families, each created from its declaration as the
+ * README's Declarations section describes. Registering a name twice returns
+ * the first family when its label order is the same and throws otherwise: one
+ * name has one meaning per process.
  */
 export class MetricRegistry {
   readonly #families = new Map<string, Family>();
+  readonly #declarations: Declarations | undefined;
+  readonly #undeclared: UndeclaredNamePolicy;
+
+  constructor(declarations?: Declarations, undeclared: UndeclaredNamePolicy = defaultUndeclaredNamePolicy()) {
+    this.#declarations = declarations;
+    this.#undeclared = undeclared;
+  }
 
   counter(name: string, help: string, labels: readonly string[] = []): Counter {
-    return new Counter(this.#register(name, help, "counter", [], labels));
+    return new Counter(this.#register(name, help, "counter", labels));
   }
   gauge(name: string, help: string, labels: readonly string[] = []): Gauge {
-    return new Gauge(this.#register(name, help, "gauge", [], labels));
+    return new Gauge(this.#register(name, help, "gauge", labels));
   }
-  histogram(name: string, help: string, buckets: readonly number[], labels: readonly string[] = []): Histogram {
-    return new Histogram(this.#register(name, help, "histogram", buckets, labels));
+  /** The histogram's buckets are the declared set. */
+  histogram(name: string, help: string, labels: readonly string[] = []): Histogram {
+    return new Histogram(this.#register(name, help, "histogram", labels));
   }
 
   /** Every family in registration order, series sorted by their label values. */
@@ -59,22 +73,39 @@ export class MetricRegistry {
     return samples;
   }
 
-  #register(name: string, help: string, type: Family["type"], buckets: readonly number[], labels: readonly string[]): Family {
+  #register(name: string, help: string, type: Family["type"], labels: readonly string[]): Family | undefined {
+    const declared = lookupMetric(this.#declarations, name);
+    if (declared === undefined) {
+      if (this.#undeclared === "throw") throw new UndeclaredNameError("metric family", name);
+      return undefined;
+    }
+    const declaredLabels = Object.keys(declared.labels);
+    if (declared.type !== type || declaredLabels.length !== labels.length || labels.some((label) => !Object.hasOwn(declared.labels, label))) {
+      if (this.#undeclared === "throw") {
+        throw new Error(`metric family ${name} is declared as a ${declared.type} with labels ${declaredLabels.sort().join(",")}, not a ${type} with labels ${labels.join(",")}`);
+      }
+      return undefined;
+    }
     const existing = this.#families.get(name);
     if (existing !== undefined) {
-      if (existing.type !== type || existing.labels.join(",") !== labels.join(",") || existing.buckets.join(",") !== buckets.join(",")) {
-        throw new Error(`metric family ${name} registered with two shapes`);
-      }
+      if (existing.labels.join(",") !== labels.join(",")) throw new Error(`metric family ${name} registered with two label orders`);
       return existing;
     }
-    const family: Family = { name, help, type, labels: [...labels], buckets: [...buckets], series: new Map() };
+    const allowed = labels.map((label) => {
+      const values = declared.labels[label]!;
+      return typeof values === "string" ? undefined : new Set(values);
+    });
+    const buckets = type !== "histogram" ? [] : declared.buckets === "request" ? requestDurationBuckets : declared.buckets === "long" ? longOperationDurationBuckets : declared.buckets!;
+    const family: Family = { name, help, type, labels: [...labels], allowed, buckets: [...buckets], series: new Map() };
     this.#families.set(name, family);
     return family;
   }
 }
 
-function seriesFor(family: Family, values: readonly string[]): Series {
+/** Returns undefined for a label value its family refuses. */
+function seriesFor(family: Family, values: readonly string[]): Series | undefined {
   if (values.length !== family.labels.length) throw new Error(`metric family ${family.name} observed with the wrong label count`);
+  if (values.some((value, i) => family.allowed[i]?.has(value) === false)) return undefined;
   const key = values.join("\0");
   let series = family.series.get(key);
   if (series === undefined) {
@@ -84,29 +115,33 @@ function seriesFor(family: Family, values: readonly string[]): Series {
   return series;
 }
 
+/** Counter, Gauge and Histogram are handles to one family; a handle without one records nothing. */
 export class Counter {
-  readonly #family: Family;
-  constructor(family: Family) { this.#family = family; }
+  readonly #family: Family | undefined;
+  constructor(family: Family | undefined) { this.#family = family; }
   add(delta: number, ...labels: string[]): void {
-    if (!(delta >= 0)) return;
-    seriesFor(this.#family, labels).value += delta;
+    if (this.#family === undefined || !(delta >= 0)) return;
+    const series = seriesFor(this.#family, labels);
+    if (series !== undefined) series.value += delta;
   }
 }
 export class Gauge {
-  readonly #family: Family;
-  constructor(family: Family) { this.#family = family; }
+  readonly #family: Family | undefined;
+  constructor(family: Family | undefined) { this.#family = family; }
   set(value: number, ...labels: string[]): void {
-    if (!Number.isFinite(value)) return;
-    seriesFor(this.#family, labels).value = value;
+    if (this.#family === undefined || !Number.isFinite(value)) return;
+    const series = seriesFor(this.#family, labels);
+    if (series !== undefined) series.value = value;
   }
 }
 export class Histogram {
-  readonly #family: Family;
-  constructor(family: Family) { this.#family = family; }
+  readonly #family: Family | undefined;
+  constructor(family: Family | undefined) { this.#family = family; }
   /** Exact bounds are inclusive; a negative or non-finite sample is dropped rather than shown as zero. */
   observe(value: number, ...labels: string[]): void {
-    if (!Number.isFinite(value) || value < 0) return;
+    if (this.#family === undefined || !Number.isFinite(value) || value < 0) return;
     const series = seriesFor(this.#family, labels);
+    if (series === undefined) return;
     series.count++;
     series.sum += value;
     this.#family.buckets.forEach((bound, i) => { if (value <= bound) series.buckets[i]!++; });

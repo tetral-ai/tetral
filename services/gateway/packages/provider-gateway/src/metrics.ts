@@ -1,4 +1,4 @@
-import { longOperationDurationBuckets, MetricRegistry, OperationMetricsRegistry, operationMetricsText, PressurePoint, renderMetrics } from "@tetral/ts-observability";
+import { MetricRegistry, OperationMetricsRegistry, operationMetricsText, PressurePoint, renderMetrics } from "@tetral/ts-observability";
 import type { Counter, Gauge, Histogram, OperationOutcome } from "@tetral/ts-observability";
 import type { ProviderAssemblyResources } from "./providers/block-assembler.js";
 import { providerGatewayDeclarations } from "./logger.js";
@@ -16,21 +16,18 @@ import { providerGatewayDeclarations } from "./logger.js";
  * output, and the registry retains no request, provider, or credential content.
  */
 
-/** Tokens per second; a rate is a speed, so neither duration bucket set applies. */
-const outputTokenRateBuckets: readonly number[] = Object.freeze([1, 5, 10, 20, 40, 80, 160, 320]);
-
 /** Aggregates process-local admitted-turn observations for operations exposition. */
 export class ProviderGatewayMetricsRegistry {
   readonly operations = new OperationMetricsRegistry("provider-gateway", ["StreamProviderRequest", "provider_first_fragment", "provider_first_complete", "complete_frame_write", "shutdown_drain", "shutdown_cancel_join"], providerGatewayDeclarations);
   /** The Gateway's own families; label values are catalogue ids and fixed sets. */
-  readonly registry = new MetricRegistry();
+  readonly registry = new MetricRegistry(providerGatewayDeclarations);
   readonly #turnsInProgress: Gauge = this.registry.gauge("providergateway_turns_in_progress", "Provider turns admitted and not yet finished.");
   readonly #turnsLimit: Gauge = this.registry.gauge("providergateway_turns_limit", "Configured concurrent provider turn limit.");
   /** Refusals count in providergateway_turns_rejected_total and record their episodes. */
   readonly #turns = new PressurePoint(this.registry, "providergateway_turns", ["capacity"]);
-  readonly #timeToFirstToken: Histogram = this.registry.histogram("providergateway_time_to_first_token_seconds", "Provider dispatch to the stream's first content fragment.", longOperationDurationBuckets, ["provider", "model", "first_kind"]);
-  readonly #outputTokensPerSecond: Histogram = this.registry.histogram("providergateway_output_tokens_per_second", "Provider-reported output tokens over the first to last content fragment.", outputTokenRateBuckets, ["provider", "model"]);
-  readonly #streamDuration: Histogram = this.registry.histogram("providergateway_stream_duration_seconds", "Provider dispatch to the end of its stream.", longOperationDurationBuckets, ["provider", "model", "outcome"]);
+  readonly #timeToFirstToken: Histogram = this.registry.histogram("providergateway_time_to_first_token_seconds", "Provider dispatch to the stream's first content fragment.", ["provider", "model", "first_kind"]);
+  readonly #outputTokensPerSecond: Histogram = this.registry.histogram("providergateway_output_tokens_per_second", "Provider-reported output tokens over the first to last content fragment.", ["provider", "model"]);
+  readonly #streamDuration: Histogram = this.registry.histogram("providergateway_stream_duration_seconds", "Provider dispatch to the end of its stream.", ["provider", "model", "outcome"]);
   readonly #tokens: Counter = this.registry.counter("providergateway_tokens_total", "Provider-reported tokens; cached is the part of input read from the provider's cache.", ["provider", "model", "type"]);
   readonly #providerRejected: Counter = this.registry.counter("providergateway_provider_rejected_total", "Provider attempts the provider refused, by cause.", ["provider", "cause"]);
 
