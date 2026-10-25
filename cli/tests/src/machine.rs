@@ -148,7 +148,9 @@ impl Machine {
 
     /// [`Machine::start`] with the App Server run by `program` with
     /// `arguments` before its own command line, such as `bwrap` with the
-    /// mounts of the App Server's view of the file system.
+    /// mounts of the App Server's view of the file system. The drop kills
+    /// only `program`, which must end the App Server when it is killed, as
+    /// `bwrap --die-with-parent` does.
     pub fn start_under(
         case: &mut Case,
         directory: &Path,

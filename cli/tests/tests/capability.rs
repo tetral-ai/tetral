@@ -55,7 +55,12 @@ fn the_ready_advertises_the_tools_whose_startup_checks_pass() {
     );
     let engine = one_credential_engine();
     let directory = tempfile::tempdir().unwrap();
-    let mut hiding = vec!["--dev-bind".into(), "/".into(), "/".into()];
+    let mut hiding = vec![
+        "--die-with-parent".into(),
+        "--dev-bind".into(),
+        "/".into(),
+        "/".into(),
+    ];
     for shells in shell_directories() {
         hiding.extend(["--tmpfs".into(), shells.into_os_string()]);
     }
