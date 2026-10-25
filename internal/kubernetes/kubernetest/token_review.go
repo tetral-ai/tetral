@@ -1,5 +1,6 @@
-// Package kubernetest provides Kubernetes wire adapters for composition tests.
-// It does not expose Kubernetes SDK types or install production authentication hooks.
+// Package kubernetest provides Kubernetes wire adapters and an empty cluster
+// for composition tests, so that their callers import no Kubernetes SDK
+// package. It installs no production authentication hooks.
 package kubernetest
 
 import (

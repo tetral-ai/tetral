@@ -29,6 +29,15 @@ var openDatabase = func(ctx context.Context, _ string, dsn string) (dbconnect.Op
 	return dbconnect.OpenProtectedDSN(ctx, dsn, os.Getenv("TETRAL_DATABASE_TLS_CA_PATH"), os.Getenv("TETRAL_DATABASE_TLS_SERVER_NAME"))
 }
 var verifySchema = func(ctx context.Context, client *dbconnect.Client) error { return client.VerifySchema(ctx) }
+var newKubernetesClient = func() (kubernetesClient, error) { return enginekubernetes.NewInClusterVisibilityClient() }
+var openBlobStore = blob.NewProtectedS3BlobStore
+
+// kubernetesClient is what Job Runner reads from its cluster: the watched
+// Runtime pods and endpoints, and a fresh read of one pod.
+type kubernetesClient interface {
+	enginekubernetes.VisibilityClient
+	GetPod(ctx context.Context, namespace, name string) (*enginekubernetes.PodObservation, error)
+}
 
 type osEnv struct{}
 
@@ -132,7 +141,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 		enginekubernetes.WithLogger(logger),
 		enginekubernetes.WithPodDeleted(repairSignal.Mark),
 	)
-	kubernetesClient, err := enginekubernetes.NewInClusterVisibilityClient()
+	kubernetesClient, err := newKubernetesClient()
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
@@ -154,7 +163,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 	if err := blobConfig.AssertProductionReady(); err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
-	blobStore, err := blob.NewProtectedS3BlobStore(ctx, blobConfig)
+	blobStore, err := openBlobStore(ctx, blobConfig)
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
