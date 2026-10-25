@@ -5,8 +5,10 @@
 //! it, 65,536 bytes for every type without a larger one. With a prepared
 //! Session running `exec_command` tasks: an instruction delivered again or
 //! its payload issued again, a `task_id` issued again with other content,
-//! tasks staged behind a withheld `prepared` ACK, and the replay ledger's
-//! entries of tasks, kept until a resume or freed by each ACK. The seam
+//! tasks staged behind a withheld `prepared` ACK, the replay ledger's
+//! entries of tasks, kept until a resume or freed by each ACK, and, with
+//! only the ledger's reserve free, new tasks refused while a running task's
+//! controls, its binding's close and its report are recorded. The seam
 //! counters these tests read are those `tetral_tests::machine` and
 //! `tetral_tests::tasks` name.
 
@@ -647,4 +649,81 @@ fn five_thousand_tasks_on_one_stream_each_issued_after_the_previous_terminal_ack
     );
     assert_eq!(tasks.engine.requests("events").len(), 1);
     case.observe("5,000 terminal reports with status success on the connection's one stream");
+}
+
+#[test]
+fn with_only_the_ledgers_reserve_free_new_tasks_are_refused_and_a_running_tasks_controls_and_report_answered()
+ {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "a running task, a binding whose prepared ACK is withheld, and closes until 64 entries are free: a staged and a new tool.execute, a read, a cancel and a close of the task's binding, then the ACK",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    let seams = &tasks.machine().seams;
+    let policy = project_policy(&tasks.project, "disabled");
+    let checked = seams.count(WAIT_CHECKED);
+    tasks.execute(
+        "task_running",
+        json!({"cmd": "while [ ! -e go ]; do sleep 0.05; done", "wait_ms": 250, "on_wait_expiry": "detach"}),
+        policy.clone(),
+    );
+    tasks.wait_for_start(checked);
+    seams.advance(millis(250));
+    tasks.report("task_running", "running");
+    prepare_pending(&tasks, "sess_pending", "bind_pending");
+    // The running task's instruction and the pending preparation hold two
+    // entries.
+    fill_ledger(&tasks, LEDGER_ROOM - 2);
+    let spawns = seams.count(SPAWN);
+
+    let staged = tasks.execute_with(
+        "sess_pending",
+        "bind_pending",
+        "task_staged",
+        json!({"cmd": "true"}),
+        policy.clone(),
+        None,
+    );
+    let refused = tasks.execute("task_refused", json!({"cmd": "true"}), policy.clone());
+    let exhausted = json!(["rejected", "resource_exhausted"]);
+    for message_id in [&staged, &refused] {
+        let report = answer_to(&tasks, message_id);
+        assert_eq!(json!([report["phase"], report["error"]["code"]]), exhausted);
+    }
+    let read = tasks.stdin("task_running", json!({"chars": "", "wait_ms": 0}));
+    assert_eq!(tasks.reply(&read)["result"]["status"], "running");
+    let cancel = tasks.cancel("task_running", json!({}));
+    assert_eq!(tasks.reply(&cancel)["result"]["result"]["cancelled"], true);
+    tasks.engine.control(
+        "close",
+        json!({"instance_id": INSTANCE, "payload": {"session_id": SESSION, "binding_id": BINDING}}),
+    );
+    let terminal = tasks.terminal("task_running");
+    assert_eq!(
+        json!([
+            terminal["result"]["result"]["cancelled"],
+            terminal["result"]["result"]["signal"]
+        ]),
+        json!([true, "terminated"])
+    );
+    release_answers(&tasks);
+    handled(&tasks, "sess_pending", "bind_pending");
+    // Once every report's ACK has freed its instruction's entry, the close
+    // shows itself recorded: a new task of its binding finds the binding
+    // closing.
+    let reports = ["tool-status", "session-status"]
+        .iter()
+        .map(|endpoint| tasks.engine.requests(endpoint).len() as u64)
+        .sum();
+    seams.wait_for_count("outbox.answered", reports);
+    let after_close = tasks.execute("task_after_close", json!({"cmd": "true"}), policy);
+    let report = answer_to(&tasks, &after_close);
+    assert_eq!(
+        json!([report["phase"], report["error"]["code"]]),
+        json!(["rejected", "binding_unavailable"])
+    );
+    assert_eq!(seams.count(SPAWN), spawns);
+    case.observe("the staged and the new tool.execute each resource_exhausted; the read replied running, the cancel cancelled, and the terminal report said cancelled, terminated; nothing launched after the ACK; once the ACKs were in, a new task of the closed binding was binding_unavailable");
 }
