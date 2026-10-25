@@ -50,8 +50,19 @@ impl From<CheckError> for StartError {
 }
 
 /// Creates a missing `run/`, takes the lock without waiting and removes the
-/// temporary files of interrupted replacements.
+/// temporary files of interrupted replacements. A root that does not exist
+/// holds no configuration and is not created, since a failed start leaves the
+/// root as it was.
 pub fn lock(root: &StateRoot) -> Result<RootLock, StartError> {
+    if let Err(error) = std::fs::symlink_metadata(root.path()) {
+        return Err(if error.kind() == std::io::ErrorKind::NotFound {
+            StartError::Configuration(ConfigurationError::Missing {
+                path: root.join(paths::CONFIG),
+            })
+        } else {
+            StartError::Io(IoFailure::new(root.path(), error))
+        });
+    }
     files::create_private_dirs(&root.join(paths::RUN))?;
     let lock = lock::acquire(root).map_err(|error| match error {
         LockError::Held => StartError::Running,

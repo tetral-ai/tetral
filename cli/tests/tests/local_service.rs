@@ -453,6 +453,14 @@ fn server_commands_write_their_results_and_each_failure_code() {
         server("run", &root),
         "invalid_configuration",
     );
+    fs::write(root.join("config.toml"), config).unwrap();
+    fails_and_changes_nothing(
+        &mut case,
+        directory.path(),
+        "tetral server run on a root that does not exist",
+        server("run", &directory.path().join("missing/root")),
+        "invalid_configuration",
+    );
 }
 
 /// A directory whose path is exactly `length` bytes, under `parent`.
