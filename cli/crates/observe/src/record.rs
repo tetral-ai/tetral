@@ -718,6 +718,9 @@ pub(crate) mod tests {
     use crate::metrics::Registry;
     use crate::sinks::Sink;
 
+    /// A flush limit no sink of a passing test reaches.
+    pub(crate) const FLUSH: std::time::Duration = std::time::Duration::from_secs(30);
+
     /// A writer that keeps every line it gets.
     #[derive(Clone, Default)]
     pub(crate) struct Written(Arc<Mutex<Vec<u8>>>);
@@ -781,7 +784,7 @@ pub(crate) mod tests {
         sinks.attach_file(Sink::spawn_file(Box::new(file.clone()), &registry));
         let subscriber = tracing_subscriber::registry().with(layer(sinks.clone()));
         tracing::subscriber::with_default(subscriber, work);
-        sinks.flush();
+        sinks.flush(FLUSH);
         (stderr, file)
     }
 

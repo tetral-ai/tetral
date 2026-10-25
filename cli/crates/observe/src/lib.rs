@@ -11,7 +11,8 @@ mod trace_context;
 
 use std::io;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tracing_subscriber::layer::SubscriberExt;
 
@@ -22,7 +23,9 @@ pub use catalogue::{
 pub use level::{InvalidLevel, LEVEL_VARIABLE, Level};
 pub use metrics::{Counter, Gauge, Histogram, Registry, registry, render};
 pub use record::{Code, Id, Identity, RecordEnum, RecordLayer, RecordValue, correlation_span};
-pub use sinks::{LOG_FILE_LIMIT_BYTES, LogFile, SINK_QUEUE_RECORDS, Sink, Sinks};
+pub use sinks::{
+    EXIT_FLUSH_LIMIT, LOG_FILE_LIMIT_BYTES, LogFile, SINK_QUEUE_RECORDS, Sink, Sinks, WriterSlot,
+};
 pub use stopwatch::{MonotonicClock, Ms, Startup, StartupPhases, Stopwatch};
 pub use trace_context::TraceContext;
 
@@ -38,6 +41,7 @@ pub static STARTUP: Startup = Startup::new();
 /// The installed recording of this process.
 pub struct Observer {
     sinks: Arc<Sinks>,
+    held_log_file: Mutex<Option<WriterSlot>>,
 }
 
 /// Installs the record layer for the whole process, writing to stderr at
@@ -49,26 +53,58 @@ pub fn install(level: Level) -> Observer {
     )));
     let subscriber = tracing_subscriber::registry().with(RecordLayer::new(level, sinks.clone()));
     let _ = tracing::subscriber::set_global_default(subscriber);
-    Observer { sinks }
+    Observer {
+        sinks,
+        held_log_file: Mutex::new(None),
+    }
 }
 
 impl Observer {
-    /// Opens the log file in `directory` and writes every later record to it
-    /// as well as to stderr. When it cannot be opened, every later record
-    /// counts in `tetral_log_write_failures_total{sink="file"}`.
+    /// Keeps every record from now on, up to the sink's queue, for the log
+    /// file that [`Observer::open_log_file`] opens later, so the records made
+    /// before it opens reach it too.
+    pub fn hold_records_for_log_file(&self) {
+        let (sink, slot) =
+            Sink::spawn_held(SINK_QUEUE_RECORDS, sinks::failures(registry(), "file"));
+        self.sinks.attach_file(sink);
+        *self.held() = Some(slot);
+    }
+
+    /// Opens the log file in `directory` and writes to it, after the records
+    /// held for it, every later record as well as stderr. When it cannot be
+    /// opened, each of those records counts in
+    /// `tetral_log_write_failures_total{sink="file"}`.
     pub fn open_log_file(&self, directory: &Path) -> io::Result<()> {
+        let slot = self.held().take().unwrap_or_else(|| {
+            let (sink, slot) =
+                Sink::spawn_held(SINK_QUEUE_RECORDS, sinks::failures(registry(), "file"));
+            self.sinks.attach_file(sink);
+            slot
+        });
         match LogFile::open(directory) {
             Ok(file) => {
-                self.sinks
-                    .attach_file(Sink::spawn_file(Box::new(file), registry()));
+                slot.fill(Some(Box::new(file)));
                 Ok(())
             }
             Err(error) => {
-                self.sinks
-                    .attach_unopened_file(sinks::failures(registry(), "file"));
+                slot.fill(None);
                 Err(error)
             }
         }
+    }
+
+    /// Waits, at most `limit`, until every record so far is written or
+    /// dropped; records still held for a log file that never opened are
+    /// discarded.
+    pub fn flush(&self, limit: Duration) {
+        drop(self.held().take());
+        self.sinks.flush(limit);
+    }
+
+    fn held(&self) -> std::sync::MutexGuard<'_, Option<WriterSlot>> {
+        self.held_log_file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 

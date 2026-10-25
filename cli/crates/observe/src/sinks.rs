@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use rustix::fs::{Mode, OFlags, RenameFlags};
 
@@ -15,6 +16,11 @@ use crate::metrics::{Counter, Registry};
 
 /// Records a sink holds that are queued or being written.
 pub const SINK_QUEUE_RECORDS: usize = 1024;
+
+/// How long a process's exit waits for its sinks to write what they hold. A
+/// writer that blocks, such as a stderr pipe that nobody reads, holds the exit
+/// no longer.
+pub const EXIT_FLUSH_LIMIT: Duration = Duration::from_secs(1);
 
 /// The size a record may not make `tetral.log` exceed.
 pub const LOG_FILE_LIMIT_BYTES: u64 = 10_485_760;
@@ -35,6 +41,18 @@ pub struct Sink {
     failures: Counter,
 }
 
+/// What a held sink writes to, given once: a writer, or `None` when there is
+/// none to be had, every record then counting as one it could not take.
+/// Dropping the slot unfilled discards the held records without counting
+/// them.
+pub struct WriterSlot(mpsc::Sender<Option<Box<dyn Write + Send>>>);
+
+impl WriterSlot {
+    pub fn fill(self, writer: Option<Box<dyn Write + Send>>) {
+        let _ = self.0.send(writer);
+    }
+}
+
 impl Sink {
     pub fn spawn_stderr(writer: Box<dyn Write + Send>, registry: &Registry) -> Sink {
         Sink::spawn(writer, SINK_QUEUE_RECORDS, failures(registry, "stderr"))
@@ -46,19 +64,33 @@ impl Sink {
 
     /// A sink holding at most `capacity` records, the one being written
     /// included.
-    pub fn spawn(mut writer: Box<dyn Write + Send>, capacity: usize, failures: Counter) -> Sink {
+    pub fn spawn(writer: Box<dyn Write + Send>, capacity: usize, failures: Counter) -> Sink {
+        let (sink, slot) = Sink::spawn_held(capacity, failures);
+        slot.fill(Some(writer));
+        sink
+    }
+
+    /// A sink that takes records, at most `capacity` of them, before its
+    /// writer is known, and writes them first once its slot is filled.
+    pub fn spawn_held(capacity: usize, failures: Counter) -> (Sink, WriterSlot) {
         let (sender, jobs) = mpsc::channel::<Job>();
+        let (slot, writer) = mpsc::channel();
         let pending = Arc::new(AtomicUsize::new(0));
         let (thread_pending, thread_failures) = (pending.clone(), failures.clone());
         thread::spawn(move || {
+            let mut writer: Result<Option<Box<dyn Write + Send>>, _> = writer.recv();
             for job in jobs {
                 match job {
                     Job::Line(line) => {
-                        if writer
-                            .write_all(&line)
-                            .and_then(|()| writer.flush())
-                            .is_err()
-                        {
+                        let failed = match &mut writer {
+                            Ok(Some(writer)) => writer
+                                .write_all(&line)
+                                .and_then(|()| writer.flush())
+                                .is_err(),
+                            Ok(None) => true,
+                            Err(_) => false,
+                        };
+                        if failed {
                             thread_failures.increment();
                         }
                         thread_pending.fetch_sub(1, Ordering::AcqRel);
@@ -69,12 +101,15 @@ impl Sink {
                 }
             }
         });
-        Sink {
-            sender,
-            pending,
-            capacity,
-            failures,
-        }
+        (
+            Sink {
+                sender,
+                pending,
+                capacity,
+                failures,
+            },
+            WriterSlot(slot),
+        )
     }
 
     pub fn send(&self, line: Arc<[u8]>) {
@@ -101,11 +136,12 @@ impl Sink {
         }
     }
 
-    /// Waits until every record sent before the call is written or dropped.
-    pub fn flush(&self) {
+    /// Waits until every record sent before the call is written or dropped,
+    /// or until `deadline`.
+    fn flush_until(&self, deadline: Instant) {
         let (done, written) = mpsc::channel();
         if self.sender.send(Job::Flush(done)).is_ok() {
-            let _ = written.recv();
+            let _ = written.recv_timeout(deadline.saturating_duration_since(Instant::now()));
         }
     }
 }
@@ -117,14 +153,7 @@ pub(crate) fn failures(registry: &Registry, sink: &str) -> Counter {
 /// Stderr from the start, and the log file once one is attached.
 pub struct Sinks {
     stderr: Sink,
-    file: OnceLock<FileSink>,
-}
-
-enum FileSink {
-    Open(Sink),
-    /// The log file could not be opened: each record it would have taken
-    /// counts as one it could not take.
-    Unopened(Counter),
+    file: OnceLock<Sink>,
 }
 
 impl Sinks {
@@ -135,15 +164,9 @@ impl Sinks {
         }
     }
 
-    /// Attaches the log file; a second file is ignored.
+    /// Attaches the log file's sink; a second one is ignored.
     pub fn attach_file(&self, file: Sink) {
-        let _ = self.file.set(FileSink::Open(file));
-    }
-
-    /// Stands in for a log file that could not be opened, counting in
-    /// `failures` every record written from then on.
-    pub fn attach_unopened_file(&self, failures: Counter) {
-        let _ = self.file.set(FileSink::Unopened(failures));
+        let _ = self.file.set(file);
     }
 
     pub fn write(&self, line: Vec<u8>) {
@@ -153,14 +176,7 @@ impl Sinks {
     /// Writes the record that `build` makes, building it only once a sink has
     /// taken a place for it.
     pub fn write_with(&self, build: impl FnOnce() -> Vec<u8>) {
-        let file = match self.file.get() {
-            Some(FileSink::Open(file)) => Some(file).filter(|file| file.reserve()),
-            Some(FileSink::Unopened(failures)) => {
-                failures.increment();
-                None
-            }
-            None => None,
-        };
+        let file = self.file.get().filter(|file| file.reserve());
         let stderr = self.stderr.reserve();
         if file.is_none() && !stderr {
             return;
@@ -174,10 +190,14 @@ impl Sinks {
         }
     }
 
-    pub fn flush(&self) {
-        self.stderr.flush();
-        if let Some(FileSink::Open(file)) = self.file.get() {
-            file.flush();
+    /// Waits until every record written before the call is written or
+    /// dropped, at most `limit` in all; a held log-file sink writes nothing
+    /// before its slot is filled or dropped.
+    pub fn flush(&self, limit: Duration) {
+        let deadline = Instant::now() + limit;
+        self.stderr.flush_until(deadline);
+        if let Some(file) = self.file.get() {
+            file.flush_until(deadline);
         }
     }
 }
@@ -274,11 +294,10 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Barrier;
-    use std::time::{Duration, Instant};
 
     use super::*;
     use crate::catalogue::catalogue;
-    use crate::record::tests::Written;
+    use crate::record::tests::{FLUSH, Written};
 
     fn mode(path: &Path) -> u32 {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
@@ -375,7 +394,7 @@ mod tests {
         for _ in 0..3 {
             sinks.write(record(60));
         }
-        sinks.flush();
+        sinks.flush(FLUSH);
         fs::set_permissions(&logs, fs::Permissions::from_mode(0o700)).unwrap();
 
         assert_eq!(stderr.text().len(), 180);
@@ -386,20 +405,44 @@ mod tests {
     }
 
     #[test]
-    fn a_log_file_that_could_not_be_opened_counts_every_later_record() {
+    fn a_held_file_sink_writes_its_records_first_or_counts_them_or_drops_them() {
         let registry = Registry::new(catalogue());
-        let stderr = Written::default();
-        let sinks = Sinks::new(Sink::spawn_stderr(Box::new(stderr.clone()), &registry));
-        sinks.attach_unopened_file(failures(&registry, "file"));
-
-        for _ in 0..3 {
-            sinks.write(record(60));
-        }
-        sinks.flush();
-
-        assert_eq!(stderr.text().len(), 180);
         let file_failures =
             registry.counter("tetral_log_write_failures_total", &[("sink", "file")]);
+        let stderr = Written::default();
+        let file = Written::default();
+        let sinks = Sinks::new(Sink::spawn_stderr(Box::new(stderr.clone()), &registry));
+        let (held, slot) = Sink::spawn_held(SINK_QUEUE_RECORDS, failures(&registry, "file"));
+        sinks.attach_file(held);
+        sinks.write(record(60));
+        sinks.write(record(60));
+        slot.fill(Some(Box::new(file.clone())));
+        sinks.write(record(60));
+        sinks.flush(FLUSH);
+        assert_eq!((file.text().len(), stderr.text().len()), (180, 180));
+        assert_eq!(file_failures.get(), 0);
+
+        // A log file that could not be opened counts every record it was to
+        // take, those held before included, while stderr goes on.
+        let sinks = Sinks::new(Sink::spawn_stderr(Box::new(stderr.clone()), &registry));
+        let (held, slot) = Sink::spawn_held(SINK_QUEUE_RECORDS, failures(&registry, "file"));
+        sinks.attach_file(held);
+        sinks.write(record(60));
+        slot.fill(None);
+        sinks.write(record(60));
+        sinks.write(record(60));
+        sinks.flush(FLUSH);
+        assert_eq!(stderr.text().len(), 360);
+        assert_eq!(file_failures.get(), 3);
+
+        // A start that fails before the log file opens drops its slot: the
+        // held records are discarded uncounted and a flush still returns.
+        let sinks = Sinks::new(Sink::spawn_stderr(Box::new(stderr.clone()), &registry));
+        let (held, slot) = Sink::spawn_held(SINK_QUEUE_RECORDS, failures(&registry, "file"));
+        sinks.attach_file(held);
+        sinks.write(record(60));
+        drop(slot);
+        sinks.flush(FLUSH);
         assert_eq!(file_failures.get(), 3);
     }
 
@@ -474,10 +517,16 @@ mod tests {
         );
         assert_eq!(full, (0, 0));
         assert_eq!(after, (1, 1));
+        let flushing = Instant::now();
+        sinks.flush(Duration::from_millis(100));
+        assert!(
+            flushing.elapsed() < Duration::from_secs(5),
+            "a flush waited past its limit for a held writer"
+        );
 
         stderr_held.wait();
         file_held.wait();
-        sinks.flush();
+        sinks.flush(FLUSH);
         assert_eq!((stderr_failures.get(), file_failures.get()), (1, 1));
     }
 }

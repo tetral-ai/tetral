@@ -41,8 +41,11 @@ registry, trace context and stopwatches.
 ## Entry points
 
 - `install(level)` makes the record layer the process's subscriber, writing to
-  stderr; `Observer::open_log_file` adds the log file, or, when it cannot be
-  opened, counts every later record as one the file could not take.
+  stderr. `Observer::hold_records_for_log_file` keeps every later record, up
+  to the sink's queue, for the log file that `Observer::open_log_file` opens
+  and writes them to it first; a log file that cannot be opened counts each of
+  them, and every later record, as one the file could not take.
+  `Observer::flush` waits for the sinks at exit, at most `EXIT_FLUSH_LIMIT`.
 - `info!("event.name", field = value, ...)`, and `debug!`, `warn!` and
   `error!`, record a declared event at its declared level.
 - `correlation_span` gives a span whose records carry the given identities and

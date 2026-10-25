@@ -155,22 +155,33 @@ pub fn run(arguments: Vec<OsString>) -> Result<Value, CommandError> {
             command: ServerCommand::Run { .. }
         }
     ) {
+        observer.hold_records_for_log_file();
         observe::STARTUP.config_started();
     }
+    let result = run_checked(cli.command, &root, &app, &observer);
+    observer.flush(observe::EXIT_FLUSH_LIMIT);
+    result
+}
 
-    private::check_root(&root).map_err(check_failed)?;
-    if let Some(recorded) = config::read(&root).map_err(config_failed)?
+fn run_checked(
+    command: Command,
+    root: &StateRoot,
+    app: &str,
+    observer: &observe::Observer,
+) -> Result<Value, CommandError> {
+    private::check_root(root).map_err(check_failed)?;
+    if let Some(recorded) = config::read(root).map_err(config_failed)?
         && recorded.app != app
     {
         return Err(app_mismatch());
     }
 
-    match cli.command {
-        Command::Configure { .. } => configure::run(&root, &app, io::stdin().lock()),
+    match command {
+        Command::Configure { .. } => configure::run(root, app, io::stdin().lock()),
         Command::Server { command } => match command {
-            ServerCommand::Run { .. } => server::run(&root, &observer),
-            ServerCommand::Status { .. } => server::status(&root),
-            ServerCommand::Stop { .. } => server::stop(&root),
+            ServerCommand::Run { .. } => server::run(root, observer),
+            ServerCommand::Status { .. } => server::status(root),
+            ServerCommand::Stop { .. } => server::stop(root),
         },
     }
 }

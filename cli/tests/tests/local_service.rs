@@ -3,8 +3,8 @@
 //! while Engine is unreachable, shutdown on request, signal and with a
 //! blocked handler, one owner per root, restart after SIGKILL, many clients
 //! at once, the socket's path, modes and hourly freshness, every result and
-//! failure code of the server commands, no key in status, a log file that
-//! cannot be opened, the removal of interrupted replacements at start, and the
+//! failure code of the server commands, no key in status, the log file's
+//! records and a log file that cannot be opened, the removal of interrupted replacements at start, and the
 //! seam protocol's barriers, clock and counters through the harness.
 
 use std::fs::{self, File};
@@ -633,9 +633,33 @@ fn an_unsafe_socket_directory_stops_server_run_and_stays_as_it_is() {
 }
 
 #[test]
-fn a_log_file_that_cannot_be_opened_is_recorded_and_the_app_server_runs_on() {
+fn the_log_file_takes_every_record_of_server_run_or_its_failure_is_recorded() {
     let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
+    let mut case = record.case("the log file holds the records made before it opened and at exit");
+    let directory = tempfile::tempdir().unwrap();
+    let root = configured_root(&mut case, directory.path());
+    let app_server = start(&mut case, &root);
+    let shutdown = request(&app_server.socket, "POST", "/v1/shutdown").unwrap();
+    assert_eq!(shutdown.status, 202);
+    let (run, _) = app_server.exited();
+    case.command("tetral server run --app app_one", &run.exit());
+    assert!(
+        records(&run).any(|record| record["event"] == "cold_start.phase_started"
+            && record["cold_start.phase"] == "config"),
+        "the config phase's start is recorded before the log file opens"
+    );
+    let file = fs::read(root.join("logs/tetral.log")).unwrap();
+    assert_eq!(
+        String::from_utf8(file).unwrap(),
+        String::from_utf8(run.stderr.clone()).unwrap(),
+        "tetral.log holds exactly the records of stderr"
+    );
+    case.observe(
+        "logs/tetral.log holds exactly the records of stderr, the config phase's start among them",
+    );
+    drop(case);
+
     let mut case = record.case("a file stands where the log directory belongs");
     let directory = tempfile::tempdir().unwrap();
     let root = configured_root(&mut case, directory.path());
