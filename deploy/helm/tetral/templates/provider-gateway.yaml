@@ -210,6 +210,7 @@ spec:
       ports:
         - protocol: TCP
           port: 9090
+{{- include "tetral.metricsScrapeIngress" (dict "root" . "port" 8080) }}
   egress:
     - to:
 {{- toYaml .Values.network.databasePeers | nindent 8 }}
@@ -242,6 +243,7 @@ spec:
         - protocol: TCP
           port: {{ . }}
 {{- end }}
+{{- include "tetral.otlpEgress" . }}
 {{- if .Values.cilium.enabled }}
 ---
 apiVersion: cilium.io/v2

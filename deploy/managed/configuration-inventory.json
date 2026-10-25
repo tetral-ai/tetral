@@ -128,10 +128,11 @@
       "units": "severity, bytes, milliseconds, records per event/reason/window, root sampling ratio, OTLP/gRPC endpoint URL",
       "unset_zero": "Empty/unset defaults; zero invalid except a 0 sampling ratio, which samples no new trace; an empty endpoint exports no trace.",
       "constraints": "Canonical integers; bytes 1024..65536, interval 100..3600000, burst 1..1000, slow query 1..60000. Sampling ratio a plain decimal 0..1. Fixed 64 Go queue/256 limiter states, TS 65536 buffer remain implementation bounds.",
-      "projection": "observability.logLevel/logMaxRecordBytes/logSummaryIntervalMs/logBurst; common helper projects every application container.",
+      "projection": "observability.logLevel/logMaxRecordBytes/logSummaryIntervalMs/logBurst/traceSampleRatio/slowQueryMs/otlpEndpoint; common helper projects every application container. otlpPeers/otlpPort and metricsScrapePeers open the workload NetworkPolicy paths; serviceMonitor.enabled renders one ServiceMonitor per metrics Service.",
       "proofs": [
         "internal/workload/diagnostics_test.go",
-        "deploy/helm/configuration_projection_test.go"
+        "deploy/helm/configuration_projection_test.go",
+        "deploy/helm/observability_test.go"
       ]
     },
     {

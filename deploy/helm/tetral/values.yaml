@@ -155,6 +155,19 @@ observability:
   logMaxRecordBytes: 16384
   logSummaryIntervalMs: 30000
   logBurst: 1
+  # Quoted so the default renders as written: Helm renders an unquoted 1.0 as 1.
+  traceSampleRatio: "1.0"
+  slowQueryMs: 250
+  # An OTLP/gRPC endpoint such as http://collector.observability:4317; empty
+  # exports no trace. When set, otlpPeers must name the collector Pods and
+  # otlpPort their port, which every workload NetworkPolicy then allows.
+  otlpEndpoint: ""
+  otlpPeers: []
+  otlpPort: 4317
+  # Peers admitted to every workload's metrics port; empty adds no rule.
+  metricsScrapePeers: []
+  serviceMonitor:
+    enabled: false
 
 queue:
   leaseReclaimIntervalSeconds: 30

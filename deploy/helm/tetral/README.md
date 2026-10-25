@@ -235,7 +235,10 @@ The chart parameterizes only axes already present in the canonical manifests:
     narrows the peer list here; adding a second, tighter policy cannot revoke
     what this one permits.
 - `observability.deploymentEnvironment` and
-  `observability.serviceVersion` drive every workload container.
+  `observability.serviceVersion` drive every workload container. The other
+  `observability` values are described in
+  [Operational configuration and diagnostics](#operational-configuration-and-diagnostics)
+  and [Observability exports](#observability-exports).
 - `resources.*` carries the thirteen workload-container request/limit blocks.
   The remaining `resources:` mappings in the canonical YAML are fixed RBAC
   resource-name lists, not container budgets, so the chart has no values for
@@ -243,9 +246,9 @@ The chart parameterizes only axes already present in the canonical manifests:
 - `cilium.enabled` controls the six API-server Cilium objects.
   `cilium.gitProxyFQDNPolicy` adds the opt-in git-proxy Cilium policy and
   replaces its ordinary DNS and external-HTTPS NetworkPolicy branches with
-  the FQDN restriction. `edge.enabled`, public TLS Secret references, and
-  `namespaces.create` control the other explicitly enumerated optional
-  objects.
+  the FQDN restriction. `edge.enabled`, public TLS Secret references,
+  `namespaces.create` and `observability.serviceMonitor.enabled` control the
+  other explicitly enumerated optional objects.
 
 By default, git-proxy uses `externalEgressPeers`:`externalEgressPorts` like
 the other outbound workloads. Its GitHub-only guarantee is enforced in the
@@ -596,10 +599,13 @@ a predecessor migration or reverse data rewrite.
 ## Operational configuration and diagnostics
 
 `observability` projects deployment environment, service version, log level,
-maximum record bytes, summary interval and burst into every application process.
-Defaults are Info, 16384 bytes, 30000 milliseconds and one record per failure
-window. Changes take effect on restart. `queue` exposes reclaim interval/batch and
-retry base/cap/attempts; `jobRunner` exposes lease duration, heartbeat and batch.
+maximum record bytes, summary interval, burst, trace sampling ratio, slow-query
+threshold and, when set, the trace endpoint into every application process.
+Log defaults are Info, 16384 bytes, 30000 milliseconds and one record per
+failure window; the trace and slow-query values are described in
+[Observability exports](#observability-exports). Changes take effect on
+restart. `queue` exposes reclaim interval/batch and retry base/cap/attempts;
+`jobRunner` exposes lease duration, heartbeat and batch.
 Retry cap must cover its base and heartbeat must be shorter than lease. The
 owning startup parsers also enforce transport and shutdown constraints and the
 Job Runner's 5000-300000 millisecond lease duration range.
@@ -619,3 +625,87 @@ the internal routing sidecars; proxy failures surface in application records,
 proxy statistics and vendor startup/control output. Kubernetes collection metadata
 is external custody information; it is not an application Session identity.
 Neither inventory prescribes a remote log backend or retention policy.
+
+## Observability exports
+
+Engine exports three signals and deploys no collector, Loki, Prometheus or
+trace backend; the operator runs those and points Engine at them.
+
+- **Records.** Every application process writes its records to stderr as
+  newline-delimited JSON, which Kubernetes keeps as the container's log.
+  [`deploy/observability/alloy.example.alloy`](../../observability/alloy.example.alloy)
+  is a Grafana Alloy configuration that reads the Pods' logs, parses the
+  records, sets only `cluster`, `namespace`, `service` and `env` as labels plus
+  `log_type` from the record's `log.type`, keeps `trace_id` as structured
+  metadata and pushes to the Loki URL the operator fills in.
+- **Metrics.** Every workload except Cleanup serves Prometheus text on
+  `/metrics` at its metrics port, listed below. Cleanup is a CronJob with no
+  listener; it keeps its push exporter, `TETRAL_CLEANUP_METRICS_EXPORT_URL`.
+- **Traces.** With `observability.otlpEndpoint` set, every process exports its
+  spans over OTLP/gRPC to that endpoint, sampled at the trace's root. Without an
+  endpoint no span leaves a Pod, and records still carry their trace ID.
+
+| Value | Default | Accepted values | Effect |
+|---|---|---|---|
+| `otlpEndpoint` | `""` | empty, or an OTLP/gRPC endpoint such as `http://otel-collector.observability:4317` | `OTEL_EXPORTER_OTLP_ENDPOINT` in every workload; empty exports no trace |
+| `otlpPeers` | `[]` | NetworkPolicy peers, each with a `namespaceSelector` or an `ipBlock`; required when `otlpEndpoint` is set | every workload NetworkPolicy allows egress to them on `otlpPort` |
+| `otlpPort` | `4317` | a TCP port, 1 to 65535 | the collector Pods' port as NetworkPolicy sees it after Service translation |
+| `traceSampleRatio` | `"1.0"` | a decimal from 0 to 1 | `TETRAL_TRACE_SAMPLE_RATIO`, the share of new traces sampled at their root; 0 samples none |
+| `slowQueryMs` | `250` | an integer from 1 to 60000 | `TETRAL_DB_SLOW_QUERY_MS`; a named database statement that takes longer records a `WARN` `db.query.slow` |
+| `metricsScrapePeers` | `[]` | NetworkPolicy peers, each with a `namespaceSelector` or an `ipBlock` | every workload NetworkPolicy admits them on its metrics port; empty adds no rule |
+| `serviceMonitor.enabled` | `false` | a boolean | one `monitoring.coreos.com/v1` ServiceMonitor per workload metrics Service |
+
+All values are under `observability`, and a value outside its accepted range
+fails the render. The default ratio is quoted because Helm renders an unquoted
+`1.0` as `1`, which is equally valid. The workload NetworkPolicies live in
+`tetral-system` and `tetral-agent-runtime`, so a peer needs a
+`namespaceSelector` or an `ipBlock`: a `podSelector` alone would match only
+Pods in each policy's own namespace. The endpoint's port and `otlpPort` usually
+agree; they differ when the collector Service maps its port to another Pod
+port.
+
+| Workload | Namespace | Metrics port | Service and port name |
+|---|---|---|---|
+| `agent-runtime` | `tetral-agent-runtime` | 8080 | `agent-runtime`, `http` |
+| `api` | `tetral-system` | 8081 | `api-metrics`, `metrics` |
+| `auth` | `tetral-system` | 8081 | `auth-metrics`, `metrics` |
+| `bridge` | `tetral-system` | 8080 | `bridge`, `http` |
+| `event-stream` | `tetral-system` | 8081 | `event-stream-metrics`, `metrics` |
+| `git-proxy` | `tetral-system` | 8081 | `git-proxy`, `metrics` |
+| `job-runner` | `tetral-system` | 8081 | `job-runner`, `metrics-job` |
+| `mcp-connector` | `tetral-system` | 8081 | `mcp-connector`, `mcp-http` |
+| `provider-gateway` | `tetral-system` | 8080 | `provider-gateway`, `http` |
+| `queue` | `tetral-system` | 8080 | `queue`, `http` |
+| `sandbox` | `tetral-system` | 8080 | `sandbox`, `http` |
+| `web-connector` | `tetral-system` | 9464 | `web-connector`, `web-metrics` |
+
+With `serviceMonitor.enabled`, install the Prometheus Operator CRDs first. Each
+ServiceMonitor lives in its workload's namespace with the labels
+`app.kubernetes.io/name` and `app.kubernetes.io/part-of: tetral`; the
+Prometheus resource's ServiceMonitor and namespace selectors must select them.
+`honorLabels: true` keeps the `service` label that Engine metrics carry;
+without it the Operator's own `service` target label, the Kubernetes Service
+name, would replace it.
+
+Without the Prometheus Operator, a plain Prometheus scrapes the same ports
+through Pod discovery. Its service account needs to list and watch Pods in both
+namespaces, and `metricsScrapePeers` must admit its Pods:
+
+```yaml
+scrape_configs:
+  - job_name: tetral
+    honor_labels: true
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [tetral-system, tetral-agent-runtime]
+    relabel_configs:
+      # Keep each workload's metrics port and no other container port.
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_container_port_number]
+        regex: (agent-runtime|bridge|provider-gateway|queue|sandbox);8080|(api|auth|event-stream|git-proxy|job-runner|mcp-connector);8081|web-connector;9464
+        action: keep
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+```

@@ -345,6 +345,7 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+{{- include "tetral.metricsScrapeIngress" (dict "root" . "port" 8080) }}
   egress:
     - to:
         - podSelector:
@@ -372,3 +373,4 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+{{- include "tetral.otlpEgress" . }}

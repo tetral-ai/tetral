@@ -1954,6 +1954,8 @@ spec:
             - bun
             - /app/dist/command.js
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -1962,6 +1964,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_RUNTIME_DRAIN_TIMEOUT_MS
               value: "60000"
             - name: TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS
@@ -2122,6 +2126,8 @@ spec:
           command:
             - /usr/local/bin/tetral-api
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -2130,6 +2136,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -2312,6 +2320,8 @@ spec:
           command:
             - /usr/local/bin/tetral-auth
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -2320,6 +2330,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -2486,6 +2498,8 @@ spec:
           command:
             - /usr/local/bin/bridge-api
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -2494,6 +2508,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -2680,6 +2696,8 @@ spec:
           command:
             - /usr/local/bin/event-stream
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -2688,6 +2706,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT
               value: "local"
             - name: TETRAL_SERVICE_VERSION
@@ -2879,6 +2899,8 @@ spec:
           command:
             - /usr/local/bin/git-proxy
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -2887,6 +2909,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -3017,6 +3041,8 @@ spec:
           command:
             - /usr/local/bin/job-runner
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -3025,6 +3051,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -3235,6 +3263,8 @@ spec:
             - bun
             - /app/dist/mcp-connector/src-command.js
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -3243,6 +3273,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -3403,6 +3435,8 @@ spec:
             - bun
             - /app/dist/provider-gateway/src-command.js
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -3411,6 +3445,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -3625,6 +3661,8 @@ spec:
           command:
             - /usr/local/bin/tetral-queue
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -3633,6 +3671,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -3774,6 +3814,8 @@ spec:
           command:
             - /usr/local/bin/tetral-sandbox
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -3782,6 +3824,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -4052,6 +4096,8 @@ spec:
           command:
             - /usr/local/bin/web-connector
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -4060,6 +4106,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_BLOB_TLS_CA_PATH
               value: /var/run/tetral/store-trust/object-store-ca.crt
             - name: TETRAL_BLOB_TLS_SERVER_NAME
@@ -4286,6 +4334,8 @@ spec:
               command:
                 - /usr/local/bin/tetral-cleanup
               env:
+                - name: TETRAL_DB_SLOW_QUERY_MS
+                  value: "250"
                 - name: TETRAL_LOG_BURST
                   value: "1"
                 - name: TETRAL_LOG_LEVEL
@@ -4294,6 +4344,8 @@ spec:
                   value: "16384"
                 - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
                   value: "30000"
+                - name: TETRAL_TRACE_SAMPLE_RATIO
+                  value: "1.0"
                 - name: TETRAL_DEPLOYMENT_ENVIRONMENT
                   value: "local"
                 - name: TETRAL_SERVICE_VERSION

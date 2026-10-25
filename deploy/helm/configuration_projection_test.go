@@ -156,13 +156,16 @@ func TestConfigurationOperationalProjectionUsesOwningParsers(t *testing.T) {
 				rwant := map[string]int64{"lease_ms": 30000, "heartbeat_ms": 10000, "jobs": 8}
 				dwant := workload.DefaultDiagnosticConfig()
 				if configured {
-					values = append(values, "queue.leaseReclaimIntervalSeconds=17", "queue.leaseReclaimLimit=23", "queue.retryBaseMs=700", "queue.retryCapMs=9000", "queue.retryMaxAttempts=4", "jobRunner.leaseDurationMs=24000", "jobRunner.heartbeatIntervalMs=6000", "jobRunner.maxJobs=3", "observability.logLevel=warn", "observability.logMaxRecordBytes=8192", "observability.logSummaryIntervalMs=7000", "observability.logBurst=3", "observability.deploymentEnvironment=projection-test", "observability.serviceVersion=projection-version", "lifecycle.providerDrainMs=200", "lifecycle.providerJoinMs=1000", "lifecycle.mcpDrainMs=250", "lifecycle.mcpJoinMs=1200")
+					values = append(values, "queue.leaseReclaimIntervalSeconds=17", "queue.leaseReclaimLimit=23", "queue.retryBaseMs=700", "queue.retryCapMs=9000", "queue.retryMaxAttempts=4", "jobRunner.leaseDurationMs=24000", "jobRunner.heartbeatIntervalMs=6000", "jobRunner.maxJobs=3", "observability.logLevel=warn", "observability.logMaxRecordBytes=8192", "observability.logSummaryIntervalMs=7000", "observability.logBurst=3", "observability.traceSampleRatio=0.25", "observability.slowQueryMs=900", "observability.otlpEndpoint=http://otel-collector.observability:4317", `observability.otlpPeers[0].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=observability`, "observability.deploymentEnvironment=projection-test", "observability.serviceVersion=projection-version", "lifecycle.providerDrainMs=200", "lifecycle.providerJoinMs=1000", "lifecycle.mcpDrainMs=250", "lifecycle.mcpJoinMs=1200")
 					qwant = map[string]int64{"reclaim_seconds": 17, "reclaim_limit": 23, "base_ms": 700, "cap_ms": 9000, "attempts": 4}
 					rwant = map[string]int64{"lease_ms": 24000, "heartbeat_ms": 6000, "jobs": 3}
 					dwant.Level = 4
 					dwant.MaxRecordBytes = 8192
 					dwant.SummaryInterval = 7 * time.Second
 					dwant.Burst = 3
+					dwant.TraceSampleRatio = 0.25
+					dwant.SlowQuery = 900 * time.Millisecond
+					dwant.TraceEndpoint = "http://otel-collector.observability:4317"
 				}
 				envs := configurationEnvironments(t, uniqueObjects(t, renderChart(t, helm, chart, values...)))
 				q, err := queueservice.ConfigFromEnv(envs["queue"])
@@ -292,7 +295,7 @@ func checkTypeScriptProjection(t *testing.T, envs map[string]projectionEnv, conf
 				MaxRecordBytes, SummaryIntervalMs, Burst int
 				TraceSampleRatio                         float64
 				TraceEndpoint                            string
-			}{"warn", 8192, 7000, 3, 1, ""}
+			}{"warn", 8192, 7000, 3, 0.25, "http://otel-collector.observability:4317"}
 			environment, version = "projection-test", "projection-version"
 		}
 		if err := requireProjection(result.Diagnostics, want); err != nil {

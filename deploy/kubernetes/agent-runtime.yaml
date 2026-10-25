@@ -50,6 +50,8 @@ spec:
             - bun
             - /app/dist/command.js
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -58,6 +60,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_RUNTIME_DRAIN_TIMEOUT_MS
               value: "60000"
             - name: TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS

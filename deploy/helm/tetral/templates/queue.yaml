@@ -222,6 +222,7 @@ spec:
       ports:
         - protocol: TCP
           port: 9090
+{{- include "tetral.metricsScrapeIngress" (dict "root" . "port" 8080) }}
   egress:
     - to:
 {{- toYaml .Values.network.databasePeers | nindent 8 }}
@@ -235,3 +236,4 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+{{- include "tetral.otlpEgress" . }}
