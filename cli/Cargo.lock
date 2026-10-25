@@ -368,6 +368,7 @@ dependencies = [
  "protocol",
  "rand",
  "reqwest",
+ "serde",
  "serde_json",
  "state",
  "thiserror",

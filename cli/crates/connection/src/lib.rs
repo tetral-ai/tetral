@@ -5,6 +5,7 @@ pub mod attempt;
 pub mod backoff;
 pub mod heartbeat;
 pub mod http;
+pub mod ledger;
 pub mod owner;
 pub mod ready;
 pub mod staging;

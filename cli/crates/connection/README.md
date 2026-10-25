@@ -36,6 +36,11 @@ Server:
   (`stream`).
 - The transport follows no redirect and never records a request's headers or
   body (`http`).
+- The replay ledger records a new operation only while its reserve stays
+  free after recording it; the rest may use the reserve; it never removes an
+  entry to make room, and an entry goes only once its instruction's final
+  report is acknowledged and no stream can deliver the instruction again
+  (`ledger`).
 
 ## State
 
@@ -65,6 +70,7 @@ instructions and the status fields `connection_state`, `connection_id`,
 | `src/ready.rs` | Ready with its startup phases, the sender check, and the grant of an ACK |
 | `src/heartbeat.rs` | Which heartbeat events start a send and which ACKs may set the deadline |
 | `src/staging.rs` | The staging queue and `STAGING_MAX` |
+| `src/ledger.rs` | The replay ledger, its limits and reserve, and when an entry goes |
 | `src/backoff.rs` | The backoff of reconnects and of each message's retries |
 | `src/http.rs` | `Transport`, the sorting of answers (`Answer`, `Failure`) and `REQUEST_TOTAL` |
 | `src/stream.rs` | The bounded reading of an event stream (`Events`) and `EVENT_MAX_BYTES` |
