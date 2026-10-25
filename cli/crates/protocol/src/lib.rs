@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+pub mod bootstrap;
 pub mod connection;
 pub mod drive_transfer;
 pub mod errors;

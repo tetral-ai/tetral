@@ -1,7 +1,8 @@
 # protocol
 
 The types that the other crates share belong here: the wire types of the
-protocol with Engine, the bodies of the local API, and, in `ports`, the
+protocol with Engine, the bootstrap that `tetral configure` installs, the
+bodies of the local API, and, in `ports`, the
 interfaces through which peer crates reach each other. The protocol's own
 description, schemas and fixtures are in `protocol/` at the repository root.
 
@@ -32,6 +33,11 @@ description, schemas and fixtures are in `protocol/` at the repository root.
   with `decode_answer` against the request it answers, and an error body
   together with its HTTP status and endpoint.
 - Messages are written as compact UTF-8 JSON by `encode`.
+- A connection key (`BootstrapKey`) prints as `<redacted>` in `Debug` and
+  `Display`; its plaintext leaves it only through `expose`, for the
+  `Authorization` header, and `Bootstrap::encode`, which writes
+  `credentials.json`; a decoding failure names the member and its rule, never
+  its value (`BootstrapError`).
 
 ## Where things are
 
@@ -57,6 +63,9 @@ description, schemas and fixtures are in `protocol/` at the repository root.
 - `errors.rs`: the client error table (`ErrorCode` with its status),
   `ErrorBody`, the endpoint table `DriveTransferEndpoint`, and the readers of
   an error body, `decode_client_error` and `decode_drive_transfer_error`.
+- `bootstrap.rs`: `Bootstrap`, the object that a launcher gives
+  `tetral configure` on stdin and that `credentials.json` holds, its member
+  rules (`ServerUrl` among them), `BootstrapKey` and `BootstrapError`.
 - `local.rs`: the bodies of the local API.
 - `ports.rs`: `ReportSink`, `SessionFactory`, `SessionHandle` and
   `ConnectionPort`.
