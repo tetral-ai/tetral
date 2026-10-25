@@ -118,14 +118,14 @@ or `dbg!` call in their sources.
 
 ## Reference control server
 
-`reference/` is for the reference control server: a Go stand-in for Engine's
-side of the client connection, which the CLI's cross-process tests run
-`tetral` against and which is never part of a release. It is Go in the
-repository's root Go module, not part of this workspace. `reference/wire/`
-holds the reference control server's own types for the protocol of
-`protocol/` at the repository root, written apart from the Rust types of
-`protocol` and tested against the same fixtures; neither set imports the
-other or any Engine package.
+`reference/` is the reference control server, Engine's side of the client
+connection for the CLI's tests, with fault-injection controls on a second
+listener; its README states its rules and controls. It is Go in the
+repository's root Go module, not part of this workspace, and
+`reference/cmd/tetral-reference` runs it. `reference/wire/` holds its own
+types for the protocol of `protocol/` at the repository root, written apart
+from the Rust types of `protocol` and tested against the same fixtures;
+neither set imports the other or any Engine package.
 
 ## Dependencies
 
