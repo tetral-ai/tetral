@@ -799,6 +799,64 @@ fn a_held_probe_blocks_neither_heartbeats_nor_the_shutdown() {
     seams.release(PROBE_STARTED);
 }
 
+#[test]
+fn get_sessions_lists_a_staged_preparation_and_the_error_of_a_failed_one() {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let project = directory_with_marker(base.join("project"));
+    let engine = one_credential_engine();
+
+    let mut case = record.case("a session.prepare staged before the ready ACK");
+    answer_fault(
+        &engine,
+        json!({ "endpoint": "ready", "count": 1, "action": "withhold" }),
+    );
+    let machine = Machine::start(
+        &mut case,
+        &base.join("machine"),
+        &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+    );
+    wait_for_received(&engine, "ready", 1);
+    let staged = prepare(&engine, &payload("sess_staged", "bind_1", &project));
+    wait_until("the staged preparation listed", || {
+        !sessions(&machine).is_empty()
+    });
+    assert_eq!(
+        sessions(&machine),
+        [json!({
+            "session_id": "sess_staged",
+            "binding_id": "bind_1",
+            "connection_id": FIRST_CONNECTION,
+            "cwd": null,
+            "state": "staged",
+            "error": null,
+        })]
+    );
+    case.observe(
+        "GET /v1/sessions listed the staged preparation as staged with cwd and error null",
+    );
+    answer_fault(&engine, json!({ "action": "release" }));
+    assert_eq!(outcome(&engine, &staged), prepared(&project));
+    drop(case);
+
+    let mut case = record.case("a preparation that failed");
+    let missing = prepare(
+        &engine,
+        &payload("sess_missing", "bind_1", &base.join("missing")),
+    );
+    assert_eq!(outcome(&engine, &missing), failed("cwd_not_found"));
+    let reported = reports_for(&engine, &missing)[0]["error"].clone();
+    assert!(reported["message"].is_string(), "{reported}");
+    let entry = entries(&machine, "sess_missing")[0].clone();
+    assert_eq!(
+        (&entry["state"], &entry["error"]),
+        (&json!("failed"), &reported)
+    );
+    case.observe("its entry is failed and carries the reported error's code and message");
+}
+
 /// Writes a `session.prepare` with `payload` on the instance's stream under
 /// `message_id`, issuing nothing.
 fn send_prepare(engine: &ReferenceServer, machine: &Machine, message_id: &str, payload: &Value) {
