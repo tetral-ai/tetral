@@ -577,16 +577,19 @@ fn a_waiting_preparation_spawns_only_once_a_probe_is_reaped_and_never_once_close
         })
         .collect();
     machine.seams.wait_until_waiting(PROBE_STARTED, 8);
-    prepare(&engine, &payload("sess_9", "bind_1", &project));
+    let ninth = prepare(&engine, &payload("sess_9", "bind_1", &project));
     quiesce(&machine, 9);
     assert_eq!(machine.seams.count(PROBE_SPAWN), 8);
     assert_eq!(state_of(&machine, "sess_9"), "preparing");
     machine.seams.release_one(PROBE_STARTED);
     machine.seams.wait_for_count(PROBE_SPAWN, 9);
     machine.seams.wait_until_waiting(PROBE_STARTED, 8);
+    // A pass of the barrier goes to any of the waiting probes, the ninth's
+    // included once it has spawned.
     let reaped = |count: usize| {
         wait_until(&format!("{count} reaped probes reported"), || {
             held.iter()
+                .chain([&ninth])
                 .filter(|message_id| !reports_for(&engine, message_id).is_empty())
                 .count()
                 == count
