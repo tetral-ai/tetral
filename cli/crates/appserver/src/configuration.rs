@@ -9,9 +9,9 @@ use std::path::PathBuf;
 
 use protocol::bootstrap::{Bootstrap, BootstrapError, ServerUrl};
 use protocol::id::Id;
-use state::atomic::IoFailure;
 use state::config::{self, Config, ConfigError};
 use state::credentials;
+use state::files::IoFailure;
 use state::paths::{self, StateRoot};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

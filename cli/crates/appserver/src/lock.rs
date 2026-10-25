@@ -5,7 +5,7 @@
 use std::fs::File;
 
 use rustix::fs::FlockOperation;
-use state::atomic::{self, IoFailure};
+use state::files::{self, IoFailure};
 use state::paths::{self, StateRoot};
 
 /// The held lock; dropping it releases the root.
@@ -26,7 +26,7 @@ pub enum LockError {
 /// takes it without waiting. `run/` must exist.
 pub fn acquire(root: &StateRoot) -> Result<RootLock, LockError> {
     let path = root.join(paths::LOCK);
-    let file = atomic::open_private(&path)?;
+    let file = files::open_private(&path)?;
     match rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive) {
         Ok(()) => Ok(RootLock { _file: file }),
         Err(rustix::io::Errno::WOULDBLOCK) => Err(LockError::Held),

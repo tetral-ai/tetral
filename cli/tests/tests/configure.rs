@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tetral_tests::control_socket;
 use tetral_tests::other_user;
 use tetral_tests::record::Case;
 use tetral_tests::run::{self, Run, Tetral};
 use tetral_tests::seams::Seams;
 use tetral_tests::snapshot::snapshot;
+use tetral_tests::socket_directory;
 
 const APP: &str = "app_one";
 
@@ -74,7 +74,7 @@ fn fails_and_changes_nothing(
 
 #[test]
 fn refused_arguments_input_and_root_paths_fail_and_change_nothing() {
-    let _socket_dir = control_socket::shared();
+    let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
 
     let mut case = record.case("arguments are refused with invalid_arguments");
@@ -289,7 +289,7 @@ fn refused_arguments_input_and_root_paths_fail_and_change_nothing() {
 
 #[test]
 fn an_unsafe_socket_directory_is_refused_and_changes_nothing() {
-    let mut socket_dir = control_socket::replaced();
+    let mut socket_dir = socket_directory::replaced();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
     let valid = bytes(&bootstrap("tetral_ck_second"));
@@ -412,7 +412,7 @@ fn version_needs_no_root_and_touches_nothing() {
 
 #[test]
 fn configure_installs_a_bootstrap_of_the_size_limit_with_private_modes() {
-    let _socket_dir = control_socket::shared();
+    let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
     let mut case =
         record.case("a bootstrap of exactly 65,536 bytes installs a new root with private modes");
@@ -460,7 +460,7 @@ fn configure_installs_a_bootstrap_of_the_size_limit_with_private_modes() {
 
 #[test]
 fn each_failure_code_of_configure_leaves_the_root_unchanged() {
-    let _socket_dir = control_socket::shared();
+    let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
     let valid = bytes(&bootstrap("tetral_ck_second"));
 
@@ -522,7 +522,7 @@ fn each_failure_code_of_configure_leaves_the_root_unchanged() {
 
 #[test]
 fn configure_installs_over_a_root_that_another_run_left() {
-    let _socket_dir = control_socket::shared();
+    let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
     let mut replacement = bootstrap("tetral_ck_second");
     replacement["server_url"] = json!("https://other.example.com");
@@ -621,7 +621,7 @@ fn configure_installs_over_a_root_that_another_run_left() {
 
 #[test]
 fn no_key_reaches_the_output_or_the_argument_list() {
-    let _socket_dir = control_socket::shared();
+    let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
     let mut case = record.case("a canary key reaches neither stdout, stderr nor the argument list");
     let directory = tempfile::tempdir().unwrap();

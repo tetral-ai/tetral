@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::atomic::{self, IoFailure};
+use crate::files::{self, IoFailure};
 use crate::paths::{self, StateRoot};
 
 /// The largest `config.toml` read; a larger one does not follow the format.
@@ -60,7 +60,7 @@ pub fn read(root: &StateRoot) -> Result<Option<Config>, ConfigError> {
 /// `read` with another size limit, for tests.
 pub fn read_with_limit(root: &StateRoot, max_bytes: usize) -> Result<Option<Config>, ConfigError> {
     let path = root.join(paths::CONFIG);
-    let Some(bytes) = atomic::read_bounded(&path, max_bytes)? else {
+    let Some(bytes) = files::read_bounded(&path, max_bytes)? else {
         return Ok(None);
     };
     parse(&path, &bytes, max_bytes).map(Some)
@@ -80,5 +80,5 @@ fn parse(path: &Path, bytes: &[u8], max_bytes: usize) -> Result<Config, ConfigEr
 /// Replaces the root's `config.toml` with `config`.
 pub fn replace(root: &StateRoot, config: &Config) -> Result<(), IoFailure> {
     let text = toml::to_string(config).expect("a configuration always serializes");
-    atomic::replace(&root.join(paths::CONFIG), text.as_bytes())
+    files::replace(&root.join(paths::CONFIG), text.as_bytes())
 }

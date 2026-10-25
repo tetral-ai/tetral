@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{Mode, OFlags};
 
-use crate::atomic::IoFailure;
+use crate::files::IoFailure;
 use crate::paths::{self, StateRoot};
 
 /// Why a control path is not private to the current user.

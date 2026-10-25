@@ -16,9 +16,9 @@ use std::io::Read;
 use appserver::lock::{self, LockError};
 use protocol::bootstrap::{BOOTSTRAP_MAX_BYTES, Bootstrap};
 use serde_json::{Value, json};
-use state::atomic;
 use state::config::{self, Config};
 use state::credentials;
+use state::files;
 use state::paths::{self, StateRoot};
 
 use crate::commands::{app_mismatch, config_failed, io_failed};
@@ -33,7 +33,7 @@ pub fn run(root: &StateRoot, app: &str, stdin: impl Read) -> Result<Value, Comma
     let bootstrap = Bootstrap::decode(&input)
         .map_err(|error| CommandError::new(Code::InvalidBootstrap, error.to_string()))?;
 
-    atomic::create_private_dirs(&root.join(paths::RUN)).map_err(io_failed)?;
+    files::create_private_dirs(&root.join(paths::RUN)).map_err(io_failed)?;
     let _lock = lock::acquire(root).map_err(|error| match error {
         LockError::Held => CommandError::new(
             Code::ServerRunning,
@@ -41,7 +41,7 @@ pub fn run(root: &StateRoot, app: &str, stdin: impl Read) -> Result<Value, Comma
         ),
         LockError::Io(failure) => io_failed(failure),
     })?;
-    atomic::remove_interrupted_replacements(root.path()).map_err(io_failed)?;
+    files::remove_interrupted_replacements(root.path()).map_err(io_failed)?;
     commit(root, app, &bootstrap, &mut |barrier| {
         state::seams::barrier_blocking(barrier);
         true
@@ -141,7 +141,7 @@ mod tests {
         ] {
             let directory = tempfile::tempdir().unwrap();
             let root = StateRoot::new(directory.path().join("root").as_os_str()).unwrap();
-            atomic::create_private_dirs(&root.join(paths::RUN)).unwrap();
+            files::create_private_dirs(&root.join(paths::RUN)).unwrap();
             let held = lock::acquire(&root).unwrap();
             commit(&root, "app", &old, &mut |_| true).unwrap();
             commit(&root, "app", &new, &mut |barrier| barrier != stop_at).unwrap();
@@ -202,7 +202,7 @@ mod tests {
         ] {
             let directory = tempfile::tempdir().unwrap();
             let root = StateRoot::new(directory.path().join("root").as_os_str()).unwrap();
-            atomic::create_private_dirs(&root.join(paths::RUN)).unwrap();
+            files::create_private_dirs(&root.join(paths::RUN)).unwrap();
             let held = lock::acquire(&root).unwrap();
             commit(&root, "app", &old, &mut |_| true).unwrap();
             commit(&root, "app", &new, &mut |barrier| {

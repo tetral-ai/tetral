@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::control_socket::socket_dir;
 use crate::run::{self, Run, Tetral};
 use crate::seams::WAIT_LIMIT;
+use crate::socket_directory::socket_dir;
 
 /// The root's socket as the local API's protocol derives it: `S/<h>.sock`,
 /// `<h>` the first 16 hexadecimal characters of the SHA-256 of the root's

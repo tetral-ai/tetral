@@ -37,7 +37,7 @@ temporary directories. No workspace crate depends on this package.
   user on the machine. A test that may meet `S` holds a shared lock on a file
   beside it for as long as it runs, and a test that replaces `S` for a case
   holds that lock exclusively and puts `S` back when the case ends
-  (`control_socket`). A case that needs `S` owned by another user makes it as
+  (`socket_directory`). A case that needs `S` owned by another user makes it as
   root with `sudo -n`; where that fails the case is recorded as not run, and
   under GitHub Actions the test fails instead. A state root owned by another
   user needs no privilege: such a case uses a directory that root already owns
@@ -56,7 +56,7 @@ temporary directories. No workspace crate depends on this package.
 - `src/record.rs`: `Record`, `Case` and the `record!` macro.
 - `src/snapshot.rs`: `snapshot`, every path under a directory with its kind,
   owner, mode and bytes.
-- `src/control_socket.rs`: the locks on `S` and its replacements for a case.
+- `src/socket_directory.rs`: the locks on `S` and its replacements for a case.
 - `src/other_user.rs`: a directory that another user owns.
 - `src/app_server.rs`: `AppServer`, a running `server run`, and `request`, one
   raw HTTP/1.1 request to the local API over a socket whose path it derives

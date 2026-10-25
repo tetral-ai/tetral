@@ -19,11 +19,11 @@ use rustix::fs::{AtFlags, CWD, FlockOperation, Timespec, Timestamps};
 use serde_json::{Value, json};
 use state::paths::StateRoot;
 use tetral_tests::app_server::{AppServer, request, socket_path};
-use tetral_tests::control_socket::{self, socket_dir};
 use tetral_tests::record::Case;
 use tetral_tests::run::{self, Run, Tetral};
 use tetral_tests::seams::Seams;
 use tetral_tests::snapshot::snapshot;
+use tetral_tests::socket_directory::{self, socket_dir};
 
 const APP: &str = "app_one";
 const KEY: &str = "tetral_ck_canary_status_4f1d";
@@ -116,7 +116,7 @@ fn lock_is_free(root: &Path) -> bool {
 
 #[test]
 fn status_answers_without_engine_and_shutdown_ends_the_process() {
-    let _socket_dir = control_socket::shared();
+    let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
 
     let mut case = record.case("status, wrong routes and shutdown through the SDK");
@@ -179,7 +179,7 @@ fn status_answers_without_engine_and_shutdown_ends_the_process() {
 
 #[test]
 fn one_app_server_owns_a_root_and_others_disturb_nothing() {
-    let _socket_dir = control_socket::shared();
+    let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
 
@@ -250,7 +250,7 @@ fn one_app_server_owns_a_root_and_others_disturb_nothing() {
 
 #[test]
 fn a_killed_app_server_leaves_a_socket_that_the_next_start_replaces() {
-    let _socket_dir = control_socket::shared();
+    let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
     let mut case = record.case("SIGKILL, then another server run");
     let directory = tempfile::tempdir().unwrap();
@@ -274,7 +274,7 @@ fn a_killed_app_server_leaves_a_socket_that_the_next_start_replaces() {
 
 #[test]
 fn sixteen_sdk_clients_at_once_all_succeed() {
-    let _socket_dir = control_socket::shared();
+    let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
     let mut case = record.case("16 SDK clients call status and sessions at once");
     let directory = tempfile::tempdir().unwrap();
@@ -313,7 +313,7 @@ fn sixteen_sdk_clients_at_once_all_succeed() {
 
 #[test]
 fn server_commands_write_their_results_and_each_failure_code() {
-    let _socket_dir = control_socket::shared();
+    let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
 
@@ -470,7 +470,7 @@ fn modified(path: &Path) -> SystemTime {
 
 #[test]
 fn the_socket_lies_in_a_private_directory_and_stays_fresh() {
-    let _socket_dir = control_socket::shared();
+    let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
 
     let mut case = record.case("a root under a 200-byte directory path");
@@ -532,7 +532,7 @@ fn the_socket_lies_in_a_private_directory_and_stays_fresh() {
 
 #[test]
 fn an_unsafe_socket_directory_stops_server_run_and_stays_as_it_is() {
-    let mut socket_dir = control_socket::replaced();
+    let mut socket_dir = socket_directory::replaced();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
 
@@ -589,7 +589,7 @@ fn an_unsafe_socket_directory_stops_server_run_and_stays_as_it_is() {
 
 #[test]
 fn a_log_file_that_cannot_be_opened_is_recorded_and_the_app_server_runs_on() {
-    let _socket_dir = control_socket::shared();
+    let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
     let mut case = record.case("a file stands where the log directory belongs");
     let directory = tempfile::tempdir().unwrap();
@@ -625,7 +625,7 @@ fn a_log_file_that_cannot_be_opened_is_recorded_and_the_app_server_runs_on() {
 
 #[test]
 fn shutdown_ends_the_process_while_a_handler_is_blocked() {
-    let _socket_dir = control_socket::shared();
+    let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
     let mut case = record.case("a client holds a connection with half a request sent");
     let directory = tempfile::tempdir().unwrap();
@@ -652,7 +652,7 @@ fn shutdown_ends_the_process_while_a_handler_is_blocked() {
 
 #[test]
 fn the_seams_hold_a_barrier_and_drive_the_clock_of_the_process_under_test() {
-    let _socket_dir = control_socket::shared();
+    let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
     let seams = Seams::serve(directory.path(), Duration::from_secs(1_000));

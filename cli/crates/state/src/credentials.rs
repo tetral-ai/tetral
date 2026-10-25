@@ -3,7 +3,7 @@
 //! `protocol::bootstrap`; this crate, which depends on no other workspace
 //! crate, reads and writes its bytes.
 
-use crate::atomic::{self, IoFailure};
+use crate::files::{self, IoFailure};
 use crate::paths::{self, StateRoot};
 
 /// The largest `credentials.json` read, the bootstrap's own limit; the
@@ -18,10 +18,10 @@ pub fn read(root: &StateRoot) -> Result<Option<Vec<u8>>, IoFailure> {
 
 /// `read` with another size limit, for tests.
 pub fn read_with_limit(root: &StateRoot, max_bytes: usize) -> Result<Option<Vec<u8>>, IoFailure> {
-    atomic::read_bounded(&root.join(paths::CREDENTIALS), max_bytes)
+    files::read_bounded(&root.join(paths::CREDENTIALS), max_bytes)
 }
 
 /// Replaces the root's `credentials.json` with `bytes`.
 pub fn replace(root: &StateRoot, bytes: &[u8]) -> Result<(), IoFailure> {
-    atomic::replace(&root.join(paths::CREDENTIALS), bytes)
+    files::replace(&root.join(paths::CREDENTIALS), bytes)
 }

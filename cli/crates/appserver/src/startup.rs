@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use rustix::fs::{AtFlags, CWD, Timespec, Timestamps, UTIME_NOW, UTIME_OMIT};
 
-use state::atomic::{self, IoFailure};
+use state::files::{self, IoFailure};
 use state::paths::{self, StateRoot};
 use state::private::{self, CheckError};
 use tokio::net::UnixListener;
@@ -52,12 +52,12 @@ impl From<CheckError> for StartError {
 /// Creates a missing `run/`, takes the lock without waiting and removes the
 /// temporary files of interrupted replacements.
 pub fn lock(root: &StateRoot) -> Result<RootLock, StartError> {
-    atomic::create_private_dirs(&root.join(paths::RUN))?;
+    files::create_private_dirs(&root.join(paths::RUN))?;
     let lock = lock::acquire(root).map_err(|error| match error {
         LockError::Held => StartError::Running,
         LockError::Io(failure) => StartError::Io(failure),
     })?;
-    atomic::remove_interrupted_replacements(root.path())?;
+    files::remove_interrupted_replacements(root.path())?;
     Ok(lock)
 }
 

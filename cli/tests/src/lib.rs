@@ -2,13 +2,13 @@
 
 pub mod app_server;
 pub mod binaries;
-pub mod control_socket;
 pub mod other_user;
 pub mod record;
 pub mod reference;
 pub mod run;
 pub mod seams;
 pub mod snapshot;
+pub mod socket_directory;
 
 use std::path::{Path, PathBuf};
 

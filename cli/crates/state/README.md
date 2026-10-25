@@ -17,10 +17,10 @@ credential files, the clock and the test seams.
   creates nothing (`private::check_root`); ancestors of the root may be
   symbolic links.
 - Directories are created with mode `0700` and files with mode `0600`, opened
-  with `O_NOFOLLOW` (`atomic`). A file is replaced only through a temporary
-  file in its directory (`atomic::replace`), and the next command to take the
+  with `O_NOFOLLOW` (`files`). A file is replaced only through a temporary
+  file in its directory (`files::replace`), and the next command to take the
   state-root lock removes the temporary files that an interrupted replacement
-  left (`atomic::remove_interrupted_replacements`). Every operating-system
+  left (`files::remove_interrupted_replacements`). Every operating-system
   failure under the root is an `IoFailure` naming its path.
 - An unknown member of `config.toml` is ignored (`config::Config`).
 - Every timer and deadline of the CLI reads `seams::now`, a clock that counts
@@ -61,7 +61,7 @@ as it is (`private::create_socket_dir`).
   `socket_path`.
 - `private.rs`: `check_root`, `check_socket`, `create_socket_dir` and the
   reasons a control path is unsafe.
-- `atomic.rs`: `IoFailure`, private directory creation, private opening,
+- `files.rs`: `IoFailure`, private directory creation, private opening,
   bounded reads, `replace` and `remove_interrupted_replacements`.
 - `config.rs`: `Config`, its reading and its replacement.
 - `credentials.rs`: the bounded reading and the replacement of

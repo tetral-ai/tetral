@@ -17,8 +17,8 @@ use std::time::Duration;
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
 use serde_json::Value;
-use state::atomic::IoFailure;
 use state::config::{self, ConfigError};
+use state::files::IoFailure;
 use state::paths::{ROOT_VARIABLE, StateRoot};
 use state::private::{self, CheckError};
 
