@@ -149,7 +149,9 @@ process's current admission phase. Registering or abandoning a candidate does
 not advance that watermark and cannot displace the current owner.
 
 New placement samples two distinct eligible Pods uniformly, probes their native
-PodIP:8080 `/metrics` concurrently and chooses the lower resident Session count.
+PodIP:8080 `/metrics/placement` concurrently and chooses the lower resident
+Session count. That page carries only the six placement series, so a Pod whose
+full `/metrics` page outgrows the 256 KiB load bound stays placeable.
 One valid report suffices; ties use a uniform draw. If both fail, one further
 round uses unprobed Pods. The bounded policy defaults are one second per probe,
 two seconds total and at most two rounds/four distinct Pods; shorter caller
@@ -536,7 +538,8 @@ or request labels enter these families.
 `TestPostgreSQLRuntimePlacementDiagnosticReasons` exercises actual registry and
 HTTP probe boundaries and compares completed histogram populations with the
 distinguishing reason counters; the concurrent collector test separately checks
-initialization and retention.
+initialization and retention. `TestPostgreSQLRuntimePlacementReadsOnlyThePlacementPage`
+places a Pod whose `/metrics` page exceeds 256 KiB, and
 `TestPostgreSQLRuntimePlacementRefusalCountsAtItsPressurePoint` counts each
 refusal cause and its episode record. `TestPostgreSQLJobRunnerRunsLeasedJobUnderItsProducerTrace`
 enqueues under a trace, leases through the Queue service and checks that the

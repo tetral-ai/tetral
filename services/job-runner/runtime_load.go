@@ -176,9 +176,11 @@ func probeRuntimeLoad(ctx context.Context, client *http.Client, candidate engine
 	}
 	ctx, cancel := context.WithTimeout(ctx, policy.ProbeTimeout)
 	defer cancel()
+	// The placement page carries only the six placement series, so the pod's
+	// full /metrics page can grow past MaxResponseBytes without excluding it.
 	// A non-replayable empty body disables net/http's automatic retry of a GET
 	// on a stale pooled connection. The wire body has zero bytes.
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+net.JoinHostPort(candidate.PodIP, "8080")+"/metrics", io.NopCloser(strings.NewReader("")))
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+net.JoinHostPort(candidate.PodIP, "8080")+"/metrics/placement", io.NopCloser(strings.NewReader("")))
 	if err != nil {
 		return RuntimeLoadReport{}, err
 	}

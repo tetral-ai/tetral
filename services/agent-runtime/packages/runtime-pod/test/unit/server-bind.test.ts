@@ -157,6 +157,30 @@ describe("Runtime Pod server bind addresses", () => {
 		);
 	});
 
+	test("the placement page serves exactly the six series Job Runner reads", async () => {
+		const metricsRegistry = new RuntimePodMetricsRegistry();
+		metricsRegistry.recordHotState({ activeSessions: 2, activeThreads: 3, activeFibers: 1, pendingApprovals: 1 });
+		metricsRegistry.observeProviderStreamDuration("agent_provider_request", 42, "success");
+		Effect.runSync(metricsRegistry.recordToolPermit(Symbol("tool"), "queued"));
+		const httpServer = createRuntimeHttpServer("127.0.0.1:0", fakeLifecycle(), metricsRegistry, undefined, () => ({ usageBytes: 80, limitBytes: 100 }));
+		try {
+			const response = await fetch(new URL("/metrics/placement", httpServer.url));
+			expect(response.status).toBe(200);
+			expect(response.headers.get("content-type")).toBe("text/plain; version=0.0.4; charset=utf-8");
+			const samples = (await response.text()).split("\n").filter((line) => line !== "" && !line.startsWith("#"));
+			expect(samples.sort()).toEqual([
+				"runtimepod_accepting_commands 0",
+				"runtimepod_active_sessions 2",
+				"runtimepod_container_memory_limit_bytes 100",
+				"runtimepod_container_memory_usage_bytes 80",
+				"runtimepod_ready 0",
+				"runtimepod_session_capacity 256",
+			]);
+		} finally {
+			httpServer.stop();
+		}
+	});
+
 	test("gRPC server binds explicit host addresses for ephemeral ports", async () => {
 		const grpcServer = createRuntimeGrpcServer(fakeRuntimeControlService());
 		try {

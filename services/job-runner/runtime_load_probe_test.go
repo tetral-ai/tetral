@@ -70,7 +70,7 @@ func TestRuntimeLoadProbeWireBounds(t *testing.T) {
 				lock.Lock()
 				calls++
 				lock.Unlock()
-				if r.Method != "GET" || r.URL.Path != "/metrics" || r.Host != "10.0.0.1:8080" {
+				if r.Method != "GET" || r.URL.Path != "/metrics/placement" || r.Host != "10.0.0.1:8080" {
 					t.Errorf("wrong native load request: %s %s %s", r.Method, r.URL, r.Host)
 				}
 				body, err := io.ReadAll(r.Body)

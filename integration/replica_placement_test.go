@@ -84,7 +84,7 @@ func TestPostgreSQLReplicaPlacementBinding(t *testing.T) {
 			held := scenario == "concurrent binders converge" || scenario == "sample changes before commit" || scenario == "caller cancels before commit" || scenario == "different binding wins during sample"
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				probes.Add(1)
-				if r.Method != "GET" || r.URL.Path != "/metrics" || (r.Host != "10.0.0.10:8080" && r.Host != "10.0.0.20:8080") {
+				if r.Method != "GET" || r.URL.Path != "/metrics/placement" || (r.Host != "10.0.0.10:8080" && r.Host != "10.0.0.20:8080") {
 					t.Errorf("wrong native metrics route: %s %s", r.Host, r.URL)
 				}
 				if held && r.Host != "10.0.0.20:8080" {

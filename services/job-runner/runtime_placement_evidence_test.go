@@ -557,6 +557,45 @@ func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 	}
 }
 
+// A Runtime pod's full /metrics page may outgrow the 256 KiB load bound; the
+// pod stays placeable because Job Runner reads only /metrics/placement.
+func TestPostgreSQLRuntimePlacementReadsOnlyThePlacementPage(t *testing.T) {
+	runtime, _ := storagetest.NewPostgreSQLDBWithAdmin(t)
+	client := dbconnect.NewClientForTesting(runtime)
+	candidates := placementEvidenceCandidates(t, client)
+	fullPage := placementVectorBody(0, 100) + strings.Repeat("# unrelated series\n", 300*1024/19)
+	if len(fullPage) <= 256*1024 {
+		t.Fatalf("full metrics page = %d bytes; want over 256 KiB", len(fullPage))
+	}
+	var mu sync.Mutex
+	var paths []string
+	httpClient := runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/metrics":
+			_, _ = io.WriteString(w, fullPage)
+		case "/metrics/placement":
+			_, _ = io.WriteString(w, placementVectorBody(0, 100))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	resolver := KubernetesRuntimeTargetResolver{LoadClient: httpClient, PlacementPolicy: DefaultRuntimePlacementPolicy(), Snapshot: func() kubernetes.BindingVisibilitySnapshot {
+		return kubernetes.NewBindingVisibilitySnapshotForTest(true, candidates[:1])
+	}}
+	choice, err := resolver.sampleRuntimePlacement(context.Background(), client, RuntimeJob{WorkspaceID: "default", SessionID: "placement_page"})
+	if err != nil || choice.Reason != "selected" || choice.Candidate.PodUID != candidates[0].PodUID {
+		t.Fatalf("placement = %+v/%v; want the pod selected", choice, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(paths) != 1 || paths[0] != "/metrics/placement" {
+		t.Fatalf("requested paths = %v; want only /metrics/placement", paths)
+	}
+}
+
 // A placement that finds no candidate or exhausts its probes is a refusal at
 // the jobrunner_placement pressure point: one count for its cause and the
 // episode's pressure.rejecting_started record.

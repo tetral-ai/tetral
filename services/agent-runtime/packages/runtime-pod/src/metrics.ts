@@ -100,6 +100,8 @@ export interface RuntimePodMetricsSource extends RuntimeMetricsSink {
  readonly observeShutdownPhase?: (phase: RuntimeShutdownPhase, durationMs: number, outcome: "success" | "error" | "timeout", logger?: ShutdownPhaseLogger) => void;
 	readonly recordCloseoutEvent: (event: RuntimeCloseoutEvent) => void;
 	readonly snapshot: () => RuntimePodDomainMetricsSnapshot;
+	/** The resident Session count alone, for the placement read. */
+	readonly activeSessions: () => number;
 }
 
 /**
@@ -298,6 +300,10 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
 		);
 	}
 
+	activeSessions(): number {
+		return this.hotState.activeSessions;
+	}
+
 	/** Returns current gauges and defensive copies of all mutable observation maps. */
 	snapshot(): RuntimePodDomainMetricsSnapshot {
 		return {
@@ -330,6 +336,7 @@ const EmptyRuntimePodMetrics: RuntimePodMetricsSource = {
 	observeContextLoadLatency: () => undefined,
 	recordCleanupCommandOutcome: () => undefined,
 	recordCloseoutEvent: () => undefined,
+	activeSessions: () => 0,
 	snapshot: () => ({
 		activeSessions: 0,
 		activeThreads: 0,
@@ -359,71 +366,20 @@ export function runtimePodMetricsText(
 	const snapshot = lifecycle.metricsSnapshot();
 	const runtimeSnapshot = runtimeMetrics.snapshot();
 	const memory = process.memoryUsage();
-	let container: ContainerMemoryObservation | undefined;
-	try {
-		container = readContainerMemory();
-	} catch {
-		/* unknown remains ineligible */
-	}
-	const validContainer =
-		container !== undefined &&
-		Number.isSafeInteger(container.usageBytes) &&
-		container.usageBytes >= 0 &&
-		Number.isSafeInteger(container.limitBytes) &&
-		container.limitBytes > 0;
-	const capacity = lifecycle.sessionCapacity();
+	const placement = placementSeries(lifecycle, runtimeSnapshot.activeSessions, readContainerMemory);
 	return [
     runtimeSnapshot.operationDurationText ?? "",
-		...(capacity === undefined
-			? []
-			: [
-					metric(
-						"runtimepod_session_capacity",
-						"Configured local Session capacity.",
-						"gauge",
-						capacity,
-					),
-				]),
-		...(validContainer
-			? [
-					metric(
-						"runtimepod_container_memory_usage_bytes",
-						"Current container cgroup memory usage.",
-						"gauge",
-						container!.usageBytes,
-					),
-					metric(
-						"runtimepod_container_memory_limit_bytes",
-						"Finite container cgroup memory limit.",
-						"gauge",
-						container!.limitBytes,
-					),
-				]
-			: ["# runtimepod_container_memory_state unknown_or_unlimited\n"]),
-		metric(
-			"runtimepod_ready",
-			"Runtime Pod readiness state.",
-			"gauge",
-			snapshot.ready ? 1 : 0,
-		),
-		metric(
-			"runtimepod_accepting_commands",
-			"Runtime Pod command admission state.",
-			"gauge",
-			snapshot.accepting ? 1 : 0,
-		),
+		placement.capacity,
+		placement.memory,
+		placement.ready,
+		placement.accepting,
 		metric(
 			"runtimepod_commands_in_flight",
 			"Runtime Pod commands currently draining or executing.",
 			"gauge",
 			snapshot.inFlightCommands,
 		),
-		metric(
-			"runtimepod_active_sessions",
-			"Runtime Pod hot-state sessions currently resident.",
-			"gauge",
-			runtimeSnapshot.activeSessions,
-		),
+		placement.activeSessions,
 		metric(
 			"runtimepod_active_threads",
 			"Runtime Pod hot-state threads currently resident.",
@@ -486,6 +442,86 @@ export function runtimePodMetricsText(
 			memory.rss,
 		),
 	].join("");
+}
+
+/**
+ * The six series Job Runner reads to place a Session, served alone on
+ * `/metrics/placement` so the page stays small however large `/metrics`
+ * grows. A capacity or container memory that is unknown is left out, which
+ * keeps the pod out of placement.
+ */
+export function runtimePodPlacementMetricsText(
+	lifecycle: RuntimePodLifecycle,
+	runtimeMetrics: RuntimePodMetricsSource = EmptyRuntimePodMetrics,
+	readContainerMemory: () =>
+		| ContainerMemoryObservation
+		| undefined = containerMemoryObservation,
+): string {
+	const placement = placementSeries(lifecycle, runtimeMetrics.activeSessions(), readContainerMemory);
+	return [placement.activeSessions, placement.capacity, placement.memory, placement.ready, placement.accepting].join("");
+}
+
+function placementSeries(
+	lifecycle: RuntimePodLifecycle,
+	activeSessions: number,
+	readContainerMemory: () => ContainerMemoryObservation | undefined,
+): { readonly activeSessions: string; readonly capacity: string; readonly memory: string; readonly ready: string; readonly accepting: string } {
+	const snapshot = lifecycle.metricsSnapshot();
+	let container: ContainerMemoryObservation | undefined;
+	try {
+		container = readContainerMemory();
+	} catch {
+		/* unknown remains ineligible */
+	}
+	const validContainer =
+		container !== undefined &&
+		Number.isSafeInteger(container.usageBytes) &&
+		container.usageBytes >= 0 &&
+		Number.isSafeInteger(container.limitBytes) &&
+		container.limitBytes > 0;
+	const capacity = lifecycle.sessionCapacity();
+	return {
+		activeSessions: metric(
+			"runtimepod_active_sessions",
+			"Runtime Pod hot-state sessions currently resident.",
+			"gauge",
+			activeSessions,
+		),
+		capacity: capacity === undefined
+			? ""
+			: metric(
+					"runtimepod_session_capacity",
+					"Configured local Session capacity.",
+					"gauge",
+					capacity,
+				),
+		memory: validContainer
+			? metric(
+					"runtimepod_container_memory_usage_bytes",
+					"Current container cgroup memory usage.",
+					"gauge",
+					container!.usageBytes,
+				) +
+				metric(
+					"runtimepod_container_memory_limit_bytes",
+					"Finite container cgroup memory limit.",
+					"gauge",
+					container!.limitBytes,
+				)
+			: "# runtimepod_container_memory_state unknown_or_unlimited\n",
+		ready: metric(
+			"runtimepod_ready",
+			"Runtime Pod readiness state.",
+			"gauge",
+			snapshot.ready ? 1 : 0,
+		),
+		accepting: metric(
+			"runtimepod_accepting_commands",
+			"Runtime Pod command admission state.",
+			"gauge",
+			snapshot.accepting ? 1 : 0,
+		),
+	};
 }
 
 function metric(

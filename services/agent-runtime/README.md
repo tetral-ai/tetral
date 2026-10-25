@@ -801,6 +801,14 @@ has no rejection counter. Waits are timed on the metrics registry's own
 monotonic clock; each call's queue time, or that it runs, lives in one Effect
 `Ref` that only these series read and that controls no tool call.
 
+The metrics port also serves `GET /metrics/placement`, in the same text format,
+with only the six series Job Runner reads to place a Session:
+`runtimepod_active_sessions`, `runtimepod_session_capacity`,
+`runtimepod_container_memory_usage_bytes`, `runtimepod_container_memory_limit_bytes`,
+`runtimepod_ready` and `runtimepod_accepting_commands`. An unknown capacity or
+container memory leaves its series out, so the pod is not placed. The page stays
+small however large `/metrics` grows.
+
 Shutdown operations are actual `shutdown_quiesce`, `shutdown_report`,
 `shutdown_release`, `shutdown_local_join`, `shutdown_clients` and
 `shutdown_listeners` boundaries. Session checkpoints and release can overlap;
