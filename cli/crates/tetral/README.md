@@ -13,6 +13,10 @@ runs as child processes of itself.
 - Every command waits for its records to be written before it exits, at most
   `observe::EXIT_FLUSH_LIMIT`; after a shutdown, never past the shutdown's
   deadline, so that `server run` exits within it (`commands`, `server`).
+- Run with `argv[0]` `codex-linux-sandbox`, it is Codex's sandbox helper
+  (`codex_linux_sandbox::run_main`) and nothing else, decided before any
+  argument is parsed: every sandboxed command runs this executable under that
+  name (`main`).
 - Run with `argv[0]` `tetral-cwd-probe`, it is the App Server's directory
   probe and nothing else: it reads at most
   `session::probe_child::INPUT_MAX_BYTES` of stdin and writes the probe's one
@@ -23,8 +27,12 @@ runs as child processes of itself.
   existing `config.toml`) before it does anything, and the first that fails
   ends it (`commands`).
 - Its errors follow the error rule of `cli/README.md`.
-- Its feature `test-seams` turns on `state/test-seams` for the builds of the
-  cross-process tests and is never enabled in a release build (`Cargo.toml`).
+- Its feature `test-seams` turns on `state/test-seams` and
+  `execution/test-seams` for the builds of the cross-process tests and is
+  never enabled in a release build (`Cargo.toml`). Under it, `argv[0]`
+  `tetral-isolation-harness` runs one command through the isolation's check
+  and launch (`execution::isolation::harness`) and writes its one answer
+  line (`main`).
 
 ## Commands
 
@@ -51,7 +59,8 @@ runs as child processes of itself.
 
 ## Where things are
 
-- `src/main.rs`: `main` and the directory probe's entry point. Past
+- `src/main.rs`: `main`, the sandbox helper's dispatch, and the entry points
+  of the directory probe and of the isolation harness. Past
   `--version`, it first checks the test harness
   (`state::seams::check_harness`).
 - `src/commands.rs`: the command line and the checks every command runs.

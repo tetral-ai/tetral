@@ -24,6 +24,13 @@ temporary directories. No workspace crate depends on this package.
   its `clock` control. A sleep is never the evidence that something did not
   happen; `seams::WAIT_LIMIT` bounds only a wait for something that must
   happen.
+- A test of real restricted processes runs `tetral` with `argv[0]`
+  `tetral-isolation-harness`, which starts one command through the
+  isolation's check and launch and answers with its outcome, and observes
+  from outside every sandbox what the command reached. It needs a host that
+  allows unprivileged user namespaces and a `bwrap` on `/usr/bin` or `/bin`.
+  A case that needs a `tetral` built with a bundled `bwrap`'s digest uses
+  `binaries::tetral_with_bwrap_digest`, built into its own target directory.
 - Each run of a test file of `tests/` writes its acceptance record into the
   directory that `TETRAL_ACCEPTANCE_DIR` names (`record`), and fails at once
   when it is unset. A case that needs a non-root user is recorded as not run,
@@ -46,10 +53,12 @@ temporary directories. No workspace crate depends on this package.
 ## Where things are
 
 - `src/lib.rs`: `workspace_dir` and `repository_root`, where the builds run.
-- `src/binaries.rs`: the builds of `tetral` and the reference control server.
+- `src/binaries.rs`: the builds of `tetral`, with and without a bundled
+  `bwrap`'s digest, and of the reference control server.
 - `src/reference.rs`: `ReferenceServer`, the server as a process, its startup
   input, its controls and its request log.
-- `src/run.rs`: `Tetral`, a command line of the `tetral` under test, and
+- `src/run.rs`: `Tetral`, a command line of the `tetral` under test or of a
+  link to it, under another `argv[0]` when it selects an entry point, and
   `Run`, its exit status, output and result object.
 - `src/seams.rs`: `Seams`, the harness side of the seam protocol, which
   `state::seams` defines; a held barrier lets all pass at its release, or one
@@ -112,3 +121,10 @@ temporary directories. No workspace crate depends on this package.
   output of `cargo metadata`, and the rule that no library crate prints,
   checked over the library crates' sources.
 - `tests/release_seams.rs`: a release build of `tetral` holds no test seam.
+- `tests/isolation_linux.rs`: real restricted processes on Linux: each grant
+  against the credential, the control socket, a second Session's files, the
+  `tetral` executable, `.git` and the metadata names, symbolic links, path
+  aliases and inherited descriptors; `disabled` and `direct` against TCP,
+  UDP and HTTP on the loopback and the LAN address; each unusable `bwrap`
+  rejected before any process starts; and the bundled `bwrap` with its
+  digest.

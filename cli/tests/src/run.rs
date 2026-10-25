@@ -3,6 +3,7 @@
 
 use std::ffi::OsStr;
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
@@ -90,12 +91,29 @@ impl Tetral {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut command = Command::new(binaries::tetral());
+        Tetral::at(binaries::tetral(), arguments)
+    }
+
+    /// A command line of the `tetral` at `program`, such as a copy of
+    /// [`binaries::tetral`] in a directory of the test's.
+    pub fn at<I, S>(program: &Path, arguments: I) -> Tetral
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut command = Command::new(program);
         command.args(arguments).env_clear();
         Tetral {
             command,
             stdin: Vec::new(),
         }
+    }
+
+    /// Runs the program under the file name `argv0`, which selects an entry
+    /// point of `tetral`.
+    pub fn arg0(mut self, argv0: &str) -> Tetral {
+        self.command.arg0(argv0);
+        self
     }
 
     pub fn home(mut self, root: &Path) -> Tetral {

@@ -33,6 +33,39 @@ pub fn tetral() -> &'static Path {
     })
 }
 
+/// The target directory of [`tetral_with_bwrap_digest`].
+pub const DIGEST_TARGET_DIR: &str = "target/test-seams-bwrap-digest";
+
+/// `tetral` with its test seams, built with `CODEX_BWRAP_SHA256=<digest>` as
+/// a release build is, into [`DIGEST_TARGET_DIR`]; one digest per test
+/// process.
+pub fn tetral_with_bwrap_digest(digest: &str) -> &'static Path {
+    static BUILT: OnceLock<(String, PathBuf)> = OnceLock::new();
+    let (built_digest, path) = BUILT.get_or_init(|| {
+        run(Command::new(cargo())
+            .args([
+                "build",
+                "-p",
+                "tetral",
+                "--features",
+                "test-seams",
+                "--target-dir",
+                DIGEST_TARGET_DIR,
+            ])
+            .env("CODEX_BWRAP_SHA256", digest)
+            .current_dir(workspace_dir()));
+        (
+            digest.to_owned(),
+            workspace_dir()
+                .join(DIGEST_TARGET_DIR)
+                .join("debug")
+                .join("tetral"),
+        )
+    });
+    assert_eq!(built_digest, digest, "one bwrap digest per test process");
+    path
+}
+
 /// The reference control server, built with `go build` at the repository
 /// root.
 pub fn reference_server() -> &'static Path {
