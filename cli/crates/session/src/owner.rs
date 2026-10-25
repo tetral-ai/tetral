@@ -437,8 +437,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use protocol::connection::PreparationErrorCode;
+    use protocol::connection::{PreparationError, PreparationErrorCode};
     use protocol::field::AbsolutePath;
+    use protocol::local::SessionEntry;
     use protocol::ports::Submission;
     use tokio::sync::oneshot::error::TryRecvError;
     use tokio::sync::{Barrier, oneshot};
@@ -691,9 +692,9 @@ mod tests {
         assert_eq!(admission.await.unwrap(), Admission::Started);
     }
 
-    #[tokio::test]
-    async fn a_probe_result_taken_after_the_probe_deadline_fails_the_preparation_with_the_timeout()
-    {
+    /// The entry of a Session whose running probe of operation 1 has the
+    /// given deadline once the owner has taken that probe's `output`.
+    async fn entry_after_probe_done(deadline: Duration, output: Option<Output>) -> SessionEntry {
         let (mailbox, messages) = mpsc::unbounded_channel();
         let preparation = Preparation {
             session_id: SafeId::new("sess_1").unwrap(),
@@ -714,15 +715,13 @@ mod tests {
             1,
             Running {
                 probe: Probe::reaped(),
-                deadline: state::seams::now().saturating_sub(Duration::from_millis(1)),
+                deadline,
                 killed: false,
             },
         );
         let result = SessionMessage::ProbeDone {
             operation: 1,
-            output: Some(Output::Entered {
-                cwd: "/project".to_owned(),
-            }),
+            output,
         };
         assert!(mailbox.send(result).is_ok());
         tokio::spawn(own(owner, messages));
@@ -732,11 +731,35 @@ mod tests {
             let _ = reply.send(entries);
         }));
         assert!(mailbox.send(read).is_ok());
-        let entries = entries.await.unwrap();
-        assert_eq!(entries[0].state, SessionState::Failed);
+        entries.await.unwrap().remove(0)
+    }
+
+    #[tokio::test]
+    async fn a_probe_result_taken_after_the_probe_deadline_fails_the_preparation_with_the_timeout()
+    {
+        let passed = state::seams::now().saturating_sub(Duration::from_millis(1));
+        let entered = Output::Entered {
+            cwd: "/project".to_owned(),
+        };
+        let entry = entry_after_probe_done(passed, Some(entered)).await;
+        assert_eq!(entry.state, SessionState::Failed);
         assert_eq!(
-            entries[0].error.0.as_ref().map(|error| error.code),
+            entry.error.0.map(|error| error.code),
             Some(PreparationErrorCode::CwdCheckTimeout)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probe_that_ends_without_a_result_line_fails_the_preparation_as_inaccessible() {
+        let ahead = state::seams::now() + Duration::from_secs(60);
+        let entry = entry_after_probe_done(ahead, None).await;
+        assert_eq!(entry.state, SessionState::Failed);
+        assert_eq!(
+            entry.error.0,
+            Some(PreparationError {
+                code: PreparationErrorCode::CwdInaccessible,
+                message: "the directory probe ended without a result".to_owned(),
+            })
         );
     }
 }

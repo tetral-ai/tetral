@@ -20,6 +20,11 @@ use crate::probe;
 use crate::probe_child::{Input, Output, lexical};
 use crate::record::{Binding, Record, Requester};
 
+/// The whole message of a probe that ends without a result line: no
+/// operating system error caused it, and the fixed text of
+/// `cwd_inaccessible` would report a crash as denied access.
+pub(crate) const PROBE_ENDED_WITHOUT_RESULT: &str = "the directory probe ended without a result";
+
 impl<S: TaskStarter> SessionOwner<S> {
     pub(crate) fn prepare(&mut self, prepare: Prepare) {
         let Some(preparation) = &self.preparation else {
@@ -207,10 +212,10 @@ impl<S: TaskStarter> SessionOwner<S> {
             Some(Output::Failed { error }) => self.fail(operation, error),
             None => self.fail(
                 operation,
-                PreparationError::new(
-                    PreparationErrorCode::CwdInaccessible,
-                    Some("the directory probe ended without a result"),
-                ),
+                PreparationError {
+                    code: PreparationErrorCode::CwdInaccessible,
+                    message: PROBE_ENDED_WITHOUT_RESULT.to_owned(),
+                },
             ),
         }
     }
