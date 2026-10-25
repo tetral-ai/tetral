@@ -46,16 +46,18 @@ that is no longer the binding's is discarded.
   its directory under its Session and its temporary directory, both named
   from the task's name chosen at admission, and the Session's Report outbox
   port (`tools::TaskStart`).
-- A task's supervisor reports its confirmed end to the owner. A
-  connection's end sends every task of its binding the end (staged ones
-  never start, running ones end at once) and keeps each started task whose
-  processes are not yet confirmed gone; while one is kept, or a record an
-  earlier App Server left for the Session is unconfirmed
+- A task's supervisor reports its PID namespace and its confirmed end to
+  the owner. A connection's end sends every task of its binding the end
+  (staged ones never start, running ones end at once) and keeps each started
+  task whose processes are not yet confirmed gone; while one is kept, or a
+  record an earlier App Server left for the Session is unconfirmed
   (`execution::cleanup::Leftovers`), a preparation of the Session fails with
   `cleanup_pending`, checked right after the connection it names. The
   shutdown sends every task the end through the termination procedure, and
   once each started task's processes are confirmed gone the owner tells the
-  Connection owner (`ConnectionPort::tasks_gone`, `tools`).
+  Connection owner (`ConnectionPort::tasks_gone`). A host process belongs to
+  the task whose reported namespace holds it
+  (`protocol::ports::TaskOwnership`, `tools`).
 - Owners follow the owner rules of `cli/README.md`. An owner reaches the
   Connection owner only through `protocol::ports::ConnectionPort` and hands
   its reports to `protocol::ports::ReportSink`.
@@ -94,8 +96,8 @@ that is no longer the binding's is discarded.
   shutdown as they end a preparation.
 - `tools.rs`: the admission of tool instructions (`ToolContext`,
   `TaskStart`), a binding's task registry and staging queue (`Tasks`),
-  their reports, the tasks' events (`TaskKey`, `TaskEvent`) and
-  `cleanup_pending`.
+  their reports, the tasks' events (`TaskKey`, `TaskEvent`),
+  `cleanup_pending` and the owner of a host process.
 - `record.rs`: `Record`, `Binding` and the entries of `GET /v1/sessions`.
 - `cases.rs`: the cases of a `session.prepare` (`Case`, `decide`).
 - `prepare.rs`: the steps of a preparation, from the connection check to the

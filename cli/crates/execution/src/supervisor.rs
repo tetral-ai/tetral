@@ -14,13 +14,13 @@
 //! handling the exit and other controls. Every wait reads the seam clock.
 //!
 //! Once the task's first process inside its sandbox exists, the supervisor
-//! writes the task's record ([`cleanup::Record`]). After the `terminal`
-//! report the task's processes are checked every
-//! [`cleanup::CHECK_INTERVAL`] until they are confirmed gone; only then do
-//! the record and, once every report has its outcome, the task's files go.
-//! A connection's end discards a staged task without a report and ends a
-//! running one with SIGKILL at once; the App Server's shutdown ends it
-//! through the termination procedure.
+//! writes the task's record ([`cleanup::Record`]) and tells its binding
+//! owner the task's PID namespace. After the `terminal` report the task's
+//! processes are checked every [`cleanup::CHECK_INTERVAL`] until they are
+//! confirmed gone; only then do the record and, once every report has its
+//! outcome, the task's files go. A connection's end discards a staged task
+//! without a report and ends a running one with SIGKILL at once; the App
+//! Server's shutdown ends it through the termination procedure.
 
 use std::collections::{HashSet, VecDeque};
 use std::os::fd::OwnedFd;
@@ -119,6 +119,9 @@ pub struct TaskSpec {
 /// What a supervisor tells its task's binding owner about the task's
 /// processes.
 pub trait TaskListener: Send + Sync {
+    /// The task's first process inside its sandbox exists, in the PID
+    /// namespace whose inode is `namespace`.
+    fn started(&self, namespace: u64);
     /// The task's processes are confirmed gone, or it never had any.
     fn gone(&self);
 }
@@ -487,8 +490,8 @@ impl Supervisor {
         self.spec.listener.gone();
     }
 
-    /// Notes the task's first process inside its sandbox once it exists and
-    /// writes the task's record.
+    /// Notes the task's first process inside its sandbox once it exists:
+    /// writes the task's record and tells the binding owner its namespace.
     fn find_leader(&mut self, pid: u32) {
         if self.leader.is_some() {
             return;
@@ -502,6 +505,7 @@ impl Supervisor {
                 cleanup::Record::new(self.spec.correlation.session_id.as_str(), boot_id, leader);
             let _ = record.write(&self.spec.record);
         }
+        self.spec.listener.started(leader.namespace);
     }
 
     /// Removes the task's files and lets go of its output, keeping only the

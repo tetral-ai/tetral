@@ -18,7 +18,8 @@ use protocol::id::{Id, SafeId};
 use protocol::local::SessionState;
 use protocol::ports::{
     Close, ConnectionPort, EntriesReply, Prepare, ProbeRequest, ProbeSlot, ReportId,
-    ReportListener, ReportOutcome, ReportSink, SessionFactory, SessionHandle, ToolCall,
+    ReportListener, ReportOutcome, ReportSink, SessionFactory, SessionHandle, TaskOwnerReply,
+    TaskOwnership, ToolCall,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -57,6 +58,11 @@ pub enum SessionMessage {
     Task {
         task: TaskKey,
         event: TaskEvent,
+    },
+    /// Which task, if any, the host process `pid` belongs to.
+    TaskOwner {
+        pid: u32,
+        reply: TaskOwnerReply,
     },
 }
 
@@ -210,6 +216,12 @@ impl SessionHandle for Handle {
     }
 }
 
+impl TaskOwnership for Handle {
+    fn task_of(&self, pid: u32, reply: TaskOwnerReply) {
+        self.send(SessionMessage::TaskOwner { pid, reply });
+    }
+}
+
 /// Gives each report outcome back to the owner as a message.
 pub(crate) struct ReportEvents {
     pub mailbox: SessionMailbox,
@@ -330,6 +342,7 @@ impl<S: TaskStarter> SessionOwner<S> {
                 self.task_event(task, event);
                 self.answer_shutdown();
             }
+            SessionMessage::TaskOwner { pid, reply } => self.task_owner(pid, reply),
         }
     }
 

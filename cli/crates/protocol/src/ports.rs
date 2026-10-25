@@ -239,6 +239,17 @@ pub trait SessionHandle: Send + Sync {
     fn entries(&self, reply: EntriesReply);
 }
 
+/// Takes the `task_id` of the task a host process belongs to, or `None`.
+pub type TaskOwnerReply = Box<dyn FnOnce(Option<Id>) + Send>;
+
+/// Which task of a Session a host process belongs to, for the Session's
+/// drive sync; its implementation belongs to `session`. On Linux a process
+/// belongs to the task whose PID namespace holds it; a process in no task's
+/// namespace belongs to none.
+pub trait TaskOwnership: Send + Sync {
+    fn task_of(&self, pid: u32, reply: TaskOwnerReply);
+}
+
 /// How Session binding owners and Drive sync owners reach the Connection
 /// owner; its implementation belongs to `connection`. The Connection owner
 /// counts the Session records and the running directory probes.

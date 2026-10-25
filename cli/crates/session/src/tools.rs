@@ -11,11 +11,13 @@
 //! control finds its task only in the registry of the binding it names, on
 //! its own connection, and goes to that task's supervisor.
 //!
-//! Each task's supervisor tells the owner when its processes are confirmed
-//! gone. A connection's end discards the binding's staged tasks and ends its
-//! running ones; until every task of an ended connection is confirmed gone,
-//! and every record an earlier App Server left for the Session is, the
-//! Session is `cleanup_pending` ([`SessionOwner::cleanup_pending`]).
+//! Each task's supervisor tells the owner the task's PID namespace and when
+//! its processes are confirmed gone. A connection's end discards the
+//! binding's staged tasks and ends its running ones; until every task of an
+//! ended connection is confirmed gone, and every record an earlier App
+//! Server left for the Session is, the Session is `cleanup_pending`
+//! ([`SessionOwner::cleanup_pending`]). A host process belongs to the task
+//! whose PID namespace holds it ([`SessionOwner::task_owner`]).
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -25,11 +27,11 @@ use std::time::Duration;
 use execution::policy::{TaskPermissions, TranslationInputs, validate};
 use execution::report::{Body, Correlation, Report};
 use execution::supervisor::{Control, SupervisorMailbox, SupervisorMessage, TaskListener};
-use execution::{cleanup, isolation, store};
+use execution::{cleanup, isolation, process, store};
 use protocol::connection::{Downstream, DownstreamPayload, DownstreamType};
 use protocol::id::Id;
 use protocol::local::SessionState;
-use protocol::ports::{ReportSink, ToolCall};
+use protocol::ports::{ReportSink, TaskOwnerReply, ToolCall};
 use protocol::tool::{
     ControlErrorCode, ExecutePayload, ExecutionTool, ProtocolError, RejectionCode,
     ToolExecutionCapability, ToolInput, VisibleLimits,
@@ -91,6 +93,8 @@ struct Task {
     tool: ExecutionTool,
     supervisor: Option<SupervisorMailbox>,
     state: TaskState,
+    /// The inode of its PID namespace, once its supervisor reported it.
+    namespace: Option<u64>,
     /// Whether its processes are confirmed gone.
     gone: bool,
 }
@@ -302,6 +306,7 @@ impl<S: TaskStarter> SessionOwner<S> {
                 } else {
                     TaskState::Started
                 },
+                namespace: None,
                 gone: false,
             },
         );
@@ -377,12 +382,14 @@ impl<S: TaskStarter> SessionOwner<S> {
         }
     }
 
-    /// What a task's supervisor reported about the task: once its processes
-    /// are gone it no longer keeps its Session `cleanup_pending`.
+    /// What a task's supervisor reported about the task: its namespace is
+    /// noted, and once its processes are gone it no longer keeps its
+    /// Session `cleanup_pending`.
     pub(crate) fn task_event(&mut self, task: TaskKey, event: TaskEvent) {
-        let TaskEvent::Gone = event;
-        self.unconfirmed
-            .remove(&(task.connection_id.clone(), task.task_id.clone()));
+        if event == TaskEvent::Gone {
+            self.unconfirmed
+                .remove(&(task.connection_id.clone(), task.task_id.clone()));
+        }
         let Some(record) = self.record.as_mut() else {
             return;
         };
@@ -396,7 +403,10 @@ impl<S: TaskStarter> SessionOwner<S> {
         else {
             return;
         };
-        entry.gone = true;
+        match event {
+            TaskEvent::Started(namespace) => entry.namespace = Some(namespace),
+            TaskEvent::Gone => entry.gone = true,
+        }
     }
 
     /// After the shutdown has ended every task, tells the Connection owner
@@ -432,6 +442,21 @@ impl<S: TaskStarter> SessionOwner<S> {
                     .pending(preparation.session_id.as_str())
             })
     }
+
+    /// The `task_id` of the task whose PID namespace holds the host process
+    /// `pid`, among the tasks whose supervisors reported their namespace.
+    pub(crate) fn task_owner(&self, pid: u32, reply: TaskOwnerReply) {
+        let owner = process::namespace(pid).and_then(|namespace| {
+            let record = self.record.as_ref()?;
+            [record.current.as_ref(), record.unavailable.as_ref()]
+                .into_iter()
+                .flatten()
+                .flat_map(|binding| binding.tasks.registry.iter())
+                .find(|(_, task)| task.namespace == Some(namespace))
+                .map(|(task_id, _)| task_id.clone())
+        });
+        reply(owner);
+    }
 }
 
 /// A task as its supervisor's events name it.
@@ -444,6 +469,8 @@ pub struct TaskKey {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskEvent {
+    /// The task's PID namespace.
+    Started(u64),
     Gone,
 }
 
@@ -470,6 +497,10 @@ impl Events {
 }
 
 impl TaskListener for Events {
+    fn started(&self, namespace: u64) {
+        self.send(TaskEvent::Started(namespace));
+    }
+
     fn gone(&self) {
         self.send(TaskEvent::Gone);
     }
