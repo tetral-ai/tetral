@@ -1,8 +1,9 @@
 //! The Connection owner of `tetral server run` against the reference control
 //! server, as separate processes over real HTTP and SSE, each on its own
-//! controlled clock: credential and version refusals, the attempt timeout
-//! and the reconnect backoff, Session instructions staged until the ready
-//! ACK and their limit, grants measured from first sends, conflicts and the
+//! controlled clock: credential and version refusals, a credential expired
+//! before start, the attempt timeout and the reconnect backoff, Session
+//! instructions staged until the ready ACK and their limit, a stream lost
+//! before that ACK, grants measured from first sends, conflicts and the
 //! predecessor rules, a clock that jumps past the deadline, answers of an
 //! ended connection, the event size limit and the protocol version, the
 //! startup phases in ready, and a redirect that is never followed.
@@ -286,6 +287,24 @@ fn a_refused_credential_blocks_before_ready_and_no_attempt_follows() {
 }
 
 #[test]
+fn a_credential_expired_before_start_blocks_and_sends_no_request() {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let mut case = record.case("credentials.json with an expires_at before this machine's time");
+    let engine = one_credential_engine();
+    let mut expired = bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY);
+    expired["expires_at"] = json!("2000-01-01T00:00:00Z");
+    let directory = tempfile::tempdir().unwrap();
+    let machine = Machine::start(&mut case, directory.path(), &expired);
+    let status = machine.wait_for("blocked");
+    assert_eq!(status["last_error"]["code"], "credential_expired");
+    machine.advance(seconds(120.0));
+    assert_eq!(machine.attempts(), 0);
+    assert_eq!(engine.state()["requests"].as_array().map_or(0, Vec::len), 0);
+    case.observe("blocked with last_error credential_expired; no attempt and no request recorded by the reference server 120 seconds later");
+}
+
+#[test]
 fn a_grant_capped_at_the_credential_expiry_ends_the_connection_there() {
     let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
@@ -453,6 +472,45 @@ fn session_instructions_wait_for_the_ready_ack() {
     machine.settle();
     assert_eq!(machine.routed(), 3);
     case.observe("after the matching ACK the three staged instructions were routed and the connection is online");
+}
+
+#[test]
+fn a_stream_lost_before_the_ready_ack_resumes_the_connection_without_a_second_ready() {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let mut case = record.case("the stream ends after connected and before the ready is answered");
+    let engine = one_credential_engine();
+    answer_fault(
+        &engine,
+        json!({ "endpoint": "ready", "action": "withhold" }),
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let machine = Machine::start(
+        &mut case,
+        directory.path(),
+        &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+    );
+    wait_for_received(&engine, "ready", 1);
+    engine.control("break_stream", json!({ "instance_id": INSTANCE }));
+    machine.wait_for("resuming");
+    machine.seams.advance(seconds(1.2));
+    let events = wait_for_requests(&engine, "events", 2);
+    assert_eq!(events[1]["query"]["resume"], "true");
+    assert_eq!(
+        events[1]["query"]["previous_connection_id"],
+        FIRST_CONNECTION
+    );
+    assert_eq!(events[1]["connection_id"], FIRST_CONNECTION);
+    machine.wait_for("registering");
+    case.observe(
+        "the next attempt resumed the same connection with resume=true, which is registering again",
+    );
+
+    answer_fault(&engine, json!({ "action": "release" }));
+    machine.wait_for("online");
+    machine.settle();
+    assert_eq!(engine.requests("ready").len(), 1);
+    case.observe("the first ready's ACK brought online and no second ready was sent");
 }
 
 #[test]
@@ -1042,23 +1100,29 @@ fn ready_carries_the_startup_phases_until_one_is_accepted() {
     );
     case.observe("connect_ms was sent as 2,147,483,647");
 
-    let mut case = record.case("a delayed first connected, a resume and a new connection");
+    let mut case =
+        record.case("a first connected delayed by 2 seconds, a resume and a new connection");
     let engine = one_credential_engine();
-    engine.control("events", json!({ "mode": "hold_headers", "count": 1 }));
+    engine.control(
+        "events",
+        json!({ "mode": "delay_connected", "delay_ms": 2_000 }),
+    );
     let machine = Machine::start(
         &mut case,
         &directory.path().join("delayed"),
         &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
     );
-    wait_for_requests(&engine, "events", 1);
-    machine.advance(seconds(10.0));
-    machine.seams.advance(seconds(1.2));
+    machine.seams.wait_for_count("connection.attempt", 1);
+    // The CLI's clock moves first, so that the connected event it waits for
+    // arrives 2 seconds after its process started.
+    machine.advance(seconds(2.0));
+    engine.advance(seconds(2.0));
     machine.wait_for("online");
     let first = engine.received("ready")[0]["body"]["startup"].clone();
     let phase = |name: &str| first[name].as_i64().unwrap();
     assert!(phase("connect_ms") >= 2_000, "{first}");
     assert!(
-        phase("config_ms") + phase("connect_ms") + phase("ready_ms") <= 11_200,
+        phase("config_ms") + phase("connect_ms") + phase("ready_ms") <= 2_000,
         "{first}"
     );
     engine.control("break_stream", json!({ "instance_id": INSTANCE }));
@@ -1084,7 +1148,7 @@ fn ready_carries_the_startup_phases_until_one_is_accepted() {
     assert_eq!(readies.len(), 2);
     assert_eq!(readies[1]["body"].get("startup"), None);
     case.observe(format!(
-        "the first ready carried {first}; the resume sent no ready; the new connection's ready carried no startup"
+        "the first ready, 2,000 ms after the process started, carried {first}; the resume sent no ready; the new connection's ready carried no startup"
     ));
 }
 

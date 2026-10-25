@@ -71,11 +71,12 @@ temporary directories. No workspace crate depends on this package.
   configuration that sends no request, and no key in what a connecting
   `server run` writes or shows.
 - `tests/connection.rs`: the Connection owner against the reference control
-  server: refused credentials and versions, the attempt timeout and the
-  backoff, staging until the ready ACK and its limit, grants from first
-  sends, conflicts and predecessors, a deadline passed in one clock step,
-  answers of an ended connection, the event size and protocol version, the
-  startup phases in ready, and a redirect that is not followed.
+  server: refused credentials and versions, a credential expired before
+  start, the attempt timeout and the backoff, staging until the ready ACK and
+  its limit, a stream lost before that ACK, grants from first sends,
+  conflicts and predecessors, a deadline passed in one clock step, answers of
+  an ended connection, the event size and protocol version, the startup
+  phases in ready, and a redirect that is not followed.
 - `tests/local_service.rs`: `server run`, `server status` and `server stop`
   and the local API: status while Engine is unreachable, the wrong routes,
   shutdown on request, on each signal and with a handler blocked, one owner
