@@ -6,12 +6,16 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+axum = { workspace = true, features = ["http1", "json", "tokio"] }
 connection.workspace = true
 drive.workspace = true
 execution.workspace = true
 mcp.workspace = true
 protocol.workspace = true
+observe.workspace = true
 rustix = { workspace = true, features = ["fs"] }
+serde_json.workspace = true
 session.workspace = true
 state.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "signal", "sync", "time"] }

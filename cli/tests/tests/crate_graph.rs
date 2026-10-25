@@ -49,7 +49,7 @@ const ALLOWED_DEPENDENCIES: &[(&str, &[&str])] = &[
             "observe",
         ],
     ),
-    ("sdk", &["protocol"]),
+    ("sdk", &["protocol", "state"]),
     (
         "connection",
         &["execution", "drive", "mcp", "protocol", "state", "observe"],

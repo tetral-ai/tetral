@@ -36,6 +36,37 @@ fn system_clock() -> Duration {
     )
 }
 
+/// How long [`sleep_until`] waits before it reads the clock again, so that a
+/// deadline that passes while the machine sleeps ends the wait within this
+/// interval of waking.
+pub const RECHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// [`RECHECK_INTERVAL`] while the test harness serves the clock, which moves
+/// only when a test advances it.
+#[cfg(feature = "test-seams")]
+pub const HARNESS_RECHECK_INTERVAL: Duration = Duration::from_millis(10);
+
+/// Waits until [`now`] reaches `deadline`. It never sleeps through one timer
+/// set for the whole wait: the runtime's timers do not count the machine's
+/// sleep, so it reads the clock again after each recheck interval.
+pub async fn sleep_until(deadline: Duration) {
+    loop {
+        let remaining = deadline.saturating_sub(now());
+        if remaining.is_zero() {
+            return;
+        }
+        tokio::time::sleep(remaining.min(recheck_interval())).await;
+    }
+}
+
+fn recheck_interval() -> Duration {
+    #[cfg(feature = "test-seams")]
+    if harness::named().is_some() {
+        return HARNESS_RECHECK_INTERVAL;
+    }
+    RECHECK_INTERVAL
+}
+
 /// Reads the clock once from the test harness that the environment names,
 /// so that a harness that does not answer fails the process at its start.
 pub fn check_harness() {

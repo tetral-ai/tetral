@@ -17,6 +17,7 @@ pub enum Code {
     InvalidConfiguration,
     IoFailed,
     ServerRunning,
+    ServerNotRunning,
 }
 
 impl Code {
@@ -29,6 +30,7 @@ impl Code {
             Code::InvalidConfiguration => "invalid_configuration",
             Code::IoFailed => "io_failed",
             Code::ServerRunning => "server_running",
+            Code::ServerNotRunning => "server_not_running",
         }
     }
 }

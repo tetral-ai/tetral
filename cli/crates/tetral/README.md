@@ -29,12 +29,25 @@ runs as child processes of itself.
   `credentials.json`, then `config.toml`, which keeps its local
   options; it writes `{}`. It never reads `credentials.json`, so it replaces a
   missing or broken credential and a pair that disagrees.
+- `tetral server run --app <app> [--idle-exit <duration>]`: runs the App
+  Server in the foreground (`appserver`) until a shutdown, then writes the
+  status as of its exit. It opens the log file once the start can no longer
+  fail; one that cannot be opened is recorded as `log.file_open_failed`, and
+  the App Server runs on. The command checks `--idle-exit`'s `<duration>`, a
+  positive integer followed by `s`, `m` or `h`, with its other arguments; the
+  App Server does not act on it.
+- `tetral server status --app <app>` and `tetral server stop --app <app>`:
+  `GET /v1/status` and `POST /v1/shutdown` through the SDK, writing the status
+  or `{}`; `server_not_running` when no App Server answers. `server stop`
+  returns at the `202`, before the App Server has exited.
 
 ## Where things are
 
 - `src/main.rs`: `main`. Past `--version`, it first checks the test harness
   (`state::seams::check_harness`).
 - `src/commands.rs`: the command line and the checks every command runs.
+- `src/server.rs`: `server run`, `server status` and `server stop`, and the
+  codes of their failures.
 - `src/configure.rs`: `configure`, its commit with the barriers
   `configure.locked`, `configure.credentials_replaced` and
   `configure.config_replaced`, and the in-process tests of a commit stopped

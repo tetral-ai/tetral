@@ -58,11 +58,21 @@ temporary directories. No workspace crate depends on this package.
   owner, mode and bytes.
 - `src/control_socket.rs`: the locks on `S` and its replacements for a case.
 - `src/other_user.rs`: a directory that another user owns.
+- `src/app_server.rs`: `AppServer`, a running `server run`, and `request`, one
+  raw HTTP/1.1 request to the local API over a socket whose path it derives
+  apart from the code under test (`socket_path`).
 - `tests/configure.rs`: `tetral configure` and `tetral --version`: the refused
   arguments, bootstraps, apps and control paths with the root unchanged, the
   size limit and private modes of a new root, each failure code, configure
   over a broken pair, a newer `config.toml` and interrupted replacements, and
   no key in the output or the argument list.
+- `tests/local_service.rs`: `server run`, `server status` and `server stop`
+  and the local API: status while Engine is unreachable, the wrong routes,
+  shutdown on request, on each signal and with a handler blocked, one owner
+  per root, restart after SIGKILL, 16 SDK clients at once, the socket's path,
+  modes and hourly modification time, an unsafe `S`, every result and failure
+  code with the root unchanged, a log file that cannot be opened, and no key
+  in status.
 - `tests/crate_graph.rs`: the rules of the crate graph, checked over the
   output of `cargo metadata`, and the rule that no library crate prints,
   checked over the library crates' sources.

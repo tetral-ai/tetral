@@ -24,7 +24,9 @@ credential files, the clock and the test seams.
   failure under the root is an `IoFailure` naming its path.
 - An unknown member of `config.toml` is ignored (`config::Config`).
 - Every timer and deadline of the CLI reads `seams::now`, a clock that counts
-  the time the machine sleeps, never `std::time::Instant` (`seams`).
+  the time the machine sleeps, never `std::time::Instant` (`seams`). A task
+  waits for a deadline with `seams::sleep_until`, which reads the clock again
+  at least every `seams::RECHECK_INTERVAL`.
 - Its test seams, `seams::check_harness`, `seams::barrier`,
   `seams::barrier_blocking` and `seams::count`, do nothing unless the crate
   feature `test-seams` is on (`seams`).
@@ -39,24 +41,30 @@ credential files, the clock and the test seams.
 | `run/app-server.lock` | The lock that the one process owning the root holds; never unlinked or replaced | `0600` |
 
 The root itself has mode `0700`, and the check accepts no permission bit for
-group or others on any of these paths. The App Server's socket lies outside
+group or others on any of these paths. `server run` also creates `logs/` for
+its log files (`paths::LOGS`, written by `observe::LogFile`), which the root
+checks do not cover. The App Server's socket lies outside
 the root, at `S/<h>.sock`: `S` is `/tmp/tetral-sock-<uid>` on Linux and
 `/private/tmp/tetral-sock-<uid>` on macOS, `<uid>` the process's real user ID,
 and `<h>` the first 16 lowercase hexadecimal characters of the SHA-256 of the
 root's canonical path (`paths::socket_path`). The path is at most 57 bytes.
 Once the root exists, `S` must be a directory of the current user with mode
-exactly `0700` and the socket a socket of the current user with mode `0600`.
+exactly `0700` and the socket a socket of the current user with mode `0600`
+(`private::check_socket`). The App Server creates a missing `S` with that
+mode and refuses one of another owner or mode, or a symbolic link, leaving it
+as it is (`private::create_socket_dir`).
 
 ## Where things are
 
 - `lib.rs`: this documentation and the print lints that `cli/README.md` states.
 - `paths.rs`: `StateRoot`, the names in the root, `socket_dir` and
   `socket_path`.
-- `private.rs`: `check_root` and the reasons a control path is unsafe.
+- `private.rs`: `check_root`, `check_socket`, `create_socket_dir` and the
+  reasons a control path is unsafe.
 - `atomic.rs`: `IoFailure`, private directory creation, private opening,
   bounded reads, `replace` and `remove_interrupted_replacements`.
 - `config.rs`: `Config`, its reading and its replacement.
 - `credentials.rs`: the bounded reading and the replacement of
   `credentials.json`.
-- `seams.rs`: the clock, the barriers, the counters and, under `test-seams`,
-  the process side of the seam protocol.
+- `seams.rs`: the clock, `sleep_until`, the barriers, the counters and, under
+  `test-seams`, the process side of the seam protocol.

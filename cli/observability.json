@@ -2,7 +2,8 @@
   "events": [
     {"name": "cold_start.phase_started", "level": "INFO", "fields": [{"name": "cold_start.kind", "type": "enum", "values": ["cli"]}, {"name": "cold_start.phase", "type": "enum", "values": ["config", "connect", "ready"]}]},
     {"name": "cold_start.phase_completed", "level": "INFO", "fields": [{"name": "cold_start.kind", "type": "enum", "values": ["cli"]}, {"name": "cold_start.phase", "type": "enum", "values": ["config", "connect", "ready"]}, {"name": "config_ms", "type": "ms"}, {"name": "connect_ms", "type": "ms"}, {"name": "ready_ms", "type": "ms"}]},
-    {"name": "diagnostic.invalid_event", "level": "WARN", "log_type": "app", "fields": [{"name": "event.original", "type": "event_name"}]}
+    {"name": "diagnostic.invalid_event", "level": "WARN", "log_type": "app", "fields": [{"name": "event.original", "type": "event_name"}]},
+    {"name": "log.file_open_failed", "level": "WARN", "log_type": "app", "errors": [{"code": "log_file_open_failed", "class": "io_error", "message_safe": "the log file could not be opened"}]}
   ],
   "metrics": [
     {"name": "tetral_connection_state", "type": "gauge", "labels": [{"name": "state", "values": ["disconnected", "connecting", "registering", "online", "resuming", "blocked", "stopping", "stopped"]}]},

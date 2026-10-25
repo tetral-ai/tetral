@@ -58,7 +58,7 @@ other features, so that the released binary holds none.
 |---|---|---|
 | 1 | `tetral` | The binary: its commands, the App Server assembly, and the internal entry points the App Server runs as child processes |
 | 2 | `appserver` | The state-root lock, the local API server, startup, shutdown and the lifecycle task |
-| 2 | `sdk` | The typed client of the local API; it depends on `protocol` only |
+| 2 | `sdk` | The typed client of the local API; it depends on `protocol` and `state` only |
 | 3 | `connection` | The Connection owner, the Report outbox, the HTTP and SSE transport to Engine and the drive transfer client |
 | 3 | `session` | The Session binding owners, the directory probe and repository clones |
 | 4 | `execution` | The Task supervisors, the translation of `sandbox_policy`, each call's permissions, into process isolation, and the tools |

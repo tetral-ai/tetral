@@ -12,6 +12,7 @@
 
 use std::ffi::OsString;
 use std::io;
+use std::time::Duration;
 
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
@@ -21,8 +22,8 @@ use state::config::{self, ConfigError};
 use state::paths::{ROOT_VARIABLE, StateRoot};
 use state::private::{self, CheckError};
 
-use crate::configure;
 use crate::output::{Code, CommandError};
+use crate::{configure, server};
 
 #[derive(Parser)]
 #[command(
@@ -45,14 +46,59 @@ enum Command {
         #[arg(long)]
         from_stdin: bool,
     },
+    /// Runs, queries or stops the App Server.
+    Server {
+        #[command(subcommand)]
+        command: ServerCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServerCommand {
+    Run {
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        idle_exit: Option<String>,
+    },
+    Status {
+        #[arg(long)]
+        app: Option<String>,
+    },
+    Stop {
+        #[arg(long)]
+        app: Option<String>,
+    },
 }
 
 impl Command {
     fn app(&self) -> Option<&str> {
         match self {
-            Command::Configure { app, .. } => app.as_deref(),
+            Command::Configure { app, .. }
+            | Command::Server {
+                command:
+                    ServerCommand::Run { app, .. }
+                    | ServerCommand::Status { app }
+                    | ServerCommand::Stop { app },
+            } => app.as_deref(),
         }
     }
+}
+
+/// `<duration>`: a positive integer followed by `s`, `m` or `h`.
+fn duration(text: &str) -> Option<Duration> {
+    let (count, unit) = text.split_at_checked(text.len().checked_sub(1)?)?;
+    let seconds: u64 = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        _ => return None,
+    };
+    if count.is_empty() || !count.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let count: u64 = count.parse().ok().filter(|count| *count > 0)?;
+    count.checked_mul(seconds).map(Duration::from_secs)
 }
 
 /// `tetral --version` alone, which runs before any check and reads no
@@ -83,13 +129,26 @@ pub fn run(arguments: Vec<OsString>) -> Result<Value, CommandError> {
         .ok_or_else(|| invalid_arguments("--app must name the app"))?
         .to_owned();
     let level = observe::Level::from_env().map_err(|error| invalid_arguments(error.to_string()))?;
-    let Command::Configure { from_stdin, .. } = cli.command;
-    if !from_stdin {
-        return Err(invalid_arguments(
-            "configure reads its bootstrap only with --from-stdin",
-        ));
+    match &cli.command {
+        Command::Configure { from_stdin, .. } if !from_stdin => {
+            return Err(invalid_arguments(
+                "configure reads its bootstrap only with --from-stdin",
+            ));
+        }
+        Command::Server {
+            command:
+                ServerCommand::Run {
+                    idle_exit: Some(idle_exit),
+                    ..
+                },
+        } if duration(idle_exit).is_none() => {
+            return Err(invalid_arguments(
+                "--idle-exit takes a positive integer followed by s, m or h",
+            ));
+        }
+        _ => {}
     }
-    observe::install(level);
+    let observer = observe::install(level);
 
     private::check_root(&root).map_err(check_failed)?;
     if let Some(recorded) = config::read(&root).map_err(config_failed)?
@@ -98,7 +157,14 @@ pub fn run(arguments: Vec<OsString>) -> Result<Value, CommandError> {
         return Err(app_mismatch());
     }
 
-    configure::run(&root, &app, io::stdin().lock())
+    match cli.command {
+        Command::Configure { .. } => configure::run(&root, &app, io::stdin().lock()),
+        Command::Server { command } => match command {
+            ServerCommand::Run { .. } => server::run(&root, &observer),
+            ServerCommand::Status { .. } => server::status(&root),
+            ServerCommand::Stop { .. } => server::stop(&root),
+        },
+    }
 }
 
 fn invalid_arguments(message: impl Into<String>) -> CommandError {
@@ -113,7 +179,7 @@ pub(crate) fn io_failed(failure: IoFailure) -> CommandError {
     CommandError::new(Code::IoFailed, failure.to_string())
 }
 
-fn check_failed(error: CheckError) -> CommandError {
+pub(crate) fn check_failed(error: CheckError) -> CommandError {
     match error {
         CheckError::Unsafe { .. } => CommandError::new(Code::UnsafeControlPath, error.to_string()),
         CheckError::Io(failure) => io_failed(failure),

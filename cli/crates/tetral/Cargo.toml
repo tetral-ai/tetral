@@ -14,8 +14,10 @@ appserver.workspace = true
 clap = { workspace = true, features = ["derive"] }
 observe.workspace = true
 protocol.workspace = true
+sdk.workspace = true
 serde_json.workspace = true
 state.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [dev-dependencies]
 tempfile.workspace = true

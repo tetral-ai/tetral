@@ -28,6 +28,7 @@ clap = "4.6.7"
 eventsource-stream = "0.2.3"
 flate2 = "1.1.10"
 fuser = "0.18.0"
+hyper = "1.12.0"
 hyper-util = "0.1.21"
 jsonschema = { version = "0.60.1", default-features = false }
 nfsserve = "0.11.0"

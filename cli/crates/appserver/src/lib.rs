@@ -2,4 +2,8 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 pub mod configuration;
+pub mod lifecycle;
+pub mod local_api;
 pub mod lock;
+pub mod shutdown;
+pub mod startup;

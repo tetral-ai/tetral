@@ -7,6 +7,8 @@ use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
+use rustix::fs::{Mode, OFlags};
+
 use crate::atomic::IoFailure;
 use crate::paths::{self, StateRoot};
 
@@ -80,13 +82,44 @@ pub fn check_root(root: &StateRoot) -> Result<(), CheckError> {
     for file in [paths::LOCK, paths::CONFIG, paths::CREDENTIALS] {
         check(&root.join(file), Kind::RegularFile, Permissions::Private)?;
     }
+    check_socket(root)?;
+    Ok(())
+}
+
+/// Checks `S` and the root's socket as [`check_root`] does, and gives the
+/// socket's path; `None` when the root does not exist.
+pub fn check_socket(root: &StateRoot) -> Result<Option<PathBuf>, CheckError> {
     let socket = paths::socket_path(root).map_err(|error| IoFailure::new(root.path(), error))?;
     let directory = paths::socket_dir();
     if check(&directory, Kind::Directory, Permissions::Exactly(0o700))?
-        && let Some(socket) = socket
+        && let Some(socket) = &socket
     {
-        check(&socket, Kind::Socket, Permissions::Exactly(0o600))?;
+        check(socket, Kind::Socket, Permissions::Exactly(0o600))?;
     }
+    Ok(socket)
+}
+
+/// Creates a missing `S` with mode `0700`, then checks `S` as
+/// [`check_root`] does: an existing `S` keeps its mode, so one with another
+/// mode or owner, or a symbolic link, is refused and left as it is.
+pub fn create_socket_dir() -> Result<(), CheckError> {
+    let directory = paths::socket_dir();
+    match rustix::fs::mkdir(&directory, Mode::from_raw_mode(0o700)) {
+        Ok(()) => {
+            // The umask may have cleared bits of the mode that mkdir got.
+            let created = rustix::fs::open(
+                &directory,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|error| IoFailure::new(&directory, error))?;
+            rustix::fs::fchmod(&created, Mode::from_raw_mode(0o700))
+                .map_err(|error| IoFailure::new(&directory, error))?;
+        }
+        Err(rustix::io::Errno::EXIST) => {}
+        Err(error) => return Err(IoFailure::new(&directory, error).into()),
+    }
+    check(&directory, Kind::Directory, Permissions::Exactly(0o700))?;
     Ok(())
 }
 
