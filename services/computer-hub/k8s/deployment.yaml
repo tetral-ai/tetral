@@ -26,6 +26,7 @@ spec:
     spec:
       serviceAccountName: computer-hub
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
       containers:
         - name: computer-hub
           image: ghcr.io/tetral-ai/tetral:0.0.0-dev

@@ -37,6 +37,7 @@ spec:
     spec:
       serviceAccountName: computer-hub
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
       containers:
         - name: computer-hub
           image: ghcr.io/tetral-ai/tetral:0.0.0-dev
@@ -270,3 +271,30 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: computer-hub
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: computer-hub
+    app.kubernetes.io/component: computer-hub
+    app.kubernetes.io/part-of: tetral
+  annotations:
+    tetral.ai/hpa-metric-source: "prometheus-adapter: computerhub_open_streams"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: computer-hub
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: computerhub_open_streams
+        target:
+          type: AverageValue
+          averageValue: "1000"

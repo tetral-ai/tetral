@@ -85,6 +85,12 @@
         "apiVersion": "autoscaling/v2",
         "kind": "HorizontalPodAutoscaler",
         "namespace": "tetral-system",
+        "name": "computer-hub"
+      },
+      {
+        "apiVersion": "autoscaling/v2",
+        "kind": "HorizontalPodAutoscaler",
+        "namespace": "tetral-system",
         "name": "git-proxy"
       },
       {
@@ -766,6 +772,12 @@
         "kind": "Deployment",
         "namespace": "tetral-system",
         "name": "web-connector"
+      },
+      {
+        "apiVersion": "autoscaling/v2",
+        "kind": "HorizontalPodAutoscaler",
+        "namespace": "tetral-system",
+        "name": "computer-hub"
       },
       {
         "apiVersion": "autoscaling/v2",

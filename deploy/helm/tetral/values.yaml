@@ -185,9 +185,15 @@ jobRunner:
   heartbeatIntervalMs: 10000
   maxJobs: 8
 
-# Two computer-hub replicas, so a CLI keeps a hub while one Pod restarts.
 computerHub:
-  replicas: 2
+  # The HorizontalPodAutoscaler keeps between minReplicas and maxReplicas hub
+  # Pods at an average of targetOpenStreamsPerPod open client streams
+  # (computerhub_open_streams through prometheus-adapter); two Pods keep a
+  # serving hub while one restarts.
+  autoscaling:
+    minReplicas: 2
+    maxReplicas: 10
+    targetOpenStreamsPerPod: 1000
   # Latest expiry an issued connection credential may have, as a Go duration
   # after issuance; also the lifetime of a credential issued without one.
   maxCredentialLifetime: 720h

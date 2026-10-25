@@ -351,8 +351,15 @@ role.
 Their declared Deployment replica defaults are one. Set `replicas.api`, `replicas.auth`, `replicas.bridge`,
 `replicas.jobRunner`, `replicas.sandbox`, `replicas.providerGateway`, `replicas.mcpConnector` or
 `replicas.webConnector` independently to a positive integer.
-`computerHub.replicas` defaults to two, so a CLI keeps a serving hub while one
-Pod restarts.
+A HorizontalPodAutoscaler scales computer-hub between
+`computerHub.autoscaling.minReplicas` (default two, so a CLI keeps a serving
+hub while one Pod restarts, and the Deployment's initial replicas) and
+`computerHub.autoscaling.maxReplicas` (default ten) at an average of
+`computerHub.autoscaling.targetOpenStreamsPerPod` (default 1,000) open client
+streams per Pod, the `computerhub_open_streams` gauge through the
+prometheus-adapter metric source Git Proxy's autoscaler uses; the connection
+budget counts the maximum. A hub Pod has a 30-second termination grace period
+in which it drains its streams.
 `computerHub.minCLIVersion` and `computerHub.recommendedCLIVersion`, semantic
 versions defaulting to `0.0.0`, set the oldest CLI whose ready the hub accepts
 and the version below which instance reads report `cli_update_available`; the

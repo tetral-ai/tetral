@@ -181,7 +181,7 @@ func TestProtectedDatabaseConsumerCensus(t *testing.T) {
 			}
 			total += jobSlots
 			ledger := transportMap(t, transportAt(t, objects["v1|ConfigMap|tetral-system|tetral-database-connection-budget"], "data"))
-			if fmt.Sprint(ledger["maximumOwnedPoolSlots"]) != strconv.Itoa(total) || total != 281 {
+			if fmt.Sprint(ledger["maximumOwnedPoolSlots"]) != strconv.Itoa(total) || total != 337 {
 				t.Fatalf("independent twelve-consumer total=%d differs from ledger %v", total, ledger)
 			}
 		})
