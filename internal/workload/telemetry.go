@@ -57,14 +57,14 @@ func NewTelemetry(options TelemetryOptions) *Telemetry {
 		service:   options.Service,
 		logger:    options.Logger,
 		tracing:   newTracing(tracingOptions{service: options.Service, environment: defaultString(options.Environment, DefaultDeploymentEnvironment), version: defaultString(options.Version, DefaultServiceVersion), sampleRatio: options.SampleRatio, exporter: options.Exporter}),
-		metrics:   NewRegistry(),
+		metrics:   NewRegistry(options.Service),
 		slowQuery: options.SlowQuery,
 	}
-	t.operations = t.metrics.Histogram("tetral_operation_duration_seconds", "Duration of a completed operation.", RequestDurationBuckets, "service", "operation", "outcome")
-	t.long = t.metrics.Histogram("tetral_long_operation_duration_seconds", "Duration of a completed long operation.", LongOperationDurationBuckets, "service", "operation", "outcome")
-	t.phases = t.metrics.Histogram("cold_start_phase_seconds", "Duration of one completed cold start phase.", LongOperationDurationBuckets, "service", "kind", "phase")
-	t.coldStarts = t.metrics.Histogram("cold_start_seconds", "Duration of a completed cold start, in total and Engine's part.", LongOperationDurationBuckets, "service", "kind", "scope")
-	t.statements = t.metrics.Histogram("db_client_operation_duration_seconds", "Duration of one named database statement or lock acquisition.", RequestDurationBuckets, "service", "operation", "outcome")
+	t.operations = t.metrics.Histogram("tetral_operation_duration_seconds", "Duration of a completed operation.", "service", "operation", "outcome")
+	t.long = t.metrics.Histogram("tetral_long_operation_duration_seconds", "Duration of a completed long operation.", "service", "operation", "outcome")
+	t.phases = t.metrics.Histogram("cold_start_phase_seconds", "Duration of one completed cold start phase.", "service", "kind", "phase")
+	t.coldStarts = t.metrics.Histogram("cold_start_seconds", "Duration of a completed cold start, in total and Engine's part.", "service", "kind", "scope")
+	t.statements = t.metrics.Histogram("db_client_operation_duration_seconds", "Duration of one named database statement or lock acquisition.", "service", "operation", "outcome")
 	if options.SyncExporter != nil {
 		t.tracing.provider.RegisterSpanProcessor(sdktrace.NewSimpleSpanProcessor(options.SyncExporter))
 	}

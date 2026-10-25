@@ -24,6 +24,9 @@ type PostgreSQLQueueStore struct {
 	// jobRunner is the process's direct Job Runner scheduler; a Queue process
 	// constructs exactly one store.
 	jobRunner *jobRunnerScheduler
+	// queueWait is the Queue service's queue_jobs_queue_wait_seconds; the
+	// store of any other process observes no wait.
+	queueWait *workload.Histogram
 }
 
 func NewPostgreSQLStore(client *dbconnect.Client) *PostgreSQLQueueStore {
@@ -41,6 +44,13 @@ func NewPostgreSQLStoreWithRetryPolicy(client *dbconnect.Client, policy RetryPol
 	store := &PostgreSQLQueueStore{client: client, retryPolicy: normalizeRetryPolicy(policy)}
 	store.jobRunner = newJobRunnerScheduler(store)
 	return store
+}
+
+// ObserveQueueWaitIn makes each committed lease observe its wait in
+// registry's queue_jobs_queue_wait_seconds, which the Queue service's table
+// declares; the Queue service calls it on its one store.
+func (s *PostgreSQLQueueStore) ObserveQueueWaitIn(registry *workload.Registry) {
+	s.queueWait = registry.Histogram("queue_jobs_queue_wait_seconds", "Time a queue job waited from its ready_at to its lease.", "kind")
 }
 
 func normalizeRetryPolicy(policy RetryPolicy) RetryPolicy {
@@ -578,7 +588,7 @@ func (s *PostgreSQLQueueStore) Lease(ctx context.Context, request LeaseRequest) 
 	if err != nil {
 		return nil, err
 	}
-	observeQueueWait(leased...)
+	s.observeQueueWait(leased...)
 	return leased, nil
 }
 
@@ -2309,13 +2319,12 @@ func scanJob(row interface{ Scan(dest ...any) error }) (*Job, error) {
 
 // observeQueueWait records, once per committed lease, how long the job waited
 // from its ready_at to its leased_at, the lease statement's clock_timestamp().
-func observeQueueWait(jobs ...*Job) {
-	histogram := workload.CurrentTelemetry().Registry().Histogram("queue_jobs_queue_wait_seconds", "Time a queue job waited from its available_at to its lease.", workload.LongOperationDurationBuckets, "kind")
+func (s *PostgreSQLQueueStore) observeQueueWait(jobs ...*Job) {
 	for _, job := range jobs {
 		if job == nil || job.LeasedAt == nil {
 			continue
 		}
-		histogram.Observe(job.LeasedAt.Sub(job.ReadyAt).Seconds(), job.Kind)
+		s.queueWait.Observe(job.LeasedAt.Sub(job.ReadyAt).Seconds(), job.Kind)
 	}
 }
 

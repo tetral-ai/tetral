@@ -168,7 +168,14 @@ and diagnostics; a service table never repeats them. A Go service embeds its
 table and calls `RegisterDeclarations` from an `init` function. A logger of a
 registered service refuses an undeclared event and `Observe` an undeclared
 operation: a test binary fails at once, production writes
-`diagnostic.invalid_event`. `deploy/managed/logging-inventory.json`,
+`diagnostic.invalid_event`. `Registry` creates a metric family only from its
+declaration: the type, label names and buckets (`request`, `long` or a list)
+come from the table, the code gives the name, help text and label order, and a
+sample whose label value is outside a declared values list is dropped. An
+undeclared name, or one declared with another type or other labels, fails a
+test binary and in production gives a handle that records nothing. Collectors
+and metric text a service writes by hand are checked by the inventory test
+alone. `deploy/managed/logging-inventory.json`,
 `metrics-inventory.json` and `span-inventory.json` catalogue the same
 declarations; `TestObservationInventory` fails on any difference.
 

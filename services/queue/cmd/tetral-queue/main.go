@@ -58,6 +58,7 @@ func run(ctx context.Context, env tetralqueue.Env) error {
 		MaxDelay:    cfg.RetryMaxDelay,
 		MaxAttempts: cfg.RetryMaxAttempts,
 	})
+	store.ObserveQueueWaitIn(workload.CurrentTelemetry().Registry())
 	if err := store.VerifyReady(ctx); err != nil {
 		return workload.LogStartupFailure(logger, "queue", workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}

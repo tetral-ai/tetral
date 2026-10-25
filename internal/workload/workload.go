@@ -177,13 +177,13 @@ type HTTPMetrics struct {
 // NewHTTPMetrics requires the owning service name from the closed workload
 // domain; see NewOperationMetrics.
 func NewHTTPMetrics(service string) *HTTPMetrics {
-	registry := NewRegistry()
+	registry := NewRegistry(service)
 	return &HTTPMetrics{
 		Operations: NewOperationMetrics(service),
 		service:    service,
 		registry:   registry,
-		requests:   registry.Histogram("http_server_request_duration_seconds", "Duration of one HTTP request.", RequestDurationBuckets, "service", "route", "method", "status_class"),
-		streams:    registry.Histogram("http_server_stream_duration_seconds", "Duration of one long HTTP request, a stream or a content transfer.", LongOperationDurationBuckets, "service", "route", "method", "status_class"),
+		requests:   registry.Histogram("http_server_request_duration_seconds", "Duration of one HTTP request.", "service", "route", "method", "status_class"),
+		streams:    registry.Histogram("http_server_stream_duration_seconds", "Duration of one long HTTP request, a stream or a content transfer.", "service", "route", "method", "status_class"),
 	}
 }
 
@@ -244,12 +244,12 @@ type GRPCMetrics struct {
 // NewGRPCMetrics requires the owning service name from the closed workload
 // domain; see NewOperationMetrics.
 func NewGRPCMetrics(service string) *GRPCMetrics {
-	registry := NewRegistry()
+	registry := NewRegistry(service)
 	return &GRPCMetrics{
 		Operations: NewOperationMetrics(service),
 		service:    service,
 		registry:   registry,
-		requests:   registry.Histogram("grpc_server_request_duration_seconds", "Duration of one internal gRPC call.", RequestDurationBuckets, "service", "method", "code"),
+		requests:   registry.Histogram("grpc_server_request_duration_seconds", "Duration of one internal gRPC call.", "service", "method", "code"),
 		methods:    map[string]bool{},
 	}
 }

@@ -24,7 +24,11 @@ const observeTestTable = `{
       "errors": {"lease_expired": {"class": "lease_error", "message_safe": "lease expired"}}}
   },
   "operations": {"lease.renew": {"long": false, "errors": ["lease_expired"]}},
-  "metrics": {},
+  "metrics": {
+    "observe_test_rejected_total": {"type": "counter", "audience": "operators", "labels": {"cause": ["capacity"]}},
+    "pressure_test_rejected_total": {"type": "counter", "audience": "operators", "labels": {"cause": ["capacity"]}},
+    "observe_test_wait_seconds": {"type": "histogram", "audience": "operators", "labels": {"kind": ["lease"], "service": "service names"}, "buckets": [1, 2]}
+  },
   "spans": {}
 }`
 
@@ -205,6 +209,47 @@ func TestUndeclaredOperationFailsTestsAndRecordsInvalidEventInProduction(t *test
 	}
 	if got := histogramCount(t, telemetry, "tetral_operation_duration_seconds", "unknown_operation", "ok"); got != 1 {
 		t.Fatalf("undeclared operation kept its own label: %v", got)
+	}
+}
+
+// The registry takes a family's type, labels and buckets from its
+// declaration: a name declared with another type or other labels is as
+// undeclared as a missing one.
+func TestRegistryCreatesOnlyDeclaredFamiliesWithTheirDeclaredShape(t *testing.T) {
+	RegisterDeclarations("observe-test", []byte(observeTestTable))
+	registry := NewRegistry("observe-test")
+	for name, create := range map[string]func(){
+		"undeclared name":  func() { registry.Counter("observe_test_undeclared_total", "Undeclared.", "cause") },
+		"another type":     func() { registry.Gauge("observe_test_rejected_total", "Wrong type.", "cause") },
+		"other label name": func() { registry.Counter("observe_test_rejected_total", "Wrong label.", "reason") },
+		"a missing label":  func() { registry.Histogram("observe_test_wait_seconds", "Missing label.", "kind") },
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: creating the family did not fail the test", name)
+				}
+			}()
+			create()
+		}()
+	}
+	failOnUndeclared = false
+	t.Cleanup(func() { failOnUndeclared = true })
+	registry.Counter("observe_test_undeclared_total", "Undeclared.", "cause").Add(1, "capacity")
+	wait := registry.Histogram("observe_test_wait_seconds", "Declared.", "service", "kind")
+	wait.Observe(1.5, "observe-test", "lease")
+	wait.Observe(1.5, "observe-test", "renew")
+	want := strings.Join([]string{
+		"# HELP observe_test_wait_seconds Declared.",
+		"# TYPE observe_test_wait_seconds histogram",
+		`observe_test_wait_seconds_bucket{kind="lease",le="1",service="observe-test"} 0`,
+		`observe_test_wait_seconds_bucket{kind="lease",le="2",service="observe-test"} 1`,
+		`observe_test_wait_seconds_bucket{kind="lease",le="+Inf",service="observe-test"} 1`,
+		`observe_test_wait_seconds_count{kind="lease",service="observe-test"} 1`,
+		`observe_test_wait_seconds_sum{kind="lease",service="observe-test"} 1.5`,
+	}, "\n") + "\n"
+	if got := registry.Text(); got != want {
+		t.Fatalf("registry text =\n%s\nwant only the declared family, its declared buckets and its declared label value:\n%s", got, want)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -1003,7 +1004,7 @@ func TestPostgreSQLStoreLeaseAndHeartbeatUseDatabaseClock(t *testing.T) {
 
 // Both lease paths return the traceparent the producer enqueued under (none
 // for untraced work) and observe one queue_jobs_queue_wait_seconds sample per
-// lease, measured from available_at rather than from admission.
+// lease, measured from ready_at rather than from admission.
 func TestPostgreSQLStoreLeaseReturnsProducerTraceAndObservesOneQueueWait(t *testing.T) {
 	ws := workspace.ID("ws_queue_trace")
 	for _, row := range []struct {
@@ -1028,8 +1029,15 @@ func TestPostgreSQLStoreLeaseReturnsProducerTraceAndObservesOneQueueWait(t *test
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			store, admin, _ := newJobRunnerTestStore(t, nil)
+			// The family is the queue service's, declared in its table.
+			table, err := os.ReadFile("../../services/queue/observability.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			workload.RegisterDeclarations("queue", table)
 			telemetry := workload.NewTelemetry(workload.TelemetryOptions{Service: "queue", SampleRatio: 1})
 			t.Cleanup(workload.InstallTelemetry(telemetry))
+			store.ObserveQueueWaitIn(telemetry.Registry())
 			ctx, want := context.Background(), ""
 			if row.traced {
 				var producer *workload.Span

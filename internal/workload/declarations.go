@@ -144,6 +144,16 @@ func ParseDeclarations(data []byte) (*Declarations, error) {
 		if (metric.Type == "histogram") != (len(metric.Buckets) > 0) {
 			return nil, fmt.Errorf("metric %q: only a histogram declares buckets", name)
 		}
+		if metric.Type == "histogram" {
+			if _, err := declaredBuckets(metric.Buckets); err != nil {
+				return nil, fmt.Errorf("metric %q: %w", name, err)
+			}
+		}
+		for label, raw := range metric.Labels {
+			if _, err := declaredLabelValues(raw); err != nil {
+				return nil, fmt.Errorf("metric %q label %q: %w", name, label, err)
+			}
+		}
 	}
 	return &table, nil
 }
@@ -204,6 +214,59 @@ func lookupOperation(service, operation string) (OperationDeclaration, bool) {
 		}
 	}
 	return OperationDeclaration{}, false
+}
+
+// lookupMetric finds the family name for service, as lookupOperation finds an
+// operation.
+func lookupMetric(service, name string) (MetricDeclaration, bool) {
+	if declared, ok := LibraryDeclarations.Metrics[name]; ok {
+		return declared, true
+	}
+	declarationRegistry.RLock()
+	defer declarationRegistry.RUnlock()
+	if table := declarationRegistry.tables[service]; table != nil {
+		declared, ok := table.Metrics[name]
+		return declared, ok
+	}
+	for _, table := range declarationRegistry.tables {
+		if declared, ok := table.Metrics[name]; ok {
+			return declared, true
+		}
+	}
+	return MetricDeclaration{}, false
+}
+
+// declaredLabelValues returns a label's values list, or nil for a closed
+// domain named by a string.
+func declaredLabelValues(raw json.RawMessage) ([]string, error) {
+	var domain string
+	if json.Unmarshal(raw, &domain) == nil {
+		return nil, nil
+	}
+	var values []string
+	if err := json.Unmarshal(raw, &values); err != nil || len(values) == 0 {
+		return nil, fmt.Errorf("labels list values or name a domain")
+	}
+	return values, nil
+}
+
+// declaredBuckets reads "request", "long" or an ascending list of bounds.
+func declaredBuckets(raw json.RawMessage) ([]float64, error) {
+	var set string
+	if json.Unmarshal(raw, &set) == nil {
+		switch set {
+		case "request":
+			return RequestDurationBuckets, nil
+		case "long":
+			return LongOperationDurationBuckets, nil
+		}
+		return nil, fmt.Errorf("bucket set %q is neither request nor long", set)
+	}
+	var bounds []float64
+	if err := json.Unmarshal(raw, &bounds); err != nil || len(bounds) == 0 || !slices.IsSorted(bounds) {
+		return nil, fmt.Errorf("buckets are request, long or an ascending list")
+	}
+	return bounds, nil
 }
 
 // failOnUndeclared is true in test binaries, where a name missing from a
