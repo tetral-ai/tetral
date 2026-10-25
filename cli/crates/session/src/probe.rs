@@ -50,11 +50,13 @@ impl Probe {
 }
 
 /// Spawns `program` as the probe of `input`, counted as the test seam
-/// counter `probe.spawn`. Once the child is reaped, `done` gets its result,
-/// `None` when it wrote none that reads.
+/// counter `probe.spawn`, and reads at most `output_max_bytes` of its stdout:
+/// [`OUTPUT_MAX_BYTES`] but for tests. Once the child is reaped, `done` gets
+/// its result, `None` when it wrote none that reads.
 pub fn spawn(
     program: &Path,
     input: &Input,
+    output_max_bytes: u64,
     done: impl FnOnce(Option<Output>) + Send + 'static,
 ) -> io::Result<Probe> {
     let mut command = tokio::process::Command::new(program);
@@ -86,7 +88,7 @@ pub fn spawn(
             state::seams::barrier("probe.started").await;
             let mut output = Vec::new();
             if let Some(stdout) = stdout {
-                let _ = stdout.take(OUTPUT_MAX_BYTES).read_to_end(&mut output).await;
+                let _ = stdout.take(output_max_bytes).read_to_end(&mut output).await;
             }
             output
         };
@@ -132,27 +134,27 @@ mod tests {
             cwd: "/project".to_owned(),
         };
         // Both lines parse as the same result when read whole.
+        let short = r#"{"cwd":"/project"}"#.to_owned();
         let padding = "x".repeat(usize::try_from(OUTPUT_MAX_BYTES).unwrap());
-        let lines = [
-            (r#"{"cwd":"/project"}"#.to_owned(), Some(entered)),
-            (
-                format!(r#"{{"cwd":"/project","padding":"{padding}"}}"#),
-                None,
-            ),
+        let long = format!(r#"{{"cwd":"/project","padding":"{padding}"}}"#);
+        let rows = [
+            (short.clone(), OUTPUT_MAX_BYTES, Some(entered)),
+            (long, OUTPUT_MAX_BYTES, None),
+            (short, 8, None),
         ];
-        for (index, (line, expected)) in lines.into_iter().enumerate() {
+        for (index, (line, limit, expected)) in rows.into_iter().enumerate() {
             let program = directory.path().join(format!("probe-{index}"));
             std::fs::write(&program, format!("#!/bin/sh\necho '{line}'\n")).unwrap();
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
             let (result, done) = oneshot::channel();
-            let _probe = spawn(&program, &input, move |output| {
+            let _probe = spawn(&program, &input, limit, move |output| {
                 let _ = result.send(output);
             })
             .unwrap();
             assert_eq!(
                 done.await.unwrap(),
                 expected,
-                "line of {} bytes",
+                "line of {} bytes, bound {limit}",
                 line.len()
             );
         }

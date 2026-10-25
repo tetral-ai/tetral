@@ -155,7 +155,8 @@ impl<S: TaskStarter> SessionOwner<S> {
         let done = move |output| {
             let _ = mailbox.send(SessionMessage::ProbeDone { operation, output });
         };
-        match probe::spawn(&preparation.shared.paths.probe_program, &input, done) {
+        let program = &preparation.shared.paths.probe_program;
+        match probe::spawn(program, &input, probe::OUTPUT_MAX_BYTES, done) {
             Ok(probe) => {
                 let deadline = state::seams::now() + preparation.shared.times.probe_limit;
                 self.probes.insert(

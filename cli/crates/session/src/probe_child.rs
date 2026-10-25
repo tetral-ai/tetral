@@ -6,7 +6,7 @@
 //! target.
 
 use std::ffi::OsStr;
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -21,6 +21,14 @@ pub const PROBE_NAME: &str = "tetral-cwd-probe";
 /// so that any `cwd` one carries fits with the state root. A longer input is
 /// cut and fails to parse.
 pub const INPUT_MAX_BYTES: u64 = 131_072;
+
+/// Reads the probe's input from `reader`, cut at `max_bytes`:
+/// [`INPUT_MAX_BYTES`] but for tests.
+pub fn read_input(reader: impl Read, max_bytes: u64) -> Vec<u8> {
+    let mut input = Vec::new();
+    let _ = reader.take(max_bytes).read_to_end(&mut input);
+    input
+}
 
 /// The probe's stdin, one JSON object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,11 +221,15 @@ mod tests {
     }
 
     #[test]
-    fn an_input_cut_short_fails_as_invalid_input() {
+    fn an_input_cut_at_its_limit_fails_as_invalid_input() {
         let input = br#"{"cwd":"/missing-directory-of-the-probe-test","create_cwd":false,"state_root":"/root"}"#;
-        assert_eq!(code(&run(input)), PreparationErrorCode::CwdNotFound);
+        let limit = input.len() as u64;
         assert_eq!(
-            code(&run(&input[..input.len() - 1])),
+            code(&run(&read_input(&input[..], limit))),
+            PreparationErrorCode::CwdNotFound
+        );
+        assert_eq!(
+            code(&run(&read_input(&input[..], limit - 1))),
             PreparationErrorCode::InvalidInput
         );
     }
