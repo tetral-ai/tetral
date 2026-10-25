@@ -143,6 +143,7 @@ func TestEngineCIWorkflowGatesOnGovulncheck(t *testing.T) {
 		"./services/auth/...",
 		"./services/bridge/...",
 		"./services/cleanup/...",
+		"./services/computer-hub/...",
 		"./services/event-stream/...",
 		"./services/gateway/...",
 		"./services/git-proxy/...",
