@@ -22,6 +22,7 @@ type routerOptions struct {
 	logger    *slog.Logger
 	metrics   httpapi.RequestMetricsRecorder
 	instances *InstanceRoutes
+	clients   *ClientRoutes
 }
 
 type RouterOption func(*routerOptions)
@@ -40,6 +41,12 @@ func WithInstanceRoutes(routes InstanceRoutes) RouterOption {
 	return func(o *routerOptions) { o.instances = &routes }
 }
 
+// WithClientRoutes serves the CLI connection routes over the given database
+// client and the pod's streams.
+func WithClientRoutes(routes ClientRoutes) RouterOption {
+	return func(o *routerOptions) { o.clients = &routes }
+}
+
 // NewRouter returns the public handler. Every route first verifies the
 // signed internal principal against the actual method and path. A client
 // route then accepts only a connection_key principal and answers any other
@@ -56,12 +63,15 @@ func NewRouter(verifier *auth.InternalPrincipalVerifier, opts ...RouterOption) h
 	}
 	router := chi.NewRouter()
 	router.Use(httpapi.RequestIDMiddleware)
-	router.Use(httpapi.RequestLogMiddleware(options.logger, httpapi.WithRequestLogMetrics(options.metrics), httpapi.WithLongRoutes(http.MethodGet+" "+routeInstanceStream)))
+	router.Use(httpapi.RequestLogMiddleware(options.logger, httpapi.WithRequestLogMetrics(options.metrics), httpapi.WithLongRoutes(http.MethodGet+" "+routeInstanceStream, http.MethodGet+" "+routeClientEvents)))
 	router.Use(httpapi.PublicRecoveryMiddleware(options.logger))
 	router.Group(func(r chi.Router) {
 		r.Use(principalMiddleware(verifier, writeClientPrincipalError))
 		r.Use(requireConnectionKey)
 		r.Handle(ClientRoutePrefix+"*", http.HandlerFunc(writeClientNotFound))
+		if options.clients != nil {
+			(&clientHandler{ClientRoutes: *options.clients, logger: options.logger}).register(r)
+		}
 	})
 	router.Group(func(r chi.Router) {
 		r.Use(principalMiddleware(verifier, httpapi.WriteError))

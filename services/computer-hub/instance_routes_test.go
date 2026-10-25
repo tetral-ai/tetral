@@ -30,8 +30,9 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-// hubFixture serves the instance routes over a test database as the
-// computer_hub role, with an API key principal of one Workspace.
+// hubFixture serves the instance and client routes over a test database as
+// the computer_hub role, with an API key principal of one Workspace, on the
+// pod hubTestPod, whose stream heartbeats run on clock.
 type hubFixture struct {
 	t         *testing.T
 	ctx       context.Context
@@ -42,6 +43,8 @@ type hubFixture struct {
 	principal auth.Principal
 	logs      *lockedBuffer
 	events    *InstanceEvents
+	streams   *Streams
+	clock     *manualClock
 	// recordStatements counts the statements that name the idempotency
 	// records table.
 	recordStatements atomic.Int64
@@ -54,8 +57,25 @@ type hubFixture struct {
 	mu          sync.Mutex
 }
 
-func newHubFixture(t *testing.T, maxLifetime time.Duration) *hubFixture {
+const hubTestPod = "computer-hub-test-0"
+
+// hubOptions are the fixture's settings beyond the credential lifetime.
+type hubOptions struct {
+	minCLIVersion, recommendedCLIVersion string
+}
+
+type hubOption func(*hubOptions)
+
+func withCLIVersions(minimum, recommended string) hubOption {
+	return func(o *hubOptions) { o.minCLIVersion, o.recommendedCLIVersion = minimum, recommended }
+}
+
+func newHubFixture(t *testing.T, maxLifetime time.Duration, opts ...hubOption) *hubFixture {
 	t.Helper()
+	settings := hubOptions{minCLIVersion: DefaultCLIVersion, recommendedCLIVersion: DefaultCLIVersion}
+	for _, opt := range opts {
+		opt(&settings)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	t.Cleanup(cancel)
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -78,14 +98,18 @@ func newHubFixture(t *testing.T, maxLifetime time.Duration) *hubFixture {
 	}
 	logger := workload.NewProcessLogger(f.logs, ServiceName, "test", "test", workload.DefaultDiagnosticConfig()).Logger
 	client := dbconnect.NewClientForTesting(hubDB)
-	f.events = NewInstanceEvents(client, "0.0.0", logger)
+	f.events = NewInstanceEvents(client, settings.recommendedCLIVersion, logger)
 	go func() { _ = f.events.Run(ctx) }()
+	f.clock = newManualClock()
+	f.streams = NewStreams(client, hubTestPod, f.clock, logger)
+	go func() { _ = f.streams.Run(ctx) }()
 	router := NewRouter(verifier, WithLogger(logger), WithInstanceRoutes(InstanceRoutes{
 		Database:              client,
 		MaxCredentialLifetime: maxLifetime,
 		PageTokenKey:          bytes.Repeat([]byte{7}, 32),
+		RecommendedCLIVersion: settings.recommendedCLIVersion,
 		Events:                f.events,
-	}))
+	}), WithClientRoutes(ClientRoutes{Database: client, MinCLIVersion: settings.minCLIVersion, Streams: f.streams}))
 	server := httptest.NewServer(BuildHTTPHandler(workload.NewReadiness(), router))
 	t.Cleanup(server.Close)
 	f.url = server.URL

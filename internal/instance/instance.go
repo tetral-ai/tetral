@@ -48,6 +48,12 @@ func LockInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instan
 	return scanInstance(tx.QueryRow(ctx, `SELECT `+instanceColumns+` FROM instances WHERE workspace_id=$1 AND id=$2 FOR UPDATE`, string(ws), instanceID))
 }
 
+// ShareInstance reads the instance and holds a share lock on its row until
+// the transaction ends, so a deregistration waits for the request.
+func ShareInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) (Instance, error) {
+	return scanInstance(tx.QueryRow(ctx, `SELECT `+instanceColumns+` FROM instances WHERE workspace_id=$1 AND id=$2 FOR SHARE`, string(ws), instanceID))
+}
+
 // CreateUserInstance creates an active user instance named name.
 func CreateUserInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, name string) (Instance, error) {
 	return InsertInstance(ctx, tx, ws, NewInstance{Kind: KindUser, Name: &name})

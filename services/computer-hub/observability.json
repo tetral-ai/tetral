@@ -163,6 +163,46 @@
         }
       }
     },
+    "client.protocol_error": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "connection.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "message.id": "string",
+        "request.message.id": "string"
+      },
+      "errors": {
+        "invalid_message": {
+          "class": "protocol_error",
+          "message_safe": "the CLI could not accept a downstream message"
+        },
+        "message_conflict": {
+          "class": "protocol_error",
+          "message_safe": "the CLI received a reused message_id with different content"
+        }
+      }
+    },
+    "connection_notices.listener_disconnected": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string"
+      },
+      "errors": {
+        "notification_listener_disconnected": {
+          "class": "dependency_unavailable",
+          "message_safe": "connection notice listener disconnected"
+        }
+      }
+    },
     "http.auth": {
       "level": "WARN",
       "log_type": "app",

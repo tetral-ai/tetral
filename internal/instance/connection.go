@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -90,6 +91,13 @@ type HeartbeatRecord struct {
 	Seq         int64
 	At          time.Time
 	ValidForMS  int64
+}
+
+// HeartbeatMessageID is the message_id of the heartbeat with sequence seq on
+// connectionID, which the CLI's heartbeat report names as its
+// request_message_id.
+func HeartbeatMessageID(connectionID string, seq int64) string {
+	return "hb_" + connectionID + "_" + strconv.FormatInt(seq, 10)
 }
 
 // Live reports whether the connection is the instance's live connection at

@@ -40,7 +40,9 @@ func Run(ctx context.Context, cfg Config, runtime Runtime) error {
 	httpMetrics := workload.NewHTTPMetrics(ServiceName)
 	events := NewInstanceEvents(runtime.Database, cfg.RecommendedCLIVersion, logger)
 	instances := InstanceRoutes{Database: runtime.Database, MaxCredentialLifetime: cfg.MaxCredentialLifetime, PageTokenKey: cfg.PageTokenKey, RecommendedCLIVersion: cfg.RecommendedCLIVersion, Events: events}
-	public := BuildHTTPHandler(readiness, NewRouter(cfg.PrincipalVerifier, WithLogger(logger), WithRequestMetrics(httpMetrics), WithInstanceRoutes(instances)))
+	streams := NewStreams(runtime.Database, cfg.PodName, nil, logger)
+	clients := ClientRoutes{Database: runtime.Database, MinCLIVersion: cfg.MinCLIVersion, Streams: streams}
+	public := BuildHTTPHandler(readiness, NewRouter(cfg.PrincipalVerifier, WithLogger(logger), WithRequestMetrics(httpMetrics), WithInstanceRoutes(instances), WithClientRoutes(clients)))
 	metrics := workload.HealthRouter(readiness,
 		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
@@ -56,9 +58,10 @@ func Run(ctx context.Context, cfg Config, runtime Runtime) error {
 	readiness.MarkReady()
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	eventsDone := make(chan struct{})
+	eventsDone, streamsDone := make(chan struct{}), make(chan struct{})
 	go func() { _ = events.Run(runCtx); close(eventsDone) }()
-	defer func() { <-eventsDone }()
+	go func() { _ = streams.Run(runCtx); close(streamsDone) }()
+	defer func() { <-eventsDone; <-streamsDone }()
 	listener := func(address, key string, handler http.Handler, tls bool) workload.Config {
 		config := workload.Config{
 			Metrics:               httpMetrics.Operations,

@@ -9,8 +9,9 @@ Controller and developer routes under `/v1/instance_requests` and
 three prefixes here after `auth`'s Check.
 
 The service owns no table. It reads and writes through `internal/instance`
-(instances, their connection credentials and the idempotency records of the
-issuing routes). It connects to PostgreSQL as the
+(instances, their connection credentials, the idempotency records of the
+issuing routes, connections, their replay ledger and protocol-error reports)
+and runs the steps of `internal/hubflow` that span packages. It connects to PostgreSQL as the
 serving role `computer_hub` and holds the blob store open through
 `internal/blob` for drive content and images.
 
@@ -66,11 +67,22 @@ operations `instances.*` and `instance_credentials.*`.
   maximum lifetime after it, stored to the microsecond; issuance time is the
   database clock of the transaction.
 - `delivery: stream`, also when `delivery` is absent, answers `409
-  instance_offline_error` after these checks and writes nothing: no CLI
-  connection is online yet.
+  instance_offline_error` after these checks and writes nothing: live
+  credential renewal is not served yet.
 - Revocation and deregistration answer `204` and change nothing when
   repeated; deregistration revokes every credential not yet revoked with cause
-  `deregistration` and keeps the instance as a tombstone.
+  `deregistration` and keeps the instance as a tombstone. Revoking the live
+  connection's credential, or deregistering its instance, ends that connection
+  in the same transaction (`hubflow.EndConnection`, causes `revoked` and
+  `deregistered`), holding its row `FOR UPDATE`.
+- The instance object's `connection` is the latest connection, kept after it
+  ends: `online` with an accepted ready and a live lease, `registering` while
+  its ready is neither accepted nor refused and it has not ended, otherwise
+  `offline`; `error` is a refused ready's `{code, message}`; `capabilities`
+  come from the instance's latest accepted ready. `cli_version` is the latest
+  ready's, accepted or refused, and `cli_update_available` compares it with
+  `TETRAL_COMPUTER_HUB_RECOMMENDED_CLI_VERSION`. A credential is `in_use`
+  when the live connection uses it.
 - Lists take `limit` (default 20, at most 100, a positive integer given once)
   and `page`, a token signed with `TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY` that
   binds the workspace, the route, the filters and the order; items come in
@@ -93,6 +105,95 @@ operations `instances.*` and `instance_credentials.*`.
   record (`log.type` `audit`) after the commit, with the actor's credential
   kind and ID, `instance.id`, `credential.id` and `operation` `issue` or
   `revoke`.
+
+## Client connection routes
+
+`GET /v1/client/events`, `POST /v1/client/ready`, `POST /v1/client/heartbeat`
+and `POST /v1/client/protocol-error` check each request in this order, the
+first failing check answering (`client_checks.go`):
+
+1. size: at most 65,536 bytes of a JSON body are read; a longer body answers
+   `413 request_too_large`, with no ACK and nothing recorded;
+2. shape: the `internal/protocol` decoder of the body or query, `400
+   invalid_message` (`protocol_version` other than `1` included);
+3. identity, on `GET /v1/client/events` only: the query's `instance_id` and
+   `credential_id` must be the principal's, else `401 credential_invalid`;
+4. authority: the instance and credential rows locked `FOR SHARE` in the
+   request's transaction; a deregistered instance answers `403
+   instance_unavailable`, a revoked credential `401 credential_revoked`, an
+   expired one `401 credential_expired` and a `pending` one `401
+   credential_invalid`;
+5. connection, on every POST: `connection_id` must name the instance's live
+   connection, not ended and with its lease later than the database clock,
+   else `409 stale_connection`;
+6. the replay ledger: the same `message_id` with an equal canonical
+   fingerprint on the same route returns the stored answer byte for byte and
+   applies nothing; with another fingerprint or route, `409 message_conflict`;
+7. the route's own checks.
+
+A database failure answers `503` and changes nothing. The ledger records the
+messages Engine accepts and the refused ready; a message refused by an earlier
+check records nothing. The connection row holds the ready's record and the
+latest heartbeat's; other messages are rows of `connection_upstream_messages`,
+deleted when the connection ends.
+
+- `GET /v1/client/events` with no live connection ends one whose lease passed
+  (`hubflow.EndConnection`, cause `lease_expired`) and creates a connection in
+  the same transaction: `conn_` and 32 hexadecimal characters, the principal's
+  credential, this pod as `hub_pod`, a lease of the earlier of 45 seconds and
+  the credential's expiry. It answers `200`, `Content-Type:
+  text/event-stream`, `Cache-Control: no-store`, and writes `connected` with
+  `resumed: false`. A live connection answers `409 connection_conflict` and is
+  not replaced.
+- `POST /v1/client/ready` on a connection whose ready is unanswered: a CLI
+  older than `TETRAL_COMPUTER_HUB_MIN_CLI_VERSION` by semantic version
+  precedence is refused with `403 cli_upgrade_required`, recorded on the
+  connection, whose lease is not renewed; otherwise the grant is the earlier of
+  45 seconds and the connection credential's expiry, refused with `401
+  credential_expired` below one millisecond, and `hubflow.AcceptReady` stores
+  it with the ready's `os`, `arch`, `cli_version` and `capabilities` and
+  notices the stream's pod. The ACK's `valid_for_ms` is the grant in whole
+  milliseconds. A second ready under a new `message_id` answers `400
+  invalid_message`.
+- `POST /v1/client/heartbeat` is accepted after the ready, when
+  `request_message_id` is `hb_<connection_id>_<heartbeat_seq>` and
+  `heartbeat_seq` is above the latest accepted one; it renews the lease by
+  the grant rule of ready. Any other new heartbeat answers `400
+  invalid_message` and renews nothing.
+- `POST /v1/client/protocol-error` stores the report in
+  `connection_protocol_errors`, as given, and writes one `WARN`
+  `client.protocol_error` record with `connection.id`, `message.id`,
+  `error.code` and `request.message.id`, never the report's message.
+
+Streams (`stream.go`): each event is one `data:` line holding one envelope
+and a blank line, flushed at once, with no `event:`, `id:` or comment.
+`connected` and `disconnect` get a new `msg_` ID. Once the connection's ready
+is accepted the stream writes `heartbeat` every 15 seconds, the first one 15
+seconds after it learns of the acceptance, or right after `connected` on a
+resumed stream of an accepted connection; the n-th heartbeat of the stream
+counted s carries `heartbeat_seq` s × 1,048,576 + n and `message_id`
+`hb_<connection_id>_<heartbeat_seq>`. A stream is registered before its
+connection commits.
+
+Connection notices (`notice.go`): each pod listens on `tetral_hub_` and the
+first 16 hexadecimal characters of the SHA-256 of
+`TETRAL_COMPUTER_HUB_POD_NAME`. `hubflow.AcceptReady` and
+`instance.EndConnection` notify the channel of the connection's `hub_pod`
+with `{"workspace_id", "connection_id"}` in their transaction. On a notice for
+a stream it holds, the pod reads the connection row: an accepted ready starts
+the heartbeats; an ended connection writes `disconnect` with `scope:
+"connection"`, `retryable: false` and `code` `credential_revoked` (revoked)
+or `instance_unavailable` (deregistered), none for `lease_expired`, and
+closes the stream. After its listening connection is lost and in place again,
+the pod reads the row of every stream it holds. A listener disconnect writes
+`connection_notices.listener_disconnected`. Delivery of the `disconnect` is
+best effort.
+
+A ready that carries `startup` and is answered for the first time records the
+`cli` cold start: the CLI's `config`, `connect` and `ready` phases with the
+reported durations, and `register`, from receiving the ready to answering it
+(`workload.BeginReportedColdStart`); an accepted ready completes it, a refused
+one ends it with `cli_upgrade_required` and observes nothing.
 
 Controllers authenticate with the workspace API key; there is no
 Controller-specific credential. Every management route acts only in the
@@ -126,7 +227,9 @@ redacted startup record. Shutdown drains both listeners within 10 seconds.
   principal key.
 - `NewRouter(verifier, ...)` is the public route table with its class checks;
   `WithInstanceRoutes` serves the instance routes over a database client and
-  an `InstanceEvents` fan-out, which `Run` starts;
+  an `InstanceEvents` fan-out, which `Run` starts; `WithClientRoutes` serves
+  the client routes over a database client and the pod's `Streams`, whose
+  `Run` listens for connection notices and whose `StreamClock` tests drive;
   `BuildHTTPHandler` adds health and readiness. Tests mint principals with
   `auth.InternalPrincipalSigner` and send them here directly.
 - `Run(ctx, cfg, Runtime)` serves the two listeners over a verified database
@@ -145,6 +248,23 @@ redacted startup record. Shutdown drains both listeners within 10 seconds.
   and an omitted expiry resolved once; paging 101 instances.
 - `instance_stream_test.go`: two streams in two workspaces each receive only
   their own workspace's noticed event.
+- `client_routes_test.go`, over HTTP and SSE with the test CLI of
+  `integration/enginetest` and a hand-driven `StreamClock`: each credential
+  failure on the events route with no connection written; grants capped by the
+  credential's expiry and by 45 seconds, and a heartbeat after the expiry
+  refused; replayed ready and heartbeat answering their original bytes with
+  the lease unchanged, and a second ready, an early heartbeat and a stale one
+  refused without a change; a report on an ended connection stale; a
+  protocol-error report replayed, conflicting and logged without its message;
+  `protocol_version` 2 refused and an unknown optional member accepted; a CLI
+  below the minimum refused and read offline with its error; the connection
+  states of instance reads and `in_use`; the 65,536-byte body limit; the
+  heartbeat schedule and sequences of a first and a resumed stream; a
+  revocation or deregistration ending the live connection with its
+  disconnect.
+- `client_cold_start_test.go`, with the process telemetry installed: one `cli`
+  cold start with the reported phases for the first answered ready, none for a
+  replay or a ready without `startup`, and a refused one observing nothing.
 - `integration/computer_hub_credential_class_test.go`: each credential class on
   the other class's routes, through `auth`'s Check and a Go edge with the
   production route rules, and straight at the hub with principals Check never
@@ -158,6 +278,6 @@ redacted startup record. Shutdown drains both listeners within 10 seconds.
 The service records through `internal/workload` with the shared HTTP request
 records and metrics, the cold start of a service pod, and the `auth.*`
 decision records of the signed principal and the operation gate, and the
-`instance_credential_audit` record and the instance event listener's
-disconnect record, declared in
-[`observability.json`](observability.json).
+`instance_credential_audit` record, the two listeners' disconnect records and
+`client.protocol_error`, declared in [`observability.json`](observability.json),
+and the `cli` cold start reported by each first answered ready.

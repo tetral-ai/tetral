@@ -109,6 +109,12 @@ func ReadInstanceCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.
 	return scanCredential(tx.QueryRow(ctx, `SELECT `+credentialColumns+` FROM instance_credentials WHERE workspace_id=$1 AND instance_id=$2 AND id=$3`, string(ws), instanceID, credentialID))
 }
 
+// ShareCredential reads credentialID of instanceID and holds a share lock on
+// its row until the transaction ends, so a revocation waits for the request.
+func ShareCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, credentialID string) (Credential, error) {
+	return scanCredential(tx.QueryRow(ctx, `SELECT `+credentialColumns+` FROM instance_credentials WHERE workspace_id=$1 AND instance_id=$2 AND id=$3 FOR SHARE`, string(ws), instanceID, credentialID))
+}
+
 // ListCredentials returns up to limit of instanceID's credentials after
 // storage sequence after, in creation order.
 func ListCredentials(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string, after int64, limit int) ([]Credential, error) {
