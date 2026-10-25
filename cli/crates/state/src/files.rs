@@ -25,13 +25,34 @@ impl IoFailure {
     }
 }
 
-/// Creates `path` and its missing ancestors with mode `0700`.
+/// Creates `path` and its missing ancestors with mode `0700`, one directory
+/// at a time, so that a failure names the directory that could not be made.
 pub fn create_private_dirs(path: &Path) -> Result<(), IoFailure> {
-    DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(path)
-        .map_err(|error| IoFailure::new(path, error))
+    let mut missing = Vec::new();
+    let mut at = Some(path);
+    while let Some(directory) = at {
+        match fs::symlink_metadata(directory) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => missing.push(directory),
+            _ => break,
+        }
+        at = directory.parent();
+    }
+    for directory in missing.into_iter().rev() {
+        match DirBuilder::new().mode(0o700).create(directory) {
+            Err(error) if error.kind() != io::ErrorKind::AlreadyExists => {
+                return Err(IoFailure::new(directory, error));
+            }
+            _ => {}
+        }
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(IoFailure::new(
+            path,
+            io::Error::from(io::ErrorKind::AlreadyExists),
+        )),
+        Err(error) => Err(IoFailure::new(path, error)),
+    }
 }
 
 /// Opens `path` for reading and writing, creating it with mode `0600` when it

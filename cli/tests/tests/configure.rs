@@ -518,6 +518,30 @@ fn each_failure_code_of_configure_leaves_the_root_unchanged() {
         );
         fs::set_permissions(root.join("run"), fs::Permissions::from_mode(0o700)).unwrap();
     }
+    drop(case);
+
+    let mut case = record
+        .case("configure under a directory of mode 0500 fails with io_failed naming the new root");
+    if case.runs_as_non_root("root may write into a directory of mode 0500") {
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("read-only");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o500)).unwrap();
+        let root = parent.join("root");
+        let run = fails_and_changes_nothing(
+            &mut case,
+            &parent,
+            "configure with a new root under a directory of mode 0500",
+            configure(&root, valid.clone()),
+            "io_failed",
+        );
+        assert!(
+            run.message().starts_with(&format!("{}: ", root.display())),
+            "{}",
+            run.message()
+        );
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+    }
 }
 
 #[test]
