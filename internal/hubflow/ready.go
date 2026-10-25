@@ -14,5 +14,5 @@ func AcceptReady(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connect
 	if err := instance.AcceptReady(ctx, tx, ws, connection, ready); err != nil {
 		return err
 	}
-	return instance.NotifyConnection(ctx, tx, connection)
+	return instance.NotifyConnection(ctx, tx, ws, connection.ID)
 }

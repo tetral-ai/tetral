@@ -57,30 +57,34 @@ func (*StaleConnectionError) Error() string {
 
 // Connection is one instance_connections row. The ready fields are set once
 // its ready is accepted, the refusal fields once it is refused, and the
-// heartbeat fields hold the latest accepted heartbeat.
+// heartbeat fields hold the latest accepted heartbeat. LastIssueSeq is the
+// issue sequence of its latest Session instruction, FirstSessionReportAt the
+// time its first Session report was stored.
 type Connection struct {
-	WorkspaceID      workspace.ID
-	InstanceID       string
-	ID               string
-	CredentialID     string
-	HubPod           string
-	ConnectedAt      time.Time
-	LeaseExpiresAt   time.Time
-	StreamCount      int64
-	ReadyMessageID   *string
-	ReadyFingerprint *[sha256.Size]byte
-	ReadyAcceptedAt  *time.Time
-	ReadyValidForMS  *int64
-	OS               *string
-	Arch             *string
-	CLIVersion       *string
-	Capabilities     json.RawMessage
-	RefusedCode      *string
-	RefusedMessage   *string
-	Heartbeat        *HeartbeatRecord
-	EndedAt          *time.Time
-	EndCause         *string
-	StorageSequence  int64
+	WorkspaceID          workspace.ID
+	InstanceID           string
+	ID                   string
+	CredentialID         string
+	HubPod               string
+	ConnectedAt          time.Time
+	LeaseExpiresAt       time.Time
+	StreamCount          int64
+	ReadyMessageID       *string
+	ReadyFingerprint     *[sha256.Size]byte
+	ReadyAcceptedAt      *time.Time
+	ReadyValidForMS      *int64
+	OS                   *string
+	Arch                 *string
+	CLIVersion           *string
+	Capabilities         json.RawMessage
+	RefusedCode          *string
+	RefusedMessage       *string
+	Heartbeat            *HeartbeatRecord
+	EndedAt              *time.Time
+	EndCause             *string
+	StorageSequence      int64
+	LastIssueSeq         int64
+	FirstSessionReportAt *time.Time
 }
 
 // HeartbeatRecord is a connection's latest accepted heartbeat: its replay
@@ -151,7 +155,8 @@ type NewConnection struct {
 
 const connectionColumns = `workspace_id,instance_id,id,credential_id,hub_pod,connected_at,lease_expires_at,stream_count,
  ready_message_id,ready_fingerprint,ready_accepted_at,ready_valid_for_ms,os,arch,cli_version,capabilities,ready_refused_code,ready_refused_message,
- last_heartbeat_message_id,last_heartbeat_fingerprint,last_heartbeat_seq,last_heartbeat_at,last_heartbeat_valid_for_ms,ended_at,end_cause,storage_sequence`
+ last_heartbeat_message_id,last_heartbeat_fingerprint,last_heartbeat_seq,last_heartbeat_at,last_heartbeat_valid_for_ms,ended_at,end_cause,storage_sequence,
+ last_issue_seq,first_session_report_at`
 
 // CreateConnection inserts a connection with stream count 1. When another
 // connection of the instance has not ended, the insert fails with an error
@@ -280,14 +285,30 @@ func EndConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, conne
 	if _, err := tx.Exec(ctx, `DELETE FROM connection_upstream_messages WHERE workspace_id=$1 AND connection_id=$2`, string(ws), connection.ID); err != nil {
 		return err
 	}
-	return NotifyConnection(ctx, tx, connection)
+	return NotifyConnection(ctx, tx, ws, connection.ID)
+}
+
+// ResumeConnection moves connection's lease to the stream of pod without
+// renewing it: hub_pod becomes pod and stream_count increases. It notifies
+// the pod that held the previous stream, which then closes it, and returns
+// the moved row. The caller holds the connection's row lock FOR UPDATE.
+func ResumeConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connection Connection, pod string) (Connection, error) {
+	moved, err := scanConnection(tx.QueryRow(ctx, `UPDATE instance_connections SET hub_pod=$3,stream_count=stream_count+1
+		WHERE workspace_id=$1 AND id=$2 RETURNING `+connectionColumns, string(ws), connection.ID, pod))
+	if err != nil {
+		return Connection{}, err
+	}
+	return moved, notifyPod(ctx, tx, connection.HubPod, ConnectionNotice{WorkspaceID: string(ws), ConnectionID: connection.ID, IssueSeq: moved.LastIssueSeq})
 }
 
 // ConnectionNotice is the payload of a connection notice: the pod that holds
-// the connection's stream reads the row itself.
+// the connection's stream reads the row itself. IssueSeq bounds the Session
+// instructions the notice releases: the issued instruction's issue_seq, or
+// the connection's last_issue_seq as the notifying transaction read it.
 type ConnectionNotice struct {
 	WorkspaceID  string `json:"workspace_id"`
 	ConnectionID string `json:"connection_id"`
+	IssueSeq     int64  `json:"issue_seq"`
 }
 
 // ConnectionNoticeChannel is the notification channel of the hub pod named
@@ -298,14 +319,26 @@ func ConnectionNoticeChannel(pod string) string {
 	return "tetral_hub_" + hex.EncodeToString(digest[:])[:16]
 }
 
-// NotifyConnection queues a connection notice on the channel of the pod that
-// holds the connection's stream; PostgreSQL delivers it when tx commits.
-func NotifyConnection(ctx context.Context, tx *dbconnect.Tx, connection Connection) error {
-	payload, err := json.Marshal(ConnectionNotice{WorkspaceID: string(connection.WorkspaceID), ConnectionID: connection.ID})
+// NotifyConnection queues a connection notice on the channel of the pod
+// that holds connectionID's stream, carrying the connection's last_issue_seq,
+// both as tx reads them; PostgreSQL delivers it when tx commits.
+func NotifyConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string) error {
+	var (
+		pod      string
+		issueSeq int64
+	)
+	if err := tx.QueryRow(ctx, `SELECT hub_pod,last_issue_seq FROM instance_connections WHERE workspace_id=$1 AND id=$2`, string(ws), connectionID).Scan(&pod, &issueSeq); err != nil {
+		return err
+	}
+	return notifyPod(ctx, tx, pod, ConnectionNotice{WorkspaceID: string(ws), ConnectionID: connectionID, IssueSeq: issueSeq})
+}
+
+func notifyPod(ctx context.Context, tx *dbconnect.Tx, pod string, notice ConnectionNotice) error {
+	payload, err := json.Marshal(notice)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `SELECT pg_notify($1,$2)`, ConnectionNoticeChannel(connection.HubPod), string(payload))
+	_, err = tx.Exec(ctx, `SELECT pg_notify($1,$2)`, ConnectionNoticeChannel(pod), string(payload))
 	return err
 }
 
@@ -419,12 +452,13 @@ func scanConnection(row scanner) (Connection, error) {
 		readyMessage, osName, arch, cliVersion, refused, message sql.NullString
 		heartbeatMessage, endCause                               sql.NullString
 		readyFingerprint, heartbeatFingerprint, capabilities     []byte
-		readyAccepted, heartbeatAt, ended                        sql.NullTime
+		readyAccepted, heartbeatAt, ended, firstReport           sql.NullTime
 		readyValidFor, heartbeatSeq, heartbeatValidFor           sql.NullInt64
 	)
 	err := row.Scan(&value.WorkspaceID, &value.InstanceID, &value.ID, &value.CredentialID, &value.HubPod, &value.ConnectedAt, &value.LeaseExpiresAt, &value.StreamCount,
 		&readyMessage, &readyFingerprint, &readyAccepted, &readyValidFor, &osName, &arch, &cliVersion, &capabilities, &refused, &message,
-		&heartbeatMessage, &heartbeatFingerprint, &heartbeatSeq, &heartbeatAt, &heartbeatValidFor, &ended, &endCause, &value.StorageSequence)
+		&heartbeatMessage, &heartbeatFingerprint, &heartbeatSeq, &heartbeatAt, &heartbeatValidFor, &ended, &endCause, &value.StorageSequence,
+		&value.LastIssueSeq, &firstReport)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Connection{}, ErrNotFound
 	}
@@ -434,7 +468,7 @@ func scanConnection(row scanner) (Connection, error) {
 	value.ConnectedAt, value.LeaseExpiresAt = value.ConnectedAt.UTC(), value.LeaseExpiresAt.UTC()
 	value.ReadyMessageID, value.OS, value.Arch, value.CLIVersion = stringOrNil(readyMessage), stringOrNil(osName), stringOrNil(arch), stringOrNil(cliVersion)
 	value.RefusedCode, value.RefusedMessage, value.EndCause = stringOrNil(refused), stringOrNil(message), stringOrNil(endCause)
-	value.ReadyAcceptedAt, value.EndedAt = timeOrNil(readyAccepted), timeOrNil(ended)
+	value.ReadyAcceptedAt, value.EndedAt, value.FirstSessionReportAt = timeOrNil(readyAccepted), timeOrNil(ended), timeOrNil(firstReport)
 	if len(readyFingerprint) == sha256.Size {
 		value.ReadyFingerprint = new([sha256.Size]byte)
 		copy(value.ReadyFingerprint[:], readyFingerprint)

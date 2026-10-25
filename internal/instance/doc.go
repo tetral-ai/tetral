@@ -1,6 +1,7 @@
 // Package instance owns CLI registrations (instances), their connection
 // credentials, the idempotency records of the issuing routes, and the CLI
-// connections with their replay ledger and protocol-error reports.
+// connections with their replay ledger, protocol-error reports and Session
+// instructions.
 //
 // OWNS:
 //   - Table instances: one row per registration of a CLI with a Workspace.
@@ -19,14 +20,21 @@
 //     the lease, stream_count, the accepted ready (its replay record, grant,
 //     os, arch, cli_version, capabilities) or the refused ready (its replay
 //     record and error), the latest accepted heartbeat (its replay record,
-//     sequence, time and grant), and the end. instances.cli_version is the
-//     latest ready's.
+//     sequence, time and grant), the end, last_issue_seq (the issue sequence
+//     of its latest Session instruction) and first_session_report_at.
+//     instances.cli_version is the latest ready's.
 //   - Table connection_upstream_messages: the replay ledger of a
 //     connection's accepted upstream messages other than ready and heartbeat,
 //     keyed by the SHA-256 of message_id, with route, fingerprint and the
 //     exact answer.
 //   - Table connection_protocol_errors: one row per accepted protocol-error
 //     report.
+//   - Table connection_instructions: one row per Session instruction issued
+//     on a connection, unique by message_id over all connections, with its
+//     issue_seq, type, exact envelope, trace_context, first_written_at and
+//     reported_at. The security-definer function
+//     tetral_computer_hub_instruction_pressure counts them across Workspaces
+//     (ReadInstructionPressure).
 //   - The connection key format: KeyPrefix followed by the unpadded base64url
 //     encoding of 32 bytes from crypto/rand, KeyLength characters in all.
 //   - The instance event notice on EventChannel, and the connection notice on
@@ -66,12 +74,22 @@
 //	  (none) -> ledger row                SaveUpstreamMessage  computer-hub
 //	  ledger rows -> (none)               EndConnection        hubflow.EndConnection
 //	  (none) -> protocol error            RecordProtocolError  computer-hub
+//	  lease moved to another stream       ResumeConnection     computer-hub
+//	  (none) -> issued instruction        IssueInstruction     the units that
+//	                                                           issue Session
+//	                                                           instructions
+//	  unwritten -> written                MarkWritten          computer-hub
+//	  unreported -> reported              MarkReported         the units that
+//	                                                           store final reports
+//	  no Session report -> first stored   MarkFirstSessionReport the unit that
+//	                                                           stores Session
+//	                                                           reports
 //
 //	Readers: ReadInstance, LockInstance, ListInstances, ReadObjects,
 //	ReadCredential, ReadInstanceCredential, ListCredentials,
 //	LiveCredentialID, FindIdempotencyRecord, LockUnendedConnection,
 //	LockLiveConnection, LockLiveConnectionOf, ReadConnection,
-//	FindUpstreamMessage.
+//	FindUpstreamMessage, UnreportedInstructions, ReadInstructionPressure.
 //
 // INVARIANTS:
 //   - The plaintext of a key is never stored, logged or returned except in
@@ -107,21 +125,32 @@
 //     message; a message refused by an earlier check records nothing. The
 //     connection row keeps the ready's record and the latest heartbeat's
 //     only; EndConnection deletes the ledger rows.
-//   - EndConnection and hubflow.AcceptReady notify the pod named by hub_pod
-//     in their transaction; the notice carries only the Workspace and the
-//     connection, and the pod reads the row.
+//   - Every writer that changes what a connection's stream must write
+//     (IssueInstruction, MarkFirstSessionReport, EndConnection,
+//     hubflow.AcceptReady) notifies the pod named by hub_pod in its
+//     transaction, and ResumeConnection the pod that held the previous
+//     stream. The notice carries the Workspace, the connection and an
+//     issue_seq, the last_issue_seq the transaction read; the pod reads the
+//     rows itself and releases the instructions up to that issue_seq.
+//   - An instruction's issue_seq is the connection's last_issue_seq plus 1,
+//     taken under the connection row's lock in the issuing transaction, so a
+//     connection's sequences have no gaps and follow commit order. An
+//     instruction is never stored on an ended connection, and its envelope
+//     never changes after it is stored.
 //
 // UPDATE-WITH:
 //
 //	internal/storage/postgresql_instance_schema.go (tables, CHECK constraints,
-//	  the lookup function and its auth_lookup policy);
+//	  the lookup function and its auth_lookup policy, the pressure function
+//	  and its instruction_pressure policies);
 //	database/postgresql.json and database/roles.json (Workspace tables, the
-//	  computer_hub role, Auth's execute grant);
+//	  computer_hub role, Auth's and Computer Hub's execute grants);
 //	internal/httpapi/errors.go (the API error types of this package's errors);
 //	services/computer-hub/instance_routes.go and instance_stream.go (the
 //	  routes over these writers and the EventChannel listener);
-//	services/computer-hub/client_*.go, stream.go and notice.go (the client
-//	  routes, the streams and the connection notice listener);
+//	services/computer-hub/client_*.go, stream.go, dispatch.go and notice.go
+//	  (the client routes, the streams, their instruction writes and the
+//	  connection notice listener);
 //	internal/hubflow (the steps that accept a ready and end a connection);
 //	services/computer-hub/observability.json (AuditEvent);
 //	internal/auth/authority_resolver.go (AuthenticateConnectionKey);
