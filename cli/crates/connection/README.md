@@ -4,7 +4,8 @@ Every request to Engine belongs here, with two owners, each one task per App
 Server:
 
 - the **Connection owner**, which owns the connection to Engine, from
-  authentication and the event stream to the routing of Session instructions;
+  authentication and the event stream to the classification and routing of
+  Session instructions;
 - the **Report outbox**, which owns every report that answers or follows an
   instruction, from the moment it is frozen until Engine acknowledges it.
 
@@ -34,6 +35,21 @@ Server:
 - A stream is bounded before it is parsed: a line longer than the event
   limit plus `data: ` or an event whose data is over the limit closes it
   (`stream`).
+- Each event after a stream's first valid `connected` is handled in one
+  order: its envelope's schema, then for a Session instruction its
+  identities (`classify`), the replay ledger, the payload's schema of a
+  `session.close` or `session.drives`, and routing; the owners of the other
+  Session instructions decide their payloads' schema failures (`owner`). A
+  connection message whose `connection_id` is not the stream's is recorded
+  as `protocol.foreign_connection` and ignored.
+- An instruction's content fingerprint is the SHA-256 of its envelope with
+  object members sorted by name and no whitespace, so member order and
+  whitespace are no change (`classify::fingerprint`). The same `message_id`
+  and fingerprint starts nothing; another fingerprint is a `message_conflict`.
+- A protocol error is `message_conflict` or `invalid_message` with a fixed
+  text for its class, carries `request_message_id` only when the envelope's
+  `message_id` reads as an ID, never the invalid content or a guessed
+  identity, and goes through the Report outbox (`protocol_error`).
 - The transport follows no redirect and never records a request's headers or
   body (`http`).
 - A report is frozen under `outbox/` before its first send, and each retry
@@ -54,7 +70,7 @@ The Connection owner owns the connection's phase (`owner::Phase`: waiting
 for an attempt, connecting, a held connection in `registering`, `online` or
 `resuming`, `blocked` and `stopped`), the reconnect backoff, the last
 connection held, which a new connection names as its predecessor, the staged
-instructions and the status fields `connection_state`, `connection_id`,
+instructions, the held connection's replay ledger and the status fields `connection_state`, `connection_id`,
 `credential_id`, `expires_at` and `last_error`.
 
 The Report outbox owns the current connection's number and identity and its
@@ -63,9 +79,11 @@ and its running attempt.
 
 ## Entry points
 
-- `Connection::spawn(Config)` starts the Connection owner; `status()` gives
-  its `ConnectionStatus` and `stop()` stops it, after which it stays
-  `stopped`.
+- `Connection::spawn(Config)` starts the Connection owner and its Report
+  outbox; `status()` gives its `ConnectionStatus` and `stop()` stops it,
+  after which it stays `stopped`. It routes each Session instruction as an
+  `Instruction`: the instruction as read, whether the ledger recorded it,
+  and the span its work runs in.
 - `Times` holds the owner's durations and limits, each a constant but for
   tests.
 - `Outbox::spawn(OutboxConfig)` starts the Report outbox, which implements
@@ -78,7 +96,9 @@ and its running attempt.
 
 | File | Holds |
 |---|---|
-| `src/owner.rs` | The Connection owner: its phases, timers, the answers to the events request, ready and heartbeats, `disconnect`, staging and routing, and the test seam counters `connection.attempt`, `connection.checked`, `connection.granted`, `connection.answered` and `route.session` |
+| `src/owner.rs` | The Connection owner: its phases, timers, the answers to the events request, ready and heartbeats, `disconnect`, the order of an event's handling and the ledger's admission (`admit`), staging and routing, the record `protocol.foreign_connection`, and the test seam counters `connection.attempt`, `connection.checked`, `connection.granted`, `connection.answered` and `route.session` |
+| `src/classify.rs` | The reading of an event's envelope and identities, and the content fingerprint |
+| `src/protocol_error.rs` | The classes of protocol errors, their codes and texts, and their reports |
 | `src/attempt.rs` | One attempt's query by its kind, the validity of `connected`, and the task that reads its stream; `ATTEMPT_TOTAL` |
 | `src/ready.rs` | Ready with its startup phases, the sender check, and the grant of an ACK |
 | `src/heartbeat.rs` | Which heartbeat events start a send and which ACKs may set the deadline |

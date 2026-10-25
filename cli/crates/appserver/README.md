@@ -42,7 +42,7 @@ ones it uses belong here too.
 
 - `startup::lock(root)` and then `startup::serve(root, lock)` start an App
   Server and give `Started`; `lifecycle::run(started, fixed, times)` starts
-  the Connection owner, serves the App Server until the shutdown sequence
+  the Connection owner and its Report outbox, serves the App Server until the shutdown sequence
   ends and gives `lifecycle::Ended`: the status as of then and the time left
   before the shutdown's deadline. `lifecycle::Times` holds the durations,
   each a constant but for tests.

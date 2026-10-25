@@ -9,18 +9,28 @@
 //! wakes, and while any deadline or wait is pending it wakes at least once
 //! per recheck interval, so a deadline that passed while the machine slept
 //! is acted on within that interval of waking.
+//!
+//! Each event after a stream's first valid `connected` is handled in a
+//! fixed order: its envelope and identities ([`crate::classify`]), the
+//! connection's replay ledger, its payload's schema, then routing. A failure
+//! is reported as a protocol error through the Report outbox
+//! ([`crate::protocol_error`]); none changes a task, binding or result.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use observe::STARTUP;
+use observe::{Identity, STARTUP, TraceContext};
 use protocol::bootstrap::BootstrapKey;
-use protocol::connection::{DisconnectPayload, Downstream, DownstreamPayload, Heartbeat};
+use protocol::connection::{
+    DisconnectPayload, Downstream, DownstreamPayload, DownstreamType, Envelope, Heartbeat,
+};
 use protocol::errors::{ErrorBody, ErrorCode};
 use protocol::field::PositiveInt;
 use protocol::id::Id;
 use protocol::local::{ConnectionState, ErrorObject};
+use protocol::ports::ReportSink;
 use protocol::time::Rfc3339Utc;
 use protocol::tool::ProtocolVersion;
 use tokio::sync::{mpsc, oneshot};
@@ -28,8 +38,13 @@ use tokio::task::AbortHandle;
 
 use crate::attempt::{self, ATTEMPT_TOTAL, AttemptKind};
 use crate::backoff::{BASE_MAX, BASE_START, Backoff, random_jitter};
+use crate::classify::{self, Read, SessionMessage};
+use crate::clock::Clock;
 use crate::heartbeat::Heartbeats;
 use crate::http::{Answer, REQUEST_TOTAL, Transport};
+use crate::ledger::{self, Entry, EntryState, Ledger, Need, Seen};
+use crate::outbox::{Outbox, OutboxConfig, OutboxEvent, OutboxTimes};
+use crate::protocol_error::{self, ProtocolErrorKind};
 use crate::ready::{self, ReadyFields};
 use crate::staging::{Admission, STAGING_MAX, Staging};
 use crate::status::{ConnectionStatus, Reconnect, Reported};
@@ -62,6 +77,8 @@ pub struct Times {
     pub backoff_max: Duration,
     pub staging_max: usize,
     pub event_max_bytes: usize,
+    pub ledger: ledger::Limits,
+    pub outbox: OutboxTimes,
 }
 
 impl Default for Times {
@@ -76,6 +93,8 @@ impl Default for Times {
             backoff_max: BASE_MAX,
             staging_max: STAGING_MAX,
             event_max_bytes: EVENT_MAX_BYTES,
+            ledger: ledger::Limits::default(),
+            outbox: OutboxTimes::default(),
         }
     }
 }
@@ -96,14 +115,25 @@ pub struct Config {
     pub ready: ReadyFields,
     /// The App Server's start on the seam clock.
     pub started: Duration,
+    /// `outbox/` in the state root, emptied at App Server start.
+    pub outbox: PathBuf,
     pub times: Times,
 }
 
-/// A Session instruction as it arrived on the stream.
+/// A Session instruction as the Connection owner routes it, its payload
+/// unchecked but for `session.close` and `session.drives`: its owner decides
+/// the schema failures of the others.
 #[derive(Debug, Clone)]
 pub struct Instruction {
-    pub downstream: Downstream,
-    pub data: String,
+    pub message: SessionMessage,
+    /// Whether the replay ledger recorded it. One it had no room for is
+    /// refused by its owner with `resource_exhausted`, or, for a
+    /// `session.close` or `session.drives`, handled without an entry.
+    pub recorded: bool,
+    /// The instruction span its work runs in, carrying its identities and,
+    /// when its `traceparent` is usable, its `trace_id`.
+    pub span: tracing::Span,
+    pub trace: Option<TraceContext>,
 }
 
 pub(crate) enum Message {
@@ -125,6 +155,7 @@ pub(crate) enum Message {
         request: u64,
         answer: Answer,
     },
+    Outbox(OutboxEvent),
 }
 
 /// A handle on the Connection owner.
@@ -144,8 +175,18 @@ impl Connection {
     /// credential's `expires_at` is not after the system's current time.
     pub fn spawn(config: Config) -> Connection {
         let (mailbox, inbox) = mpsc::unbounded_channel();
-        let owner = Owner::new(config, mailbox.clone());
-        tokio::spawn(own(owner, inbox));
+        let (events, reports) = mpsc::unbounded_channel();
+        let transport = Arc::new(Transport::new(&config.server_url));
+        let outbox = Outbox::spawn(OutboxConfig {
+            directory: config.outbox.clone(),
+            transport: transport.clone(),
+            key: config.credential.key.clone(),
+            times: config.times.outbox,
+            clock: Clock::seams(),
+            events,
+        });
+        let owner = Owner::new(config, transport, outbox, mailbox.clone());
+        tokio::spawn(own(owner, inbox, reports));
         Connection { mailbox }
     }
 
@@ -172,7 +213,11 @@ impl Connection {
     }
 }
 
-async fn own(mut owner: Owner, mut inbox: mpsc::UnboundedReceiver<Message>) {
+async fn own(
+    mut owner: Owner,
+    mut inbox: mpsc::UnboundedReceiver<Message>,
+    mut reports: mpsc::UnboundedReceiver<OutboxEvent>,
+) {
     owner.start();
     loop {
         let wake = owner.wake_in();
@@ -181,6 +226,7 @@ async fn own(mut owner: Owner, mut inbox: mpsc::UnboundedReceiver<Message>) {
                 Some(message) => owner.handle(message),
                 None => return,
             },
+            Some(event) = reports.recv() => owner.handle(Message::Outbox(event)),
             () = sleep_or_wait(wake) => {}
         }
         owner.check();
@@ -228,6 +274,7 @@ struct Held {
     heartbeats: Heartbeats,
     /// The latest heartbeat, until it is acknowledged or given up.
     heartbeat: Option<Outgoing>,
+    ledger: Ledger,
 }
 
 enum Stream {
@@ -283,6 +330,7 @@ struct Owner {
     started: Duration,
     times: Times,
     transport: Arc<Transport>,
+    outbox: Outbox,
     mailbox: mpsc::UnboundedSender<Message>,
     phase: Phase,
     /// The reconnect backoff; each upstream message has its own.
@@ -297,10 +345,16 @@ struct Owner {
 }
 
 impl Owner {
-    fn new(config: Config, mailbox: mpsc::UnboundedSender<Message>) -> Owner {
+    fn new(
+        config: Config,
+        transport: Arc<Transport>,
+        outbox: Outbox,
+        mailbox: mpsc::UnboundedSender<Message>,
+    ) -> Owner {
         let times = config.times;
         Owner {
-            transport: Arc::new(Transport::new(&config.server_url)),
+            transport,
+            outbox,
             instance_id: config.instance_id,
             credential: config.credential,
             ready: config.ready,
@@ -354,6 +408,7 @@ impl Owner {
             Message::Event { stream, data } => self.event(phase, stream, data, now),
             Message::StreamEnded { stream } => self.stream_ended(phase, stream, now),
             Message::Answered { request, answer } => self.answered(phase, request, answer, now),
+            Message::Outbox(event) => self.outbox_event(phase, event, now),
             Message::Status(_) | Message::Stop(_) => phase,
         };
         self.reported.change(self.state());
@@ -439,6 +494,7 @@ impl Owner {
         }
         match &held.stream {
             Stream::Waiting { at } if now >= *at => {
+                held.ledger.resume_started();
                 let kind = AttemptKind::Resume {
                     connection: held.id.clone(),
                 };
@@ -558,7 +614,7 @@ impl Owner {
     fn release(&mut self, phase: Phase) {
         match phase {
             Phase::Connecting(attempt) => attempt.task.abort(),
-            Phase::Held(held) => release_held(*held),
+            Phase::Held(held) => self.release_held(*held),
             Phase::Waiting { .. } | Phase::Blocked | Phase::Stopped => {}
         }
     }
@@ -660,11 +716,11 @@ impl Owner {
                         // The old connection ends, but not this stream, which
                         // carries the new one.
                         held.stream = Stream::Waiting { at: now };
-                        release_held(*held);
+                        self.release_held(*held);
                         self.new_connection(connection, stream, task, now)
                     }
                     Some((None, _)) => Phase::Held(held),
-                    None if live => self.live_event(held, data, now),
+                    None if live => self.live_event(held, stream, data, now),
                     None => Phase::Held(held),
                 }
             }
@@ -679,6 +735,9 @@ impl Owner {
         }
         self.held_count += 1;
         self.last_held = Some(id.clone());
+        let tool_execution = self.ready.capabilities.tool_execution.is_some();
+        self.outbox
+            .connection_started(self.held_count, id.clone(), tool_execution);
         let mut held = Box::new(Held {
             id,
             stream: Stream::Live { stream, task },
@@ -688,6 +747,7 @@ impl Owner {
             messages: 0,
             heartbeats: Heartbeats::default(),
             heartbeat: None,
+            ledger: Ledger::new(self.times.ledger),
         });
         let message_id = held.next_message_id();
         let built = ready::ready(&self.ready, &held.id, message_id.clone(), now);
@@ -718,38 +778,92 @@ impl Owner {
         )
     }
 
-    fn live_event(&mut self, mut held: Box<Held>, data: String, now: Duration) -> Phase {
-        // A message that does not decode changes nothing here; the protocol
-        // error reports take it.
-        let Ok(downstream) = protocol::decode::<Downstream>(data.as_bytes()) else {
-            return Phase::Held(held);
-        };
-        if downstream.connection_id != held.id {
-            return Phase::Held(held);
-        }
-        if is_session_instruction(&downstream.payload) {
-            let instruction = Instruction { downstream, data };
-            let admission = match held.registration.as_mut() {
-                Some(registration) => registration.staging.admit(instruction),
-                None => Admission::Route(instruction),
-            };
-            return match admission {
-                Admission::Staged => Phase::Held(held),
-                Admission::Route(instruction) => {
-                    route(instruction);
-                    Phase::Held(held)
-                }
-                Admission::Overflow => self.end(Phase::Held(held), now),
-            };
-        }
-        match downstream.payload {
-            DownstreamPayload::Connected(_) => {
-                observe::warn!(
-                    "connection.unexpected_connected",
-                    connection.id = observe::Id(held.id.as_str())
-                );
+    /// An event of the live stream `stream`, which began with a valid
+    /// `connected`.
+    fn live_event(&mut self, held: Box<Held>, stream: u64, data: String, now: Duration) -> Phase {
+        match classify::read(data) {
+            Read::Unparseable { kind, message_id } => {
+                self.protocol_error(&held.id, kind, message_id, None);
                 Phase::Held(held)
             }
+            Read::Other(envelope, data) => self.connection_message(held, &envelope, &data, now),
+            Read::Session(message) => self.session_instruction(held, stream, message, now),
+        }
+    }
+
+    fn session_instruction(
+        &mut self,
+        mut held: Box<Held>,
+        stream: u64,
+        message: SessionMessage,
+        now: Duration,
+    ) -> Phase {
+        let trace = message
+            .envelope
+            .traceparent
+            .as_deref()
+            .and_then(TraceContext::parse);
+        let span = instruction_span(&held.id, &message, trace.as_ref());
+        let entered = span.clone().entered();
+        let message_id = message.envelope.message_id.clone();
+        let recorded = match admit(&mut held.ledger, &message, stream) {
+            Admitted::Duplicate => return Phase::Held(held),
+            Admitted::Refused(kind) => {
+                self.protocol_error(&held.id, kind, Some(message_id), trace.as_ref());
+                return Phase::Held(held);
+            }
+            Admitted::Route { recorded } => recorded,
+        };
+        drop(entered);
+        let instruction = Instruction {
+            message,
+            recorded,
+            span,
+            trace,
+        };
+        let admission = match held.registration.as_mut() {
+            Some(registration) => registration.staging.admit(instruction),
+            None => Admission::Route(instruction),
+        };
+        match admission {
+            Admission::Staged => Phase::Held(held),
+            Admission::Route(instruction) => {
+                route(instruction);
+                Phase::Held(held)
+            }
+            Admission::Overflow => self.end(Phase::Held(held), now),
+        }
+    }
+
+    /// A message for the Connection owner's own handlers.
+    fn connection_message(
+        &mut self,
+        mut held: Box<Held>,
+        envelope: &Envelope,
+        data: &str,
+        now: Duration,
+    ) -> Phase {
+        if envelope.kind == DownstreamType::Connected {
+            observe::warn!(
+                "connection.unexpected_connected",
+                connection.id = observe::Id(held.id.as_str())
+            );
+            return Phase::Held(held);
+        }
+        if envelope.connection_id != held.id {
+            observe::warn!(
+                "protocol.foreign_connection",
+                connection.id = observe::Id(held.id.as_str()),
+                message.id = observe::Id(envelope.message_id.as_str())
+            );
+            return Phase::Held(held);
+        }
+        let Ok(downstream) = protocol::decode::<Downstream>(data.as_bytes()) else {
+            let kind = ProtocolErrorKind::InvalidPayload;
+            self.protocol_error(&held.id, kind, Some(envelope.message_id.clone()), None);
+            return Phase::Held(held);
+        };
+        match downstream.payload {
             DownstreamPayload::Heartbeat(heartbeat) => {
                 self.heartbeat_event(
                     &mut held,
@@ -781,6 +895,36 @@ impl Owner {
                 self.blocked(Phase::Held(held), error)
             }
             _ => Phase::Held(held),
+        }
+    }
+
+    fn protocol_error(
+        &self,
+        connection: &Id,
+        kind: ProtocolErrorKind,
+        request_message_id: Option<Id>,
+        trace: Option<&TraceContext>,
+    ) {
+        let mut report = protocol_error::report(connection.clone(), kind, request_message_id);
+        report.traceparent = trace.map(|trace| trace.header_value().to_owned());
+        self.outbox.submit(report);
+    }
+
+    fn outbox_event(&mut self, phase: Phase, event: OutboxEvent, now: Duration) -> Phase {
+        let mut held = match phase {
+            Phase::Held(held) if held.id == *event.connection() => held,
+            other => return other,
+        };
+        match event {
+            OutboxEvent::FinalAcked { instruction, .. } => {
+                let current = match &held.stream {
+                    Stream::Live { stream, .. } => Some(*stream),
+                    Stream::Waiting { .. } | Stream::Resuming(_) => None,
+                };
+                held.ledger.final_acked(&instruction, current);
+                Phase::Held(held)
+            }
+            OutboxEvent::Refused { error, .. } => self.request_refused(held, &error, now),
         }
     }
 
@@ -957,25 +1101,89 @@ impl Owner {
     }
 }
 
-fn release_held(held: Held) {
-    match held.stream {
-        Stream::Live { task, .. } => task.abort(),
-        Stream::Resuming(attempt) => attempt.task.abort(),
-        Stream::Waiting { .. } => {}
+/// What the replay ledger and the payload check make of a Session
+/// instruction.
+#[derive(Debug, PartialEq, Eq)]
+enum Admitted {
+    /// The same instruction again: nothing new starts.
+    Duplicate,
+    Refused(ProtocolErrorKind),
+    Route {
+        recorded: bool,
+    },
+}
+
+/// Looks the instruction up in `ledger` before anything else, checks the
+/// payload of a `session.close` or `session.drives`, and records it, as a
+/// new operation when it is a `session.prepare`, `tool.execute` or
+/// `mcp.call`, since the connection holds no binding or task yet.
+fn admit(ledger: &mut Ledger, message: &SessionMessage, stream: u64) -> Admitted {
+    let envelope = &message.envelope;
+    match ledger.seen(&envelope.message_id, &message.fingerprint, stream) {
+        Seen::Duplicate => return Admitted::Duplicate,
+        Seen::Conflict => return Admitted::Refused(ProtocolErrorKind::Conflict),
+        Seen::New => {}
+    }
+    let need = match envelope.kind {
+        DownstreamType::SessionClose | DownstreamType::SessionDrives => {
+            if protocol::decode::<Downstream>(message.data.as_bytes()).is_err() {
+                return Admitted::Refused(ProtocolErrorKind::InvalidPayload);
+            }
+            Need::Reserve
+        }
+        DownstreamType::SessionPrepare | DownstreamType::ToolExecute | DownstreamType::McpCall => {
+            Need::NewOperation
+        }
+        _ => Need::Reserve,
+    };
+    let entry = Entry {
+        message_id: envelope.message_id.clone(),
+        kind: envelope.kind,
+        fingerprint: message.fingerprint.clone(),
+        session_id: message.session_id.clone(),
+        binding_id: message.binding_id.clone(),
+        tool_use_event_id: message.tool_use_event_id.clone(),
+        task_id: message.task_id.clone(),
+        stream,
+        state: EntryState::Open,
+        reports: Vec::new(),
+        body: None,
+    };
+    Admitted::Route {
+        recorded: ledger.record(entry, need).is_ok(),
     }
 }
 
-fn is_session_instruction(payload: &DownstreamPayload) -> bool {
-    matches!(
-        payload,
-        DownstreamPayload::SessionPrepare(_)
-            | DownstreamPayload::SessionClose(_)
-            | DownstreamPayload::SessionDrives(_)
-            | DownstreamPayload::ToolExecute(_)
-            | DownstreamPayload::ToolStdin(_)
-            | DownstreamPayload::ToolCancel(_)
-            | DownstreamPayload::McpCall(_)
-    )
+fn instruction_span(
+    connection: &Id,
+    message: &SessionMessage,
+    trace: Option<&TraceContext>,
+) -> tracing::Span {
+    let mut identities = vec![
+        (Identity::Connection, connection.as_str()),
+        (Identity::Message, message.envelope.message_id.as_str()),
+        (Identity::Session, message.session_id.as_str()),
+        (Identity::Binding, message.binding_id.as_str()),
+    ];
+    if let Some(event) = &message.tool_use_event_id {
+        identities.push((Identity::ToolUseEvent, event));
+    }
+    if let Some(task) = &message.task_id {
+        identities.push((Identity::Task, task));
+    }
+    observe::correlation_span(&identities, trace)
+}
+
+impl Owner {
+    /// Closes the connection's stream; the outbox drops its reports.
+    fn release_held(&self, held: Held) {
+        match held.stream {
+            Stream::Live { task, .. } => task.abort(),
+            Stream::Resuming(attempt) => attempt.task.abort(),
+            Stream::Waiting { .. } => {}
+        }
+        self.outbox.connection_ended(held.id);
+    }
 }
 
 impl Held {
@@ -1028,5 +1236,155 @@ fn code_text(code: ErrorCode) -> String {
     match serde_json::to_value(code) {
         Ok(serde_json::Value::String(text)) => text,
         _ => unreachable!("an error code serializes as its name"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    fn message(kind: &str, message_id: &str, payload: Value) -> SessionMessage {
+        let data = json!({
+            "protocol_version": 1,
+            "connection_id": "conn_a",
+            "message_id": message_id,
+            "type": kind,
+            "payload": payload,
+        })
+        .to_string();
+        match classify::read(data) {
+            Read::Session(message) => message,
+            other => panic!("{kind} read as {other:?}"),
+        }
+    }
+
+    fn close(message_id: &str, binding: &str) -> SessionMessage {
+        message(
+            "session.close",
+            message_id,
+            json!({ "session_id": "sess_a", "binding_id": binding }),
+        )
+    }
+
+    fn prepare(message_id: &str) -> SessionMessage {
+        message(
+            "session.prepare",
+            message_id,
+            json!({
+                "session_id": "sess_new",
+                "binding_id": "bind_new",
+                "cwd": "/tmp",
+                "drives": [],
+                "drive_exclude": [],
+                "repositories": [],
+            }),
+        )
+    }
+
+    #[test]
+    fn with_only_the_reserve_free_a_new_binding_finds_no_room_and_a_close_is_recorded_from_it() {
+        let mut ledger = Ledger::new(ledger::Limits::default());
+        for index in 0..ledger::ENTRIES_MAX - ledger::RESERVE_ENTRIES {
+            let filler = close(&format!("msg_{index}"), "bind_a");
+            assert_eq!(
+                admit(&mut ledger, &filler, 1),
+                Admitted::Route { recorded: true }
+            );
+        }
+        assert_eq!(ledger.len(), 4_032);
+
+        assert_eq!(
+            admit(&mut ledger, &prepare("msg_prepare"), 1),
+            Admitted::Route { recorded: false }
+        );
+        assert_eq!(ledger.len(), 4_032);
+        assert_eq!(
+            admit(&mut ledger, &close("msg_close", "bind_a"), 1),
+            Admitted::Route { recorded: true }
+        );
+        assert_eq!(ledger.len(), 4_033);
+        assert_eq!(
+            admit(&mut ledger, &close("msg_close", "bind_a"), 1),
+            Admitted::Duplicate
+        );
+    }
+
+    #[test]
+    fn the_ledger_is_read_before_the_payload_and_only_closes_and_session_drives_have_their_payload_checked()
+     {
+        let mut ledger = Ledger::new(ledger::Limits::default());
+        let invalid_close = message(
+            "session.close",
+            "msg_invalid",
+            json!({ "session_id": "a/b", "binding_id": "bind_a" }),
+        );
+        let invalid_drives = message(
+            "session.drives",
+            "msg_no_drives",
+            json!({ "session_id": "sess_a", "binding_id": "bind_a" }),
+        );
+        let invalid_prepare = message(
+            "session.prepare",
+            "msg_no_cwd",
+            json!({ "session_id": "sess_a", "binding_id": "bind_a" }),
+        );
+        let invalid_execute = message(
+            "tool.execute",
+            "msg_no_input",
+            json!({
+                "session_id": "sess_a",
+                "binding_id": "bind_a",
+                "tool_use_event_id": "tue_a",
+                "task_id": "task_a",
+            }),
+        );
+        let rows = [
+            (
+                "a close",
+                close("msg_a", "bind_a"),
+                Admitted::Route { recorded: true },
+            ),
+            (
+                "the same close again",
+                close("msg_a", "bind_a"),
+                Admitted::Duplicate,
+            ),
+            (
+                "its message_id with another binding",
+                close("msg_a", "bind_b"),
+                Admitted::Refused(ProtocolErrorKind::Conflict),
+            ),
+            (
+                "a close whose payload fails its schema",
+                invalid_close.clone(),
+                Admitted::Refused(ProtocolErrorKind::InvalidPayload),
+            ),
+            (
+                "the same invalid close again",
+                invalid_close,
+                Admitted::Refused(ProtocolErrorKind::InvalidPayload),
+            ),
+            (
+                "a session.drives without drives",
+                invalid_drives,
+                Admitted::Refused(ProtocolErrorKind::InvalidPayload),
+            ),
+            (
+                "a session.prepare without cwd",
+                invalid_prepare,
+                Admitted::Route { recorded: true },
+            ),
+            (
+                "a tool.execute without input",
+                invalid_execute,
+                Admitted::Route { recorded: true },
+            ),
+        ];
+        for (name, message, admitted) in rows {
+            assert_eq!(admit(&mut ledger, &message, 1), admitted, "{name}");
+        }
+        assert_eq!(ledger.len(), 3);
     }
 }

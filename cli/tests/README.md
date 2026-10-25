@@ -81,6 +81,12 @@ temporary directories. No workspace crate depends on this package.
   conflicts and predecessors, a deadline passed in one clock step, answers of
   an ended connection, the event size and protocol version, the startup
   phases in ready, and a redirect that is not followed.
+- `tests/ledger_outbox.rs`: the replay ledger and the Report outbox against
+  the reference control server: refused reports never sent again and a
+  refusal that ends the connection, a report whose ACK was lost sent again
+  byte for byte and recorded once, a Session instruction delivered again
+  routed once and its `message_id` with other content a conflict, and the
+  correlation of protocol errors.
 - `tests/local_service.rs`: `server run`, `server status` and `server stop`
   and the local API: status while Engine is unreachable, the wrong routes,
   shutdown on request, on each signal and with a handler blocked, one owner

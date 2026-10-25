@@ -17,9 +17,11 @@ rand.workspace = true
 reqwest.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+sha2.workspace = true
 state.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

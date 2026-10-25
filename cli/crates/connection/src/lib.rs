@@ -3,12 +3,14 @@
 
 pub mod attempt;
 pub mod backoff;
+pub mod classify;
 pub mod clock;
 pub mod heartbeat;
 pub mod http;
 pub mod ledger;
 pub mod outbox;
 pub mod owner;
+pub mod protocol_error;
 pub mod ready;
 pub mod report_deadline;
 pub mod staging;

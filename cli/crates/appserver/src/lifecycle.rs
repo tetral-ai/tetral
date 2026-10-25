@@ -172,6 +172,7 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
         configuration,
         socket,
         listener,
+        outbox,
     } = started;
     let credentials = configuration.credentials;
     let connection = Connection::spawn(connection::Config {
@@ -188,6 +189,7 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
             capabilities: capabilities::assemble(),
         },
         started: start,
+        outbox,
         times: times.connection,
     });
     let (lifecycle, finished) = spawn(ShutdownParts {

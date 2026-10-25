@@ -27,6 +27,7 @@ pub struct Started {
     pub configuration: Configuration,
     pub socket: PathBuf,
     pub listener: UnixListener,
+    pub outbox: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -98,6 +99,7 @@ pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
         configuration,
         socket,
         listener,
+        outbox: root.join(paths::OUTBOX),
     })
 }
 
