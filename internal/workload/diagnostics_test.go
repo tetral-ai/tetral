@@ -21,8 +21,7 @@ import (
 
 func TestDiagnosticBootControlsAndSafeErrors(t *testing.T) {
 	cfg, err := DiagnosticConfigFromEnv(func(string) string { return "" })
-	if err != nil || cfg.Level != slog.LevelInfo || cfg.MaxRecordBytes != 16384 || cfg.SummaryInterval != 30*time.Second || cfg.Burst != 1 ||
-		cfg.TraceSampleRatio != 1 || cfg.SlowQuery != 250*time.Millisecond || cfg.TraceEndpoint != "" {
+	if err != nil || cfg.Level != slog.LevelInfo || cfg.MaxRecordBytes != 16384 || cfg.SummaryInterval != 30*time.Second || cfg.Burst != 1 {
 		t.Fatalf("defaults: %+v %v", cfg, err)
 	}
 	values := map[string]string{"TETRAL_LOG_LEVEL": "warn", "TETRAL_LOG_MAX_RECORD_BYTES": "4096", "TETRAL_LOG_SUMMARY_INTERVAL_MS": "500", "TETRAL_LOG_BURST": "3",

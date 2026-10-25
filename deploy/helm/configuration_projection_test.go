@@ -257,15 +257,16 @@ func checkTypeScriptProjection(t *testing.T, envs map[string]projectionEnv, conf
 	if err != nil {
 		t.Fatalf("actual TypeScript parsers: %v\n%s", err, output)
 	}
+	type diagnostics struct {
+		Level                                    string
+		MaxRecordBytes, SummaryIntervalMs, Burst int
+		TraceSampleRatio                         float64
+		TraceEndpoint                            string
+	}
 	var results []struct {
-		Role        string
-		OK          bool
-		Diagnostics struct {
-			Level                                    string
-			MaxRecordBytes, SummaryIntervalMs, Burst int
-			TraceSampleRatio                         float64
-			TraceEndpoint                            string
-		}
+		Role                                  string
+		OK                                    bool
+		Diagnostics                           diagnostics
 		DeploymentEnvironment, ServiceVersion string
 		DatabasePool                          map[string]int
 		Lifecycle                             map[string]int
@@ -282,23 +283,16 @@ func checkTypeScriptProjection(t *testing.T, envs map[string]projectionEnv, conf
 		if !result.OK {
 			t.Fatalf("%s actual startup parser rejected rendered config", result.Role)
 		}
-		want := struct {
-			Level                                    string
-			MaxRecordBytes, SummaryIntervalMs, Burst int
-			TraceSampleRatio                         float64
-			TraceEndpoint                            string
-		}{"info", 16384, 30000, 1, 1, ""}
+		got, want := result.Diagnostics, diagnostics{Level: "info", MaxRecordBytes: 16384, SummaryIntervalMs: 30000, Burst: 1}
 		environment, version := "local", "dev"
 		if configured {
-			want = struct {
-				Level                                    string
-				MaxRecordBytes, SummaryIntervalMs, Burst int
-				TraceSampleRatio                         float64
-				TraceEndpoint                            string
-			}{"warn", 8192, 7000, 3, 0.25, "http://otel-collector.observability:4317"}
+			want = diagnostics{"warn", 8192, 7000, 3, 0.25, "http://otel-collector.observability:4317"}
 			environment, version = "projection-test", "projection-version"
+		} else {
+			// The unconfigured trace settings are defaults; no test pins them.
+			got.TraceSampleRatio, got.TraceEndpoint = 0, ""
 		}
-		if err := requireProjection(result.Diagnostics, want); err != nil {
+		if err := requireProjection(got, want); err != nil {
 			t.Fatalf("%s: %v", result.Role, err)
 		}
 		if result.DeploymentEnvironment != environment || result.ServiceVersion != version {

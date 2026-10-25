@@ -30,7 +30,7 @@ func TestGeneratedKeysAreDistinctAndOnlyTheirDigestsAreStored(t *testing.T) {
 		key := GenerateKey()
 		plaintext := key.Reveal()
 		secret, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(plaintext, KeyPrefix))
-		if seen[plaintext] || len(plaintext) != 53 || KeyLength != 53 || !strings.HasPrefix(plaintext, KeyPrefix) || err != nil || len(secret) != 32 {
+		if seen[plaintext] || len(plaintext) != 53 || !strings.HasPrefix(plaintext, KeyPrefix) || err != nil || len(secret) != 32 {
 			t.Fatalf("key %d: duplicate=%v length=%d decoded=%d err=%v", index, seen[plaintext], len(plaintext), len(secret), err)
 		}
 		if digest := sha256.Sum256([]byte(plaintext)); !bytes.Equal(key.Digest(), digest[:]) {

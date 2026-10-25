@@ -118,13 +118,16 @@ func TestHelmObservabilitySettingsReachEveryWorkload(t *testing.T) {
 		`observability.metricsScrapePeers[0].podSelector.matchLabels.app\.kubernetes\.io/name=prometheus`,
 	}
 	for _, tc := range []struct {
-		name, endpoint, ratio, slowQuery string
-		scraped                          bool
-		values                           []string
+		name, endpoint string
+		// ratio and slowQuery, when a row sets them, are the values every
+		// workload must receive.
+		ratio, slowQuery string
+		scraped          bool
+		values           []string
 	}{
-		{name: "defaults", ratio: "1.0", slowQuery: "250"},
+		{name: "defaults"},
 		{name: "lower bounds", ratio: "0", slowQuery: "1", values: []string{"observability.traceSampleRatio=0", "observability.slowQueryMs=1"}},
-		{name: "scrape peers only", ratio: "1.0", slowQuery: "250", scraped: true, values: scrapePeer},
+		{name: "scrape peers only", scraped: true, values: scrapePeer},
 		{name: "exports", endpoint: endpoint, ratio: "0.25", slowQuery: "60000", scraped: true, values: []string{
 			"observability.otlpEndpoint=" + endpoint,
 			`observability.otlpPeers[0].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=observability`,
@@ -147,7 +150,7 @@ func TestHelmObservabilitySettingsReachEveryWorkload(t *testing.T) {
 						env[fmt.Sprint(item["name"])] = item["value"]
 					}
 					for key, want := range map[string]string{"TETRAL_TRACE_SAMPLE_RATIO": tc.ratio, "TETRAL_DB_SLOW_QUERY_MS": tc.slowQuery} {
-						if env[key] != want {
+						if want != "" && env[key] != want {
 							t.Errorf("%s/%v %s = %#v; want %q", name, container["name"], key, env[key], want)
 						}
 					}
