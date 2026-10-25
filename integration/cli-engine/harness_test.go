@@ -1,17 +1,3 @@
-// Package joint runs builds of the CLI against the real Engine: PostgreSQL,
-// MinIO and NATS in containers, auth, api and computer-hub as processes behind
-// a public edge of the test process (edge_test.go), and CLI machines on the
-// Linux host or on a Mac over SSH (mac_test.go). Each test writes a record of
-// what it ran and observed into TETRAL_ACCEPTANCE_DIR (record_test.go).
-//
-// The module has its own go.mod, so no test profile of the repository and no
-// CI workflow runs it. A run sets the inputs requireInputs reads and runs one
-// test from this directory:
-//
-//	go test -count=1 -timeout=60m -run '^<test name>$' ./...
-//
-// A test fails at once, and never skips, when an input it needs is missing
-// or invalid.
 package joint
 
 import (

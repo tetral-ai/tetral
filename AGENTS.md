@@ -11,7 +11,8 @@ is restated here.
 |-----|---------------|
 | `README.md` | The front page: what Tetral is, how to install it, where to go next. |
 | `services/<name>/README.md` | Per-service contract: responsibilities, lifecycle, seams, testing. `services/api` also holds the boot environment, the workspace isolation model, and `/v1` surface status. |
-| `internal/<name>/README.md` | Shared-package contracts: process lifecycle and diagnostics (`internal/workload`), the client protocol types (`internal/protocol`), Runtime configuration and control, MCP manifests, TypeScript observability and database pools. |
+| `internal/<name>/README.md` | Shared-package contracts: process lifecycle and diagnostics (`internal/workload`), the client protocol types (`internal/protocol`), the machine rows and connections (`internal/instance`, `internal/hubflow`), Runtime configuration and control, MCP manifests, TypeScript observability and database pools. |
+| `integration/<name>/README.md` | Cross-process test harnesses: the test clients (`integration/enginetest`) and the CLI and Engine end-to-end tests (`integration/cli-engine`). |
 | `deploy/**/README.md` | Installation and deployment contracts for the Helm chart (`deploy/helm/tetral`), the raw manifests and any separately installed dependency. |
 | `docs/*.md` | Cross-service guides, for example testing and CI ownership, bootstrap, authentication (`docs/authentication.md`), and the service-stack upgrade from the previous release (`docs/upgrade-service-stack.md`). |
 | `CONTRIBUTING.md` | The pre-PR self-check every contribution runs. |

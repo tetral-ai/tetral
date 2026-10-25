@@ -51,9 +51,10 @@
 //     functions with a fixed search_path owned by the migration role: the
 //     lock-only runtime process functions, the Job Runner binding-discovery
 //     upper and page functions, the Auth credential lookup, authority lock
-//     and token prune functions, the Cleanup due-Session discovery function,
-//     and the Cleanup receipt/change and Queue Job Runner terminal retention
-//     functions. The baseline also inserts the Cleanup scheduling cursor's
+//     and token prune functions, the Auth connection key lookup, the Computer
+//     Hub instruction pressure function, the Cleanup due-Session discovery
+//     function, and the Cleanup receipt/change and Queue Job Runner terminal
+//     retention functions. The baseline also inserts the Cleanup scheduling cursor's
 //     singleton row. It stays portable across
 //     self-managed PostgreSQL and managed providers.
 //     The complete database preparation command additionally requires a
@@ -65,6 +66,7 @@
 //   - postgresql_runtime_schema.go (runtime process, liveness and handoff tables, lock-only functions)
 //   - postgresql_runner_discovery_schema.go (Job Runner cross-workspace binding-discovery policies and functions)
 //   - postgresql_auth_schema.go (Auth policy and token tables, lookup/lock/prune functions, key and grant triggers)
+//   - postgresql_instance_schema.go (instance, credential, idempotency, connection, replay, protocol-error and instruction tables; the connection key lookup and instruction pressure functions and their policies)
 //   - postgresql_cleanup_schema.go (Cleanup scheduling cursor, global due index, discovery policy and function)
 //   - postgresql_retention_schema.go (feed retention metadata, age and head indexes, owner-checked retention policies and functions)
 //   - postgresql_migrator.go (version checksums, baseline steps, MigrateSchema/VerifySchema)
@@ -148,14 +150,19 @@
 //	                                                                                                                        key issuance
 //	auth_access_tokens                                     Auth exchange issuance; pruning                                  Auth admission (lookup function) and
 //	                                                        through the prune function; tetral-auth-policy revocation       derived-key issuance
+//	instances / instance_credentials /                     computer-hub through internal/instance                           computer-hub; Auth admission (the
+//	instance_idempotency_records                                                                                            connection key lookup function)
+//	instance_connections / connection_upstream_messages /  computer-hub through internal/instance and internal/hubflow      computer-hub (the instruction pressure
+//	connection_protocol_errors / connection_instructions                                                                    function across Workspaces)
 //
 // UPDATE-WITH: the table DDL in postgresql_schema.go,
 // postgresql_runtime_schema.go, postgresql_auth_schema.go,
-// postgresql_cleanup_schema.go and postgresql_retention_schema.go; the writer/reader
-// services under services/bridge, services/job-runner, services/api,
-// services/sandbox, services/queue, services/cleanup, services/event-stream,
-// services/git-proxy, services/gateway and services/auth; the shared writers in
-// internal/runtimecontrol, internal/sessioneventwrite, internal/sessionevent,
-// internal/mcpmanifest, internal/session and internal/auth; and the enforced grants in
-// database/roles.json.
+// postgresql_instance_schema.go, postgresql_cleanup_schema.go and
+// postgresql_retention_schema.go; the writer/reader services under
+// services/bridge, services/job-runner, services/api, services/sandbox,
+// services/queue, services/cleanup, services/event-stream, services/git-proxy,
+// services/gateway, services/auth and services/computer-hub; the shared writers
+// in internal/runtimecontrol, internal/sessioneventwrite, internal/sessionevent,
+// internal/mcpmanifest, internal/session, internal/auth, internal/instance and
+// internal/hubflow; and the enforced grants in database/roles.json.
 package storage
