@@ -29,6 +29,19 @@ temporary directories. No workspace crate depends on this package.
   when it is unset. A case that needs a non-root user is recorded as not run,
   with its reason, when the test runs as root
   (`record::Case::runs_as_non_root`); no case skips silently.
+- A test reads the one result object of a command's stdout (`run::Run`). A
+  case that a command must not change compares a snapshot of the root's
+  paths, kinds, owners, modes and bytes taken before and after it
+  (`snapshot`).
+- `S`, the directory of control sockets, is shared by every App Server of the
+  user on the machine. A test that may meet `S` holds a shared lock on a file
+  beside it for as long as it runs, and a test that replaces `S` for a case
+  holds that lock exclusively and puts `S` back when the case ends
+  (`control_socket`). A case that needs `S` owned by another user makes it as
+  root with `sudo -n`; where that fails the case is recorded as not run, and
+  under GitHub Actions the test fails instead. A state root owned by another
+  user needs no privilege: such a case uses a directory that root already owns
+  (`other_user::directory`).
 
 ## Where things are
 
@@ -37,10 +50,19 @@ temporary directories. No workspace crate depends on this package.
 - `src/reference.rs`: `ReferenceServer`, the server as a process, its startup
   input and its controls.
 - `src/run.rs`: `Tetral`, a command line of the `tetral` under test, and
-  `Run`, its exit status and output.
+  `Run`, its exit status, output and result object.
 - `src/seams.rs`: `Seams`, the harness side of the seam protocol, which
   `state::seams` defines.
 - `src/record.rs`: `Record`, `Case` and the `record!` macro.
+- `src/snapshot.rs`: `snapshot`, every path under a directory with its kind,
+  owner, mode and bytes.
+- `src/control_socket.rs`: the locks on `S` and its replacements for a case.
+- `src/other_user.rs`: a directory that another user owns.
+- `tests/configure.rs`: `tetral configure` and `tetral --version`: the refused
+  arguments, bootstraps, apps and control paths with the root unchanged, the
+  size limit and private modes of a new root, each failure code, configure
+  over a broken pair, a newer `config.toml` and interrupted replacements, and
+  no key in the output or the argument list.
 - `tests/crate_graph.rs`: the rules of the crate graph, checked over the
   output of `cargo metadata`, and the rule that no library crate prints,
   checked over the library crates' sources.

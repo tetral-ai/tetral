@@ -11,4 +11,11 @@ test-seams = ["state/test-seams"]
 
 [dependencies]
 appserver.workspace = true
+clap = { workspace = true, features = ["derive"] }
+observe.workspace = true
+protocol.workspace = true
+serde_json.workspace = true
 state.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

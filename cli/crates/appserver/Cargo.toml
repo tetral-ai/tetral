@@ -11,5 +11,7 @@ drive.workspace = true
 execution.workspace = true
 mcp.workspace = true
 protocol.workspace = true
+rustix = { workspace = true, features = ["fs"] }
 session.workspace = true
 state.workspace = true
+thiserror.workspace = true

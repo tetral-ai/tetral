@@ -16,3 +16,7 @@ ones it uses belong here too.
 ## Where things are
 
 - `lib.rs`: this documentation and the print lints that `cli/README.md` states.
+- `lock.rs`: the state-root lock, `run/app-server.lock` held with `flock`
+  without waiting (`acquire`, `RootLock`).
+- `configuration.rs`: the configuration an App Server starts from, read
+  under the lock and refused when the two files disagree (`read`).

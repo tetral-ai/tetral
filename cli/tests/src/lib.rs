@@ -1,10 +1,13 @@
 #![doc = include_str!("../README.md")]
 
 pub mod binaries;
+pub mod control_socket;
+pub mod other_user;
 pub mod record;
 pub mod reference;
 pub mod run;
 pub mod seams;
+pub mod snapshot;
 
 use std::path::{Path, PathBuf};
 

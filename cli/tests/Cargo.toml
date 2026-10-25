@@ -7,6 +7,6 @@ publish = false
 
 [dependencies]
 reqwest = { workspace = true, features = ["blocking", "json"] }
-rustix = { workspace = true, features = ["process"] }
+rustix = { workspace = true, features = ["fs", "process"] }
 serde_json.workspace = true
 tempfile.workspace = true

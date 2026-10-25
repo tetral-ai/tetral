@@ -9,5 +9,10 @@ publish.workspace = true
 test-seams = ["dep:tokio"]
 
 [dependencies]
-rustix = { workspace = true, features = ["time"] }
+rustix = { workspace = true, features = ["fs", "process", "time"] }
+serde = { workspace = true, features = ["derive"] }
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true, features = ["rt"], optional = true }
+toml.workspace = true

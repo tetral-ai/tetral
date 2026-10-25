@@ -1,5 +1,5 @@
 //! Runs the `tetral` under test as a child process with a given environment
-//! and stdin.
+//! and stdin, and reads its one result object.
 
 use std::ffi::OsStr;
 use std::io::{Read, Write};
@@ -7,6 +7,8 @@ use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use serde_json::Value;
 
 use crate::binaries;
 use crate::seams::{SOCKET_VARIABLE, Seams, WAIT_LIMIT};
@@ -20,6 +22,55 @@ pub struct Run {
 }
 
 impl Run {
+    /// The one JSON object of stdout; fails unless stdout is exactly one
+    /// compact JSON object and a newline.
+    pub fn object(&self) -> Value {
+        let text = std::str::from_utf8(&self.stdout).expect("stdout is UTF-8");
+        let line = text
+            .strip_suffix('\n')
+            .unwrap_or_else(|| panic!("stdout {text:?} does not end in one newline"));
+        assert!(
+            !line.contains('\n'),
+            "stdout holds more than one line: {text:?}"
+        );
+        let object: Value =
+            serde_json::from_str(line).unwrap_or_else(|error| panic!("stdout {line:?}: {error}"));
+        assert!(object.is_object(), "stdout {line:?} is not an object");
+        assert_eq!(
+            serde_json::to_string(&object).unwrap(),
+            line,
+            "stdout is not compact"
+        );
+        object
+    }
+
+    /// The failure's code, after checking the exit status and the object's
+    /// shape `{"error": {"code", "message"}}`.
+    pub fn error_code(&self) -> String {
+        assert_eq!(self.status.code(), Some(1), "exit status of a failure");
+        let object = self.object();
+        assert_eq!(
+            object.as_object().map(|members| members.len()),
+            Some(1),
+            "a failure object holds error only: {object}"
+        );
+        let error = object["error"].as_object().expect("an error object");
+        assert_eq!(error.len(), 2, "the error holds code and message only");
+        assert!(
+            error["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty())
+        );
+        error["code"].as_str().expect("a code").to_owned()
+    }
+
+    pub fn message(&self) -> String {
+        self.object()["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
     /// How the run exited, for a record.
     pub fn exit(&self) -> String {
         self.status.to_string()
