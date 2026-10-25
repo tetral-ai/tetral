@@ -316,6 +316,22 @@ fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepa
     assert_eq!(outcome(&engine, &message_id), failed("cwd_forbidden"));
     assert_eq!(listing(&machine.root), root_listing);
     case.observe("the missing directory was created and prepared; without create_cwd cwd_not_found and nothing created; below the link into the state root cwd_forbidden and nothing created there");
+
+    let mut case = record.case("create_cwd with a .. after a missing directory and after a link");
+    let into_run = base.join("into_run");
+    symlink(machine.root.join("run"), &into_run).unwrap();
+    let base_listing = listing(base);
+    let mut after_missing = payload("sess_after_missing", "bind_1", &base.join("gone/../made"));
+    after_missing["create_cwd"] = json!(true);
+    let message_id = prepare(&engine, &after_missing);
+    assert_eq!(outcome(&engine, &message_id), failed("cwd_not_found"));
+    let mut after_link = payload("sess_after_link", "bind_1", &into_run.join("../new"));
+    after_link["create_cwd"] = json!(true);
+    let message_id = prepare(&engine, &after_link);
+    assert_eq!(outcome(&engine, &message_id), failed("cwd_forbidden"));
+    assert_eq!(listing(base), base_listing);
+    assert_eq!(listing(&machine.root), root_listing);
+    case.observe("after a missing directory cwd_not_found; after a link into the state root, which the .. leaves for the state root itself, cwd_forbidden; nothing created in either place");
 }
 
 #[test]

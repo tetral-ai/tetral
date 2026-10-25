@@ -101,19 +101,25 @@ fn check(input: &Input) -> Result<PathBuf, PreparationError> {
 /// Creates the components of `target` below its deepest existing ancestor,
 /// one at a time with the process umask, each opened without following a
 /// symbolic link, after refusing an ancestor that resolves into the state
-/// root.
+/// root. The ancestor is found by resolving each shorter prefix of `target`
+/// as given, so a `..` after a symbolic link leaves the link's target, as the
+/// kernel resolves it. A target whose missing components hold a `..` is not
+/// found: reaching it would create a directory that the `..` then leaves.
 fn create_missing(target: &Path, state_root: &Path) -> Result<(), PreparationError> {
-    let lexical = lexical(target);
     let mut missing = Vec::new();
-    let mut ancestor = lexical.as_path();
-    while std::fs::metadata(ancestor).is_err() {
+    let mut ancestor = target;
+    let resolved = loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(resolved) => break resolved,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(resolution(&error)),
+        }
         let (Some(parent), Some(name)) = (ancestor.parent(), ancestor.file_name()) else {
             return Err(failure(PreparationErrorCode::CwdNotFound, None));
         };
         missing.push(name.to_owned());
         ancestor = parent;
-    }
-    let resolved = std::fs::canonicalize(ancestor).map_err(|error| resolution(&error))?;
+    };
     if resolved.starts_with(state_root) {
         return Err(failure(PreparationErrorCode::CwdForbidden, None));
     }
