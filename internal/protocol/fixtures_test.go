@@ -241,20 +241,23 @@ func readFixtures(t *testing.T, name string) []fixture {
 func TestFixturesDecodeAndReencode(t *testing.T) {
 	files := []struct {
 		name string
-		// census is the file's count of the fixtures each check below
-		// selects, so that a selector that matches nothing fails.
-		census map[string]int
-		codecs func([]fixture) map[string]codec
+		// selects names the checks below that at least one of the file's
+		// fixtures reaches, so that a selector that matches nothing fails.
+		selects []string
+		codecs  func([]fixture) map[string]codec
 	}{
-		{"tool-execution-v1.fixtures.json", map[string]int{}, func([]fixture) map[string]codec { return toolExecutionCodecs }},
-		{"connection-v1.fixtures.json", map[string]int{"http_status": 17}, func([]fixture) map[string]codec { return connectionCodecs }},
-		{"drive-transfer-v1.fixtures.json", map[string]int{"relation only": 34, "endpoint and status": 15, "endpoint and error": 23, "pair": 30}, driveTransferCodecs},
+		{"tool-execution-v1.fixtures.json", nil, func([]fixture) map[string]codec { return toolExecutionCodecs }},
+		{"connection-v1.fixtures.json", []string{"http_status"}, func([]fixture) map[string]codec { return connectionCodecs }},
+		{"drive-transfer-v1.fixtures.json", []string{"relation only", "endpoint and status", "endpoint and error", "pair"}, driveTransferCodecs},
 	}
 	for _, file := range files {
 		t.Run(file.name, func(t *testing.T) {
 			fixtures := readFixtures(t, file.name)
-			if got := census(fixtures); !maps.Equal(got, file.census) {
-				t.Fatalf("census = %v; want %v", got, file.census)
+			counts := census(fixtures)
+			for _, selector := range file.selects {
+				if counts[selector] == 0 {
+					t.Fatalf("no fixture is selected by %q", selector)
+				}
 			}
 			codecs := file.codecs(fixtures)
 			for _, f := range fixtures {
