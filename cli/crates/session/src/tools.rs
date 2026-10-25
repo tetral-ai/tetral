@@ -11,17 +11,20 @@
 //! control finds its task only in the registry of the binding it names, on
 //! its own connection, and goes to that task's supervisor.
 //!
-//! Until every record an earlier App Server left for the Session is
-//! confirmed, the Session is `cleanup_pending`
-//! ([`SessionOwner::cleanup_pending`]).
+//! Each task's supervisor tells the owner when its processes are confirmed
+//! gone. A connection's end discards the binding's staged tasks and ends its
+//! running ones; until every task of an ended connection is confirmed gone,
+//! and every record an earlier App Server left for the Session is, the
+//! Session is `cleanup_pending` ([`SessionOwner::cleanup_pending`]).
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use execution::policy::{TaskPermissions, TranslationInputs, validate};
 use execution::report::{Body, Correlation, Report};
-use execution::supervisor::{Control, SupervisorMailbox, SupervisorMessage};
+use execution::supervisor::{Control, SupervisorMailbox, SupervisorMessage, TaskListener};
 use execution::{cleanup, isolation, store};
 use protocol::connection::{Downstream, DownstreamPayload, DownstreamType};
 use protocol::id::Id;
@@ -33,7 +36,7 @@ use protocol::tool::{
 };
 use serde_json::{Value, json};
 
-use crate::owner::{SessionOwner, Shared, TaskStarter};
+use crate::owner::{SessionMailbox, SessionMessage, SessionOwner, Shared, TaskStarter};
 use crate::record::{Binding, Record};
 
 /// What the admission of tool instructions reads besides a binding, the
@@ -88,6 +91,8 @@ struct Task {
     tool: ExecutionTool,
     supervisor: Option<SupervisorMailbox>,
     state: TaskState,
+    /// Whether its processes are confirmed gone.
+    gone: bool,
 }
 
 impl std::fmt::Debug for Task {
@@ -117,6 +122,33 @@ impl Tasks {
             if let Some(task) = self.registry.get_mut(&task_id) {
                 task.state = TaskState::Prevented;
             }
+        }
+    }
+
+    /// The connection ended: staged tasks never start, and every task's
+    /// supervisor ends its task. Gives the tasks whose processes are not
+    /// yet confirmed gone.
+    pub fn connection_ended(&mut self) -> Vec<Id> {
+        self.prevent_staged();
+        self.send_all(|| SupervisorMessage::ConnectionEnded);
+        self.unconfirmed().cloned().collect()
+    }
+
+    /// The started tasks whose processes are not yet confirmed gone.
+    fn unconfirmed(&self) -> impl Iterator<Item = &Id> {
+        self.registry
+            .iter()
+            .filter(|(_, task)| task.state == TaskState::Started && !task.gone)
+            .map(|(task_id, _)| task_id)
+    }
+
+    fn send_all(&self, message: impl Fn() -> SupervisorMessage) {
+        for supervisor in self
+            .registry
+            .values()
+            .filter_map(|task| task.supervisor.as_ref())
+        {
+            let _ = supervisor.send(message());
         }
     }
 
@@ -236,7 +268,15 @@ impl<S: TaskStarter> SessionOwner<S> {
         };
         let staged = binding.state == SessionState::PreparedPendingAck;
         let tool = tool_of(&start.tool);
-        let supervisor = self.starter.supervise(start, preparation.reports.clone());
+        let listener = Arc::new(Events {
+            mailbox: self.mailbox.clone(),
+            connection_id: call.connection_id.clone(),
+            binding_id: call.binding_id.clone(),
+            task_id: call.task_id.clone(),
+        });
+        let supervisor = self
+            .starter
+            .supervise(start, preparation.reports.clone(), listener);
         if !staged && let Some(supervisor) = &supervisor {
             self.starter.start(supervisor);
         }
@@ -252,6 +292,7 @@ impl<S: TaskStarter> SessionOwner<S> {
                 } else {
                     TaskState::Started
                 },
+                gone: false,
             },
         );
         if staged {
@@ -326,15 +367,80 @@ impl<S: TaskStarter> SessionOwner<S> {
         }
     }
 
-    /// Whether an earlier execution of this Session may still run: a record
-    /// an earlier App Server left whose processes are not confirmed gone.
+    /// What a task's supervisor reported about the task: once its processes
+    /// are gone it no longer keeps its Session `cleanup_pending`.
+    pub(crate) fn task_event(&mut self, task: TaskKey, event: TaskEvent) {
+        let TaskEvent::Gone = event;
+        self.unconfirmed
+            .remove(&(task.connection_id.clone(), task.task_id.clone()));
+        let Some(record) = self.record.as_mut() else {
+            return;
+        };
+        let Some(entry) = [record.current.as_mut(), record.unavailable.as_mut()]
+            .into_iter()
+            .flatten()
+            .find(|binding| {
+                binding.binding_id == task.binding_id && binding.connection_id == task.connection_id
+            })
+            .and_then(|binding| binding.tasks.registry.get_mut(&task.task_id))
+        else {
+            return;
+        };
+        entry.gone = true;
+    }
+
+    /// Whether an earlier execution of this Session may still run: a task
+    /// of an ended connection, or a record an earlier App Server left, whose
+    /// processes are not confirmed gone.
     pub(crate) fn cleanup_pending(&self) -> bool {
-        self.preparation.as_ref().is_some_and(|preparation| {
-            preparation
-                .shared
-                .leftovers
-                .pending(preparation.session_id.as_str())
-        })
+        !self.unconfirmed.is_empty()
+            || self.preparation.as_ref().is_some_and(|preparation| {
+                preparation
+                    .shared
+                    .leftovers
+                    .pending(preparation.session_id.as_str())
+            })
+    }
+}
+
+/// A task as its supervisor's events name it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskKey {
+    pub connection_id: Id,
+    pub binding_id: Id,
+    pub task_id: Id,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskEvent {
+    Gone,
+}
+
+/// Gives a supervisor's reports about its task back to the owner as
+/// messages.
+struct Events {
+    mailbox: SessionMailbox,
+    connection_id: Id,
+    binding_id: Id,
+    task_id: Id,
+}
+
+impl Events {
+    fn send(&self, event: TaskEvent) {
+        let _ = self.mailbox.send(SessionMessage::Task {
+            task: TaskKey {
+                connection_id: self.connection_id.clone(),
+                binding_id: self.binding_id.clone(),
+                task_id: self.task_id.clone(),
+            },
+            event,
+        });
+    }
+}
+
+impl TaskListener for Events {
+    fn gone(&self) {
+        self.send(TaskEvent::Gone);
     }
 }
 

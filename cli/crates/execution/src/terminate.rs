@@ -2,12 +2,15 @@
 //! [`GRACE`] SIGKILL to the launched process group and to the first process
 //! of the task's PID namespace, then a wait of at most [`KILL_WAIT`] for the
 //! exit, after which the supervisor stops waiting and reports no exit facts.
+//! At a connection's end the procedure starts with SIGKILL
+//! ([`Termination::kill`]). A sent signal is never taken as the exit.
 //!
 //! On Linux SIGTERM goes to the PID namespace's first process, Codex's inner
 //! stage, which passes it on to the command's process group; one sent to the
 //! launched process group would end the whole sandbox at once, through
-//! `bwrap`'s `--die-with-parent`, and leave the command no grace. On macOS it
-//! goes to the process group.
+//! `bwrap`'s `--die-with-parent`, and leave the command no grace. SIGKILL to
+//! the namespace's first process makes the kernel end every other process of
+//! the namespace. On macOS both go to the process group.
 
 use std::time::Duration;
 
@@ -57,9 +60,26 @@ impl Termination {
         }
     }
 
+    /// Sends SIGKILL at once to the task whose launched process is `pid`,
+    /// as at a connection's end.
+    pub fn kill(pid: u32, steps: Steps) -> Termination {
+        kill_task(pid);
+        Termination {
+            pid,
+            steps,
+            killed: true,
+            due: state::seams::now() + steps.kill_wait,
+        }
+    }
+
     /// When the next step is due.
     pub fn due(&self) -> Duration {
         self.due
+    }
+
+    /// Whether SIGKILL has been sent.
+    pub fn killed(&self) -> bool {
+        self.killed
     }
 
     /// Takes the step that is due: SIGKILL after the grace, giving the step

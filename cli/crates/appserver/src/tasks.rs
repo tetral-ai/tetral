@@ -7,7 +7,7 @@ use std::sync::Arc;
 use execution::isolation::Isolation;
 use execution::limits::Visible;
 use execution::store::{LOG_HEAD_BYTES, TaskFiles};
-use execution::supervisor::{self, Bounds, Context, SupervisorMailbox, TaskSpec};
+use execution::supervisor::{self, Bounds, Context, SupervisorMailbox, TaskListener, TaskSpec};
 use protocol::ports::ReportSink;
 use protocol::tool::ToolInput;
 use session::{TaskStart, TaskStarter};
@@ -28,6 +28,7 @@ impl TaskStarter for Supervisors {
         &mut self,
         task: TaskStart,
         reports: Arc<dyn ReportSink>,
+        listener: Arc<dyn TaskListener>,
     ) -> Option<SupervisorMailbox> {
         let ToolInput::ExecCommand(input) = task.tool else {
             return None;
@@ -47,6 +48,7 @@ impl TaskStarter for Supervisors {
             traceparent: task.traceparent,
             received: task.received,
             record: task.record,
+            listener,
         };
         Some(supervisor::spawn(
             spec,

@@ -7,13 +7,13 @@
 //! outcomes come back as messages tagged with their operation or report,
 //! and a result whose operation is no longer current is discarded.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use execution::cleanup::Leftovers;
-use execution::supervisor::{SupervisorMailbox, SupervisorMessage};
+use execution::supervisor::{SupervisorMailbox, SupervisorMessage, TaskListener};
 use protocol::id::{Id, SafeId};
 use protocol::local::SessionState;
 use protocol::ports::{
@@ -25,7 +25,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::probe::{PROBE_LIMIT, Probe};
 use crate::probe_child::Output;
 use crate::record::Record;
-use crate::tools::{self, TaskStart, ToolContext};
+use crate::tools::{self, TaskEvent, TaskKey, TaskStart, ToolContext};
 
 pub enum SessionMessage {
     /// A tool instruction for one of this Session's bindings.
@@ -53,6 +53,11 @@ pub enum SessionMessage {
     ConnectionEnded(Id),
     Shutdown,
     Entries(EntriesReply),
+    /// What a task's supervisor reported about its processes.
+    Task {
+        task: TaskKey,
+        event: TaskEvent,
+    },
 }
 
 pub type SessionMailbox = mpsc::UnboundedSender<SessionMessage>;
@@ -60,12 +65,13 @@ pub type SessionMailbox = mpsc::UnboundedSender<SessionMessage>;
 /// Supervises the tasks of admitted commands.
 pub trait TaskStarter: Send + 'static {
     /// The supervisor of an admitted task, `staged` until [`TaskStarter::start`],
-    /// whose reports go to `reports`; `None` for a tool that no supervisor
-    /// runs here.
+    /// whose reports go to `reports` and which tells `listener` about the
+    /// task's processes; `None` for a tool that no supervisor runs here.
     fn supervise(
         &mut self,
         task: TaskStart,
         reports: Arc<dyn ReportSink>,
+        listener: Arc<dyn TaskListener>,
     ) -> Option<SupervisorMailbox>;
 
     /// Starts a staged task's supervisor.
@@ -84,6 +90,7 @@ impl TaskStarter for NoTasks {
         &mut self,
         _task: TaskStart,
         _reports: Arc<dyn ReportSink>,
+        _listener: Arc<dyn TaskListener>,
     ) -> Option<SupervisorMailbox> {
         None
     }
@@ -244,6 +251,9 @@ pub(crate) struct SessionOwner<S> {
     pub requests: HashMap<ProbeRequest, u64>,
     /// Each probe not yet reaped, by operation.
     pub probes: HashMap<u64, Running>,
+    /// The tasks of ended connections, by connection and `task_id`, whose
+    /// processes are not yet confirmed gone.
+    pub unconfirmed: HashSet<(Id, Id)>,
 }
 
 async fn own<S: TaskStarter>(
@@ -286,6 +296,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             last_request: 0,
             requests: HashMap::new(),
             probes: HashMap::new(),
+            unconfirmed: HashSet::new(),
         }
     }
 
@@ -309,6 +320,7 @@ impl<S: TaskStarter> SessionOwner<S> {
                 };
                 reply(entries);
             }
+            SessionMessage::Task { task, event } => self.task_event(task, event),
         }
     }
 
@@ -371,7 +383,8 @@ impl<S: TaskStarter> SessionOwner<S> {
     }
 
     /// The bindings of the ended connection become `unavailable`; a running
-    /// preparation of one ends and its staged tasks are discarded.
+    /// preparation of one ends, its staged tasks are discarded and its
+    /// running ones end.
     fn connection_ended(&mut self, connection: &Id) {
         let Some(record) = self.record.as_mut() else {
             return;
@@ -385,7 +398,9 @@ impl<S: TaskStarter> SessionOwner<S> {
         binding.state = SessionState::Unavailable;
         binding.waiting.clear();
         binding.reports.clear();
-        binding.tasks.prevent_staged();
+        for task_id in binding.tasks.connection_ended() {
+            self.unconfirmed.insert((connection.clone(), task_id));
+        }
         let operation = binding.operation;
         record.unavailable = Some(binding);
         self.end_operation(operation);
@@ -624,6 +639,7 @@ mod tests {
             &mut self,
             _task: TaskStart,
             _reports: Arc<dyn ReportSink>,
+            _listener: Arc<dyn TaskListener>,
         ) -> Option<SupervisorMailbox> {
             let (mailbox, messages) = mpsc::unbounded_channel();
             self.supervisors.push(messages);

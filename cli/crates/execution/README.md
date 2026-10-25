@@ -118,7 +118,10 @@ which owns that task's process tree; the translation of a call's
   which the sandbox's stages report that way (`exec::ExitFacts::observed`).
 - The termination procedure sends a task SIGTERM, on Linux to its PID
   namespace's first process, which passes it on to the command's process
-  group, and SIGKILL after a grace (`terminate`).
+  group, SIGKILL after a grace, and waits a bounded time for the exit; at a
+  connection's end it starts with SIGKILL. A sent signal is never taken as
+  the exit, and after SIGKILL the pipes are read only until that wait ends
+  (`terminate`, `supervisor`).
 - A task stays tracked until its processes are confirmed gone: on Linux, no
   process this user can inspect in its PID namespace, checked every
   `cleanup::CHECK_INTERVAL`. Once the namespace's first process exists the
@@ -135,6 +138,8 @@ which owns that task's process tree; the translation of a call's
   tasks left. The check owns the records and is the only writer of which
   Sessions they keep `cleanup_pending`; readers see what it last published
   (`cleanup::Check`, `cleanup::Leftovers`).
+- A connection's end discards a staged task without a report and ends a
+  running one (`supervisor`).
 - The initial wait runs from the spawn. One that ends before the command's
   start, whatever `on_wait_expiry` says, one under `kill`, and a detached
   command's lifetime end the command through the termination procedure
@@ -142,10 +147,11 @@ which owns that task's process tree; the translation of a call's
 
 ## Where things are
 
-- `supervisor.rs`: `spawn`, a task's `TaskSpec`, the shared `Context` and
-  its `Bounds`, `SupervisorMessage`, `Control` and `SupervisorMailbox`; the
-  start, the running loop, the reports, the controls with their waiters and
-  replies, the confirmation and the cleanup.
+- `supervisor.rs`: `spawn`, a task's `TaskSpec` and its `TaskListener`, the
+  shared `Context` and its `Bounds`, `SupervisorMessage`, `Control`
+  and `SupervisorMailbox`; the start, the running loop, the reports, the
+  controls with their waiters and replies, the confirmation and the
+  cleanup.
 - `stdin.rs`: `Request`, what a `tool.stdin` asks for with its wait, and
   `WriteRecords`, a task's handled writes.
 - `cancel.rs`: `Receipt`, the state in which a cancel finds its task.

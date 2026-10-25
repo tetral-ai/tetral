@@ -16,4 +16,5 @@ state.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]
+fuser.workspace = true
 tempfile.workspace = true

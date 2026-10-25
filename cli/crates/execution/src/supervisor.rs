@@ -18,6 +18,8 @@
 //! report the task's processes are checked every
 //! [`cleanup::CHECK_INTERVAL`] until they are confirmed gone; only then do
 //! the record and, once every report has its outcome, the task's files go.
+//! A connection's end discards a staged task without a report and ends a
+//! running one with SIGKILL at once.
 
 use std::collections::{HashSet, VecDeque};
 use std::os::fd::OwnedFd;
@@ -110,6 +112,14 @@ pub struct TaskSpec {
     pub received: Duration,
     /// Where the task's record goes ([`cleanup::record_path`]).
     pub record: PathBuf,
+    pub listener: Arc<dyn TaskListener>,
+}
+
+/// What a supervisor tells its task's binding owner about the task's
+/// processes.
+pub trait TaskListener: Send + Sync {
+    /// The task's processes are confirmed gone, or it never had any.
+    fn gone(&self);
 }
 
 /// What every supervisor of an App Server shares.
@@ -152,6 +162,8 @@ pub enum SupervisorMessage {
     Cancel(Box<Control<CancelPayload>>),
     /// The outbox's outcome of one of the task's reports.
     Outcome(ReportId, ReportOutcome),
+    /// The task's connection ended.
+    ConnectionEnded,
 }
 
 /// A control of the task, admitted by its binding owner on the task's
@@ -223,6 +235,7 @@ pub fn spawn(spec: TaskSpec, context: Context) -> SupervisorMailbox {
         writes: VecDeque::new(),
         writing: None,
         waiters: Vec::new(),
+        stopped: false,
         leader: None,
         gone: false,
         checked: Duration::ZERO,
@@ -265,6 +278,8 @@ struct Supervisor {
     writes: VecDeque<Control<StdinPayload>>,
     writing: Option<Writing>,
     waiters: Vec<Waiter>,
+    /// A connection's end stopped the task's writes.
+    stopped: bool,
     /// The task's first process inside its sandbox, once seen.
     leader: Option<Leader>,
     /// Whether the task's processes are confirmed gone.
@@ -292,6 +307,8 @@ enum Expiry {
     Lifetime,
     /// A `tool.cancel`.
     Cancel,
+    /// The task's connection ended.
+    ConnectionEnded,
 }
 
 /// A task as a reply reports it.
@@ -326,14 +343,18 @@ struct Waiter {
 enum Staged {
     Started,
     Cancelled,
-    /// The binding owner forgot the task.
-    Forgotten,
+    /// The binding owner forgot the task or its connection ended: it ends
+    /// without a report.
+    Discarded,
 }
 
 impl Supervisor {
     async fn run(mut self) {
         match self.staged().await {
-            Staged::Forgotten => return,
+            Staged::Discarded => {
+                self.confirm_gone();
+                return;
+            }
             Staged::Cancelled => {}
             Staged::Started => match self.launch().await {
                 Err(Start::Rejected(rejection)) => {
@@ -364,7 +385,7 @@ impl Supervisor {
         let mut held = Vec::new();
         let staged = loop {
             match self.messages.recv().await {
-                None => return Staged::Forgotten,
+                None | Some(SupervisorMessage::ConnectionEnded) => return Staged::Discarded,
                 Some(SupervisorMessage::Start) => {
                     self.left_queue = Some(state::seams::now());
                     break Staged::Started;
@@ -409,7 +430,7 @@ impl Supervisor {
                     }
                     Some(SupervisorMessage::Stdin(control)) => self.stdin(*control),
                     Some(SupervisorMessage::Cancel(control)) => self.cancel(*control),
-                    Some(SupervisorMessage::Start) => {}
+                    Some(SupervisorMessage::Start | SupervisorMessage::ConnectionEnded) => {}
                 },
                 () = state::seams::sleep_until(next_check), if !self.gone => {
                     self.check_gone();
@@ -447,6 +468,7 @@ impl Supervisor {
         }
         self.gone = true;
         cleanup::remove(&self.spec.record);
+        self.spec.listener.gone();
     }
 
     /// Notes the task's first process inside its sandbox once it exists and
@@ -589,10 +611,17 @@ impl Supervisor {
             let ending_due = self
                 .ending
                 .map_or(Duration::MAX, |(termination, _)| termination.due());
-            let drain_ends = self
-                .exit
-                .as_ref()
-                .map_or(Duration::MAX, |(_, at)| *at + bounds.output_drain);
+            // After SIGKILL the pipes are read only until the wait for the
+            // exit ends, so that no report comes later than that.
+            let drain_ends = self.exit.as_ref().map_or(Duration::MAX, |(_, at)| {
+                let drained = *at + bounds.output_drain;
+                match self.ending {
+                    Some((termination, _)) if termination.killed() => {
+                        drained.min(termination.due())
+                    }
+                    _ => drained,
+                }
+            });
             let write_due = self
                 .writing
                 .as_ref()
@@ -674,6 +703,7 @@ impl Supervisor {
                     Some(SupervisorMessage::Outcome(report, _)) => {
                         self.awaited.remove(&report);
                     }
+                    Some(SupervisorMessage::ConnectionEnded) => self.connection_ended(pid),
                     Some(SupervisorMessage::Start) => {}
                     None => forgotten = true,
                 },
@@ -972,7 +1002,12 @@ impl Supervisor {
                     "write_seq is at or below the task's highest recorded write and matches none",
                 ),
                 Check::Repeat(record) => self.reply_repeat(&control, record),
-                Check::New if self.state().ended || self.stdin.is_none() || self.cancelled => {
+                Check::New
+                    if self.state().ended
+                        || self.stdin.is_none()
+                        || self.cancelled
+                        || self.stopped =>
+                {
                     self.records
                         .record(write_seq, digest, 0, Some(ControlErrorCode::StdinClosed));
                     self.reply_closed(&control, 0);
@@ -1087,6 +1122,23 @@ impl Supervisor {
                 Expiry::Cancel,
             ));
         }
+    }
+
+    /// The task's connection ended: writes stop as at a cancel, and the
+    /// termination procedure ends the task with SIGKILL at once, also one
+    /// already in its grace.
+    fn connection_ended(&mut self, pid: u32) {
+        self.stopped = true;
+        self.write_interrupted();
+        if self.exit.is_some() {
+            return;
+        }
+        let steps = self.context.bounds.termination;
+        self.ending = match self.ending {
+            Some((termination, _)) if termination.killed() => self.ending,
+            Some((_, current)) => Some((Termination::kill(pid, steps), current)),
+            None => Some((Termination::kill(pid, steps), Expiry::ConnectionEnded)),
+        };
     }
 
     /// The `terminal` report of a task cancelled before it started.
