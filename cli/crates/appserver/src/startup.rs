@@ -55,9 +55,8 @@ impl From<CheckError> for StartError {
     }
 }
 
-/// Creates a missing `run/`, takes the lock without waiting, removes the
-/// temporary files of interrupted replacements and empties `outbox/`, whose
-/// reports belong to connections of an earlier process. A root that does not exist
+/// Creates a missing `run/`, takes the lock without waiting and removes the
+/// temporary files of interrupted replacements. A root that does not exist
 /// holds no configuration and is not created, since a failed start leaves the
 /// root as it was.
 pub fn lock(root: &StateRoot) -> Result<RootLock, StartError> {
@@ -76,17 +75,20 @@ pub fn lock(root: &StateRoot) -> Result<RootLock, StartError> {
         LockError::Io(failure) => StartError::Io(failure),
     })?;
     files::remove_interrupted_replacements(root.path())?;
-    state::outbox::reset(&root.join(paths::OUTBOX))?;
     Ok(lock)
 }
 
-/// The steps after the lock: the configuration, `S` and the socket, bound
-/// with mode `0600` before it accepts a connection.
+/// The steps after the lock: the configuration; `outbox/` emptied, whose
+/// reports belong to connections of an earlier process, only once the
+/// configuration is valid, so that a start that fails on it leaves the root
+/// as it was; then `S` and the socket, bound with mode `0600` before it
+/// accepts a connection.
 pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
     let configuration = configuration::read(root)?;
     let canonical_root =
         std::fs::canonicalize(root.path()).map_err(|error| IoFailure::new(root.path(), error))?;
     observe::STARTUP.config_loaded(state::seams::now());
+    state::outbox::reset(&root.join(paths::OUTBOX))?;
 
     private::create_socket_dir()?;
     let socket = paths::socket_path(root)

@@ -478,7 +478,10 @@ fn server_commands_write_their_results_and_each_failure_code() {
     }
     drop(case);
 
-    let mut case = record.case("invalid_configuration for server run");
+    let mut case =
+        record.case("invalid_configuration for server run, with a report left in outbox/");
+    fs::create_dir_all(root.join("outbox/1")).unwrap();
+    fs::write(root.join("outbox/1/r1.json"), b"{}").unwrap();
     let credentials = fs::read(root.join("credentials.json")).unwrap();
     let config = fs::read_to_string(root.join("config.toml")).unwrap();
     fs::remove_file(root.join("credentials.json")).unwrap();
