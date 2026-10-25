@@ -214,6 +214,23 @@ func TestResumeFalseWaitsForTheRemainingLease(t *testing.T) {
 	}
 }
 
+func TestRetryAfterIsTheLeaseLeftInMillisecondsRoundedUp(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		left time.Duration
+		want int64
+	}{
+		{time.Nanosecond, 1},
+		{time.Millisecond, 1},
+		{time.Millisecond + 100*time.Nanosecond, 2},
+		{44_999*time.Millisecond + 500*time.Microsecond, 45_000},
+	} {
+		if got := retryAfterMS(now.Add(tc.left), now); got != tc.want {
+			t.Errorf("retry_after_ms with %v left = %d; want %d", tc.left, got, tc.want)
+		}
+	}
+}
+
 func TestStreamEndsAtItsMaximumAgeAndTheConnectionResumes(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour, withStreamMaxAge(10*time.Minute))
 	cli := f.userInstance(time.Time{})

@@ -131,8 +131,7 @@ func (h *clientHandler) events(w http.ResponseWriter, r *http.Request) {
 				return refuse(protocol.ErrorConnectionConflict, "another connection of the instance is active")
 			}
 			if query.Resume.Value != "true" {
-				remaining := (previous.LeaseExpiresAt.Sub(granted.now) + time.Millisecond - 1) / time.Millisecond
-				return refuseRetryAfter(protocol.ErrorPreviousConnectionActive, "the previous connection's lease is still active", int64(remaining))
+				return refuseRetryAfter(protocol.ErrorPreviousConnectionActive, "the previous connection's lease is still active", retryAfterMS(previous.LeaseExpiresAt, granted.now))
 			}
 			if err := activate(); err != nil {
 				return err
@@ -175,4 +174,10 @@ func (h *clientHandler) events(w http.ResponseWriter, r *http.Request) {
 	}
 	defer h.Streams.release(stream)
 	h.Streams.serve(ctx, w, stream, started, resumed)
+}
+
+// retryAfterMS is the lease left at now in milliseconds, rounded up, so a
+// retry after it never finds the lease still live.
+func retryAfterMS(leaseExpiresAt, now time.Time) int64 {
+	return int64((leaseExpiresAt.Sub(now) + time.Millisecond - 1) / time.Millisecond)
 }
