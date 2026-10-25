@@ -322,8 +322,10 @@ and a pod holds only the streams it serves, so a CLI resumes on another pod
 when its pod drains or dies. A HorizontalPodAutoscaler keeps 2 to 10 pods (Helm
 `computerHub.autoscaling.minReplicas`, `maxReplicas`) at an average of 1,000
 `computerhub_open_streams` per pod (`targetOpenStreamsPerPod`) through
-prometheus-adapter; the pod's readiness probe and its 30-second termination
-grace period carry the drain.
+prometheus-adapter, and the Deployment sets no replica count, so an upgrade
+keeps the count it chose; the pod's readiness probe and its 30-second
+termination grace period carry the drain, which is why Helm refuses a
+`computerHub.streamDrainWindow` over 15 seconds.
 
 ## Seams
 

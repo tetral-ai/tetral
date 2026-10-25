@@ -19,7 +19,6 @@ metadata:
     app.kubernetes.io/component: computer-hub
     app.kubernetes.io/part-of: tetral
 spec:
-  replicas: 2
   strategy:
     type: RollingUpdate
     rollingUpdate:

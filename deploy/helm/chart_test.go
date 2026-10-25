@@ -451,6 +451,36 @@ func TestHelmChartRejectsInvalidNetworkAndGitProxyFQDNPolicyValues(t *testing.T)
 	}
 }
 
+// The hub refuses to start with a drain window over 15 seconds, so the chart
+// refuses one at render time, in whatever units the duration is written.
+func TestHelmChartBoundsTheComputerHubDrainWindow(t *testing.T) {
+	helm := requireHelm(t)
+	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
+	for _, window := range []string{"15001ms", "1m", "0s"} {
+		t.Run(window, func(t *testing.T) {
+			output, err := renderChartFailure(t, helm, chart, `computerHub.streamDrainWindow="`+window+`"`)
+			if err == nil || !strings.Contains(output, "computerHub.streamDrainWindow must be a positive Go duration of at most 15s") {
+				t.Fatalf("drain window %s rendered or failed otherwise (%v):\n%s", window, err, output)
+			}
+		})
+	}
+	renderChart(t, helm, chart, "computerHub.streamDrainWindow=14s1000ms")
+}
+
+// The autoscaler owns the hub's replicas: a Deployment that also set them
+// would reset the hub to that count on every upgrade.
+func TestHelmChartLeavesComputerHubReplicasToItsAutoscaler(t *testing.T) {
+	helm := requireHelm(t)
+	objects := uniqueObjects(t, renderChart(t, helm, filepath.Join(engineRoot(t), "deploy", "helm", "tetral")))
+	if replicas, set := objects["apps/v1|Deployment|tetral-system|computer-hub"]["spec"].(map[string]any)["replicas"]; set {
+		t.Fatalf("computer-hub Deployment sets replicas %v beside its autoscaler", replicas)
+	}
+	autoscaler, ok := objects["autoscaling/v2|HorizontalPodAutoscaler|tetral-system|computer-hub"]
+	if !ok || autoscaler["spec"].(map[string]any)["scaleTargetRef"].(map[string]any)["name"] != "computer-hub" {
+		t.Fatalf("no HorizontalPodAutoscaler scales the computer-hub Deployment: %v", autoscaler)
+	}
+}
+
 func TestHelmChartStringValuesRemainStringsForBooleanShapedOverrides(t *testing.T) {
 	helm := requireHelm(t)
 	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")

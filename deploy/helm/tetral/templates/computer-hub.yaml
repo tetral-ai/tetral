@@ -19,7 +19,7 @@ metadata:
     app.kubernetes.io/component: computer-hub
     app.kubernetes.io/part-of: tetral
 spec:
-  replicas: {{ .Values.computerHub.autoscaling.minReplicas }}
+  {{- /* No replicas: the HorizontalPodAutoscaler below owns them, so an upgrade keeps the Pods it scaled to. */}}
   strategy:
     type: RollingUpdate
     rollingUpdate:

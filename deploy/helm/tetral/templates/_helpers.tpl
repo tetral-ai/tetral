@@ -114,6 +114,18 @@ alternative DSN environment names; neither can be inferred from DATABASE_URL. */
 {{/* Existing Provider HPA floor, shared by its resource and validation. */}}
 {{- define "tetral.providerGatewayMinReplicas" -}}2{{- end -}}
 
+{{/* Seconds of a Go duration that already matched the duration syntax, such
+as 1m30s; the template functions have no duration parser. */}}
+{{- define "tetral.durationSeconds" -}}
+{{- $units := dict "h" 3600.0 "m" 60.0 "s" 1.0 "ms" 0.001 "us" 0.000001 "ns" 0.000000001 -}}
+{{- $seconds := 0.0 -}}
+{{- range $part := regexFindAll "[0-9]+(\\.[0-9]+)?(h|ms|m|s|us|ns)" (toString .) -1 -}}
+{{- $number := regexFind "^[0-9]+(\\.[0-9]+)?" $part -}}
+{{- $seconds = addf $seconds (mulf (float64 $number) (get $units (trimPrefix $number $part))) -}}
+{{- end -}}
+{{- $seconds -}}
+{{- end -}}
+
 {{/* Fixed finite complement of the exact Git ticket header. */}}
 {{- define "tetral.gitPrivateHeadersPattern" -}}
 (?i)^x-tetral-(|[^g].*|g[^i].*|g|gi[^t].*|gi|git[^\-].*|git|git-[^t].*|git-|git-t[^i].*|git-t|git-ti[^c].*|git-ti|git-tic[^k].*|git-tic|git-tick[^e].*|git-tick|git-ticke[^t].*|git-ticke|git-ticket.+)$

@@ -19,9 +19,15 @@ func renderedPoolSlots(objects map[string]map[string]any, roles map[string]int) 
 			return 0, fmt.Errorf("missing process %s", role)
 		}
 		spec := d["spec"].(map[string]any)
-		replicas, err := strconv.Atoi(fmt.Sprint(spec["replicas"]))
-		if err != nil || replicas <= 0 {
-			return 0, fmt.Errorf("replica bound invalid")
+		// A Deployment whose autoscaler owns its replicas sets none and starts
+		// at the Kubernetes default of one.
+		replicas := 1
+		if value, set := spec["replicas"]; set {
+			parsed, err := strconv.Atoi(fmt.Sprint(value))
+			if err != nil || parsed <= 0 {
+				return 0, fmt.Errorf("replica bound invalid")
+			}
+			replicas = parsed
 		}
 		for _, object := range objects {
 			if object["kind"] == "HorizontalPodAutoscaler" {
