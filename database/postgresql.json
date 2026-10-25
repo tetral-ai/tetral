@@ -54,7 +54,10 @@
     "auth_access_tokens",
     "instances",
     "instance_credentials",
-    "instance_idempotency_records"
+    "instance_idempotency_records",
+    "instance_connections",
+    "connection_upstream_messages",
+    "connection_protocol_errors"
   ],
   "append_only_workspace_tables": [
     "session_file_attachment_consumptions",

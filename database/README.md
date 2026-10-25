@@ -123,6 +123,16 @@ key; a revoked one names its cause, `delete` or `deregistration`.
 one row per issuing request's `Idempotency-Key`, scoped to the principal's
 credential and the route, with the request body's fingerprint and the
 instance and credential the request created.
+`instance_connections` holds one row per CLI connection of an instance, kept
+after it ends: its credential, the hub pod holding its stream, its lease, the
+accepted or refused ready, the latest accepted heartbeat and the end. A
+partial unique index allows one connection per instance that has not ended.
+`connection_upstream_messages` is the connection's replay ledger of accepted
+upstream messages other than ready and heartbeat, keyed by the SHA-256 of the
+`message_id`, with the request fingerprint and the exact answer; ending the
+connection deletes its rows. `connection_protocol_errors` keeps each accepted
+protocol-error report. Only the `computer_hub` role writes these three tables,
+and it may only insert protocol errors.
 Auth resolves a connection key before it knows the Workspace through the
 migration-owned security-definer
 `public.tetral_auth_lookup_connection_key(bytea)`, which only Auth executes,

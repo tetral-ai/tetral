@@ -253,6 +253,9 @@
         "instances": ["SELECT", "INSERT", "UPDATE"],
         "instance_credentials": ["SELECT", "INSERT", "UPDATE"],
         "instance_idempotency_records": ["SELECT", "INSERT", "DELETE"],
+        "instance_connections": ["SELECT", "INSERT", "UPDATE"],
+        "connection_upstream_messages": ["SELECT", "INSERT", "DELETE"],
+        "connection_protocol_errors": ["INSERT"],
         "tetral_schema_migrations": ["SELECT"]
       }
     }
