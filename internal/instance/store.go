@@ -21,6 +21,8 @@ const (
 	CredentialPending = "pending"
 	CredentialActive  = "active"
 	CredentialRevoked = "revoked"
+	// CredentialExpired is only read, never stored (CredentialState).
+	CredentialExpired = "expired"
 )
 
 // ErrNotFound is returned when no row with the ID exists in the transaction's
@@ -61,11 +63,12 @@ type NewInstance struct {
 }
 
 // NewCredential describes a credential row to insert; only the key's digest
-// is written.
+// is written. A zero IssuedAt is the database clock at the insert.
 type NewCredential struct {
 	InstanceID string
 	State      string
 	Key        ConnectionKey
+	IssuedAt   time.Time
 	ExpiresAt  time.Time
 }
 
@@ -82,11 +85,12 @@ func InsertInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, row 
 		VALUES ($1,$2,$3,$4,'active') RETURNING `+instanceColumns, string(ws), id.New("inst_"), row.Kind, row.Name))
 }
 
-// InsertCredential creates a credential with a new ccred_ ID, issued at the
-// database clock.
+// InsertCredential creates a credential with a new ccred_ ID. It checks no
+// limit; IssueCredential is the issuing writer.
 func InsertCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, row NewCredential) (Credential, error) {
-	return scanCredential(tx.QueryRow(ctx, `INSERT INTO instance_credentials (workspace_id,instance_id,id,state,key_digest,expires_at)
-		VALUES ($1,$2,$3,$4,$5,$6) RETURNING `+credentialColumns, string(ws), row.InstanceID, id.New("ccred_"), row.State, row.Key.Digest(), row.ExpiresAt))
+	issuedAt := sql.NullTime{Time: row.IssuedAt, Valid: !row.IssuedAt.IsZero()}
+	return scanCredential(tx.QueryRow(ctx, `INSERT INTO instance_credentials (workspace_id,instance_id,id,state,key_digest,issued_at,expires_at)
+		VALUES ($1,$2,$3,$4,$5,COALESCE($6,clock_timestamp()),$7) RETURNING `+credentialColumns, string(ws), row.InstanceID, id.New("ccred_"), row.State, row.Key.Digest(), issuedAt, row.ExpiresAt))
 }
 
 func ReadInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) (Instance, error) {
@@ -97,7 +101,9 @@ func ReadCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, cred
 	return scanCredential(tx.QueryRow(ctx, `SELECT `+credentialColumns+` FROM instance_credentials WHERE workspace_id=$1 AND id=$2`, string(ws), credentialID))
 }
 
-func scanInstance(row *dbconnect.Row) (Instance, error) {
+type scanner interface{ Scan(dest ...any) error }
+
+func scanInstance(row scanner) (Instance, error) {
 	var value Instance
 	var name sql.NullString
 	var deregistered sql.NullTime
@@ -119,7 +125,7 @@ func scanInstance(row *dbconnect.Row) (Instance, error) {
 	return value, nil
 }
 
-func scanCredential(row *dbconnect.Row) (Credential, error) {
+func scanCredential(row scanner) (Credential, error) {
 	var value Credential
 	var revoked sql.NullTime
 	var cause sql.NullString
