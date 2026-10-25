@@ -23,6 +23,9 @@ runs as child processes of itself.
   probe and nothing else: it reads at most
   `session::probe_child::INPUT_MAX_BYTES` of stdin and writes the probe's one
   line to stdout (`main`).
+- Run with `argv[1]` `__tetral-task`, it is a task's launcher entry inside
+  the task's sandbox and nothing else, decided before any other argument is
+  parsed (`execution::child`).
 - `tetral --version` alone answers next, reading no environment variable and
   no file. Every other command runs the checks of `commands` in order (the
   arguments, the root checks of `state::private`, the app recorded in an

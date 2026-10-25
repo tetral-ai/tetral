@@ -74,6 +74,13 @@ which owns that task's process tree; the translation of a call's
 - Each probe of a `bwrap` candidate is bounded by `PROBE_TIMEOUT` and
   `PROBE_OUTPUT_LIMIT_BYTES`, which `Isolation::with_probe_bounds`
   overrides.
+- `exec_command` runs as `tetral __tetral-task exec <directory> <shell>
+  <cmd>` through the restricted path; inside the sandbox the launcher entry
+  checks and enters the directory, with no fallback, and executes
+  `[<shell>, "-c", <cmd>]`. It reports on the launch-status pipe at
+  descriptor 3: `child::STARTED` right before the exec, whose arrival is the
+  task's actual start, or a failure object. The pipe's end tells nothing,
+  since the sandbox's own stages hold it open (`child`).
 - A command's environment is the App Server's without any `TETRAL_` name,
   then the call's `env`, then entries that `env` cannot override and
   `TMPDIR` (`env`).
@@ -83,6 +90,8 @@ which owns that task's process tree; the translation of a call's
 - `lib.rs`: `spawn_task_supervisor`, `SupervisorMessage` and
   `SupervisorMailbox`.
 - `env.rs`: `command_environment`.
+- `child/mod.rs`, `child/exec.rs`: the launcher entry `__tetral-task` and its
+  `exec` kind.
 - `policy/mod.rs`: `TaskPermissions`, a task's stored permissions, and
   `PolicyRejection`.
 - `policy/validate.rs`: the validation steps, path normalization and the

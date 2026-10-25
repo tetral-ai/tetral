@@ -51,6 +51,12 @@ fn main() -> ExitCode {
     {
         return probe();
     }
+    if arguments
+        .get(1)
+        .is_some_and(|entry| entry == execution::child::ENTRY)
+    {
+        return execution::child::run(&arguments[2..]);
+    }
     if commands::is_version(&arguments) {
         return output::write(Ok(output::version()));
     }
