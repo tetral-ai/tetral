@@ -24,6 +24,7 @@ use crate::machine::{
 };
 use crate::record::Case;
 use crate::reference::ReferenceServer;
+use crate::run::Run;
 
 pub const SESSION: &str = "sess_1";
 pub const BINDING: &str = "bind_1";
@@ -127,6 +128,20 @@ impl TaskMachine {
         };
         machine.wait_for("online");
         self.machine = Some(machine);
+    }
+
+    /// Waits for the App Server to exit by itself, as after a shutdown, and
+    /// gives its run and how long the exit took; the state root stays.
+    pub fn exited(&mut self) -> (Run, Duration) {
+        let Machine {
+            app_server,
+            seams,
+            root: _,
+        } = self.machine.take().expect("the machine runs");
+        let exited = app_server.exited();
+        // The seams answer until the App Server has exited.
+        drop(seams);
+        exited
     }
 
     /// The records of `event` that the App Server has written.

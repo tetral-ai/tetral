@@ -1,12 +1,13 @@
 //! The end of tasks between `tetral server run`, whose ready advertises
 //! `tool_execution`, and the reference control server as separate
 //! processes, each on its own controlled clock, with real restricted
-//! processes: the termination procedure's grace, a connection's end with
-//! SIGKILL at once, a resume that keeps a task running, processes that stay
-//! after SIGKILL and the `cleanup_pending` of their Session, an old
-//! connection's late events, and the records an App Server killed with
-//! SIGKILL leaves for the next start. The test seams these tests use are
-//! those `tetral_tests::tasks` and `tetral_tests::machine` name.
+//! processes: the termination procedure's grace, a shutdown that ends a
+//! running task through it, a connection's end with SIGKILL at once, a resume
+//! that keeps a task running, processes that stay after SIGKILL and the
+//! `cleanup_pending` of their Session, an old connection's late events, and
+//! the records an App Server killed with SIGKILL leaves for the next start.
+//! The test seams these tests use are those `tetral_tests::tasks` and
+//! `tetral_tests::machine` name.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -169,6 +170,46 @@ fn a_cancel_gives_the_command_its_grace_to_run_its_term_trap_and_exit() {
         "{marks:?}"
     );
     case.observe("within the grace m held t, stdout after, and the terminal report exit_code 0 with cancelled");
+}
+
+#[test]
+fn a_shutdown_ends_a_running_task_through_its_term_trap_and_the_app_server_exits_within_five_seconds()
+ {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let mut case = record.case("trap 'echo t >> m' TERM; sleep 1231, then POST /v1/shutdown");
+    let directory = tempfile::tempdir().unwrap();
+    let mut tasks = TaskMachine::start(&mut case, directory.path());
+    detached(
+        &tasks,
+        "task_shutdown",
+        "trap 'echo t >> m' TERM; sleep 1231",
+    );
+    assert!(process_running(&["sleep", "1231"]));
+    let issued = Instant::now();
+    let shutdown = request(&tasks.machine().app_server.socket, "POST", "/v1/shutdown").unwrap();
+    assert_eq!(shutdown.status, 202);
+    // The clock never moves: the command exits at SIGTERM, within its grace.
+    let (run, _) = tasks.exited();
+    let took = issued.elapsed();
+    assert!(run.status.success(), "{}", run.exit());
+    assert!(
+        took < Duration::from_secs(5),
+        "exited {took:?} after the shutdown"
+    );
+    let marks = fs::read_to_string(tasks.project.join("m")).unwrap();
+    assert!(
+        !marks.is_empty() && marks.lines().all(|line| line == "t"),
+        "{marks:?}"
+    );
+    assert!(!process_running(&["sleep", "1231"]));
+    assert_eq!(
+        listing(&tasks.root.join("execution")),
+        Vec::<std::path::PathBuf>::new()
+    );
+    case.observe(format!(
+        "m held t; no sleep 1231 and no task record were left; the App Server exited 0, {took:?} after the shutdown"
+    ));
 }
 
 #[test]
