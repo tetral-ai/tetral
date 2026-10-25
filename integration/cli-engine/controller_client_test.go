@@ -74,14 +74,18 @@ func (c *controllerClient) decode(response apiResponse, want int, target any) {
 
 // instanceObject is the part of the instance object the scenarios read.
 type instanceObject struct {
-	ID                 string            `json:"id"`
-	Kind               string            `json:"kind"`
-	RegistrationState  string            `json:"registration_state"`
-	Connection         *connectionObject `json:"connection"`
-	CLIVersion         *string           `json:"cli_version"`
-	CLIUpdateAvailable bool              `json:"cli_update_available"`
-	ComputerCount      int               `json:"computer_count"`
-	BindingCount       int               `json:"binding_count"`
+	ID                  string            `json:"id"`
+	Kind                string            `json:"kind"`
+	RegistrationState   string            `json:"registration_state"`
+	Connection          *connectionObject `json:"connection"`
+	CLIVersion          *string           `json:"cli_version"`
+	CLIUpdateAvailable  bool              `json:"cli_update_available"`
+	ComputerCount       int               `json:"computer_count"`
+	BindingCount        int               `json:"binding_count"`
+	LastCredentialReuse *struct {
+		CredentialID string    `json:"credential_id"`
+		DetectedAt   time.Time `json:"detected_at"`
+	} `json:"last_credential_reuse"`
 }
 
 type connectionObject struct {
@@ -127,6 +131,20 @@ func (c *controllerClient) createUserInstance(ctx context.Context, name string) 
 		c.t.Fatal("the creation response holds no connection key")
 	}
 	return registration{instance: created.Instance, credential: created.Credential}
+}
+
+// issueStreamCredential issues a credential with delivery stream, which
+// renews the instance's online connection: 202 with a pending credential and
+// no key.
+func (c *controllerClient) issueStreamCredential(ctx context.Context, instanceID string) credentialObject {
+	c.t.Helper()
+	var credential credentialObject
+	c.decode(c.do(ctx, http.MethodPost, "/v1/instances/"+instanceID+"/credentials", fmt.Sprintf("renew-%s-%d", instanceID, time.Now().UnixNano()),
+		map[string]any{"delivery": "stream"}), http.StatusAccepted, &credential)
+	if credential.State != "pending" || credential.ConnectionKey != nil {
+		c.t.Fatalf("stream issuance: credential %+v; want pending without a key", credential)
+	}
+	return credential
 }
 
 // issueResponseCredential issues a credential with delivery response.

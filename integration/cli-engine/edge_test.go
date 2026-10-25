@@ -49,16 +49,17 @@ type backend struct {
 }
 
 // eventsRequest is one GET /v1/client/events the edge forwarded: when it
-// arrived, its predecessor query, the backend's status and, once the
-// backend's response ended, when.
+// arrived, its credential and predecessor query, the backend's status and,
+// once the backend's response ended, when.
 type eventsRequest struct {
-	backend  string
-	instance string
-	previous string
-	resume   string
-	status   int
-	at       time.Time
-	ended    time.Time
+	backend    string
+	instance   string
+	credential string
+	previous   string
+	resume     string
+	status     int
+	at         time.Time
+	ended      time.Time
 }
 
 // endRecorder calls ended when the proxy closes the response body it copied.
@@ -252,7 +253,7 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				query := r.URL.Query()
 				e.mu.Lock()
 				index := len(e.events)
-				e.events = append(e.events, eventsRequest{backend: target.name, instance: query.Get("instance_id"), previous: query.Get("previous_connection_id"), resume: query.Get("resume"), status: response.StatusCode, at: arrived})
+				e.events = append(e.events, eventsRequest{backend: target.name, instance: query.Get("instance_id"), credential: query.Get("credential_id"), previous: query.Get("previous_connection_id"), resume: query.Get("resume"), status: response.StatusCode, at: arrived})
 				e.mu.Unlock()
 				response.Body = endRecorder{ReadCloser: response.Body, ended: func() {
 					e.mu.Lock()

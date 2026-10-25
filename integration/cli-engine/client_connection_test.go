@@ -4,6 +4,9 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/tetral-ai/tetral/integration/enginetest"
+	"github.com/tetral-ai/tetral/internal/protocol"
 )
 
 // TestKilledHubPodsCLIsResumeOnOtherPods runs two CLIs against two
@@ -161,6 +164,84 @@ func TestDelayedReadyAcknowledgementKeepsTheConnection(t *testing.T) {
 	}
 	object := controller.readInstance(ctx, registered.instance.ID)
 	record.observe("one event request; the CLI's status was online %s after it, ready_at %s; connection %s", online.Sub(requests[0].at).Round(time.Millisecond), object.Connection.ReadyAt.Format(time.RFC3339Nano), object.Connection.ID)
+}
+
+// TestLiveRenewalMovesTheConnectionToTheNewCredential has the Controller
+// issue a credential with delivery stream to an online CLI. The CLI fetches
+// it and resumes the same connection with it, which stays online throughout:
+// the new credential becomes the connection's, active and in use, the old
+// one is revoked, and no request of the CLI uses the old one. A heartbeat
+// with the old credential's key, as from a copied credential file, then
+// answers 401 credential_revoked, and the instance read shows that
+// credential's reuse while the connection stays online on the new one.
+func TestLiveRenewalMovesTheConnectionToTheNewCredential(t *testing.T) {
+	in := requireInputs(t, needs{})
+	record := newAcceptanceRecord(t, in, platformOf(in))
+	record.boundary("no binding and no task are on the connection during the renewal: Engine does not prepare Sessions or route tool calls to a computer yet")
+	e := startEngine(t, record, engineOptions{})
+	controller := e.controller()
+	set := newMachines(t, in, needs{}, e, record)
+	ctx := t.Context()
+
+	registered := controller.createUserInstance(ctx, "renewed")
+	old := registered.credential
+	m := set.add("renewed", "renewed-app")
+	m.configure(bootstrap(e.serverURL, registered.instance.ID, old))
+	m.serve()
+	requireOnline(t, controller, m, registered.instance.ID, old.ID)
+	connection := *controller.readInstance(ctx, registered.instance.ID).Connection
+	streams := len(e.edge.eventsRequests(registered.instance.ID))
+
+	renewed := controller.issueStreamCredential(ctx, registered.instance.ID)
+	issued := time.Now()
+	resumed := e.edge.waitEvents(t, registered.instance.ID, streams+1, 30*time.Second, "an event request after the issuance", func(eventsRequest) bool { return true })
+	if resumed.status != http.StatusOK || resumed.resume != "true" || resumed.previous != connection.ID || resumed.credential != renewed.ID {
+		t.Fatalf("event request after the issuance %+v; want 200 with resume=true, previous_connection_id %s and credential_id %s", resumed, connection.ID, renewed.ID)
+	}
+	object := requireOnlineUntil(t, controller, registered.instance.ID, connection.ID, 30*time.Second, "a heartbeat accepted on the new credential", func(object instanceObject) bool {
+		return object.Connection.CredentialID == renewed.ID && object.Connection.LastHeartbeatAt != nil && object.Connection.LastHeartbeatAt.After(resumed.at)
+	})
+	if object.LastCredentialReuse != nil {
+		t.Fatalf("instance read last_credential_reuse %+v before any use of the old credential; a request of the CLI used it after the renewal", *object.LastCredentialReuse)
+	}
+	states := map[string]credentialObject{}
+	for _, credential := range controller.listCredentials(ctx, registered.instance.ID) {
+		states[credential.ID] = credential
+	}
+	if got := states[renewed.ID]; got.State != "active" || !got.InUse {
+		t.Fatalf("renewed credential %+v; want active and in use", got)
+	}
+	if got := states[old.ID]; got.State != "revoked" || got.InUse {
+		t.Fatalf("old credential %+v; want revoked and not in use", got)
+	}
+	status := m.waitStatus(10*time.Second, "credential_id "+renewed.ID, func(status map[string]any) bool {
+		return statusField(status, "credential_id") == renewed.ID
+	})
+	if statusField(status, "connection_state") != "online" || statusField(status, "connection_id") != connection.ID {
+		t.Fatalf("%s status %v; want online with connection %s", m.name, status, connection.ID)
+	}
+	record.observe("the CLI resumed connection %s on %s with credential %s %s after the issuance; online in every instance read; heartbeat accepted on it at %s; credential list: %s active and in use, %s revoked; the CLI's status online with the same connection and the new credential; no reuse recorded",
+		connection.ID, resumed.backend, renewed.ID, resumed.at.Sub(issued).Round(time.Millisecond), object.Connection.LastHeartbeatAt.Format(time.RFC3339Nano), renewed.ID, old.ID)
+
+	copied := enginetest.CLI{BaseURL: e.serverURL, InstanceID: registered.instance.ID, CredentialID: old.ID, Key: *old.ConnectionKey}
+	used := time.Now()
+	response, err := copied.Heartbeat(ctx, protocol.Heartbeat{ConnectionID: connection.ID, MessageID: "copied-heartbeat", RequestMessageID: "copied-heartbeat-request", HeartbeatSeq: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusal, err := response.Error()
+	if err != nil || response.Status != http.StatusUnauthorized || refusal.Code != protocol.ErrorCredentialRevoked {
+		t.Fatalf("heartbeat with the old credential answered %d %s (%v); want 401 credential_revoked", response.Status, response.Body, err)
+	}
+	object = controller.readInstance(ctx, registered.instance.ID)
+	switch {
+	case object.LastCredentialReuse == nil || object.LastCredentialReuse.CredentialID != old.ID:
+		t.Fatalf("instance read last_credential_reuse %+v; want credential %s", object.LastCredentialReuse, old.ID)
+	case object.Connection == nil || object.Connection.ID != connection.ID || object.Connection.State != "online" || object.Connection.CredentialID != renewed.ID:
+		t.Fatalf("instance read connection %+v after the old credential's use; want %s online on %s", object.Connection, connection.ID, renewed.ID)
+	}
+	record.observe("a heartbeat with the old credential's key through the edge %s after the renewal answered 401 credential_revoked; the instance read's last_credential_reuse names %s, detected_at %s; the connection stayed online on %s",
+		used.Sub(resumed.at).Round(time.Millisecond), old.ID, object.LastCredentialReuse.DetectedAt.Format(time.RFC3339Nano), renewed.ID)
 }
 
 // requireOnlineUntil reads instanceID until done accepts the read, failing
