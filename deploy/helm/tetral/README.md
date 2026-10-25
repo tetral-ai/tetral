@@ -350,8 +350,8 @@ role.
 Their declared Deployment replica defaults are one. Set `replicas.api`, `replicas.auth`, `replicas.bridge`,
 `replicas.jobRunner`, `replicas.sandbox`, `replicas.providerGateway`, `replicas.mcpConnector` or
 `replicas.webConnector` independently to a positive integer.
-`computerHub.replicas` defaults to two and rejects fewer, so a CLI keeps a
-serving hub while one Pod restarts.
+`computerHub.replicas` defaults to two, so a CLI keeps a serving hub while one
+Pod restarts.
 
 `autoscaling.providerGateway.enabled` defaults to true and retains the existing
 HPA: minimum two, maximum ten, CPU utilization target 70 percent. An enabled

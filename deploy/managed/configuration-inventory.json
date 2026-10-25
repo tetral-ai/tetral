@@ -530,7 +530,7 @@
       "units": "listen addresses, Go duration",
       "unset_zero": "Whitespace empty addresses default; database DSN and principal key required.",
       "constraints": "Metrics address differs from the public address; the principal key is a base64 Ed25519 public key; blob settings pass blob production readiness.",
-      "projection": "Fixed ports 8080/8081, computer-hub-url DSN key of the database Secret, blob Secret keys, and at least two replicas; no other hub setting is chart-owned.",
+      "projection": "Fixed ports 8080/8081, computer-hub-url DSN key of the database Secret, blob Secret keys, and computerHub.replicas (default two); no other hub setting is chart-owned.",
       "proofs": [
         "services/computer-hub/config_test.go",
         "deploy/helm/configuration_projection_test.go",

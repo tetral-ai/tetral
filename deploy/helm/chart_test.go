@@ -1057,20 +1057,6 @@ func runGoTest(t *testing.T, root string, environment []string, arguments ...str
 	}
 }
 
-// A single computer-hub would leave every connected CLI without a hub while
-// its Pod restarts, so the chart starts two and refuses fewer.
-func TestHelmChartRunsAtLeastTwoComputerHubReplicas(t *testing.T) {
-	helm := requireHelm(t)
-	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
-	objects := uniqueObjects(t, renderChart(t, helm, chart))
-	if got := transportAt(t, objects["apps/v1|Deployment|tetral-system|computer-hub"], "spec", "replicas"); got != 2 {
-		t.Fatalf("default computer-hub replicas = %v; want 2", got)
-	}
-	for _, value := range []string{"computerHub.replicas=1", "computerHub.replicas=0"} {
-		requireRenderError(t, helm, chart, []string{value}, "computerHub.replicas must be an integer of at least 2")
-	}
-}
-
 func TestHelmSeparatedWorkloadReplicaOverrides(t *testing.T) {
 	helm := requireHelm(t)
 	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")

@@ -104,7 +104,7 @@ network lists above it is the narrowest setting and stays allowed. */}}
 {{- if gt (int .Values.lifecycle.queueDrainMs) 25000 }}{{ fail "Queue drain must remain within its typed 25s limit" }}{{ end }}
 {{- if gt (add (int .Values.lifecycle.queueDrainMs) (int .Values.lifecycle.cancelJoinMs)) 25000 }}{{ fail "Queue drain and cancellation join must fit 25s application allocation, reserving 5s signal/proxy margin in 30s Pod grace" }}{{ end }}
 {{- if not (regexMatch "^[1-9][0-9]*$" (toString .Values.replicas.eventStream)) }}{{ fail "replicas.eventStream must be a positive integer" }}{{ end }}
-{{- if or (not (regexMatch "^[1-9][0-9]*$" (toString .Values.computerHub.replicas))) (lt (int .Values.computerHub.replicas) 2) }}{{ fail "computerHub.replicas must be an integer of at least 2" }}{{ end }}
+{{- if not (regexMatch "^[1-9][0-9]*$" (toString .Values.computerHub.replicas)) }}{{ fail "computerHub.replicas must be a positive integer" }}{{ end }}
 {{- if .Values.preview.enabled }}
 {{- if not (regexMatch "^[A-Za-z0-9.-]+:4222$" .Values.preview.brokerAddress) }}{{ fail "preview.brokerAddress must be a broker DNS name on port 4222 without credentials" }}{{ end }}
 {{- range $key := list "publisherSecret" "subscriberSecret" }}{{- if not (get $.Values.preview $key) }}{{ fail (printf "preview.%s is required" $key) }}{{ end }}{{ end }}

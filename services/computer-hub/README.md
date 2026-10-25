@@ -6,8 +6,7 @@ The service between Engine and the machines it uses. It serves every path
 under `/v1/client/` (the routes a CLI calls with its connection key), and the
 Controller and developer routes under `/v1/instance_requests` and
 `/v1/instances`; `api` keeps every other `/v1` route. The public edge sends the
-three prefixes here after `auth`'s Check, and the deployment runs at least two
-replicas.
+three prefixes here after `auth`'s Check.
 
 The service owns no table. It reads and writes through `internal/instance`
 (instances and their connection credentials). It connects to PostgreSQL as the

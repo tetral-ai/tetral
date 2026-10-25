@@ -182,7 +182,7 @@ jobRunner:
   heartbeatIntervalMs: 10000
   maxJobs: 8
 
-# computer-hub runs at least two replicas, so a CLI keeps a hub while one restarts.
+# Two computer-hub replicas, so a CLI keeps a hub while one Pod restarts.
 computerHub:
   replicas: 2
 
