@@ -148,7 +148,8 @@ func TestInternalCallKeepsOneTraceAcrossClientAndServerAndRecordsTheRequestSessi
 }
 
 // A stream call has no request until its first message arrives; the
-// interceptor takes the correlation fields from that message.
+// interceptor takes the correlation fields from that message, and a later
+// message with other IDs changes none of them.
 func TestInternalStreamCarriesTheCorrelationFieldsOfItsFirstMessage(t *testing.T) {
 	spans := tracetest.NewInMemoryExporter()
 	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: "queue", SampleRatio: 1, SyncExporter: spans})))
@@ -168,8 +169,10 @@ func TestInternalStreamCarriesTheCorrelationFieldsOfItsFirstMessage(t *testing.T
 					ServiceName: "tetral.test.v1.SessionService",
 					HandlerType: (*testService)(nil),
 					Streams: []grpc.StreamDesc{{StreamName: "Stream", ClientStreams: true, Handler: func(_ any, stream grpc.ServerStream) error {
-						if err := stream.RecvMsg(requestType.New().Interface()); err != nil {
-							return err
+						for range 2 {
+							if err := stream.RecvMsg(requestType.New().Interface()); err != nil {
+								return err
+							}
 						}
 						handlerFields <- workload.ContextFields(stream.Context())
 						return stream.SendMsg(requestType.New().Interface())
@@ -184,17 +187,22 @@ func TestInternalStreamCarriesTheCorrelationFieldsOfItsFirstMessage(t *testing.T
 		t.Fatal(err)
 	}
 	want := map[string]string{"workspace.id": "ws_stream", "session.id": "sesn_stream", "thread.id": "thrd_stream"}
-	request := requestType.New()
-	for name, value := range map[protoreflect.Name]string{"workspace_id": "ws_stream", "session_id": "sesn_stream", "thread_id": "thrd_stream"} {
-		request.Set(requestType.Descriptor().Fields().ByName(name), protoreflect.ValueOfString(value))
+	message := func(suffix string) protoreflect.ProtoMessage {
+		request := requestType.New()
+		for name, prefix := range map[protoreflect.Name]string{"workspace_id": "ws_", "session_id": "sesn_", "thread_id": "thrd_"} {
+			request.Set(requestType.Descriptor().Fields().ByName(name), protoreflect.ValueOfString(prefix+suffix))
+		}
+		return request.Interface()
 	}
 	callerCtx := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer trace-test")
 	stream, err := conn.NewStream(callerCtx, &grpc.StreamDesc{StreamName: "Stream", ClientStreams: true}, sessionStreamMethod)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := stream.SendMsg(request.Interface()); err != nil {
-		t.Fatal(err)
+	for _, suffix := range []string{"stream", "later"} {
+		if err := stream.SendMsg(message(suffix)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := stream.CloseSend(); err != nil {
 		t.Fatal(err)
