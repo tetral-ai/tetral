@@ -3,7 +3,8 @@
 The App Server's files and time belong here: the state root and the names in
 it, the control socket's path, the checks that the control paths are private,
 the private creation and atomic replacement of files, the configuration and
-credential files, the clock and the test seams.
+credential files, the files of the Report outbox, the clock and the test
+seams.
 
 ## Design rules
 
@@ -39,6 +40,8 @@ credential files, the clock and the test seams.
 | `credentials.json` | The bootstrap object, connection key included; its format is that of `protocol::bootstrap` | `0600` |
 | `run/` | Directory | `0700` |
 | `run/app-server.lock` | The lock that the one process owning the root holds; never unlinked or replaced | `0600` |
+| `outbox/` | Directory, deleted and created again empty at each App Server start (`outbox::reset`) | `0700` |
+| `outbox/<n>/<message_id>.json` | A report frozen before its first send, in the directory of its connection's number `<n>`, which goes when that connection ends (`outbox`) | `0600` |
 
 The root itself has mode `0700`, and the check accepts no permission bit for
 group or others on any of these paths. `server run` also creates `logs/` for
@@ -66,5 +69,6 @@ as it is (`private::create_socket_dir`).
 - `config.rs`: `Config`, its reading and its replacement.
 - `credentials.rs`: the bounded reading and the replacement of
   `credentials.json`.
+- `outbox.rs`: the reset of `outbox/` and its report files.
 - `seams.rs`: the clock, `sleep_until`, the barriers, the counters and, under
   `test-seams`, the process side of the seam protocol.

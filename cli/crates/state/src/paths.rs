@@ -21,6 +21,8 @@ pub const RUN: &str = "run";
 pub const LOCK: &str = "run/app-server.lock";
 /// The directory of `server run`'s log files.
 pub const LOGS: &str = "logs";
+/// The directory where the Report outbox freezes its reports (`outbox`).
+pub const OUTBOX: &str = "outbox";
 
 /// The state root as `TETRAL_HOME` names it. The CLI reaches the root's
 /// control files through this form; the paths it builds for others start from
