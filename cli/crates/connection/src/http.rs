@@ -296,14 +296,14 @@ mod tests {
             progress: progress.clone(),
         };
         let mut context = Context::from_waker(Waker::noop());
-        let mut sizes = Vec::new();
+        let mut handed = Vec::new();
         while let Poll::Ready(Some(Ok(frame))) = Pin::new(&mut chunks).poll_frame(&mut context) {
-            sizes.push(frame.into_data().unwrap().len());
+            handed.push((
+                frame.into_data().unwrap().len(),
+                progress.swap(0, Ordering::AcqRel),
+            ));
         }
-        assert_eq!(sizes, [4, 4, 2]);
-        assert_eq!(
-            progress.load(Ordering::Acquire),
-            nanos(Duration::from_secs(7))
-        );
+        let marked = nanos(Duration::from_secs(7));
+        assert_eq!(handed, [(4, marked), (4, marked), (2, marked)]);
     }
 }
