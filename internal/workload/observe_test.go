@@ -304,9 +304,15 @@ func TestRecordsWithoutExporterStillCarryATraceID(t *testing.T) {
 	}
 }
 
-type blockingExporter struct{ release chan struct{} }
+// blockingExporter holds the export worker inside ExportSpans until release
+// closes; entered receives once the worker is inside.
+type blockingExporter struct{ entered, release chan struct{} }
 
 func (e blockingExporter) ExportSpans(ctx context.Context, _ []sdktrace.ReadOnlySpan) error {
+	select {
+	case e.entered <- struct{}{}:
+	default:
+	}
 	select {
 	case <-e.release:
 	case <-ctx.Done():
@@ -316,20 +322,28 @@ func (e blockingExporter) ExportSpans(ctx context.Context, _ []sdktrace.ReadOnly
 func (blockingExporter) Shutdown(context.Context) error { return nil }
 
 func TestFullSpanQueueDropsTheNextSpanWithoutBlocking(t *testing.T) {
-	exporter := blockingExporter{release: make(chan struct{})}
-	defer close(exporter.release)
-	// An unstarted processor keeps every span in its queue, so the queue's
-	// capacity alone decides which span is dropped.
-	processor := newBoundedSpanProcessor(exporter, false)
-	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
-	tracer := provider.Tracer("test")
-	telemetry := NewTelemetry(TelemetryOptions{Service: "span-queue-test"})
-	telemetry.tracing.processor = processor
+	exporter := blockingExporter{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	telemetry := NewTelemetry(TelemetryOptions{Service: "span-queue-test", Exporter: exporter, SampleRatio: 1})
+	t.Cleanup(InstallTelemetry(telemetry))
+	t.Cleanup(func() {
+		close(exporter.release)
+		telemetry.Shutdown(context.Background())
+	})
+	// Once the export worker holds the first span inside ExportSpans, it takes
+	// no further span from the queue, so the queue's capacity alone decides
+	// which later span is dropped.
+	_, first := StartSpan(context.Background(), "queued")
+	first.End()
+	select {
+	case <-exporter.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the export worker never exported the first span")
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for range 2049 {
-			_, span := tracer.Start(context.Background(), "queued")
+		for range spanQueueCapacity + 1 {
+			_, span := StartSpan(context.Background(), "queued")
 			span.End()
 		}
 	}()
@@ -346,7 +360,7 @@ func TestFullSpanQueueDropsTheNextSpanWithoutBlocking(t *testing.T) {
 		}
 	}
 	if dropped != 1 {
-		t.Fatalf("tetral_diagnostic_spans_dropped_total = %v; want the 2,049th span dropped", dropped)
+		t.Fatalf("tetral_diagnostic_spans_dropped_total = %v; want only the span after a full queue dropped", dropped)
 	}
 }
 

@@ -89,7 +89,7 @@ func newTracing(options tracingOptions) *tracing {
 	}
 	var processor *boundedSpanProcessor
 	if options.exporter != nil {
-		processor = newBoundedSpanProcessor(options.exporter, true)
+		processor = newBoundedSpanProcessor(options.exporter)
 		providerOptions = append(providerOptions, sdktrace.WithSpanProcessor(processor))
 	}
 	provider := sdktrace.NewTracerProvider(providerOptions...)
@@ -127,13 +127,9 @@ type boundedSpanProcessor struct {
 	once     sync.Once
 }
 
-func newBoundedSpanProcessor(exporter sdktrace.SpanExporter, start bool) *boundedSpanProcessor {
+func newBoundedSpanProcessor(exporter sdktrace.SpanExporter) *boundedSpanProcessor {
 	p := &boundedSpanProcessor{exporter: exporter, queue: make(chan sdktrace.ReadOnlySpan, spanQueueCapacity), stop: make(chan struct{}), done: make(chan struct{})}
-	if start {
-		go p.run()
-	} else {
-		close(p.done)
-	}
+	go p.run()
 	return p
 }
 
