@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use tetral_tests::app_server::{request, wait_until};
 use tetral_tests::machine::{
-    CREDENTIAL, INSTANCE, KEY, Machine, answer_fault, bootstrap, credential, engine,
-    one_credential_engine, seconds, send, wait_for_received, wait_for_requests,
+    CREDENTIAL, FIRST_CONNECTION, INSTANCE, KEY, Machine, answer_fault, bootstrap, credential,
+    engine, one_credential_engine, seconds, send, wait_for_received, wait_for_requests,
 };
 use tetral_tests::record::Case;
 use tetral_tests::reference::ReferenceServer;
@@ -849,4 +849,66 @@ fn a_new_binding_finds_no_room_in_a_replay_ledger_with_only_its_reserve_free() {
     assert_eq!(sessions(&machine), Vec::<Value>::new());
     assert_eq!(machine.seams.count(PROBE_SPAWN), 0);
     case.observe("the preparation failed with resource_exhausted, with no record and no probe");
+}
+
+#[test]
+fn a_preparation_addressed_to_an_earlier_connection_fails_with_stale_connection() {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let project = directory_with_marker(base.join("project"));
+    let engine = one_credential_engine();
+
+    let mut case = record.case("a session.prepare naming the connection before the current one");
+    let machine = online_machine(&mut case, &engine, &base.join("machine"));
+    // The second connection's ready ACK is withheld, so that the copy naming
+    // the first connection waits in staging while Engine issues the same
+    // message_id on the second; the report then answers an issued
+    // instruction and is accepted.
+    answer_fault(
+        &engine,
+        json!({ "endpoint": "ready", "count": 1, "action": "withhold" }),
+    );
+    send(
+        &engine,
+        json!({
+            "protocol_version": 1,
+            "connection_id": FIRST_CONNECTION,
+            "message_id": "msg_disconnect",
+            "type": "disconnect",
+            "payload": { "scope": "connection", "retryable": true, "code": "stale_connection" },
+        }),
+    );
+    machine.wait_for("disconnected");
+    engine.advance(seconds(46.0));
+    machine.seams.advance(seconds(1.2));
+    machine.wait_for("registering");
+    let stale = payload("sess_stale", "bind_1", &project);
+    send(
+        &engine,
+        json!({
+            "protocol_version": 1,
+            "connection_id": FIRST_CONNECTION,
+            "message_id": "msg_stale",
+            "type": "session.prepare",
+            "payload": stale,
+        }),
+    );
+    engine.control(
+        "prepare",
+        json!({ "instance_id": INSTANCE, "message_id": "msg_stale", "payload": stale }),
+    );
+    wait_for_received(&engine, "protocol-error", 1);
+    engine.control("answer", json!({ "action": "release" }));
+    let current = machine.wait_for("online")["connection_id"].clone();
+    assert_eq!(outcome(&engine, "msg_stale"), failed("stale_connection"));
+    assert_eq!(
+        reports_for(&engine, "msg_stale")[0]["connection_id"],
+        current
+    );
+    quiesce(&machine, 1);
+    assert!(entries(&machine, "sess_stale").is_empty());
+    assert_eq!(machine.seams.count(PROBE_SPAWN), 0);
+    case.observe("the copy naming the first connection failed with stale_connection on the second; the Session lists no binding and no probe was spawned");
 }

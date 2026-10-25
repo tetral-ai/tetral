@@ -96,7 +96,8 @@ temporary directories. No workspace crate depends on this package.
   new connection and a resumed stream, the probe slots, their timeouts and
   the rejection episode they record, 128 Session records, a held probe under
   heartbeats and shutdown, reports refused as answering no issued
-  instruction, and a new binding refused by a full replay ledger.
+  instruction, a new binding refused by a full replay ledger, and a
+  preparation that names an earlier connection.
 - `tests/local_service.rs`: `server run`, `server status` and `server stop`
   and the local API: status while Engine is unreachable, the wrong routes,
   shutdown on request, on each signal and with a handler blocked, one owner
