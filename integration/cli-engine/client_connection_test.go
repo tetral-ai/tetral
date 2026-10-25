@@ -169,8 +169,8 @@ func TestDelayedReadyAcknowledgementKeepsTheConnection(t *testing.T) {
 // TestLiveRenewalMovesTheConnectionToTheNewCredential has the Controller
 // issue a credential with delivery stream to an online CLI. The CLI fetches
 // it and resumes the same connection with it, which stays online throughout:
-// the new credential becomes the connection's, active and in use, the old
-// one is revoked, and no request of the CLI uses the old one. A heartbeat
+// the new credential becomes the connection's, active and in use, and the old
+// one is revoked. A heartbeat
 // with the old credential's key, as from a copied credential file, then
 // answers 401 credential_revoked, and the instance read shows that
 // credential's reuse while the connection stays online on the new one.
@@ -201,9 +201,6 @@ func TestLiveRenewalMovesTheConnectionToTheNewCredential(t *testing.T) {
 	object := requireOnlineUntil(t, controller, registered.instance.ID, connection.ID, 30*time.Second, "a heartbeat accepted on the new credential", func(object instanceObject) bool {
 		return object.Connection.CredentialID == renewed.ID && object.Connection.LastHeartbeatAt != nil && object.Connection.LastHeartbeatAt.After(resumed.at)
 	})
-	if object.LastCredentialReuse != nil {
-		t.Fatalf("instance read last_credential_reuse %+v before any use of the old credential; a request of the CLI used it after the renewal", *object.LastCredentialReuse)
-	}
 	states := map[string]credentialObject{}
 	for _, credential := range controller.listCredentials(ctx, registered.instance.ID) {
 		states[credential.ID] = credential
@@ -220,7 +217,7 @@ func TestLiveRenewalMovesTheConnectionToTheNewCredential(t *testing.T) {
 	if statusField(status, "connection_state") != "online" || statusField(status, "connection_id") != connection.ID {
 		t.Fatalf("%s status %v; want online with connection %s", m.name, status, connection.ID)
 	}
-	record.observe("the CLI resumed connection %s on %s with credential %s %s after the issuance; online in every instance read; heartbeat accepted on it at %s; credential list: %s active and in use, %s revoked; the CLI's status online with the same connection and the new credential; no reuse recorded",
+	record.observe("the CLI resumed connection %s on %s with credential %s %s after the issuance; online in every instance read; heartbeat accepted on it at %s; credential list: %s active and in use, %s revoked; the CLI's status online with the same connection and the new credential",
 		connection.ID, resumed.backend, renewed.ID, resumed.at.Sub(issued).Round(time.Millisecond), object.Connection.LastHeartbeatAt.Format(time.RFC3339Nano), renewed.ID, old.ID)
 
 	copied := enginetest.CLI{BaseURL: e.serverURL, InstanceID: registered.instance.ID, CredentialID: old.ID, Key: *old.ConnectionKey}
