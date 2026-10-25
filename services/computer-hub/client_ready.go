@@ -46,9 +46,9 @@ func (h *clientHandler) ready(w http.ResponseWriter, r *http.Request) {
 		answer  clientAnswer
 		outcome readyOutcome
 	)
-	err = h.Database.WithWorkspaceTx(ctx, string(id.workspace), "computer_hub.client_ready", func(tx *dbconnect.Tx) error {
+	err = h.clientTx(ctx, id.workspace, "computer_hub.client_ready", func(tx *dbconnect.Tx) error {
 		answer, outcome = clientAnswer{}, readyReplayed
-		granted, err := authorize(ctx, tx, id)
+		granted, err := authorize(ctx, tx, id, false)
 		if err != nil {
 			return err
 		}

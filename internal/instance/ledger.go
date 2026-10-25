@@ -15,6 +15,8 @@ const (
 	RouteReady         = "ready"
 	RouteHeartbeat     = "heartbeat"
 	RouteProtocolError = "protocol-error"
+	// RouteCredential's records keep no answer: the answer held a key.
+	RouteCredential = "credential"
 )
 
 // LedgerEntry is the replay record of one message_id on a connection: the

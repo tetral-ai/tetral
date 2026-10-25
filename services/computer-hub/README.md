@@ -67,9 +67,16 @@ operations `instances.*` and `instance_credentials.*`.
   or an RFC 3339 time ending in `Z`, later than issuance and at most the
   maximum lifetime after it, stored to the microsecond; issuance time is the
   database clock of the transaction.
-- `delivery: stream`, also when `delivery` is absent, answers `409
-  instance_offline_error` after these checks and writes nothing: live
-  credential renewal is not served yet.
+- `delivery: response` creates an `active` credential and answers `201` with
+  its key. `delivery: stream`, also when `delivery` is absent, is a live
+  renewal: when the instance's connection is `online` (not ended, a live
+  lease, an accepted ready, held `FOR SHARE`), the transaction creates a
+  `pending` credential without a digest that renews that connection and
+  replaces its credential, notifies the stream's pod, which writes
+  `credential.renew`, and answers `202` with `connection_key: null`; with no
+  online connection, after the credential limit, `409
+  instance_offline_error` and nothing written. A renewal whose connection
+  ends stays `pending` until it expires or is revoked.
 - Revocation and deregistration answer `204` and change nothing when
   repeated; deregistration revokes every credential not yet revoked with cause
   `deregistration` and keeps the instance as a tombstone. Revoking the live
@@ -102,16 +109,19 @@ operations `instances.*` and `instance_credentials.*`.
   Delivery is best effort: a subscriber more than 64 events behind is closed,
   a reconnecting subscriber gets no backlog, and every stream ends at
   shutdown.
-- Each issued or revoked credential writes one `instance_credential_audit`
-  record (`log.type` `audit`) after the commit, with the actor's credential
-  kind and ID, `instance.id`, `credential.id` and `operation` `issue` or
-  `revoke`.
+- `last_credential_reuse` is the latest use of a credential that an
+  activation revoked (client routes below).
+- Each issued, fetched, activated or revoked credential writes one
+  `instance_credential_audit` record (`log.type` `audit`) after the commit,
+  with the actor's credential kind and ID, `instance.id`, `credential.id` and
+  `operation` `issue`, `fetch`, `activate` or `revoke`; the client routes'
+  actor is the connection key.
 
 ## Client connection routes
 
-`GET /v1/client/events`, `POST /v1/client/ready`, `POST /v1/client/heartbeat`
-and `POST /v1/client/protocol-error` check each request in this order, the
-first failing check answering (`client_checks.go`):
+`GET /v1/client/events`, `POST /v1/client/ready`, `POST /v1/client/heartbeat`,
+`POST /v1/client/protocol-error` and `POST /v1/client/credential` check each
+request in this order, the first failing check answering (`client_checks.go`):
 
 1. size: at most 65,536 bytes of a JSON body are read; a longer body answers
    `413 request_too_large`, with no ACK and nothing recorded;
@@ -123,7 +133,12 @@ first failing check answering (`client_checks.go`):
    request's transaction; a deregistered instance answers `403
    instance_unavailable`, a revoked credential `401 credential_revoked`, an
    expired one `401 credential_expired` and a `pending` one `401
-   credential_invalid`;
+   credential_invalid`, except on `GET /v1/client/events`, which activates
+   it (below). A use of a credential revoked with cause
+   `pending_activation` also sets the instance's `last_credential_reuse` to
+   it and the database clock and sends `credential_reused` on the instance
+   stream, and that refusal commits; a credential revoked by `DELETE` or
+   deregistration records nothing;
 5. connection, on every POST: `connection_id` must name the instance's live
    connection, not ended and with its lease later than the database clock,
    else `409 stale_connection`;
@@ -132,7 +147,8 @@ first failing check answering (`client_checks.go`):
    applies nothing; with another fingerprint or route, `409 message_conflict`;
 7. the route's own checks.
 
-A database failure answers `503` and changes nothing. The ledger records the
+A database failure answers `503` and changes nothing. Every transaction locks
+the instance, then credentials, then the connection. The ledger records the
 messages Engine accepts and the refused ready; a message refused by an earlier
 check records nothing. The connection row holds the ready's record and the
 latest heartbeat's; other messages are rows of `connection_upstream_messages`,
@@ -151,9 +167,14 @@ deleted when the connection ends.
   carries the same connection and `resumed: true`. With `resume=false` it
   answers `409 previous_connection_active` with `retry_after_ms`, the
   remaining lease in milliseconds rounded up; without its ID, `409
-  connection_conflict`. A refusal changes nothing. A `200` has `Content-Type:
-  text/event-stream` and `Cache-Control: no-store`. A draining pod answers
-  `503`.
+  connection_conflict`. A refusal changes nothing. A `pending` credential,
+  a renewal whose key was fetched, is activated in the transaction that
+  resumes the connection or creates the new one: it becomes `active`
+  (`used_at`), the connection's credential, so later grants are capped at its
+  expiry, and the credential it replaces is revoked with cause
+  `pending_activation`; a refused request activates nothing. A `200` has
+  `Content-Type: text/event-stream` and `Cache-Control: no-store`. A
+  draining pod answers `503`.
 - `POST /v1/client/ready` on a connection whose ready is unanswered: a CLI
   older than `TETRAL_COMPUTER_HUB_MIN_CLI_VERSION` by semantic version
   precedence is refused with `403 cli_upgrade_required`, recorded on the
@@ -173,6 +194,14 @@ deleted when the connection ends.
   `connection_protocol_errors`, as given, and writes one `WARN`
   `client.protocol_error` record with `connection.id`, `message.id`,
   `error.code` and `request.message.id`, never the report's message.
+- `POST /v1/client/credential` fetches a renewal's key once: it generates the
+  key, stores its digest and `fetched_at`, and answers `200` with
+  `{credential_id, connection_key, expires_at}` and `Cache-Control: no-store`.
+  An unknown credential, another instance's, one delivered in a response, one
+  that is not `pending`, is revoked or expired, or was already fetched answers
+  `404 not_found` and changes nothing. The ledger keeps the fetch's route and
+  fingerprint but no answer, so a retry with the same `message_id` and content
+  is checked again and answers `404`.
 
 Streams (`stream.go`): each event is one `data:` line holding one envelope
 and a blank line, flushed at once, with no `event:`, `id:` or comment; a
@@ -191,8 +220,8 @@ unready, refuses new streams, writes that `disconnect` to each of its n
 streams, the i-th at i/n of `TETRAL_COMPUTER_HUB_STREAM_DRAIN_WINDOW`, and
 only then stops; each listener drains within the window plus 10 seconds.
 
-Instruction writes (`dispatch.go`): a stream writes Session instructions in
-passes, one at its start and one each time a notice or the listener's return
+Instruction writes (`dispatch.go`): a stream writes renewals and Session
+instructions in passes, one at its start and one each time a notice or the listener's return
 wakes it, inside a transaction that holds the connection row `FOR SHARE`. An
 ended connection writes `disconnect` with `scope: "connection"`, `retryable:
 false` and `code` `credential_revoked` (revoked) or `instance_unavailable`
@@ -200,9 +229,11 @@ false` and `code` `credential_revoked` (revoked) or `instance_unavailable`
 connection whose `hub_pod` or `stream_count` names another stream closes it
 without one. While the lease has passed, the credential is revoked or
 expired, the instance is deregistered or the ready is unaccepted, the pass
-writes nothing. Otherwise it writes, in issue order and each once per stream,
-the stored envelope of every instruction without `reported_at` whose
-`issue_seq` is at most the stream's bound, and until
+writes nothing. Otherwise it writes `credential.renew` once per stream for
+each `pending`, unexpired renewal of the connection, under `message_id`
+`renew_<credential_id>` on every stream; then, in issue order and each once
+per stream, the stored envelope of every instruction without `reported_at`
+whose `issue_seq` is at most the stream's bound, and until
 `first_session_report_at` is set only `issue_seq` 1 to 64. The bound is the
 highest `issue_seq` a notice released; a stream start and the listener's
 return release all the connection row counts. A failed pass runs again after
@@ -335,6 +366,17 @@ grace period carry the drain.
   revocation never followed by a write; the stored traceparent on a resend,
   one `instruction.deliver` span and the started counter; the pressure gauges
   of a written and a queued instruction whose stream is gone.
+- `credential_renewal_test.go`: a stream issuance on an online connection
+  answering `202` with one notice and one `credential.renew`, its replay `202`,
+  and `409 instance_offline_error` with nothing written without a connection
+  or before the ready is accepted; a renewal of an ended connection kept
+  `pending` and never written on the next connection; `404 not_found` for every
+  credential that may not be fetched and for the retry of a fetch whose answer
+  was lost, `409 message_conflict` for its `message_id` with other content; a
+  heartbeat with the fetched credential refused, then the resume that
+  activates it and revokes the old one in one commit, with grants capped by
+  the new expiry; a use of the revoked old credential recorded with one
+  `credential_reused` event, a use of a deleted one not.
 - `client_cold_start_test.go`, with the process telemetry installed: one `cli`
   cold start with the reported phases for the first answered ready, none for a
   replay or a ready without `startup`, and a refused one observing nothing.

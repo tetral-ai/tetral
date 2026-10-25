@@ -27,6 +27,7 @@ const (
 	routeClientReady         = "/v1/client/ready"
 	routeClientHeartbeat     = "/v1/client/heartbeat"
 	routeClientProtocolError = "/v1/client/protocol-error"
+	routeClientCredential    = "/v1/client/credential" //nolint:gosec // G101: a route path, not credential material.
 )
 
 type clientHandler struct {
@@ -43,6 +44,7 @@ func (h *clientHandler) register(r chi.Router) {
 		{http.MethodPost, routeClientReady, h.ready},
 		{http.MethodPost, routeClientHeartbeat, h.heartbeat},
 		{http.MethodPost, routeClientProtocolError, h.protocolError},
+		{http.MethodPost, routeClientCredential, h.credential},
 	}
 	// Another method on a route path answers the client 404 body.
 	for _, route := range routes {
@@ -69,10 +71,14 @@ func (h *clientHandler) register(r chi.Router) {
 //   - it is live and no previous_connection_id, or another one, was given:
 //     409 connection_conflict.
 //
-// A refusal changes nothing. A draining pod answers 503 before the
-// transaction; a stream registered after its commit while the pod began to
-// drain writes connected and then its stream-only disconnect, so the CLI
-// resumes elsewhere.
+// A refusal changes nothing. A request authenticated with a pending
+// credential, a renewal whose key was fetched, activates it in the
+// transaction that moves the lease or creates the connection: the credential
+// becomes active and the connection's, and the credential it replaces is
+// revoked (instance.ActivateCredential); a refused request activates
+// nothing. A draining pod answers 503 before the transaction; a stream
+// registered after its commit while the pod began to drain writes connected
+// and then its stream-only disconnect, so the CLI resumes elsewhere.
 func (h *clientHandler) events(w http.ResponseWriter, r *http.Request) {
 	ctx, id := r.Context(), identityOf(r)
 	query, err := protocol.DecodeEventsQuery(r.URL.Query())
@@ -89,12 +95,30 @@ func (h *clientHandler) events(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var (
-		started instance.Connection
-		resumed bool
+		started   instance.Connection
+		resumed   bool
+		activated string
+		replaced  string
 	)
-	err = h.Database.WithWorkspaceTx(ctx, string(id.workspace), "computer_hub.client_events", func(tx *dbconnect.Tx) error {
-		granted, err := authorize(ctx, tx, id)
+	err = h.clientTx(ctx, id.workspace, "computer_hub.client_events", func(tx *dbconnect.Tx) error {
+		activated, replaced = "", ""
+		granted, err := authorize(ctx, tx, id, true)
 		if err != nil {
+			return err
+		}
+		activating := granted.credential.State == instance.CredentialPending
+		if activating && granted.credential.ReplacesCredentialID != nil {
+			// Locked before the connection, the order every request keeps.
+			if _, err := instance.LockCredential(ctx, tx, id.workspace, id.instanceID, *granted.credential.ReplacesCredentialID); err != nil {
+				return err
+			}
+		}
+		activate := func() error {
+			if !activating {
+				return nil
+			}
+			activated = granted.credential.ID
+			replaced, err = instance.ActivateCredential(ctx, tx, id.workspace, granted.credential, granted.now)
 			return err
 		}
 		previous, found, err := instance.LockUnendedConnection(ctx, tx, id.workspace, id.instanceID)
@@ -109,7 +133,14 @@ func (h *clientHandler) events(w http.ResponseWriter, r *http.Request) {
 				remaining := (previous.LeaseExpiresAt.Sub(granted.now) + time.Millisecond - 1) / time.Millisecond
 				return refuseRetryAfter(protocol.ErrorPreviousConnectionActive, "the previous connection's lease is still active", int64(remaining))
 			}
-			started, err = instance.ResumeConnection(ctx, tx, id.workspace, previous, h.Streams.podName, previous.CredentialID)
+			if err := activate(); err != nil {
+				return err
+			}
+			credentialID := previous.CredentialID
+			if activating {
+				credentialID = granted.credential.ID
+			}
+			started, err = instance.ResumeConnection(ctx, tx, id.workspace, previous, h.Streams.podName, credentialID)
 			resumed = true
 			return err
 		}
@@ -122,6 +153,9 @@ func (h *clientHandler) events(w http.ResponseWriter, r *http.Request) {
 		if !leaseExpiresAt.After(granted.now) {
 			return refuse(protocol.ErrorCredentialExpired, "no lease grant remains before the credential expires")
 		}
+		if err := activate(); err != nil {
+			return err
+		}
 		started, err = instance.CreateConnection(ctx, tx, id.workspace, instance.NewConnection{
 			ID: instance.NewConnectionID(), InstanceID: id.instanceID, CredentialID: id.credentialID, HubPod: h.Streams.podName,
 			ConnectedAt: granted.now, LeaseExpiresAt: leaseExpiresAt,
@@ -132,6 +166,7 @@ func (h *clientHandler) events(w http.ResponseWriter, r *http.Request) {
 		writeClientFailure(w, r, err)
 		return
 	}
+	h.auditActivation(ctx, id, activated, replaced)
 	stream := h.Streams.hold(id.workspace, started.ID, started.StreamCount)
 	if stream == nil {
 		httpapi.WriteError(w, r, &httpapi.UnavailableError{Message: "the pod is shutting down"})

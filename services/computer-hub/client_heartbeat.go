@@ -28,8 +28,8 @@ func (h *clientHandler) heartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	fingerprint := fingerprintOf(body)
 	var answer clientAnswer
-	err = h.Database.WithWorkspaceTx(ctx, string(id.workspace), "computer_hub.client_heartbeat", func(tx *dbconnect.Tx) error {
-		granted, err := authorize(ctx, tx, id)
+	err = h.clientTx(ctx, id.workspace, "computer_hub.client_heartbeat", func(tx *dbconnect.Tx) error {
+		granted, err := authorize(ctx, tx, id, false)
 		if err != nil {
 			return err
 		}

@@ -270,7 +270,7 @@ func (f *hubFixture) issue(instanceID, key, body string) (int, map[string]any) {
 	f.t.Helper()
 	status, data := f.do(http.MethodPost, "/v1/instances/"+instanceID+"/credentials", []string{key}, body)
 	var credential map[string]any
-	if status == http.StatusCreated {
+	if status == http.StatusCreated || status == http.StatusAccepted {
 		decodeJSON(f.t, data, &credential)
 	}
 	return status, credential

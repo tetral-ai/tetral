@@ -22,9 +22,12 @@ import (
 //  2. it writes nothing while the lease has passed, the credential is revoked
 //     or expired, or the instance is deregistered, nor before the ready is
 //     accepted;
-//  3. otherwise it writes, in issue order, each unreported instruction whose
-//     issue_seq is at most the stream's bound and not yet written on this
-//     stream; until the first Session report is stored only the first
+//  3. otherwise it writes credential.renew once on this stream for each
+//     pending renewal of the connection (instance.PendingRenewals), under the
+//     message_id renewMessageID gives, the same on every stream;
+//  4. then, in issue order, each unreported instruction whose issue_seq is
+//     at most the stream's bound and not yet written on this stream; until
+//     the first Session report is stored only the first
 //     instance.SessionInstructionCap of them.
 //
 // The bound is the highest issue_seq a notice released. A stream start and
@@ -88,8 +91,24 @@ func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
 			stream.raise(bound)
 		}
 		state.accepted = state.accepted || connection.ReadyAcceptedAt != nil
-		if writable, err := s.writable(ctx, tx, connection); err != nil || !writable {
+		writable, now, err := s.writable(ctx, tx, connection)
+		if err != nil || !writable {
 			return err
+		}
+		renewals, err := instance.PendingRenewals(ctx, tx, stream.workspace, connection.InstanceID, stream.connection, now)
+		if err != nil {
+			return err
+		}
+		for _, credentialID := range renewals {
+			messageID := renewMessageID(credentialID)
+			if state.written[messageID] {
+				continue
+			}
+			if state.writer.write(messageID, protocol.CredentialRenewPayload{CredentialID: credentialID}) != nil {
+				outcome = passBroken
+				return nil
+			}
+			state.written[messageID] = true
 		}
 		upTo := bound
 		if connection.FirstSessionReportAt == nil {
@@ -138,26 +157,31 @@ func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
 	return outcome
 }
 
-// writable reports whether a pass may write Session instructions on
-// connection: its lease is later than the database clock, its credential is
-// neither revoked nor expired, its instance is registered and its ready is
+// writable reports whether a pass may write on connection at now, the
+// database clock it returns: the lease is later than now, the credential is
+// neither revoked nor expired, the instance is registered and the ready is
 // accepted. It reads the credential and the instance FOR SHARE.
-func (s *Streams) writable(ctx context.Context, tx *dbconnect.Tx, connection instance.Connection) (bool, error) {
+func (s *Streams) writable(ctx context.Context, tx *dbconnect.Tx, connection instance.Connection) (bool, time.Time, error) {
 	now, err := instance.Now(ctx, tx)
 	if err != nil || !connection.Live(now) || connection.ReadyAcceptedAt == nil {
-		return false, err
+		return false, now, err
 	}
 	current, err := instance.ShareInstance(ctx, tx, connection.WorkspaceID, connection.InstanceID)
 	if err != nil || current.RegistrationState == instance.RegistrationDeregistered {
-		return false, err
+		return false, now, err
 	}
 	credential, err := instance.ShareCredential(ctx, tx, connection.WorkspaceID, connection.InstanceID, connection.CredentialID)
 	if err != nil {
-		return false, err
+		return false, now, err
 	}
 	switch instance.CredentialState(credential, now) {
 	case instance.CredentialRevoked, instance.CredentialExpired:
-		return false, nil
+		return false, now, nil
 	}
-	return true, nil
+	return true, now, nil
 }
+
+// renewMessageID is the message_id of credential.renew for credentialID. A
+// resumed stream writes it again under the same ID, so a CLI that handled it
+// on an earlier stream of the connection recognizes it.
+func renewMessageID(credentialID string) string { return "renew_" + credentialID }

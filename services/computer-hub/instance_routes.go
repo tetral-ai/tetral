@@ -134,7 +134,7 @@ func (h *instanceHandler) createInstance(w http.ResponseWriter, r *http.Request)
 		if err != nil {
 			return err
 		}
-		issued = issuance{instance: created, credential: credential, key: &connectionKey, now: now}
+		issued = issuance{instance: created, credential: credential, key: &connectionKey, now: now, created: true, status: http.StatusCreated}
 		if issued.object, err = instance.ReadObject(ctx, tx, ws, created, h.RecommendedCLIVersion, now); err != nil {
 			return err
 		}
@@ -202,18 +202,30 @@ func (h *instanceHandler) issueCredential(w http.ResponseWriter, r *http.Request
 			return h.expiryError()
 		}
 		if delivery == instance.DeliveryStream {
-			if err := instance.CheckCredentialLimit(ctx, tx, ws, instanceID, now); err != nil {
+			// A live renewal of the online connection; its key is fetched
+			// on that connection (client_credential.go).
+			connection, online, err := instance.ShareOnlineConnection(ctx, tx, ws, instanceID, now)
+			if err != nil {
 				return err
 			}
-			// Stream delivery is live credential renewal, which the hub
-			// does not serve yet, so every instance answers as offline.
-			return &instance.OfflineError{}
+			if !online {
+				if err := instance.CheckCredentialLimit(ctx, tx, ws, instanceID, now); err != nil {
+					return err
+				}
+				return &instance.OfflineError{}
+			}
+			credential, err := instance.IssueRenewal(ctx, tx, ws, connection, now, expiresAt)
+			if err != nil {
+				return err
+			}
+			issued = issuance{instance: current, credential: credential, live: connection.CredentialID, now: now, created: true, status: http.StatusAccepted}
+			return instance.SaveIdempotencyRecord(ctx, tx, ws, scope, instance.IdempotencyRecord{Fingerprint: fingerprint, InstanceID: instanceID, CredentialID: credential.ID, Status: http.StatusAccepted})
 		}
 		credential, connectionKey, err := instance.IssueCredential(ctx, tx, ws, instanceID, instance.CredentialActive, now, expiresAt)
 		if err != nil {
 			return err
 		}
-		issued = issuance{instance: current, credential: credential, key: &connectionKey, now: now}
+		issued = issuance{instance: current, credential: credential, key: &connectionKey, now: now, created: true, status: http.StatusCreated}
 		return instance.SaveIdempotencyRecord(ctx, tx, ws, scope, instance.IdempotencyRecord{Fingerprint: fingerprint, InstanceID: instanceID, CredentialID: credential.ID, Status: http.StatusCreated})
 	})
 	if err != nil {
@@ -221,7 +233,7 @@ func (h *instanceHandler) issueCredential(w http.ResponseWriter, r *http.Request
 		return
 	}
 	h.auditIssue(ctx, principal, issued)
-	writeJSON(w, http.StatusCreated, issued.credentialObject())
+	writeJSON(w, issued.status, issued.credentialObject())
 }
 
 func (h *instanceHandler) listInstances(w http.ResponseWriter, r *http.Request) {
@@ -383,9 +395,10 @@ func endLiveConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, i
 	return hubflow.EndConnection(ctx, tx, ws, connection, cause)
 }
 
-// issuance is the result of an issuing request. key is nil on a replay;
-// object is the instance object of an instance creation, and live the
-// credential of the instance's live connection.
+// issuance is the result of an issuing request: created unless it is a
+// replay, answered with status. key is nil on a replay and for a stream
+// delivery; object is the instance object of an instance creation, and live
+// the credential of the instance's live connection.
 type issuance struct {
 	instance   instance.Instance
 	object     instance.InstanceObject
@@ -393,6 +406,8 @@ type issuance struct {
 	key        *instance.ConnectionKey
 	live       string
 	now        time.Time
+	created    bool
+	status     int
 }
 
 func (i issuance) credentialObject() instance.IssuedCredentialObject {
@@ -432,7 +447,7 @@ func (h *instanceHandler) replay(ctx context.Context, tx *dbconnect.Tx, ws works
 		return issuance{}, true, err
 	}
 	live, err := instance.LiveCredentialID(ctx, tx, ws, current.ID, now)
-	return issuance{instance: current, object: object, credential: credential, live: live, now: now}, true, err
+	return issuance{instance: current, object: object, credential: credential, live: live, now: now, status: record.Status}, true, err
 }
 
 // idempotentTx runs fn in one transaction and runs it once more when a
@@ -447,7 +462,7 @@ func (h *instanceHandler) idempotentTx(ctx context.Context, ws workspace.ID, ope
 }
 
 func (h *instanceHandler) auditIssue(ctx context.Context, principal auth.Principal, issued issuance) {
-	if issued.key != nil {
+	if issued.created {
 		instance.AuditCredentialOperation(ctx, h.logger, actorOf(principal), issued.instance.ID, issued.credential.ID, instance.AuditIssue)
 	}
 }

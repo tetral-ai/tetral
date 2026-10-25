@@ -25,21 +25,26 @@ import (
 //     413 for a body over its complete limit;
 //  3. identity, on GET /v1/client/events only (clientEvents);
 //  4. authority: authorize locks the principal's instance and credential
-//     FOR SHARE in the request's transaction;
+//     FOR SHARE in the request's transaction (an activating credential FOR
+//     UPDATE);
 //  5. connection, on every POST: the instance's live connection
 //     (instance.LockLiveConnection), else 409 stale_connection;
 //  6. the replay ledger (replayOf);
 //  7. the route's own checks.
 //
+// A refusal changes nothing, except one that records a credential reuse.
 // A database failure at any step answers 503 and changes nothing, so the
-// authority checks fail closed.
+// authority checks fail closed. Every lock is taken in the order instance,
+// credentials, connection.
 
 // clientFailure is a refusal with its code of the client error table and,
-// for previous_connection_active, its retry_after_ms.
+// for previous_connection_active, its retry_after_ms. commit marks a refusal
+// whose transaction keeps what it wrote (clientTx).
 type clientFailure struct {
 	code         protocol.ErrorCode
 	message      string
 	retryAfterMS protocol.Optional[int64]
+	commit       bool
 }
 
 func (f *clientFailure) Error() string { return string(f.code) + ": " + f.message }
@@ -50,6 +55,27 @@ func refuse(code protocol.ErrorCode, message string) error {
 
 func refuseRetryAfter(code protocol.ErrorCode, message string, retryAfterMS int64) error {
 	return &clientFailure{code: code, message: message, retryAfterMS: protocol.Some(retryAfterMS)}
+}
+
+// clientTx runs fn in one transaction of the request's Workspace. A refusal
+// fn returns rolls back what it wrote, except a refusal marked commit, which
+// commits it before the refusal is answered.
+func (h *clientHandler) clientTx(ctx context.Context, ws workspace.ID, operation string, fn func(*dbconnect.Tx) error) error {
+	var kept error
+	err := h.Database.WithWorkspaceTx(ctx, string(ws), operation, func(tx *dbconnect.Tx) error {
+		kept = nil
+		err := fn(tx)
+		var failure *clientFailure
+		if errors.As(err, &failure) && failure.commit {
+			kept = err
+			return nil
+		}
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	return kept
 }
 
 // clientAnswer is the status and exact body of a client route's answer, as
@@ -145,18 +171,31 @@ type authority struct {
 // authorize locks the principal's instance and credential FOR SHARE and
 // refuses a deregistered instance (403 instance_unavailable), then a revoked
 // (401 credential_revoked), expired (401 credential_expired) or pending
-// (401 credential_invalid) credential.
-func authorize(ctx context.Context, tx *dbconnect.Tx, id clientIdentity) (authority, error) {
+// (401 credential_invalid) credential. With activating, the events request
+// that may activate it, a pending credential passes, locked FOR UPDATE for
+// its activation. A use of a credential that an activation revoked is
+// recorded as the instance's credential reuse in the request's transaction,
+// whose refusal commits it.
+func authorize(ctx context.Context, tx *dbconnect.Tx, id clientIdentity, activating bool) (authority, error) {
+	unknown := refuse(protocol.ErrorCredentialInvalid, "the connection key does not authenticate this request")
 	current, err := instance.ShareInstance(ctx, tx, id.workspace, id.instanceID)
 	if errors.Is(err, instance.ErrNotFound) {
-		return authority{}, refuse(protocol.ErrorCredentialInvalid, "the connection key does not authenticate this request")
+		return authority{}, unknown
 	}
 	if err != nil {
 		return authority{}, err
 	}
-	credential, err := instance.ShareCredential(ctx, tx, id.workspace, id.instanceID, id.credentialID)
+	lock := instance.ShareCredential
+	if activating {
+		// Two requests that both held a share lock could not both upgrade it.
+		peek, err := instance.ReadInstanceCredential(ctx, tx, id.workspace, id.instanceID, id.credentialID)
+		if err == nil && peek.State == instance.CredentialPending {
+			lock = instance.LockCredential
+		}
+	}
+	credential, err := lock(ctx, tx, id.workspace, id.instanceID, id.credentialID)
 	if errors.Is(err, instance.ErrNotFound) {
-		return authority{}, refuse(protocol.ErrorCredentialInvalid, "the connection key does not authenticate this request")
+		return authority{}, unknown
 	}
 	if err != nil {
 		return authority{}, err
@@ -170,11 +209,20 @@ func authorize(ctx context.Context, tx *dbconnect.Tx, id clientIdentity) (author
 	}
 	switch instance.CredentialState(credential, now) {
 	case instance.CredentialRevoked:
-		return authority{}, refuse(protocol.ErrorCredentialRevoked, "the credential has been revoked")
+		failure := &clientFailure{code: protocol.ErrorCredentialRevoked, message: "the credential has been revoked"}
+		if credential.RevocationCause != nil && *credential.RevocationCause == instance.CausePendingActivation {
+			if err := instance.RecordCredentialReuse(ctx, tx, id.workspace, id.instanceID, credential.ID); err != nil {
+				return authority{}, err
+			}
+			failure.commit = true
+		}
+		return authority{}, failure
 	case instance.CredentialExpired:
 		return authority{}, refuse(protocol.ErrorCredentialExpired, "the credential has expired")
 	case instance.CredentialPending:
-		return authority{}, refuse(protocol.ErrorCredentialInvalid, "the credential is not active")
+		if !activating {
+			return authority{}, refuse(protocol.ErrorCredentialInvalid, "the credential is not active")
+		}
 	}
 	return authority{credential: credential, now: now}, nil
 }
