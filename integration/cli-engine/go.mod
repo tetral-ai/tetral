@@ -1,6 +1,6 @@
 module github.com/tetral-ai/tetral/integration/cli-engine
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/envoyproxy/go-control-plane/envoy v1.37.1-0.20260729145720-a2d8c7492908

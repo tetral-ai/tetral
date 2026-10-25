@@ -131,7 +131,7 @@ compares every original listener, route, cluster and endpoint with the official
 translator, rejects conflicting duplicate or missing/unexpected Secret references,
 and supplies only the omitted upstream-generated Secrets. It never constructs
 replacement proxy policy or changes the checksum-verified CLI. The helper uses
-Go 1.26.9, the Engine module's toolchain, which also satisfies upstream's Go
+Go 1.26.10, the Engine module's toolchain, which also satisfies upstream's Go
 1.26.8 minimum. Separate module and symbol vulnerability scans cover this
 test-only dependency graph. This repairs
 local serialization; it does not establish controller Secret propagation.
