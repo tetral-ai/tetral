@@ -80,8 +80,9 @@ temporary directories. No workspace crate depends on this package.
   start, the attempt timeout and the backoff, staging until the ready ACK and
   its limit, a stream lost before that ACK, grants from first sends,
   conflicts and predecessors, a deadline passed in one clock step, answers of
-  an ended connection, the event size and protocol version, the startup
-  phases in ready, and a redirect that is not followed.
+  an ended connection, a heartbeat ACK taken after the connection deadline,
+  the event size and protocol version, the startup phases in ready, and a
+  redirect that is not followed.
 - `tests/ledger_outbox.rs`: the replay ledger and the Report outbox against
   the reference control server: refused reports never sent again and a
   refusal that ends the connection, a report whose ACK was lost sent again
@@ -93,11 +94,12 @@ temporary directories. No workspace crate depends on this package.
   the state root and to a project, `create_cwd`, a repeated, held, retargeted
   and changed preparation and its ACK, two App Servers with the same
   Sessions, a removed directory and a new connection, a probe result after a
-  new connection and a resumed stream, the probe slots, their timeouts and
-  the rejection episode they record, 128 Session records, a held probe under
-  heartbeats and shutdown, reports refused as answering no issued
-  instruction, a new binding refused by a full replay ledger, and a
-  preparation that names an earlier connection.
+  new connection and a resumed stream, the probe slots, the order in which
+  waiting preparations get them, their timeouts and the rejection episode
+  they record, 128 Session records, a held probe under heartbeats and
+  shutdown, the listing of a staged and of a failed preparation, reports
+  refused as answering no issued instruction, a new binding refused by a
+  full replay ledger, and a preparation that names an earlier connection.
 - `tests/local_service.rs`: `server run`, `server status` and `server stop`
   and the local API: status while Engine is unreachable, the wrong routes,
   shutdown on request, on each signal and with a handler blocked, one owner
