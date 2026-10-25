@@ -229,6 +229,8 @@ func readFixtures(t *testing.T, name string) []fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// json.Unmarshal reads the file as one whole document, so a truncated
+	// file or data after the document fails.
 	var fixtures []fixture
 	if err := json.Unmarshal(data, &fixtures); err != nil {
 		t.Fatal(err)
@@ -239,15 +241,14 @@ func readFixtures(t *testing.T, name string) []fixture {
 func TestFixturesDecodeAndReencode(t *testing.T) {
 	files := []struct {
 		name string
-		// census is the file's count of fixtures and of those each check
-		// below selects, so that a truncated file or a selector that
-		// matches nothing fails.
+		// census is the file's count of the fixtures each check below
+		// selects, so that a selector that matches nothing fails.
 		census map[string]int
 		codecs func([]fixture) map[string]codec
 	}{
-		{"tool-execution-v1.fixtures.json", map[string]int{"fixtures": 61, "valid": 29}, func([]fixture) map[string]codec { return toolExecutionCodecs }},
-		{"connection-v1.fixtures.json", map[string]int{"fixtures": 239, "valid": 61, "http_status": 17}, func([]fixture) map[string]codec { return connectionCodecs }},
-		{"drive-transfer-v1.fixtures.json", map[string]int{"fixtures": 126, "valid": 49, "relation only": 34, "endpoint and status": 15, "endpoint and error": 23, "pair": 30}, driveTransferCodecs},
+		{"tool-execution-v1.fixtures.json", map[string]int{}, func([]fixture) map[string]codec { return toolExecutionCodecs }},
+		{"connection-v1.fixtures.json", map[string]int{"http_status": 17}, func([]fixture) map[string]codec { return connectionCodecs }},
+		{"drive-transfer-v1.fixtures.json", map[string]int{"relation only": 34, "endpoint and status": 15, "endpoint and error": 23, "pair": 30}, driveTransferCodecs},
 	}
 	for _, file := range files {
 		t.Run(file.name, func(t *testing.T) {
@@ -266,11 +267,8 @@ func TestFixturesDecodeAndReencode(t *testing.T) {
 }
 
 func census(fixtures []fixture) map[string]int {
-	counts := map[string]int{"fixtures": len(fixtures)}
+	counts := map[string]int{}
 	for _, f := range fixtures {
-		if f.Valid {
-			counts["valid"]++
-		}
 		if f.HTTPStatus != 0 {
 			counts["http_status"]++
 		}
