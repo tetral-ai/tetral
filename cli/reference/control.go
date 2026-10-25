@@ -200,8 +200,8 @@ func (server *Server) controlInstruction(kind string) func(json.RawMessage) (any
 }
 
 // controlSend writes any event on an instance's current stream as given,
-// a malformed one included, or writes again an event the stream's
-// connection was sent before. Nothing is recorded as issued.
+// a malformed one included, or writes again an instruction issued on the
+// stream's connection, sent or still queued. Nothing is recorded as issued.
 func (server *Server) controlSend(body json.RawMessage) (any, error) {
 	var input struct {
 		InstanceID string          `json:"instance_id"`

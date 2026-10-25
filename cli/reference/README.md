@@ -48,7 +48,7 @@ bound addresses (`Addresses`) to stdout and serves until it gets `SIGINT` or
 ## Controls
 
 Each control is `POST /control/<name>` with a JSON body, answered with a JSON
-object or `400` with the reason.
+object or `400` with the reason; an unknown `<name>` gets `404`.
 
 | Control | Effect |
 |---|---|

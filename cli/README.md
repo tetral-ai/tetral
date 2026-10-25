@@ -128,9 +128,10 @@ from the Rust types of `protocol` and tested against the same fixtures;
 neither set imports the other or any Engine package.
 
 The cross-process tests of `tests/tests/` run `tetral`, built with the feature
-`test-seams`, and the reference control server as separate processes; the
-harness in `tests/src/` builds both, drives the clock and barriers of
-`state::seams`, and writes each test file's acceptance record. A release
+`test-seams`, and, where a test needs Engine's side, the reference control
+server as separate processes; the harness in `tests/src/` builds both, drives
+the clock and barriers of `state::seams`, and writes the acceptance record of
+each test file of `tests/tests/`. A release
 build enables no test seam, and `tests/tests/release_seams.rs` checks that
 its binary holds none.
 
@@ -147,9 +148,10 @@ Every `cargo` command runs with `cli/` as its working directory, so that
 `--manifest-path cli/Cargo.toml` from the repository root.
 
 - `cargo build` and `cargo test` in `cli/` build and test the workspace.
-  `cargo test` needs Go, which builds the reference control server and whose
-  version each acceptance record names, and `TETRAL_ACCEPTANCE_DIR` naming
-  the directory that each test file's acceptance record,
+  `cargo test` needs Go, with which the harness builds the reference control
+  server for the tests that run it and whose version each acceptance record
+  names, and `TETRAL_ACCEPTANCE_DIR` naming the
+  directory that the acceptance record of each test file of `tests/tests/`,
   `<test>_<os>-<arch>_<commit>.md`, is written to; a test fails at once
   without it.
 - `go test -race ./cli/reference/...` at the repository root tests the Go
@@ -157,7 +159,7 @@ Every `cargo` command runs with `cli/` as its working directory, so that
 - `make test-affected` at the repository root runs the evidence group `cli`
   (the same two commands, with the acceptance records under its output
   directory) for a change under `cli/`; a change under `cli/reference/`, which
-  the cross-process tests build, also runs the Go groups.
+  the harness builds for the cross-process tests, also runs the Go groups.
   A change under `protocol/` makes it fall back to the full profile, which runs
   the `cli` group and every Go package.
 

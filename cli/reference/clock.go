@@ -9,6 +9,8 @@ import (
 // every lease, grant, heartbeat and stream age changes exactly when a test
 // says so.
 type Clock struct {
+	// mu guards now and changed: the control listener advances the clock
+	// while the protocol listener's handlers read it.
 	mu      sync.Mutex
 	now     time.Time
 	changed chan struct{}
