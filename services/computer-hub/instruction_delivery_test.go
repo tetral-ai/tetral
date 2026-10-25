@@ -650,19 +650,26 @@ func TestResentInstructionKeepsItsTraceAndMakesOneDeliverSpan(t *testing.T) {
 	}
 }
 
+// TestInstructionWithoutAStreamCountsAsQueued writes two instructions and
+// stores a third once the stream is gone: two are in progress and one is
+// queued, and the oldest queued age is the queued one's 30 seconds, though a
+// written one is older.
 func TestInstructionWithoutAStreamCountsAsQueued(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	_, stream := f.openOnline()
-	written := f.issueInstruction(f.ctx, stream.connectionID, "sess_written")
-	f.requireInstructions(stream, written)
+	oldest := f.issueInstruction(f.ctx, stream.connectionID, "sess_written")
+	written := f.issueInstruction(f.ctx, stream.connectionID, "sess_written_too")
+	f.requireInstructions(stream, oldest, written)
 	waitUntil(t, func() bool {
-		return f.count(`SELECT count(*) FROM connection_instructions WHERE message_id=$1 AND first_written_at IS NOT NULL`, written) == 1
+		return f.count(`SELECT count(*) FROM connection_instructions WHERE message_id IN ($1,$2) AND first_written_at IS NOT NULL`, oldest, written) == 2
 	})
 	_ = stream.stream.Close()
 	waitUntil(t, func() bool { return f.streams.lookup(stream.connectionID) == nil })
 	waiting := f.issueInstruction(f.ctx, stream.connectionID, "sess_waiting")
-	if _, err := f.admin.ExecContext(f.ctx, `UPDATE connection_instructions SET created_at=clock_timestamp()-interval '30 seconds' WHERE message_id=$1`, waiting); err != nil {
-		t.Fatal(err)
+	for messageID, age := range map[string]string{waiting: "30 seconds", oldest: "60 seconds"} {
+		if _, err := f.admin.ExecContext(f.ctx, `UPDATE connection_instructions SET created_at=clock_timestamp()-$2::interval WHERE message_id=$1`, messageID, age); err != nil {
+			t.Fatal(err)
+		}
 	}
 	metrics, err := instructionPressure(f.client)(f.ctx)
 	if err != nil {
@@ -672,9 +679,9 @@ func TestInstructionWithoutAStreamCountsAsQueued(t *testing.T) {
 	for _, metric := range metrics {
 		values[metric.Name] = metric.Value
 	}
-	if values["computerhub_instructions_queued"] != 1 || values["computerhub_instructions_in_progress"] != 1 ||
+	if values["computerhub_instructions_queued"] != 1 || values["computerhub_instructions_in_progress"] != 2 ||
 		math.Abs(values["computerhub_instructions_oldest_queued_seconds"]-30) > 1 {
-		t.Fatalf("pressure = %v; want one written and one queued 30 seconds ago, within a second", values)
+		t.Fatalf("pressure = %v; want two written and one queued 30 seconds ago, within a second", values)
 	}
 }
 
