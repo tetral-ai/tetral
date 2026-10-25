@@ -75,6 +75,7 @@ func processFromEnvironment(t *testing.T) *ProcessLogger {
 
 func TestEndpointExportsAnEndedSpanToTheOTLPReceiver(t *testing.T) {
 	receiver := startOTLPReceiver(t)
+	t.Setenv("TETRAL_TRACE_SAMPLE_RATIO", "1")
 	owner := processFromEnvironment(t)
 	ctx, observation := Observe(context.Background(), "lease.renew")
 	traceID := trace.SpanContextFromContext(ctx).TraceID().String()

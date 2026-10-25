@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -39,23 +40,37 @@ func statementSamples(t *testing.T, telemetry *workload.Telemetry, operation str
 	return sample
 }
 
-func installStatementTelemetry(t *testing.T) (*bytes.Buffer, *workload.Telemetry) {
+// installStatementTelemetry installs the process logger and telemetry a
+// service builds from its environment, with TETRAL_DB_SLOW_QUERY_MS set to
+// slowQueryMs. records ends the process logger and returns what it wrote.
+func installStatementTelemetry(t *testing.T, slowQueryMs string) (records func() string, telemetry *workload.Telemetry) {
 	t.Helper()
-	records := &bytes.Buffer{}
-	telemetry := workload.NewTelemetry(workload.TelemetryOptions{Service: "api", Logger: workload.NewLogger(records, "api", "test", "unit")})
-	t.Cleanup(workload.InstallTelemetry(telemetry))
-	return records, telemetry
+	t.Setenv("TETRAL_DB_SLOW_QUERY_MS", slowQueryMs)
+	t.Setenv("TETRAL_LOG_LEVEL", "info")
+	cfg, err := workload.DiagnosticConfigFromEnv(os.Getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	written := &bytes.Buffer{}
+	owner := workload.NewProcessLogger(written, "api", "test", "unit", cfg)
+	t.Cleanup(workload.InstallDefaultLogger(owner.Logger))
+	t.Cleanup(owner.CloseWithBudget)
+	return func() string {
+		owner.CloseWithBudget()
+		return written.String()
+	}, owner.Telemetry
 }
 
 func TestSlowStatementWritesOneSlowRecordWithoutItsText(t *testing.T) {
-	records, telemetry := installStatementTelemetry(t)
+	records, telemetry := installStatementTelemetry(t, "250")
 	client := NewClientForTesting(storagetest.NewPostgreSQLDB(t))
 	if _, err := client.Exec(context.Background(), "statement.slow", "SELECT pg_sleep(0.3)"); err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.Split(strings.TrimSpace(records.String()), "\n")
+	written := records()
+	lines := strings.Split(strings.TrimSpace(written), "\n")
 	if len(lines) != 1 {
-		t.Fatalf("records = %q; want one db.query.slow", records.String())
+		t.Fatalf("records = %q; want one db.query.slow", written)
 	}
 	var record map[string]any
 	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
@@ -67,33 +82,40 @@ func TestSlowStatementWritesOneSlowRecordWithoutItsText(t *testing.T) {
 	if ms, _ := record["duration_ms"].(float64); ms < 300 {
 		t.Fatalf("duration_ms = %v; want at least 300", record["duration_ms"])
 	}
-	if strings.Contains(records.String(), "pg_sleep") || strings.Contains(records.String(), "SELECT") {
-		t.Fatalf("slow record carries the statement text: %s", records.String())
+	if strings.Contains(written, "pg_sleep") || strings.Contains(written, "SELECT") {
+		t.Fatalf("slow record carries the statement text: %s", written)
 	}
 	if sample := statementSamples(t, telemetry, "statement.slow"); sample.count != 1 || sample.sum <= 0.25 {
 		t.Fatalf("slow statement samples = %+v; want one above 0.25 seconds", sample)
 	}
 }
 
-func TestFastStatementWritesNoRecord(t *testing.T) {
-	records, telemetry := installStatementTelemetry(t)
-	client := NewClientForTesting(storagetest.NewPostgreSQLDB(t))
-	var one int
-	if err := client.QueryRow(context.Background(), "statement.fast", "SELECT 1").Scan(&one); err != nil {
-		t.Fatal(err)
-	}
-	if records.Len() != 0 {
-		t.Fatalf("a fast statement wrote a record: %s", records.String())
-	}
-	if sample := statementSamples(t, telemetry, "statement.fast"); sample.count != 1 {
-		t.Fatalf("fast statement samples = %+v; want one", sample)
+func TestStatementWithinTheSlowQueryThresholdWritesNoRecord(t *testing.T) {
+	for _, tc := range []struct{ name, slowQueryMs, query string }{
+		{name: "fast statement", slowQueryMs: "250", query: "SELECT 1"},
+		{name: "statement under a raised threshold", slowQueryMs: "1000", query: "SELECT 1 FROM pg_sleep(0.3)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			records, telemetry := installStatementTelemetry(t, tc.slowQueryMs)
+			client := NewClientForTesting(storagetest.NewPostgreSQLDB(t))
+			var one int
+			if err := client.QueryRow(context.Background(), "statement.fast", tc.query).Scan(&one); err != nil {
+				t.Fatal(err)
+			}
+			if written := records(); written != "" {
+				t.Fatalf("a statement within the threshold wrote a record: %s", written)
+			}
+			if sample := statementSamples(t, telemetry, "statement.fast"); sample.count != 1 {
+				t.Fatalf("statement samples = %+v; want one", sample)
+			}
+		})
 	}
 }
 
 // The lock's acquisition is a sample of the same operation, so the statement
 // on the lock-holding connection is counted from inside the callback.
 func TestSessionLockStatementIsObservedLikeAnyStatement(t *testing.T) {
-	records, telemetry := installStatementTelemetry(t)
+	records, telemetry := installStatementTelemetry(t, "250")
 	client := NewClientForTesting(storagetest.NewPostgreSQLDB(t))
 	var before, after statementSample
 	locked, err := client.TryWithSessionLock(context.Background(), "statement.session_lock", "statement_observation", func(conn *SessionLockConn) error {
@@ -111,20 +133,21 @@ func TestSessionLockStatementIsObservedLikeAnyStatement(t *testing.T) {
 	if after.count-before.count != 1 || after.sum-before.sum <= 0.25 {
 		t.Fatalf("samples went from %+v to %+v; want one statement above 0.25 seconds", before, after)
 	}
+	written := records()
 	var slow []map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(records.String()), "\n") {
+	for _, line := range strings.Split(strings.TrimSpace(written), "\n") {
 		var record map[string]any
 		if json.Unmarshal([]byte(line), &record) == nil && record["event"] == "db.query.slow" {
 			slow = append(slow, record)
 		}
 	}
 	if len(slow) != 1 || slow[0]["operation"] != "statement.session_lock" {
-		t.Fatalf("records = %q; want one db.query.slow of the statement", records.String())
+		t.Fatalf("records = %q; want one db.query.slow of the statement", written)
 	}
 }
 
 func TestListenObservesNoStatementSample(t *testing.T) {
-	_, telemetry := installStatementTelemetry(t)
+	_, telemetry := installStatementTelemetry(t, "250")
 	client := NewClientForTesting(storagetest.NewPostgreSQLDB(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := false
@@ -138,7 +161,7 @@ func TestListenObservesNoStatementSample(t *testing.T) {
 }
 
 func TestHeldLockObservesOnlyItsAcquisitionWait(t *testing.T) {
-	_, telemetry := installStatementTelemetry(t)
+	_, telemetry := installStatementTelemetry(t, "250")
 	client := NewClientForTesting(storagetest.NewPostgreSQLDB(t))
 	if err := client.WithAdvisoryLock(context.Background(), "statement.lock", 11, 12, func() error {
 		time.Sleep(time.Second)
