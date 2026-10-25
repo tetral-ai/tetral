@@ -1,7 +1,7 @@
 //! The start of `server run` after the command's own checks, in this order:
-//! the state-root lock, the removal of interrupted replacements, an empty
-//! `outbox/`, the configuration read under the lock, the socket directory
-//! `S`, and the socket. A failure at any step leaves the steps before it and
+//! the state-root lock, the removal of interrupted replacements, the
+//! configuration read under the lock, an empty `outbox/`, the entries of `T`
+//! deleted, the socket directory `S`, and the socket. A failure at any step leaves the steps before it and
 //! touches nothing after it; without the lock, nothing in `S`
 //! is touched, since the lock is what proves that no other App Server serves
 //! the root's socket.
@@ -85,9 +85,10 @@ pub fn lock(root: &StateRoot) -> Result<RootLock, StartError> {
 
 /// The steps after the lock: the configuration and the capabilities;
 /// `outbox/` emptied, whose reports belong to connections of an earlier
-/// process, only once both are valid, so that a start that fails on them
-/// leaves the root as it was; then `S` and the socket, bound with mode
-/// `0600` before it accepts a connection.
+/// process, and `T` emptied of its tasks' temporary directories, only once
+/// both are valid, so that a start that fails on them leaves the root as it
+/// was; then `S` and the socket, bound with mode `0600` before it accepts a
+/// connection.
 pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
     let configuration = configuration::read(root)?;
     let capabilities = capabilities::assemble()?;
@@ -95,6 +96,7 @@ pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
         std::fs::canonicalize(root.path()).map_err(|error| IoFailure::new(root.path(), error))?;
     observe::STARTUP.config_loaded(state::seams::now());
     state::outbox::reset(&root.join(paths::OUTBOX))?;
+    execution::store::clear_task_parent(&execution::store::task_parent(&canonical_root));
 
     private::create_socket_dir()?;
     let socket = paths::socket_path(root)

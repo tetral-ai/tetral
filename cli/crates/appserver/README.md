@@ -24,7 +24,9 @@ ones it uses belong here too.
 - Startup runs its steps in order and a failure leaves every later step
   undone: the lock, the removal of the temporary files that interrupted
   replacements left, the configuration read under it, `outbox/` emptied, the
-  socket directory `S` created and checked, a socket left by an App Server that died removed, and
+  entries of `T` deleted when `T` passes its checks
+  (`execution::store::clear_task_parent`), the socket directory `S` created
+  and checked, a socket left by an App Server that died removed, and
   the socket bound with mode `0600` before it accepts a connection
   (`startup`). A held lock is `Running` and touches nothing in `S`.
 - Only a held lock or an answering socket shows that an App Server runs; a

@@ -93,7 +93,8 @@ which owns that task's process tree; the translation of a call's
 - `report.rs`: `Report`, its `Correlation` and `Body`, the error bounds
   (`bounded`) and the size fitting of a process result (`fit`).
 - `store.rs`: a task's name, the paths of `T`, of a task's directory and of
-  its temporary directory, and `TaskFiles` with its `Log`s.
+  its temporary directory, `TaskFiles` with its `Log`s, and
+  `clear_task_parent`.
 - `isolation/harness.rs`: the test entry `tetral-isolation-harness`, under the
   feature `test-seams`: one command through admission, the check and the
   launch.

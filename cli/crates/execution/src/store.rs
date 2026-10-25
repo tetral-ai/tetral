@@ -199,6 +199,27 @@ impl Log {
     }
 }
 
+/// Deletes every entry of `parent`, `T`, never following a symbolic link out
+/// of it, when `T` is a directory of this user with no permission bit for
+/// group or others; leaves any other `T` untouched. At an App Server's start
+/// its entries are the temporary directories of an earlier process's tasks,
+/// which no task names any more.
+pub fn clear_task_parent(parent: &Path) {
+    if !is_private_directory(parent) {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let _ = match entry.file_type() {
+            Ok(kind) if kind.is_dir() => fs::remove_dir_all(&path),
+            _ => fs::remove_file(&path),
+        };
+    }
+}
+
 fn new_directory(path: &Path) -> Result<(), IoFailure> {
     DirBuilder::new()
         .mode(DIRECTORY_MODE)
