@@ -12,9 +12,10 @@ description, schemas and fixtures are in `protocol/` at the repository root.
 - `decode` reads a message in four steps: its size against the type's
   `Message::MAX_BYTES`, refused before anything is parsed; `strict::check`
   over the raw bytes, which refuses a repeated member name, a `\u` escape of
-  a lone surrogate, a number that is not finite as a 64-bit float, and an
-  integer outside the signed 64-bit range; typed decoding; then the rules of
-  `Message::check`.
+  a lone surrogate, a number that is not finite as a 64-bit float, an
+  integer outside the signed 64-bit range, and objects and arrays nested
+  deeper than `strict::MAX_NESTING` (127) levels; typed decoding; then the
+  rules of `Message::check`.
 - Each type has the members of its schema definition, under their exact
   names. Unknown members are dropped, except in the objects the schema
   closes, such as `sandbox_policy` and a commit request, which refuse them.
@@ -30,15 +31,20 @@ description, schemas and fixtures are in `protocol/` at the repository root.
   narrower size limit of a downstream event, `connection::MESSAGE_MAX_BYTES`
   or, for a tool instruction, its type's own limit through
   `tool::check_instruction`, and relations between members. A tool-status
-  report is read under its media limit whatever it holds. A response is read
+  report is read under the media limit whatever it holds (`tool::ToolStatus`).
+  A response is read
   with `decode_answer` against the request it answers, and an error body
   together with its HTTP status and endpoint.
 - Messages are written as compact UTF-8 JSON by `encode`.
-- A connection key (`BootstrapKey`) prints as `<redacted>` in `Debug` and
-  `Display`; its plaintext leaves it only through `expose`, for the
-  `Authorization` header, and `Bootstrap::encode`, which writes
-  `credentials.json`; a decoding failure names the member and its rule, never
-  its value (`BootstrapError`).
+- A connection key prints as `<redacted>` in `Debug` and `Display`. There are
+  two types, one per rule the protocol gives a key: `bootstrap::BootstrapKey`,
+  the bootstrap's key, any nonempty text, whose plaintext leaves it only
+  through `expose`, for the `Authorization` header, and `Bootstrap::encode`,
+  which writes `credentials.json`; and `connection::ConnectionKey`, a key
+  that Engine issues in a credential response, `tetral_ck_` and its text,
+  whose plaintext leaves it only through `expose`, for the `Authorization`
+  header and the credential file. A bootstrap's decoding failure names the
+  member and its rule, never its value (`BootstrapError`).
 
 ## Where things are
 

@@ -1088,6 +1088,9 @@ impl ToolStatus {
 }
 
 impl Message for ToolStatus {
+    /// Whether a report carries media, and so falls under this limit rather
+    /// than `ORDINARY_TOOL_STATUS_JSON_BYTES`, is the budget of the side that
+    /// builds it; reading bounds every report by the larger limit.
     const MAX_BYTES: usize = limits::MEDIA_TOOL_STATUS_JSON_BYTES;
 
     fn check(&self, _received: &Received<'_>) -> Result<(), DecodeError> {

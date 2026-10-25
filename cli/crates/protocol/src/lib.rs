@@ -29,8 +29,7 @@ pub const PROTOCOL_VERSION: i64 = 1;
 pub trait Message: Serialize + DeserializeOwned {
     /// The largest size of the message as received, in bytes. A downstream
     /// event, whose limit depends on what it carries, has the largest here and
-    /// the narrower ones in [`Message::check`]; a tool-status report is read
-    /// under its media limit whatever it holds.
+    /// the narrower ones in [`Message::check`].
     const MAX_BYTES: usize;
 
     /// The rules beyond the schema that the protocol states: the narrower

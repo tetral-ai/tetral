@@ -42,7 +42,9 @@ impl TextRule for ServerUrlRule {
     }
 }
 
-/// The bootstrap's connection key: any nonempty text. It never appears in
+/// The bootstrap's connection key: any nonempty text, the rule of the
+/// bootstrap input, where a key that Engine issues has the stricter
+/// [`ConnectionKey`](crate::connection::ConnectionKey). It never appears in
 /// `Debug` or `Display` output.
 #[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct BootstrapKey(Text<NonEmpty>);

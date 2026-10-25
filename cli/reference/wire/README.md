@@ -9,11 +9,14 @@ own tests.
 
 ## Design rules
 
-- `Decode` reads a message in two passes: `readStrict` over the raw bytes,
-  then typed decoding of the tree it returns. The strict pass reads with
-  `json.Decoder.Token` and `UseNumber` and refuses a repeated member name, a
-  `\u` escape of a lone surrogate, a number that is not finite as a 64-bit
-  float and an integer outside the signed 64-bit range.
+- `Decode` reads a message in three steps: its size against the type's
+  `MaxBytes`, refused before anything is parsed; `readStrict` over the raw
+  bytes; then typed decoding of the tree it returns. The strict pass reads
+  with `json.Decoder.Token` and `UseNumber` and refuses a repeated member
+  name, a `\u` escape of a lone surrogate, a number that is not finite as a
+  64-bit float, an integer outside the signed 64-bit range, and objects and
+  arrays nested deeper than `MaxNesting` (127) levels, as the CLI's decoder
+  does.
 - The decoder reads members by the exact names of their `json` tags; an
   unknown member is dropped, except in a struct with a `Closed` field, which
   refuses it. A `wire` tag adds `min` and `max` (an integer's value or an
