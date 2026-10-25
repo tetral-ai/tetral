@@ -10,9 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
 	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 func TestEventsRefusesEachCredentialFailureAndWritesNoConnection(t *testing.T) {
@@ -214,6 +217,38 @@ func TestProtocolErrorReportReplaysAndConflicts(t *testing.T) {
 	if strings.Count(logs, `"event":"client.protocol_error"`) != 1 || strings.Contains(logs, "REPORT_TEXT_SENTINEL") ||
 		!strings.Contains(logs, `"request.message.id":"msg_never_sent"`) || !strings.Contains(logs, `"message.id":"report_1"`) {
 		t.Fatalf("logs hold %d client.protocol_error records or the report's message", strings.Count(logs, `"event":"client.protocol_error"`))
+	}
+}
+
+// TestHeartbeatsRecordNothingAndEventStreamsStartNoSpan proves the hub's
+// quiet and untraced client requests: a heartbeat writes no request record
+// and starts no span, an event stream writes its record and starts no span,
+// and a ready writes both.
+func TestHeartbeatsRecordNothingAndEventStreamsStartNoSpan(t *testing.T) {
+	spans := tracetest.NewInMemoryExporter()
+	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: ServiceName, SyncExporter: spans, SampleRatio: 1})))
+	f := newHubFixture(t, 720*time.Hour)
+	cli, stream := f.openOnline()
+	f.clock.waitTimers(t, 2)
+	f.clock.Advance(HeartbeatInterval)
+	beat := stream.heartbeat("msg_quiet_beat")
+	if response, err := cli.Heartbeat(f.ctx, beat); err != nil || response.Status != http.StatusOK {
+		t.Fatalf("heartbeat = %d %s, %v", response.Status, response.Body, err)
+	}
+	_ = stream.stream.Close()
+	recorded := func(route string) bool {
+		return strings.Contains(f.logs.String(), `"http.route":"`+route+`"`)
+	}
+	waitUntil(t, func() bool { return recorded(routeClientEvents) })
+	if !recorded(routeClientReady) || recorded(routeClientHeartbeat) {
+		t.Fatal("want request records of the ready and the events stream, none of the heartbeat")
+	}
+	var names []string
+	for _, stub := range spans.GetSpans() {
+		names = append(names, stub.Name)
+	}
+	if !slices.Contains(names, "POST "+routeClientReady) || slices.Contains(names, "POST "+routeClientHeartbeat) || slices.Contains(names, "GET "+routeClientEvents) {
+		t.Fatalf("spans = %v; want the ready's and neither the heartbeat's nor the events stream's", names)
 	}
 }
 

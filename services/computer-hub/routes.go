@@ -63,7 +63,13 @@ func NewRouter(verifier *auth.InternalPrincipalVerifier, opts ...RouterOption) h
 	}
 	router := chi.NewRouter()
 	router.Use(httpapi.RequestIDMiddleware)
-	router.Use(httpapi.RequestLogMiddleware(options.logger, httpapi.WithRequestLogMetrics(options.metrics), httpapi.WithLongRoutes(http.MethodGet+" "+routeInstanceStream, http.MethodGet+" "+routeClientEvents)))
+	// A heartbeat arrives every 15 seconds per connection and records
+	// nothing; an event stream lives up to its age limit, so it is recorded
+	// but starts no span.
+	router.Use(httpapi.RequestLogMiddleware(options.logger, httpapi.WithRequestLogMetrics(options.metrics),
+		httpapi.WithLongRoutes(http.MethodGet+" "+routeInstanceStream, http.MethodGet+" "+routeClientEvents),
+		httpapi.WithQuietRequests(http.MethodPost+" "+routeClientHeartbeat),
+		httpapi.WithUntracedRequests(http.MethodGet+" "+routeClientEvents)))
 	router.Use(httpapi.PublicRecoveryMiddleware(options.logger))
 	router.Group(func(r chi.Router) {
 		r.Use(principalMiddleware(verifier, writeClientPrincipalError))
