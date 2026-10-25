@@ -57,7 +57,6 @@ pub fn version() -> Value {
     json!({ "cli_version": env!("CARGO_PKG_VERSION") })
 }
 
-/// Writes the result and gives the exit status.
 pub fn write(result: Result<Value, CommandError>) -> ExitCode {
     let (object, status) = match result {
         Ok(object) => (object, ExitCode::SUCCESS),

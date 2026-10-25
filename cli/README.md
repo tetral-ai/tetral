@@ -69,8 +69,8 @@ other features, so that the released binary holds none.
 | 5 | `observe` | Records, the log file, the catalogue of events and metrics, the metrics registry, trace context, stopwatches and the startup phases |
 
 Each crate's `README.md` is its orientation and its crate documentation.
-Library crates return typed errors made with `thiserror`; only the command
-entry points of `tetral` use `anyhow`.
+Library crates return typed errors made with `thiserror`; `tetral` turns each
+into the error code of its command's result (`output::CommandError`).
 
 ## State owners
 

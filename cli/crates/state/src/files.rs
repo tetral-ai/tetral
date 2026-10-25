@@ -87,7 +87,9 @@ pub fn read_bounded(path: &Path, limit: usize) -> Result<Option<Vec<u8>>, IoFail
     Ok(Some(bytes))
 }
 
-/// The name prefix of a replacement's temporary file.
+/// Marks a replacement's temporary file, so that the next lock holder can
+/// remove those that an interrupted replacement left
+/// ([`remove_interrupted_replacements`]).
 pub const REPLACEMENT_PREFIX: &str = ".replace-";
 
 /// Replaces `path` with `bytes`: a temporary file of mode `0600` in the same

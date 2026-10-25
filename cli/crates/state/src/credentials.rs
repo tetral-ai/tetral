@@ -21,7 +21,6 @@ pub fn read_with_limit(root: &StateRoot, max_bytes: usize) -> Result<Option<Vec<
     files::read_bounded(&root.join(paths::CREDENTIALS), max_bytes)
 }
 
-/// Replaces the root's `credentials.json` with `bytes`.
 pub fn replace(root: &StateRoot, bytes: &[u8]) -> Result<(), IoFailure> {
     files::replace(&root.join(paths::CREDENTIALS), bytes)
 }

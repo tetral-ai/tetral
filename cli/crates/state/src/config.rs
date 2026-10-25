@@ -77,7 +77,6 @@ fn parse(path: &Path, bytes: &[u8], max_bytes: usize) -> Result<Config, ConfigEr
     toml::from_str(text).map_err(|_| format())
 }
 
-/// Replaces the root's `config.toml` with `config`.
 pub fn replace(root: &StateRoot, config: &Config) -> Result<(), IoFailure> {
     let text = toml::to_string(config).expect("a configuration always serializes");
     files::replace(&root.join(paths::CONFIG), text.as_bytes())
