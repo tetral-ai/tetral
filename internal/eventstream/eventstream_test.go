@@ -730,46 +730,41 @@ func tamperEventPageToken(token string) string {
 	return token[:len(token)-1] + string(replacement)
 }
 
-func TestEventStreamBoundaryLogsServerErrorsOnly(t *testing.T) {
+func TestEventStreamBoundaryRecordsEveryRequestAndFailsOnlyServerErrors(t *testing.T) {
 	signer, verifier := testInternalPrincipalPair(t)
-	t.Run("fast 2xx emits no boundary log", func(t *testing.T) {
-		var buffer bytes.Buffer
-		router := listRouter(&recordingReader{}, verifier, captureLogger(&buffer))
-		recorder := httptest.NewRecorder()
-		router.ServeHTTP(recorder, signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true"))
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("status = %d; want 200 body=%s", recorder.Code, recorder.Body.String())
-		}
-		if buffer.String() != "" {
-			t.Fatalf("fast 2xx emitted boundary log: %s", buffer.String())
-		}
-	})
-
-	t.Run("missing principal is auth-only and not boundary logged", func(t *testing.T) {
-		var buffer bytes.Buffer
-		router := listRouter(&recordingReader{}, verifier, captureLogger(&buffer))
-		recorder := httptest.NewRecorder()
-		router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/sessions/sesn_events/events", nil))
-		if recorder.Code != http.StatusUnauthorized {
-			t.Fatalf("status = %d; want 401", recorder.Code)
-		}
-		if got := countLogLines(buffer.String(), "http.request"); got != 0 {
-			t.Fatalf("boundary http.request lines on 401 = %d; want 0: %s", got, buffer.String())
-		}
-	})
-
-	t.Run("500 emits boundary log", func(t *testing.T) {
-		var buffer bytes.Buffer
-		router := listRouter(nil, verifier, captureLogger(&buffer))
-		recorder := httptest.NewRecorder()
-		router.ServeHTTP(recorder, signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true"))
-		if recorder.Code != http.StatusInternalServerError {
-			t.Fatalf("status = %d; want 500 body=%s", recorder.Code, recorder.Body.String())
-		}
-		if got := countLogLines(buffer.String(), "http.request"); got != 1 {
-			t.Fatalf("boundary http.request lines = %d; want exactly 1: %s", got, buffer.String())
-		}
-	})
+	for _, test := range []struct {
+		name    string
+		reader  eventstream.ListReader
+		request func() *http.Request
+		status  int
+		failed  int
+	}{
+		{"200", &recordingReader{}, func() *http.Request {
+			return signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true")
+		}, http.StatusOK, 0},
+		{"401 without a principal", &recordingReader{}, func() *http.Request {
+			return httptest.NewRequest(http.MethodGet, "/v1/sessions/sesn_events/events", nil)
+		}, http.StatusUnauthorized, 0},
+		{"500", nil, func() *http.Request {
+			return signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true")
+		}, http.StatusInternalServerError, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var buffer bytes.Buffer
+			router := listRouter(test.reader, verifier, captureLogger(&buffer))
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, test.request())
+			if recorder.Code != test.status {
+				t.Fatalf("status = %d; want %d body=%s", recorder.Code, test.status, recorder.Body.String())
+			}
+			if got := countLogLines(buffer.String(), "http.request.completed"); got != 1 {
+				t.Fatalf("http.request.completed lines = %d; want 1: %s", got, buffer.String())
+			}
+			if got := countLogLines(buffer.String(), "http.request.failed"); got != test.failed {
+				t.Fatalf("http.request.failed lines = %d; want %d: %s", got, test.failed, buffer.String())
+			}
+		})
+	}
 }
 
 type recordingReader struct {

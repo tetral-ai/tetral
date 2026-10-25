@@ -94,7 +94,7 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 			metricMethods = append(metricMethods, "/"+service+"/"+method.Name)
 		}
 	}
-	grpcMetrics.Operations.SetOperations(metricMethods)
+	grpcMetrics.SetMethods(metricMethods)
 
 	drainTimeout := cfg.DrainTimeout
 	if drainTimeout <= 0 {
@@ -131,7 +131,6 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 			metricsOptions = append(metricsOptions, workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", runtime.DBStatsProvider)))
 		}
 		metricsOptions = append(metricsOptions,
-			workload.WithHTTPMetrics(httpMetrics),
 			workload.WithMetricsCollector("http", httpMetrics.Collector()),
 			workload.WithMetricsCollector("grpc", grpcMetrics.Collector()),
 			workload.WithMetricsCollector("queue_retention", retentionMetrics.Collector()),
@@ -195,7 +194,7 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 	defer timer.Stop()
 	select {
 	case <-joined:
-		grpcMetrics.Operations.ObserveShutdown(logger, "shutdown_queue_drain", "success", time.Since(drainStarted))
+		grpcMetrics.Operations.ObserveShutdown(logger, "shutdown_queue_drain", "ok", time.Since(drainStarted))
 	case <-timer.C:
 		grpcMetrics.Operations.ObserveShutdown(logger, "shutdown_queue_drain", "timeout", time.Since(drainStarted))
 		joinStarted := time.Now()
@@ -205,7 +204,7 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 		cancelWork()
 		grpcServer.Stop()
 		<-joined
-		grpcMetrics.Operations.ObserveShutdown(logger, "shutdown_queue_cancel_join", "success", time.Since(joinStarted))
+		grpcMetrics.Operations.ObserveShutdown(logger, "shutdown_queue_cancel_join", "ok", time.Since(joinStarted))
 		errOut = errors.Join(errOut, context.DeadlineExceeded)
 	}
 	return errors.Join(errOut, httpRunErr)

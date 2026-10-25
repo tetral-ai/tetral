@@ -1,0 +1,796 @@
+{
+  "service": "workload",
+  "events": {
+    "cold_start.completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "benchmarks",
+      "fields": {
+        "cold_start.kind": "string",
+        "cold_start.start_kind": "string",
+        "config_ms": "integer",
+        "dependencies_ms": "integer",
+        "outcome": "string",
+        "ready_ms": "integer"
+      }
+    },
+    "cold_start.phase_completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "benchmarks",
+      "fields": {
+        "cold_start.kind": "string",
+        "cold_start.phase": "string",
+        "config_ms": "integer",
+        "dependencies_ms": "integer",
+        "ready_ms": "integer"
+      }
+    },
+    "cold_start.phase_started": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "benchmarks",
+      "fields": {
+        "cold_start.kind": "string",
+        "cold_start.phase": "string"
+      }
+    },
+    "db.query.slow": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "operation": "string"
+      }
+    },
+    "diagnostic.invalid_event": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.original": "string",
+        "reason": "string"
+      }
+    },
+    "diagnostic.suppressed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "event.original": "string",
+        "first_seen": "string",
+        "last_seen": "string",
+        "operation": "string",
+        "reason": "string",
+        "suppressed.count": "integer"
+      }
+    },
+    "http.panic": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "internal_error": {
+          "class": "panic",
+          "message_safe": "internal error"
+        }
+      }
+    },
+    "http.request.completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "edge.request.id": "string",
+        "http.request.method": "string",
+        "http.response.status_code": "integer",
+        "http.route": "string",
+        "request.id": "string",
+        "workspace.id": "string"
+      }
+    },
+    "http.request.failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "http.request.method": "string",
+        "http.response.status_code": "integer",
+        "http.route": "string",
+        "request.id": "string",
+        "workspace.id": "string"
+      },
+      "errors": {
+        "server_error": {
+          "class": "http_error",
+          "message_safe": "HTTP request failed"
+        }
+      }
+    },
+    "internal.grpc.cancellation_join_timeout": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "duration.ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string"
+      },
+      "errors": {
+        "cancellation_join_timeout": {
+          "class": "shutdown_error",
+          "message_safe": "gRPC handlers outlived the cancellation budget"
+        }
+      }
+    },
+    "internal.grpc.recovered": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "duration.ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "grpc.code": "string",
+        "grpc.method": "string",
+        "operation": "string",
+        "retryable": "boolean",
+        "terminal": "boolean"
+      },
+      "errors": {
+        "internal_error": {
+          "class": "panic",
+          "message_safe": "internal gRPC error"
+        }
+      }
+    },
+    "internal.grpc.request": {
+      "level": "DEBUG",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "caller.service_account": "string",
+        "component": "string",
+        "duration.ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "grpc.code": "string",
+        "grpc.method": "string",
+        "operation": "string",
+        "retryable": "boolean",
+        "terminal": "boolean"
+      },
+      "errors": {
+        "aborted": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "alreadyexists": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "canceled": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "dataloss": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "deadlineexceeded": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "failedprecondition": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "internal": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "invalidargument": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "notfound": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "outofrange": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "permissiondenied": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "resourceexhausted": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "unauthenticated": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "unavailable": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "unimplemented": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "unknown": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        }
+      }
+    },
+    "pressure.rejecting_ended": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "pressure.cause": "string",
+        "pressure.point": "string",
+        "pressure.rejected": "integer"
+      }
+    },
+    "pressure.rejecting_started": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "pressure.cause": "string",
+        "pressure.point": "string"
+      }
+    },
+    "startup.failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "listener.state": "string",
+        "operation": "string",
+        "readiness.state": "string",
+        "startup.cause": "string",
+        "startup.cause_category": "string",
+        "startup.config_problem": "string"
+      },
+      "errors": {
+        "config_error": {
+          "class": "config_error",
+          "message_safe": "configuration invalid"
+        },
+        "startup_error": {
+          "class": "startup_error",
+          "message_safe": "startup failed"
+        }
+      }
+    },
+    "workload.http.panic": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "phase": "string",
+        "transport.outcome": "string",
+        "transport.stage": "string"
+      },
+      "errors": {
+        "internal_error": {
+          "class": "panic",
+          "message_safe": "internal error"
+        }
+      }
+    },
+    "workload.http_server.failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "phase": "string",
+        "transport.outcome": "string",
+        "transport.stage": "string"
+      },
+      "errors": {
+        "http_server_failed": {
+          "class": "internal_error",
+          "message_safe": "HTTP server failure"
+        }
+      }
+    },
+    "workload.http_transport.failed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "phase": "string",
+        "transport.outcome": "string",
+        "transport.stage": "string"
+      },
+      "errors": {
+        "tls_handshake_failed": {
+          "class": "transport_error",
+          "message_safe": "TLS handshake failed"
+        }
+      }
+    },
+    "workload.listener.failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "listener.transport": "string",
+        "operation": "string",
+        "readiness.state": "string",
+        "startup.cause": "string",
+        "startup.config_problem": "string"
+      },
+      "errors": {
+        "config_error": {
+          "class": "config_error",
+          "message_safe": "configuration invalid"
+        },
+        "startup_error": {
+          "class": "startup_error",
+          "message_safe": "startup failed"
+        }
+      }
+    },
+    "workload.listener.starting": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "listener.transport": "string",
+        "operation": "string",
+        "readiness.state": "string"
+      }
+    },
+    "workload.server.failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "readiness.state": "string",
+        "startup.cause": "string",
+        "startup.config_problem": "string"
+      },
+      "errors": {
+        "config_error": {
+          "class": "config_error",
+          "message_safe": "configuration invalid"
+        },
+        "startup_error": {
+          "class": "startup_error",
+          "message_safe": "startup failed"
+        }
+      }
+    },
+    "workload.shutdown.complete": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "readiness.state": "string"
+      }
+    },
+    "workload.shutdown.incomplete": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "duration.ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string"
+      },
+      "errors": {
+        "process_shutdown_timeout": {
+          "class": "shutdown_error",
+          "message_safe": "operation failed"
+        }
+      }
+    },
+    "workload.shutdown.phase_completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "duration.seconds": "number",
+        "metric.observation.count": "integer",
+        "operation": "string",
+        "outcome": "string"
+      }
+    },
+    "workload.shutdown.starting": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "readiness.state": "string"
+      }
+    },
+    "workload.started": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "listener.transport": "string",
+        "operation": "string",
+        "readiness.state": "string"
+      }
+    }
+  },
+  "operations": {
+    "shutdown_grpc_cancel_join": {
+      "long": true
+    },
+    "shutdown_grpc_drain": {
+      "long": true
+    },
+    "shutdown_http_drain": {
+      "long": true
+    },
+    "shutdown_http_join": {
+      "long": true
+    }
+  },
+  "metrics": {
+    "cold_start_phase_seconds": {
+      "type": "histogram",
+      "audience": "benchmarks",
+      "labels": {
+        "kind": [
+          "service_pod"
+        ],
+        "phase": [
+          "config",
+          "dependencies",
+          "ready"
+        ],
+        "service": "service names"
+      },
+      "buckets": "long"
+    },
+    "cold_start_seconds": {
+      "type": "histogram",
+      "audience": "benchmarks",
+      "labels": {
+        "kind": [
+          "service_pod"
+        ],
+        "scope": [
+          "engine",
+          "total"
+        ],
+        "service": "service names"
+      },
+      "buckets": "long"
+    },
+    "db_client_operation_duration_seconds": {
+      "type": "histogram",
+      "audience": "operators",
+      "labels": {
+        "operation": "statement and lock names fixed in code",
+        "outcome": [
+          "ok",
+          "error"
+        ],
+        "service": "service names"
+      },
+      "buckets": "request"
+    },
+    "db_pool_idle_connections": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {
+        "pool": "pool names fixed by each service"
+      }
+    },
+    "db_pool_in_use_connections": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {
+        "pool": "pool names fixed by each service"
+      }
+    },
+    "db_pool_open_connections": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {
+        "pool": "pool names fixed by each service"
+      }
+    },
+    "db_pool_wait_count_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "pool": "pool names fixed by each service"
+      }
+    },
+    "db_pool_wait_duration_seconds_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "pool": "pool names fixed by each service"
+      }
+    },
+    "go_gc_cycles_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "go_gc_pause_seconds_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "go_goroutines": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "go_heap_alloc_bytes": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "go_heap_free_bytes": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "go_sched_gomaxprocs_threads": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "grpc_server_request_duration_seconds": {
+      "type": "histogram",
+      "audience": "operators",
+      "labels": {
+        "code": [
+          "OK",
+          "Canceled",
+          "Unknown",
+          "InvalidArgument",
+          "DeadlineExceeded",
+          "NotFound",
+          "AlreadyExists",
+          "PermissionDenied",
+          "ResourceExhausted",
+          "FailedPrecondition",
+          "Aborted",
+          "OutOfRange",
+          "Unimplemented",
+          "Internal",
+          "Unavailable",
+          "DataLoss",
+          "Unauthenticated"
+        ],
+        "method": "full gRPC method names the service registers",
+        "service": "service names"
+      },
+      "buckets": "request"
+    },
+    "http_server_request_duration_seconds": {
+      "type": "histogram",
+      "audience": "operators",
+      "labels": {
+        "method": [
+          "CONNECT",
+          "DELETE",
+          "GET",
+          "HEAD",
+          "OPTIONS",
+          "PATCH",
+          "POST",
+          "PUT",
+          "TRACE",
+          "_OTHER"
+        ],
+        "route": "route patterns the service registers, or unmatched",
+        "service": "service names",
+        "status_class": [
+          "1xx",
+          "2xx",
+          "3xx",
+          "4xx",
+          "5xx"
+        ]
+      },
+      "buckets": "request"
+    },
+    "http_server_stream_duration_seconds": {
+      "type": "histogram",
+      "audience": "operators",
+      "labels": {
+        "method": [
+          "CONNECT",
+          "DELETE",
+          "GET",
+          "HEAD",
+          "OPTIONS",
+          "PATCH",
+          "POST",
+          "PUT",
+          "TRACE",
+          "_OTHER"
+        ],
+        "route": "long route patterns the service registers",
+        "service": "service names",
+        "status_class": [
+          "1xx",
+          "2xx",
+          "3xx",
+          "4xx",
+          "5xx"
+        ]
+      },
+      "buckets": "long"
+    },
+    "tetral_diagnostic_dropped_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "tetral_diagnostic_emitted_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "tetral_diagnostic_filtered_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "tetral_diagnostic_limiter_entries": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "tetral_diagnostic_queue_records": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "tetral_diagnostic_sink_failures_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "tetral_diagnostic_spans_dropped_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "tetral_diagnostic_suppressed_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "tetral_long_operation_duration_seconds": {
+      "type": "histogram",
+      "audience": "operators",
+      "labels": {
+        "operation": "long operations declared in the service's table",
+        "outcome": "ok, rejected, error or a declared error code",
+        "service": "service names"
+      },
+      "buckets": "long"
+    },
+    "tetral_metrics_collector_errors_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "collector": "collector names fixed by each service"
+      }
+    },
+    "tetral_operation_duration_seconds": {
+      "type": "histogram",
+      "audience": "operators",
+      "labels": {
+        "operation": "operations declared in the service's table",
+        "outcome": "ok, rejected, error or a declared error code",
+        "service": "service names"
+      },
+      "buckets": "request"
+    }
+  },
+  "spans": {
+    "{http.request.method} {http.route}": {
+      "attributes": [
+        "http.request.method",
+        "http.route",
+        "http.response.status_code"
+      ]
+    },
+    "{grpc.method}": {
+      "attributes": [
+        "rpc.grpc.status_name"
+      ]
+    },
+    "{db.operation.name}": {
+      "attributes": [
+        "db.operation.name"
+      ]
+    },
+    "{operation}": {
+      "attributes": []
+    }
+  }
+}

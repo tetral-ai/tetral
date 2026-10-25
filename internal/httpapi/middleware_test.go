@@ -14,7 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
 	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -64,78 +68,173 @@ func TestRequestIDMiddlewareInjectsUniquePrefixedIDs(t *testing.T) {
 	}
 }
 
-func TestRequestLoggingSuppressesOrdinarySuccessByDefault(t *testing.T) {
-	var buffer bytes.Buffer
-	logger := newTestLogger(&buffer)
-	metrics := &recordingRequestMetrics{}
-	handler := RequestIDMiddleware(RequestLogMiddleware(logger, time.Hour, WithRequestLogMetrics(metrics))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	})))
-
-	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/sessions", nil))
-
-	if buffer.String() != "" {
-		t.Fatalf("ordinary 2xx request logged by default: %s", buffer.String())
-	}
-	if metrics.calls != 1 || metrics.method != http.MethodGet || metrics.statusCode != http.StatusNoContent {
-		t.Fatalf("request metrics = %+v; want one observed 204 GET", metrics)
-	}
+// newRecordedRouter mounts handlers on a chi router behind the request
+// boundary, as the public routers do, and records spans synchronously.
+func newRecordedRouter(t *testing.T, buffer *bytes.Buffer, metrics RequestMetricsRecorder, options ...RequestLogOption) (*chi.Mux, *tracetest.InMemoryExporter) {
+	t.Helper()
+	exporter := tracetest.NewInMemoryExporter()
+	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: "api", SyncExporter: exporter, SampleRatio: 1})))
+	router := chi.NewRouter()
+	router.Use(RequestIDMiddleware)
+	router.Use(RequestLogMiddleware(workload.NewLogger(buffer, "api", "test", "unit"), append([]RequestLogOption{WithRequestLogMetrics(metrics)}, options...)...))
+	return router, exporter
 }
 
-func TestRequestLoggingEmitsServerErrorAndSlowRequests(t *testing.T) {
+func decodeHTTPLogLines(t *testing.T, output string) []map[string]any {
+	t.Helper()
+	var records []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		if line != "" {
+			records = append(records, decodeHTTPLogLine(t, line))
+		}
+	}
+	return records
+}
+
+func TestRequestBoundaryWritesOneCompletedRecordPerRequestWithItsRoutePattern(t *testing.T) {
 	for _, test := range []struct {
-		name      string
-		status    int
-		threshold time.Duration
-		wantKind  string
-		wantError bool
+		name, method, path, wantRoute, wantMethod string
+		status                                    int
 	}{
-		{name: "server error", status: http.StatusInternalServerError, threshold: time.Hour, wantKind: "server_error", wantError: true},
-		{name: "slow", status: http.StatusOK, threshold: 0, wantKind: "slow_request"},
+		{name: "ok", method: http.MethodGet, path: "/v1/sessions/sesn_1", wantRoute: "/v1/sessions/{session_id}", wantMethod: "GET", status: http.StatusOK},
+		{name: "not found", method: http.MethodGet, path: "/v1/sessions/sesn_missing", wantRoute: "/v1/sessions/{session_id}", wantMethod: "GET", status: http.StatusNotFound},
+		{name: "server error", method: http.MethodPost, path: "/v1/sessions/sesn_1", wantRoute: "/v1/sessions/{session_id}", wantMethod: "POST", status: http.StatusInternalServerError},
+		{name: "unmatched inside a mounted router", method: http.MethodGet, path: "/v1/nowhere/sesn_1", wantRoute: "unmatched", wantMethod: "GET", status: http.StatusNotFound},
+		{name: "unmatched outside every mount", method: http.MethodGet, path: "/nowhere", wantRoute: "unmatched", wantMethod: "GET", status: http.StatusNotFound},
+		{name: "nonstandard method", method: "PROPFIND", path: "/v1/sessions/sesn_1", wantRoute: "unmatched", wantMethod: "_OTHER", status: http.StatusMethodNotAllowed},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var buffer bytes.Buffer
-			logger := newTestLogger(&buffer)
-			handler := RequestIDMiddleware(RequestLogMiddleware(logger, test.threshold)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(test.status)
-			})))
-
-			handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/sessions", nil))
-
-			fields := decodeHTTPLogLine(t, buffer.String())
-			if fields["msg"] != "http.request" ||
-				fields["operation"] != "http.request" ||
-				fields["event.kind"] != test.wantKind ||
-				fields["component"] != "http-api" ||
-				fields["http.request.method"] != http.MethodPost {
-				t.Fatalf("request log fields = %#v", fields)
+			metrics := &recordingRequestMetrics{}
+			router, _ := newRecordedRouter(t, &buffer, metrics)
+			router.Route("/v1", func(r chi.Router) {
+				r.HandleFunc("/sessions/{session_id}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(test.status) })
+			})
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, httptest.NewRequest(test.method, test.path, nil))
+			records := decodeHTTPLogLines(t, buffer.String())
+			wantRecords := 1
+			if test.status >= 500 {
+				wantRecords = 2
 			}
-			if fields["http.response.status_code"].(float64) != float64(test.status) {
-				t.Fatalf("status field = %#v; want %d", fields["http.response.status_code"], test.status)
+			if len(records) != wantRecords {
+				t.Fatalf("records = %v; want %d", records, wantRecords)
 			}
-			if _, ok := fields["duration.ms"]; !ok {
-				t.Fatalf("request log missing duration.ms: %#v", fields)
+			completed := records[0]
+			if completed["msg"] != "http.request.completed" || completed["level"] != "INFO" || completed["http.route"] != test.wantRoute || completed["http.request.method"] != test.wantMethod || completed["http.response.status_code"] != float64(test.status) {
+				t.Fatalf("completed record = %v", completed)
 			}
-			if _, ok := fields["event.duration_ms"]; ok {
-				t.Fatalf("request log still emitted legacy event.duration_ms: %#v", fields)
+			if _, ok := completed["duration_ms"]; !ok {
+				t.Fatalf("completed record has no duration_ms: %v", completed)
 			}
-			if !strings.HasPrefix(fields["request.id"].(string), "req_") {
-				t.Fatalf("request.id = %#v; want req_ prefix", fields["request.id"])
+			if completed["request.id"] != recorder.Header().Get("request-id") || !strings.HasPrefix(recorder.Header().Get("request-id"), "req_") {
+				t.Fatalf("request.id %v differs from the response request-id %q", completed["request.id"], recorder.Header().Get("request-id"))
 			}
-			if test.wantError {
-				if fields["error.class"] != "http_error" ||
-					fields["error.code"] != "server_error" ||
-					fields["error.message_safe"] != "HTTP request failed" {
-					t.Fatalf("server-error request log missing shared error fields: %#v", fields)
+			if strings.Contains(buffer.String(), test.path) {
+				t.Fatalf("a record carries the request path: %s", buffer.String())
+			}
+			if test.status >= 500 {
+				failed := records[1]
+				if failed["msg"] != "http.request.failed" || failed["level"] != "ERROR" || failed["error.class"] != "http_error" || failed["error.code"] != "server_error" || failed["error.message_safe"] != "HTTP request failed" {
+					t.Fatalf("failure record = %v", failed)
 				}
-			} else {
-				for _, field := range []string{"error.class", "error.code", "error.message_safe"} {
-					if _, ok := fields[field]; ok {
-						t.Fatalf("non-error request log contains %s: %#v", field, fields)
-					}
+			}
+			for _, field := range []string{"error.class", "error.code", "error.message_safe"} {
+				if _, ok := completed[field]; ok {
+					t.Fatalf("completed record carries %s: %v", field, completed)
 				}
+			}
+			if metrics.calls != 1 || metrics.route != test.wantRoute || metrics.method != test.method || metrics.statusCode != test.status || metrics.long {
+				t.Fatalf("observation = %+v", metrics)
 			}
 		})
+	}
+}
+
+func TestRequestBoundaryLeavesHealthChecksAndMetricsUnrecordedAndUntraced(t *testing.T) {
+	for _, path := range []string{"/health", "/ready", "/metrics"} {
+		var buffer bytes.Buffer
+		metrics := &recordingRequestMetrics{}
+		router, exporter := newRecordedRouter(t, &buffer, metrics)
+		router.Get(path, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+		router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+		if buffer.Len() != 0 || metrics.calls != 0 || len(exporter.GetSpans()) != 0 {
+			t.Fatalf("%s recorded: records=%q observations=%d spans=%d", path, buffer.String(), metrics.calls, len(exporter.GetSpans()))
+		}
+	}
+}
+
+func TestRequestBoundaryTurnsAnIncomingTraceparentIntoALinkOfANewTrace(t *testing.T) {
+	var buffer bytes.Buffer
+	router, exporter := newRecordedRouter(t, &buffer, &recordingRequestMetrics{})
+	router.Post("/v1/sessions/{session_id}/events", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	const sent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	request := httptest.NewRequest(http.MethodPost, "/v1/sessions/sesn_1/events", nil)
+	request.Header.Set("traceparent", sent)
+	router.ServeHTTP(httptest.NewRecorder(), request)
+	spans := exporter.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("spans = %d; want 1", len(spans))
+	}
+	span := spans[0]
+	if span.SpanContext.TraceID().String() == "4bf92f3577b34da6a3ce929d0e0e4736" || span.Parent.IsValid() {
+		t.Fatalf("the sent traceparent became the request's parent: trace %s parent %v", span.SpanContext.TraceID(), span.Parent)
+	}
+	if len(span.Links) != 1 || span.Links[0].SpanContext.TraceID().String() != "4bf92f3577b34da6a3ce929d0e0e4736" || span.Links[0].SpanContext.SpanID().String() != "00f067aa0ba902b7" {
+		t.Fatalf("links = %+v; want the sent traceparent as the only link", span.Links)
+	}
+	record := decodeHTTPLogLines(t, buffer.String())[0]
+	if record["trace_id"] != span.SpanContext.TraceID().String() {
+		t.Fatalf("record trace_id %v differs from the request's trace %s", record["trace_id"], span.SpanContext.TraceID())
+	}
+}
+
+func TestRequestBoundarySpanCarriesTheRouteAndNeverThePathOrQuery(t *testing.T) {
+	var buffer bytes.Buffer
+	router, exporter := newRecordedRouter(t, &buffer, &recordingRequestMetrics{})
+	router.Get("/v1/drives/{drive_id}/files/*", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/drives/drv_1/files/private/notes.txt?version=ver_1", nil))
+	spans := exporter.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("spans = %d; want 1", len(spans))
+	}
+	attributes := map[string]string{}
+	for _, attribute := range spans[0].Attributes {
+		attributes[string(attribute.Key)] = attribute.Value.String()
+	}
+	if attributes["http.route"] != "/v1/drives/{drive_id}/files/*" || attributes["http.request.method"] != "GET" || attributes["http.response.status_code"] != "200" {
+		t.Fatalf("span attributes = %v", attributes)
+	}
+	for _, forbidden := range []string{"url.path", "url.query", "client.address", "user_agent.original"} {
+		if _, ok := attributes[forbidden]; ok {
+			t.Fatalf("span carries %s: %v", forbidden, attributes)
+		}
+	}
+	for _, value := range attributes {
+		if strings.Contains(value, "notes.txt") || strings.Contains(value, "ver_1") {
+			t.Fatalf("span attribute carries the path or query: %v", attributes)
+		}
+	}
+}
+
+func TestRequestBoundaryObservesALongRouteInTheStreamHistogramOnly(t *testing.T) {
+	var buffer bytes.Buffer
+	metrics := workload.NewHTTPMetrics("api")
+	router, _ := newRecordedRouter(t, &buffer, metrics, WithLongRoutes("GET /v1/sessions/{session_id}/stream"))
+	router.Get("/v1/sessions/{session_id}/stream", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/sessions/sesn_1/stream", nil))
+	samples, _ := metrics.Collector()(context.Background())
+	var stream, request int
+	for _, sample := range samples {
+		switch sample.Name {
+		case "http_server_stream_duration_seconds_count":
+			stream += int(sample.Value)
+		case "http_server_request_duration_seconds_count":
+			request += int(sample.Value)
+		}
+	}
+	if stream != 1 || request != 0 {
+		t.Fatalf("stream samples = %d, request samples = %d; want 1 and 0", stream, request)
 	}
 }
 
@@ -161,7 +260,7 @@ func TestRequestLoggingRedactsSensitiveHTTPBoundaryInputs(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			var buffer bytes.Buffer
 			logger := newTestLogger(&buffer)
-			handler := RequestIDMiddleware(RequestLogMiddleware(logger, time.Hour)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			handler := RequestIDMiddleware(RequestLogMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				if test.err != "" {
 					writeError(w, httptest.NewRequest(http.MethodPost, test.path, nil), errors.New(test.err))
 					return
@@ -182,12 +281,11 @@ func TestRequestLoggingRedactsSensitiveHTTPBoundaryInputs(t *testing.T) {
 					t.Fatalf("request boundary leaked %q: log=%s body=%s", forbidden, logOutput, recorder.Body.String())
 				}
 			}
-			fields := decodeHTTPLogLine(t, logOutput)
-			if fields["msg"] != "http.request" || fields["http.response.status_code"].(float64) != 500 {
+			fields := decodeHTTPLogLines(t, logOutput)[0]
+			if fields["msg"] != "http.request.completed" || fields["http.response.status_code"].(float64) != 500 {
 				t.Fatalf("request log fields = %#v", fields)
 			}
-			if fields["operation"] != "http.request" ||
-				fields["component"] != "http-api" ||
+			if fields["http.route"] != "unmatched" ||
 				!strings.HasPrefix(fields["request.id"].(string), "req_") ||
 				fields["http.request.method"] != http.MethodPost {
 				t.Fatalf("request log missing safe request fields: %#v", fields)
@@ -219,7 +317,7 @@ func TestRequestRecordsCarryVerifiedEdgeRequestID(t *testing.T) {
 	}
 	var buffer bytes.Buffer
 	logger := newTestLogger(&buffer)
-	handler := RequestIDMiddleware(RequestLogMiddleware(logger, time.Hour)(internalPrincipalMiddleware(verifier)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := RequestIDMiddleware(RequestLogMiddleware(logger)(internalPrincipalMiddleware(verifier)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth.RecordDecision(r.Context(), "operation", &auth.PermissionError{}, auth.AuditFacts(principal))
 		w.WriteHeader(http.StatusInternalServerError)
 	}))))
@@ -233,10 +331,10 @@ func TestRequestRecordsCarryVerifiedEdgeRequestID(t *testing.T) {
 		t.Fatalf("forged request ID header reached logs: %s", buffer.String())
 	}
 	lines := strings.Split(strings.TrimSpace(buffer.String()), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("log lines = %d; want decision and boundary records: %s", len(lines), buffer.String())
+	if len(lines) != 3 {
+		t.Fatalf("log lines = %d; want decision, completed and failure records: %s", len(lines), buffer.String())
 	}
-	for index, wantMessage := range []string{"auth.operation.denied", "http.request"} {
+	for index, wantMessage := range []string{"auth.operation.denied", "http.request.completed", "http.request.failed"} {
 		fields := decodeHTTPLogLine(t, lines[index])
 		if fields["msg"] != wantMessage {
 			t.Fatalf("record %d msg = %v; want %s", index, fields["msg"], wantMessage)
@@ -246,6 +344,9 @@ func TestRequestRecordsCarryVerifiedEdgeRequestID(t *testing.T) {
 		}
 		if fields["edge.request.id"] != "edge-request-signed" {
 			t.Fatalf("%s edge.request.id = %v; want the signed principal request_id", wantMessage, fields["edge.request.id"])
+		}
+		if index > 0 && fields["workspace.id"] != string(workspace.DefaultID) {
+			t.Fatalf("%s workspace.id = %v; want the verified principal's workspace", wantMessage, fields["workspace.id"])
 		}
 	}
 }
@@ -274,7 +375,7 @@ func TestAuthMiddlewareLogsFailuresWithoutSecretMaterial(t *testing.T) {
 		}
 	}
 	fields := decodeHTTPLogLine(t, line)
-	if fields["msg"] != "http.auth" || fields["auth.result"] != "failure" || fields["url.path"] != "/v1/api_keys/{api_key_id}" {
+	if fields["msg"] != "http.auth" || fields["auth.result"] != "failure" || fields["url.path"] != nil {
 		t.Fatalf("auth log fields = %#v", fields)
 	}
 	if fields["operation"] != "http.auth" ||
@@ -382,7 +483,7 @@ func TestStatusTrackingWriterForwardsFlushThroughResponseController(t *testing.T
 	var buffer bytes.Buffer
 	logger := newTestLogger(&buffer)
 	flushErr := errors.New("flush not reached")
-	handler := RequestIDMiddleware(RequestLogMiddleware(logger, time.Hour)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := RequestIDMiddleware(RequestLogMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte("partial"))
 		// http.ResponseController walks the Unwrap chain to reach Flush; without
@@ -404,8 +505,8 @@ func TestStatusTrackingWriterForwardsFlushThroughResponseController(t *testing.T
 	}
 	// Status tracking is unaffected by the Unwrap forwarding: the boundary log
 	// still records the 500 the handler wrote.
-	fields := decodeHTTPLogLine(t, buffer.String())
-	if fields["msg"] != "http.request" || fields["http.response.status_code"].(float64) != 500 {
+	fields := decodeHTTPLogLines(t, buffer.String())[0]
+	if fields["msg"] != "http.request.completed" || fields["http.response.status_code"].(float64) != 500 {
 		t.Fatalf("status tracking drifted after Unwrap: %#v", fields)
 	}
 }
@@ -421,14 +522,13 @@ func decodeHTTPLogLine(t *testing.T, line string) map[string]any {
 
 type recordingRequestMetrics struct {
 	calls      int
+	route      string
 	method     string
 	statusCode int
-	duration   time.Duration
+	long       bool
 }
 
-func (m *recordingRequestMetrics) ObserveHTTPRequest(method string, statusCode int, duration time.Duration) {
+func (m *recordingRequestMetrics) ObserveHTTPRoute(route, method string, statusCode int, _ time.Duration, long bool) {
 	m.calls++
-	m.method = method
-	m.statusCode = statusCode
-	m.duration = duration
+	m.route, m.method, m.statusCode, m.long = route, method, statusCode, long
 }

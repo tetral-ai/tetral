@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -29,7 +28,7 @@ func NewRouter(sessionHandler *SessionHandler, apiKey string, options ...RouterO
 	applyRouterOptionDefaults(opts)
 
 	router.Use(RequestIDMiddleware)
-	router.Use(RequestLogMiddleware(opts.logger, opts.slowRequestThreshold, WithRequestLogMetrics(opts.requestMetrics)))
+	router.Use(RequestLogMiddleware(opts.logger, WithRequestLogMetrics(opts.requestMetrics)))
 	router.Use(recoveryMiddleware(opts.logger))
 
 	registerRoutes(router, sessionHandler, resolveAuthenticator(apiKey, opts), opts)
@@ -49,7 +48,7 @@ func NewRouterWithPanicHandler(sessionHandler *SessionHandler, apiKey string, op
 	applyRouterOptionDefaults(opts)
 
 	router.Use(RequestIDMiddleware)
-	router.Use(RequestLogMiddleware(opts.logger, opts.slowRequestThreshold, WithRequestLogMetrics(opts.requestMetrics)))
+	router.Use(RequestLogMiddleware(opts.logger, WithRequestLogMetrics(opts.requestMetrics)))
 	router.Use(recoveryMiddleware(opts.logger))
 
 	registerRoutes(router, sessionHandler, resolveAuthenticator(apiKey, opts), opts)
@@ -65,19 +64,18 @@ func NewRouterWithPanicHandler(sessionHandler *SessionHandler, apiKey string, op
 type RouterOption func(*routerOptions)
 
 type routerOptions struct {
-	agentHandler         *AgentHandler
-	environmentHandler   *EnvironmentHandler
-	vaultHandler         *VaultHandler
-	skillHandler         *SkillHandler
-	fileHandler          *FileHandler
-	memoryHandler        *MemoryHandler
-	sessionEventHandler  *SessionEventHandler
-	sessionEventList     SessionEventListHandler
-	authenticator        auth.Authenticator
-	internalVerifier     *auth.InternalPrincipalVerifier
-	logger               *slog.Logger
-	slowRequestThreshold time.Duration
-	requestMetrics       RequestMetricsRecorder
+	agentHandler        *AgentHandler
+	environmentHandler  *EnvironmentHandler
+	vaultHandler        *VaultHandler
+	skillHandler        *SkillHandler
+	fileHandler         *FileHandler
+	memoryHandler       *MemoryHandler
+	sessionEventHandler *SessionEventHandler
+	sessionEventList    SessionEventListHandler
+	authenticator       auth.Authenticator
+	internalVerifier    *auth.InternalPrincipalVerifier
+	logger              *slog.Logger
+	requestMetrics      RequestMetricsRecorder
 }
 
 type SessionEventListHandler interface {
@@ -159,9 +157,6 @@ func WithRequestMetrics(metrics RequestMetricsRecorder) RouterOption {
 func applyRouterOptionDefaults(opts *routerOptions) {
 	if opts.logger == nil {
 		opts.logger = workload.ComponentLogger("api")
-	}
-	if opts.slowRequestThreshold == 0 {
-		opts.slowRequestThreshold = DefaultSlowRequestThreshold
 	}
 }
 

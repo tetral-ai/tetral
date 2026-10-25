@@ -34,7 +34,6 @@ import (
 	internalevents "github.com/tetral-ai/tetral/internal/eventstream"
 	"github.com/tetral-ai/tetral/internal/files"
 	"github.com/tetral-ai/tetral/internal/gitticket"
-	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/testinfra"
@@ -382,10 +381,6 @@ func (edge *translatedPublicEdge) assertStreamingUpload(t *testing.T, f *publicP
 		}
 		return false
 	})
-	// The API handler is already reading this body. Holding the suffix past
-	// the API's slow-request threshold makes its default-verbosity boundary
-	// record exist for the logging correlation assertion below.
-	time.Sleep(httpapi.DefaultSlowRequestThreshold + 250*time.Millisecond)
 	unblock()
 	if err := <-producerJoined; err != nil {
 		t.Fatal("upload producer did not join")
@@ -436,7 +431,7 @@ func (edge *translatedPublicEdge) assertEdgeRequestCorrelation(t *testing.T, api
 	var apiRecord map[string]any
 	publicWait(t, "API boundary record for the held edge upload", func() bool {
 		for _, record := range edgeDiagnosticRecords(t, edge.apiRecords.Bytes()) {
-			if record["event"] == "http.request" && record["request.id"] == apiRequestID {
+			if record["event"] == "http.request.completed" && record["request.id"] == apiRequestID {
 				apiRecord = record
 				return true
 			}
@@ -444,7 +439,7 @@ func (edge *translatedPublicEdge) assertEdgeRequestCorrelation(t *testing.T, api
 		return false
 	})
 	edgeRequestID, _ := apiRecord["edge.request.id"].(string)
-	if apiRecord["event.kind"] != "slow_request" || apiRecord["url.path"] != "/v1/files" || edgeRequestID == "" || edgeRequestID == apiRequestID {
+	if apiRecord["http.route"] != "/v1/files" || edgeRequestID == "" || edgeRequestID == apiRequestID {
 		t.Fatalf("API boundary record lacks a distinct verified edge request ID: %v", apiRecord)
 	}
 	admissions := 0

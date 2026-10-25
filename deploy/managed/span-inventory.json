@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "purpose": "Every span name template each Engine component starts and the attributes it may carry. Spans hold identities, sizes, durations and outcomes, never content, paths, queries, client addresses or error messages.",
+  "services": {
+    "workload": {
+      "{http.request.method} {http.route}": {
+        "attributes": [
+          "http.request.method",
+          "http.route",
+          "http.response.status_code"
+        ]
+      },
+      "{grpc.method}": {
+        "attributes": [
+          "rpc.grpc.status_name"
+        ]
+      },
+      "{db.operation.name}": {
+        "attributes": [
+          "db.operation.name"
+        ]
+      },
+      "{operation}": {
+        "attributes": []
+      }
+    }
+  }
+}

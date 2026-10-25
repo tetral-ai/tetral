@@ -52,6 +52,13 @@
         "edge.request.id"
       ],
       "presence": "Optional. Auth Check records carry the edge-generated request ID as request.id. API, Auth API-key and Event Stream records carry their own request ID as request.id (also the public request-id response header and error request_id) and, once the Auth-signed principal is verified, its request_id claim as edge.request.id. Join Check request.id to backend edge.request.id. Records written before principal verification have no edge.request.id; an incoming X-Request-Id header never supplies it. Correlation is scoped to the observed deployment and request lifetime."
+    },
+    "trace": {
+      "join_keys": [
+        "trace_id",
+        "span_id"
+      ],
+      "presence": "On every record written under a span. A turn is one trace; a developer API request starts its own trace and an incoming traceparent is only a link of it."
     }
   },
   "external_collection_custody": {
@@ -468,5 +475,505 @@
       ],
       "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
     }
-  ]
+  ],
+  "service_events": {
+    "workload": {
+      "source": "internal/workload/observability.json",
+      "events": {
+        "cold_start.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "benchmarks",
+          "fields": {
+            "cold_start.kind": "string",
+            "cold_start.start_kind": "string",
+            "config_ms": "integer",
+            "dependencies_ms": "integer",
+            "outcome": "string",
+            "ready_ms": "integer"
+          }
+        },
+        "cold_start.phase_completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "benchmarks",
+          "fields": {
+            "cold_start.kind": "string",
+            "cold_start.phase": "string",
+            "config_ms": "integer",
+            "dependencies_ms": "integer",
+            "ready_ms": "integer"
+          }
+        },
+        "cold_start.phase_started": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "benchmarks",
+          "fields": {
+            "cold_start.kind": "string",
+            "cold_start.phase": "string"
+          }
+        },
+        "db.query.slow": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "operation": "string"
+          }
+        },
+        "diagnostic.invalid_event": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "event.original": "string",
+            "reason": "string"
+          }
+        },
+        "diagnostic.suppressed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "event.original": "string",
+            "first_seen": "string",
+            "last_seen": "string",
+            "operation": "string",
+            "reason": "string",
+            "suppressed.count": "integer"
+          }
+        },
+        "http.panic": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "request.id": "string"
+          },
+          "errors": {
+            "internal_error": {
+              "class": "panic",
+              "message_safe": "internal error"
+            }
+          }
+        },
+        "http.request.completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "edge.request.id": "string",
+            "http.request.method": "string",
+            "http.response.status_code": "integer",
+            "http.route": "string",
+            "request.id": "string",
+            "workspace.id": "string"
+          }
+        },
+        "http.request.failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "duration_ms": "integer",
+            "edge.request.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "http.request.method": "string",
+            "http.response.status_code": "integer",
+            "http.route": "string",
+            "request.id": "string",
+            "workspace.id": "string"
+          },
+          "errors": {
+            "server_error": {
+              "class": "http_error",
+              "message_safe": "HTTP request failed"
+            }
+          }
+        },
+        "internal.grpc.cancellation_join_timeout": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "duration.ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string"
+          },
+          "errors": {
+            "cancellation_join_timeout": {
+              "class": "shutdown_error",
+              "message_safe": "gRPC handlers outlived the cancellation budget"
+            }
+          }
+        },
+        "internal.grpc.recovered": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "duration.ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "grpc.code": "string",
+            "grpc.method": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "internal_error": {
+              "class": "panic",
+              "message_safe": "internal gRPC error"
+            }
+          }
+        },
+        "internal.grpc.request": {
+          "level": "DEBUG",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "caller.service_account": "string",
+            "component": "string",
+            "duration.ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "grpc.code": "string",
+            "grpc.method": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "aborted": {
+              "class": "grpc_error",
+              "message_safe": "internal gRPC request failed"
+            },
+            "alreadyexists": {
+              "class": "grpc_error",
+              "message_safe": "internal gRPC request failed"
+            },
+            "canceled": {
+              "class": "grpc_error",
+              "message_safe": "internal gRPC request failed"
+            },
+            "dataloss": {
+              "class": "grpc_error",
+              "message_safe": "internal gRPC request failed"
+            },
+            "deadlineexceeded": {
+              "class": "grpc_error",
+              "message_safe": "internal gRPC request failed"
+            },
+            "failedprecondition": {
+              "class": "grpc_error",
+              "message_safe": "internal gRPC request failed"
+            },
+            "internal": {
+              "class": "grpc_error",
+              "message_safe": "internal gRPC request failed"
+            },
+            "invalidargument": {
+              "class": "grpc_error",
+              "message_safe": "internal gRPC request failed"
+            },
+            "notfound": {
+              "class": "grpc_error",
+              "message_safe": "internal gRPC request failed"
+            },
+            "outofrange": {
+              "class": "grpc_error",
+              "message_safe": "internal gRPC request failed"
+            },
+            "permissiondenied": {
+              "class": "grpc_error",
+              "message_safe": "internal gRPC request failed"
+            },
+            "resourceexhausted": {
+              "class": "grpc_error",
+              "message_safe": "internal gRPC request failed"
+            },
+            "unauthenticated": {
+              "class": "grpc_error",
+              "message_safe": "internal gRPC request failed"
+            },
+            "unavailable": {
+              "class": "grpc_error",
+              "message_safe": "internal gRPC request failed"
+            },
+            "unimplemented": {
+              "class": "grpc_error",
+              "message_safe": "internal gRPC request failed"
+            },
+            "unknown": {
+              "class": "grpc_error",
+              "message_safe": "internal gRPC request failed"
+            }
+          }
+        },
+        "pressure.rejecting_ended": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "pressure.cause": "string",
+            "pressure.point": "string",
+            "pressure.rejected": "integer"
+          }
+        },
+        "pressure.rejecting_started": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "pressure.cause": "string",
+            "pressure.point": "string"
+          }
+        },
+        "startup.failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "listener.state": "string",
+            "operation": "string",
+            "readiness.state": "string",
+            "startup.cause": "string",
+            "startup.cause_category": "string",
+            "startup.config_problem": "string"
+          },
+          "errors": {
+            "config_error": {
+              "class": "config_error",
+              "message_safe": "configuration invalid"
+            },
+            "startup_error": {
+              "class": "startup_error",
+              "message_safe": "startup failed"
+            }
+          }
+        },
+        "workload.http.panic": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "phase": "string",
+            "transport.outcome": "string",
+            "transport.stage": "string"
+          },
+          "errors": {
+            "internal_error": {
+              "class": "panic",
+              "message_safe": "internal error"
+            }
+          }
+        },
+        "workload.http_server.failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "phase": "string",
+            "transport.outcome": "string",
+            "transport.stage": "string"
+          },
+          "errors": {
+            "http_server_failed": {
+              "class": "internal_error",
+              "message_safe": "HTTP server failure"
+            }
+          }
+        },
+        "workload.http_transport.failed": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "phase": "string",
+            "transport.outcome": "string",
+            "transport.stage": "string"
+          },
+          "errors": {
+            "tls_handshake_failed": {
+              "class": "transport_error",
+              "message_safe": "TLS handshake failed"
+            }
+          }
+        },
+        "workload.listener.failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "listener.transport": "string",
+            "operation": "string",
+            "readiness.state": "string",
+            "startup.cause": "string",
+            "startup.config_problem": "string"
+          },
+          "errors": {
+            "config_error": {
+              "class": "config_error",
+              "message_safe": "configuration invalid"
+            },
+            "startup_error": {
+              "class": "startup_error",
+              "message_safe": "startup failed"
+            }
+          }
+        },
+        "workload.listener.starting": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "event.kind": "string",
+            "listener.transport": "string",
+            "operation": "string",
+            "readiness.state": "string"
+          }
+        },
+        "workload.server.failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "readiness.state": "string",
+            "startup.cause": "string",
+            "startup.config_problem": "string"
+          },
+          "errors": {
+            "config_error": {
+              "class": "config_error",
+              "message_safe": "configuration invalid"
+            },
+            "startup_error": {
+              "class": "startup_error",
+              "message_safe": "startup failed"
+            }
+          }
+        },
+        "workload.shutdown.complete": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "readiness.state": "string"
+          }
+        },
+        "workload.shutdown.incomplete": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "duration.ms": "integer",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string"
+          },
+          "errors": {
+            "process_shutdown_timeout": {
+              "class": "shutdown_error",
+              "message_safe": "operation failed"
+            }
+          }
+        },
+        "workload.shutdown.phase_completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "duration.seconds": "number",
+            "metric.observation.count": "integer",
+            "operation": "string",
+            "outcome": "string"
+          }
+        },
+        "workload.shutdown.starting": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "readiness.state": "string"
+          }
+        },
+        "workload.started": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "event.kind": "string",
+            "listener.transport": "string",
+            "operation": "string",
+            "readiness.state": "string"
+          }
+        }
+      }
+    }
+  }
 }

@@ -145,5 +145,7 @@ func LogStartupFailure(logger *slog.Logger, component string, err error, base ..
 	}
 	attrs = append(attrs, base...)
 	logger.Error("startup.failed", StartupFailureAttrs(err, attrs...)...)
+	class, _, _ := StartupFailureFields(err)
+	failProcessColdStart(class)
 	return err
 }

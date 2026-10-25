@@ -73,7 +73,7 @@ func TestSandboxConsumerAcquisitionAndJoinedDrain(t *testing.T) {
 			case <-time.After(2 * time.Second):
 				t.Fatal("consumer owner did not join")
 			}
-			outcome := "success"
+			outcome := "ok"
 			if force {
 				outcome = "timeout"
 			}

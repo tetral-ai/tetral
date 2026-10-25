@@ -218,7 +218,6 @@ func run(ctx context.Context, env jobrunner.Env) error {
 		Listener:              listener,
 		Metrics:               httpMetrics.Operations,
 		Handler: workload.HealthRouter(readiness,
-			workload.WithHTTPMetrics(httpMetrics),
 			workload.WithMetricsCollector("http", httpMetrics.Collector()),
 			workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
 			workload.WithMetricsCollector("placement", deliveryStore.PlacementMetrics.Collector()),

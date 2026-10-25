@@ -5,11 +5,13 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/id"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 // RequestIDFromContext exposes the request_id stored on the context
@@ -38,15 +40,16 @@ func RequestIDMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// DefaultSlowRequestThreshold is the production boundary-log slow-request cutoff.
-const DefaultSlowRequestThreshold = 2 * time.Second
-
+// RequestMetricsRecorder observes one request by its route pattern.
 type RequestMetricsRecorder interface {
-	ObserveHTTPRequest(method string, statusCode int, duration time.Duration)
+	ObserveHTTPRoute(route, method string, statusCode int, duration time.Duration, long bool)
 }
 
 type requestLogOptions struct {
-	metrics RequestMetricsRecorder
+	metrics  RequestMetricsRecorder
+	quiet    map[string]bool
+	untraced map[string]bool
+	long     map[string]bool
 }
 
 type RequestLogOption func(*requestLogOptions)
@@ -57,14 +60,44 @@ func WithRequestLogMetrics(metrics RequestMetricsRecorder) RequestLogOption {
 	}
 }
 
-// RequestLogMiddleware is the exported boundary request-logging constructor.
-// It logs only the events that matter in production: server errors (>= 500) and
-// slow requests (>= slowThreshold). Ordinary fast 2xx/3xx traffic stays quiet.
-// Workloads that need the same boundary policy (e.g. event-stream) install this
-// directly instead of reimplementing it; a high slowThreshold suppresses
-// slow-request logging entirely.
-func RequestLogMiddleware(logger *slog.Logger, slowThreshold time.Duration, options ...RequestLogOption) func(http.Handler) http.Handler {
-	opts := requestLogOptions{}
+// WithQuietRequests names requests, as "METHOD /path", that start no trace
+// and observe nothing, such as a client heartbeat.
+func WithQuietRequests(requests ...string) RequestLogOption {
+	return func(opts *requestLogOptions) {
+		for _, request := range requests {
+			opts.quiet[request] = true
+		}
+	}
+}
+
+// WithUntracedRequests names requests, as "METHOD /path", that start no span
+// but are recorded and observed, such as a stream that outlives any trace.
+func WithUntracedRequests(requests ...string) RequestLogOption {
+	return func(opts *requestLogOptions) {
+		for _, request := range requests {
+			opts.untraced[request] = true
+		}
+	}
+}
+
+// WithLongRoutes names route patterns, as "METHOD pattern", observed in the
+// stream histogram with the long-operation buckets.
+func WithLongRoutes(routes ...string) RequestLogOption {
+	return func(opts *requestLogOptions) {
+		for _, route := range routes {
+			opts.long[route] = true
+		}
+	}
+}
+
+// RequestLogMiddleware is the public HTTP boundary's recording: one INFO
+// http.request.completed per request, with its route pattern and never its
+// path; one http_server_request_duration_seconds sample, or a stream sample
+// for a long route; and a server span that starts a new trace, an incoming
+// traceparent becoming only a link of it. A 5xx also writes the handled
+// failure record. Health checks and /metrics are never recorded.
+func RequestLogMiddleware(logger *slog.Logger, options ...RequestLogOption) func(http.Handler) http.Handler {
+	opts := requestLogOptions{quiet: map[string]bool{}, untraced: map[string]bool{}, long: map[string]bool{}}
 	for _, option := range options {
 		if option != nil {
 			option(&opts)
@@ -72,46 +105,67 @@ func RequestLogMiddleware(logger *slog.Logger, slowThreshold time.Duration, opti
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			request := r.Method + " " + r.URL.Path
+			if opts.quiet[request] || quietPath(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			tracker := &statusTrackingWriter{ResponseWriter: w, status: http.StatusOK}
 			start := time.Now()
 			ctx := auth.WithEdgeRequestIDRecorder(r.Context())
 			ctx = auth.WithAuditRecorder(ctx, authLogRecorder{logger: logger})
+			method := workload.HTTPMethodLabel(r.Method)
+			var span *workload.Span
+			if !opts.untraced[request] {
+				ctx, span = workload.StartRequestSpan(ctx, method, r.Header.Get("traceparent"))
+				span.SetString("http.request.method", method)
+			}
 			next.ServeHTTP(tracker, r.WithContext(ctx))
 			duration := time.Since(start)
+			route := matchedRoute(r)
 			if opts.metrics != nil {
-				opts.metrics.ObserveHTTPRequest(r.Method, tracker.status, duration)
+				opts.metrics.ObserveHTTPRoute(route, r.Method, tracker.status, duration, opts.long[r.Method+" "+route])
 			}
-			if tracker.status < http.StatusInternalServerError && duration < slowThreshold {
-				return
-			}
-			kind := "server_error"
-			if tracker.status < http.StatusInternalServerError {
-				kind = "slow_request"
-			}
-			attrs := []any{
-				slog.String("operation", "http.request"),
-				slog.String("event.kind", kind),
-				slog.String("component", "http-api"),
-				slog.String("request.id", RequestIDFromContext(r.Context())),
-				slog.String("http.request.method", r.Method),
-				slog.String("url.path", safeRequestPath(r)),
+			attrs := []slog.Attr{
+				slog.String("http.request.method", method),
+				slog.String("http.route", route),
 				slog.Int("http.response.status_code", tracker.status),
-				slog.Int64("duration.ms", duration.Milliseconds()),
+				slog.Int64("duration_ms", duration.Milliseconds()),
+				slog.String("request.id", RequestIDFromContext(r.Context())),
 			}
-			attrs = appendEdgeRequestID(ctx, attrs)
+			if edgeRequestID := auth.EdgeRequestIDFromContext(ctx); edgeRequestID != "" {
+				attrs = append(attrs, slog.String("edge.request.id", edgeRequestID))
+			}
+			if workspaceID := auth.VerifiedWorkspaceIDFromContext(ctx); workspaceID != "" {
+				attrs = append(attrs, slog.String("workspace.id", workspaceID))
+			}
+			logger.LogAttrs(ctx, slog.LevelInfo, "http.request.completed", attrs...)
 			if tracker.status >= http.StatusInternalServerError {
-				attrs = append(attrs,
+				logger.LogAttrs(ctx, slog.LevelError, "http.request.failed", append(attrs,
 					slog.String("error.class", "http_error"),
 					slog.String("error.code", "server_error"),
 					slog.String("error.message_safe", "HTTP request failed"),
-				)
+				)...)
 			}
+			span.SetName(method + " " + route)
+			span.SetString("http.route", route)
+			span.SetInt("http.response.status_code", int64(tracker.status))
 			if tracker.status >= http.StatusInternalServerError {
-				logger.Error("http.request", attrs...)
-			} else {
-				logger.Info("http.request", attrs...)
+				span.SetFailure("http_error", "server_error")
 			}
+			span.End()
 		})
+	}
+}
+
+// quietPath reports the health checks and /metrics, which are never
+// recorded wherever a service mounts them.
+func quietPath(path string) bool {
+	switch path {
+	case "/health", "/ready", "/metrics", "/metrics/":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -177,7 +231,6 @@ func (r authLogRecorder) RecordAuthEvent(ctx context.Context, event auth.AuditEv
 		slog.String("auth.result", event.Result),
 		slog.String("request.id", event.RequestID),
 		slog.String("http.request.method", event.Method),
-		slog.String("url.path", event.Path),
 	}
 	if event.ErrorType != "" {
 		attrs = append(attrs,
@@ -212,7 +265,6 @@ func PublicRecoveryMiddleware(logger *slog.Logger) func(http.Handler) http.Handl
 						slog.String("event.kind", "panic"),
 						slog.String("component", "http-api"),
 						slog.String("request.id", requestID),
-						slog.String("url.path", safeRequestPath(r)),
 						slog.String("error.class", "panic"),
 						slog.String("error.code", "internal_error"),
 						slog.String("error.message_safe", "internal error"),
@@ -234,13 +286,6 @@ func appendEdgeRequestID(ctx context.Context, attrs []any) []any {
 		attrs = append(attrs, slog.String("edge.request.id", edgeRequestID))
 	}
 	return attrs
-}
-
-func safeRequestPath(r *http.Request) string {
-	if strings.HasPrefix(r.URL.Path, "/v1/api_keys/") {
-		return "/v1/api_keys/{api_key_id}"
-	}
-	return r.URL.Path
 }
 
 // recordDecision accepts only the fixed Auth builder vocabulary and emits no
@@ -282,4 +327,22 @@ func (r authLogRecorder) recordDecision(ctx context.Context, event auth.AuditEve
 	}
 	attrs = append(attrs, slog.String("error.class", class), slog.String("error.code", event.Code), slog.String("error.message_safe", "authentication decision failed"))
 	r.logger.Warn("auth."+event.Stage+"."+event.Result, attrs...)
+}
+
+// matchedRoute is the route pattern that served r, or "unmatched". A request
+// that enters a mounted router and matches nothing there still carries the
+// mount's pattern, so the root router is asked whether any route matches.
+func matchedRoute(r *http.Request) string {
+	routeContext := chi.RouteContext(r.Context())
+	if routeContext == nil || routeContext.RoutePattern() == "" {
+		return "unmatched"
+	}
+	path := r.URL.RawPath
+	if path == "" {
+		path = r.URL.Path
+	}
+	if routeContext.Routes != nil && routeContext.Routes.Find(chi.NewRouteContext(), r.Method, path) == "" {
+		return "unmatched"
+	}
+	return routeContext.RoutePattern()
 }

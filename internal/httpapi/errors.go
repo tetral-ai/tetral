@@ -1,4 +1,3 @@
-// Package httpapi provides HTTP handlers, middleware, and error handling for the Engine API.
 package httpapi
 
 import (

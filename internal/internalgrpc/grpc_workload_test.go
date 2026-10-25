@@ -40,6 +40,7 @@ func TestRunGRPCWorkloadMetricsIncludeDatabaseStats(t *testing.T) {
 			if cfg.CancelJoinTimeout != 73*time.Millisecond {
 				t.Errorf("cancel/join configuration = %s", cfg.CancelJoinTimeout)
 			}
+			cfg.Metrics.SetMethods([]string{"/tetral.test.v1.Service/Call"})
 			cfg.Metrics.ObserveGRPCRequest("/tetral.test.v1.Service/Call", "OK", time.Second)
 			cfg.OnServing()
 			<-ctx.Done()
@@ -51,7 +52,7 @@ func TestRunGRPCWorkloadMetricsIncludeDatabaseStats(t *testing.T) {
 			body := recorder.Body.String()
 			for _, want := range []string{
 				"go_goroutines",
-				"grpc_request_duration_seconds",
+				"grpc_server_request_duration_seconds",
 				`db_pool_open_connections{pool="runtime"} 4`,
 				"tetral_diagnostic_sink_failures_total 0",
 			} {

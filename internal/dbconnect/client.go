@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/tetral-ai/tetral/internal/storage"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 type Client struct {
@@ -101,7 +102,9 @@ func NewTxForTesting(sqlTx *sql.Tx, client *Client, operation string) *Tx {
 }
 
 func (tx *Tx) Exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	ctx, done := observeStatement(ctx, tx.operation)
 	result, err := tx.tx.ExecContext(ctx, query, args...)
+	done(err)
 	if err != nil {
 		return nil, tx.client.classifyRuntimeError(tx.operation, err)
 	}
@@ -113,7 +116,9 @@ func (tx *Tx) ExecContext(ctx context.Context, query string, args ...any) (sql.R
 }
 
 func (tx *Tx) Query(ctx context.Context, query string, args ...any) (*Rows, error) {
+	ctx, done := observeStatement(ctx, tx.operation)
 	rows, err := tx.tx.QueryContext(ctx, query, args...)
+	done(err)
 	if err != nil {
 		return nil, tx.client.classifyRuntimeError(tx.operation, err)
 	}
@@ -130,7 +135,10 @@ func (tx *Tx) QueryRows(ctx context.Context, query string, args ...any) (interfa
 }
 
 func (tx *Tx) QueryRow(ctx context.Context, query string, args ...any) *Row {
-	return &Row{row: tx.tx.QueryRowContext(ctx, query, args...), client: tx.client, op: tx.operation}
+	ctx, done := observeStatement(ctx, tx.operation)
+	row := tx.tx.QueryRowContext(ctx, query, args...)
+	done(rowError(row))
+	return &Row{row: row, client: tx.client, op: tx.operation}
 }
 
 func (tx *Tx) QueryRowScanner(ctx context.Context, query string, args ...any) interface {
@@ -161,7 +169,9 @@ func (c *Client) Exec(ctx context.Context, operation string, query string, args 
 	if err := c.validateOperation(operation); err != nil {
 		return nil, err
 	}
+	ctx, done := observeStatement(ctx, operation)
 	result, err := c.db.ExecContext(ctx, query, args...)
+	done(err)
 	if err != nil {
 		return nil, c.classifyRuntimeError(operation, err)
 	}
@@ -172,7 +182,9 @@ func (c *Client) Query(ctx context.Context, operation string, query string, args
 	if err := c.validateOperation(operation); err != nil {
 		return nil, err
 	}
+	ctx, done := observeStatement(ctx, operation)
 	rows, err := c.db.QueryContext(ctx, query, args...)
+	done(err)
 	if err != nil {
 		return nil, c.classifyRuntimeError(operation, err)
 	}
@@ -183,7 +195,10 @@ func (c *Client) QueryRow(ctx context.Context, operation string, query string, a
 	if err := c.validateOperation(operation); err != nil {
 		return &Row{err: err}
 	}
-	return &Row{row: c.db.QueryRowContext(ctx, query, args...), client: c, op: operation}
+	ctx, done := observeStatement(ctx, operation)
+	row := c.db.QueryRowContext(ctx, query, args...)
+	done(rowError(row))
+	return &Row{row: row, client: c, op: operation}
 }
 
 // Listen holds one dedicated PostgreSQL connection until ctx is cancelled or
@@ -292,7 +307,10 @@ func (c *Client) WithAdvisoryLock(ctx context.Context, operation string, categor
 		return c.classifyRuntimeError(operation, err)
 	}
 	defer func() { _ = conn.Close() }()
-	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1, $2)", category, resource); err != nil {
+	lockCtx, acquired := observeStatement(ctx, operation)
+	_, err = conn.ExecContext(lockCtx, "SELECT pg_advisory_lock($1, $2)", category, resource)
+	acquired(err)
+	if err != nil {
 		return c.classifyRuntimeError(operation, err)
 	}
 	unlocked := false
@@ -324,7 +342,10 @@ func (c *Client) TryWithAdvisoryLock(ctx context.Context, operation string, cate
 	}
 	defer func() { _ = conn.Close() }()
 	var locked bool
-	if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1, $2)", category, resource).Scan(&locked); err != nil {
+	lockCtx, acquired := observeStatement(ctx, operation)
+	err = conn.QueryRowContext(lockCtx, "SELECT pg_try_advisory_lock($1, $2)", category, resource).Scan(&locked)
+	acquired(err)
+	if err != nil {
 		return false, c.classifyRuntimeError(operation, err)
 	}
 	if !locked {
@@ -378,7 +399,10 @@ func (c *Client) TryWithSessionLock(ctx context.Context, operation string, name 
 		return false, c.classifyRuntimeError(operation, err)
 	}
 	var locked bool
-	if err := conn.QueryRowContext(ctx, "SELECT pg_catalog.pg_try_advisory_lock(pg_catalog.hashtextextended($1, 0))", name).Scan(&locked); err != nil {
+	lockCtx, acquired := observeStatement(ctx, operation)
+	err = conn.QueryRowContext(lockCtx, "SELECT pg_catalog.pg_try_advisory_lock(pg_catalog.hashtextextended($1, 0))", name).Scan(&locked)
+	acquired(err)
+	if err != nil {
 		// A failed try-lock has an unknown outcome; never pool that session.
 		discardConn(conn)
 		return false, c.classifyRuntimeError(operation, err)
@@ -448,7 +472,10 @@ func (c *Client) withWorkspaceTx(ctx context.Context, workspaceID string, operat
 			_ = tx.Rollback()
 		}
 	}()
-	if _, err := tx.ExecContext(ctx, "SELECT set_config('tetral.workspace_id', $1, true)", workspaceID); err != nil {
+	scopeCtx, scoped := observeStatement(ctx, operation)
+	_, err = tx.ExecContext(scopeCtx, "SELECT set_config('tetral.workspace_id', $1, true)", workspaceID)
+	scoped(err)
+	if err != nil {
 		return c.classifyRuntimeError(operation, err)
 	}
 	wrapped := &Tx{tx: tx, client: c, operation: operation}
@@ -487,6 +514,35 @@ func (c *Client) Close() error {
 		}
 	})
 	return c.closeErr
+}
+
+// observeStatement times one named statement, or one lock acquisition, in
+// db_client_operation_duration_seconds; a transaction's whole scope and the
+// time a lock is held are not statements. A span is made only when the
+// caller's trace is sampled.
+func observeStatement(ctx context.Context, operation string) (context.Context, func(error)) {
+	started := time.Now()
+	var span *workload.Span
+	if workload.ContextTraceSampled(ctx) {
+		ctx, span = workload.StartSpan(ctx, operation)
+		span.SetString("db.operation.name", operation)
+	}
+	return ctx, func(err error) {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			span.SetFailure("database_error", "statement_failed")
+		} else {
+			err = nil
+		}
+		span.End()
+		workload.CurrentTelemetry().ObserveStatement(ctx, operation, started, err)
+	}
+}
+
+func rowError(row *sql.Row) error {
+	if row == nil {
+		return nil
+	}
+	return row.Err()
 }
 
 func (c *Client) validateOperation(operation string) error {

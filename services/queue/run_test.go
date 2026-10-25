@@ -115,9 +115,9 @@ func TestQueueRunJoinsMaintenanceAndRPCBeforeReturning(t *testing.T) {
 			}
 			// Queue registers its own drain phases, so the completed phase keeps
 			// its owning operation name instead of collapsing to unknown_method.
-			wantPhases := []string{"shutdown_queue_drain/success"}
+			wantPhases := []string{"shutdown_queue_drain/ok"}
 			if force {
-				wantPhases = []string{"shutdown_queue_drain/timeout", "shutdown_queue_cancel_join/success"}
+				wantPhases = []string{"shutdown_queue_drain/timeout", "shutdown_queue_cancel_join/ok"}
 			}
 			var phases []string
 			for _, record := range decodeJSONLogRecords(t, logs.Bytes()) {

@@ -3,6 +3,7 @@ package internalgrpc
 import (
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/sessionrpc"
 
 	"google.golang.org/grpc"
@@ -45,6 +46,8 @@ func boundedInternalDialOptions(maxMessageBytes int) []grpc.DialOption {
 			grpc.MaxCallSendMsgSize(maxMessageBytes),
 		),
 		grpc.WithKeepaliveParams(internalClientKeepaliveParameters()),
+		grpc.WithChainUnaryInterceptor(auth.TraceparentUnaryClientInterceptor()),
+		grpc.WithChainStreamInterceptor(auth.TraceparentStreamClientInterceptor()),
 	}
 }
 

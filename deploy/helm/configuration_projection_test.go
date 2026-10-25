@@ -537,7 +537,7 @@ func TestConfigurationInventoryHasCurrentOwnerSources(t *testing.T) {
 		_ = json.Unmarshal(family["sources"], &sourcePaths)
 		_ = json.Unmarshal(family["environment_keys"], &declaredKeys)
 		actualKeys := map[string]bool{}
-		pattern := regexp.MustCompile(`\b(?:TETRAL_[A-Z0-9_]+|ENGINE_[A-Z0-9_]+|DAYTONA_[A-Z0-9_]+)\b`)
+		pattern := regexp.MustCompile(`\b(?:TETRAL_[A-Z0-9_]+|ENGINE_[A-Z0-9_]+|DAYTONA_[A-Z0-9_]+|OTEL_[A-Z0-9_]+)\b`)
 		for _, path := range sourcePaths {
 			source, err := os.ReadFile(filepath.Join(root, path))
 			if err != nil {
@@ -606,7 +606,7 @@ func checkedConfigurationDefaults(t *testing.T, families []map[string]json.RawMe
 	}
 	expected := map[string]map[string]any{
 		"go-database-pool":        {"max_open": pool.MaxOpenConns, "max_idle": pool.MaxIdleConns, "max_lifetime": pool.ConnMaxLifetime.String(), "max_idle_time": pool.ConnMaxIdleTime.String(), "statement_timeout": pool.StatementTimeout.String()},
-		"diagnostics":             {"level": strings.ToLower(diagnostic.Level.String()), "max_record_bytes": diagnostic.MaxRecordBytes, "summary_interval_ms": diagnostic.SummaryInterval.Milliseconds(), "burst": diagnostic.Burst},
+		"diagnostics":             {"level": strings.ToLower(diagnostic.Level.String()), "max_record_bytes": diagnostic.MaxRecordBytes, "summary_interval_ms": diagnostic.SummaryInterval.Milliseconds(), "burst": diagnostic.Burst, "trace_sample_ratio": diagnostic.TraceSampleRatio, "slow_query_ms": diagnostic.SlowQuery.Milliseconds(), "otlp_endpoint": diagnostic.TraceEndpoint},
 		"runtime-process-custody": {"registration_ms": process.RegistrationTimeout.Milliseconds(), "report_timeout_ms": process.ReportTimeout.Milliseconds(), "report_interval_ms": process.ReportInterval.Milliseconds(), "freshness_ms": process.Freshness.Milliseconds()},
 		"queue":                   {"reclaim_interval_seconds": int64(q.LeaseReclaimInterval / time.Second), "reclaim_limit": q.LeaseReclaimBatchLimit, "retry_base_ms": q.RetryBaseDelay.Milliseconds(), "retry_cap_ms": q.RetryMaxDelay.Milliseconds(), "retry_max_attempts": q.RetryMaxAttempts, "drain_ms": q.DrainTimeout.Milliseconds(), "cancel_join_ms": q.CancelJoinTimeout.Milliseconds()},
 		"cleanup":                 {"claim_limit": c.ClaimLimit, "metrics_export_timeout": c.MetricsExportTimeout.String()},

@@ -296,12 +296,12 @@ The additive `tetral_operation_duration_seconds` family uses
 `service="git-proxy"` and the four parsed operations `refs-upload`,
 `refs-receive`, `upload-pack`, `receive-pack`; an unparsed request uses
 `unknown_method`. It reuses the actual existing request duration from entry
-through relay return. HTTP statuses below 400 are `success`, 4xx `rejected`
+through relay return. HTTP statuses below 400 are `ok`, 4xx `rejected`
 and 5xx `error`; these describe the observed HTTP result, not repository state.
 The family also records actual `shutdown_http_drain` and
 `shutdown_http_join` phases. Existing Git histogram, request counters and
 active connection gauge remain unchanged. The per-ticket concurrency bound
 is not a process-wide capacity gauge.
 
-Fixed seconds buckets and replica percentile queries follow the
-[shared operation duration contract](../../internal/workload/README.md#operation-durations).
+Duration buckets follow the
+[shared metric rules](../../internal/workload/README.md#metrics).

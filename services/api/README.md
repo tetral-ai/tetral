@@ -726,7 +726,8 @@ for the restart-only `TETRAL_LOG_*` controls, the default Info level, bounded
 suppression summaries, diagnostic drop and sink-failure metrics, and the
 diagnostic close after listeners and business resources.
 
-HTTP boundary records (server errors and slow requests) and authorization
+HTTP boundary records (`http.request.completed` for every request and
+`http.request.failed` for a 5xx) and authorization
 decision records carry `request.id`, the API's own `req_` ID that is also the
 `request-id` response header and error `request_id`. After the Auth-signed
 principal verifies, they also carry its signed request ID as `edge.request.id`,

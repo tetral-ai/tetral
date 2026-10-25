@@ -76,9 +76,9 @@ func TestRunOpensSeparateListenersAndStopsCleanlyOnCancellation(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not stop")
 	}
-	for _, sample := range []string{`operation="/tetral.provider_gateway.v1.ProviderGatewayService/RunWeb",outcome="rejected",service="web-connector"} 1`, `operation="shutdown_grpc_drain",outcome="success",service="web-connector"} 1`} {
-		if !strings.Contains(service.metrics.GRPC.Operations.Text(), sample) {
-			t.Fatalf("missing owning duration %s: %s", sample, service.metrics.GRPC.Operations.Text())
+	for _, sample := range []string{`method="/tetral.provider_gateway.v1.ProviderGatewayService/RunWeb",service="web-connector"} 1`, `operation="shutdown_grpc_drain",outcome="ok",service="web-connector"} 1`} {
+		if !strings.Contains(service.metrics.GRPC.Text(), sample) {
+			t.Fatalf("missing owning duration %s: %s", sample, service.metrics.GRPC.Text())
 		}
 	}
 	for _, field := range []string{

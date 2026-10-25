@@ -21,15 +21,19 @@ import (
 
 func TestDiagnosticBootControlsAndSafeErrors(t *testing.T) {
 	cfg, err := DiagnosticConfigFromEnv(func(string) string { return "" })
-	if err != nil || cfg.Level != slog.LevelInfo || cfg.MaxRecordBytes != 16384 || cfg.SummaryInterval != 30*time.Second || cfg.Burst != 1 {
+	if err != nil || cfg.Level != slog.LevelInfo || cfg.MaxRecordBytes != 16384 || cfg.SummaryInterval != 30*time.Second || cfg.Burst != 1 ||
+		cfg.TraceSampleRatio != 1 || cfg.SlowQuery != 250*time.Millisecond || cfg.TraceEndpoint != "" {
 		t.Fatalf("defaults: %+v %v", cfg, err)
 	}
-	values := map[string]string{"TETRAL_LOG_LEVEL": "warn", "TETRAL_LOG_MAX_RECORD_BYTES": "4096", "TETRAL_LOG_SUMMARY_INTERVAL_MS": "500", "TETRAL_LOG_BURST": "3"}
+	values := map[string]string{"TETRAL_LOG_LEVEL": "warn", "TETRAL_LOG_MAX_RECORD_BYTES": "4096", "TETRAL_LOG_SUMMARY_INTERVAL_MS": "500", "TETRAL_LOG_BURST": "3",
+		"TETRAL_TRACE_SAMPLE_RATIO": "0.25", "TETRAL_DB_SLOW_QUERY_MS": "900", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4317"}
 	cfg, err = DiagnosticConfigFromEnv(func(key string) string { return values[key] })
-	if err != nil || cfg.Level != slog.LevelWarn || cfg.MaxRecordBytes != 4096 || cfg.SummaryInterval != 500*time.Millisecond || cfg.Burst != 3 {
+	if err != nil || cfg.Level != slog.LevelWarn || cfg.MaxRecordBytes != 4096 || cfg.SummaryInterval != 500*time.Millisecond || cfg.Burst != 3 ||
+		cfg.TraceSampleRatio != 0.25 || cfg.SlowQuery != 900*time.Millisecond || cfg.TraceEndpoint != "http://collector:4317" {
 		t.Fatalf("overrides: %+v %v", cfg, err)
 	}
-	for key, value := range map[string]string{"TETRAL_LOG_LEVEL": "PRIVATE_SENTINEL", "TETRAL_LOG_MAX_RECORD_BYTES": "1023", "TETRAL_LOG_SUMMARY_INTERVAL_MS": "99", "TETRAL_LOG_BURST": "0"} {
+	for key, value := range map[string]string{"TETRAL_LOG_LEVEL": "PRIVATE_SENTINEL", "TETRAL_LOG_MAX_RECORD_BYTES": "1023", "TETRAL_LOG_SUMMARY_INTERVAL_MS": "99", "TETRAL_LOG_BURST": "0",
+		"TETRAL_TRACE_SAMPLE_RATIO": "1.5", "TETRAL_DB_SLOW_QUERY_MS": "60001", "OTEL_EXPORTER_OTLP_ENDPOINT": "PRIVATE_SENTINEL:4317"} {
 		_, err := DiagnosticConfigFromEnv(func(k string) string {
 			if k == key {
 				return value
@@ -281,6 +285,14 @@ func TestDiagnosticStartupBuilderExcludesNonTokenPayload(t *testing.T) {
 	}
 	if strings.Contains(output.String(), "PRIVATE_CONTENT_SENTINEL") || !strings.Contains(output.String(), `"error.message_safe":"startup failed"`) {
 		t.Fatal("startup builder leaked dependency payload")
+	}
+}
+
+func TestRecordsRedactSessionTokensAndTheVaultKey(t *testing.T) {
+	for _, key := range []string{"session_token", "sessionToken", "connection.session_token", "engine_vault_key", "engineVaultKey"} {
+		if actual, accepted := diagnosticValue(key, slog.StringValue("credential-value")); !accepted || actual != "[REDACTED]" {
+			t.Errorf("%s = %v; want [REDACTED]", key, actual)
+		}
 	}
 }
 

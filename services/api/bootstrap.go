@@ -43,7 +43,6 @@ func Run(ctx context.Context, env Env, stderr io.Writer, buildApplication BuildA
 	handler := BuildHTTPHandler(readiness, application.Handler)
 	metricsHandler := workload.HealthRouter(readiness,
 		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
-		workload.WithHTTPMetrics(httpMetrics),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
 		workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", application.Client)),
 	)

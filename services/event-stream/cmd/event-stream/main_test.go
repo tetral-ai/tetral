@@ -308,6 +308,26 @@ func TestEventStreamCommandStartupFailuresStopBeforeServingAndRedactLogs(t *test
 	}
 }
 
+func TestEventStreamPanickingRequestStillWritesItsCompletedRecord(t *testing.T) {
+	signer, verifier, _ := commandInternalPrincipalPair(t)
+	var logs bytes.Buffer
+	handler := eventstream.NewRouter(panickingEventReader{&commandEventReader{}}, verifier, eventstream.WithLogger(workload.NewLogger(&logs, "event-stream", "test", "unit")))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, commandSignedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events/stream?beta=true"))
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d; want 500", recorder.Code)
+	}
+	if got := strings.Count(logs.String(), `"msg":"http.request.completed"`); got != 1 || !strings.Contains(logs.String(), `"http.response.status_code":500`) {
+		t.Fatalf("completed records = %d; want one with status 500: %s", got, logs.String())
+	}
+}
+
+type panickingEventReader struct{ *commandEventReader }
+
+func (panickingEventReader) CurrentStreamPosition(context.Context, workspace.ID, string) (int64, error) {
+	panic("reader failed")
+}
+
 type envMap map[string]string
 
 func (m envMap) Getenv(key string) string { return m[key] }

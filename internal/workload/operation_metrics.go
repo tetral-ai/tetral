@@ -10,15 +10,12 @@ import (
 	"time"
 )
 
-// operationDurationBuckets are seconds upper bounds. The TypeScript projection
-// is checked against this domain by the owning conformance test.
-var operationDurationBuckets = [...]float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120, 300, 900, 1800}
-
 type operationKey struct{ operation, outcome string }
 type operationObservation struct {
+	long    bool
 	count   uint64
 	sum     float64
-	buckets [len(operationDurationBuckets)]uint64
+	buckets []uint64
 }
 
 // OperationMetrics retains fixed-bucket observations only for a constructor's
@@ -42,9 +39,7 @@ func NewOperationMetrics(service string, operations ...string) *OperationMetrics
 		panic("workload: operation metrics service " + strconv.Quote(service) + " is outside the closed workload domain")
 	}
 	m := &OperationMetrics{service: service, operations: map[string]bool{}, records: map[operationKey]operationObservation{}}
-	for _, operation := range append(operations, "shutdown_http_drain", "shutdown_http_join", "shutdown_grpc_drain", "shutdown_grpc_cancel_join") {
-		m.operations[operation] = true
-	}
+	m.addOperations(append(operations, "shutdown_http_drain", "shutdown_http_join", "shutdown_grpc_drain", "shutdown_grpc_cancel_join"))
 	return m
 }
 
@@ -56,7 +51,17 @@ func (m *OperationMetrics) SetOperations(operations []string) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.addOperations(operations)
+}
+
+// addOperations admits operations to the label domain; once the service has
+// registered its table, each must be declared there or in the library's.
+func (m *OperationMetrics) addOperations(operations []string) {
+	registered := RegisteredDeclarations(m.service) != nil
 	for _, operation := range operations {
+		if _, declared := lookupOperation(m.service, operation); registered && !declared {
+			undeclared("operation", operation)
+		}
 		m.operations[operation] = true
 	}
 }
@@ -90,15 +95,22 @@ func (m *OperationMetrics) record(operation, outcome string, duration time.Durat
 		operation = "unknown_method"
 	}
 	switch outcome {
-	case "success", "error", "cancelled", "rejected", "timeout":
+	case "success":
+		outcome = "ok"
+	case "ok", "error", "cancelled", "rejected", "timeout":
 	default:
 		outcome = "error"
 	}
 	key := operationKey{operation, outcome}
-	value := m.records[key]
+	value, seen := m.records[key]
+	if !seen {
+		declared, _ := lookupOperation(m.service, operation)
+		value.long = declared.Long
+		value.buckets = make([]uint64, len(operationBuckets(value.long)))
+	}
 	value.count++
 	value.sum += duration.Seconds()
-	for i, bound := range operationDurationBuckets {
+	for i, bound := range operationBuckets(value.long) {
 		if duration.Seconds() <= bound {
 			value.buckets[i]++
 		}
@@ -125,14 +137,17 @@ func (m *OperationMetrics) Collector() MetricsCollector {
 			return keys[i].operation < keys[j].operation
 		})
 		var metrics []Metric
-		const name = "tetral_operation_duration_seconds"
 		for _, key := range keys {
 			value := m.records[key]
+			name, help := "tetral_operation_duration_seconds", "Duration of a completed operation."
+			if value.long {
+				name, help = "tetral_long_operation_duration_seconds", "Duration of a completed long operation."
+			}
 			labels := []MetricLabel{{"service", m.service}, {"operation", key.operation}, {"outcome", key.outcome}}
 			appendSample := func(suffix string, labels []MetricLabel, value float64) {
-				metrics = append(metrics, Metric{Name: name + suffix, Family: name, Help: "Completed owning operation duration in seconds.", Type: "histogram", Labels: labels, Value: value})
+				metrics = append(metrics, Metric{Name: name + suffix, Family: name, Help: help, Type: "histogram", Labels: labels, Value: value})
 			}
-			for i, bound := range operationDurationBuckets {
+			for i, bound := range operationBuckets(value.long) {
 				appendSample("_bucket", append(append([]MetricLabel(nil), labels...), MetricLabel{"le", strconv.FormatFloat(bound, 'g', -1, 64)}), float64(value.buckets[i]))
 			}
 			appendSample("_bucket", append(append([]MetricLabel(nil), labels...), MetricLabel{"le", "+Inf"}), float64(value.count))
@@ -143,19 +158,13 @@ func (m *OperationMetrics) Collector() MetricsCollector {
 	}
 }
 
-func grpcMetricOutcome(code string) string {
-	switch code {
-	case "OK":
-		return "success"
-	case "Canceled":
-		return "cancelled"
-	case "DeadlineExceeded":
-		return "timeout"
-	case "InvalidArgument", "Unauthenticated", "PermissionDenied", "ResourceExhausted", "Unimplemented":
-		return "rejected"
-	default:
-		return "error"
+// operationBuckets is the bucket set of an operation that its table marks
+// long or not.
+func operationBuckets(long bool) []float64 {
+	if long {
+		return LongOperationDurationBuckets
 	}
+	return RequestDurationBuckets
 }
 
 // Text renders only this histogram family for owners with custom metrics ports.

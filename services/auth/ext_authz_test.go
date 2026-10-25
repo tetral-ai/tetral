@@ -147,7 +147,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 	client := authv3.NewAuthorizationClient(connection)
 	check := func(t *testing.T, req *authv3.CheckRequest, want int) *authv3.CheckResponse {
 		t.Helper()
-		outcome := "success"
+		outcome := "ok"
 		if want >= 400 {
 			outcome = "rejected"
 		}
@@ -511,7 +511,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 		if err != nil || externalTestStatus(response) != 500 || externalTestPrincipal(response) != "" {
 			t.Fatalf("closed owning DB Check=%v/%v", response, err)
 		}
-		if authOperationSample(t, failedMetrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, "error") != 1 || authOperationSample(t, failedMetrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, "success") != 0 {
+		if authOperationSample(t, failedMetrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, "error") != 1 || authOperationSample(t, failedMetrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, "ok") != 0 {
 			t.Fatal("typed 500 was counted as successful gRPC admission")
 		}
 		flushAPIKeyUsage(ctx, t, admin, runtime, resolver)
@@ -528,7 +528,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 		t.Fatal(err)
 	}
 	runJoined = true
-	if authOperationSample(t, metrics, "tetral_operation_duration_seconds_count", "shutdown_grpc_drain", "success") != 1 {
+	if authOperationSample(t, metrics, "tetral_long_operation_duration_seconds_count", "shutdown_grpc_drain", "ok") != 1 {
 		t.Fatal("Auth graceful owner did not populate its actual drain")
 	}
 	diagnosticOwner.CloseWithBudget()

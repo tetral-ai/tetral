@@ -331,8 +331,9 @@ eligible rows remained. These are
 availability gauges, not a claim that every available job is presently leaseable
 under Session/Thread ordering. Per-kind groups absent from the database have no
 series; a failed collector emits its error counter rather than invented zeros.
-The shared [operation histogram](../../internal/workload/README.md#operation-durations)
-records registered RPC outcomes and actual Queue drain/join boundaries. The service account
+The shared [gRPC request histogram](../../internal/workload/README.md#metrics)
+records every registered RPC, and the [shutdown phases](../../internal/workload/README.md#shutdown-phases)
+record the actual Queue drain/join boundaries. The service account
 mounts no Kubernetes API token; the network policy restricts egress to PostgreSQL
 and DNS, and ingress on both ports to `api`, `job-runner`, and
 `sandbox`.

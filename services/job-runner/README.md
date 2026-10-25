@@ -500,7 +500,7 @@ Placement's existing probe and attempt timers also populate fixed-bucket
 A probe covers the process registry proof and actual HTTP load query. An
 attempt covers bounded sampling through all started probes joining; it ends
 before transactional binding arbitration and command delivery. Eligible probes
-and selected attempts are `success`; timeout/cancellation retain those outcomes;
+and selected attempts are `ok`; timeout/cancellation retain those outcomes;
 capacity, not-accepting, no-candidate and exhausted sampling are `rejected`.
 Registry, transport, invalid-response, visibility, policy and randomness
 failures are `error`. An exhausted attempt means no eligible candidate was
@@ -508,7 +508,7 @@ found; the original probe reason counters retain the exclusion/dependency cause.
 
 `runtime_placement_probe_total{outcome}` and `runtime_placement_total{outcome}`
 count the fine-grained probe and attempt reasons that the histogram's
-success/rejected/error outcome folds together; placement durations are exported
+ok/rejected/error outcome folds together; placement durations are exported
 only through the histogram. Both use the same owning hooks and exported
 collector, with race-safe zero-value initialization. No pod, process, Session
 or request labels enter these families.

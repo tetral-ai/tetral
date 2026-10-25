@@ -366,7 +366,7 @@ func externalTestNativeTLS(ctx context.Context, t *testing.T, admin *sql.DB, wor
 	case <-ctx.Done():
 		t.Fatal("Check listener did not join after admitted work")
 	}
-	if authOperationSample(t, metrics, "tetral_operation_duration_seconds_count", "shutdown_grpc_drain", "success") != 1 || authOperationSample(t, metrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, "success") == 0 {
+	if authOperationSample(t, metrics, "tetral_long_operation_duration_seconds_count", "shutdown_grpc_drain", "ok") != 1 || authOperationSample(t, metrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, "ok") == 0 {
 		t.Fatal("real native Check and held-owner drain durations were not exposed")
 	}
 	if err := server.Close(); err != nil {

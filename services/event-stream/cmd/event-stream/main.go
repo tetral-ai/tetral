@@ -162,7 +162,6 @@ func run(ctx context.Context, env envReader, open openStartupFunc) error {
 	metricsHandler := workload.HealthRouter(readiness,
 		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
 		workload.WithMetricsCollector("previews", previewMetrics.Collector()),
-		workload.WithHTTPMetrics(httpMetrics),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
 		workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", database.runtimeClient)),
 	)

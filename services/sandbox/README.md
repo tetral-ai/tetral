@@ -570,8 +570,8 @@ labels. The family also observes actual `shutdown_workers_drain`, forced
 `shutdown_http_join` boundaries. It does not equate an accepted provider
 submission or one worker observation with completion of durable business work.
 
-Fixed seconds buckets and replica percentile queries follow the
-[shared operation duration contract](../../internal/workload/README.md#operation-durations).
+Duration buckets follow the
+[shared metric rules](../../internal/workload/README.md#metrics).
 
 Skill materialization reads concrete references saved on the Session. Later
 uploads or soft deletion of a Skill/version do not change an existing Session's

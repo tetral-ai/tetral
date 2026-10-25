@@ -456,5 +456,5 @@ separate from claim failure, and a CronJob registry does not persist across
 invocations. Deployment must collect each invocation's export rather
 than treating its reset counts as a resident counter.
 
-Fixed seconds buckets and replica percentile queries follow the
-[shared operation duration contract](../../internal/workload/README.md#operation-durations).
+Duration buckets follow the
+[shared metric rules](../../internal/workload/README.md#metrics).

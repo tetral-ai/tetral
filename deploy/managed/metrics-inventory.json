@@ -1,0 +1,297 @@
+{
+  "schema_version": 1,
+  "purpose": "Every metric family each Engine component exposes: its type, label names with their allowed values or the closed domain that fixes them in code, bucket set and audience. The source observability.json of each component is the declaration; this catalogue must match it exactly.",
+  "bucket_sets": {
+    "request": [
+      0.005,
+      0.01,
+      0.025,
+      0.05,
+      0.1,
+      0.25,
+      0.5,
+      1,
+      2.5,
+      5,
+      10
+    ],
+    "long": [
+      0.1,
+      0.5,
+      1,
+      2.5,
+      5,
+      10,
+      30,
+      60,
+      120,
+      300,
+      600,
+      1800
+    ]
+  },
+  "services": {
+    "workload": {
+      "cold_start_phase_seconds": {
+        "type": "histogram",
+        "audience": "benchmarks",
+        "labels": {
+          "kind": [
+            "service_pod"
+          ],
+          "phase": [
+            "config",
+            "dependencies",
+            "ready"
+          ],
+          "service": "service names"
+        },
+        "buckets": "long"
+      },
+      "cold_start_seconds": {
+        "type": "histogram",
+        "audience": "benchmarks",
+        "labels": {
+          "kind": [
+            "service_pod"
+          ],
+          "scope": [
+            "engine",
+            "total"
+          ],
+          "service": "service names"
+        },
+        "buckets": "long"
+      },
+      "db_client_operation_duration_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {
+          "operation": "statement and lock names fixed in code",
+          "outcome": [
+            "ok",
+            "error"
+          ],
+          "service": "service names"
+        },
+        "buckets": "request"
+      },
+      "db_pool_idle_connections": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {
+          "pool": "pool names fixed by each service"
+        }
+      },
+      "db_pool_in_use_connections": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {
+          "pool": "pool names fixed by each service"
+        }
+      },
+      "db_pool_open_connections": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {
+          "pool": "pool names fixed by each service"
+        }
+      },
+      "db_pool_wait_count_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "pool": "pool names fixed by each service"
+        }
+      },
+      "db_pool_wait_duration_seconds_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "pool": "pool names fixed by each service"
+        }
+      },
+      "go_gc_cycles_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "go_gc_pause_seconds_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "go_goroutines": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "go_heap_alloc_bytes": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "go_heap_free_bytes": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "go_sched_gomaxprocs_threads": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "grpc_server_request_duration_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {
+          "code": [
+            "OK",
+            "Canceled",
+            "Unknown",
+            "InvalidArgument",
+            "DeadlineExceeded",
+            "NotFound",
+            "AlreadyExists",
+            "PermissionDenied",
+            "ResourceExhausted",
+            "FailedPrecondition",
+            "Aborted",
+            "OutOfRange",
+            "Unimplemented",
+            "Internal",
+            "Unavailable",
+            "DataLoss",
+            "Unauthenticated"
+          ],
+          "method": "full gRPC method names the service registers",
+          "service": "service names"
+        },
+        "buckets": "request"
+      },
+      "http_server_request_duration_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {
+          "method": [
+            "CONNECT",
+            "DELETE",
+            "GET",
+            "HEAD",
+            "OPTIONS",
+            "PATCH",
+            "POST",
+            "PUT",
+            "TRACE",
+            "_OTHER"
+          ],
+          "route": "route patterns the service registers, or unmatched",
+          "service": "service names",
+          "status_class": [
+            "1xx",
+            "2xx",
+            "3xx",
+            "4xx",
+            "5xx"
+          ]
+        },
+        "buckets": "request"
+      },
+      "http_server_stream_duration_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {
+          "method": [
+            "CONNECT",
+            "DELETE",
+            "GET",
+            "HEAD",
+            "OPTIONS",
+            "PATCH",
+            "POST",
+            "PUT",
+            "TRACE",
+            "_OTHER"
+          ],
+          "route": "long route patterns the service registers",
+          "service": "service names",
+          "status_class": [
+            "1xx",
+            "2xx",
+            "3xx",
+            "4xx",
+            "5xx"
+          ]
+        },
+        "buckets": "long"
+      },
+      "tetral_diagnostic_dropped_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_diagnostic_emitted_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_diagnostic_filtered_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_diagnostic_limiter_entries": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_diagnostic_queue_records": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_diagnostic_sink_failures_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_diagnostic_spans_dropped_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_diagnostic_suppressed_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_long_operation_duration_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {
+          "operation": "long operations declared in the service's table",
+          "outcome": "ok, rejected, error or a declared error code",
+          "service": "service names"
+        },
+        "buckets": "long"
+      },
+      "tetral_metrics_collector_errors_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "collector": "collector names fixed by each service"
+        }
+      },
+      "tetral_operation_duration_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {
+          "operation": "operations declared in the service's table",
+          "outcome": "ok, rejected, error or a declared error code",
+          "service": "service names"
+        },
+        "buckets": "request"
+      }
+    }
+  }
+}
