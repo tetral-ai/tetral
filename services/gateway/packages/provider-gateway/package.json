@@ -20,9 +20,9 @@
     "@tetral/gateway-protocol": "workspace:*",
     "@tetral/ts-observability": "file:../../../../internal/ts-observability",
     "ai": "6.0.168",
-    "zod": "4.4.3",
+    "zod": "4.6.6",
     "@tetral/ts-dbconnect": "file:../../../../internal/ts-dbconnect",
-    "undici": "7.30.0",
+    "undici": "7.30.1",
     "@nats-io/transport-node": "3.4.0"
   }
 }

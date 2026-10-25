@@ -13,6 +13,6 @@
   "dependencies": {
     "@tetral/gateway-protocol": "file:../../../gateway/packages/protocol",
     "effect": "4.0.0-beta.66",
-    "zod": "4.4.3"
+    "zod": "4.6.6"
   }
 }
