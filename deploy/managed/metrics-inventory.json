@@ -1241,12 +1241,15 @@
         "audience": "benchmarks",
         "labels": {
           "kind": [
+            "cli",
             "service_pod"
           ],
           "phase": [
             "config",
+            "connect",
             "dependencies",
-            "ready"
+            "ready",
+            "register"
           ],
           "service": "service names"
         },
@@ -1257,6 +1260,7 @@
         "audience": "benchmarks",
         "labels": {
           "kind": [
+            "cli",
             "service_pod"
           ],
           "scope": [

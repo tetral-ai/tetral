@@ -68,6 +68,32 @@ func BeginColdStart(ctx context.Context, kind, startKind string, phases ...strin
 	return beginColdStartAt(ctx, CurrentTelemetry(), time.Now(), kind, startKind, phases)
 }
 
+// ReportedPhase is a phase of a cold start that another process ran and
+// measured, such as a CLI's startup phases reported in its ready.
+type ReportedPhase struct {
+	Name     string
+	Duration time.Duration
+}
+
+// BeginReportedColdStart starts a cold start of kind whose first phases ran
+// in another process, with the durations it reported, and whose phases in
+// local run here, the first one from started. Only the local phases record
+// cold_start.phase_started and cold_start.phase_completed; the summary and
+// the histograms cover every phase.
+func BeginReportedColdStart(ctx context.Context, kind, startKind string, started time.Time, reported []ReportedPhase, local ...string) *ColdStart {
+	phases := make([]string, 0, len(reported)+len(local))
+	for _, phase := range reported {
+		phases = append(phases, phase.Name)
+	}
+	phases = append(phases, local...)
+	c := &ColdStart{telemetry: CurrentTelemetry(), kind: kind, startKind: startKind, phases: phases, external: map[string]bool{}, started: started, phaseStarted: started, current: len(reported), durations: make([]time.Duration, len(phases))}
+	for i, phase := range reported {
+		c.durations[i] = phase.Duration
+	}
+	c.recordPhaseStarted(ctx)
+	return c
+}
+
 func beginColdStartAt(ctx context.Context, t *Telemetry, started time.Time, kind, startKind string, phases []string) *ColdStart {
 	c := &ColdStart{telemetry: t, kind: kind, startKind: startKind, phases: phases, external: map[string]bool{}, started: started, phaseStarted: started, durations: make([]time.Duration, len(phases))}
 	c.recordPhaseStarted(ctx)

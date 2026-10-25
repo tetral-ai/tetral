@@ -9,9 +9,11 @@
         "cold_start.kind": "string",
         "cold_start.start_kind": "string",
         "config_ms": "integer",
+        "connect_ms": "integer",
         "dependencies_ms": "integer",
         "outcome": "string",
-        "ready_ms": "integer"
+        "ready_ms": "integer",
+        "register_ms": "integer"
       }
     },
     "cold_start.phase_completed": {
@@ -23,7 +25,8 @@
         "cold_start.phase": "string",
         "config_ms": "integer",
         "dependencies_ms": "integer",
-        "ready_ms": "integer"
+        "ready_ms": "integer",
+        "register_ms": "integer"
       }
     },
     "cold_start.phase_started": {
@@ -549,12 +552,15 @@
       "audience": "benchmarks",
       "labels": {
         "kind": [
+          "cli",
           "service_pod"
         ],
         "phase": [
           "config",
+          "connect",
           "dependencies",
-          "ready"
+          "ready",
+          "register"
         ],
         "service": "service names"
       },
@@ -565,6 +571,7 @@
       "audience": "benchmarks",
       "labels": {
         "kind": [
+          "cli",
           "service_pod"
         ],
         "scope": [
