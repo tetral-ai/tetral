@@ -21,7 +21,7 @@ use state::paths::StateRoot;
 use tetral_tests::app_server::{AppServer, request, socket_path};
 use tetral_tests::record::Case;
 use tetral_tests::run::{self, Run, Tetral};
-use tetral_tests::seams::Seams;
+use tetral_tests::seams::{Seams, WAIT_LIMIT};
 use tetral_tests::snapshot::snapshot;
 use tetral_tests::socket_directory::{self, socket_dir};
 
@@ -284,30 +284,42 @@ fn a_killed_app_server_leaves_a_socket_that_the_next_start_replaces() {
 fn sixteen_sdk_clients_at_once_all_succeed() {
     let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
-    let mut case = record.case("16 SDK clients call status and sessions at once");
+    let mut case = record.case(
+        "16 SDK clients call status and sessions at once while another connection holds half a request",
+    );
     let directory = tempfile::tempdir().unwrap();
     let root = configured_root(&mut case, directory.path());
-    let _app_server = start(&mut case, &root);
+    let app_server = start(&mut case, &root);
+    // A listener that serves one connection at a time stays on this one, so
+    // the calls below can succeed only on a listener that serves them
+    // together.
+    let mut half = UnixStream::connect(&app_server.socket).unwrap();
+    half.write_all(b"GET /v1/status HTTP/1.1\r\nHost: local")
+        .unwrap();
     let runtime = runtime();
     let together = Arc::new(tokio::sync::Barrier::new(16));
     let answers = runtime.block_on(async {
-        let calls: Vec<_> = (0..16)
-            .map(|_| {
-                let client = client(&root);
-                let together = together.clone();
-                tokio::spawn(async move {
-                    together.wait().await;
-                    let (status, sessions) = tokio::join!(client.status(), client.sessions());
-                    (status.unwrap(), sessions.unwrap())
+        tokio::time::timeout(WAIT_LIMIT, async {
+            let calls: Vec<_> = (0..16)
+                .map(|_| {
+                    let client = client(&root);
+                    let together = together.clone();
+                    tokio::spawn(async move {
+                        together.wait().await;
+                        let (status, sessions) = tokio::join!(client.status(), client.sessions());
+                        (status.unwrap(), sessions.unwrap())
+                    })
                 })
-            })
-            .collect();
-        let mut answers = Vec::new();
-        for call in calls {
-            answers.push(call.await.unwrap());
-        }
-        answers
+                .collect();
+            let mut answers = Vec::new();
+            for call in calls {
+                answers.push(call.await.unwrap());
+            }
+            answers
+        })
+        .await
     });
+    let answers = answers.expect("the calls are answered while a connection holds half a request");
     assert_eq!(answers.len(), 16);
     for (status, sessions) in answers {
         assert_eq!(
@@ -316,7 +328,10 @@ fn sixteen_sdk_clients_at_once_all_succeed() {
         );
         assert!(sessions.sessions.is_empty());
     }
-    case.observe("all 16 status and 16 sessions calls succeeded");
+    case.observe(
+        "all 16 status and 16 sessions calls succeeded while the half request stayed open",
+    );
+    drop(half);
 }
 
 #[test]
@@ -705,17 +720,20 @@ fn shutdown_ends_the_process_while_a_handler_is_blocked() {
     let mut half = UnixStream::connect(&app_server.socket).unwrap();
     half.write_all(b"GET /v1/status HTTP/1.1\r\nHost: local")
         .unwrap();
+    let posted = std::time::Instant::now();
     let shutdown = request(&app_server.socket, "POST", "/v1/shutdown").unwrap();
     assert_eq!((shutdown.status, shutdown.json()), (202, json!({})));
     seams.advance(Duration::from_secs(5));
     let (run, _) = app_server.exited();
+    let took = posted.elapsed();
     case.command("tetral server run --app app_one", &run.exit());
+    assert!(took < Duration::from_secs(5), "the exit took {took:?}");
     assert_eq!(run.object(), expected_status("stopping", "stopped"));
     assert!(fs::symlink_metadata(socket_path(&root)).is_err());
     assert!(lock_is_free(&root));
-    case.observe(
-        "five seconds of the controlled clock after the 202, the process exited 0; the socket is gone and the lock is free",
-    );
+    case.observe(format!(
+        "the process exited 0 {took:?} after the POST, its controlled clock moved five seconds; the socket is gone and the lock is free"
+    ));
     drop(half);
 }
 
@@ -763,5 +781,8 @@ fn the_seams_hold_a_barrier_and_drive_the_clock_of_the_process_under_test() {
     case.command("tetral server stop --app app_one", &stop.exit());
     let (run, _) = app_server.exited();
     case.command("tetral server run --app app_one", &run.exit());
-    case.observe("socket.touched read 0 at start and 1 after the clock moved one hour");
+    assert_eq!(seams.count("socket.touched"), 1);
+    case.observe(
+        "socket.touched read 0 at start, 1 after the clock moved one hour, and still 1 once the process exited",
+    );
 }
