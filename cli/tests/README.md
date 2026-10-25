@@ -83,8 +83,9 @@ temporary directories. No workspace crate depends on this package.
   test seam `TETRAL_TEST_TOOL_EXECUTION`, and the system `PATH` for its
   tasks; `task_parent` locates a root's `T` apart from the code under test.
 - `src/tasks.rs`: `TaskMachine`, such a machine with one prepared Session,
-  which issues tool instructions, reads their reports, follows the seams of
-  a task's start and initial wait, and removes `T` when it ends.
+  which issues tool instructions and controls, reads their reports and
+  replies, follows the seams of a task's start, initial wait, output, writes
+  and waiting replies, and removes `T` when it ends.
 - `tests/configure.rs`: `tetral configure` and `tetral --version`: the refused
   arguments, bootstraps, apps and control paths with the root unchanged, the
   size limit and private modes of a new root, each failure code, configure
@@ -136,6 +137,13 @@ temporary directories. No workspace crate depends on this package.
   never comes within it, a detached command's lifetime, the working
   directory and its errors, the environment, the exit facts, the end of a
   task's processes, the metrics and the trace context.
+- `tests/stdin_cancel.rs`: `tool.stdin`: writes recorded by `write_seq`,
+  repeated and stale writes and a lost reply sent again, failed controls,
+  the waits of reads and writes and a lifetime they never extend, windows
+  and a lost read reply, a reply and the `terminal` report of an exit
+  during its wait acknowledged apart, windows, counters and a control's
+  `limits` in replies, a full pipe, writes sent together, escaped `chars`,
+  and U+0003.
 - `tests/task_storage.rs`: a task's output beyond what a stream keeps, files
   that cannot be created and a log that cannot be written, task files that
   no other task reaches, `TMPDIR` with files and Unix sockets, the files'

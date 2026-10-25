@@ -4,9 +4,14 @@
 //! initial wait reports the test seam counter `task.wait_checked` after each
 //! reading of the clock, the launcher entry waits at the barrier
 //! `task.launch` between its directory's check and entering it (in a task
-//! with network), and the launch counts `process.spawn`.
+//! with network), the launch counts `process.spawn`, each control reply
+//! that starts to wait counts `task.reply_waiting`, each reading of the
+//! clock by the timer of a running task's waiting replies
+//! `task.reply_checked`, each read of a task's output `task.output_read`,
+//! and each write that starts on a task's stdin pipe `task.write_started`.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -28,6 +33,20 @@ pub const WAIT_CHECKED: &str = "task.wait_checked";
 /// The barrier of the launcher entry before it enters its directory.
 pub const LAUNCH: &str = "task.launch";
 
+/// The counter of the control replies that start to wait.
+pub const REPLY_WAITING: &str = "task.reply_waiting";
+
+/// The counter of the readings of the clock by the timer of a running
+/// task's waiting replies.
+pub const REPLY_CHECKED: &str = "task.reply_checked";
+
+/// The counter of the reads of a task's output, counted once the bytes are
+/// in its capture.
+pub const OUTPUT_READ: &str = "task.output_read";
+
+/// The counter of the writes that start on a task's stdin pipe.
+pub const WRITE_STARTED: &str = "task.write_started";
+
 /// How often the reference control server sends a heartbeat, on its clock.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -42,6 +61,8 @@ pub struct TaskMachine {
     pub root: PathBuf,
     /// The prepared binding's directory, canonical.
     pub project: PathBuf,
+    /// The controls issued, which number their `tool_use_event_id`s.
+    controls: AtomicU64,
 }
 
 impl TaskMachine {
@@ -62,6 +83,7 @@ impl TaskMachine {
             root: machine.root.canonicalize().unwrap(),
             machine: Some(machine),
             project: project.canonicalize().unwrap(),
+            controls: AtomicU64::new(0),
         };
         let issued = tasks.prepare(SESSION, BINDING, &tasks.project, None);
         tasks.wait_prepared(&issued);
@@ -167,6 +189,54 @@ impl TaskMachine {
         }
         let issued = self.engine.control("execute", control);
         issued["message_id"].as_str().unwrap().to_owned()
+    }
+
+    /// Issues `tool.stdin` of `task_id` with the payload's `members`
+    /// (`chars`, `write_seq`, `wait_ms`, `limits`) and gives its
+    /// `message_id`.
+    pub fn stdin(&self, task_id: &str, members: Value) -> String {
+        self.issue_control("stdin", task_id, members)
+    }
+
+    fn issue_control(&self, kind: &str, task_id: &str, members: Value) -> String {
+        let number = self.controls.fetch_add(1, Ordering::SeqCst);
+        let mut payload = json!({
+            "session_id": SESSION, "binding_id": BINDING,
+            "tool_use_event_id": format!("call_{kind}_{number}"), "task_id": task_id,
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(members.as_object().cloned().unwrap_or_default());
+        let issued = self
+            .engine
+            .control(kind, json!({"instance_id": INSTANCE, "payload": payload}));
+        issued["message_id"].as_str().unwrap().to_owned()
+    }
+
+    /// The accepted control reply that answers `message_id`, if any.
+    pub fn accepted_reply(&self, message_id: &str) -> Option<Value> {
+        self.engine
+            .received("tool-status")
+            .into_iter()
+            .map(|received| received["body"].clone())
+            .find(|body| body["kind"] == "control" && body["request_message_id"] == message_id)
+    }
+
+    /// Waits for the accepted control reply that answers `message_id` and
+    /// gives it.
+    pub fn reply(&self, message_id: &str) -> Value {
+        let mut found = Value::Null;
+        wait_until(&format!("the reply to {message_id}"), || {
+            match self.accepted_reply(message_id) {
+                Some(reply) => {
+                    found = reply;
+                    true
+                }
+                None => false,
+            }
+        });
+        found
     }
 
     /// The accepted execution reports of `task_id`, in arrival order.

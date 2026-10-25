@@ -9,6 +9,7 @@ pub mod isolation;
 pub mod limits;
 pub mod policy;
 pub mod report;
+pub mod stdin;
 pub mod store;
 pub mod supervisor;
 pub mod terminate;

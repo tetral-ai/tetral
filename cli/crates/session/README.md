@@ -35,7 +35,9 @@ that is no longer the binding's is discarded.
   arrival order before the binding's next instruction, and a close, a cancel
   of the task or the connection's end prevents a staged start (`tools`).
 - A control finds its task only in the registry of the binding it names on
-  its own connection; an absent task is `task_not_found` (`tools`).
+  its own connection; an absent task is `task_not_found`, a `tool.stdin` of
+  a task that is not an `exec_command` is `unsupported_control`, and every
+  other `tool.stdin` goes to the task's supervisor (`tools`).
 - An owner starts admitted commands only from its handler, through the
   `TaskStarter` it is given, so a start never races its binding's close: the
   starter gives each admitted task its supervisor at admission, `staged`,

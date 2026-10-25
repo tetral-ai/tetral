@@ -175,8 +175,10 @@ impl ExitFacts {
     }
 }
 
-/// An `exec_command` result envelope.
+/// The result envelope of an `exec_command` report or of its task's
+/// `stdin` reply.
 pub struct Outcome {
+    pub tool: HelperTool,
     pub task_id: Id,
     pub status: HelperStatus,
     pub error: Option<ToolError>,
@@ -186,12 +188,13 @@ pub struct Outcome {
     pub stderr: StreamSnapshot,
     pub duration: Duration,
     pub metrics: Option<Metrics>,
+    pub written_bytes: Option<u64>,
 }
 
 impl Outcome {
     pub fn envelope(self) -> HelperEnvelope {
         HelperEnvelope {
-            tool: HelperTool::ExecCommand,
+            tool: self.tool,
             status: self.status,
             truncated: false,
             error: self.error,
@@ -202,7 +205,7 @@ impl Outcome {
                 timed_out: self.timed_out,
                 cancelled: None,
                 was_running: None,
-                written_bytes: None,
+                written_bytes: self.written_bytes.map(Count::saturating),
                 stdout: self.stdout,
                 stderr: self.stderr,
                 duration_ms: millis(self.duration),

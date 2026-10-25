@@ -9,7 +9,7 @@
 //! ([`SessionOwner::start_staged`]). Each admitted task has its Task
 //! supervisor from its admission on, `staged` until the owner starts it. A
 //! control finds its task only in the registry of the binding it names, on
-//! its own connection.
+//! its own connection, and a `tool.stdin` goes to that task's supervisor.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use execution::policy::{TaskPermissions, TranslationInputs, validate};
 use execution::report::{Body, Correlation, Report};
-use execution::supervisor::SupervisorMailbox;
+use execution::supervisor::{Control, SupervisorMailbox, SupervisorMessage};
 use execution::{isolation, store};
 use protocol::connection::{Downstream, DownstreamPayload, DownstreamType};
 use protocol::id::Id;
@@ -79,6 +79,7 @@ struct Task {
     /// The `message_id`s of the instructions it answers: the one that
     /// registered it and each identical one that joined it.
     instructions: Vec<Id>,
+    tool: ExecutionTool,
     supervisor: Option<SupervisorMailbox>,
     state: TaskState,
 }
@@ -88,6 +89,7 @@ impl std::fmt::Debug for Task {
         formatter
             .debug_struct("Task")
             .field("instructions", &self.instructions)
+            .field("tool", &self.tool)
             .field("state", &self.state)
             .finish_non_exhaustive()
     }
@@ -226,6 +228,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             received: call.received,
         };
         let staged = binding.state == SessionState::PreparedPendingAck;
+        let tool = tool_of(&start.tool);
         let supervisor = self.starter.supervise(start, preparation.reports.clone());
         if !staged && let Some(supervisor) = &supervisor {
             self.starter.start(supervisor);
@@ -235,6 +238,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             Task {
                 fingerprint: call.fingerprint.clone(),
                 instructions: vec![call.message_id.clone()],
+                tool,
                 supervisor,
                 state: if staged {
                     TaskState::Staged
@@ -250,10 +254,12 @@ impl<S: TaskStarter> SessionOwner<S> {
     }
 
     /// The admission of a `tool.stdin` or `tool.cancel`: the ledger's room,
-    /// its schema and budgets, then its task in the named binding's registry.
-    /// A cancel of a staged task prevents its start.
+    /// its schema and budgets, then its task in the named binding's registry,
+    /// and for a `tool.stdin` the task's tool. An admitted `tool.stdin` goes
+    /// to the task's supervisor; a cancel of a staged task prevents its
+    /// start.
     fn control(&mut self, call: &ToolCall) -> Result<(), Body> {
-        control_checks(call)?;
+        let payload = control_checks(call)?;
         let task = self
             .record
             .as_mut()
@@ -271,9 +277,27 @@ impl<S: TaskStarter> SessionOwner<S> {
         let Some((task, staged)) = task else {
             return Err(task_not_found());
         };
-        if call.kind == DownstreamType::ToolCancel && task.state == TaskState::Staged {
-            task.state = TaskState::Prevented;
-            staged.retain(|task_id| *task_id != call.task_id);
+        let message = match payload {
+            DownstreamPayload::ToolStdin(stdin) => {
+                if task.tool != ExecutionTool::ExecCommand {
+                    return Err(control_error(
+                        ControlErrorCode::UnsupportedControl,
+                        "tool.stdin works only on an exec_command task",
+                    ));
+                }
+                SupervisorMessage::Stdin(Box::new(control(call, stdin)))
+            }
+            DownstreamPayload::ToolCancel(_) => {
+                if task.state == TaskState::Staged {
+                    task.state = TaskState::Prevented;
+                    staged.retain(|task_id| *task_id != call.task_id);
+                }
+                return Ok(());
+            }
+            _ => return Ok(()),
+        };
+        if let Some(supervisor) = &task.supervisor {
+            let _ = supervisor.send(message);
         }
         Ok(())
     }
@@ -402,8 +426,9 @@ fn schema_failure(call: &ToolCall) -> Body {
     }
 }
 
-/// The checks of a control before its task is looked up.
-fn control_checks(call: &ToolCall) -> Result<(), Body> {
+/// The checks of a control before its task is looked up; gives its
+/// payload.
+fn control_checks(call: &ToolCall) -> Result<DownstreamPayload, Body> {
     if !call.recorded {
         return Err(control_error(
             ControlErrorCode::ResourceExhausted,
@@ -412,9 +437,9 @@ fn control_checks(call: &ToolCall) -> Result<(), Body> {
     }
     match protocol::decode::<Downstream>(call.data.as_bytes()) {
         Ok(Downstream {
-            payload: DownstreamPayload::ToolStdin(_) | DownstreamPayload::ToolCancel(_),
+            payload: payload @ (DownstreamPayload::ToolStdin(_) | DownstreamPayload::ToolCancel(_)),
             ..
-        }) => Ok(()),
+        }) => Ok(payload),
         _ => Err(control_error(
             ControlErrorCode::InvalidInput,
             "the control does not match its schema or exceeds a size budget",
@@ -459,6 +484,17 @@ fn task_not_found() -> Body {
         ControlErrorCode::TaskNotFound,
         "task_id names no task of the named binding on this connection",
     )
+}
+
+/// The control `call` with its decoded `payload`, as its task's supervisor
+/// takes it.
+fn control<P>(call: &ToolCall, payload: P) -> Control<P> {
+    Control {
+        connection_id: call.connection_id.clone(),
+        correlation: correlation(call),
+        traceparent: call.traceparent.clone(),
+        payload,
+    }
 }
 
 fn correlation(call: &ToolCall) -> Correlation {

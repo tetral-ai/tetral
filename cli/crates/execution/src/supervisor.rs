@@ -1,16 +1,19 @@
 //! The Task supervisor: the one owner of a task and its process tree, from
 //! the task's admission until its Session binding owner forgets it. A task
-//! is `staged` until the binding owner starts it
-//! ([`SupervisorMessage::Start`]); it is then `starting` while its
-//! supervisor checks the isolation, creates the task's files and launches
-//! the command;
-//! `running` from the command's actual start, while the supervisor reads both
-//! pipes into the task's capture; `ended` once the shell's exit has been
+//! is `staged` until the binding owner starts it ([`SupervisorMessage::Start`]);
+//! it is then `starting` while its supervisor checks the isolation, creates
+//! the task's files and launches the command; `running` from the command's
+//! actual start, while the supervisor reads both pipes into the task's
+//! capture and writes its stdin; `ended` once the shell's exit has been
 //! observed, or given up on, and the `terminal` report has been handed to the
-//! outbox; and `cleaned` once that report is acknowledged or dropped and the
-//! task's files are gone. Every wait reads the seam clock.
+//! outbox; and `cleaned` once every report of the task is acknowledged or
+//! dropped and the task's files are gone. The supervisor answers the task's
+//! `tool.stdin` in every state but `staged`, where they wait for the start:
+//! each waiting reply is a timer and a waiter of the supervisor, which
+//! meanwhile keeps reading output and handling the exit and other controls.
+//! Every wait reads the seam clock.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,9 +23,13 @@ use observe::{Identity, TraceContext};
 use protocol::field::PositiveInt;
 use protocol::id::Id;
 use protocol::ports::{ReportId, ReportListener, ReportOutcome, ReportSink};
-use protocol::tool::{ExecInput, HelperStatus, Metrics, ProtocolError, ReportPhase, ToolError};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use protocol::tool::{
+    ControlErrorCode, ExecInput, HelperStatus, HelperTool, Metrics, ProtocolError, ReportPhase,
+    StdinPayload, StreamSnapshot, ToolError,
+};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::pipe::Receiver;
+use tokio::process::ChildStdin;
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
@@ -32,6 +39,7 @@ use crate::isolation::{Command, Isolation, LaunchError, Process};
 use crate::limits::Visible;
 use crate::policy::{PolicyRejection, TaskPermissions};
 use crate::report::{self, Body, Correlation, ErrorBounds, Rendering, Report, StreamOutput};
+use crate::stdin::{self, Check, Request, WriteRecords};
 use crate::store::{Log, TaskFiles};
 use crate::terminate::{self, Termination};
 
@@ -50,12 +58,29 @@ const LAUNCH_STATUS_MAX_BYTES: usize = 65_536;
 /// of a command that has started.
 const WAIT_CHECKED: &str = "task.wait_checked";
 
+/// The test seam counter of each reply that starts to wait.
+const REPLY_WAITING: &str = "task.reply_waiting";
+
+/// The test seam counter of each reading of the clock by the timer of the
+/// waiting replies of a running task.
+const REPLY_CHECKED: &str = "task.reply_checked";
+
+/// The test seam counter of each read of output, counted once its bytes are
+/// in the capture and before any reply they end.
+const OUTPUT_READ: &str = "task.output_read";
+
+/// The test seam counter of each write that starts on the pipe, counted
+/// once its deadline is set.
+const WRITE_STARTED: &str = "task.write_started";
+
 /// The message of every failure to start other than a directory's.
 const NOT_STARTED: &str = "process could not start";
 
 /// The message of a command whose start did not come within its initial
 /// wait.
 const NOT_STARTED_IN_WAIT: &str = "process did not start within the wait";
+
+const STDIN_CLOSED: &str = "task stdin is closed or not accepting input";
 
 /// One admitted `exec_command` task, as its supervisor starts it.
 pub struct TaskSpec {
@@ -87,6 +112,7 @@ pub struct Context {
 pub struct Bounds {
     pub output_drain: Duration,
     pub termination: terminate::Steps,
+    pub stdin_write: Duration,
 }
 
 impl Default for Bounds {
@@ -94,6 +120,7 @@ impl Default for Bounds {
         Bounds {
             output_drain: OUTPUT_DRAIN,
             termination: terminate::Steps::default(),
+            stdin_write: stdin::WRITE_TIMEOUT,
         }
     }
 }
@@ -101,8 +128,20 @@ impl Default for Bounds {
 pub enum SupervisorMessage {
     /// The binding owner starts the staged task.
     Start,
+    /// An admitted `tool.stdin` of the task.
+    Stdin(Box<Control<StdinPayload>>),
     /// The outbox's outcome of one of the task's reports.
     Outcome(ReportId, ReportOutcome),
+}
+
+/// A control of the task, admitted by its binding owner on the task's
+/// connection.
+pub struct Control<P> {
+    pub connection_id: Id,
+    /// The control's own identities, which its reply answers.
+    pub correlation: Correlation,
+    pub traceparent: Option<String>,
+    pub payload: P,
 }
 
 pub type SupervisorMailbox = mpsc::UnboundedSender<SupervisorMessage>;
@@ -147,7 +186,22 @@ pub fn spawn(spec: TaskSpec, context: Context) -> SupervisorMailbox {
         messages,
         awaited: HashSet::new(),
         report_seq: 0,
-        left_queue: Duration::ZERO,
+        left_queue: None,
+        process: None,
+        spawned: Duration::ZERO,
+        start: None,
+        out: Stream::new(None::<tokio::process::ChildStdout>),
+        err: Stream::new(None::<tokio::process::ChildStderr>),
+        stdin: None,
+        ending: None,
+        exit: None,
+        ended: None,
+        cleaned: false,
+        kept: (exec::empty_stream(), exec::empty_stream()),
+        records: WriteRecords::default(),
+        writes: VecDeque::new(),
+        writing: None,
+        waiters: Vec::new(),
     };
     tokio::spawn(supervisor.run().instrument(span));
     mailbox
@@ -163,7 +217,29 @@ struct Supervisor {
     /// The `report_seq` of the task's last execution report.
     report_seq: i64,
     /// When the task left admission and its binding's staging queue.
-    left_queue: Duration,
+    left_queue: Option<Duration>,
+    /// The launched command, until its supervision ends.
+    process: Option<Process>,
+    spawned: Duration,
+    /// The command's actual start.
+    start: Option<Duration>,
+    out: Stream,
+    err: Stream,
+    /// The command's stdin, until it closes for good.
+    stdin: Option<ChildStdin>,
+    ending: Option<(Termination, Expiry)>,
+    /// The shell's exit facts and when they were observed.
+    exit: Option<(ExitFacts, Duration)>,
+    /// What the `terminal` report said, once it was made.
+    ended: Option<State>,
+    cleaned: bool,
+    /// The streams' counters once the task is cleaned.
+    kept: (StreamSnapshot, StreamSnapshot),
+    records: WriteRecords,
+    /// The writes that wait for the one being written.
+    writes: VecDeque<Control<StdinPayload>>,
+    writing: Option<Writing>,
+    waiters: Vec<Waiter>,
 }
 
 /// Why a task did not reach `running`.
@@ -172,16 +248,6 @@ enum Start {
     Rejected(PolicyRejection),
     /// The start failed; the `terminal` report carries this error.
     Failed(ToolError),
-}
-
-/// A launched command, from its spawn.
-struct Launched {
-    process: Process,
-    call: ExecCall,
-    /// The launch-status pipe, on which the launcher entry reports the
-    /// command's start or its failure.
-    status: Receiver,
-    spawned: Duration,
 }
 
 /// Why the supervisor ended a running command.
@@ -195,43 +261,125 @@ enum Expiry {
     Lifetime,
 }
 
+/// A task as a reply reports it.
+#[derive(Debug, Clone, Default)]
+struct State {
+    /// Whether the task has ended; its exit facts are then final.
+    ended: bool,
+    exit: ExitFacts,
+    timed_out: bool,
+    duration: Duration,
+}
+
+/// The write being written, with the bytes written so far.
+struct Writing {
+    control: Control<StdinPayload>,
+    write_seq: i64,
+    digest: [u8; 32],
+    wait: Duration,
+    offset: usize,
+    deadline: Duration,
+}
+
+/// A reply that waits.
+struct Waiter {
+    control: Control<StdinPayload>,
+    deadline: Duration,
+    /// `None` for a read, which also ends at new output; a write's bytes.
+    written: Option<u64>,
+}
+
+/// How the staged state ended.
+enum Staged {
+    Started,
+    /// The binding owner forgot the task.
+    Forgotten,
+}
+
 impl Supervisor {
     async fn run(mut self) {
-        // `staged`
-        loop {
-            match self.messages.recv().await {
-                None => return,
-                Some(SupervisorMessage::Start) => break,
-                Some(SupervisorMessage::Outcome(..)) => {}
-            }
+        match self.staged().await {
+            Staged::Forgotten => return,
+            Staged::Started => match self.launch().await {
+                Err(Start::Rejected(rejection)) => {
+                    self.submit(
+                        self.spec.correlation.clone(),
+                        &self.spec.connection_id.clone(),
+                        self.spec.traceparent.clone(),
+                        Body::Rejected(ProtocolError {
+                            code: rejection.code,
+                            message: rejection.message,
+                        }),
+                    );
+                    self.ended = Some(State {
+                        ended: true,
+                        ..State::default()
+                    });
+                }
+                Err(Start::Failed(error)) => self.report_start_failure(error),
+                Ok((call, status)) => self.running(call, status).await,
+            },
         }
-        self.left_queue = state::seams::now();
-        match self.start().await {
-            Err(Start::Rejected(rejection)) => {
-                self.submit(Body::Rejected(ProtocolError {
-                    code: rejection.code,
-                    message: rejection.message,
-                }));
-                return;
-            }
-            Err(Start::Failed(error)) => self.report_start_failure(error),
-            Ok(launched) => self.supervise(launched).await,
-        }
-        while !self.awaited.is_empty() {
+        self.settle().await;
+    }
+
+    /// `staged`: the task's `tool.stdin` wait, until the start.
+    async fn staged(&mut self) -> Staged {
+        let mut held = Vec::new();
+        let staged = loop {
             match self.messages.recv().await {
+                None => return Staged::Forgotten,
+                Some(SupervisorMessage::Start) => {
+                    self.left_queue = Some(state::seams::now());
+                    break Staged::Started;
+                }
+                Some(SupervisorMessage::Stdin(control)) => held.push(*control),
                 Some(SupervisorMessage::Outcome(report, _)) => {
                     self.awaited.remove(&report);
                 }
-                Some(SupervisorMessage::Start) => {}
+            }
+        };
+        for control in held {
+            self.stdin(control);
+        }
+        staged
+    }
+
+    /// `ended` and `cleaned`: controls are answered from what the task
+    /// left; the task's files go once every report has its outcome.
+    async fn settle(&mut self) {
+        loop {
+            if !self.cleaned && self.awaited.is_empty() {
+                self.clean();
+            }
+            match self.messages.recv().await {
                 None => break,
+                Some(SupervisorMessage::Outcome(report, _)) => {
+                    self.awaited.remove(&report);
+                }
+                Some(SupervisorMessage::Stdin(control)) => self.stdin(*control),
+                Some(SupervisorMessage::Start) => {}
             }
         }
+        if !self.cleaned {
+            self.clean();
+        }
+    }
+
+    /// Removes the task's files and lets go of its output, keeping only the
+    /// streams' counters for a repeated write's reply.
+    fn clean(&mut self) {
         let _ = self.spec.files.remove();
+        self.kept = (self.out.capture.counters(), self.err.capture.counters());
+        self.out.capture = StreamCapture::new();
+        self.err.capture = StreamCapture::new();
+        self.cleaned = true;
     }
 
     /// `starting`: the availability check, the task's files, the
-    /// environment and the launch.
-    async fn start(&mut self) -> Result<Launched, Start> {
+    /// environment and the launch; gives the call and the launch-status
+    /// pipe.
+    async fn launch(&mut self) -> Result<(ExecCall, Receiver), Start> {
         let context = &self.context;
         let spec = &self.spec;
         let available = context
@@ -272,7 +420,7 @@ impl Supervisor {
             env,
             directory: None,
         };
-        let process = context
+        let mut process = context
             .isolation
             .launch(
                 &available,
@@ -287,15 +435,22 @@ impl Supervisor {
                 LaunchError::Rejected(rejection) => Start::Rejected(rejection),
                 LaunchError::Spawn(_) => spawn_failed(NOT_STARTED),
             })?;
-        let spawned = state::seams::now();
+        self.spawned = state::seams::now();
         let status = Receiver::from_owned_fd(OwnedFd::from(status))
             .map_err(|_| spawn_failed(NOT_STARTED))?;
-        Ok(Launched {
-            process,
-            call,
-            status,
-            spawned,
-        })
+        self.stdin = process.child.stdin.take();
+        self.out.reader = process
+            .child
+            .stdout
+            .take()
+            .map(|reader| Box::new(reader) as _);
+        self.err.reader = process
+            .child
+            .stderr
+            .take()
+            .map(|reader| Box::new(reader) as _);
+        self.process = Some(process);
+        Ok((call, status))
     }
 
     /// The `terminal` report of a command that never started: `status:
@@ -304,6 +459,10 @@ impl Supervisor {
         let outcome = self.outcome(HelperStatus::Error, Some(error), ExitFacts::default());
         let empty = StreamCapture::new();
         self.report(ReportPhase::Terminal, outcome, &empty, &empty);
+        self.ended = Some(State {
+            ended: true,
+            ..State::default()
+        });
     }
 
     /// From the spawn, through the command's start on the launch-status
@@ -311,80 +470,102 @@ impl Supervisor {
     /// with neither the start nor a failure on the pipe ended before the
     /// launcher entry ran, as an error of Codex's sandbox stages ends it:
     /// its exit status and output are the command's result.
-    async fn supervise(&mut self, launched: Launched) {
-        let Launched {
-            mut process,
-            call,
-            mut status,
-            spawned,
-        } = launched;
+    async fn running(&mut self, call: ExecCall, status: Receiver) {
         let bounds = self.context.bounds;
-        // stdin stays open for the task's writes.
-        let _stdin = process.child.stdin.take();
-        let mut out = Stream::new(process.child.stdout.take());
-        let mut err = Stream::new(process.child.stderr.take());
-        let mut status_open = true;
-        let mut start: Option<Duration> = None;
+        let pid = self.process.as_ref().map_or(0, |process| process.pid);
+        let mut status = Some(status);
         let mut failure = Vec::new();
-        let wait_ends = spawned + call.wait;
+        let wait_ends = self.spawned + call.wait;
         let mut waited = false;
         let mut forgotten = false;
-        let mut ending: Option<(Termination, Expiry)> = None;
-        let mut exit: Option<(ExitFacts, Duration)> = None;
+        self.next_write();
         loop {
-            if exit.is_some() && !out.is_open() && !err.is_open() {
+            if self.exit.is_some() && !self.out.is_open() && !self.err.is_open() {
                 break;
             }
+            let lifetime_ends = self
+                .start
+                .map_or(Duration::MAX, |start| start + call.lifetime);
+            let ending_due = self
+                .ending
+                .map_or(Duration::MAX, |(termination, _)| termination.due());
+            let drain_ends = self
+                .exit
+                .as_ref()
+                .map_or(Duration::MAX, |(_, at)| *at + bounds.output_drain);
+            let write_due = self
+                .writing
+                .as_ref()
+                .map_or(Duration::MAX, |writing| writing.deadline);
+            let reply_due = self.reply_due();
+            let detached = call.on_expiry == OnExpiry::Detach;
+            let quiet = self.exit.is_none() && self.ending.is_none();
+            let started = self.start.is_some();
             tokio::select! {
-                read = out.read(), if out.is_open() => {
-                    out.take(read, &mut self.spec.files.stdout);
+                read = self.out.read(), if self.out.is_open() => {
+                    if self.out.take(read, &mut self.spec.files.stdout) {
+                        self.output_arrived();
+                    }
                 }
-                read = err.read(), if err.is_open() => {
-                    err.take(read, &mut self.spec.files.stderr);
+                read = self.err.read(), if self.err.is_open() => {
+                    if self.err.take(read, &mut self.spec.files.stderr) {
+                        self.output_arrived();
+                    }
                 }
-                read = read_some(&mut status), if status_open => match read {
+                read = read_some(status.as_mut()), if status.is_some() => match read {
                     Some(bytes) => {
                         let mut bytes = &bytes[..];
-                        if start.is_none()
+                        if self.start.is_none()
                             && failure.is_empty()
                             && let Some(rest) = bytes.strip_prefix(crate::child::STARTED)
                         {
-                            start = Some(state::seams::now());
+                            self.start = Some(state::seams::now());
                             bytes = rest;
                         }
                         let room = LAUNCH_STATUS_MAX_BYTES.saturating_sub(failure.len());
                         failure.extend_from_slice(&bytes[..bytes.len().min(room)]);
                     }
-                    None => status_open = false,
+                    None => status = None,
                 },
-                waited_status = process.child.wait(), if exit.is_none() => {
+                waited_status = wait_child(self.process.as_mut()), if self.exit.is_none() => {
                     let facts = waited_status.map_or_else(|_| ExitFacts::default(), ExitFacts::observed);
-                    exit = Some((facts, state::seams::now()));
+                    self.exit = Some((facts, state::seams::now()));
+                    self.exited();
                 }
-                () = initial_wait(wait_ends, start.is_some()), if !waited && exit.is_none() && ending.is_none() => {
+                () = initial_wait(wait_ends, started), if !waited && quiet => {
                     waited = true;
-                    match (start, call.on_expiry) {
+                    match (self.start, call.on_expiry) {
                         (None, _) => {
-                            ending = Some((Termination::begin(process.pid, bounds.termination), Expiry::NotStarted));
+                            self.ending = Some((Termination::begin(pid, bounds.termination), Expiry::NotStarted));
                         }
                         (Some(_), OnExpiry::Kill) => {
-                            ending = Some((Termination::begin(process.pid, bounds.termination), Expiry::Wait));
+                            self.ending = Some((Termination::begin(pid, bounds.termination), Expiry::Wait));
                         }
-                        (Some(start), OnExpiry::Detach) => self.report_running(start, &mut out.capture, &mut err.capture),
+                        (Some(start), OnExpiry::Detach) => self.report_running(start),
                     }
                 }
-                () = state::seams::sleep_until(start.map_or(Duration::MAX, |start| start + call.lifetime)), if call.on_expiry == OnExpiry::Detach && start.is_some() && exit.is_none() && ending.is_none() => {
-                    ending = Some((Termination::begin(process.pid, bounds.termination), Expiry::Lifetime));
+                () = state::seams::sleep_until(lifetime_ends), if detached && started && quiet => {
+                    self.ending = Some((Termination::begin(pid, bounds.termination), Expiry::Lifetime));
                 }
-                () = state::seams::sleep_until(ending.map_or(Duration::MAX, |(termination, _)| termination.due())), if exit.is_none() && ending.is_some() => {
-                    let Some((termination, expiry)) = ending else { break };
+                () = state::seams::sleep_until(ending_due), if self.exit.is_none() && self.ending.is_some() => {
+                    let Some((termination, expiry)) = self.ending else { break };
                     match termination.step() {
-                        Some(next) => ending = Some((next, expiry)),
+                        Some(next) => self.ending = Some((next, expiry)),
                         None => break,
                     }
                 }
-                () = state::seams::sleep_until(exit.as_ref().map_or(Duration::MAX, |(_, at)| *at + bounds.output_drain)), if exit.is_some() => break,
+                () = state::seams::sleep_until(drain_ends), if self.exit.is_some() => break,
+                written = write_some(&mut self.stdin, self.writing.as_ref()), if self.writing.is_some() => {
+                    self.wrote(written);
+                }
+                () = state::seams::sleep_until(write_due), if self.writing.is_some() => {
+                    self.write_failed();
+                }
+                () = state::seams::sleep_until_counted(reply_due, REPLY_CHECKED), if !self.waiters.is_empty() => {
+                    self.expire_waiters();
+                }
                 message = self.messages.recv(), if !forgotten => match message {
+                    Some(SupervisorMessage::Stdin(control)) => self.stdin(*control),
                     Some(SupervisorMessage::Outcome(report, _)) => {
                         self.awaited.remove(&report);
                     }
@@ -393,8 +574,17 @@ impl Supervisor {
                 },
             }
         }
-        drop((out.reader.take(), err.reader.take()));
-        let expiry = ending.map(|(_, expiry)| expiry);
+        drop((self.out.reader.take(), self.err.reader.take()));
+        if self.exit.is_none() {
+            self.exit = Some((ExitFacts::default(), state::seams::now()));
+        }
+        self.exited();
+        if self.writing.is_some() {
+            self.write_failed();
+        }
+        self.stdin = None;
+        self.next_write();
+        let expiry = self.ending.map(|(_, expiry)| expiry);
         if !failure.is_empty() {
             self.report_start_failure(launch_failure(&failure));
             return;
@@ -407,39 +597,67 @@ impl Supervisor {
             ));
             return;
         }
-        let (facts, exited) = exit.unwrap_or_else(|| (ExitFacts::default(), state::seams::now()));
+        let state = self.state();
         let mut outcome = match expiry {
             Some(Expiry::Wait) => self.outcome(
                 HelperStatus::Error,
                 Some(exec::tool_error("timeout", "command timed out", None)),
-                facts,
+                state.exit.clone(),
             ),
-            _ => self.outcome(HelperStatus::Success, None, facts),
+            _ => self.outcome(HelperStatus::Success, None, state.exit.clone()),
         };
-        let run = exited.saturating_sub(start.unwrap_or(exited));
-        outcome.timed_out = expiry.is_some();
-        outcome.duration = run;
-        outcome.metrics = Some(self.metrics(run));
-        self.report(ReportPhase::Terminal, outcome, &out.capture, &err.capture);
-        for (log, stream) in [
-            (&self.spec.files.stdout, &out),
-            (&self.spec.files.stderr, &err),
+        outcome.timed_out = state.timed_out;
+        outcome.duration = state.duration;
+        outcome.metrics = Some(self.metrics(state.duration));
+        let (out, err) = (
+            std::mem::take(&mut self.out.capture),
+            std::mem::take(&mut self.err.capture),
+        );
+        self.report(ReportPhase::Terminal, outcome, &out, &err);
+        for (log, stream, capture) in [
+            (&self.spec.files.stdout, &self.out, &out),
+            (&self.spec.files.stderr, &self.err, &err),
         ] {
-            if !stream.log_failed && log.finish(&stream.capture.stored_text()).is_err() {
+            if !stream.log_failed && log.finish(&capture.stored_text()).is_err() {
                 output_write_failed();
             }
+        }
+        self.out.capture = out;
+        self.err.capture = err;
+        self.ended = Some(state);
+    }
+
+    /// The task as a reply reports it now.
+    fn state(&self) -> State {
+        if let Some(ended) = &self.ended {
+            return ended.clone();
+        }
+        let now = state::seams::now();
+        match &self.exit {
+            Some((facts, at)) => State {
+                ended: true,
+                exit: facts.clone(),
+                timed_out: matches!(self.ending, Some((_, Expiry::Wait | Expiry::Lifetime))),
+                duration: at.saturating_sub(self.start.unwrap_or(*at)),
+            },
+            None => State {
+                ended: false,
+                exit: ExitFacts::default(),
+                timed_out: false,
+                duration: self
+                    .start
+                    .map_or(Duration::ZERO, |start| now.saturating_sub(start)),
+            },
         }
     }
 
     /// The `running` report at the end of a `detach` initial wait, from both
     /// streams' windows.
-    fn report_running(
-        &mut self,
-        start: Duration,
-        stdout: &mut StreamCapture,
-        stderr: &mut StreamCapture,
-    ) {
-        let (stdout, stderr) = (stdout.take_window(), stderr.take_window());
+    fn report_running(&mut self, start: Duration) {
+        let (stdout, stderr) = (
+            self.out.capture.take_window(),
+            self.err.capture.take_window(),
+        );
         let mut outcome = self.outcome(HelperStatus::Running, None, ExitFacts::default());
         outcome.duration = state::seams::now().saturating_sub(start);
         outcome.metrics = None;
@@ -450,6 +668,7 @@ impl Supervisor {
     /// metrics of a command that never ran.
     fn outcome(&self, status: HelperStatus, error: Option<ToolError>, exit: ExitFacts) -> Outcome {
         Outcome {
+            tool: HelperTool::ExecCommand,
             task_id: self.spec.correlation.task_id.clone(),
             status,
             error,
@@ -459,12 +678,12 @@ impl Supervisor {
             stderr: exec::empty_stream(),
             duration: Duration::ZERO,
             metrics: Some(self.metrics(Duration::ZERO)),
+            written_bytes: None,
         }
     }
 
     /// Renders both streams with the task's limits into `outcome`, fits the
-    /// report and hands it to the outbox; the cleanup waits for a
-    /// `terminal` report's outcome.
+    /// report and hands it to the outbox.
     fn report(
         &mut self,
         phase: ReportPhase,
@@ -494,33 +713,398 @@ impl Supervisor {
                 visible_lines: limits.lines,
             },
         );
-        let id = self.submit(report.body);
-        if phase == ReportPhase::Terminal {
-            self.awaited.insert(id);
-        }
+        self.submit(
+            report.correlation,
+            &self.spec.connection_id.clone(),
+            self.spec.traceparent.clone(),
+            report.body,
+        );
     }
 
-    fn submit(&self, body: Body) -> ReportId {
-        let report = Report {
-            correlation: self.spec.correlation.clone(),
-            body,
-        };
-        let mut submission = report.submission(self.spec.connection_id.clone());
-        submission.traceparent = self.spec.traceparent.clone();
+    /// Hands a report to the outbox; the cleanup waits for its outcome.
+    fn submit(
+        &mut self,
+        correlation: Correlation,
+        connection_id: &Id,
+        traceparent: Option<String>,
+        body: Body,
+    ) {
+        let report = Report { correlation, body };
+        let mut submission = report.submission(connection_id.clone());
+        submission.traceparent = traceparent;
         submission.listener = Some(self.listener.clone());
-        self.context.reports.submit(submission)
+        let id = self.context.reports.submit(submission);
+        self.awaited.insert(id);
     }
 
     /// The metrics of a report built now, for a command that ran for `run`.
     fn metrics(&self, run: Duration) -> Metrics {
         let now = state::seams::now();
+        let left_queue = self.left_queue.unwrap_or(now);
         Metrics {
             wall_time_ms: exec::millis(now.saturating_sub(self.spec.received)),
-            queued_ms: exec::millis(self.left_queue.saturating_sub(self.spec.received)),
+            queued_ms: exec::millis(left_queue.saturating_sub(self.spec.received)),
             drive_wait_ms: exec::millis(Duration::ZERO),
             run_ms: exec::millis(run),
             sync_ms: exec::millis(Duration::ZERO),
         }
+    }
+
+    /// The shell's exit has been observed: every waiting reply is made.
+    fn exited(&mut self) {
+        for waiter in std::mem::take(&mut self.waiters) {
+            self.reply_waiter(waiter);
+        }
+    }
+
+    /// New output ends every waiting read.
+    fn output_arrived(&mut self) {
+        state::seams::count(OUTPUT_READ);
+        let (reads, writes) = std::mem::take(&mut self.waiters)
+            .into_iter()
+            .partition(|waiter| waiter.written.is_none());
+        self.waiters = writes;
+        for waiter in reads {
+            self.reply_waiter(waiter);
+        }
+    }
+
+    fn reply_due(&self) -> Duration {
+        self.waiters
+            .iter()
+            .map(|waiter| waiter.deadline)
+            .min()
+            .unwrap_or(Duration::MAX)
+    }
+
+    fn expire_waiters(&mut self) {
+        let now = state::seams::now();
+        let (due, waiting) = std::mem::take(&mut self.waiters)
+            .into_iter()
+            .partition(|waiter| waiter.deadline <= now);
+        self.waiters = waiting;
+        for waiter in due {
+            self.reply_waiter(waiter);
+        }
+    }
+
+    /// A `tool.stdin`: a read replies at once when a window holds output or
+    /// the task has ended, else waits; a write joins the task's writes.
+    fn stdin(&mut self, control: Control<StdinPayload>) {
+        match Request::of(&control.payload) {
+            Request::Read { wait } => {
+                if self.cleaned {
+                    self.control_error(
+                        &control,
+                        ControlErrorCode::ResultUnavailable,
+                        "the task's output is no longer kept",
+                    );
+                } else if self.state().ended
+                    || self.out.capture.window_has_output()
+                    || self.err.capture.window_has_output()
+                    || wait.is_zero()
+                {
+                    self.reply_window(&control, None);
+                } else {
+                    self.wait_reply(control, wait, None);
+                }
+            }
+            Request::Write { .. } => {
+                self.writes.push_back(control);
+                if self.process.is_some() || self.ended.is_some() {
+                    self.next_write();
+                }
+            }
+        }
+    }
+
+    fn wait_reply(&mut self, control: Control<StdinPayload>, wait: Duration, written: Option<u64>) {
+        self.waiters.push(Waiter {
+            control,
+            deadline: state::seams::now() + wait,
+            written,
+        });
+        state::seams::count(REPLY_WAITING);
+    }
+
+    /// Handles the queued writes in arrival order until one has to be
+    /// written to the pipe.
+    fn next_write(&mut self) {
+        while self.writing.is_none() {
+            let Some(control) = self.writes.pop_front() else {
+                return;
+            };
+            let Request::Write {
+                write_seq,
+                chars,
+                digest,
+                wait,
+            } = Request::of(&control.payload)
+            else {
+                continue;
+            };
+            let check = self.records.check(write_seq, &digest);
+            if self.cleaned && !matches!(check, Check::Repeat(_)) {
+                self.control_error(
+                    &control,
+                    ControlErrorCode::ResultUnavailable,
+                    "the task's output is no longer kept",
+                );
+                continue;
+            }
+            match check {
+                Check::Conflict => self.control_error(
+                    &control,
+                    ControlErrorCode::WriteConflict,
+                    "write_seq names a recorded write with other chars",
+                ),
+                Check::Stale => self.control_error(
+                    &control,
+                    ControlErrorCode::InvalidInput,
+                    "write_seq is at or below the task's highest recorded write and matches none",
+                ),
+                Check::Repeat(record) => self.reply_repeat(&control, record),
+                Check::New if self.state().ended || self.stdin.is_none() => {
+                    self.records
+                        .record(write_seq, digest, 0, Some(ControlErrorCode::StdinClosed));
+                    self.reply_closed(&control, 0);
+                }
+                Check::New if chars == stdin::INTERRUPT => {
+                    if let Some(process) = &self.process {
+                        terminate::interrupt(process.pid);
+                    }
+                    self.records.record(write_seq, digest, 0, None);
+                    self.wait_reply(control, wait, Some(0));
+                }
+                Check::New => {
+                    self.writing = Some(Writing {
+                        control,
+                        write_seq,
+                        digest,
+                        wait,
+                        offset: 0,
+                        deadline: state::seams::now() + self.context.bounds.stdin_write,
+                    });
+                    state::seams::count(WRITE_STARTED);
+                }
+            }
+        }
+    }
+
+    /// What one write to the pipe gave.
+    fn wrote(&mut self, written: std::io::Result<usize>) {
+        let Some(writing) = &mut self.writing else {
+            return;
+        };
+        match written {
+            Ok(count) if count > 0 => {
+                writing.offset += count;
+                if writing.offset < writing.control.payload.chars.len() {
+                    return;
+                }
+                let writing = self.writing.take().expect("a write in progress");
+                let written = writing.offset as u64;
+                self.records
+                    .record(writing.write_seq, writing.digest, written, None);
+                self.wait_reply(writing.control, writing.wait, Some(written));
+                self.next_write();
+            }
+            _ => self.write_failed(),
+        }
+    }
+
+    /// A write that failed or timed out: the task's stdin closes for good
+    /// and the write ends `stdin_closed` with the bytes written so far.
+    fn write_failed(&mut self) {
+        self.stdin = None;
+        let Some(writing) = self.writing.take() else {
+            return;
+        };
+        let written = writing.offset as u64;
+        self.records.record(
+            writing.write_seq,
+            writing.digest,
+            written,
+            Some(ControlErrorCode::StdinClosed),
+        );
+        self.reply_closed(&writing.control, written);
+        self.next_write();
+    }
+
+    /// A reply's result for `tool`, with the task's state and empty streams.
+    fn reply_outcome(&self, tool: HelperTool, status: HelperStatus, state: &State) -> Outcome {
+        Outcome {
+            tool,
+            task_id: self.spec.correlation.task_id.clone(),
+            status,
+            error: None,
+            exit: if state.ended {
+                state.exit.clone()
+            } else {
+                ExitFacts::default()
+            },
+            timed_out: state.ended && state.timed_out,
+            stdout: exec::empty_stream(),
+            stderr: exec::empty_stream(),
+            duration: state.duration,
+            metrics: None,
+            written_bytes: None,
+        }
+    }
+
+    fn reply_waiter(&mut self, waiter: Waiter) {
+        self.reply_window(&waiter.control, waiter.written);
+    }
+
+    /// A `stdin` reply with both streams' windows: `running` while the task
+    /// runs, `success` with its exit facts once it has ended.
+    fn reply_window(&mut self, control: &Control<StdinPayload>, written: Option<u64>) {
+        let state = self.state();
+        let status = if state.ended {
+            HelperStatus::Success
+        } else {
+            HelperStatus::Running
+        };
+        let mut outcome = self.reply_outcome(HelperTool::Stdin, status, &state);
+        outcome.written_bytes = written;
+        let limits = Visible::requested(control.payload.limits.as_ref());
+        let (stdout, stderr) = (
+            self.out.capture.take_window(),
+            self.err.capture.take_window(),
+        );
+        self.reply(control, outcome, &stdout, &stderr, limits, None);
+    }
+
+    /// A write that ended `stdin_closed`: the result, with the bytes
+    /// written, and the error when bytes were written or the task has
+    /// ended; otherwise only the error.
+    fn reply_closed(&mut self, control: &Control<StdinPayload>, written: u64) {
+        let state = self.state();
+        if written == 0 && !state.ended {
+            self.control_error(control, ControlErrorCode::StdinClosed, STDIN_CLOSED);
+            return;
+        }
+        let mut outcome = self.reply_outcome(HelperTool::Stdin, HelperStatus::Error, &state);
+        outcome.error = Some(exec::tool_error("stdin_closed", STDIN_CLOSED, None));
+        outcome.written_bytes = Some(written);
+        let limits = Visible::requested(control.payload.limits.as_ref());
+        let (stdout, stderr) = (
+            self.out.capture.take_window(),
+            self.err.capture.take_window(),
+        );
+        self.reply(
+            control,
+            outcome,
+            &stdout,
+            &stderr,
+            limits,
+            Some(closed_error()),
+        );
+    }
+
+    /// A write repeated with its recorded content: a new reply with the
+    /// recorded outcome and the task's current state, reading no output.
+    fn reply_repeat(&mut self, control: &Control<StdinPayload>, record: stdin::WriteRecord) {
+        let state = self.state();
+        let closed = record.error == Some(ControlErrorCode::StdinClosed);
+        let status = match (closed, state.ended) {
+            (true, _) => HelperStatus::Error,
+            (false, true) => HelperStatus::Success,
+            (false, false) => HelperStatus::Running,
+        };
+        let mut outcome = self.reply_outcome(HelperTool::Stdin, status, &state);
+        outcome.written_bytes = Some(record.written_bytes);
+        if closed {
+            outcome.error = Some(exec::tool_error("stdin_closed", STDIN_CLOSED, None));
+        }
+        let limits = Visible::requested(control.payload.limits.as_ref());
+        let (stdout, stderr) = if self.cleaned {
+            (Counters(self.kept.0.clone()), Counters(self.kept.1.clone()))
+        } else {
+            (
+                Counters(self.out.capture.counters()),
+                Counters(self.err.capture.counters()),
+            )
+        };
+        let error = closed.then(closed_error);
+        self.reply(control, outcome, &stdout, &stderr, limits, error);
+    }
+
+    fn control_error(
+        &mut self,
+        control: &Control<StdinPayload>,
+        code: ControlErrorCode,
+        message: &str,
+    ) {
+        self.submit(
+            control.correlation.clone(),
+            &control.connection_id,
+            control.traceparent.clone(),
+            Body::Control {
+                result: None,
+                error: Some(ProtocolError {
+                    code,
+                    message: message.to_owned(),
+                }),
+            },
+        );
+    }
+
+    /// Renders both streams with the control's limits into `outcome`, fits
+    /// the reply and hands it to the outbox.
+    fn reply<P>(
+        &mut self,
+        control: &Control<P>,
+        mut outcome: Outcome,
+        stdout: &dyn StreamOutput,
+        stderr: &dyn StreamOutput,
+        limits: Visible,
+        error: Option<ProtocolError<ControlErrorCode>>,
+    ) {
+        outcome.stdout = stdout.snapshot(limits.bytes, limits.lines);
+        outcome.stderr = stderr.snapshot(limits.bytes, limits.lines);
+        let mut report = Report {
+            correlation: control.correlation.clone(),
+            body: Body::Control {
+                result: Some(Box::new(report::bounded(
+                    outcome.envelope(),
+                    ErrorBounds::default(),
+                ))),
+                error,
+            },
+        };
+        report::fit(
+            &mut report,
+            &control.connection_id,
+            &Rendering {
+                stdout,
+                stderr,
+                visible_bytes: limits.bytes,
+                visible_lines: limits.lines,
+            },
+        );
+        self.submit(
+            report.correlation,
+            &control.connection_id,
+            control.traceparent.clone(),
+            report.body,
+        );
+    }
+}
+
+fn closed_error() -> ProtocolError<ControlErrorCode> {
+    ProtocolError {
+        code: ControlErrorCode::StdinClosed,
+        message: STDIN_CLOSED.to_owned(),
+    }
+}
+
+/// Streams that a reply reports by their counters alone.
+struct Counters(StreamSnapshot);
+
+impl StreamOutput for Counters {
+    fn snapshot(&self, _visible_bytes: usize, _visible_lines: usize) -> StreamSnapshot {
+        self.0.clone()
     }
 }
 
@@ -555,8 +1139,34 @@ async fn initial_wait(ends: Duration, started: bool) {
     }
 }
 
+async fn wait_child(process: Option<&mut Process>) -> std::io::Result<std::process::ExitStatus> {
+    match process {
+        Some(process) => process.child.wait().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// One write to the task's stdin of what is left of the write in progress.
+/// A write that another branch overtakes has written nothing.
+async fn write_some(
+    stdin: &mut Option<ChildStdin>,
+    writing: Option<&Writing>,
+) -> std::io::Result<usize> {
+    match (stdin, writing) {
+        (Some(stdin), Some(writing)) => {
+            stdin
+                .write(&writing.control.payload.chars.as_bytes()[writing.offset..])
+                .await
+        }
+        _ => std::future::pending().await,
+    }
+}
+
 /// The next bytes of `pipe`, or `None` at its end.
-async fn read_some(pipe: &mut Receiver) -> Option<Vec<u8>> {
+async fn read_some(pipe: Option<&mut Receiver>) -> Option<Vec<u8>> {
+    let Some(pipe) = pipe else {
+        return std::future::pending().await;
+    };
     let mut buffer = [0u8; 4_096];
     match pipe.read(&mut buffer).await {
         Ok(0) | Err(_) => None,
@@ -594,10 +1204,14 @@ impl Stream {
         }
     }
 
-    /// Keeps what a read gave; the pipe's end, or an error, closes it.
-    fn take(&mut self, read: std::io::Result<usize>, log: &mut Log) {
+    /// Keeps what a read gave, telling whether it gave bytes; the pipe's
+    /// end, or an error, closes it.
+    fn take(&mut self, read: std::io::Result<usize>, log: &mut Log) -> bool {
         match read {
-            Ok(0) | Err(_) => self.reader = None,
+            Ok(0) | Err(_) => {
+                self.reader = None;
+                false
+            }
             Ok(count) => {
                 let bytes = &self.buffer[..count];
                 self.capture.write(bytes);
@@ -605,6 +1219,7 @@ impl Stream {
                     self.log_failed = true;
                     output_write_failed();
                 }
+                true
             }
         }
     }

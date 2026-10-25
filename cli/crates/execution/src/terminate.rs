@@ -77,6 +77,12 @@ impl Termination {
     }
 }
 
+/// Sends SIGINT to the task whose launched process is `pid`, as [`Termination::begin`]
+/// sends SIGTERM.
+pub fn interrupt(pid: u32) {
+    signal_task(pid, Signal::INT);
+}
+
 fn group(pid: u32) -> Option<Pid> {
     i32::try_from(pid).ok().and_then(Pid::from_raw)
 }

@@ -78,10 +78,26 @@ which owns that task's process tree; the translation of a call's
   until its Session binding owner starts it, `starting` while it checks the
   isolation, creates the task's files and launches the command, `running`
   from the command's actual start, `ended` with its `terminal` report and
-  `cleaned` once that report is acknowledged or dropped and the files are
-  gone. It reads both pipes all the time into the
-  capture and the logs, so no command blocks on its output, and every wait
-  reads the seam clock (`supervisor`).
+  `cleaned` once every report of the task, control replies included, is
+  acknowledged or dropped and the files are gone; a cleaned task keeps only
+  its streams' counters, its exit facts and its write records. It reads both
+  pipes all the time into the capture and the logs, so no command blocks on
+  its output, and every wait reads the seam clock (`supervisor`).
+- The supervisor answers the task's `tool.stdin` in every state but
+  `staged`, where they wait for the start; each waiting reply is a timer and a waiter of the
+  supervisor, which meanwhile keeps reading output and handling the exit and
+  other controls (`supervisor`).
+- A read replies at once when a window holds output or the task has ended,
+  otherwise at the first new output, the exit or the end of its wait; a
+  write's reply waits its wait, ending early only at the exit. Both take
+  their waits' defaults and clamps from `stdin::Request`.
+- A task's writes are handled one at a time in arrival order. Each
+  `write_seq` is recorded with the SHA-256 of its `chars`, the bytes
+  written and its error before its reply, so that a repeat reuses the
+  record and never writes again (`stdin::WriteRecords`). A write that fails
+  or outlasts `WRITE_TIMEOUT` closes the task's stdin for good; `chars` of
+  exactly U+0003 send SIGINT the way the termination procedure sends SIGTERM
+  (`terminate::interrupt`).
 - `exec_command` runs as `tetral __tetral-task exec <directory> <shell>
   <cmd>` through the restricted path; inside the sandbox the launcher entry
   checks and enters the directory, with no fallback, and executes
@@ -106,15 +122,18 @@ which owns that task's process tree; the translation of a call's
 ## Where things are
 
 - `supervisor.rs`: `spawn`, a task's `TaskSpec`, the shared `Context` and
-  its `Bounds`, `SupervisorMessage` and `SupervisorMailbox`; the start, the
-  running loop and the reports.
+  its `Bounds`, `SupervisorMessage`, `Control` and `SupervisorMailbox`; the
+  start, the running loop, the reports, the controls with their waiters and
+  replies, and the cleanup.
+- `stdin.rs`: `Request`, what a `tool.stdin` asks for with its wait, and
+  `WriteRecords`, a task's handled writes.
 - `exec.rs`: `ExecCall`, a call's directory, waits and expiry; `shell`;
   `ExitFacts`; `Outcome`, the result envelope of a report.
 - `env.rs`: `command_environment`.
 - `child/mod.rs`, `child/exec.rs`: the launcher entry `__tetral-task` and its
   `exec` kind.
-- `terminate.rs`: `Termination`, its `Steps`, and on Linux the PID
-  namespace's first process.
+- `terminate.rs`: `Termination`, its `Steps`, `interrupt`, and on Linux the
+  PID namespace's first process.
 - `policy/mod.rs`: `TaskPermissions`, a task's stored permissions, and
   `PolicyRejection`.
 - `policy/validate.rs`: the validation steps, path normalization and the

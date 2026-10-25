@@ -74,6 +74,23 @@ impl StreamCapture {
         }
     }
 
+    /// Whether output has been written since the last window was taken.
+    pub fn window_has_output(&self) -> bool {
+        self.window.written > 0
+    }
+
+    /// A snapshot with no text that carries the stream's counters, for a
+    /// reply that reads no output.
+    pub fn counters(&self) -> StreamSnapshot {
+        StreamSnapshot {
+            text: String::new(),
+            total_bytes: Count::saturating(self.totals.bytes),
+            total_lines: Count::saturating(self.totals.lines),
+            returned_bytes: Count::saturating(0),
+            truncated: false,
+        }
+    }
+
     /// Everything the cumulative capture keeps, head, marker and tail, with no
     /// visible limit: the text a task's log holds once the task has ended.
     pub fn stored_text(&self) -> String {
