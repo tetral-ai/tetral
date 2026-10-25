@@ -41,8 +41,8 @@ Error bodies:
 
 ## Instance routes
 
-`POST /v1/instances`, `GET /v1/instances`, `GET /v1/instances/{instance_id}`,
-`DELETE /v1/instances/{instance_id}`, and
+`POST /v1/instances`, `GET /v1/instances`, `GET /v1/instances/stream`,
+`GET /v1/instances/{instance_id}`, `DELETE /v1/instances/{instance_id}`, and
 `POST|GET /v1/instances/{instance_id}/credentials` and
 `DELETE /v1/instances/{instance_id}/credentials/{credential_id}` run under the
 operations `instances.*` and `instance_credentials.*`.
@@ -79,6 +79,16 @@ operations `instances.*` and `instance_credentials.*`.
   failure than the ones above is a database failure, `503` with nothing
   changed. The key appears only in the first successful issuance response;
   nothing logs a request or response body.
+- `GET /v1/instances/stream` answers SSE: `event: credential_reused` or
+  `event: unused`, `data:` the instance object. A writer that produces an
+  event calls `instance.NotifyInstanceEvent` in its transaction
+  (`pg_notify` on `tetral_hub_instance_events`); every pod listens on that
+  channel (`InstanceEvents.Run`, reconnecting after a failure, which writes
+  `instance_events.listener_disconnected`), reads the instance object of each
+  notice and queues the event for its own subscribers in that workspace.
+  Delivery is best effort: a subscriber more than 64 events behind is closed,
+  a reconnecting subscriber gets no backlog, and every stream ends at
+  shutdown.
 - Each issued or revoked credential writes one `instance_credential_audit`
   record (`log.type` `audit`) after the commit, with the actor's credential
   kind and ID, `instance.id`, `credential.id` and `operation` `issue` or
@@ -112,7 +122,8 @@ redacted startup record. Shutdown drains both listeners within 10 seconds.
 - `ConfigFromEnv` parses every `TETRAL_COMPUTER_HUB_*` setting and the
   principal key.
 - `NewRouter(verifier, ...)` is the public route table with its class checks;
-  `WithInstanceRoutes` serves the instance routes over a database client;
+  `WithInstanceRoutes` serves the instance routes over a database client and
+  an `InstanceEvents` fan-out, which `Run` starts;
   `BuildHTTPHandler` adds health and readiness. Tests mint principals with
   `auth.InternalPrincipalSigner` and send them here directly.
 - `Run(ctx, cfg, Runtime)` serves the two listeners over a verified database
@@ -129,6 +140,8 @@ redacted startup record. Shutdown drains both listeners within 10 seconds.
   idempotency rows, logs or audit records; the states and fields of instance
   and credential reads; repeated revocation and deregistration; expiry bounds
   and an omitted expiry resolved once; paging 101 instances.
+- `instance_stream_test.go`: two streams in two workspaces each receive only
+  their own workspace's noticed event.
 - `integration/computer_hub_credential_class_test.go`: each credential class on
   the other class's routes, through `auth`'s Check and a Go edge with the
   production route rules, and straight at the hub with principals Check never
@@ -142,5 +155,6 @@ redacted startup record. Shutdown drains both listeners within 10 seconds.
 The service records through `internal/workload` with the shared HTTP request
 records and metrics, the cold start of a service pod, and the `auth.*`
 decision records of the signed principal and the operation gate, and the
-`instance_credential_audit` record, declared in
+`instance_credential_audit` record and the instance event listener's
+disconnect record, declared in
 [`observability.json`](observability.json).

@@ -43,6 +43,7 @@ const (
 	OperationInstancesDelete             Operation = "instances.delete"
 	OperationInstancesList               Operation = "instances.list"
 	OperationInstancesRead               Operation = "instances.read"
+	OperationInstancesStream             Operation = "instances.stream"
 	OperationMemoriesCreate              Operation = "memories.create"
 	OperationMemoriesDelete              Operation = "memories.delete"
 	OperationMemoriesList                Operation = "memories.list"
@@ -134,6 +135,7 @@ var registeredOperations = []Operation{
 	OperationInstancesDelete,
 	OperationInstancesList,
 	OperationInstancesRead,
+	OperationInstancesStream,
 	OperationMemoriesCreate,
 	OperationMemoriesDelete,
 	OperationMemoriesList,
@@ -218,6 +220,7 @@ var operationRoutes = []OperationRoute{
 	{"GET", "/v1/files/{file_id}", OperationFilesRead},
 	{"GET", "/v1/files/{file_id}/content", OperationFilesContentRead},
 	{"GET", "/v1/instances", OperationInstancesList},
+	{"GET", "/v1/instances/stream", OperationInstancesStream},
 	{"GET", "/v1/instances/{instance_id}", OperationInstancesRead},
 	{"GET", "/v1/instances/{instance_id}/credentials", OperationInstanceCredentialsList},
 	{"GET", "/v1/memory_stores", OperationMemoryStoresList},

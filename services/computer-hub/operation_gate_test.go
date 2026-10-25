@@ -22,6 +22,7 @@ func TestInstanceRoutesRequireTheirOwnOperations(t *testing.T) {
 	}{
 		{http.MethodPost, "/v1/instances", "instances.create"},
 		{http.MethodGet, "/v1/instances", "instances.list"},
+		{http.MethodGet, "/v1/instances/stream", "instances.stream"},
 		{http.MethodGet, "/v1/instances/inst_absent", "instances.read"},
 		{http.MethodDelete, "/v1/instances/inst_absent", "instances.delete"},
 		{http.MethodPost, "/v1/instances/inst_absent/credentials", "instance_credentials.create"},

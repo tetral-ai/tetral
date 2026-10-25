@@ -41,6 +41,7 @@ type hubFixture struct {
 	signer    *auth.InternalPrincipalSigner
 	principal auth.Principal
 	logs      *lockedBuffer
+	events    *InstanceEvents
 	// recordStatements counts the statements that name the idempotency
 	// records table.
 	recordStatements atomic.Int64
@@ -76,10 +77,14 @@ func newHubFixture(t *testing.T, maxLifetime time.Duration) *hubFixture {
 		t.Fatal(err)
 	}
 	logger := workload.NewProcessLogger(f.logs, ServiceName, "test", "test", workload.DefaultDiagnosticConfig()).Logger
+	client := dbconnect.NewClientForTesting(hubDB)
+	f.events = NewInstanceEvents(client, logger)
+	go func() { _ = f.events.Run(ctx) }()
 	router := NewRouter(verifier, WithLogger(logger), WithInstanceRoutes(InstanceRoutes{
-		Database:              dbconnect.NewClientForTesting(hubDB),
+		Database:              client,
 		MaxCredentialLifetime: maxLifetime,
 		PageTokenKey:          bytes.Repeat([]byte{7}, 32),
+		Events:                f.events,
 	}))
 	server := httptest.NewServer(BuildHTTPHandler(workload.NewReadiness(), router))
 	t.Cleanup(server.Close)

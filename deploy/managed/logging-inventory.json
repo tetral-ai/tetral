@@ -3834,6 +3834,23 @@
             "workspace.id": "string"
           }
         },
+        "instance_events.listener_disconnected": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string"
+          },
+          "errors": {
+            "notification_listener_disconnected": {
+              "class": "dependency_unavailable",
+              "message_safe": "instance event listener disconnected"
+            }
+          }
+        },
         "schema.migration.completed": {
           "level": "INFO",
           "log_type": "app",

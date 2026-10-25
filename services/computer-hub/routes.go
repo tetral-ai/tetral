@@ -56,7 +56,7 @@ func NewRouter(verifier *auth.InternalPrincipalVerifier, opts ...RouterOption) h
 	}
 	router := chi.NewRouter()
 	router.Use(httpapi.RequestIDMiddleware)
-	router.Use(httpapi.RequestLogMiddleware(options.logger, httpapi.WithRequestLogMetrics(options.metrics)))
+	router.Use(httpapi.RequestLogMiddleware(options.logger, httpapi.WithRequestLogMetrics(options.metrics), httpapi.WithLongRoutes(http.MethodGet+" "+routeInstanceStream)))
 	router.Use(httpapi.PublicRecoveryMiddleware(options.logger))
 	router.Group(func(r chi.Router) {
 		r.Use(principalMiddleware(verifier, writeClientPrincipalError))

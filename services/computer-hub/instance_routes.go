@@ -22,11 +22,12 @@ import (
 )
 
 // InstanceRoutes is what the instance routes need: the serving database
-// client and the two settings they apply.
+// client, the two settings they apply and the pod's instance event fan-out.
 type InstanceRoutes struct {
 	Database              *dbconnect.Client
 	MaxCredentialLifetime time.Duration
 	PageTokenKey          []byte
+	Events                *InstanceEvents
 }
 
 const (
@@ -51,6 +52,7 @@ func (h *instanceHandler) register(r chi.Router) {
 	}{
 		{http.MethodPost, routeInstances, h.createInstance},
 		{http.MethodGet, routeInstances, h.listInstances},
+		{http.MethodGet, routeInstanceStream, h.streamInstances},
 		{http.MethodGet, routeInstance, h.readInstance},
 		{http.MethodDelete, routeInstance, h.deregisterInstance},
 		{http.MethodPost, routeInstanceCredentials, h.issueCredential},
