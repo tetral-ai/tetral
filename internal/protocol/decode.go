@@ -419,6 +419,13 @@ func stringSize(s string) int {
 // failure, after which every step is a no-op.
 type decoder struct {
 	err error
+	// unreadable holds the query parameters given more than once or with a
+	// value that is not UTF-8: reading one fails, and one that the definition
+	// does not model is never read.
+	unreadable map[*value]string
+	// unreadableErr is the first such read, recorded even after another
+	// failure: that rule comes first, so its failure is the one returned.
+	unreadableErr error
 }
 
 func (d *decoder) failed() bool { return d.err != nil }
@@ -459,14 +466,25 @@ func (d *decoder) object(ptr string, v *value) *object {
 // member returns the named member and its pointer, or nil when it is absent
 // or the decoder has failed.
 func (o *object) member(name string) (*value, string) {
-	if o.d.failed() {
+	if o.v == nil {
 		return nil, ""
 	}
 	for i, m := range o.v.members {
-		if m.key == name {
-			o.used[i] = true
-			return m.value, pointer(o.ptr, name)
+		if m.key != name {
+			continue
 		}
+		if reason, ok := o.d.unreadable[m.value]; ok {
+			if o.d.unreadableErr == nil {
+				o.d.unreadableErr = invalid(pointer(o.ptr, name), reason)
+			}
+			o.d.fail(pointer(o.ptr, name), "%s", reason)
+			return nil, ""
+		}
+		if o.d.failed() {
+			return nil, ""
+		}
+		o.used[i] = true
+		return m.value, pointer(o.ptr, name)
 	}
 	return nil, ""
 }
@@ -586,6 +604,15 @@ func minLength(n int) stringCheck {
 	}
 }
 
+func maxLength(n int) stringCheck {
+	return func(s string) string {
+		if utf8.RuneCountInString(s) > n {
+			return fmt.Sprintf("longer than %d characters", n)
+		}
+		return ""
+	}
+}
+
 // noNUL is the pattern ^[^\u0000]+$ less its nonempty part.
 func noNUL(s string) string {
 	if strings.ContainsRune(s, 0) {
@@ -604,6 +631,17 @@ func absolutePath(s string) string {
 	}
 	return noNUL(s)
 }
+
+func lowerHex(n int) stringCheck {
+	return func(s string) string {
+		if len(s) != n || strings.Trim(s, "0123456789abcdef") != "" {
+			return fmt.Sprintf("not %d lowercase hexadecimal digits", n)
+		}
+		return ""
+	}
+}
+
+var sha256Hex = stringWith(lowerHex(64))
 
 // isECMASpace is \s of the ECMAScript regular expressions that JSON Schema
 // patterns use.
@@ -632,6 +670,8 @@ func checkEnum(d *decoder, ptr, s string, values ...string) {
 		d.fail(ptr, "%q is not one of %q", s, values)
 	}
 }
+
+func constString(want string) decodeFunc[string] { return enum(want) }
 
 func boolean(d *decoder, ptr string, v *value) bool {
 	if d.failed() {
@@ -829,4 +869,47 @@ func integerTokens[T any](check func(T, *value) error, names ...string) func(T, 
 		}
 		return check(out, v)
 	}
+}
+
+// decodeParameters decodes query parameters as the object of strings the
+// schema's definition models.
+func decodeParameters[T any](params map[string][]string, f decodeFunc[T]) (T, error) {
+	var zero T
+	names := make([]string, 0, len(params))
+	for name := range params {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	v := &value{kind: kindObject}
+	d := &decoder{unreadable: map[*value]string{}}
+	for _, name := range names {
+		values := params[name]
+		if len(values) == 0 {
+			continue
+		}
+		item := &value{kind: kindString, text: values[0]}
+		if len(values) > 1 {
+			d.unreadable[item] = "given more than once"
+		} else if !utf8.ValidString(values[0]) {
+			d.unreadable[item] = "invalid UTF-8"
+		}
+		v.members = append(v.members, member{key: name, value: item})
+	}
+	out := f(d, "", v)
+	if d.unreadableErr != nil {
+		return zero, d.unreadableErr
+	}
+	if d.err != nil {
+		return zero, d.err
+	}
+	return out, nil
+}
+
+// singleValues gives each parameter of params its one value.
+func singleValues(params map[string]string) map[string][]string {
+	values := make(map[string][]string, len(params))
+	for name, v := range params {
+		values[name] = []string{v}
+	}
+	return values
 }

@@ -3,6 +3,7 @@ package protocol
 import (
 	"fmt"
 	"net/http"
+	"slices"
 )
 
 // ErrorCode is a code of the client error table, the codes every
@@ -33,6 +34,42 @@ const (
 	ErrorRangeNotSatisfiable      ErrorCode = "range_not_satisfiable"
 	ErrorRateLimited              ErrorCode = "rate_limited"
 )
+
+// ClientErrors maps each code of the client error table to the HTTP status
+// it is sent with.
+var ClientErrors = map[ErrorCode]int{
+	ErrorInvalidMessage:           http.StatusBadRequest,
+	ErrorContentHashMismatch:      http.StatusBadRequest,
+	ErrorCredentialInvalid:        http.StatusUnauthorized,
+	ErrorCredentialExpired:        http.StatusUnauthorized,
+	ErrorCredentialRevoked:        http.StatusUnauthorized,
+	ErrorInstanceUnavailable:      http.StatusForbidden,
+	ErrorCLIUpgradeRequired:       http.StatusForbidden,
+	ErrorDriveAccessDenied:        http.StatusForbidden,
+	ErrorNotFound:                 http.StatusNotFound,
+	ErrorContentNotFound:          http.StatusNotFound,
+	ErrorConnectionConflict:       http.StatusConflict,
+	ErrorPreviousConnectionActive: http.StatusConflict,
+	ErrorStaleConnection:          http.StatusConflict,
+	ErrorStaleBinding:             http.StatusConflict,
+	ErrorContentMissing:           http.StatusConflict,
+	ErrorMessageConflict:          http.StatusConflict,
+	ErrorUnknownInstruction:       http.StatusConflict,
+	ErrorDriveCursorExpired:       http.StatusGone,
+	ErrorRequestTooLarge:          http.StatusRequestEntityTooLarge,
+	ErrorFileTooLarge:             http.StatusRequestEntityTooLarge,
+	ErrorRangeNotSatisfiable:      http.StatusRequestedRangeNotSatisfiable,
+	ErrorRateLimited:              http.StatusTooManyRequests,
+}
+
+func errorCodeNames() []string {
+	names := make([]string, 0, len(ClientErrors))
+	for code := range ClientErrors {
+		names = append(names, string(code))
+	}
+	slices.Sort(names)
+	return names
+}
 
 // DecodeError is a decoding failure: the JSON pointer of the first value that
 // fails and the answer computer-hub sends for it.

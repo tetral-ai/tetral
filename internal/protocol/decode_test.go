@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -30,6 +31,14 @@ func ordinaryReport(total int) []byte {
 	return []byte(strings.Replace(statusTemplate, "PAD", strings.Repeat("v", total-len(statusTemplate)+3), 1))
 }
 
+// escapedHeartbeat is a heartbeat of written bytes whose unknown member is
+// written as \u0061 escapes, six bytes for each one-byte character.
+func escapedHeartbeat(written int) []byte {
+	const template = `{"protocol_version":1,"connection_id":"conn","message_id":"hb","request_message_id":"msg_hb","heartbeat_seq":7,"padding":"PAD"}`
+	n := written - len(template) + 3
+	return []byte(strings.Replace(template, "PAD", strings.Repeat(`\u0061`, n/6)+strings.Repeat("a", n%6), 1))
+}
+
 // managedPolicy is a managed network policy with rules.
 func managedPolicy(rules string) []byte {
 	return []byte(`{"schema_version":1,"filesystem":{"rules":[]},"network":{"mode":"managed","rules":` + rules + `}}`)
@@ -43,6 +52,12 @@ func TestDecodingRulesBeyondTheFixtures(t *testing.T) {
 	tool := func(data []byte) func() error {
 		return func() error {
 			_, err := DecodeToolDownstream(data)
+			return err
+		}
+	}
+	events := func(query url.Values) func() error {
+		return func() error {
+			_, err := DecodeEventsQuery(query)
 			return err
 		}
 	}
@@ -148,6 +163,35 @@ func TestDecodingRulesBeyondTheFixtures(t *testing.T) {
 			name:    "a listen address with a zone",
 			decode:  sandbox(managedPolicy(`{"allow":[],"deny":[],"listen":[{"address":"fe80::1%a","transport":"tcp","ports":[{"from":8080,"to":8080}]}]}`)),
 			pointer: "/network/rules/listen/0/address",
+		},
+		{
+			name:    "a query parameter given twice",
+			decode:  events(url.Values{"protocol_version": {"1", "1"}, "instance_id": {"inst_1"}, "credential_id": {"ccred_1"}}),
+			pointer: "/protocol_version",
+		},
+		{
+			name:    "invalid UTF-8 in a query parameter",
+			decode:  events(url.Values{"protocol_version": {"1"}, "instance_id": {"inst_\xff"}, "credential_id": {"ccred_1"}}),
+			pointer: "/instance_id",
+		},
+		{
+			name:    "a query parameter given twice is reported before a value an earlier parameter breaks",
+			decode:  events(url.Values{"protocol_version": {"2"}, "instance_id": {"inst_1", "inst_2"}, "credential_id": {"ccred_1"}}),
+			pointer: "/instance_id",
+		},
+		{
+			name: "a query parameter the definition does not model, given twice and not in UTF-8, is not read",
+			check: func(t *testing.T) {
+				if _, err := DecodeEventsQuery(url.Values{"protocol_version": {"1"}, "instance_id": {"inst_1"}, "credential_id": {"ccred_1"}, "trace": {"\xff", "b"}}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:   "a heartbeat over 64 KiB as written, though not with its escapes undone",
+			decode: func() error { _, err := DecodeHeartbeat(escapedHeartbeat(DefaultMessageJSONBytes + 1)); return err },
+			status: http.StatusRequestEntityTooLarge,
+			code:   ErrorRequestTooLarge,
 		},
 	}
 	for _, test := range tests {

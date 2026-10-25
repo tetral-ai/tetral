@@ -151,6 +151,7 @@ func writeString(e *encoder, s string)               { e.str(s) }
 func writeInteger(e *encoder, n int64)               { e.integer(n) }
 func writeBool(e *encoder, b bool)                   { e.boolean(b) }
 func writeRaw(e *encoder, r RawObject)               { e.raw(r) }
+func writeStrings(e *encoder, items []string)        { e.strings(items) }
 func writeStringMap(e *encoder, m map[string]string) { e.stringMap(m) }
 func writeValue[T encodable](e *encoder, v T)        { v.encode(e) }
 func writeList[T encodable](e *encoder, items []T)   { list(e, items) }

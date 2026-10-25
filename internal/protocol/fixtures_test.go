@@ -16,10 +16,11 @@ import (
 
 // fixture is one entry of a protocol fixture file.
 type fixture struct {
-	Name   string          `json:"name"`
-	Schema string          `json:"schema"`
-	Valid  bool            `json:"valid"`
-	Value  json.RawMessage `json:"value"`
+	Name       string          `json:"name"`
+	Schema     string          `json:"schema"`
+	Valid      bool            `json:"valid"`
+	Value      json.RawMessage `json:"value"`
+	HTTPStatus int             `json:"http_status"`
 }
 
 // codec decodes one schema definition's fixtures through its exported
@@ -38,6 +39,37 @@ func jsonCodec[T encodable](decode func([]byte) (T, error)) codec {
 	}
 }
 
+// parameterCodec decodes a query, path parameter or header fixture, an
+// object of strings, through its exported decoder, and encodes the result
+// back to that object. A fixture member that is not a string has no
+// parameter form, so the definition's decoder reads the fixture's JSON
+// instead.
+func parameterCodec[T any](decode func(map[string]string) (T, error), definition decodeFunc[T], encode func(T) map[string][]string) codec {
+	return codec{
+		decode: func(_ fixture, raw []byte) (any, error) {
+			var params map[string]string
+			if json.Unmarshal(raw, &params) != nil {
+				return decodeChecked(raw, definition, nil)
+			}
+			return decode(params)
+		},
+		encode: func(v any) []byte {
+			params := make(map[string]string)
+			for name, values := range encode(v.(T)) {
+				params[name] = values[0]
+			}
+			data, _ := json.Marshal(params)
+			return data
+		},
+	}
+}
+
+// values adapts a decoder of url.Values or http.Header to a fixture's
+// object of strings.
+func values[P ~map[string][]string, T any](decode func(P) (T, error)) func(map[string]string) (T, error) {
+	return func(params map[string]string) (T, error) { return decode(singleValues(params)) }
+}
+
 var toolExecutionCodecs = map[string]codec{
 	"Downstream":          jsonCodec(DecodeToolDownstream),
 	"ToolStatus":          jsonCodec(DecodeToolStatus),
@@ -46,6 +78,28 @@ var toolExecutionCodecs = map[string]codec{
 	"ProtocolErrorReport": jsonCodec(DecodeProtocolErrorReport),
 	"ReadyExtension":      jsonCodec(DecodeReadyExtension),
 	"SandboxPolicy":       jsonCodec(DecodeSandboxPolicy),
+}
+
+var connectionCodecs = map[string]codec{
+	"EventsQuery":          parameterCodec(values(DecodeEventsQuery), eventsQuery, EventsQuery.Query),
+	"Downstream":           jsonCodec(DecodeDownstream),
+	"Ready":                jsonCodec(DecodeReady),
+	"Heartbeat":            jsonCodec(DecodeHeartbeat),
+	"Acknowledgement":      toolExecutionCodecs["Acknowledgement"],
+	"GrantAcknowledgement": jsonCodec(DecodeGrantAcknowledgement),
+	"SessionStatus":        jsonCodec(DecodeSessionStatus),
+	"McpTools":             jsonCodec(DecodeMcpTools),
+	"CredentialRequest":    jsonCodec(DecodeCredentialRequest),
+	"CredentialResponse":   jsonCodec(DecodeCredentialResponse),
+	"GitTicketRequest":     jsonCodec(DecodeGitTicketRequest),
+	"GitTicketResponse":    jsonCodec(DecodeGitTicketResponse),
+	"ErrorBody": {
+		decode: func(f fixture, raw []byte) (any, error) { return DecodeErrorBody(f.HTTPStatus, raw) },
+		encode: func(v any) []byte { return Encode(v.(ErrorBody)) },
+	},
+	"ToolStatus":          toolExecutionCodecs["ToolStatus"],
+	"DriveSyncReport":     toolExecutionCodecs["DriveSyncReport"],
+	"ProtocolErrorReport": toolExecutionCodecs["ProtocolErrorReport"],
 }
 
 func readFixtures(t *testing.T, name string) []fixture {
@@ -71,6 +125,7 @@ func TestFixturesDecodeAndReencode(t *testing.T) {
 		codecs func([]fixture) map[string]codec
 	}{
 		{"tool-execution-v1.fixtures.json", map[string]int{"fixtures": 61, "valid": 29}, func([]fixture) map[string]codec { return toolExecutionCodecs }},
+		{"connection-v1.fixtures.json", map[string]int{"fixtures": 239, "valid": 61, "http_status": 17}, func([]fixture) map[string]codec { return connectionCodecs }},
 	}
 	for _, file := range files {
 		t.Run(file.name, func(t *testing.T) {
@@ -94,6 +149,9 @@ func census(fixtures []fixture) map[string]int {
 		if f.Valid {
 			counts["valid"]++
 		}
+		if f.HTTPStatus != 0 {
+			counts["http_status"]++
+		}
 	}
 	return counts
 }
@@ -101,7 +159,10 @@ func census(fixtures []fixture) map[string]int {
 // unknownMembers lists, for each fixture that has them, the members its
 // schema allows without defining them. A decoder that skips any other member
 // has dropped a field, and the encoding differs from the fixture.
-var unknownMembers = map[string][]string{}
+var unknownMembers = map[string][]string{
+	"connected_with_unknown_optional_field": {"/payload/hub", "/trace"},
+	"ready_with_unknown_optional_field":     {"/capabilities/gpu", "/hostname"},
+}
 
 func runFixture(t *testing.T, codecs map[string]codec, f fixture) {
 	t.Helper()
@@ -121,6 +182,26 @@ func runFixture(t *testing.T, codecs map[string]codec, f fixture) {
 		t.Fatalf("valid fixture rejected: %v", err)
 	}
 	assertReencodes(t, c, f, got)
+	if f.HTTPStatus != 0 {
+		assertRejectedUnderAnotherStatus(t, c, f)
+	}
+}
+
+// assertRejectedUnderAnotherStatus decodes a valid error body again with a
+// status its table does not pair with its code: 400, or 409 for a 400 body.
+func assertRejectedUnderAnotherStatus(t *testing.T, c codec, f fixture) {
+	t.Helper()
+	another := 400
+	if f.HTTPStatus == 400 {
+		another = 409
+	}
+	other := f
+	other.HTTPStatus = another
+	_, err := c.decode(other, f.Value)
+	var decodeErr *DecodeError
+	if !errors.As(err, &decodeErr) || decodeErr.Status != 400 || decodeErr.Code != ErrorInvalidMessage {
+		t.Fatalf("decoded under HTTP %d: %v", another, err)
+	}
 }
 
 // assertReencodes checks that the encoding of a decoded fixture decodes to an
@@ -217,5 +298,51 @@ func sameJSON(a, b any, path string) (string, bool) {
 		return path, true
 	default:
 		return path, reflect.DeepEqual(a, b)
+	}
+}
+
+func TestClientErrorsPairEachSchemaErrorCodeWithItsStatus(t *testing.T) {
+	var connection struct {
+		Defs struct {
+			ErrorCode struct {
+				Enum []string `json:"enum"`
+			}
+		} `json:"$defs"`
+	}
+	readSchema(t, "connection-v1.schema.json", &connection)
+	codes := connection.Defs.ErrorCode.Enum
+	slices.Sort(codes)
+	if got := errorCodeNames(); !slices.Equal(got, codes) {
+		t.Fatalf("ClientErrors has codes %q, the schema %q", got, codes)
+	}
+	// The schema names the codes; the client connection error table pairs
+	// each with its status.
+	table := []string{
+		"400 invalid_message", "400 content_hash_mismatch", "401 credential_invalid", "401 credential_expired",
+		"401 credential_revoked", "403 instance_unavailable", "403 cli_upgrade_required", "403 drive_access_denied",
+		"404 not_found", "404 content_not_found", "409 connection_conflict", "409 previous_connection_active",
+		"409 stale_connection", "409 stale_binding", "409 content_missing", "409 message_conflict",
+		"409 unknown_instruction", "410 drive_cursor_expired", "413 request_too_large", "413 file_too_large",
+		"416 range_not_satisfiable", "429 rate_limited",
+	}
+	got := make([]string, 0, len(ClientErrors))
+	for code, status := range ClientErrors {
+		got = append(got, strconv.Itoa(status)+" "+string(code))
+	}
+	slices.Sort(got)
+	slices.Sort(table)
+	if !slices.Equal(got, table) {
+		t.Fatalf("ClientErrors pairs %q, the error table %q", got, table)
+	}
+}
+
+func readSchema(t *testing.T, name string, schema any) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "protocol", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, schema); err != nil {
+		t.Fatal(err)
 	}
 }
