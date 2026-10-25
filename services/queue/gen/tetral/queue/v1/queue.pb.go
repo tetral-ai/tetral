@@ -43,8 +43,11 @@ type QueueJob struct {
 	LeasedUntil    string                 `protobuf:"bytes,14,opt,name=leased_until,json=leasedUntil,proto3" json:"leased_until,omitempty"`
 	AttemptCount   int32                  `protobuf:"varint,15,opt,name=attempt_count,json=attemptCount,proto3" json:"attempt_count,omitempty"`
 	MaxAttempts    int32                  `protobuf:"varint,16,opt,name=max_attempts,json=maxAttempts,proto3" json:"max_attempts,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// The W3C traceparent of the producer's context at enqueue, or empty when
+	// the producer had no trace. The consumer continues this trace.
+	TraceContext  string `protobuf:"bytes,17,opt,name=trace_context,json=traceContext,proto3" json:"trace_context,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *QueueJob) Reset() {
@@ -187,6 +190,13 @@ func (x *QueueJob) GetMaxAttempts() int32 {
 		return x.MaxAttempts
 	}
 	return 0
+}
+
+func (x *QueueJob) GetTraceContext() string {
+	if x != nil {
+		return x.TraceContext
+	}
+	return ""
 }
 
 type LeaseRequest struct {
@@ -1081,7 +1091,7 @@ var File_tetral_queue_v1_queue_proto protoreflect.FileDescriptor
 
 const file_tetral_queue_v1_queue_proto_rawDesc = "" +
 	"\n" +
-	"\x1btetral/queue/v1/queue.proto\x12\x0ftetral.queue.v1\"\xfe\x03\n" +
+	"\x1btetral/queue/v1/queue.proto\x12\x0ftetral.queue.v1\"\xa3\x04\n" +
 	"\bQueueJob\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12!\n" +
 	"\fworkspace_id\x18\x02 \x01(\tR\vworkspaceId\x12\x12\n" +
@@ -1101,7 +1111,8 @@ const file_tetral_queue_v1_queue_proto_rawDesc = "" +
 	"\tleased_at\x18\r \x01(\tR\bleasedAt\x12!\n" +
 	"\fleased_until\x18\x0e \x01(\tR\vleasedUntil\x12#\n" +
 	"\rattempt_count\x18\x0f \x01(\x05R\fattemptCount\x12!\n" +
-	"\fmax_attempts\x18\x10 \x01(\x05R\vmaxAttempts\"\xaf\x01\n" +
+	"\fmax_attempts\x18\x10 \x01(\x05R\vmaxAttempts\x12#\n" +
+	"\rtrace_context\x18\x11 \x01(\tR\ftraceContext\"\xaf\x01\n" +
 	"\fLeaseRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x14\n" +
 	"\x05kinds\x18\x02 \x03(\tR\x05kinds\x12\x1f\n" +

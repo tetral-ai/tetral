@@ -136,7 +136,7 @@ func handBackRuntimeInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID,
 			if input.InboxStatus == "delivering" {
 				if _, err := tx.Exec(ctx,
 					`UPDATE queue_jobs
-					    SET status = 'pending', available_at = $3,
+					    SET status = 'pending', available_at = $3, ready_at = clock_timestamp(),
 					        lease_token = NULL, leased_by = NULL, leased_at = NULL, leased_until = NULL,
 					        lease_previous_attempt_count = NULL, updated_at = $3
 					  WHERE workspace_id = $1 AND id = $2 AND status IN ('pending', 'leased')`,
@@ -149,7 +149,7 @@ func handBackRuntimeInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID,
 			} else if input.QueueStatus.String == queue.StatusLeased {
 				if _, err := tx.Exec(ctx,
 					`UPDATE queue_jobs
-					    SET status = 'pending', available_at = $3,
+					    SET status = 'pending', available_at = $3, ready_at = clock_timestamp(),
 					        lease_token = NULL, leased_by = NULL, leased_at = NULL, leased_until = NULL,
 					        lease_previous_attempt_count = NULL, updated_at = $3
 					  WHERE workspace_id = $1 AND id = $2 AND status = 'leased'`,

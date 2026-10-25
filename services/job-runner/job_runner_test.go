@@ -3,6 +3,7 @@ package jobrunner
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
@@ -237,6 +239,65 @@ func TestPostgreSQLJobRunnerHeartbeatLossYieldsToReclaimedExactOwner(t *testing.
 	}
 	if queueStatus != queue.StatusAcknowledged || inboxStatus != "accepted" {
 		t.Fatalf("winning heartbeat settlement = Queue:%s Inbox:%s; want acknowledged/accepted", queueStatus, inboxStatus)
+	}
+}
+
+// traceObservingDeliverer accepts every job and reports the traceparent of the
+// context its delivery ran under.
+type traceObservingDeliverer struct {
+	*recordingDeliverer
+	traceparents chan string
+}
+
+func (d *traceObservingDeliverer) DeliverRuntimeJob(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
+	d.traceparents <- workload.ContextTraceparent(ctx)
+	return d.recordingDeliverer.DeliverRuntimeJob(ctx, job)
+}
+
+// A job enqueued under a producer's trace is leased through the Queue service
+// with that trace, and Job Runner runs it under the same trace ID: its Runtime
+// delivery context and its attempt record carry it.
+func TestPostgreSQLJobRunnerRunsLeasedJobUnderItsProducerTrace(t *testing.T) {
+	runtimeDB, _ := storagetest.NewPostgreSQLDBWithAdmin(t)
+	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: ServiceNameJobRunner, SampleRatio: 1})))
+	producerCtx, producer := workload.StartSpan(context.Background(), "producer")
+	traceID := workload.ContextTraceparent(producerCtx)[3:35]
+	request, err := queue.NewRuntimeRecoveryEnqueueRequest(workspace.DefaultID, "sesn_trace", "thr_trace", "evt_trace", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))
+	if _, err := queueStore.Enqueue(producerCtx, request); err != nil {
+		t.Fatalf("enqueue under the producer trace: %v", err)
+	}
+	producer.End()
+
+	records := &lockedBuffer{}
+	deliverer := &traceObservingDeliverer{recordingDeliverer: &recordingDeliverer{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}, traceparents: make(chan string, 1)}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
+		Logger: workload.NewLogger(records, ServiceNameJobRunner, "test", "unit"),
+		Config: JobRunnerConfig{LeaseOwner: "trace-runner", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {
+		t.Fatal(err)
+	}
+	if delivered := <-deliverer.traceparents; workload.ParseTraceparent(delivered).TraceID().String() != traceID {
+		t.Fatalf("delivery traceparent = %q; want trace %s", delivered, traceID)
+	}
+	var attempts []map[string]any
+	decoder := json.NewDecoder(strings.NewReader(records.String()))
+	for decoder.More() {
+		var record map[string]any
+		if err := decoder.Decode(&record); err != nil {
+			t.Fatal(err)
+		}
+		if record["event"] == "job_runner.runtime_delivery.attempt" {
+			attempts = append(attempts, record)
+		}
+	}
+	if len(attempts) != 1 || attempts[0]["trace_id"] != traceID {
+		t.Fatalf("attempt records = %v; want one with trace_id %s", attempts, traceID)
 	}
 }
 

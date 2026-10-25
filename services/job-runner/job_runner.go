@@ -211,7 +211,7 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			return err
 		}
 		if found {
-			r.logRuntimeJobAttempt(job, "none", "durable_replay")
+			r.logRuntimeJobAttempt(ctx, job, "none", "durable_replay")
 			return r.applyRuntimeDeliveryResult(ctx, job, replayed)
 		}
 	}
@@ -240,7 +240,7 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 				// same clamped N+1 marker; generic Queue.Retry must not terminalize it.
 				return finalizeErr
 			}
-			r.logRuntimeJobAttempt(job, "none", runtimeJobFinalizationDisposition(finalized))
+			r.logRuntimeJobAttempt(ctx, job, "none", runtimeJobFinalizationDisposition(finalized))
 			return r.applyRuntimeDeliveryResult(ctx, job, finalized)
 		}
 		if job.InputKind == "interrupt_control" && runtimeJobFinalAttempt(job) {
@@ -260,7 +260,7 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 				}
 				return finalizeErr
 			}
-			r.logRuntimeJobAttempt(job, "none", runtimeJobFinalizationDisposition(finalized))
+			r.logRuntimeJobAttempt(ctx, job, "none", runtimeJobFinalizationDisposition(finalized))
 			return r.applyRuntimeDeliveryResult(ctx, job, finalized)
 		}
 	}
@@ -282,7 +282,7 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 				return replayErr
 			}
 			if found {
-				r.logRuntimeJobAttempt(job, "runtime_transport_error", "durable_replay")
+				r.logRuntimeJobAttempt(ctx, job, "runtime_transport_error", "durable_replay")
 				return r.applyRuntimeDeliveryResult(ctx, job, replayed)
 			}
 		}
@@ -317,14 +317,14 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			}
 		}
 		if job.Kind == queue.KindRuntimeConfigUpdate && !isMCPManifestRuntimeJob(job) {
-			r.logRuntimeJobAttempt(job, preparationKind, "deferred")
+			r.logRuntimeJobAttempt(ctx, job, preparationKind, "deferred")
 			return r.deferRuntimeConfig(ctx, job)
 		}
 		// A cleanup transport failure does not prove whether the idempotent host
 		// effect completed. Keep the same capped Queue identity available for
 		// receipt/effect replay; only a typed Runtime rejection may exhaust it.
 		if job.Kind == queue.KindCleanupSession {
-			r.logRuntimeJobAttempt(job, preparationKind, "outcome_reconciliation")
+			r.logRuntimeJobAttempt(ctx, job, preparationKind, "outcome_reconciliation")
 			return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
 				WorkspaceId:  job.WorkspaceID,
 				JobId:        job.JobID,
@@ -342,13 +342,13 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 				return err
 			}
 			if shouldDeferRuntimeConfigResult(job, finalized) {
-				r.logRuntimeJobAttempt(job, preparationKind, "deferred")
+				r.logRuntimeJobAttempt(ctx, job, preparationKind, "deferred")
 				return r.deferRuntimeConfig(ctx, job)
 			}
-			r.logRuntimeJobAttempt(job, preparationKind, runtimeJobFinalizationDisposition(finalized))
+			r.logRuntimeJobAttempt(ctx, job, preparationKind, runtimeJobFinalizationDisposition(finalized))
 			return r.applyRuntimeDeliveryResult(ctx, job, finalized)
 		}
-		r.logRuntimeJobAttempt(job, preparationKind, "retry_scheduled")
+		r.logRuntimeJobAttempt(ctx, job, preparationKind, "retry_scheduled")
 		return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
 			WorkspaceId:  job.WorkspaceID,
 			JobId:        job.JobID,
@@ -358,7 +358,7 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 		}))
 	}
 	if shouldDeferRuntimeConfigResult(job, result) {
-		r.logRuntimeJobAttempt(job, "none", "deferred")
+		r.logRuntimeJobAttempt(ctx, job, "none", "deferred")
 		return r.deferRuntimeConfig(ctx, job)
 	}
 	// An interrupt without a durable receipt remains an outcome-unknown Session
@@ -385,10 +385,10 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 		result = finalized
 	}
 	if shouldDeferRuntimeConfigResult(job, result) {
-		r.logRuntimeJobAttempt(job, preparationKind, "deferred")
+		r.logRuntimeJobAttempt(ctx, job, preparationKind, "deferred")
 		return r.deferRuntimeConfig(ctx, job)
 	}
-	r.logRuntimeJobAttempt(job, preparationKind, runtimeJobFinalizationDisposition(result))
+	r.logRuntimeJobAttempt(ctx, job, preparationKind, runtimeJobFinalizationDisposition(result))
 	return r.applyRuntimeDeliveryResult(ctx, job, result)
 }
 
@@ -420,12 +420,12 @@ func runtimeJobFinalizationDisposition(result RuntimeDeliveryResult) string {
 // Runtime delivery telemetry is emitted only after the owning branch has
 // selected its Queue disposition. It carries bounded identities and kinds;
 // durable Inbox and Queue facts remain the lifecycle authority.
-func (r *JobRunner) logRuntimeJobAttempt(job RuntimeJob, preparationKind string, disposition string) {
+func (r *JobRunner) logRuntimeJobAttempt(ctx context.Context, job RuntimeJob, preparationKind string, disposition string) {
 	if r == nil || r.Logger == nil {
 		return
 	}
 	defer func() { _ = recover() }()
-	r.Logger.Info("job_runner.runtime_delivery.attempt",
+	r.Logger.InfoContext(ctx, "job_runner.runtime_delivery.attempt",
 		slog.String("operation", "runtime_delivery.attempt"),
 		slog.String("event.kind", "runtime_delivery_attempt"),
 		slog.String("component", ServiceNameJobRunner),
@@ -480,10 +480,10 @@ func (r *JobRunner) settleInvalidRuntimeJobPayload(ctx context.Context, job Runt
 		if !outcome.InterruptTerminalized {
 			disposition = "invalid_interrupt_settled"
 		}
-		r.logRuntimeJobAttempt(job, "invalid_runtime_job_payload", disposition)
+		r.logRuntimeJobAttempt(ctx, job, "invalid_runtime_job_payload", disposition)
 		return nil
 	}
-	r.logRuntimeJobAttempt(job, "invalid_runtime_job_payload", "invalid_interrupt_invariant_dead_lettered")
+	r.logRuntimeJobAttempt(ctx, job, "invalid_runtime_job_payload", "invalid_interrupt_invariant_dead_lettered")
 	return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
 		WorkspaceId:  job.WorkspaceID,
 		JobId:        job.JobID,
@@ -495,7 +495,7 @@ func (r *JobRunner) settleInvalidRuntimeJobPayload(ctx context.Context, job Runt
 
 func (r *JobRunner) deadLetterInvalidRuntimeJob(ctx context.Context, job RuntimeJob) error {
 	if job.Kind != queue.KindRuntimeInput {
-		r.logRuntimeJobAttempt(job, "invalid_runtime_job_payload", "invalid_payload_dead_lettered")
+		r.logRuntimeJobAttempt(ctx, job, "invalid_runtime_job_payload", "invalid_payload_dead_lettered")
 		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
 			WorkspaceId:  job.WorkspaceID,
 			JobId:        job.JobID,
@@ -518,7 +518,7 @@ func (r *JobRunner) deadLetterInvalidRuntimeJob(ctx context.Context, job Runtime
 	} else if outcome.DeadLettered {
 		disposition = "invalid_payload_dead_lettered"
 	}
-	r.logRuntimeJobAttempt(job, "invalid_runtime_job_payload", disposition)
+	r.logRuntimeJobAttempt(ctx, job, "invalid_runtime_job_payload", disposition)
 	return nil
 }
 
@@ -569,7 +569,7 @@ func (r *JobRunner) applyRuntimeCleanupResult(ctx context.Context, job RuntimeJo
 	}
 	preparationKind := valueOrDefault(result.ErrorKind, "none")
 	if result.Status != RuntimeDeliveryRejected {
-		r.logRuntimeJobAttempt(job, preparationKind, runtimeJobFinalizationDisposition(result))
+		r.logRuntimeJobAttempt(ctx, job, preparationKind, runtimeJobFinalizationDisposition(result))
 		return r.applyRuntimeDeliveryResult(ctx, job, result)
 	}
 	if cleanupSessionFinalAttempt(job) {
@@ -577,10 +577,10 @@ func (r *JobRunner) applyRuntimeCleanupResult(ctx context.Context, job RuntimeJo
 		if err != nil {
 			return err
 		}
-		r.logRuntimeJobAttempt(job, preparationKind, runtimeJobFinalizationDisposition(finalized))
+		r.logRuntimeJobAttempt(ctx, job, preparationKind, runtimeJobFinalizationDisposition(finalized))
 		return r.applyRuntimeDeliveryResult(ctx, job, finalized)
 	}
-	r.logRuntimeJobAttempt(job, preparationKind, "retry_scheduled")
+	r.logRuntimeJobAttempt(ctx, job, preparationKind, "retry_scheduled")
 	return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
 		WorkspaceId:  job.WorkspaceID,
 		JobId:        job.JobID,

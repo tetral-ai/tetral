@@ -30,10 +30,12 @@ import (
 
 func TestQueueServerLogsSuccessfulLeaseWaitAndDurableIdentity(t *testing.T) {
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	// The database clock runs an hour ahead of the producer's and the Queue's.
+	leasedAt := now.Add(time.Hour)
 	store := &recordingStore{leaseJobs: []*queue.Job{{
 		ID: "qjob_observed", WorkspaceID: "ws_observed", Kind: queue.KindSandboxToolExecute,
 		PartitionKey: "sandbox:ws_observed:sesn_observed", CreatedAt: now.Add(-time.Hour),
-		AvailableAt: now.Add(-500 * time.Millisecond), AttemptCount: 2,
+		AvailableAt: now.Add(-2 * time.Second), ReadyAt: leasedAt.Add(-500 * time.Millisecond), LeasedAt: &leasedAt, AttemptCount: 2,
 	}}}
 	var logs bytes.Buffer
 	server := NewServer(store, slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -85,6 +87,7 @@ func TestQueueServiceGeneratedClientLeasesAndFencesTransitions(t *testing.T) {
 			LeasedUntil:    timePtr(now.Add(time.Minute)),
 			AttemptCount:   1,
 			MaxAttempts:    10,
+			TraceContext:   "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
 		}},
 	}
 	conn, cleanup := newQueueClientConn(t, store, now)
@@ -101,8 +104,8 @@ func TestQueueServiceGeneratedClientLeasesAndFencesTransitions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Lease: %v", err)
 	}
-	if len(lease.GetJobs()) != 1 || lease.GetJobs()[0].GetId() != "qjob_rpc" || lease.GetJobs()[0].GetPayloadJson() == "" {
-		t.Fatalf("Lease response = %#v; want one durable-reference job", lease.GetJobs())
+	if len(lease.GetJobs()) != 1 || lease.GetJobs()[0].GetId() != "qjob_rpc" || lease.GetJobs()[0].GetPayloadJson() == "" || lease.GetJobs()[0].GetTraceContext() != store.leaseJobs[0].TraceContext {
+		t.Fatalf("Lease response = %#v; want one durable-reference job carrying its trace context", lease.GetJobs())
 	}
 	if store.leaseRequest.LeaseDuration != time.Minute || store.leaseRequest.Now != now {
 		t.Fatalf("stored lease request = %#v; want duration/now from service", store.leaseRequest)
@@ -158,6 +161,9 @@ func TestQueueServiceGeneratedClientLeasesAndFencesTransitions(t *testing.T) {
 	}
 }
 
+// maximalTraceContext is a traceparent at its fixed 55-byte length.
+var maximalTraceContext = "00-" + strings.Repeat("a", 32) + "-" + strings.Repeat("b", 16) + "-01"
+
 func TestQueueLeaseCarriesMaximumLegalBatchWithinScopedFuse(t *testing.T) {
 	now := time.Date(294276, 12, 31, 23, 59, 59, 999999999, time.UTC)
 	const payloadPrefix = `{"payload":"`
@@ -186,6 +192,7 @@ func TestQueueLeaseCarriesMaximumLegalBatchWithinScopedFuse(t *testing.T) {
 			LeasedUntil:    timePtr(now.Add(time.Minute)),
 			AttemptCount:   int(^uint32(0) >> 1),
 			MaxAttempts:    int(^uint32(0) >> 1),
+			TraceContext:   maximalTraceContext,
 		})
 	}
 	store := &recordingStore{leaseJobs: jobs}
@@ -233,6 +240,7 @@ func TestQueueJobRunnerLeaseCarriesMaximumAcceptedBatchWithinScopedFuse(t *testi
 			LeasedUntil:    &now,
 			AttemptCount:   math.MinInt32,
 			MaxAttempts:    math.MinInt32,
+			TraceContext:   maximalTraceContext,
 		})
 	}
 	store := &recordingStore{jobRunnerResult: queue.LeaseJobRunnerJobsResult{Jobs: jobs, RetryAfter: time.Duration(math.MaxInt32) * time.Millisecond}}

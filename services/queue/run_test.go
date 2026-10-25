@@ -214,3 +214,33 @@ func TestQueueDrainConfigurationLeavesPodJoinMargin(t *testing.T) {
 		}
 	}
 }
+
+type snapshotMetricsStore []queue.MetricsSnapshot
+
+func (s snapshotMetricsStore) Metrics(context.Context, time.Time) ([]queue.MetricsSnapshot, error) {
+	return s, nil
+}
+
+// The job queue's pressure-point gauges, per kind, beside its unchanged
+// pending, retry and dead-letter gauges.
+func TestQueueMetricsRenderJobQueuePressureGauges(t *testing.T) {
+	store := snapshotMetricsStore{{Kind: queue.KindRuntimeInput, PendingJobs: 5, ReadyJobs: 3, LeasedJobs: 2, RetryPendingJobs: 1, DeadLetteredJobs: 4, ReadyLagSeconds: 7.5}}
+	metrics, err := queueMetricsCollector(store, time.Now)(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]float64{}
+	for _, metric := range metrics {
+		if len(metric.Labels) != 1 || metric.Labels[0] != (workload.MetricLabel{Name: "kind", Value: queue.KindRuntimeInput}) || metric.Type != "gauge" {
+			t.Fatalf("metric %s labels %v type %s; want one kind label on a gauge", metric.Name, metric.Labels, metric.Type)
+		}
+		got[metric.Name] = metric.Value
+	}
+	want := map[string]float64{
+		"queue_jobs_queued": 3, "queue_jobs_oldest_queued_seconds": 7.5, "queue_jobs_in_progress": 2,
+		"queue_pending_jobs": 5, "queue_retry_pending_jobs": 1, "queue_dead_lettered_jobs": 4,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("queue gauges = %v; want %v", got, want)
+	}
+}

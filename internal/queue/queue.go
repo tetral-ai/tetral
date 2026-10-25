@@ -85,6 +85,8 @@ const (
 	MaxQueueTimestampBytes = 35
 	// Queue-minted lease tokens are a fixed prefix plus 16 random bytes.
 	MaxQueueLeaseTokenBytes = len("qlt_") + 2*LeaseTokenSize
+	// A version 00 traceparent is exactly 55 bytes.
+	MaxQueueTraceContextBytes = 55
 	// Protobuf terms are worst-case key, length, and int32 varint widths for
 	// the current QueueJob schema; the reflection census fails on a new field.
 	maxProtoFieldTagBytes      = 2
@@ -161,6 +163,7 @@ func queueJobFieldBounds() []QueueJobFieldBound {
 		{Name: "leased_until", MaxValueBytes: MaxQueueTimestampBytes},
 		{Name: "attempt_count", MaxValueBytes: maxProtoInt32Bytes, Numeric: true},
 		{Name: "max_attempts", MaxValueBytes: maxProtoInt32Bytes, Numeric: true},
+		{Name: "trace_context", MaxValueBytes: MaxQueueTraceContextBytes},
 	}
 }
 
@@ -340,6 +343,14 @@ type Job struct {
 	MaxAttempts            int
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
+	// TraceContext is the traceparent of the producer's context at enqueue,
+	// or empty when the producer had no trace; the consumer continues it.
+	TraceContext string
+	// ReadyAt is the time AvailableAt names, on the database clock: every
+	// write of available_at sets ready_at to clock_timestamp() plus the same
+	// delay. Only the queue timing metrics read it, so a wait spanning two
+	// processes comes from one clock; due checks read AvailableAt.
+	ReadyAt time.Time
 }
 
 const (

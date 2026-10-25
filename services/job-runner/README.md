@@ -73,6 +73,10 @@ synchronous Heartbeat before any Runtime delivery. A slot frees only after the
 job, its heartbeat and its final Queue transition finish, and that completion
 wakes acquisition even while other jobs still run. No request is made while
 every slot is busy, and leased work never waits in a local backlog.
+Each job runs in a `job_runner.run_job` span that continues the job's
+`trace_context`, the trace its producer enqueued it under (a new trace when it
+has none), so the job's records, its Runtime and Queue calls and their
+`traceparent` metadata carry the producer's trace ID.
 
 A response with jobs is followed immediately by a request for the remaining
 free slots. An empty response waits for Queue's `retry_after_ms`, a committed
@@ -515,7 +519,9 @@ or request labels enter these families.
 `TestPostgreSQLRuntimePlacementDiagnosticReasons` exercises actual registry and
 HTTP probe boundaries and compares completed histogram populations with the
 distinguishing reason counters; the concurrent collector test separately checks
-initialization and retention.
+initialization and retention. `TestPostgreSQLJobRunnerRunsLeasedJobUnderItsProducerTrace`
+enqueues under a trace, leases through the Queue service and checks that the
+Runtime delivery and the attempt record carry the producer's trace ID.
 
 Owner-local unit and PostgreSQL suites are in this directory; real Bridge and
 Runner compositions are in `integration/`. Runtime/Bun and Blob fixtures retain

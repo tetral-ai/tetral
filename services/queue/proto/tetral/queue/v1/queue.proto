@@ -37,6 +37,9 @@ message QueueJob {
   string leased_until = 14;
   int32 attempt_count = 15;
   int32 max_attempts = 16;
+  // The W3C traceparent of the producer's context at enqueue, or empty when
+  // the producer had no trace. The consumer continues this trace.
+  string trace_context = 17;
 }
 
 message LeaseRequest {

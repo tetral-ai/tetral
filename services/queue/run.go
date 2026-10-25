@@ -233,11 +233,11 @@ func queueMetricsCollector(store queueMetricsStore, now func() time.Time) worklo
 			labels := []workload.MetricLabel{{Name: "kind", Value: snapshot.Kind}}
 			metrics = append(metrics,
 				workload.Metric{Name: "queue_pending_jobs", Help: "Pending queue jobs.", Type: "gauge", Labels: labels, Value: float64(snapshot.PendingJobs)},
-				workload.Metric{Name: "queue_ready_jobs", Help: "Pending queue jobs whose available_at is at or before the observation time.", Type: "gauge", Labels: labels, Value: float64(snapshot.ReadyJobs)},
-				workload.Metric{Name: "queue_leased_jobs", Help: "Leased queue jobs.", Type: "gauge", Labels: labels, Value: float64(snapshot.LeasedJobs)},
+				workload.Metric{Name: "queue_jobs_queued", Help: "Pending queue jobs whose available_at is at or before the observation time.", Type: "gauge", Labels: labels, Value: float64(snapshot.ReadyJobs)},
+				workload.Metric{Name: "queue_jobs_in_progress", Help: "Leased queue jobs.", Type: "gauge", Labels: labels, Value: float64(snapshot.LeasedJobs)},
 				workload.Metric{Name: "queue_retry_pending_jobs", Help: "Pending queue jobs that have retried at least once.", Type: "gauge", Labels: labels, Value: float64(snapshot.RetryPendingJobs)},
 				workload.Metric{Name: "queue_dead_lettered_jobs", Help: "Dead-lettered queue jobs.", Type: "gauge", Labels: labels, Value: float64(snapshot.DeadLetteredJobs)},
-				workload.Metric{Name: "queue_ready_lag_seconds", Help: "Maximum ready pending queue lag in seconds.", Type: "gauge", Labels: labels, Value: snapshot.ReadyLagSeconds},
+				workload.Metric{Name: "queue_jobs_oldest_queued_seconds", Help: "Age of the oldest pending queue job past its available_at.", Type: "gauge", Labels: labels, Value: snapshot.ReadyLagSeconds},
 			)
 		}
 		return metrics, nil

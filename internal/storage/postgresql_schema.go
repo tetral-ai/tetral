@@ -1268,6 +1268,10 @@ const (
 		CONSTRAINT platform_provider_keys_status_shape CHECK (status IN ('active', 'disabled'))
 	)`
 
+	commentPostgreSQLQueueJobsReadyAt = `COMMENT ON COLUMN queue_jobs.ready_at IS ` +
+		`'The time available_at names, on the database clock: clock_timestamp() plus the same delay. ` +
+		`Only the queue timing metrics read it; due checks read available_at.'`
+
 	createPostgreSQLQueueJobsTable = `CREATE TABLE IF NOT EXISTS queue_jobs (
 		id TEXT NOT NULL,
 		workspace_id TEXT NOT NULL,
@@ -1293,6 +1297,7 @@ const (
 		defer_count INTEGER NOT NULL DEFAULT 0,
 		max_attempts INTEGER NOT NULL DEFAULT 10,
 		available_at TIMESTAMPTZ NOT NULL,
+		ready_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		acknowledged_at TIMESTAMPTZ,
@@ -1300,6 +1305,7 @@ const (
 		dead_lettered_at TIMESTAMPTZ,
 		last_error_kind TEXT,
 		last_error_message TEXT,
+		trace_context TEXT,
 		PRIMARY KEY (id),
 		UNIQUE (workspace_id, id),
 		CONSTRAINT queue_jobs_kind_shape CHECK (kind IN ('runtime_input', 'runtime_recovery', 'runtime_config_update', 'cleanup_session', 'session_delete_cleanup', 'environment_build', 'environment_ready_fanout', 'sandbox_tool_execute', 'sandbox_activate', 'sandbox_materialize', 'sandbox_release', 'sandbox_tool_cancel', 'sandbox_output_capture', 'sandbox_output_capture_cleanup', 'sandbox_memory_projection', 'sandbox_background_command', 'sandbox_background_reconcile')),
@@ -2106,6 +2112,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"create_platform_provider_keys", createPostgreSQLPlatformProviderKeysTable},
 		{"create_queue_partition_counters", createPostgreSQLQueuePartitionCountersTable},
 		{"create_queue_jobs", createPostgreSQLQueueJobsTable},
+		{"comment_queue_jobs_ready_at", commentPostgreSQLQueueJobsReadyAt},
 	}...)
 	steps = append(steps, postgresqlCleanupScheduleTableSteps()...)
 	steps = append(steps, []postgresqlSchemaStep{
