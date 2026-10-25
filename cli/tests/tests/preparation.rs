@@ -803,9 +803,11 @@ fn a_held_probe_blocks_neither_heartbeats_nor_the_shutdown() {
     machine.seams.hold(PROBE_STARTED);
     let held = prepare(&engine, &payload("sess_held", "bind_1", &project));
     machine.seams.wait_until_waiting(PROBE_STARTED, 1);
-    for heartbeat in 1..=4 {
+    // The ready ACK made the first grant; each heartbeat's ACK makes one.
+    for (heartbeat, grants) in (1..=4).zip(2..) {
         engine.advance(seconds(15.0));
         wait_for_received(&engine, "heartbeat", heartbeat);
+        machine.seams.wait_for_count("connection.granted", grants);
         machine.advance(seconds(15.0));
     }
     assert_eq!(machine.state(), "online");
