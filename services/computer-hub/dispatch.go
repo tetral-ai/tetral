@@ -50,6 +50,9 @@ type streamState struct {
 	written  map[string]bool
 	unmarked map[string]bool
 	accepted bool
+	// retryBase is the wait before the stream's next pass after a failed
+	// one, before its jitter; 0 once a pass commits.
+	retryBase time.Duration
 }
 
 type passOutcome int
@@ -62,8 +65,29 @@ const (
 	passBroken
 )
 
-// passRetryDelay is the wait before a failed pass runs again.
-const passRetryDelay = time.Second
+// A failed pass runs again after passRetryFirst, the wait doubling after
+// each further failure up to passRetryMax and multiplied by 1+r, r uniform
+// in 0 to 0.2, so that streams failing together during a database outage
+// spread their retries; a pass that commits returns it to passRetryFirst.
+// passDeadline bounds one pass, its transaction and its writes, so neither
+// a held lock nor a reader that stops reading keeps the pass's row locks
+// and pooled connection.
+const (
+	passRetryFirst = time.Second
+	passRetryMax   = 30 * time.Second
+	passDeadline   = 10 * time.Second
+)
+
+// retryAfter returns the wait before the stream's pass runs again after a
+// failed one, with jitter r.
+func (state *streamState) retryAfter(r float64) time.Duration {
+	if state.retryBase == 0 {
+		state.retryBase = passRetryFirst
+	} else {
+		state.retryBase = min(2*state.retryBase, passRetryMax)
+	}
+	return time.Duration(float64(state.retryBase) * (1 + r))
+}
 
 // firstWrite is an instruction this pass wrote to a stream for the first
 // time on any stream.
@@ -72,8 +96,13 @@ type firstWrite struct {
 	queued      time.Duration
 }
 
-// deliver runs one pass of state's stream.
+// deliver runs one pass of state's stream within passDeadline.
 func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
+	ctx, cancel := context.WithTimeout(ctx, passDeadline)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	state.writer.until = deadline
+	defer func() { state.writer.until = time.Time{} }()
 	stream := state.stream
 	bound, all := stream.take()
 	outcome := passWritten
@@ -163,8 +192,7 @@ func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
 	}
 	if err != nil {
 		// The failed statement is observed under the pass's operation; the
-		// stream keeps its bound and runs the pass again after
-		// passRetryDelay.
+		// stream keeps its bound and runs the pass again (retryAfter).
 		if all {
 			stream.raiseAll()
 		}

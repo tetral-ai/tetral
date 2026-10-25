@@ -245,8 +245,12 @@ per stream, the stored envelope of every instruction without `reported_at`
 whose `issue_seq` is at most the stream's bound, and until
 `first_session_report_at` is set only `issue_seq` 1 to 64. The bound is the
 highest `issue_seq` a notice released; a stream start and the listener's
-return release all the connection row counts. A failed pass runs again after
-one second. The first write of an instruction to any stream sets
+return release all the connection row counts. A pass has 10 seconds for its
+transaction and its writes. A pass that fails, by a database error or by that
+deadline, runs again after 1 second, the wait doubling after each failed pass
+up to 30 seconds and multiplied by 1 + r, r uniform in 0 to 0.2; a pass that
+commits returns the wait to 1 second. A write the deadline cuts off leaves the
+response unusable, so that stream ends and its CLI resumes. The first write of an instruction to any stream sets
 `first_written_at`, observes `computerhub_instructions_queue_wait_seconds`
 and, when the instruction has a `trace_context`, is one span
 `instruction.deliver` in that trace with `connection.id`, `message.id` and

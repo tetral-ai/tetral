@@ -20,8 +20,8 @@ import (
 // HeartbeatInterval is the contract's spacing of heartbeats on a stream.
 const HeartbeatInterval = 15 * time.Second
 
-// streamWriteTimeout bounds one event write, so a client that stops reading
-// breaks its stream instead of holding a write transaction open.
+// streamWriteTimeout bounds one event write outside a pass, whose writes
+// share its deadline instead; a client that stops reading breaks its stream.
 const streamWriteTimeout = 10 * time.Second
 
 // StreamClock schedules a stream's heartbeats and its age limit. Tests drive
@@ -266,9 +266,11 @@ func (s *Streams) serve(ctx context.Context, w http.ResponseWriter, stream *clie
 		if pass {
 			switch s.deliver(ctx, state) {
 			case passFailed:
-				retry = s.clock.After(passRetryDelay)
+				retry = s.clock.After(state.retryAfter(rand.Float64() * 0.2)) //nolint:gosec // G404: spreads retries, not a secret.
 			case passEnded, passMoved, passBroken:
 				return
+			default:
+				state.retryBase = 0
 			}
 			if state.accepted && next == nil {
 				next = s.clock.After(HeartbeatInterval)
@@ -313,11 +315,13 @@ func disconnectCode(connection instance.Connection) (protocol.ErrorCode, bool) {
 }
 
 // sseWriter writes one envelope per event as a single data line followed by
-// a blank line, and flushes it at once, within streamWriteTimeout.
+// a blank line, and flushes it at once, by until when it is set and within
+// streamWriteTimeout otherwise.
 type sseWriter struct {
 	w            http.ResponseWriter
 	controller   *http.ResponseController
 	connectionID string
+	until        time.Time
 }
 
 func (s sseWriter) write(messageID string, payload protocol.DownstreamPayload) error {
@@ -327,7 +331,11 @@ func (s sseWriter) write(messageID string, payload protocol.DownstreamPayload) e
 func (s sseWriter) writeEnvelope(envelope []byte) error {
 	event := make([]byte, 0, len(envelope)+8)
 	event = append(append(append(event, "data: "...), envelope...), "\n\n"...)
-	if err := s.controller.SetWriteDeadline(time.Now().Add(streamWriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+	deadline := s.until
+	if deadline.IsZero() {
+		deadline = time.Now().Add(streamWriteTimeout)
+	}
+	if err := s.controller.SetWriteDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		return err
 	}
 	if _, err := s.w.Write(event); err != nil {

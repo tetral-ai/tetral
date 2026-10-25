@@ -19,6 +19,8 @@ type manualClock struct {
 	mu      sync.Mutex
 	now     time.Duration
 	pending []manualTimer
+	// requested holds every duration After was given, in order.
+	requested []time.Duration
 }
 
 type manualTimer struct {
@@ -33,6 +35,7 @@ func (c *manualClock) After(d time.Duration) <-chan time.Time {
 	defer c.mu.Unlock()
 	ch := make(chan time.Time, 1)
 	c.pending = append(c.pending, manualTimer{at: c.now + d, ch: ch})
+	c.requested = append(c.requested, d)
 	return ch
 }
 
@@ -56,6 +59,26 @@ func (c *manualClock) waiting() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.pending)
+}
+
+// waitRequest waits until After has been called n times and returns the
+// duration of the n-th call.
+func (c *manualClock) waitRequest(t *testing.T, n int) time.Duration {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		c.mu.Lock()
+		if len(c.requested) >= n {
+			d := c.requested[n-1]
+			c.mu.Unlock()
+			return d
+		}
+		c.mu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatalf("After calls fewer than %d", n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // waitTimers waits until n timers are pending.
