@@ -500,6 +500,55 @@ fn a_missing_deny_path_under_a_directory_of_another_user_stays_uncreatable_and_t
     assert!(!missing.exists(), "{} exists", missing.display());
 }
 
+#[test]
+fn a_rule_for_a_regular_file_and_a_deny_path_under_one_leave_the_command_running() {
+    let mut case = tetral_tests::record!().case(
+        "a read_write rule for a regular file, and a deny path under a regular file, in a writable project",
+    );
+    let world = World::new();
+    let p = &world.project;
+    let f = p.join("f");
+    fs::write(&f, "x\n").unwrap();
+    let file_rule = policy(
+        json!([
+            {"path": "/", "access": "read"},
+            {"path": p, "access": "read_write"},
+            {"path": f, "access": "read_write"},
+        ]),
+        "direct",
+    );
+    world.probe(
+        &mut case,
+        &file_rule,
+        p,
+        &[(
+            "echo y >> <p>/f",
+            format!("echo y >> {}", quoted(&f)),
+            Succeeds,
+        )],
+    );
+    assert_eq!(fs::read_to_string(&f).unwrap(), "x\ny\n");
+    let under_file = policy(
+        json!([
+            {"path": "/", "access": "read"},
+            {"path": p, "access": "read_write"},
+            {"path": f.join("x"), "access": "deny"},
+        ]),
+        "direct",
+    );
+    let shown = world.run(
+        &under_file,
+        p,
+        &["/bin/sh", "-c", &format!("cat {}", quoted(&f))],
+    );
+    assert_eq!(
+        (&shown["exit_code"], &shown["stdout"]),
+        (&json!(0), &json!("x\ny\n")),
+        "{shown}"
+    );
+    case.observe("f ended with y; under <p>/f/x deny, cat <p>/f ran and printed f");
+}
+
 /// The host's LAN address: the source address of its default route.
 fn lan_address() -> IpAddr {
     let socket = UdpSocket::bind("0.0.0.0:0").unwrap();

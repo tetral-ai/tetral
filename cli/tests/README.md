@@ -181,8 +181,9 @@ temporary directories. No workspace crate depends on this package.
 - `tests/isolation_linux.rs`: real restricted processes on Linux: each grant
   against the credential, the control socket, a second Session's files, the
   `tetral` executable, `.git` and the metadata names, symbolic links, path
-  aliases and inherited descriptors, and a missing deny path in a directory
-  of another user; `disabled` and `direct` against TCP,
-  UDP and HTTP on the loopback and the LAN address; each unusable `bwrap`,
+  aliases and inherited descriptors, a missing deny path in a directory of
+  another user, and a rule for a regular file and a deny path under one;
+  `disabled` and `direct` against TCP, UDP and HTTP on the loopback and the
+  LAN address; each unusable `bwrap`,
   one that the test user could have planted among them, rejected before any
   process starts; and the bundled `bwrap` with its digest.

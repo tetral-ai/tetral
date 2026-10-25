@@ -251,9 +251,10 @@ async fn select(
 /// The profile that a launch hands to the Codex crates. Their `bwrap`
 /// arguments protect each missing `.git` at the top of a writable path, and
 /// each missing `read` or `deny` path inside one, by first creating an empty
-/// entry there as a mount target. In a directory that belongs to another user
-/// and grants this user no write, or on a read-only filesystem, `bwrap`
-/// cannot create it, and the operating system already refuses its creation:
+/// entry there as a mount target. Under an entry that is not a directory, in
+/// a directory that belongs to another user and grants this user no write,
+/// or on a read-only filesystem, `bwrap` cannot create it, and the operating
+/// system already refuses its creation:
 /// there the profile leaves the protection to that refusal, with write for
 /// such a `.git`, so that nothing is mounted at it, and without such a
 /// `read` or `deny` entry, as `Skip` would leave it out (the Codex crates
@@ -300,7 +301,7 @@ pub(super) fn launch_profile(profile: &PermissionProfile) -> PermissionProfile {
             .iter()
             .any(|entry| path_of(entry).as_deref() == Some(git.as_path()));
         if !has_entry
-            && root.is_dir()
+            && root.exists()
             && std::fs::symlink_metadata(&git).is_err()
             && refuses_new_entries(root)
             && let Ok(git) = AbsolutePathBuf::from_absolute_path(&git)
@@ -333,15 +334,19 @@ fn first_missing_component(path: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// Whether no process of this user can create an entry in `directory`:
-/// `access(2)` with `W_OK` fails, with `EROFS` or for a directory that another
-/// user owns. A directory of this user's own keeps the Codex default even
-/// without write, since a command could grant itself the write.
-fn refuses_new_entries(directory: &Path) -> bool {
-    match rustix::fs::access(directory, rustix::fs::Access::WRITE_OK) {
+/// Whether no process of this user can create an entry in `holder`: it is
+/// not a directory, or `access(2)` with `W_OK` fails, with `EROFS` or for a
+/// directory that another user owns. A directory of this user's own keeps the
+/// Codex default even without write, since a command could grant itself the
+/// write.
+fn refuses_new_entries(holder: &Path) -> bool {
+    if !holder.is_dir() {
+        return true;
+    }
+    match rustix::fs::access(holder, rustix::fs::Access::WRITE_OK) {
         Ok(()) => false,
         Err(rustix::io::Errno::ROFS) => true,
-        Err(_) => std::fs::metadata(directory)
+        Err(_) => std::fs::metadata(holder)
             .is_ok_and(|metadata| metadata.uid() != rustix::process::getuid().as_raw()),
     }
 }
