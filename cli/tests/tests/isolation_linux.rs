@@ -148,7 +148,7 @@ impl World {
     }
 }
 
-/// What TE-20's probes name, as a command sees it: the state root `R`, the
+/// What the isolation probes name, as a command sees it: the state root `R`, the
 /// control socket, the project `p` with a `.git` directory and the project
 /// `q` without one, both in `base` beside `R`, the `tetral` executable at
 /// `<p>/bin/tetral`, and the task's private temporary directory as a shell
@@ -464,7 +464,7 @@ fn every_grant_reaches_only_what_its_rules_allow_and_never_the_protected_paths()
     grants_reach_only_what_their_rules_allow(&mut case, &World::new());
 }
 
-/// TE-20's probes under `/` read with `<p>` read_write, of a missing
+/// The probes under `/` read with `<p>` read_write, of a missing
 /// top-level `.git`, of the descriptors, under `/` read_write, under no rule
 /// and under a deny rule inside `<p>`.
 fn grants_reach_only_what_their_rules_allow(case: &mut Case, runner: &impl Runner) {
@@ -651,7 +651,7 @@ fn a_missing_deny_path_under_a_directory_of_another_user_stays_uncreatable_and_t
     a_missing_deny_path_stays_uncreatable(&mut case, &World::new());
 }
 
-/// TE-20's probe of a deny rule for a path below a missing `/<m>`.
+/// The probe of a deny rule for a path below a missing `/<m>`.
 fn a_missing_deny_path_stays_uncreatable(case: &mut Case, runner: &impl Runner) {
     if !case.runs_as_non_root("root may create entries in /") {
         return;
@@ -687,7 +687,7 @@ fn a_rule_for_a_regular_file_and_a_deny_path_under_one_leave_the_command_running
     regular_file_rules_leave_the_command_running(&mut case, &World::new());
 }
 
-/// TE-20's probes of a `read_write` rule for a regular file and of a deny
+/// The probes of a `read_write` rule for a regular file and of a deny
 /// rule below one.
 fn regular_file_rules_leave_the_command_running(case: &mut Case, runner: &impl Runner) {
     let targets = runner.targets();
@@ -738,7 +738,7 @@ fn regular_file_rules_leave_the_command_running(case: &mut Case, runner: &impl R
 fn the_probes_run_again_as_calls_of_an_app_server_against_its_own_paths() {
     let _socket_dir = socket_directory::shared();
     let mut case = tetral_tests::record!().case(
-        "TE-20's probes as exec_command calls of an App Server started from <p>/bin/tetral, and those that read or write one file as view_image and edit calls, against its own state root, control socket and task directories",
+        "the isolation probes as exec_command calls of an App Server started from <p>/bin/tetral, and those that read or write one file as view_image and edit calls, against its own state root, control socket and task directories",
     );
     let served = Served::start(&mut case);
     grants_reach_only_what_their_rules_allow(&mut case, &served);
@@ -769,7 +769,7 @@ fn read_by_view_image(envelope: &Value) -> Expect {
     }
 }
 
-/// TE-20's probes that read or write one file, as `view_image` and `edit`
+/// The probes that read or write one file, as `view_image` and `edit`
 /// calls of `served`.
 fn file_probes(case: &mut Case, served: &Served) {
     let targets = served.targets();
