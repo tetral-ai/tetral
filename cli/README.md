@@ -95,6 +95,7 @@ owners; they send messages and await replies.
 | Drive sync | One per Session on this machine | `drive` | The Session's drive sync state, the checks before a command, uploads and catch-up |
 | Content cache | One per machine | `drive` | The cached file contents and the slots that bound concurrent uploads and downloads |
 | MCP manager | One per App Server | `mcp` | The local MCP servers and each binding's MCP connections |
+| Earlier task records | One per App Server | `execution` | The records under `execution/` that an earlier App Server left, their confirmation checks and the set of Sessions they keep `cleanup_pending`, which Session binding owners and the local API read through a `watch` channel |
 
 Peer crates reach each other only through interfaces. `session`,
 `execution`, `drive` and `mcp` may send no HTTP request: their reports go to
