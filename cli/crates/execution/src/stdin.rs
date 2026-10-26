@@ -1,7 +1,7 @@
 //! `write_stdin` as a task's supervisor handles it: a `tool.stdin` with empty
 //! `chars` reads the task's state and output; one with nonempty `chars`
 //! writes them, or for exactly U+0003 interrupts the task, at most once for
-//! each `write_seq`, then waits. Ported from the Go Helper's supervisor.
+//! each `write_seq`, then waits.
 
 use std::collections::HashMap;
 use std::time::Duration;

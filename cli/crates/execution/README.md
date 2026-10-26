@@ -105,6 +105,10 @@ which owns that task's process tree; the translation of a call's
   state decides the reply's `cancelled` and `was_running`
   (`cancel::Receipt`). Cancelling a running task stops its writes, leaves its
   stdin open and begins the termination procedure (`supervisor`).
+- Of `exec_command`, `write_stdin`, `edit` and `view_image`, the error
+  kinds, messages, clamps and validation that the contract does not state
+  are those of the Go Helper in `internal/sandbox/helper/`, case by case
+  (`exec`, `stdin`, `child`).
 - `exec_command` runs as `tetral __tetral-task exec <directory> <shell>
   <cmd>` through the restricted path; inside the sandbox the launcher entry
   checks and enters the directory, with no fallback, and executes

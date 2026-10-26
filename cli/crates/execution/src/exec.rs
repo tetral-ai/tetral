@@ -94,7 +94,7 @@ pub fn shell() -> &'static str {
     }
 }
 
-/// The names of signals 1 to 31 as the Go Helper reports a death by one.
+/// The `signal` of a death by each of the signals 1 to 31.
 const SIGNAL_NAMES: [&str; 31] = [
     "hangup",
     "interrupt",
