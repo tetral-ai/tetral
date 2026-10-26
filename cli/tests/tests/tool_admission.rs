@@ -17,7 +17,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::time::Duration;
 
 use serde_json::{Value, json};
 use tetral_tests::app_server::wait_until;
@@ -28,8 +27,8 @@ use tetral_tests::machine::{
 use tetral_tests::record::Case;
 use tetral_tests::reference::ReferenceServer;
 use tetral_tests::tasks::{
-    AVAILABILITY_CHECK, BINDING, HEARTBEAT_INTERVAL, LAUNCH, SESSION, TaskMachine,
-    UNBOUND_ADMISSION, WAIT_CHECKED, millis, policy as project_policy,
+    AVAILABILITY_CHECK, BINDING, HEARTBEAT_INTERVAL, LAUNCH, MAXIMUM_STREAM_AGE, SESSION,
+    TaskMachine, UNBOUND_ADMISSION, WAIT_CHECKED, millis, policy as project_policy,
 };
 use tetral_tests::{binaries, socket_directory};
 
@@ -154,10 +153,6 @@ const LEDGER_ROOM: usize = 4_032;
 /// The entries the ledger keeps in reserve for the controls, closes and
 /// reports of what it holds.
 const LEDGER_RESERVE: usize = 64;
-
-/// The age at which the reference control server ends a stream with a
-/// stream-only `disconnect`.
-const MAXIMUM_STREAM_AGE: Duration = Duration::from_secs(30 * 60);
 
 /// What the `terminal` report of a task that never started says: its
 /// sequence, status, `cancelled`, exit facts, `duration_ms` and streams.

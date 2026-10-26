@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 
 use crate::app_server::wait_until;
 use crate::machine::{
-    CREDENTIAL, INSTANCE, KEY, Machine, bootstrap, one_credential_engine, task_parent,
+    CREDENTIAL, INSTANCE, KEY, Machine, bootstrap, credential, engine, task_parent,
     wait_for_received,
 };
 use crate::record::Case;
@@ -36,6 +36,10 @@ use crate::run::Run;
 
 pub const SESSION: &str = "sess_1";
 pub const BINDING: &str = "bind_1";
+
+/// The age at which the reference control server of a [`TaskMachine`] ends
+/// a stream with a stream-only `disconnect`, set in its startup input.
+pub const MAXIMUM_STREAM_AGE: Duration = Duration::from_secs(30 * 60);
 
 /// The counter of the initial wait's readings of the clock.
 pub const WAIT_CHECKED: &str = "task.wait_checked";
@@ -109,7 +113,7 @@ impl TaskMachine {
     /// Starts the machine in `directory` and prepares [`SESSION`]'s binding
     /// [`BINDING`] at `directory/project`.
     pub fn start(case: &mut Case, directory: &Path) -> TaskMachine {
-        let engine = one_credential_engine();
+        let engine = task_engine();
         let machine = Machine::start_with_tools(
             case,
             directory,
@@ -123,7 +127,7 @@ impl TaskMachine {
     /// ([`Machine::start_with_tools_from`]); a restart runs the default
     /// build.
     pub fn start_from(case: &mut Case, directory: &Path, tetral: &Path, path: &str) -> TaskMachine {
-        let engine = one_credential_engine();
+        let engine = task_engine();
         let machine = Machine::start_with_tools_from(
             case,
             directory,
@@ -437,6 +441,15 @@ impl TaskMachine {
     pub fn temporary_directories(&self) -> Vec<PathBuf> {
         listing(&task_parent(&self.root))
     }
+}
+
+/// A reference control server that knows the one test credential and ends a
+/// stream at [`MAXIMUM_STREAM_AGE`].
+fn task_engine() -> ReferenceServer {
+    engine(
+        &[credential(INSTANCE, CREDENTIAL, KEY, "active")],
+        json!({ "max_stream_age_ms": MAXIMUM_STREAM_AGE.as_millis() as u64 }),
+    )
 }
 
 impl Drop for TaskMachine {
