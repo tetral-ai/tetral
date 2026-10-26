@@ -746,7 +746,7 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
     drop(tasks);
 
     let mut case = record.case(
-        "a record of another boot naming a running process started outside any task, written before the App Server starts",
+        "a record of another boot naming a running process started outside any task, written with a task directory of its Session before the App Server starts",
     );
     let mut tasks = TaskMachine::start(&mut case, &directory.path().join("other_boot"));
     let mut outside = std::process::Command::new("sleep")
@@ -776,7 +776,11 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
         .root
         .join("execution")
         .join("00000000000000000000000000000000.json");
+    let task_directories = tasks.root.join("sessions").join(SESSION).join("tasks");
     tasks.kill_and_restart(|_| {
+        let left = task_directories.join("00000000000000000000000000000000");
+        fs::create_dir_all(&left).unwrap();
+        fs::write(left.join("stdout.log"), "left\n").unwrap();
         fs::write(
             &path,
             serde_json::to_vec(&json!({
@@ -790,6 +794,7 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
     });
     assert!(tasks.machine().status()["last_error"].is_null());
     assert!(!path.exists());
+    assert!(listing(&task_directories).is_empty());
     assert_eq!(
         prepared(&tasks, SESSION, "bind_other_boot"),
         json!(["prepared", null])
@@ -797,7 +802,7 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
     assert!(outside.try_wait().unwrap().is_none());
     outside.kill().unwrap();
     outside.wait().unwrap();
-    case.observe("the record was confirmed at the start: last_error null, the record gone, the Session prepared, and the named process still running");
+    case.observe("the record was confirmed at the start: last_error null, the record and the Session's task directory gone, the Session prepared, and the named process still running");
 }
 
 fn listing(directory: &Path) -> Vec<std::path::PathBuf> {

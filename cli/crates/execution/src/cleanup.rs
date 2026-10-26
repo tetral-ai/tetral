@@ -119,14 +119,17 @@ struct Leftover {
 /// Reads every record in `R/execution/`, creating the directory where it
 /// is missing. A record of another boot is confirmed at once and its
 /// processes are never signalled: the restart ended every process it
-/// names, whose IDs may now belong to others. A file that is no record
-/// names no process and is deleted.
+/// names, whose IDs may now belong to others; when it was its Session's
+/// last record, the Session's task directories go with it, as
+/// [`Check::run`] removes them. A file that is no record names no process
+/// and is deleted.
 pub fn read(state_root: &Path) -> Result<(Check, Leftovers), IoFailure> {
     let directory = state_root.join(DIRECTORY);
     files::create_private_dirs(&directory)?;
     files::remove_interrupted_replacements(&directory)?;
     let boot_id = process::boot_id();
     let mut records: BTreeMap<String, Vec<Leftover>> = BTreeMap::new();
+    let mut confirmed = BTreeSet::new();
     let entries =
         std::fs::read_dir(&directory).map_err(|error| IoFailure::new(&directory, error))?;
     for entry in entries.flatten() {
@@ -147,8 +150,18 @@ pub fn read(state_root: &Path) -> Result<(Check, Leftovers), IoFailure> {
                         signalled: false,
                     });
             }
-            _ => remove(&path),
+            Some(record) => {
+                remove(&path);
+                confirmed.insert(record.session_id);
+            }
+            None => remove(&path),
         }
+    }
+    for session_id in confirmed
+        .iter()
+        .filter(|session_id| !records.contains_key(*session_id))
+    {
+        crate::store::clear_session_tasks(state_root, session_id);
     }
     let (published, leftovers) = watch::channel(Arc::new(records.keys().cloned().collect()));
     let check = Check {
