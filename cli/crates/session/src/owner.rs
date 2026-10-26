@@ -276,6 +276,9 @@ pub(crate) struct SessionOwner<S> {
     /// The tasks of ended connections, by connection and `task_id`, whose
     /// processes are not yet confirmed gone.
     pub unconfirmed: HashSet<(Id, Id)>,
+    /// The started tasks not yet ended, by connection and `task_id`, as the
+    /// Connection owner's task pressure point counts them.
+    pub running: HashSet<(Id, Id)>,
     /// The App Server's shutdown has ended every task.
     pub shutting_down: bool,
     /// The Connection owner was told that every task is confirmed gone.
@@ -323,6 +326,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             requests: HashMap::new(),
             probes: HashMap::new(),
             unconfirmed: HashSet::new(),
+            running: HashSet::new(),
             shutting_down: false,
             shutdown_answered: false,
         }
@@ -403,11 +407,14 @@ impl<S: TaskStarter> SessionOwner<S> {
         };
         binding.state = SessionState::Closing;
         binding.waiting.clear();
-        binding.tasks.close();
+        let unstaged = binding.tasks.close();
         let operation = binding.operation;
         let reports = std::mem::take(&mut binding.reports);
         self.end_operation(operation);
         if let Some(preparation) = &self.preparation {
+            for staged in unstaged {
+                preparation.connection.task_unstaged(staged);
+            }
             for report in reports {
                 preparation.reports.cancel(report);
             }
@@ -430,12 +437,18 @@ impl<S: TaskStarter> SessionOwner<S> {
         binding.state = SessionState::Unavailable;
         binding.waiting.clear();
         binding.reports.clear();
-        for task_id in binding.tasks.connection_ended() {
+        let (unconfirmed, unstaged) = binding.tasks.connection_ended();
+        for task_id in unconfirmed {
             self.unconfirmed.insert((connection.clone(), task_id));
         }
         let operation = binding.operation;
         record.unavailable = Some(binding);
         self.end_operation(operation);
+        if let Some(preparation) = &self.preparation {
+            for staged in unstaged {
+                preparation.connection.task_unstaged(staged);
+            }
+        }
     }
 
     fn shutdown(&mut self) {

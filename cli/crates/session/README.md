@@ -50,7 +50,11 @@ that is no longer the binding's is discarded.
   and the owner starts it once its binding is `prepared`. A task carries
   its directory under its Session and its temporary directory, both named
   from the task's name chosen at admission, and the Session's Report outbox
-  port (`tools::TaskStart`).
+  port (`tools::TaskStart`). The owner tells the Connection owner each
+  `tool.execute` it stages, each that leaves the queue without starting,
+  each task's start and the end of each started task, its processes
+  confirmed gone or its start rejected, and each `tool.execute` it
+  rejects `resource_exhausted` (`ConnectionPort`, `tools`).
 - A task's supervisor reports its PID namespace and its confirmed end to
   the owner. A connection's end sends every task of its binding the end
   (staged ones never start, running ones end at once) and keeps each started

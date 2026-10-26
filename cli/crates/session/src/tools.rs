@@ -85,8 +85,8 @@ pub struct TaskStart {
 pub struct Tasks {
     registry: HashMap<Id, Task>,
     /// The tasks admitted while the binding waits for its ACK, in arrival
-    /// order.
-    staged: VecDeque<Id>,
+    /// order, each with the time on the seam clock it was staged.
+    staged: VecDeque<(Id, Duration)>,
 }
 
 struct Task {
@@ -121,29 +121,38 @@ enum TaskState {
 
 impl Tasks {
     /// Prevents the start of every staged task: at once, never behind
-    /// another binding's ACK.
-    fn prevent_staged(&mut self) {
-        for task_id in std::mem::take(&mut self.staged) {
+    /// another binding's ACK. Gives when each one with a supervisor was
+    /// staged.
+    fn prevent_staged(&mut self) -> Vec<Duration> {
+        let mut unstaged = Vec::new();
+        for (task_id, staged) in std::mem::take(&mut self.staged) {
             if let Some(task) = self.registry.get_mut(&task_id) {
                 task.state = TaskState::Prevented;
+                if task.supervisor.is_some() {
+                    unstaged.push(staged);
+                }
             }
         }
+        unstaged
     }
 
     /// The binding closes: staged tasks never start, and each makes the
-    /// `terminal` report of a cancelled staged task.
-    pub fn close(&mut self) {
-        self.prevent_staged();
+    /// `terminal` report of a cancelled staged task. Gives when each one
+    /// with a supervisor was staged.
+    pub fn close(&mut self) -> Vec<Duration> {
+        let unstaged = self.prevent_staged();
         self.send_all(|| SupervisorMessage::Prevent);
+        unstaged
     }
 
     /// The connection ended: staged tasks never start, and every task's
     /// supervisor ends its task. Gives the tasks whose processes are not
-    /// yet confirmed gone.
-    pub fn connection_ended(&mut self) -> Vec<Id> {
-        self.prevent_staged();
+    /// yet confirmed gone, and when each discarded staged task with a
+    /// supervisor was staged.
+    pub fn connection_ended(&mut self) -> (Vec<Id>, Vec<Duration>) {
+        let unstaged = self.prevent_staged();
         self.send_all(|| SupervisorMessage::ConnectionEnded);
-        self.unconfirmed().cloned().collect()
+        (self.unconfirmed().cloned().collect(), unstaged)
     }
 
     /// The App Server shuts down: every task's supervisor ends its task.
@@ -174,15 +183,15 @@ impl Tasks {
         }
     }
 
-    /// The supervisors of the staged tasks in arrival order, each task now
-    /// started.
-    fn start_staged(&mut self) -> Vec<SupervisorMailbox> {
+    /// The staged tasks in arrival order, each now started, with its
+    /// supervisor and the time it was staged.
+    fn start_staged(&mut self) -> Vec<(Id, SupervisorMailbox, Duration)> {
         std::mem::take(&mut self.staged)
             .into_iter()
-            .filter_map(|task_id| {
+            .filter_map(|(task_id, staged)| {
                 let task = self.registry.get_mut(&task_id)?;
                 task.state = TaskState::Started;
-                task.supervisor.clone()
+                Some((task_id, task.supervisor.clone()?, staged))
             })
             .collect()
     }
@@ -239,6 +248,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             return Ok(());
         }
         if !call.recorded {
+            preparation.connection.task_refused();
             return Err(rejected(
                 RejectionCode::ResourceExhausted,
                 "the connection has no room to record a new task",
@@ -301,8 +311,16 @@ impl<S: TaskStarter> SessionOwner<S> {
         let supervisor = self
             .starter
             .supervise(start, preparation.reports.clone(), listener);
-        if !staged && let Some(supervisor) = &supervisor {
-            self.starter.start(supervisor);
+        let now = state::seams::now();
+        if let Some(supervisor) = &supervisor {
+            if staged {
+                preparation.connection.task_staged(now);
+            } else {
+                self.starter.start(supervisor);
+                preparation.connection.task_started(None);
+                self.running
+                    .insert((call.connection_id.clone(), call.task_id.clone()));
+            }
         }
         binding.tasks.registry.insert(
             call.task_id.clone(),
@@ -320,7 +338,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             },
         );
         if staged {
-            binding.tasks.staged.push_back(call.task_id.clone());
+            binding.tasks.staged.push_back((call.task_id.clone(), now));
         }
         Ok(())
     }
@@ -362,7 +380,15 @@ impl<S: TaskStarter> SessionOwner<S> {
             DownstreamPayload::ToolCancel(cancel) => {
                 if task.state == TaskState::Staged {
                     task.state = TaskState::Prevented;
-                    staged.retain(|task_id| *task_id != call.task_id);
+                    if let Some(position) = staged
+                        .iter()
+                        .position(|(task_id, _)| *task_id == call.task_id)
+                        && let Some((_, at)) = staged.remove(position)
+                        && task.supervisor.is_some()
+                        && let Some(preparation) = &self.preparation
+                    {
+                        preparation.connection.task_unstaged(at);
+                    }
                 }
                 SupervisorMessage::Cancel(Box::new(control(call, cancel)))
             }
@@ -386,8 +412,13 @@ impl<S: TaskStarter> SessionOwner<S> {
         else {
             return;
         };
-        for supervisor in binding.tasks.start_staged() {
+        let connection_id = binding.connection_id.clone();
+        for (task_id, supervisor, staged) in binding.tasks.start_staged() {
             self.starter.start(&supervisor);
+            if let Some(preparation) = &self.preparation {
+                preparation.connection.task_started(Some(staged));
+            }
+            self.running.insert((connection_id.clone(), task_id));
         }
     }
 
@@ -399,6 +430,14 @@ impl<S: TaskStarter> SessionOwner<S> {
         if event == TaskEvent::Gone {
             self.unconfirmed
                 .remove(&(task.connection_id.clone(), task.task_id.clone()));
+        }
+        if matches!(event, TaskEvent::Gone | TaskEvent::Withdrawn)
+            && self
+                .running
+                .remove(&(task.connection_id.clone(), task.task_id.clone()))
+            && let Some(preparation) = &self.preparation
+        {
+            preparation.connection.task_ended();
         }
         let Some(record) = self.record.as_mut() else {
             return;
