@@ -494,14 +494,26 @@ fn a_reply_and_the_terminal_report_of_an_exit_during_its_wait_are_acknowledged_a
         "while [ ! -e go ]; do sleep 0.05; done; exit 3",
         1_800_000,
     );
+    // The read's reply and the terminal report are uploaded concurrently, so
+    // both ACKs are withheld and only the terminal report's goes out.
     answer_fault(
         &tasks.engine,
-        json!({"endpoint": "tool-status", "action": "withhold"}),
+        json!({"endpoint": "tool-status", "count": 2, "action": "withhold"}),
     );
     let read = waiting(&tasks, "task_exit", json!({"chars": ""}));
     fs::write(tasks.project.join("go"), "").unwrap();
     let terminal = tasks.terminal("task_exit");
     assert_eq!(terminal["result"]["result"]["exit_code"], 3);
+    wait_until("the exit's two ACKs withheld", || {
+        tasks.engine.state()["held"].as_array().map_or(0, Vec::len) == 2
+    });
+    let seams = &tasks.machine().seams;
+    let answered = seams.count("outbox.answered");
+    tasks.engine.control(
+        "answer",
+        json!({"action": "release", "message_id": terminal["message_id"].as_str().unwrap()}),
+    );
+    seams.wait_for_count("outbox.answered", answered + 1);
     // The server accepted the reply and holds its ACK; the CLI has none.
     let reply = tasks.reply(&read);
     assert_eq!(
@@ -543,7 +555,7 @@ fn a_reply_and_the_terminal_report_of_an_exit_during_its_wait_are_acknowledged_a
         json!({"endpoint": "tool-status", "action": "release"}),
     );
     tasks.wait_files_removed(tetral_tests::tasks::SESSION);
-    case.observe("the terminal report arrived while the read reply's ACK was held; the reply said success with exit_code 3; a write to the ended task was stdin_closed with the exit facts; two reads of it replied at once with success and exit_code 3; the task's directory stayed until the held ACK was released");
+    case.observe("the read reply's and the terminal report's ACKs were withheld and only the terminal report's released; the reply said success with exit_code 3; a write to the ended task was stdin_closed with the exit facts; two reads of it replied at once with success and exit_code 3; the task's directory stayed until the held ACK was released");
 }
 
 #[test]
