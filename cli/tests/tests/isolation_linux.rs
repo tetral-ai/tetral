@@ -1178,8 +1178,9 @@ struct Offer<'a> {
 
 #[derive(Clone, Copy)]
 enum Expected<'a> {
-    /// The command runs and writes its marker.
-    Runs,
+    /// The command runs and writes its marker; a planted `bwrap` that
+    /// comes later on `PATH` never runs.
+    Runs { ignored: Option<&'a Path> },
     /// The check rejects the call `sandbox_unavailable` and nothing starts;
     /// for a planted `bwrap`, the message names it and it never runs.
     Unavailable { planted: Option<&'a Path> },
@@ -1256,9 +1257,15 @@ fn check_offer(case: &mut Case, offer: Offer, via: Via) {
         );
     };
     match expected {
-        Expected::Runs => {
+        Expected::Runs { ignored } => {
             assert_eq!(outcome["exit_code"], 0, "{name}: {outcome}");
             assert_eq!((spawned, marker.exists()), (1, true), "{name}");
+            if let Some(ignored) = ignored {
+                assert!(
+                    !ran_marker(ignored).exists(),
+                    "{name}: the planted bwrap ran"
+                );
+            }
         }
         Expected::Unavailable { planted } => {
             assert_eq!(
@@ -1298,7 +1305,7 @@ fn check_offered_call(
         task_policy(&tasks.project, "direct"),
     );
     let (phase, report) = match expected {
-        Expected::Runs => ("terminal", tasks.terminal("task_offer")),
+        Expected::Runs { .. } => ("terminal", tasks.terminal("task_offer")),
         _ => ("rejected", tasks.report("task_offer", "rejected")),
     };
     let spawned = tasks.machine().seams.count("process.spawn") - spawned_before;
@@ -1312,12 +1319,18 @@ fn check_offered_call(
         if marker.exists() { "written" } else { "absent" }
     ));
     match expected {
-        Expected::Runs => {
+        Expected::Runs { ignored } => {
             assert_eq!(
                 report["result"]["result"]["exit_code"], 0,
                 "{name}: {report}"
             );
             assert_eq!((spawned, marker.exists()), (1, true), "{name}");
+            if let Some(ignored) = ignored {
+                assert!(
+                    !ran_marker(ignored).exists(),
+                    "{name}: the planted bwrap ran"
+                );
+            }
         }
         Expected::Unavailable { planted } => {
             assert_eq!(
@@ -1414,7 +1427,7 @@ fn each_bwrap_offer_runs_the_command_rejects_the_call_or_has_the_helper_refuse_i
             path: SYSTEM_PATH,
             beside: None,
             command_path: SYSTEM_PATH,
-            expected: Expected::Runs,
+            expected: Expected::Runs { ignored: None },
         },
         Offer {
             name: "a copy of the host's bwrap that the test user owns, ahead of the system one on PATH, in a directory the call cannot write",
@@ -1432,7 +1445,9 @@ fn each_bwrap_offer_runs_the_command_rejects_the_call_or_has_the_helper_refuse_i
             path: &planted_last,
             beside: None,
             command_path: SYSTEM_PATH,
-            expected: Expected::Runs,
+            expected: Expected::Runs {
+                ignored: Some(&planted),
+            },
         },
         Offer {
             name: "a symbolic link that the test user owns, ahead of the system bwrap on PATH, to the host's bwrap",
