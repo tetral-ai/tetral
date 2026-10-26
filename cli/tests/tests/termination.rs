@@ -756,12 +756,14 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
     let written: Value = serde_json::from_slice(&fs::read(&listing(&records)[0]).unwrap()).unwrap();
     assert_eq!(written["session_id"], SESSION);
     tasks.machine().seams.hold(CONFIRMED);
-    tasks.kill_and_restart(|_| {});
     // Only the command, inside the recorded namespace, appends to the
-    // marker.
+    // marker. The namespace empties before the next start, whose SIGKILL
+    // would empty it too.
     let namespace = written["pid_namespace"].as_u64().unwrap();
-    wait_until("the recorded namespace without a process", || {
-        !namespace_has_processes(namespace)
+    tasks.kill_and_restart(|_| {
+        wait_until("the recorded namespace without a process", || {
+            !namespace_has_processes(namespace)
+        });
     });
     let status = tasks.machine().status();
     assert_eq!(
