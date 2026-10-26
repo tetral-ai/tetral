@@ -136,7 +136,9 @@ which owns that task's process tree; the translation of a call's
   `old_string` exactly or, only when that finds nothing, with curly quotes
   mapped to ASCII, which locates spans and changes no written byte, and
   writes through a new file beside the target, renamed over it with the
-  target's mode (`child/edit.rs`).
+  target's mode, or, when the target is a mount point that a rename cannot
+  replace, as a file that its own rule mounts, into the target in place
+  (`child/edit.rs`).
 - An image is recognized by its first bytes and refused from its header,
   by `protocol::image` acceptance of its `stat` size and dimensions, before
   the rest is read; it is read whole, bounded at that size and one byte

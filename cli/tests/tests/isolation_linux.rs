@@ -897,6 +897,27 @@ fn file_probes(case: &mut Case, served: &Served) {
 
     let g = p.join("g");
     fs::write(&g, "x\n").unwrap();
+    fs::set_permissions(&g, fs::Permissions::from_mode(0o7640)).unwrap();
+    let file_rule = policy(
+        json!([
+            {"path": "/", "access": "read"},
+            {"path": p, "access": "read_write"},
+            {"path": g, "access": "read_write"},
+        ]),
+        "direct",
+    );
+    // The rule mounts g itself, which a rename cannot replace, so the edit
+    // writes it in place.
+    edit(
+        case,
+        &file_rule,
+        "<p>/g under its own rule",
+        &g,
+        "x",
+        Succeeds,
+    );
+    assert_eq!(fs::read_to_string(&g).unwrap(), "edited\n");
+    assert_eq!(fs::metadata(&g).unwrap().mode() & 0o7777, 0o7640);
     let under_file = policy(
         json!([
             {"path": "/", "access": "read"},

@@ -162,7 +162,9 @@ fn straight_quotes(text: &str) -> (String, Vec<usize>) {
 /// Writes `content` in place of the regular file at `path` through a new
 /// file beside the file `path` names, through any symbolic link: created
 /// exclusively, written, synced, given `mode` and renamed over it, then its
-/// directory synced when possible. Any failure removes the new file.
+/// directory synced when possible. A file that cannot be renamed over
+/// because it is a mount point, as one that its own rule mounts, is written
+/// in place instead. Any failure removes the new file.
 fn write_atomically(path: &Path, content: &[u8], mode: u32) -> io::Result<()> {
     let target = fs::canonicalize(path)?;
     let (directory, name) = target
@@ -179,14 +181,27 @@ fn write_atomically(path: &Path, content: &[u8], mode: u32) -> io::Result<()> {
             fs::set_permissions(&temporary, Permissions::from_mode(mode))
         })
         .and_then(|()| fs::rename(&temporary, &target));
-    if written.is_err() {
+    if let Err(error) = written {
         let _ = fs::remove_file(&temporary);
-        return written;
+        if error.raw_os_error() == Some(rustix::io::Errno::BUSY.raw_os_error()) {
+            return write_in_place(&target, content, mode);
+        }
+        return Err(error);
     }
     if let Ok(directory) = File::open(directory) {
         let _ = directory.sync_all();
     }
     Ok(())
+}
+
+/// Writes `content` into the file at `target`: truncated, written and
+/// synced, with `mode`, which a write by this user may have cleared of its
+/// setuid and setgid bits, set again.
+fn write_in_place(target: &Path, content: &[u8], mode: u32) -> io::Result<()> {
+    let mut file = OpenOptions::new().write(true).truncate(true).open(target)?;
+    file.write_all(content)?;
+    file.sync_all()?;
+    file.set_permissions(Permissions::from_mode(mode))
 }
 
 /// A new file `.<name>.tetral-tmp-<16 hexadecimal characters>` in
