@@ -159,9 +159,6 @@ impl Owners {
         }
     }
 
-    /// Hands `call` to its Session's owner, or, for a Session without one,
-    /// to the factory, which rejects it; it never creates an owner or a
-    /// record.
     /// Whether the Session `session_id` has an owner here, which then
     /// admits its tool instructions.
     pub fn owns(&self, session_id: &str) -> bool {
@@ -170,6 +167,9 @@ impl Owners {
             .is_some_and(|session_id| self.owners.contains_key(&session_id))
     }
 
+    /// Hands `call` to its Session's owner, or, for a Session without one,
+    /// to the factory, which rejects it; it never creates an owner or a
+    /// record.
     pub fn tool(&self, call: ToolCall) {
         let owned = SafeId::new(call.session_id.as_str())
             .ok()
