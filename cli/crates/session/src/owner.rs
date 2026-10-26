@@ -393,7 +393,7 @@ impl<S: TaskStarter> SessionOwner<S> {
         };
         binding.state = SessionState::Closing;
         binding.waiting.clear();
-        binding.tasks.prevent_staged();
+        binding.tasks.close();
         let operation = binding.operation;
         let reports = std::mem::take(&mut binding.reports);
         self.end_operation(operation);

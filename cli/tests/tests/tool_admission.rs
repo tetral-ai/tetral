@@ -554,11 +554,27 @@ fn a_task_staged_behind_a_withheld_prepared_ack_starts_only_after_it_and_never_o
         "close",
         json!({"instance_id": INSTANCE, "payload": {"session_id": "sess_closed", "binding_id": "bind_closed"}}),
     );
-    handled(&tasks, "sess_closed", "bind_closed");
+    // The close prevents the start at once, before the ACK.
+    let closed = tasks.terminal("task_closed");
+    let result = &closed["result"]["result"];
+    assert_eq!(
+        json!([
+            closed["report_seq"],
+            closed["result"]["status"],
+            result["cancelled"],
+            result["exit_code"],
+            result["signal"],
+            result["duration_ms"],
+            result["stdout"]["text"],
+            result["stderr"]["text"],
+        ]),
+        json!([1, "success", true, null, null, 0, "", ""]),
+        "{closed:#}"
+    );
     release_answers(&tasks);
     handled(&tasks, "sess_closed", "bind_closed");
     assert_eq!(seams.count(SPAWN), spawns + 2);
-    case.observe("no process before the released ACK, then one; the cancelled task never launched, a later task of its binding did; the closed binding's task never launched");
+    case.observe("no process before the released ACK, then one; the cancelled task never launched, a later task of its binding did; the closed binding's task never launched and reported cancelled at the close");
 }
 
 #[test]

@@ -9,7 +9,8 @@
 //! outbox; and `cleaned` once every report of the task is acknowledged or
 //! dropped and the task's files are gone. The supervisor answers the task's
 //! controls in every state but `staged`, whose `tool.stdin` wait for the
-//! start or the cancel that prevents it: each waiting reply is a timer and a
+//! start or for the cancel or the binding's close that prevents it, which
+//! makes the task's `terminal` report at once: each waiting reply is a timer and a
 //! waiter of the supervisor, which meanwhile keeps reading output and
 //! handling the exit and other controls. Every wait reads the seam clock.
 //! A file tool's task runs its child instead of a command
@@ -187,6 +188,8 @@ pub enum SupervisorMessage {
     Stdin(Box<Control<StdinPayload>>),
     /// An admitted `tool.cancel` of the task.
     Cancel(Box<Control<CancelPayload>>),
+    /// The task's binding closes: a staged task never starts.
+    Prevent,
     /// The outbox's outcome of one of the task's reports.
     Outcome(ReportId, ReportOutcome),
     /// The task's connection ended.
@@ -450,6 +453,11 @@ impl Supervisor {
                     self.cancel(*control);
                     break Staged::Cancelled;
                 }
+                Some(SupervisorMessage::Prevent) => {
+                    self.left_queue = Some(state::seams::now());
+                    self.report_cancelled_staged();
+                    break Staged::Cancelled;
+                }
                 Some(SupervisorMessage::Stdin(control)) => held.push(*control),
                 Some(SupervisorMessage::Outcome(report, _)) => {
                     self.awaited.remove(&report);
@@ -487,6 +495,7 @@ impl Supervisor {
                     Some(SupervisorMessage::Cancel(control)) => self.cancel(*control),
                     Some(
                         SupervisorMessage::Start
+                        | SupervisorMessage::Prevent
                         | SupervisorMessage::ConnectionEnded
                         | SupervisorMessage::Shutdown,
                     ) => {}
@@ -779,7 +788,7 @@ impl Supervisor {
                     }
                     Some(SupervisorMessage::ConnectionEnded) => self.stop(pid, Expiry::ConnectionEnded),
                     Some(SupervisorMessage::Shutdown) => self.stop(pid, Expiry::Shutdown),
-                    Some(SupervisorMessage::Start) => {}
+                    Some(SupervisorMessage::Start | SupervisorMessage::Prevent) => {}
                     None => forgotten = true,
                 },
             }
@@ -906,7 +915,11 @@ impl Supervisor {
                     Some(SupervisorMessage::Shutdown) => self.stop(pid, Expiry::Shutdown),
                     // The binding owner refuses a `tool.stdin` of a file
                     // tool's task.
-                    Some(SupervisorMessage::Stdin(_) | SupervisorMessage::Start) => {}
+                    Some(
+                        SupervisorMessage::Stdin(_)
+                        | SupervisorMessage::Start
+                        | SupervisorMessage::Prevent,
+                    ) => {}
                     None => forgotten = true,
                 },
             }
@@ -1339,7 +1352,8 @@ impl Supervisor {
         };
     }
 
-    /// The `terminal` report of a task cancelled before it started.
+    /// The `terminal` report of a task cancelled, or whose binding closed,
+    /// before it started.
     fn report_cancelled_staged(&mut self) {
         if let Some(call) = FileCall::of(&self.spec.tool) {
             self.report_file(call.cancelled(false), Duration::ZERO);

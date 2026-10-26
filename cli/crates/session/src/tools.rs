@@ -121,12 +121,19 @@ enum TaskState {
 impl Tasks {
     /// Prevents the start of every staged task: at once, never behind
     /// another binding's ACK.
-    pub fn prevent_staged(&mut self) {
+    fn prevent_staged(&mut self) {
         for task_id in std::mem::take(&mut self.staged) {
             if let Some(task) = self.registry.get_mut(&task_id) {
                 task.state = TaskState::Prevented;
             }
         }
+    }
+
+    /// The binding closes: staged tasks never start, and each makes the
+    /// `terminal` report of a cancelled staged task.
+    pub fn close(&mut self) {
+        self.prevent_staged();
+        self.send_all(|| SupervisorMessage::Prevent);
     }
 
     /// The connection ended: staged tasks never start, and every task's
