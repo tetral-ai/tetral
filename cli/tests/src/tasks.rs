@@ -11,8 +11,11 @@
 //! each write that starts on a task's stdin pipe `task.write_started`, each
 //! check of an ended task's processes `task.gone_checked`, and each reading
 //! of the clock by the timer of the termination procedure's next step
-//! `task.ending_checked`. The supervisor's observation of the launched
-//! process's exit waits at the barrier `task.exit_observed`.
+//! `task.ending_checked`, and each end of a task's output pipe
+//! `task.output_ended`. The supervisor's observation of the launched
+//! process's exit waits at the barrier `task.exit_observed`, and each of its
+//! reads of the launch-status pipe before the command's start at
+//! `task.launch_status`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -67,6 +70,13 @@ pub const ENDING_CHECKED: &str = "task.ending_checked";
 /// The barrier of the supervisor's observation of the launched process's
 /// exit.
 pub const EXIT_OBSERVED: &str = "task.exit_observed";
+
+/// The counter of the ends of a task's output pipes.
+pub const OUTPUT_ENDED: &str = "task.output_ended";
+
+/// The barrier of each read of the launch-status pipe before the command's
+/// start.
+pub const LAUNCH_STATUS: &str = "task.launch_status";
 
 /// How often the reference control server sends a heartbeat, on its clock.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);

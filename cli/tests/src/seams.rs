@@ -112,6 +112,11 @@ impl Seams {
         self.wait_for(|state| state.waiting.get(name).copied().unwrap_or(0) >= count);
     }
 
+    /// How many processes wait at the held barrier `name` now.
+    pub fn waiting(&self, name: &str) -> usize {
+        self.shared.lock().waiting.get(name).copied().unwrap_or(0)
+    }
+
     /// How often the counter `name` was reported.
     pub fn count(&self, name: &str) -> u64 {
         self.shared.lock().counters.get(name).copied().unwrap_or(0)

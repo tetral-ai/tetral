@@ -104,6 +104,14 @@ const ENDING_CHECKED: &str = "task.ending_checked";
 /// never seen.
 const EXIT_OBSERVED: &str = "task.exit_observed";
 
+/// The test seam barrier that holds each read of the launch-status pipe
+/// before the command's start, so that a test can have a launch failure
+/// arrive after the exit and the end of both output pipes.
+const LAUNCH_STATUS: &str = "task.launch_status";
+
+/// The test seam counter of each end of an output pipe.
+const OUTPUT_ENDED: &str = "task.output_ended";
+
 /// The message of every failure to start other than a directory's.
 const NOT_STARTED: &str = "process could not start";
 
@@ -665,7 +673,10 @@ impl Supervisor {
         let mut forgotten = false;
         self.next_write();
         loop {
-            if self.exit.is_some() && !self.out.is_open() && !self.err.is_open() {
+            // A launch failure is written before the sandbox exits, but may
+            // be read after its exit and the end of both output pipes.
+            if self.exit.is_some() && !self.out.is_open() && !self.err.is_open() && status.is_none()
+            {
                 break;
             }
             let lifetime_ends = self
@@ -707,7 +718,7 @@ impl Supervisor {
                         self.output_arrived();
                     }
                 }
-                read = read_some(status.as_mut()), if status.is_some() => match read {
+                read = read_status(status.as_mut(), started), if status.is_some() => match read {
                     Some(bytes) => {
                         let mut bytes = &bytes[..];
                         if self.start.is_none()
@@ -1589,6 +1600,15 @@ async fn write_some(
     }
 }
 
+/// [`read_some`] of the launch-status pipe, held at [`LAUNCH_STATUS`]
+/// until the command has `started`.
+async fn read_status(pipe: Option<&mut Receiver>, started: bool) -> Option<Vec<u8>> {
+    if pipe.is_some() && !started {
+        state::seams::barrier(LAUNCH_STATUS).await;
+    }
+    read_some(pipe).await
+}
+
 /// The next bytes of `pipe`, or `None` at its end.
 async fn read_some(pipe: Option<&mut Receiver>) -> Option<Vec<u8>> {
     let Some(pipe) = pipe else {
@@ -1637,6 +1657,7 @@ impl Stream {
         match read {
             Ok(0) | Err(_) => {
                 self.reader = None;
+                state::seams::count(OUTPUT_ENDED);
                 false
             }
             Ok(count) => {

@@ -22,7 +22,8 @@ use tetral_tests::machine::{INSTANCE, answer_fault, seconds, wait_for_received};
 use tetral_tests::reference::ReferenceServer;
 use tetral_tests::socket_directory;
 use tetral_tests::tasks::{
-    BINDING, LAUNCH, SESSION, TaskMachine, WAIT_CHECKED, millis, policy, process_running,
+    BINDING, EXIT_OBSERVED, LAUNCH, LAUNCH_STATUS, OUTPUT_ENDED, SESSION, TaskMachine,
+    WAIT_CHECKED, millis, policy, process_running,
 };
 
 /// What a report says of its task.
@@ -389,10 +390,33 @@ fn a_missing_working_directory_is_cwd_not_found_without_a_fallback_or_a_rerun() 
     assert_eq!(path(&removed), json!(tasks.project));
 
     fs::create_dir(&tasks.project).unwrap();
-    tasks.execute("task_after", json!({"cmd": "echo ok"}), disabled);
+    tasks.execute("task_after", json!({"cmd": "echo ok"}), disabled.clone());
     assert_eq!(summary(&tasks.terminal("task_after")), exited("ok\n"));
     assert!(!tasks.project.join("ran.log").exists());
-    case.observe("cwd_not_found naming the binding's directory, which stays missing; an absolute cwd and another Session's call ran; the removal at task.launch is cwd_not_found, and after the directory came back a new call ran and the failed one did not");
+
+    // The failure reaches the supervisor only after it has seen the end of
+    // both output pipes and the sandbox's exit.
+    seams.hold(LAUNCH_STATUS);
+    seams.hold(EXIT_OBSERVED);
+    let ended = seams.count(OUTPUT_ENDED);
+    let absent = tasks.project.join("absent");
+    tasks.execute(
+        "task_late",
+        json!({"cmd": "echo ran > ran.log", "cwd": absent}),
+        disabled,
+    );
+    seams.wait_for_count(OUTPUT_ENDED, ended + 2);
+    seams.wait_until_waiting(EXIT_OBSERVED, 1);
+    let reading = seams.waiting(LAUNCH_STATUS);
+    seams.release(EXIT_OBSERVED);
+    // Having seen the exit, the supervisor reads the launch-status pipe again.
+    seams.wait_until_waiting(LAUNCH_STATUS, reading + 1);
+    seams.release(LAUNCH_STATUS);
+    let late = tasks.terminal("task_late");
+    assert_eq!(summary(&late), not_run("cwd_not_found"), "{late:#}");
+    assert_eq!(path(&late), json!(absent));
+    assert!(!tasks.project.join("ran.log").exists());
+    case.observe("cwd_not_found naming the binding's directory, which stays missing; an absolute cwd and another Session's call ran; the removal at task.launch is cwd_not_found, and after the directory came back a new call ran and the failed one did not; a failure read after the exit and both pipes' ends is cwd_not_found");
 }
 
 #[test]
