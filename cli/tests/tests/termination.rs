@@ -547,24 +547,54 @@ fn an_old_connections_waiter_and_late_output_change_nothing_of_the_new_one() {
     let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "a task printing all the time with a write's reply waiting, its connection ended; on the next connection the Session prepared again and a task of the same task_id",
+        "a task printing all the time with a write's reply waiting, its connection ended with the observation of its exit held; on the next connection another Session's task of the same task_id running when the old task's ending ends, then the Session prepared again and a task of the same task_id",
     );
     let directory = tempfile::tempdir().unwrap();
     let tasks = TaskMachine::start(&mut case, directory.path());
     let machine = tasks.machine();
+    let seams = &machine.seams;
+    seams.hold(EXIT_OBSERVED);
     detached(&tasks, "task_old", "while :; do printf x; sleep 0.01; done");
     // A write's reply waits its whole wait while output keeps coming.
-    let waiting = machine.seams.count(REPLY_WAITING);
-    tasks.stdin(
+    let waiting = seams.count(REPLY_WAITING);
+    let write = tasks.stdin(
         "task_old",
         json!({"chars": "x", "write_seq": 1, "wait_ms": 30_000}),
     );
-    machine.seams.wait_for_count(REPLY_WAITING, waiting + 1);
+    seams.wait_for_count(REPLY_WAITING, waiting + 1);
     let old = machine.status()["connection_id"].clone();
-    let checked = machine.seams.count(GONE_CHECKED);
     end_connection(&tasks);
+    // The SIGKILL at the connection's end ends the processes; the exit waits
+    // at the barrier, so the task's ending lasts the 2-second wait after the
+    // SIGKILL and its waiting reply is still open on the next connection.
+    seams.wait_until_waiting(EXIT_OBSERVED, 1);
     let new = reconnect(&tasks, seconds(1.2));
-    machine.seams.wait_for_count(GONE_CHECKED, checked + 1);
+    assert_eq!(
+        prepared(&tasks, "sess_other", "bind_other"),
+        json!(["prepared", null])
+    );
+    let checked = seams.count(WAIT_CHECKED);
+    tasks.execute_with(
+        "sess_other",
+        "bind_other",
+        "task_old",
+        json!({"cmd": "printf other; while [ ! -e go ]; do sleep 0.05; done", "wait_ms": 250, "on_wait_expiry": "detach"}),
+        policy(&tasks.project, "direct"),
+        None,
+    );
+    tasks.wait_for_start(checked);
+    seams.advance(millis(250));
+    wait_until("the other Session's running report", || {
+        tasks
+            .reports("task_old")
+            .iter()
+            .any(|report| report["binding_id"] == "bind_other")
+    });
+    let gone = seams.count(GONE_CHECKED);
+    seams.advance(millis(600));
+    seams.wait_for_count(GONE_CHECKED, gone + 1);
+    // The barrier holds every task's exit; the old task's ending is over.
+    seams.release(EXIT_OBSERVED);
     assert_eq!(
         prepared_once_gone(&tasks, SESSION, "bind_new"),
         json!(["prepared", null])
@@ -577,20 +607,16 @@ fn an_old_connections_waiter_and_late_output_change_nothing_of_the_new_one() {
         policy(&tasks.project, "disabled"),
         None,
     );
-    let on_new: Vec<Value> = tasks
-        .engine
-        .received("tool-status")
-        .into_iter()
-        .map(|received| received["body"].clone())
-        .filter(|body| body["connection_id"] == new)
-        .collect();
-    wait_until("the new task's terminal report", || {
-        tasks
-            .reports("task_old")
-            .iter()
-            .any(|report| report["binding_id"] == "bind_new")
+    fs::write(tasks.project.join("go"), "").unwrap();
+    wait_until("both new tasks' terminal reports", || {
+        let reports = tasks.reports("task_old");
+        ["bind_new", "bind_other"].iter().all(|binding| {
+            reports
+                .iter()
+                .any(|report| report["binding_id"] == *binding && report["phase"] == "terminal")
+        })
     });
-    let new_reports: Vec<Value> = tasks
+    let mut new_reports: Vec<Value> = tasks
         .reports("task_old")
         .into_iter()
         .filter(|report| report["connection_id"] == new)
@@ -603,11 +629,27 @@ fn an_old_connections_waiter_and_late_output_change_nothing_of_the_new_one() {
             ])
         })
         .collect();
-    assert_eq!(new_reports, [json!(["bind_new", "terminal", 1, "new"])]);
+    new_reports.sort_by_key(|report| report.to_string());
+    assert_eq!(
+        new_reports,
+        [
+            json!(["bind_new", "terminal", 1, "new"]),
+            json!(["bind_other", "running", 1, "other"]),
+            json!(["bind_other", "terminal", 2, "other"]),
+        ]
+    );
+    let on_new: Vec<Value> = tasks
+        .engine
+        .received("tool-status")
+        .into_iter()
+        .map(|received| received["body"].clone())
+        .filter(|body| body["connection_id"] == new)
+        .collect();
     assert!(
-        on_new.iter().all(|body| body["kind"] != "control"),
+        on_new.iter().all(|body| body["kind"] == "execution"),
         "{on_new:?}"
     );
+    assert_eq!(tasks.accepted_reply(&write), None);
     let sessions = request(&machine.app_server.socket, "GET", "/v1/sessions")
         .unwrap()
         .json();
@@ -620,7 +662,7 @@ fn an_old_connections_waiter_and_late_output_change_nothing_of_the_new_one() {
         .collect();
     assert_eq!(bindings, [json!(["bind_new", new, "prepared"])]);
     assert_ne!(old, new);
-    case.observe("no reply or report of the old task reached the new connection; the new task of the same task_id reported terminal 1 with its own output; the Session's binding is the new prepared one");
+    case.observe("the old task's ending ended after the next connection was online and another Session's task of the same task_id was running; no reply or report of the old task reached any connection; the other task and the new task of the same task_id reported only their own output; the Session's binding is the new prepared one");
 }
 
 #[test]
