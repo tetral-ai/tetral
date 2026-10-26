@@ -114,7 +114,11 @@ fn a_refused_report_is_never_sent_again_and_a_stale_connection_ends_the_connecti
     wait_for_received(&engine, "protocol-error", 1);
     let sent = by_message_id(engine.requests("protocol-error"));
     assert_eq!(message_ids(&sent), ["r1", "r2", "r3"]);
-    assert!(frozen_reports(&machine.root).is_empty());
+    // The later report's file goes once the CLI applies its ACK, after the
+    // reference server has recorded the report.
+    wait_until("no report file left", || {
+        frozen_reports(&machine.root).is_empty()
+    });
     case.observe("both refused reports were recorded as dropped, their files deleted, and neither was sent again past the first retry wait");
 
     let mut case = record.case("a report answered 409 stale_connection");

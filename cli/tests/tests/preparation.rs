@@ -481,6 +481,9 @@ fn a_removed_directory_leaves_its_binding_prepared_and_a_new_connection_checks_i
     for (session, project) in [("sess_removed", &removed), ("sess_kept", &kept)] {
         let message_id = prepare(&engine, &payload(session, "bind_1", project));
         assert_eq!(outcome(&engine, &message_id), prepared(project));
+        wait_until(&format!("{session} prepared at its ACK"), || {
+            state_of(&machine, session) == "prepared"
+        });
     }
     fs::remove_dir_all(&removed).unwrap();
     engine.advance(seconds(15.0));
@@ -507,6 +510,9 @@ fn a_removed_directory_leaves_its_binding_prepared_and_a_new_connection_checks_i
     let restored = directory_with_marker(removed.clone());
     let message_id = prepare(&engine, &payload("sess_removed", "bind_3", &restored));
     assert_eq!(outcome(&engine, &message_id), prepared(&restored));
+    wait_until("bind_3 prepared at its ACK", || {
+        state_of(&machine, "sess_removed") == "prepared"
+    });
     let listed = entries(&machine, "sess_removed");
     assert_eq!(listed.len(), 1, "{listed:?}");
     assert_eq!(
