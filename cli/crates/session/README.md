@@ -36,7 +36,8 @@ that is no longer the binding's is discarded.
   of the task or the connection's end prevents a staged start; after a close
   or a cancel the task's supervisor makes its `terminal` report (`tools`).
 - A control finds its task only in the registry of the binding it names on
-  its own connection; an absent task is `task_not_found`, a `tool.stdin` of
+  its own connection; an absent task is `task_not_found`, and a task whose
+  start its supervisor rejected leaves the registry; a `tool.stdin` of
   a task that is not an `exec_command` is `unsupported_control`, a
   `tool.cancel` of a staged task takes it out of the staging queue, and
   every other control goes to the task's supervisor (`tools`).

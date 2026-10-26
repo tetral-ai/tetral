@@ -130,6 +130,10 @@ const NOT_STARTED_IN_WAIT: &str = "process did not start within the wait";
 
 const STDIN_CLOSED: &str = "task stdin is closed or not accepting input";
 
+/// The message of the control error `task_not_found`, which also answers
+/// every control of a task whose start was rejected.
+pub const TASK_NOT_FOUND: &str = "task_id names no task of the named binding on this connection";
+
 /// One admitted task, as its supervisor starts it.
 pub struct TaskSpec {
     pub connection_id: Id,
@@ -156,6 +160,9 @@ pub trait TaskListener: Send + Sync {
     fn started(&self, namespace: u64);
     /// The task's processes are confirmed gone, or it never had any.
     fn gone(&self);
+    /// The task's start was rejected, so its instruction was not admitted:
+    /// the registration is withdrawn.
+    fn withdrawn(&self);
 }
 
 /// What every supervisor of an App Server shares.
@@ -266,6 +273,7 @@ pub fn spawn(spec: TaskSpec, context: Context) -> SupervisorMailbox {
         err: Stream::new(None::<tokio::process::ChildStderr>),
         stdin: None,
         held: Vec::new(),
+        withdrawn: false,
         ending: None,
         exit: None,
         ended: None,
@@ -308,6 +316,8 @@ struct Supervisor {
     stdin: Option<ChildStdin>,
     /// The `tool.stdin` that arrived before the start was decided.
     held: Vec<Control<StdinPayload>>,
+    /// The start was rejected and the registration withdrawn.
+    withdrawn: bool,
     ending: Option<(Termination, Expiry)>,
     /// The shell's exit facts and when they were observed.
     exit: Option<(ExitFacts, Duration)>,
@@ -433,17 +443,11 @@ impl Supervisor {
         // the launched task, or as of a task that has ended.
         match checked {
             None => self.release_held(),
-            Some(Err(rejection)) => {
-                self.reject(rejection);
-                self.release_held();
-            }
+            Some(Err(rejection)) => self.reject(rejection),
             Some(Ok(available)) => {
                 let work = Work::of(&self.spec.tool, &self.spec.cwd);
                 match self.launch(&available, work).await {
-                    Err(Start::Rejected(rejection)) => {
-                        self.reject(rejection);
-                        self.release_held();
-                    }
+                    Err(Start::Rejected(rejection)) => self.reject(rejection),
                     Err(Start::Failed(error)) => {
                         self.report_start_failure(error);
                         self.release_held();
@@ -524,7 +528,9 @@ impl Supervisor {
     }
 
     /// The `rejected` report of a call that the availability check or the
-    /// transform refused; no process of the task started.
+    /// transform refused; no process of the task started. The registration
+    /// is withdrawn, so each control of the task, held or later, gets
+    /// `task_not_found` as one of a task never admitted.
     fn reject(&mut self, rejection: PolicyRejection) {
         self.submit(
             self.spec.correlation.clone(),
@@ -539,6 +545,11 @@ impl Supervisor {
             ended: true,
             ..State::default()
         });
+        self.withdrawn = true;
+        self.spec.listener.withdrawn();
+        for control in std::mem::take(&mut self.held) {
+            self.control_error(&control, ControlErrorCode::TaskNotFound, TASK_NOT_FOUND);
+        }
     }
 
     /// `ended` and `cleaned`: controls are answered from what the task
@@ -561,6 +572,12 @@ impl Supervisor {
                     None => open = false,
                     Some(SupervisorMessage::Outcome(report, _)) => {
                         self.awaited.remove(&report);
+                    }
+                    Some(SupervisorMessage::Stdin(control)) if self.withdrawn => {
+                        self.control_error(&control, ControlErrorCode::TaskNotFound, TASK_NOT_FOUND);
+                    }
+                    Some(SupervisorMessage::Cancel(control)) if self.withdrawn => {
+                        self.control_error(&control, ControlErrorCode::TaskNotFound, TASK_NOT_FOUND);
                     }
                     Some(SupervisorMessage::Stdin(control)) => self.stdin(*control),
                     Some(SupervisorMessage::Cancel(control)) => self.cancel(*control),
@@ -1542,12 +1559,7 @@ impl Supervisor {
         self.reply(control, outcome, &stdout, &stderr, limits, error);
     }
 
-    fn control_error(
-        &mut self,
-        control: &Control<StdinPayload>,
-        code: ControlErrorCode,
-        message: &str,
-    ) {
+    fn control_error<P>(&mut self, control: &Control<P>, code: ControlErrorCode, message: &str) {
         self.submit(
             control.correlation.clone(),
             &control.connection_id,

@@ -81,10 +81,12 @@ temporary directories. No workspace crate depends on this package.
   counters of the Connection owner; `Machine::start_with_tools` gives the App
   Server the protocol's `tool_execution` fixture to advertise, through the
   test seam `TETRAL_TEST_TOOL_EXECUTION`, and the system `PATH` for its
-  tasks; `Machine::start_under` runs the App Server under another program,
+  tasks, and `Machine::start_with_tools_from` another `tetral` build and
+  `PATH`; `Machine::start_under` runs the App Server under another program,
   such as `bwrap` with mounts that change what it finds; `task_parent`
   locates a root's `T` apart from the code under test.
 - `src/tasks.rs`: `TaskMachine`, such a machine with one prepared Session,
+  also on another `tetral` build and `PATH` (`TaskMachine::start_from`),
   which issues tool instructions and controls, reads their reports and
   replies, follows the seams of a task's start, initial wait, output, writes,
   waiting replies, termination steps, observed exit and the checks of an
@@ -131,7 +133,8 @@ temporary directories. No workspace crate depends on this package.
   with its own report or protocol error; with a prepared Session, an
   instruction delivered again or its payload issued again, a `task_id`
   issued again with other content, tasks staged behind a withheld
-  `prepared` ACK and the controls they held when their start fails, a
+  `prepared` ACK and the controls they held when their start fails or is
+  rejected, after which the task leaves the registry, a
   cancel and a close while a task's availability check is held, the
   replay-ledger entries of tasks, kept until a resume
   or freed by each ACK, and, with only the ledger's reserve free, new tasks

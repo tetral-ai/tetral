@@ -110,6 +110,26 @@ impl TaskMachine {
             directory,
             &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
         );
+        TaskMachine::prepared(engine, machine, directory)
+    }
+
+    /// [`TaskMachine::start`] with the App Server run from the `tetral` at
+    /// `tetral` with `path` as its `PATH`
+    /// ([`Machine::start_with_tools_from`]); a restart runs the default
+    /// build.
+    pub fn start_from(case: &mut Case, directory: &Path, tetral: &Path, path: &str) -> TaskMachine {
+        let engine = one_credential_engine();
+        let machine = Machine::start_with_tools_from(
+            case,
+            directory,
+            &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+            tetral,
+            path,
+        );
+        TaskMachine::prepared(engine, machine, directory)
+    }
+
+    fn prepared(engine: ReferenceServer, machine: Machine, directory: &Path) -> TaskMachine {
         machine.wait_for("online");
         let project = directory.join("project");
         std::fs::create_dir(&project).unwrap();

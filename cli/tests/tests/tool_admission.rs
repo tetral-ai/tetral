@@ -6,7 +6,7 @@
 //! Session running `exec_command` tasks: an instruction delivered again or
 //! its payload issued again, a `task_id` issued again with other content,
 //! tasks staged behind a withheld `prepared` ACK and the controls they held
-//! when their start fails, a cancel and a close while a task's availability
+//! when their start fails or is rejected, a cancel and a close while a task's availability
 //! check is held, the replay ledger's
 //! entries of tasks, kept until a resume or freed by each ACK, and, with
 //! only the ledger's reserve free, new tasks refused while a running task's
@@ -26,11 +26,11 @@ use tetral_tests::machine::{
 };
 use tetral_tests::record::Case;
 use tetral_tests::reference::ReferenceServer;
-use tetral_tests::socket_directory;
 use tetral_tests::tasks::{
     AVAILABILITY_CHECK, BINDING, HEARTBEAT_INTERVAL, LAUNCH, SESSION, TaskMachine, WAIT_CHECKED,
     millis, policy as project_policy,
 };
+use tetral_tests::{binaries, socket_directory};
 
 /// The Session these instructions name, which the machine never prepared:
 /// an instruction that passes its budgets finds no binding and no task.
@@ -637,6 +637,65 @@ fn a_read_and_a_write_held_by_a_staged_task_are_answered_when_its_start_fails() 
     let write = tasks.reply(&write);
     assert_eq!(write["error"]["code"], "stdin_closed", "{write:#}");
     case.observe("the start failed exec_spawn_failed; the held read was answered as of the ended task and the held write stdin_closed");
+}
+
+#[test]
+fn a_task_whose_start_is_rejected_leaves_the_registry_so_its_controls_find_no_task() {
+    let _socket_dir = socket_directory::shared();
+    let mut case = tetral_tests::record!().case(
+        "an App Server whose PATH holds no bwrap: a staged exec_command with a read sent while it is staged, then the ACK; a cancel after its rejection; the same instruction issued again",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let empty = directory.path().join("empty");
+    fs::create_dir(&empty).unwrap();
+    let tasks = TaskMachine::start_from(
+        &mut case,
+        directory.path(),
+        binaries::tetral(),
+        empty.to_str().unwrap(),
+    );
+    let policy = project_policy(&tasks.project, "disabled");
+    let execute = || {
+        tasks.execute_with(
+            "sess_held",
+            "bind_held",
+            "task_rejected",
+            json!({"cmd": "touch ran"}),
+            policy.clone(),
+            None,
+        )
+    };
+    let control = |kind: &str, members: Value| {
+        let mut payload = json!({
+            "session_id": "sess_held", "binding_id": "bind_held",
+            "tool_use_event_id": format!("call_{kind}"), "task_id": "task_rejected",
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(members.as_object().cloned().unwrap());
+        let issued = tasks
+            .engine
+            .control(kind, json!({"instance_id": INSTANCE, "payload": payload}));
+        issued["message_id"].as_str().unwrap().to_owned()
+    };
+    let rejection = |report: &Value| json!([report["phase"], report["error"]["code"]]);
+    let unavailable = json!(["rejected", "sandbox_unavailable"]);
+
+    prepare_pending(&tasks, "sess_held", "bind_held");
+    let first = execute();
+    let read = control("stdin", json!({"chars": ""}));
+    handled(&tasks, "sess_held", "bind_held");
+    release_answers(&tasks);
+    assert_eq!(rejection(&answer_to(&tasks, &first)), unavailable);
+    assert_eq!(tasks.reply(&read)["error"]["code"], "task_not_found");
+    let cancel = control("cancel", json!({}));
+    assert_eq!(tasks.reply(&cancel)["error"]["code"], "task_not_found");
+    // Registered no more, the same instruction is judged again, not joined.
+    let second = execute();
+    assert_eq!(rejection(&answer_to(&tasks, &second)), unavailable);
+    assert!(!tasks.project.join("ran").exists());
+    case.observe("the start was rejected sandbox_unavailable; the held read and a later cancel found no task; the instruction issued again was rejected again; nothing ran");
 }
 
 #[test]

@@ -26,7 +26,9 @@ use std::time::Duration;
 
 use execution::policy::{TaskPermissions, TranslationInputs, validate};
 use execution::report::{Body, Correlation, Report};
-use execution::supervisor::{Control, SupervisorMailbox, SupervisorMessage, TaskListener};
+use execution::supervisor::{
+    Control, SupervisorMailbox, SupervisorMessage, TASK_NOT_FOUND, TaskListener,
+};
 use execution::{cleanup, isolation, process, store};
 use protocol::connection::{Downstream, DownstreamPayload, DownstreamType};
 use protocol::id::Id;
@@ -390,8 +392,9 @@ impl<S: TaskStarter> SessionOwner<S> {
     }
 
     /// What a task's supervisor reported about the task: its namespace is
-    /// noted, and once its processes are gone it no longer keeps its
-    /// Session `cleanup_pending`.
+    /// noted, once its processes are gone it no longer keeps its Session
+    /// `cleanup_pending`, and a task whose start was rejected leaves the
+    /// registry, so that its `task_id` names no task.
     pub(crate) fn task_event(&mut self, task: TaskKey, event: TaskEvent) {
         if event == TaskEvent::Gone {
             self.unconfirmed
@@ -400,19 +403,27 @@ impl<S: TaskStarter> SessionOwner<S> {
         let Some(record) = self.record.as_mut() else {
             return;
         };
-        let Some(entry) = [record.current.as_mut(), record.unavailable.as_mut()]
+        let Some(tasks) = [record.current.as_mut(), record.unavailable.as_mut()]
             .into_iter()
             .flatten()
             .find(|binding| {
                 binding.binding_id == task.binding_id && binding.connection_id == task.connection_id
             })
-            .and_then(|binding| binding.tasks.registry.get_mut(&task.task_id))
+            .map(|binding| &mut binding.tasks)
         else {
+            return;
+        };
+        if event == TaskEvent::Withdrawn {
+            tasks.registry.remove(&task.task_id);
+            return;
+        }
+        let Some(entry) = tasks.registry.get_mut(&task.task_id) else {
             return;
         };
         match event {
             TaskEvent::Started(namespace) => entry.namespace = Some(namespace),
             TaskEvent::Gone => entry.gone = true,
+            TaskEvent::Withdrawn => {}
         }
     }
 
@@ -479,6 +490,8 @@ pub enum TaskEvent {
     /// The task's PID namespace.
     Started(u64),
     Gone,
+    /// Its start was rejected.
+    Withdrawn,
 }
 
 /// Gives a supervisor's reports about its task back to the owner as
@@ -510,6 +523,10 @@ impl TaskListener for Events {
 
     fn gone(&self) {
         self.send(TaskEvent::Gone);
+    }
+
+    fn withdrawn(&self) {
+        self.send(TaskEvent::Withdrawn);
     }
 }
 
@@ -673,10 +690,7 @@ fn control_error(code: ControlErrorCode, message: &str) -> Body {
 }
 
 fn task_not_found() -> Body {
-    control_error(
-        ControlErrorCode::TaskNotFound,
-        "task_id names no task of the named binding on this connection",
-    )
+    control_error(ControlErrorCode::TaskNotFound, TASK_NOT_FOUND)
 }
 
 /// The control `call` with its decoded `payload`, as its task's supervisor

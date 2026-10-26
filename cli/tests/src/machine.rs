@@ -135,6 +135,23 @@ impl Machine {
         )
     }
 
+    /// [`Machine::start_with_tools`] with the App Server run from the
+    /// `tetral` at `tetral`, such as a build with a `bwrap` digest, and with
+    /// `path` as its `PATH`.
+    pub fn start_with_tools_from(
+        case: &mut Case,
+        directory: &Path,
+        bootstrap: &Value,
+        tetral: &Path,
+        path: &str,
+    ) -> Machine {
+        let server_run = Tetral::at(tetral, ["server", "run", "--app", APP])
+            .current_dir(&crate::workspace_dir().join("tests"))
+            .env(TOOL_EXECUTION_VARIABLE, tool_execution_fragment())
+            .env("PATH", path);
+        Machine::start_as(case, directory, bootstrap, server_run)
+    }
+
     /// [`Machine::start`] with the App Server's working directory
     /// `working_directory`.
     pub fn start_in(
