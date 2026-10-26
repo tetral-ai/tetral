@@ -533,6 +533,7 @@ fn a_running_task_ends_at_the_connections_deadline_after_a_withheld_resume_or_a_
     let tasks = TaskMachine::start(&mut case, &directory.path().join("stepped"));
     let machine = tasks.machine();
     detached(&tasks, "task_stepped", "sleep 1212");
+    wait_until("sleep 1212 running", || process_running(&["sleep", "1212"]));
     let stepped = Instant::now();
     machine.seams.advance(seconds(46.0));
     wait_until("the task's process gone", || {
