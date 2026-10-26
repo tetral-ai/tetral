@@ -8,13 +8,14 @@
 //! observed, or given up on, and the `terminal` report has been handed to the
 //! outbox; and `cleaned` once every report of the task is acknowledged or
 //! dropped and the task's files are gone. The supervisor answers the task's
-//! controls in every state but `staged` and the availability check that
-//! begins `starting`, during which its `tool.stdin` wait and its messages are
+//! `tool.cancel` at receipt in every state, and its `tool.stdin` in every
+//! state but `staged` and the availability check that begins `starting`,
+//! during which that `tool.stdin` waits and the task's other messages are
 //! still read: a cancel or the binding's close prevents the start and makes
 //! the task's `terminal` report at once, and the connection's end discards
-//! the task without one. Each waiting reply is a timer and a
-//! waiter of the supervisor, which meanwhile keeps reading output and
-//! handling the exit and other controls. Every wait reads the seam clock.
+//! the task without one. Each waiting reply is a timer and a waiter of the
+//! supervisor, which meanwhile keeps reading output and handling the exit
+//! and other controls. Every wait reads the seam clock.
 //! A file tool's task runs its child instead of a command
 //! ([`crate::file_tools`]): `running` from the spawn, its `terminal` report
 //! is made once the child's result is received, or once its child is gone

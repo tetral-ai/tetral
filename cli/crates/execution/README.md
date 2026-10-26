@@ -87,12 +87,12 @@ which owns that task's process tree; the translation of a call's
   holds its read buffer only while its pipe is open. It reads both
   pipes all the time into the capture and the logs, so no command blocks on
   its output, and every wait reads the seam clock (`supervisor`).
-- The supervisor answers the task's `tool.stdin` and `tool.cancel` in every
-  state but `staged` and the availability check that begins `starting`,
-  during which its `tool.stdin` wait and its messages are still read: a
-  cancel or the binding's close prevents the start and makes the task's
-  `terminal` report at once, and the connection's end discards the task
-  without one. Each waiting reply is a timer and a waiter of the
+- The supervisor answers the task's `tool.cancel` at receipt in every
+  state, and its `tool.stdin` in every state but `staged` and the
+  availability check that begins `starting`, during which that `tool.stdin`
+  waits and the task's other messages are still read: a cancel or the
+  binding's close prevents the start and makes the task's `terminal` report
+  at once, and the connection's end discards the task without one. Each waiting reply is a timer and a waiter of the
   supervisor, which meanwhile keeps reading output and handling the exit and
   other controls (`supervisor`).
 - A read replies at once when a window holds output or the task has ended,
