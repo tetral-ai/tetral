@@ -227,8 +227,8 @@ fn a_cancel_of_a_task_ignoring_sigterm_reports_its_sigkill_two_seconds_later_wit
         "task_blocked",
         "trap '' TERM; sleep 1241 & cat mnt/f > out 2>&1; wait",
     );
-    wait_until("the read reaching the mount", || {
-        reads.load(Ordering::SeqCst) > 0
+    wait_until("the read reaching the mount and sleep 1241 running", || {
+        reads.load(Ordering::SeqCst) > 0 && process_running(&["sleep", "1241"])
     });
     let cancel = tasks.cancel("task_blocked", json!({}));
     assert_eq!(tasks.reply(&cancel)["result"]["result"]["cancelled"], true);
@@ -305,7 +305,7 @@ fn a_shutdown_ends_a_running_task_through_its_term_trap_and_the_app_server_exits
         "task_shutdown",
         "trap 'echo t >> m' TERM; sleep 1231",
     );
-    assert!(process_running(&["sleep", "1231"]));
+    wait_until("sleep 1231 running", || process_running(&["sleep", "1231"]));
     let issued = Instant::now();
     let shutdown = request(&tasks.machine().app_server.socket, "POST", "/v1/shutdown").unwrap();
     assert_eq!(shutdown.status, 202);
@@ -499,6 +499,7 @@ fn a_running_task_ends_at_the_connections_deadline_after_a_withheld_resume_or_a_
     let tasks = TaskMachine::start(&mut case, &directory.path().join("withheld"));
     let machine = tasks.machine();
     detached(&tasks, "task_held", "trap 'echo t >> m' TERM; sleep 1211");
+    wait_until("sleep 1211 running", || process_running(&["sleep", "1211"]));
     let connection = machine.status()["connection_id"].clone();
     let streams = tasks.engine.requests("events").len();
     tasks
@@ -793,7 +794,7 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
     let mut tasks = TaskMachine::start(&mut case, &directory.path().join("other_boot"));
     let mut outside = Outside(
         std::process::Command::new("sleep")
-            .arg("1231")
+            .arg("1261")
             .spawn()
             .unwrap(),
     );

@@ -198,12 +198,12 @@ fn a_kill_wait_ends_every_process_of_the_command_with_the_timeout_error_and_its_
     let checked = seams.count(WAIT_CHECKED);
     tasks.execute(
         "task_kill",
-        json!({"cmd": "printf partial; sleep 1201 & sleep 1202", "wait_ms": 1_000, "on_wait_expiry": "kill"}),
+        json!({"cmd": "printf partial; sleep 1204 & sleep 1205", "wait_ms": 1_000, "on_wait_expiry": "kill"}),
         policy(&tasks.project, "disabled"),
     );
     tasks.wait_for_start(checked);
     wait_until("both sleeps running", || {
-        process_running(&["sleep", "1201"]) && process_running(&["sleep", "1202"])
+        process_running(&["sleep", "1204"]) && process_running(&["sleep", "1205"])
     });
     seams.advance(millis(1_000));
     let terminal = tasks.terminal("task_kill");
@@ -217,7 +217,7 @@ fn a_kill_wait_ends_every_process_of_the_command_with_the_timeout_error_and_its_
         "{terminal:#}"
     );
     assert_eq!(terminal["result"]["error"]["message"], "command timed out");
-    assert!(!process_running(&["sleep", "1201"]) && !process_running(&["sleep", "1202"]));
+    assert!(!process_running(&["sleep", "1204"]) && !process_running(&["sleep", "1205"]));
     case.observe("terminal timeout, timed_out, signal terminated, stdout partial; neither sleep runs when the report arrives");
 }
 
