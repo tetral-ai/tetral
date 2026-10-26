@@ -142,8 +142,9 @@ temporary directories. No workspace crate depends on this package.
   or freed by each ACK, also of an instruction that joined a task, a
   running task's write and cancel with no entry free, which leave it
   unchanged, and, with only the ledger's reserve free, new tasks
-  refused while a running task's controls, its binding's close and its
-  report are recorded.
+  refused, as one `pressure.rejecting_started` of `tetral_tasks` in the App
+  Server's log, while a running task's controls, its binding's close and
+  its report are recorded.
 - `tests/capability.rs`: the `tool_execution` that ready advertises from
   the App Server's own startup checks, with all tools and without a shell.
 - `tests/tool_reports.rs`: the reports of tool instructions: an ACK that
