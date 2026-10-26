@@ -134,11 +134,10 @@ const STDIN_CLOSED: &str = "task stdin is closed or not accepting input";
 /// every control of a task whose start was rejected.
 pub const TASK_NOT_FOUND: &str = "task_id names no task of the named binding on this connection";
 
-/// One admitted task, as its supervisor starts it.
+/// One admitted task, as its supervisor starts it, without its tool's input.
 pub struct TaskSpec {
     pub connection_id: Id,
     pub correlation: Correlation,
-    pub tool: ToolInput,
     pub permissions: TaskPermissions,
     pub limits: Visible,
     /// The binding's canonical working directory.
@@ -240,10 +239,10 @@ impl ReportListener for Listener {
     }
 }
 
-/// Starts the supervisor of the admitted task `spec`, `staged` until its
-/// mailbox gets [`SupervisorMessage::Start`]; it runs inside its
-/// instruction's span.
-pub fn spawn(spec: TaskSpec, context: Context) -> SupervisorMailbox {
+/// Starts the supervisor of the admitted task `spec` with the input of its
+/// tool, `staged` until its mailbox gets [`SupervisorMessage::Start`]; it
+/// runs inside its instruction's span.
+pub fn spawn(spec: TaskSpec, tool: ToolInput, context: Context) -> SupervisorMailbox {
     let (mailbox, messages) = mpsc::unbounded_channel();
     let trace = spec.traceparent.as_deref().and_then(TraceContext::parse);
     let correlation = &spec.correlation;
@@ -263,6 +262,7 @@ pub fn spawn(spec: TaskSpec, context: Context) -> SupervisorMailbox {
     );
     let supervisor = Supervisor {
         spec,
+        tool: Some(tool),
         context,
         listener: Arc::new(Listener(mailbox.downgrade())),
         messages,
@@ -272,8 +272,8 @@ pub fn spawn(spec: TaskSpec, context: Context) -> SupervisorMailbox {
         process: None,
         spawned: Duration::ZERO,
         start: None,
-        out: Stream::new(None::<tokio::process::ChildStdout>),
-        err: Stream::new(None::<tokio::process::ChildStderr>),
+        out: Stream::new(),
+        err: Stream::new(),
         stdin: None,
         held: Vec::new(),
         joined: Vec::new(),
@@ -301,6 +301,8 @@ pub fn spawn(spec: TaskSpec, context: Context) -> SupervisorMailbox {
 
 struct Supervisor {
     spec: TaskSpec,
+    /// The tool's input, until the task is cleaned.
+    tool: Option<ToolInput>,
     context: Context,
     listener: Arc<Listener>,
     messages: mpsc::UnboundedReceiver<SupervisorMessage>,
@@ -454,7 +456,7 @@ impl Supervisor {
             None => self.release_held(),
             Some(Err(rejection)) => self.reject(rejection),
             Some(Ok(available)) => {
-                let work = Work::of(&self.spec.tool, &self.spec.cwd);
+                let work = Work::of(self.input(), &self.spec.cwd);
                 match self.launch(&available, work).await {
                     Err(Start::Rejected(rejection)) => self.reject(rejection),
                     Err(Start::Failed(error)) => {
@@ -663,7 +665,16 @@ impl Supervisor {
         self.kept = (self.out.capture.counters(), self.err.capture.counters());
         self.out.capture = StreamCapture::new();
         self.err.capture = StreamCapture::new();
+        self.tool = None;
         self.cleaned = true;
+    }
+
+    /// The tool's input, which only the start and the reports of a task
+    /// that never ran read, all before the cleanup.
+    fn input(&self) -> &ToolInput {
+        self.tool
+            .as_ref()
+            .expect("the input is kept until the cleanup")
     }
 
     /// The rest of `starting`, after the availability check: the task's
@@ -733,16 +744,8 @@ impl Supervisor {
             Receiver::from_owned_fd(OwnedFd::from(status)).map_err(|_| failed(NOT_STARTED))?;
         if let Work::Exec(_) = work {
             self.stdin = process.child.stdin.take();
-            self.out.reader = process
-                .child
-                .stdout
-                .take()
-                .map(|reader| Box::new(reader) as _);
-            self.err.reader = process
-                .child
-                .stderr
-                .take()
-                .map(|reader| Box::new(reader) as _);
+            self.out.open(process.child.stdout.take());
+            self.err.open(process.child.stderr.take());
         }
         self.process = Some(process);
         Ok((work, status))
@@ -752,7 +755,7 @@ impl Supervisor {
     /// error`, null exit facts and empty streams; of a file tool, its
     /// error.
     fn report_start_failure(&mut self, error: ToolError) {
-        if let Some(call) = FileCall::of(&self.spec.tool) {
+        if let Some(call) = FileCall::of(self.input()) {
             self.report_file(crate::child::failed(call.tool(), error), Duration::ZERO);
             return;
         }
@@ -1472,7 +1475,7 @@ impl Supervisor {
     /// The `terminal` report of a task cancelled, or whose binding closed,
     /// before it started.
     fn report_cancelled_staged(&mut self) {
-        if let Some(call) = FileCall::of(&self.spec.tool) {
+        if let Some(call) = FileCall::of(self.input()) {
             self.report_file(call.cancelled(false), Duration::ZERO);
             return;
         }
@@ -1751,18 +1754,27 @@ async fn read_some(pipe: Option<&mut Receiver>) -> Option<Vec<u8>> {
 struct Stream {
     reader: Option<Box<dyn AsyncRead + Unpin + Send>>,
     capture: StreamCapture,
+    /// The read buffer, held only while the pipe is open.
     buffer: Vec<u8>,
     /// Whether a write of its log failed; the log is then left alone.
     log_failed: bool,
 }
 
 impl Stream {
-    fn new<R: AsyncRead + Unpin + Send + 'static>(reader: Option<R>) -> Stream {
+    fn new() -> Stream {
         Stream {
-            reader: reader.map(|reader| Box::new(reader) as _),
+            reader: None,
             capture: StreamCapture::new(),
-            buffer: vec![0; READ_CHUNK_BYTES],
+            buffer: Vec::new(),
             log_failed: false,
+        }
+    }
+
+    /// Reads `reader` from now on, when the command has the pipe.
+    fn open<R: AsyncRead + Unpin + Send + 'static>(&mut self, reader: Option<R>) {
+        if let Some(reader) = reader {
+            self.reader = Some(Box::new(reader));
+            self.buffer = vec![0; READ_CHUNK_BYTES];
         }
     }
 
@@ -1783,6 +1795,7 @@ impl Stream {
         match read {
             Ok(0) | Err(_) => {
                 self.reader = None;
+                self.buffer = Vec::new();
                 state::seams::count(OUTPUT_ENDED);
                 false
             }

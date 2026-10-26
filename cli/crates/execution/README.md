@@ -81,7 +81,8 @@ which owns that task's process tree; the translation of a call's
   from the command's actual start, `ended` with its `terminal` report and
   `cleaned` once every report of the task, control replies included, is
   acknowledged or dropped and the files are gone; a cleaned task keeps only
-  its streams' counters, its exit facts and its write records. It reads both
+  its streams' counters, its exit facts and its write records, and a stream
+  holds its read buffer only while its pipe is open. It reads both
   pipes all the time into the capture and the logs, so no command blocks on
   its output, and every wait reads the seam clock (`supervisor`).
 - The supervisor answers the task's `tool.stdin` and `tool.cancel` in every

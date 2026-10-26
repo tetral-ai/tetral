@@ -32,7 +32,6 @@ impl TaskStarter for Supervisors {
         let spec = TaskSpec {
             connection_id: task.connection_id,
             correlation: task.correlation,
-            tool: task.tool,
             permissions: task.permissions,
             limits: Visible::requested(task.limits.as_ref()),
             cwd: task.cwd,
@@ -48,6 +47,7 @@ impl TaskStarter for Supervisors {
         };
         Some(supervisor::spawn(
             spec,
+            task.tool,
             Context {
                 tetral: self.tetral.clone(),
                 isolation: self.isolation,
