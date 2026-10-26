@@ -160,7 +160,7 @@ fn task_files_are_reachable_from_no_other_task_and_tmpdir_holds_files_and_unix_s
     let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "a running task of S1 that writes $TMPDIR/x and talks over $TMPDIR/s, read by another task of S1 and one of S2",
+        "a running task of S1 that writes $TMPDIR/x, talks over $TMPDIR/s and reads its own stdout.log, read by another task of S1 and one of S2",
     );
     let directory = tempfile::tempdir().unwrap();
     let tasks = TaskMachine::start(&mut case, directory.path());
@@ -179,7 +179,7 @@ fn task_files_are_reachable_from_no_other_task_and_tmpdir_holds_files_and_unix_s
 path = os.environ["TMPDIR"] + "/s"
 listener = socket.socket(socket.AF_UNIX); listener.bind(path); listener.listen(1)
 client = socket.socket(socket.AF_UNIX); client.connect(path)
-accepted, _ = listener.accept(); client.sendall(b"ping"); print(" socket", accepted.recv(4).decode(), flush=True)'; sleep 120"#,
+accepted, _ = listener.accept(); client.sendall(b"ping"); print(" socket", accepted.recv(4).decode(), flush=True)'; while [ ! -s own ]; do sleep 0.05; done; cat "$(cat own)" || echo own-denied; sleep 120"#,
             "wait_ms": 250, "on_wait_expiry": "detach", "task_lifetime_ms": 1_000,
         }),
         policy(&tasks.project, "direct"),
@@ -189,6 +189,13 @@ accepted, _ = listener.accept(); client.sendall(b"ping"); print(" socket", accep
     let temporary = only(tasks.temporary_directories());
     wait_until("the owner's output in its log", || {
         fs::read_to_string(&log).is_ok_and(|text| text == "secret socket ping\n")
+    });
+    // The owner reads the log's path from `own`, renamed into place whole,
+    // and then the log itself.
+    fs::write(tasks.project.join("own.part"), log.to_str().unwrap()).unwrap();
+    fs::rename(tasks.project.join("own.part"), tasks.project.join("own")).unwrap();
+    wait_until("the owner's read of its own log", || {
+        fs::read_to_string(&log).is_ok_and(|text| text.len() > "secret socket ping\n".len())
     });
     assert_eq!(fs::read_to_string(temporary.join("x")).unwrap(), "kept\n");
 
@@ -223,8 +230,8 @@ accepted, _ = listener.accept(); client.sendall(b"ping"); print(" socket", accep
     }
     tasks.advance(millis(1_000));
     let owner = tasks.terminal("task_owner");
-    assert_eq!(stdout(&owner)["text"], "secret socket ping\n");
-    case.observe("the owner wrote $TMPDIR/x and exchanged ping over $TMPDIR/s; another task of its Session and a task of another Session could read neither its stdout.log nor $TMPDIR/x");
+    assert_eq!(stdout(&owner)["text"], "secret socket ping\nown-denied\n");
+    case.observe("the owner wrote $TMPDIR/x, exchanged ping over $TMPDIR/s and could not read its own stdout.log; another task of its Session and a task of another Session could read neither its stdout.log nor $TMPDIR/x");
 }
 
 #[test]
