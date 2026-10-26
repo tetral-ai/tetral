@@ -575,6 +575,7 @@ mod tests {
             ReportId(0)
         }
         fn cancel(&self, _report: ReportId) {}
+        fn add_final(&self, _report: ReportId, _instruction: Id) {}
     }
 
     /// Starts an owner whose Session's current binding is `bind_1`, prepared,
@@ -621,6 +622,7 @@ mod tests {
             ReportId(0)
         }
         fn cancel(&self, _report: ReportId) {}
+        fn add_final(&self, _report: ReportId, _instruction: Id) {}
     }
 
     fn close_of(binding_id: &str) -> Close {

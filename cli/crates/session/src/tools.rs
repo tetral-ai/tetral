@@ -89,9 +89,6 @@ pub struct Tasks {
 struct Task {
     /// Its `tool.execute` payload's content fingerprint.
     fingerprint: String,
-    /// The `message_id`s of the instructions it answers: the one that
-    /// registered it and each identical one that joined it.
-    instructions: Vec<Id>,
     tool: ExecutionTool,
     supervisor: Option<SupervisorMailbox>,
     state: TaskState,
@@ -105,7 +102,6 @@ impl std::fmt::Debug for Task {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Task")
-            .field("instructions", &self.instructions)
             .field("tool", &self.tool)
             .field("state", &self.state)
             .finish_non_exhaustive()
@@ -234,7 +230,9 @@ impl<S: TaskStarter> SessionOwner<S> {
                     "task_id names a task of this connection with another payload",
                 ));
             }
-            task.instructions.push(call.message_id.clone());
+            if let Some(supervisor) = &task.supervisor {
+                let _ = supervisor.send(SupervisorMessage::Joined(call.message_id.clone()));
+            }
             return Ok(());
         }
         if !call.recorded {
@@ -307,7 +305,6 @@ impl<S: TaskStarter> SessionOwner<S> {
             call.task_id.clone(),
             Task {
                 fingerprint: call.fingerprint.clone(),
-                instructions: vec![call.message_id.clone()],
                 tool,
                 supervisor,
                 state: if staged {

@@ -346,7 +346,7 @@ impl<S: TaskStarter> SessionOwner<S> {
                 binding_id,
                 outcome,
             });
-        submission.final_for = Some(requester.message_id.clone());
+        submission.final_for = vec![requester.message_id.clone()];
         submission.traceparent = requester.traceparent.clone();
         submission.listener = Some(Arc::new(ReportEvents {
             mailbox: self.mailbox.clone(),

@@ -8,7 +8,8 @@
 //! tasks staged behind a withheld `prepared` ACK and the controls they held
 //! when their start fails or is rejected, a cancel and a close while a task's availability
 //! check is held, the replay ledger's
-//! entries of tasks, kept until a resume or freed by each ACK, and, with
+//! entries of tasks, kept until a resume or freed by each ACK, also of an
+//! instruction that joined a task, and, with
 //! only the ledger's reserve free, new tasks refused while a running task's
 //! controls, its binding's close and its report are recorded. The seam
 //! counters these tests read are those `tetral_tests::machine` and
@@ -806,6 +807,72 @@ fn an_instruction_whose_final_ack_comes_after_a_resume_keeps_its_ledger_entry_un
         assert_eq!(fs::read_to_string(tasks.project.join("f")).unwrap(), "x");
         case.observe(format!(
             "the resent instruction launched nothing and f holds x once; the new task before the next resume was resource_exhausted; after the resume at {name} a new task ran"
+        ));
+    }
+}
+
+#[test]
+fn a_tool_execute_that_joins_a_task_takes_its_final_report_and_frees_its_ledger_entry_with_it() {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    for (name, after_terminal) in [
+        ("while the task runs", false),
+        ("after the task's terminal report, before its ACK", true),
+    ] {
+        let mut case = record.case(&format!(
+            "4,030 closes and a task joined by the same instruction {name}: after the terminal report's ACK, a running task and a new task"
+        ));
+        let directory = tempfile::tempdir().unwrap();
+        let tasks = TaskMachine::start(&mut case, directory.path());
+        let policy = project_policy(&tasks.project, "disabled");
+        // The task and the instruction that joins it take the last two
+        // entries before the reserve.
+        fill_ledger(&tasks, LEDGER_ROOM - 2);
+        let input = json!({"cmd": "while [ ! -e go ]; do sleep 0.05; done"});
+        let go = || fs::write(tasks.project.join("go"), "").unwrap();
+        if after_terminal {
+            answer_fault(
+                &tasks.engine,
+                json!({"endpoint": "tool-status", "action": "withhold"}),
+            );
+        }
+        let first = tasks.execute("task_joined", input.clone(), policy.clone());
+        if after_terminal {
+            go();
+            tasks.terminal("task_joined");
+        }
+        let joined = tasks.execute("task_joined", input, policy.clone());
+        handled(&tasks, SESSION, BINDING);
+        if after_terminal {
+            release_answers(&tasks);
+        } else {
+            go();
+        }
+        let terminal = tasks.terminal("task_joined");
+        assert_eq!(terminal["request_message_id"], first.as_str());
+        tasks.answers_settled();
+        assert!(
+            tasks
+                .engine
+                .received("tool-status")
+                .iter()
+                .all(|report| report["body"]["request_message_id"] != joined.as_str()),
+            "the joined instruction got a report of its own"
+        );
+
+        // With both entries freed, a task that keeps running and a new one
+        // fit before the reserve.
+        tasks.execute(
+            "task_kept",
+            json!({"cmd": "while [ ! -e stop ]; do sleep 0.05; done"}),
+            policy.clone(),
+        );
+        let admitted = tasks.execute("task_admitted", json!({"cmd": "true"}), policy);
+        let report = answer_to(&tasks, &admitted);
+        assert_eq!(report["phase"], "terminal", "{report:#}");
+        fs::write(tasks.project.join("stop"), "").unwrap();
+        case.observe(format!(
+            "joined {name}, the task's terminal report answered both instructions; after its ACK a running task and a new task were both admitted"
         ));
     }
 }

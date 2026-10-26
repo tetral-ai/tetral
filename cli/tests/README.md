@@ -137,7 +137,7 @@ temporary directories. No workspace crate depends on this package.
   rejected, after which the task leaves the registry, a
   cancel and a close while a task's availability check is held, the
   replay-ledger entries of tasks, kept until a resume
-  or freed by each ACK, and, with only the ledger's reserve free, new tasks
+  or freed by each ACK, also of an instruction that joined a task, and, with only the ledger's reserve free, new tasks
   refused while a running task's controls, its binding's close and its
   report are recorded.
 - `tests/capability.rs`: the `tool_execution` that ready advertises from

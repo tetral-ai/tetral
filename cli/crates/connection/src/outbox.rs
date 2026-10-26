@@ -99,6 +99,7 @@ impl std::fmt::Debug for Outbox {
 enum Message {
     Submit(ReportId, Submission),
     Cancel(ReportId),
+    AddFinal(ReportId, Id),
     ConnectionStarted {
         number: u64,
         connection: Id,
@@ -161,6 +162,10 @@ impl ReportSink for Outbox {
     fn cancel(&self, report: ReportId) {
         self.send(Message::Cancel(report));
     }
+
+    fn add_final(&self, report: ReportId, instruction: Id) {
+        self.send(Message::AddFinal(report, instruction));
+    }
 }
 
 async fn own(mut owner: Owner, mut inbox: mpsc::UnboundedReceiver<Message>) {
@@ -204,7 +209,7 @@ struct Pending {
     message_id: Id,
     endpoint: ReportEndpoint,
     size: usize,
-    final_for: Option<Id>,
+    final_for: Vec<Id>,
     traceparent: Option<String>,
     listener: Option<Arc<dyn ReportListener>>,
     backoff: Backoff,
@@ -218,6 +223,15 @@ impl Owner {
         match message {
             Message::Submit(report, submission) => self.submit(report, submission).await,
             Message::Cancel(report) => self.cancel(report).await,
+            Message::AddFinal(report, instruction) => {
+                if let Some(pending) = self
+                    .current
+                    .as_mut()
+                    .and_then(|current| current.reports.get_mut(&report))
+                {
+                    pending.final_for.push(instruction);
+                }
+            }
             Message::ConnectionStarted {
                 number,
                 connection,
@@ -416,13 +430,13 @@ impl Owner {
             return true;
         };
         tell(&pending.listener, report, outcome);
-        if outcome == ReportOutcome::Acked
-            && let Some(instruction) = pending.final_for
-        {
-            let _ = self.config.events.send(OutboxEvent::FinalAcked {
-                connection,
-                instruction,
-            });
+        if outcome == ReportOutcome::Acked {
+            for instruction in pending.final_for {
+                let _ = self.config.events.send(OutboxEvent::FinalAcked {
+                    connection: connection.clone(),
+                    instruction,
+                });
+            }
         }
         true
     }

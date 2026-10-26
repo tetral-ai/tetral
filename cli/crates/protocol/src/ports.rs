@@ -66,8 +66,10 @@ pub struct Submission {
     /// The connection the report belongs to; it is sent on no other.
     pub connection_id: Id,
     pub endpoint: ReportEndpoint,
-    /// The `message_id` of the instruction whose final report this is.
-    pub final_for: Option<Id>,
+    /// The `message_id`s of the instructions whose final report this is:
+    /// the one it answers and each identical `tool.execute` that joined its
+    /// task.
+    pub final_for: Vec<Id>,
     /// The `traceparent` of the instruction the report was built for, when
     /// that value is usable.
     pub traceparent: Option<String>,
@@ -86,7 +88,7 @@ impl Submission {
         Submission {
             connection_id,
             endpoint: R::ENDPOINT,
-            final_for: None,
+            final_for: Vec::new(),
             traceparent: None,
             listener: None,
             build: Box::new(move |connection, message| {
@@ -129,6 +131,11 @@ pub trait ReportSink: Send + Sync {
 
     /// Stops the report's retries and deletes it.
     fn cancel(&self, report: ReportId);
+
+    /// Makes the report also the final report of `instruction`, an identical
+    /// `tool.execute` that joined its task after it was submitted; a report
+    /// already acknowledged or dropped is left as it was.
+    fn add_final(&self, report: ReportId, instruction: Id);
 }
 
 /// A `session.prepare` that passed the Connection owner's admission, for the

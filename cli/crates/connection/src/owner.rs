@@ -1552,7 +1552,7 @@ impl Owner {
                 outcome: SessionOutcome::Failed { error },
             }
         });
-        report.final_for = Some(request_message_id);
+        report.final_for = vec![request_message_id];
         report.traceparent = instruction
             .trace
             .as_ref()

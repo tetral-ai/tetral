@@ -161,7 +161,7 @@ impl Report {
         let mut submission = Submission::new(connection_id, move |connection, message_id| {
             self.status(connection, message_id)
         });
-        submission.final_for = final_for;
+        submission.final_for = final_for.into_iter().collect();
         submission
     }
 

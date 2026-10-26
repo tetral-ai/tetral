@@ -205,6 +205,9 @@ pub enum SupervisorMessage {
     Cancel(Box<Control<CancelPayload>>),
     /// The task's binding closes: a staged task never starts.
     Prevent,
+    /// An identical `tool.execute` with this `message_id` joined the task:
+    /// the task's final report, its `terminal` or `rejected`, ends it too.
+    Joined(Id),
     /// The outbox's outcome of one of the task's reports.
     Outcome(ReportId, ReportOutcome),
     /// The task's connection ended.
@@ -273,6 +276,8 @@ pub fn spawn(spec: TaskSpec, context: Context) -> SupervisorMailbox {
         err: Stream::new(None::<tokio::process::ChildStderr>),
         stdin: None,
         held: Vec::new(),
+        joined: Vec::new(),
+        final_report: None,
         withdrawn: false,
         ending: None,
         exit: None,
@@ -316,6 +321,10 @@ struct Supervisor {
     stdin: Option<ChildStdin>,
     /// The `tool.stdin` that arrived before the start was decided.
     held: Vec<Control<StdinPayload>>,
+    /// The instructions that joined the task.
+    joined: Vec<Id>,
+    /// The task's final report, once submitted.
+    final_report: Option<ReportId>,
     /// The start was rejected and the registration withdrawn.
     withdrawn: bool,
     ending: Option<(Termination, Expiry)>,
@@ -510,6 +519,7 @@ impl Supervisor {
                 Some(SupervisorMessage::Outcome(report, _)) => {
                     self.awaited.remove(&report);
                 }
+                Some(SupervisorMessage::Joined(instruction)) => self.join(instruction),
             }
         }
     }
@@ -573,6 +583,7 @@ impl Supervisor {
                     Some(SupervisorMessage::Outcome(report, _)) => {
                         self.awaited.remove(&report);
                     }
+                    Some(SupervisorMessage::Joined(instruction)) => self.join(instruction),
                     Some(SupervisorMessage::Stdin(control)) if self.withdrawn => {
                         self.control_error(&control, ControlErrorCode::TaskNotFound, TASK_NOT_FOUND);
                     }
@@ -873,6 +884,7 @@ impl Supervisor {
                     Some(SupervisorMessage::Outcome(report, _)) => {
                         self.awaited.remove(&report);
                     }
+                    Some(SupervisorMessage::Joined(instruction)) => self.join(instruction),
                     Some(SupervisorMessage::ConnectionEnded) => self.stop(pid, Expiry::ConnectionEnded),
                     Some(SupervisorMessage::Shutdown) => self.stop(pid, Expiry::Shutdown),
                     Some(SupervisorMessage::Start | SupervisorMessage::Prevent) => {}
@@ -998,6 +1010,7 @@ impl Supervisor {
                     Some(SupervisorMessage::Outcome(report, _)) => {
                         self.awaited.remove(&report);
                     }
+                    Some(SupervisorMessage::Joined(instruction)) => self.join(instruction),
                     Some(SupervisorMessage::ConnectionEnded) => self.stop(pid, Expiry::ConnectionEnded),
                     Some(SupervisorMessage::Shutdown) => self.stop(pid, Expiry::Shutdown),
                     // The binding owner refuses a `tool.stdin` of a file
@@ -1143,7 +1156,8 @@ impl Supervisor {
         );
     }
 
-    /// Hands a report to the outbox; the cleanup waits for its outcome.
+    /// Hands a report to the outbox; the cleanup waits for its outcome. The
+    /// task's final report also ends the instructions that joined it.
     fn submit(
         &mut self,
         correlation: Correlation,
@@ -1153,10 +1167,26 @@ impl Supervisor {
     ) {
         let report = Report { correlation, body };
         let mut submission = report.submission(connection_id.clone());
+        let task_final =
+            submission.final_for.first() == Some(&self.spec.correlation.request_message_id);
+        if task_final {
+            submission.final_for.extend(self.joined.iter().cloned());
+        }
         submission.traceparent = traceparent;
         submission.listener = Some(self.listener.clone());
         let id = self.context.reports.submit(submission);
+        if task_final {
+            self.final_report = Some(id);
+        }
         self.awaited.insert(id);
+    }
+
+    /// An identical `tool.execute` joined the task.
+    fn join(&mut self, instruction: Id) {
+        match self.final_report {
+            Some(report) => self.context.reports.add_final(report, instruction),
+            None => self.joined.push(instruction),
+        }
     }
 
     /// The metrics of a report built now, for a command that ran for `run`.

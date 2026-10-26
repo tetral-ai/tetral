@@ -24,7 +24,9 @@ that is no longer the binding's is discarded.
   binding changes nothing for it.
 - A `tool.execute` is admitted in fixed steps, the first failing one
   deciding its `rejected` report, before any side effect: its task identity
-  in the binding's registry (an equal payload joins the task, another is
+  in the binding's registry (an equal payload joins the task, whose final
+  report, its `terminal` or `rejected`, then ends it too, so that its
+  replay-ledger entry goes with that report's ACK; another is
   `task_conflict`), the replay ledger's room, its schema, budgets and tool
   against the ready's list, its policy, its binding. Step 3 judges
   everything but the policy, which step 4 judges by `execution::policy`,
