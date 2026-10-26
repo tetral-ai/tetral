@@ -1,7 +1,8 @@
 //! The records of tasks whose processes could outlive their App Server. A
-//! task's supervisor writes `R/execution/<task name>.json` once the task's
-//! first process inside its sandbox exists and deletes it once the task's
-//! processes are confirmed gone. The next App Server reads the records an
+//! task's supervisor writes `R/execution/<task name>.json` when the task's
+//! child reports its start on descriptor 3, or, without that report, while
+//! the task is being ended, and deletes it once the task's processes are
+//! confirmed gone. The next App Server reads the records an
 //! earlier one left before its first connection ([`read`]) and checks them
 //! every [`CHECK_INTERVAL`] until each is confirmed ([`Check::run`]); until
 //! then the record's Session is `cleanup_pending`. The check is the only
