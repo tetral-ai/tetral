@@ -1,6 +1,8 @@
 package reference
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -59,6 +61,17 @@ func execResult(phase string, stdout string) map[string]any {
 	return map[string]any{"kind": "execution", "phase": phase, "report_seq": 1, "result": envelope}
 }
 
+// viewImageResult is a terminal view_image result report whose image is
+// data, declared as sizeBytes.
+func viewImageResult(data string, sizeBytes int) map[string]any {
+	envelope := map[string]any{
+		"schema_version": 1, "tool": "view_image", "status": "success", "truncated": false, "error": nil,
+		"result":  map[string]any{"mime": "image/png", "size_bytes": sizeBytes, "data_base64": data},
+		"metrics": map[string]any{"wall_time_ms": 1, "queued_ms": 0, "drive_wait_ms": 0, "run_ms": 1, "sync_ms": 0},
+	}
+	return map[string]any{"kind": "execution", "phase": "terminal", "report_seq": 1, "result": envelope}
+}
+
 func TestAToolInstructionIsWrittenWithTheBytesOfItsPayload(t *testing.T) {
 	ts := startServer(t)
 	stream, _ := ts.online()
@@ -82,6 +95,59 @@ func TestAToolInstructionIsWrittenWithTheBytesOfItsPayload(t *testing.T) {
 	sizes := stream.dataBytes()
 	if html, text := sizes[len(sizes)-2], sizes[len(sizes)-1]; html != text {
 		t.Errorf("the events are %d and %d bytes", html, text)
+	}
+}
+
+func TestAViewImageReportIsJudgedByTheIssuedToolAndItsImage(t *testing.T) {
+	image := base64.StdEncoding.EncodeToString([]byte("abc"))
+	for _, row := range []struct {
+		name    string
+		tool    string
+		members map[string]any
+		// bodyBytes, when set, is the body's size, which data_base64 fills.
+		bodyBytes int
+		status    int
+		code      string
+	}{
+		{"an image of its declared size", "view_image", viewImageResult(image, 3), 0, http.StatusOK, ""},
+		{"a view_image result answering an exec_command", "exec_command", viewImageResult(image, 3), 0,
+			http.StatusConflict, "unknown_instruction"},
+		{"data_base64 outside the standard alphabet", "view_image", viewImageResult("YWJj-A==", 4), 0,
+			http.StatusBadRequest, "invalid_message"},
+		{"data_base64 with a line break", "view_image", viewImageResult("YW\nJj", 3), 0,
+			http.StatusBadRequest, "invalid_message"},
+		{"a size_bytes other than the decoded bytes", "view_image", viewImageResult(image, 4), 0,
+			http.StatusBadRequest, "invalid_message"},
+		{"an image of 10,485,761 bytes", "view_image",
+			viewImageResult(base64.StdEncoding.EncodeToString(make([]byte, 10_485_761)), 10_485_761), 0,
+			http.StatusBadRequest, "invalid_message"},
+		{"a body of 14,680,065 bytes", "view_image", viewImageResult("", 0), 14_680_065,
+			http.StatusRequestEntityTooLarge, "request_too_large"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			ts := startServer(t)
+			stream, connectionID := ts.online()
+			instruction := executePayload("task_1")
+			instruction["tool"] = row.tool
+			if row.tool == "view_image" {
+				instruction["input"] = map[string]any{"path": "picture.png"}
+			}
+			var issued struct {
+				MessageID string `json:"message_id"`
+			}
+			ts.call("execute", map[string]any{"instance_id": "inst_a", "payload": instruction}, &issued)
+			stream.expect("tool.execute")
+			report := toolReport(connectionID, "report_1", issued.MessageID, row.members)
+			if row.bodyBytes > 0 {
+				empty, _ := json.Marshal(report)
+				data := strings.Repeat("A", row.bodyBytes-len(empty))
+				report["result"].(map[string]any)["result"].(map[string]any)["data_base64"] = data
+			}
+			answer := ts.post("tool-status", "tetral_ck_a", report)
+			if answer.status != row.status || answer.code() != row.code {
+				t.Fatalf("answer %d %.200s; want %d %q", answer.status, answer.body, row.status, row.code)
+			}
+		})
 	}
 }
 
@@ -145,8 +211,6 @@ func TestAToolStatusReportIsAcceptedOnlyForItsIssuedInstructionWithinItsLimits(t
 			execResult("terminal", strings.Repeat("a", 262_144)), http.StatusBadRequest, "invalid_message", false},
 		{"an ordinary report over 327,680 bytes", "execute",
 			execResult("terminal", strings.Repeat("a", 327_680)), http.StatusRequestEntityTooLarge, "request_too_large", false},
-		{"a body over 14,680,064 bytes", "execute",
-			execResult("terminal", strings.Repeat("a", 14_680_064)), http.StatusRequestEntityTooLarge, "request_too_large", false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			ts := startServer(t)

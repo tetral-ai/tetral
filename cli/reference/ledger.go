@@ -61,9 +61,11 @@ type issuedInstruction struct {
 	// reports carry.
 	toolUseEventID string
 	taskID         string
-	envelope       []byte
-	reported       bool
-	sends          int
+	// tool is a tool.execute's, whose reports are judged by it.
+	tool     string
+	envelope []byte
+	reported bool
+	sends    int
 	// prepares is the binding a session.prepare names; it exists on the
 	// connection only once the prepare is issued, so a queued prepare grants
 	// no Git ticket.
@@ -108,6 +110,7 @@ func (server *Server) issue(conn *connection, spec instructionSpec, bypass bool)
 		BindingID      any   `json:"binding_id"`
 		ToolUseEventID any   `json:"tool_use_event_id"`
 		TaskID         any   `json:"task_id"`
+		Tool           any   `json:"tool"`
 		CreateCwd      any   `json:"create_cwd"`
 		Repositories   []any `json:"repositories"`
 	}
@@ -137,9 +140,10 @@ func (server *Server) issue(conn *connection, spec instructionSpec, bypass bool)
 	bindingID, _ := fields.BindingID.(string)
 	toolUseEventID, _ := fields.ToolUseEventID.(string)
 	taskID, _ := fields.TaskID.(string)
+	tool, _ := fields.Tool.(string)
 	instruction := &issuedInstruction{
 		messageID: messageID, kind: spec.Type, sessionID: sessionID, bindingID: bindingID,
-		toolUseEventID: toolUseEventID, taskID: taskID, envelope: encoded,
+		toolUseEventID: toolUseEventID, taskID: taskID, tool: tool, envelope: encoded,
 	}
 	if spec.Type == "session.prepare" {
 		createCwd, _ := fields.CreateCwd.(bool)

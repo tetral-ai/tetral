@@ -31,13 +31,16 @@ its own protocol types in `wire/`; `tetral` never depends on it.
   issued, to grant its binding's Git tickets.
 - A tool-status report is accepted only when it answers a tool instruction
   issued on its connection, with that instruction's Session, binding,
-  `tool_use_event_id` and `task_id` and the kind that answers its type
-  (`409 unknown_instruction` otherwise), and only within the byte limits of
-  its kind: a body over 14,680,064 bytes or an ordinary report over 327,680
+  `tool_use_event_id` and `task_id`, the kind that answers its type and, for
+  an execution result, the tool that was issued (`409 unknown_instruction`
+  otherwise), and only within the byte limits of that tool: a body over
+  14,680,064 bytes, or a report of any tool but `view_image` over 327,680,
   is `413 request_too_large`; a result envelope over 262,144 bytes (for
-  `view_image`, with `data_base64` emptied) or metadata over 65,536 is
-  `400 invalid_message`. A terminal or rejected execution report and a
-  control's reply mark the instruction reported (`tools.go`).
+  `view_image`, with `data_base64` emptied), metadata over 65,536, and a
+  `view_image` image whose `data_base64` is not standard Base64 without line
+  breaks or decodes to more than 10,485,760 bytes or to another count than
+  `size_bytes` are `400 invalid_message`. A terminal or rejected execution
+  report and a control's reply mark the instruction reported (`tools.go`).
 - A stream gets a `heartbeat` every 15 seconds of the server's clock
   (`HeartbeatInterval`), on a resumed stream first right after `connected`,
   and a stream-only `disconnect` at the maximum stream age. A grant lasts at
