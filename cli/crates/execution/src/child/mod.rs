@@ -151,16 +151,15 @@ impl DirectoryError {
         }
     }
 
-    /// The tool error that names `directory`; `Other` is
-    /// `cwd_inaccessible`, the directory being there but not usable.
+    /// The tool error that names `directory`, with the Go Helper's
+    /// messages; `Other` is `cwd_inaccessible` for a file tool, while
+    /// `exec_command` reports it as `exec_spawn_failed` (`exec`).
     fn tool_error(self, directory: &Path) -> ToolError {
         let (kind, message) = match self {
-            DirectoryError::NotFound => ("cwd_not_found", "working directory does not exist"),
-            DirectoryError::NotDirectory => {
-                ("cwd_not_directory", "working directory is not a directory")
-            }
+            DirectoryError::NotFound => ("cwd_not_found", "cwd does not exist"),
+            DirectoryError::NotDirectory => ("cwd_not_directory", "cwd is not a directory"),
             DirectoryError::Inaccessible | DirectoryError::Other => {
-                ("cwd_inaccessible", "working directory is not accessible")
+                ("cwd_inaccessible", "cwd is not accessible")
             }
         };
         tool_error(kind, message, Some(directory.display().to_string()))

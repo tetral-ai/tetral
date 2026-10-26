@@ -499,18 +499,10 @@ fn a_missing_or_overlong_path_and_each_failure_of_the_working_directory_give_the
          replaced by a file",
     );
     fs::remove_dir_all(&project).unwrap();
-    failures(
-        "removed",
-        "cwd_not_found",
-        "working directory does not exist",
-    );
+    failures("removed", "cwd_not_found", "cwd does not exist");
     assert!(!project.exists());
     fs::write(&project, "x").unwrap();
-    failures(
-        "file",
-        "cwd_not_directory",
-        "working directory is not a directory",
-    );
+    failures("file", "cwd_not_directory", "cwd is not a directory");
     case.observe(
         "cwd_not_found naming the directory, which was not created, then cwd_not_directory, for \
          both tools",
@@ -526,11 +518,7 @@ fn a_missing_or_overlong_path_and_each_failure_of_the_working_directory_give_the
     fs::create_dir(&project).unwrap();
     fs::set_permissions(&project, fs::Permissions::from_mode(0o000)).unwrap();
     let outcomes = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        failures(
-            "locked",
-            "cwd_inaccessible",
-            "working directory is not accessible",
-        )
+        failures("locked", "cwd_inaccessible", "cwd is not accessible")
     }));
     fs::set_permissions(&project, fs::Permissions::from_mode(0o700)).unwrap();
     if let Err(panic) = outcomes {
