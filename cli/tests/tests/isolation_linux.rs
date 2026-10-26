@@ -1145,6 +1145,7 @@ fn fake_bwrap(directory: &Path, body: &str) -> PathBuf {
 /// App Server's `PATH`, the bytes of a `bwrap` beside `tetral`, and the
 /// command's own `PATH`, which the launch hands to `tetral` as
 /// `codex-linux-sandbox`.
+#[derive(Clone)]
 struct Offer<'a> {
     name: &'a str,
     tetral: &'a Path,
@@ -1172,9 +1173,28 @@ fn ran_marker(planted: &Path) -> PathBuf {
     planted.with_file_name("ran")
 }
 
-/// Runs a command that writes a marker through `offer` and checks what it
-/// expects.
-fn check_offer(case: &mut Case, offer: Offer) {
+/// How an offer's command is started: by the isolation harness, or as a
+/// `tool.execute` of an App Server run from the offer's `tetral` with its
+/// `PATH`, the command's `PATH` in the call's `env`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Via {
+    Harness,
+    ToolExecute,
+}
+
+/// Checks `offer` by the harness and, unless the helper refuses it, which
+/// only the harness's request can set up, as a `tool.execute`.
+fn check_offer_both_ways(case: &mut Case, offer: Offer) {
+    let refused = matches!(offer.expected, Expected::RefusedByTheHelper { .. });
+    check_offer(case, offer.clone(), Via::Harness);
+    if !refused {
+        check_offer(case, offer, Via::ToolExecute);
+    }
+}
+
+/// Runs a command that writes a marker through `offer` `via` the harness or
+/// a call, and checks what it expects.
+fn check_offer(case: &mut Case, offer: Offer, via: Via) {
     let Offer {
         name,
         tetral,
@@ -1188,6 +1208,10 @@ fn check_offer(case: &mut Case, offer: Offer) {
         let bwrap = world.tetral.with_file_name("bwrap");
         fs::write(&bwrap, bytes).unwrap();
         fs::set_permissions(&bwrap, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    if via == Via::ToolExecute {
+        check_offered_call(case, &world, name, path, command_path, expected);
+        return;
     }
     let marker = world.project.join("marker");
     let request = world.request(
@@ -1230,6 +1254,69 @@ fn check_offer(case: &mut Case, offer: Offer) {
             assert_eq!((spawned, marker.exists()), (1, false), "{name}");
             names(outcome["stderr"].as_str().unwrap(), planted);
         }
+    }
+}
+
+/// [`check_offer`] as a `tool.execute` of an App Server run from the
+/// world's `tetral` with `path` as its `PATH`.
+fn check_offered_call(
+    case: &mut Case,
+    world: &World,
+    name: &str,
+    path: &str,
+    command_path: &str,
+    expected: Expected,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start_from(case, directory.path(), &world.tetral, path);
+    let marker = tasks.project.join("marker");
+    let spawned_before = tasks.machine().seams.count("process.spawn");
+    tasks.execute(
+        "task_offer",
+        json!({"cmd": format!("echo > {}", quoted(&marker)), "env": {"PATH": command_path}}),
+        task_policy(&tasks.project, "direct"),
+    );
+    let (phase, report) = match expected {
+        Expected::Runs => ("terminal", tasks.terminal("task_offer")),
+        _ => ("rejected", tasks.report("task_offer", "rejected")),
+    };
+    let spawned = tasks.machine().seams.count("process.spawn") - spawned_before;
+    case.observe(format!(
+        "{name}, as a tool.execute: {phase} {}; process.spawn {spawned}; marker {}",
+        if phase == "terminal" {
+            report["result"]["result"]["exit_code"].to_string()
+        } else {
+            report["error"].to_string()
+        },
+        if marker.exists() { "written" } else { "absent" }
+    ));
+    match expected {
+        Expected::Runs => {
+            assert_eq!(
+                report["result"]["result"]["exit_code"], 0,
+                "{name}: {report}"
+            );
+            assert_eq!((spawned, marker.exists()), (1, true), "{name}");
+        }
+        Expected::Unavailable { planted } => {
+            assert_eq!(
+                report["error"]["code"], "sandbox_unavailable",
+                "{name}: {report}"
+            );
+            assert_eq!((spawned, marker.exists()), (0, false), "{name}");
+            if let Some(planted) = planted {
+                let message = report["error"]["message"].as_str().unwrap();
+                assert!(
+                    message.contains(planted.to_str().unwrap()),
+                    "{name}: {message}"
+                );
+                assert!(
+                    !ran_marker(planted).exists(),
+                    "{name}: the planted bwrap ran"
+                );
+            }
+        }
+        Expected::RefusedByTheHelper { .. } => unreachable!("only the harness sets it up"),
     }
 }
 
@@ -1346,7 +1433,7 @@ fn each_bwrap_offer_runs_the_command_rejects_the_call_or_has_the_helper_refuse_i
         },
     ];
     for offer in rows {
-        check_offer(&mut case, offer);
+        check_offer_both_ways(&mut case, offer);
     }
     drop(case);
 
@@ -1400,7 +1487,7 @@ fn each_bwrap_offer_runs_the_command_rejects_the_call_or_has_the_helper_refuse_i
             },
         },
     ] {
-        check_offer(&mut case, offer);
+        check_offer_both_ways(&mut case, offer);
     }
 }
 

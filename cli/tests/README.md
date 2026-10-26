@@ -214,4 +214,5 @@ temporary directories. No workspace crate depends on this package.
   LAN address, and a `disabled` task across 20 seconds of the clock while
   the heartbeats are ACKed and a `direct` task connects; each unusable
   `bwrap`, one that the test user could have planted among them, rejected
-  before any process starts; and the bundled `bwrap` with its digest.
+  before any process starts, by the harness and as a `tool.execute`; and the
+  bundled `bwrap` with its digest.
