@@ -75,7 +75,10 @@ const READ_CHUNK_BYTES: usize = 65_536;
 
 /// The most bytes of the launch-status pipe that the supervisor keeps: one
 /// failure object of the launcher entry.
-const LAUNCH_STATUS_MAX_BYTES: usize = 65_536;
+pub const LAUNCH_STATUS_MAX_BYTES: usize = 65_536;
+
+/// The most bytes that one read of the launch-status pipe takes.
+const LAUNCH_STATUS_READ_BYTES: usize = 4_096;
 
 /// The test seam counter of each reading of the clock by the initial wait
 /// of a command that has started.
@@ -177,12 +180,15 @@ pub struct Context {
     pub boot_id: Option<String>,
 }
 
-/// The waits of a supervisor, each a constant but for tests.
+/// The waits and sizes of a supervisor, each a constant but for tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bounds {
     pub output_drain: Duration,
     pub termination: terminate::Steps,
     pub stdin_write: Duration,
+    /// How often an ended task's processes are checked until they are gone.
+    pub gone_check: Duration,
+    pub launch_status_max_bytes: usize,
 }
 
 impl Default for Bounds {
@@ -191,6 +197,8 @@ impl Default for Bounds {
             output_drain: OUTPUT_DRAIN,
             termination: terminate::Steps::default(),
             stdin_write: stdin::WRITE_TIMEOUT,
+            gone_check: cleanup::CHECK_INTERVAL,
+            launch_status_max_bytes: LAUNCH_STATUS_MAX_BYTES,
         }
     }
 }
@@ -578,7 +586,7 @@ impl Supervisor {
             if !open && self.gone {
                 break;
             }
-            let next_check = self.checked + cleanup::CHECK_INTERVAL;
+            let next_check = self.checked + self.context.bounds.gone_check;
             tokio::select! {
                 message = self.messages.recv(), if open => match message {
                     None => open = false,
@@ -839,7 +847,7 @@ impl Supervisor {
                             self.find_leader(pid);
                             bytes = rest;
                         }
-                        let room = LAUNCH_STATUS_MAX_BYTES.saturating_sub(failure.len());
+                        let room = bounds.launch_status_max_bytes.saturating_sub(failure.len());
                         failure.extend_from_slice(&bytes[..bytes.len().min(room)]);
                     }
                     None => status = None,
@@ -1743,7 +1751,7 @@ async fn read_some(pipe: Option<&mut Receiver>) -> Option<Vec<u8>> {
     let Some(pipe) = pipe else {
         return std::future::pending().await;
     };
-    let mut buffer = [0u8; 4_096];
+    let mut buffer = [0u8; LAUNCH_STATUS_READ_BYTES];
     match pipe.read(&mut buffer).await {
         Ok(0) | Err(_) => None,
         Ok(count) => Some(buffer[..count].to_vec()),

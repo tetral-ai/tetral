@@ -166,7 +166,10 @@ which owns that task's process tree; the translation of a call's
   Session's last confirmation removes the task directories the earlier
   tasks left. The check owns the records and is the only writer of which
   Sessions they keep `cleanup_pending`; readers see what it last published
-  (`cleanup::Check`, `cleanup::Leftovers`).
+  (`cleanup::Check`, `cleanup::Leftovers`). The check's interval and a
+  record's size bound are `cleanup::Limits`, which `cleanup::read_with`
+  overrides; a supervisor's waits, its check interval and the
+  launch-status bound are `supervisor::Bounds`.
 - A connection's end discards a staged task without a report and ends a
   running one; the shutdown ends every task through the termination
   procedure, and once it has begun, the end of the connection that it

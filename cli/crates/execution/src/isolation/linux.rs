@@ -351,6 +351,9 @@ fn refuses_new_entries(holder: &Path) -> bool {
     }
 }
 
+/// The bytes of one read of the bundled `bwrap` while it is hashed.
+const DIGEST_READ_BYTES: usize = 8_192;
+
 fn digest_matches(bwrap: &Path) -> bool {
     let Some(expected) = BUNDLED_BWRAP_SHA256 else {
         return true;
@@ -364,7 +367,7 @@ fn digest_matches(bwrap: &Path) -> bool {
         return false;
     };
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 8192];
+    let mut buffer = [0_u8; DIGEST_READ_BYTES];
     loop {
         match file.read(&mut buffer) {
             Ok(0) => break,

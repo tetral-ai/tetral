@@ -26,7 +26,24 @@ pub const DIRECTORY: &str = "execution";
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// A record is a few short fields; a larger file is no record.
-const RECORD_MAX_BYTES: usize = 4_096;
+pub const RECORD_MAX_BYTES: usize = 4_096;
+
+/// The interval and size of the records' check, each a constant but for
+/// tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub check_interval: Duration,
+    pub record_max_bytes: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Limits {
+        Limits {
+            check_interval: CHECK_INTERVAL,
+            record_max_bytes: RECORD_MAX_BYTES,
+        }
+    }
+}
 
 #[cfg(target_os = "linux")]
 const PLATFORM: &str = "linux";
@@ -105,6 +122,7 @@ impl Leftovers {
 #[derive(Debug)]
 pub struct Check {
     state_root: PathBuf,
+    check_interval: Duration,
     records: BTreeMap<String, Vec<Leftover>>,
     published: watch::Sender<Arc<BTreeSet<String>>>,
 }
@@ -124,6 +142,11 @@ struct Leftover {
 /// [`Check::run`] removes them. A file that is no record names no process
 /// and is deleted.
 pub fn read(state_root: &Path) -> Result<(Check, Leftovers), IoFailure> {
+    read_with(state_root, Limits::default())
+}
+
+/// [`read`] with `limits`.
+pub fn read_with(state_root: &Path, limits: Limits) -> Result<(Check, Leftovers), IoFailure> {
     let directory = state_root.join(DIRECTORY);
     files::create_private_dirs(&directory)?;
     files::remove_interrupted_replacements(&directory)?;
@@ -134,10 +157,10 @@ pub fn read(state_root: &Path) -> Result<(Check, Leftovers), IoFailure> {
         std::fs::read_dir(&directory).map_err(|error| IoFailure::new(&directory, error))?;
     for entry in entries.flatten() {
         let path = entry.path();
-        let record = files::read_bounded(&path, RECORD_MAX_BYTES)
+        let record = files::read_bounded(&path, limits.record_max_bytes)
             .ok()
             .flatten()
-            .filter(|bytes| bytes.len() <= RECORD_MAX_BYTES)
+            .filter(|bytes| bytes.len() <= limits.record_max_bytes)
             .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok());
         match record {
             Some(record) if Some(&record.boot_id) == boot_id.as_ref() => {
@@ -166,6 +189,7 @@ pub fn read(state_root: &Path) -> Result<(Check, Leftovers), IoFailure> {
     let (published, leftovers) = watch::channel(Arc::new(records.keys().cloned().collect()));
     let check = Check {
         state_root: state_root.to_path_buf(),
+        check_interval: limits.check_interval,
         records,
         published,
     };
@@ -173,7 +197,7 @@ pub fn read(state_root: &Path) -> Result<(Check, Leftovers), IoFailure> {
 }
 
 impl Check {
-    /// Checks the records at once and then every [`CHECK_INTERVAL`] of the
+    /// Checks the records at once and then every check interval of the
     /// seam clock until each is confirmed.
     pub async fn run(mut self) {
         loop {
@@ -182,7 +206,7 @@ impl Check {
                 return;
             }
             state::seams::sleep_until_counted(
-                state::seams::now() + CHECK_INTERVAL,
+                state::seams::now() + self.check_interval,
                 "cleanup.checked",
             )
             .await;

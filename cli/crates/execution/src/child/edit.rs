@@ -169,7 +169,8 @@ fn write_atomically(path: &Path, content: &[u8], mode: u32) -> io::Result<()> {
         .parent()
         .zip(target.file_name())
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let (mut file, temporary) = create_temporary(directory, &name.to_string_lossy())?;
+    let (mut file, temporary) =
+        create_temporary(directory, &name.to_string_lossy(), TEMPORARY_NAME_ATTEMPTS)?;
     let written = file
         .write_all(content)
         .and_then(|()| file.sync_all())
@@ -189,9 +190,10 @@ fn write_atomically(path: &Path, content: &[u8], mode: u32) -> io::Result<()> {
 }
 
 /// A new file `.<name>.tetral-tmp-<16 hexadecimal characters>` in
-/// `directory`, created exclusively with mode 0600.
-fn create_temporary(directory: &Path, name: &str) -> io::Result<(File, PathBuf)> {
-    for _ in 0..TEMPORARY_NAME_ATTEMPTS {
+/// `directory`, created exclusively with mode 0600, with at most `attempts`
+/// names tried.
+fn create_temporary(directory: &Path, name: &str, attempts: usize) -> io::Result<(File, PathBuf)> {
+    for _ in 0..attempts {
         let suffix: String = rand::random::<[u8; 8]>()
             .iter()
             .map(|byte| format!("{byte:02x}"))
