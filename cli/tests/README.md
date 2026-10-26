@@ -152,7 +152,7 @@ temporary directories. No workspace crate depends on this package.
   report is sent again byte for byte; a media report that the server reads
   slowly completes past 10 seconds within its total while heartbeats keep
   their timing, and one whose answer is withheld fails 10 seconds after its
-  body and is sent again unchanged.
+  body is acknowledged and is sent again unchanged.
 - `tests/edit_view_image.rs`: `edit` and `view_image` through their
   restricted children: each step of an edit, the curly-quote fallback, the
   file's mode kept, the images at and past image acceptance's limits, files

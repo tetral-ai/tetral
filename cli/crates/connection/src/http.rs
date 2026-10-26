@@ -2,16 +2,17 @@
 //! credential's key as the bearer of every request, and every answer sorted
 //! into what the Connection owner acts on. No request is ever recorded with
 //! its headers or body. Reports go through their own client (`Uploads`),
-//! whose connections bound how far the body counted as progress runs ahead
-//! of what has left the machine.
+//! whose TCP connections let an upload count as progress only the bytes that
+//! the other end has acknowledged.
 
 use std::convert::Infallible;
 use std::error::Error as StdError;
 use std::future::Future;
+use std::os::fd::{AsRawFd, RawFd};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::{Context, Poll};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use bytes::{Buf, BufMut, Bytes};
@@ -23,7 +24,9 @@ use hyper::body::Incoming;
 use hyper_rustls::{HttpsConnector, MaybeHttpsStream};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::proxy::Tunnel;
-use hyper_util::client::legacy::connect::{Connected, Connection, HttpConnector};
+use hyper_util::client::legacy::connect::{
+    CaptureConnection, Connected, Connection, HttpConnector, capture_connection,
+};
 use hyper_util::client::proxy::matcher::Matcher;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use protocol::bootstrap::BootstrapKey;
@@ -32,6 +35,7 @@ use protocol::errors::{ErrorBody, decode_client_error};
 use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, PROXY_AUTHORIZATION};
 use reqwest::{Response, StatusCode, Url};
 use rustls::pki_types::ServerName;
+use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tower_service::Service;
 
@@ -68,7 +72,19 @@ pub struct Transport {
     client: reqwest::Client,
     uploads: Uploads,
     server_url: String,
-    chunk_bytes: usize,
+    /// What each report attempt has seen of its socket, for the tests that
+    /// move the clock only once an attempt has seen what the kernel did.
+    #[cfg(test)]
+    attempts: Mutex<Vec<AttemptSeen>>,
+}
+
+/// The acknowledged bytes a report attempt last read, and whether it saw its
+/// body sent.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct AttemptSeen {
+    pub(crate) acknowledged: Option<u64>,
+    pub(crate) sent: bool,
 }
 
 impl Transport {
@@ -81,10 +97,17 @@ impl Transport {
             .expect("an HTTP client with no proxy or certificate option builds");
         Transport {
             client,
-            uploads: Uploads::new(UPLOAD_SEND_BUFFER_BYTES, Matcher::from_system()),
+            uploads: Uploads::new(Matcher::from_system()),
             server_url: server_url.to_owned(),
-            chunk_bytes: CHUNK_BYTES,
+            #[cfg(test)]
+            attempts: Mutex::default(),
         }
+    }
+
+    /// The attempts of reports this transport has made, in their order.
+    #[cfg(test)]
+    pub(crate) fn attempts(&self) -> Vec<AttemptSeen> {
+        self.attempts.lock().unwrap().clone()
     }
 
     fn url(&self, path: &str) -> Url {
@@ -121,9 +144,13 @@ impl Transport {
 
     /// `POST <path>` of a frozen report with its exact `Content-Length` and
     /// the `traceparent` of its instruction. The attempt fails at `deadline`
-    /// on `clock`, and earlier once `stall` passes without progress: before
-    /// the first byte is taken, between bytes, or after the last one without
-    /// an answer.
+    /// on `clock`, and earlier once `stall` passes without progress: until
+    /// its connection is up, between rises of the bytes that the other end
+    /// has acknowledged, and from the body's being sent to the answer. The
+    /// socket is read at each recheck of the clock, at least once a second;
+    /// each reading is reported to the test seam counter
+    /// `outbox.upload_checked`, so that a test can tell that the attempt has
+    /// read its socket at a time it moved the clock to.
     pub async fn post_report(
         &self,
         path: &str,
@@ -138,7 +165,6 @@ impl Transport {
             stall,
         } = report;
         let length = bytes.len();
-        let progress = Arc::new(AtomicU64::new(nanos(clock.now())));
         let mut request = Request::post(self.url(path).as_str())
             .header(AUTHORIZATION, format!("Bearer {}", key.expose()))
             .header(CONTENT_TYPE, "application/json")
@@ -146,32 +172,53 @@ impl Transport {
         if let Some(traceparent) = traceparent {
             request = request.header("traceparent", traceparent);
         }
-        let request = request.body(Chunks {
-            bytes,
-            taken: 0,
-            chunk_bytes: self.chunk_bytes,
-            clock: clock.clone(),
-            progress: progress.clone(),
-        });
+        let taken = Arc::new(OnceLock::new());
+        let Ok(mut request) = request.body(ReportBody {
+            bytes: Some(Bytes::from(bytes)),
+            connection: None,
+            taken: taken.clone(),
+        }) else {
+            return Answer::Failed(Failure::Network);
+        };
+        let connection = capture_connection(&mut request);
+        request.body_mut().connection = Some(connection.clone());
         let answer = async {
-            let Ok(request) = request else {
-                return Answer::Failed(Failure::Network);
-            };
             match self.uploads.send(request).await {
                 Ok(response) => read_answer(response).await,
                 Err(_) => Answer::Failed(Failure::Network),
             }
         };
         tokio::pin!(answer);
+        let mut progress = Progress::new(clock.now());
+        #[cfg(test)]
+        let attempt = {
+            let mut attempts = self.attempts.lock().unwrap();
+            attempts.push(AttemptSeen::default());
+            attempts.len() - 1
+        };
+        let mut socket = None;
         loop {
-            let last = Duration::from_nanos(progress.load(Ordering::Acquire));
-            let until = deadline.min(last + stall);
+            if socket.is_none() {
+                socket = socket_of(&connection);
+            }
+            if let Some(socket) = &socket {
+                progress.read(socket, &taken, clock.now());
+                state::seams::count("outbox.upload_checked");
+            }
+            #[cfg(test)]
+            {
+                self.attempts.lock().unwrap()[attempt] = AttemptSeen {
+                    acknowledged: progress.acknowledged,
+                    sent: progress.sent,
+                };
+            }
+            let until = deadline.min(progress.last + stall);
             if clock.now() >= until {
                 return Answer::Failed(Failure::Timeout);
             }
             tokio::select! {
                 answer = &mut answer => return answer,
-                () = clock.sleep_until(until) => {}
+                () = clock.sleep_step(until) => {}
             }
         }
     }
@@ -200,51 +247,161 @@ impl Transport {
     }
 }
 
-/// The socket send buffer of each report upload's connection. Set before
-/// connecting, it also stops the kernel from resizing the buffer, so that the
-/// body that counts as progress is at most this far ahead of what has left
-/// the machine.
-const UPLOAD_SEND_BUFFER_BYTES: usize = 65_536;
+/// What an attempt has seen of its connection's socket.
+struct Progress {
+    /// The clock's time of the attempt's last progress: its start, the first
+    /// read of its socket, each rise of the acknowledged bytes and the body's
+    /// being sent.
+    last: Duration,
+    acknowledged: Option<u64>,
+    sent: bool,
+}
 
-/// hyper's write buffer limit, its least: hyper takes the next chunk of a
-/// report's body, which counts as progress, only while fewer bytes than this
-/// wait in its buffer, so it holds less than this plus one chunk
-/// ([`CHUNK_BYTES`]) ahead of the socket's send buffer.
-const UPLOAD_WRITE_BUFFER_BYTES: usize = 8_192;
+impl Progress {
+    fn new(start: Duration) -> Progress {
+        Progress {
+            last: start,
+            acknowledged: None,
+            sent: false,
+        }
+    }
 
-/// The client of report uploads. reqwest sets no socket send buffer, so
-/// uploads go through hyper's client with a connector of their own, which
-/// takes the proxy of `proxies`: plain HTTP is sent to it in absolute form,
-/// HTTPS through its `CONNECT` tunnel. `Matcher::from_system` is the matcher
-/// that reqwest's client takes for the CLI's other requests.
+    /// Reads `socket` at `now`. The body is sent once a flush that ended
+    /// after it was `taken` has written its last byte to the socket and the
+    /// socket holds nothing unacknowledged; that is reported to the test
+    /// seam counter `outbox.sent`.
+    fn read(&mut self, socket: &Socket, taken: &OnceLock<u64>, now: Duration) {
+        // The flushes are read before what the socket holds, so that the
+        // body's last byte is in the socket when the socket is read.
+        let written = taken
+            .get()
+            .is_some_and(|flushes| socket.flushes() > *flushes);
+        let Some((acknowledged, held)) = socket.state() else {
+            return;
+        };
+        if self.acknowledged.is_none_or(|before| acknowledged > before) {
+            self.last = now;
+        }
+        self.acknowledged = Some(acknowledged);
+        if written && held == 0 && !self.sent {
+            self.sent = true;
+            self.last = now;
+            state::seams::count("outbox.sent");
+        }
+    }
+}
+
+/// What a report upload reads of its connection's TCP socket: the bytes
+/// written to it, the flushes that ended, and, while the stream is open, how
+/// many of those bytes the socket still holds unacknowledged.
+struct Socket {
+    /// The socket's descriptor until its stream is dropped, so that a read
+    /// never reaches a descriptor number that was used again.
+    descriptor: Mutex<Option<RawFd>>,
+    written: AtomicU64,
+    flushes: AtomicU64,
+}
+
+impl Socket {
+    fn flushes(&self) -> u64 {
+        self.flushes.load(Ordering::Acquire)
+    }
+
+    /// The bytes acknowledged and those still held, or `None` once the
+    /// stream is gone or the socket cannot tell.
+    fn state(&self) -> Option<(u64, u64)> {
+        let descriptor = self
+            .descriptor
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Read before what the socket holds, so that bytes written in between
+        // never count as acknowledged.
+        let written = self.written.load(Ordering::Acquire);
+        let held = unacknowledged((*descriptor)?).ok()?;
+        Some((written.saturating_sub(held), held))
+    }
+}
+
+/// The bytes that the TCP socket `descriptor` holds and its peer has not
+/// acknowledged: `SIOCOUTQ`, which Linux defines as `TIOCOUTQ`.
+#[cfg(target_os = "linux")]
+fn unacknowledged(descriptor: RawFd) -> std::io::Result<u64> {
+    let mut held: libc::c_int = 0;
+    // SAFETY: the caller holds the descriptor open, and the request writes
+    // one `c_int` through the pointer.
+    let result = unsafe { libc::ioctl(descriptor, libc::TIOCOUTQ, &raw mut held) };
+    if result == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(u64::try_from(held).unwrap_or(0))
+}
+
+/// The bytes that the TCP socket `descriptor` holds and its peer has not
+/// acknowledged: `SO_NWRITE`.
+#[cfg(target_os = "macos")]
+fn unacknowledged(descriptor: RawFd) -> std::io::Result<u64> {
+    let mut held: libc::c_int = 0;
+    let mut length = libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>())
+        .expect("a c_int's size fits a socklen_t");
+    // SAFETY: the caller holds the descriptor open, and the option writes at
+    // most `length` bytes through the pointer.
+    let result = unsafe {
+        libc::getsockopt(
+            descriptor,
+            libc::SOL_SOCKET,
+            libc::SO_NWRITE,
+            (&raw mut held).cast(),
+            &raw mut length,
+        )
+    };
+    if result == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(u64::try_from(held).unwrap_or(0))
+}
+
+/// The socket of the connection that `connection` captured, once its request
+/// has one.
+fn socket_of(connection: &CaptureConnection) -> Option<Arc<Socket>> {
+    let connected = connection.connection_metadata();
+    let mut extras = http::Extensions::new();
+    connected.as_ref()?.get_extras(&mut extras);
+    extras.get::<Arc<Socket>>().cloned()
+}
+
+/// The client of report uploads. reqwest's client gives a request no way to
+/// its connection's socket, so uploads go through hyper's client with a
+/// connector of their own, whose TCP connections are [`Counted`] and each
+/// tell their [`Socket`] to the request that uses them. It takes the proxy of
+/// `proxies`: plain HTTP is sent to it in absolute form, HTTPS through its
+/// `CONNECT` tunnel. `Matcher::from_system` is the matcher that reqwest's
+/// client takes for the CLI's other requests.
 struct Uploads {
-    client: Client<UploadConnector, Chunks>,
+    client: Client<UploadConnector, ReportBody>,
     proxies: Arc<Matcher>,
 }
 
 impl Uploads {
-    fn new(send_buffer_bytes: usize, proxies: Matcher) -> Uploads {
+    fn new(proxies: Matcher) -> Uploads {
         let mut http = HttpConnector::new();
         http.enforce_http(false);
         http.set_nodelay(true);
-        http.set_send_buffer_size(Some(send_buffer_bytes));
         let tls = Arc::new(tls_config());
         let proxies = Arc::new(proxies);
         let connector = UploadConnector {
-            https: HttpsConnector::from((http, tls.clone())),
+            https: HttpsConnector::from((CountingConnector(http), tls.clone())),
             tls,
             proxies: proxies.clone(),
         };
         let client = Client::builder(TokioExecutor::new())
             .pool_timer(TokioTimer::new())
-            .http1_max_buf_size(UPLOAD_WRITE_BUFFER_BYTES)
             .build(connector);
         Uploads { client, proxies }
     }
 
     async fn send(
         &self,
-        mut request: Request<Chunks>,
+        mut request: Request<ReportBody>,
     ) -> Result<http::Response<Incoming>, BoxError> {
         // A tunnel carries the proxy's credentials in its `CONNECT`; a
         // forwarded request carries them itself.
@@ -281,9 +438,115 @@ fn tls_config() -> rustls::ClientConfig {
 
 type BoxError = Box<dyn StdError + Send + Sync>;
 
+/// [`HttpConnector`], each of whose connections is [`Counted`].
+#[derive(Clone)]
+struct CountingConnector(HttpConnector);
+
+impl Service<Uri> for CountingConnector {
+    type Response = Counted;
+    type Error = BoxError;
+    type Future = Pin<Box<dyn Future<Output = Result<Counted, BoxError>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), BoxError>> {
+        self.0.poll_ready(cx).map_err(Into::into)
+    }
+
+    fn call(&mut self, destination: Uri) -> Self::Future {
+        let connecting = self.0.call(destination);
+        Box::pin(async move { Ok(Counted::new(connecting.await?)) })
+    }
+}
+
+/// The TCP connection of a report upload, to its destination or to its
+/// proxy, which counts what is written to its socket for [`Socket`].
+struct Counted {
+    io: TokioIo<TcpStream>,
+    socket: Arc<Socket>,
+}
+
+impl Counted {
+    fn new(io: TokioIo<TcpStream>) -> Counted {
+        let socket = Arc::new(Socket {
+            descriptor: Mutex::new(Some(io.inner().as_raw_fd())),
+            written: AtomicU64::new(0),
+            flushes: AtomicU64::new(0),
+        });
+        Counted { io, socket }
+    }
+}
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        *self
+            .socket
+            .descriptor
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+    }
+}
+
+impl Connection for Counted {
+    fn connected(&self) -> Connected {
+        self.io.connected().extra(self.socket.clone())
+    }
+}
+
+impl hyper::rt::Read for Counted {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: hyper::rt::ReadBufCursor<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_read(cx, buf)
+    }
+}
+
+impl hyper::rt::Write for Counted {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let written = ready!(Pin::new(&mut this.io).poll_write(cx, buf))?;
+        this.socket
+            .written
+            .fetch_add(written as u64, Ordering::AcqRel);
+        Poll::Ready(Ok(written))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        ready!(Pin::new(&mut this.io).poll_flush(cx))?;
+        this.socket.flushes.fetch_add(1, Ordering::AcqRel);
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_shutdown(cx)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.io.is_write_vectored()
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let written = ready!(Pin::new(&mut this.io).poll_write_vectored(cx, bufs))?;
+        this.socket
+            .written
+            .fetch_add(written as u64, Ordering::AcqRel);
+        Poll::Ready(Ok(written))
+    }
+}
+
 #[derive(Clone)]
 struct UploadConnector {
-    https: HttpsConnector<HttpConnector>,
+    https: HttpsConnector<CountingConnector>,
     tls: Arc<rustls::ClientConfig>,
     proxies: Arc<Matcher>,
 }
@@ -410,26 +673,17 @@ pub struct ReportRequest {
     pub stall: Duration,
 }
 
-/// The bytes of a report handed to the connection one chunk at a time. Each
-/// chunk taken stores the clock's time in `progress`, since a waiter that
-/// noticed progress only when it woke would measure the stall from then.
-struct Chunks {
-    bytes: Vec<u8>,
-    taken: usize,
-    /// [`CHUNK_BYTES`] but for tests.
-    chunk_bytes: usize,
-    clock: Clock,
-    progress: Arc<AtomicU64>,
+/// A report's body, handed to its connection whole. Taking it notes in
+/// `taken` how many flushes its connection's socket has ended, since a later
+/// flush writes the body's last byte to the socket.
+struct ReportBody {
+    bytes: Option<Bytes>,
+    /// The request's connection, set once the request is built.
+    connection: Option<CaptureConnection>,
+    taken: Arc<OnceLock<u64>>,
 }
 
-fn nanos(time: Duration) -> u64 {
-    u64::try_from(time.as_nanos()).unwrap_or(u64::MAX)
-}
-
-/// The size of each chunk of a report's body.
-const CHUNK_BYTES: usize = 65_536;
-
-impl http_body::Body for Chunks {
+impl http_body::Body for ReportBody {
     type Data = Bytes;
     type Error = Infallible;
 
@@ -438,24 +692,21 @@ impl http_body::Body for Chunks {
         _cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
         let this = self.get_mut();
-        let start = this.taken;
-        if start >= this.bytes.len() {
+        let Some(bytes) = this.bytes.take() else {
             return Poll::Ready(None);
+        };
+        if let Some(socket) = this.connection.as_ref().and_then(socket_of) {
+            let _ = this.taken.set(socket.flushes());
         }
-        let end = (start + this.chunk_bytes).min(this.bytes.len());
-        let chunk = Bytes::copy_from_slice(&this.bytes[start..end]);
-        this.taken = end;
-        this.progress
-            .store(nanos(this.clock.now()), Ordering::Release);
-        Poll::Ready(Some(Ok(Frame::data(chunk))))
+        Poll::Ready(Some(Ok(Frame::data(bytes))))
     }
 
     fn is_end_stream(&self) -> bool {
-        self.taken >= self.bytes.len()
+        self.bytes.is_none()
     }
 
     fn size_hint(&self) -> SizeHint {
-        SizeHint::with_exact((self.bytes.len() - self.taken) as u64)
+        SizeHint::with_exact(self.bytes.as_ref().map_or(0, |bytes| bytes.len() as u64))
     }
 }
 
@@ -506,19 +757,16 @@ async fn read_bounded<B: http_body::Body + Unpin>(mut body: B, limit: usize) -> 
 mod tests {
     use std::task::Waker;
 
-    use http_body::Body as _;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     use super::*;
 
-    fn chunks(bytes: &[u8], progress: Arc<AtomicU64>) -> Chunks {
-        Chunks {
-            bytes: bytes.to_vec(),
-            taken: 0,
-            chunk_bytes: 4,
-            clock: Clock::new(|| Duration::from_secs(7), Duration::from_millis(10)),
-            progress,
+    fn body(bytes: &[u8]) -> ReportBody {
+        ReportBody {
+            bytes: Some(Bytes::copy_from_slice(bytes)),
+            connection: None,
+            taken: Arc::default(),
         }
     }
 
@@ -555,13 +803,8 @@ mod tests {
         ] {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let proxy = format!("http://user:secret@{}", listener.local_addr().unwrap());
-            let uploads = Uploads::new(
-                UPLOAD_SEND_BUFFER_BYTES,
-                Matcher::builder().http(proxy.clone()).https(proxy).build(),
-            );
-            let request = Request::post(destination)
-                .body(chunks(b"{}", Arc::default()))
-                .unwrap();
+            let uploads = Uploads::new(Matcher::builder().http(proxy.clone()).https(proxy).build());
+            let request = Request::post(destination).body(body(b"{}")).unwrap();
             let upload = tokio::spawn(async move { uploads.send(request).await.is_ok() });
             let head = tokio::time::timeout(Duration::from_secs(10), first_head(listener))
                 .await
@@ -582,19 +825,42 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_report_body_is_handed_over_in_chunks_of_the_chunk_size_each_marking_progress() {
-        let progress = Arc::new(AtomicU64::new(0));
-        let mut chunks = chunks(b"0123456789", progress.clone());
+    #[tokio::test]
+    async fn a_socket_holds_what_was_written_to_it_unacknowledged_until_its_peer_takes_it() {
+        // A receive buffer far smaller than what is written, so that the peer
+        // acknowledges only part of it until it reads.
+        let listening = tokio::net::TcpSocket::new_v4().unwrap();
+        listening.set_recv_buffer_size(4_096).unwrap();
+        listening.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = listening.listen(1).unwrap();
+        let destination = format!("http://{}", listener.local_addr().unwrap());
+        let (counted, accepted) = tokio::join!(
+            CountingConnector(HttpConnector::new()).call(destination.parse().unwrap()),
+            listener.accept()
+        );
+        let mut counted = counted.unwrap();
+        let (mut peer, _) = accepted.unwrap();
+        let socket = counted.socket.clone();
         let mut context = Context::from_waker(Waker::noop());
-        let mut handed = Vec::new();
-        while let Poll::Ready(Some(Ok(frame))) = Pin::new(&mut chunks).poll_frame(&mut context) {
-            handed.push((
-                frame.into_data().unwrap().len(),
-                progress.swap(0, Ordering::AcqRel),
-            ));
+        let mut written = 0;
+        while let Poll::Ready(count) =
+            hyper::rt::Write::poll_write(Pin::new(&mut counted), &mut context, &[0; 65_536])
+        {
+            written += count.unwrap();
         }
-        let marked = nanos(Duration::from_secs(7));
-        assert_eq!(handed, [(4, marked), (4, marked), (2, marked)]);
+        let (acknowledged, held) = socket.state().unwrap();
+        assert!(held > 0, "{written} written, {acknowledged} acknowledged");
+        peer.read_exact(&mut vec![0; written]).await.unwrap();
+        let start = std::time::Instant::now();
+        while socket.state().is_some_and(|(_, held)| held > 0) {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "the peer's acknowledgement did not come"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(socket.state(), Some((written as u64, 0)));
+        drop(counted);
+        assert_eq!(socket.state(), None);
     }
 }

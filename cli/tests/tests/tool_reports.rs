@@ -201,6 +201,7 @@ fn a_throttled_media_report_completes_past_ten_seconds_and_one_without_an_answer
         }),
     );
     let heartbeats = tasks.engine.received("heartbeat").len();
+    let answered = tasks.answers_settled();
     view_image(&tasks, "task_throttled", "large.jpg");
     let read = || tasks.engine.state()["throttled"][0]["read"].as_u64();
     wait_until("the throttled read", || read().is_some());
@@ -220,6 +221,19 @@ fn a_throttled_media_report_completes_past_ten_seconds_and_one_without_an_answer
             read_at_heartbeat = read();
         }
         seams.advance(Duration::from_secs(1));
+        // The upload reads its acknowledged bytes from its socket apart from
+        // the clock, so the clock moves on only once it has read them at
+        // this time.
+        let checked = seams.count("outbox.upload_checked");
+        wait_until("the upload's reading of its socket", || {
+            seams.count("outbox.upload_checked") >= checked + 2
+                || seams.count("outbox.answered") > answered
+        });
+        assert!(
+            seams.count("outbox.answered") == answered
+                || accepted(&tasks, "task_throttled").is_some(),
+            "the throttled upload's attempt ended unaccepted after {elapsed:?}"
+        );
     }
     let report = accepted(&tasks, "task_throttled").unwrap();
     let size = serde_json::to_vec(&report).unwrap().len();
@@ -242,9 +256,13 @@ fn a_throttled_media_report_completes_past_ten_seconds_and_one_without_an_answer
             json!({"endpoint": "tool-status", "action": "withhold"}),
         );
         let answered = tasks.answers_settled();
+        let sent = seams.count("outbox.sent");
         view_image(&tasks, task, "large.jpg");
         wait_until("the withheld report", || accepted(&tasks, task).is_some());
         let message_id = accepted(&tasks, task).unwrap()["message_id"].clone();
+        // The answer's wait starts once the App Server has seen every byte of
+        // the body acknowledged, which it reads apart from the clock.
+        seams.wait_for_count("outbox.sent", sent + 1);
         seams.advance(stalled);
         if released == 1 {
             tasks.engine.control("answer", json!({"action": "release"}));

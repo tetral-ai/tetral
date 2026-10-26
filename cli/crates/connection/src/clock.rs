@@ -39,6 +39,14 @@ impl Clock {
             tokio::time::sleep(remaining.min(self.recheck)).await;
         }
     }
+
+    /// Waits until the clock reaches `deadline` or for one recheck interval,
+    /// whichever comes first, so that a waiter can read something else at
+    /// least that often.
+    pub async fn sleep_step(&self, deadline: Duration) {
+        let remaining = deadline.saturating_sub(self.now());
+        tokio::time::sleep(remaining.min(self.recheck)).await;
+    }
 }
 
 impl std::fmt::Debug for Clock {

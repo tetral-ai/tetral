@@ -54,15 +54,19 @@ Server:
   `message_id` reads as an ID, never the invalid content or a guessed
   identity, and goes through the Report outbox (`protocol_error`).
 - The transport follows no redirect and never records a request's headers or
-  body (`http`). Reports go over connections of their own, whose socket send
-  buffer is fixed before connecting, through the proxy that the CLI's other
-  requests take (`http::Uploads`).
+  body (`http`). Reports go over connections of their own, through the proxy
+  that the CLI's other requests take (`http::Uploads`). An upload's progress
+  is the bytes written to its TCP socket less those the socket still holds
+  unacknowledged, as the kernel counts them, so that a body waiting in the
+  send buffer is not taken for one that has left (`http::Progress`).
 - A report is frozen under `outbox/` before its first send, and each retry
   sends that file again, until its matching ACK, a refusal or its
   connection's end, which cancels its uploads and deletes its directory; no
   report is sent on another connection (`outbox`). An attempt ends at its
   total, which grows with the size of a size-scaled report, and earlier
-  after 10 seconds without progress (`report_deadline`, `http`).
+  after 10 seconds without progress: until its connection is up, between
+  rises of its acknowledged bytes, and from the body's being sent, every
+  byte of it acknowledged, to the answer (`report_deadline`, `http`).
 - A `session.prepare` is admitted before it reaches its Session binding
   owner: a payload that fails its schema gets `invalid_input`, and a Session
   without a record while `sessions::RECORDS_MAX` exist or a new operation
@@ -154,7 +158,7 @@ and its running attempt.
 | `src/staging.rs` | The staging queue and `STAGING_MAX` |
 | `src/ledger.rs` | The replay ledger, its limits and reserve, and when an entry goes |
 | `src/backoff.rs` | The backoff of reconnects and of each message's retries |
-| `src/http.rs` | `Transport`, the sorting of answers (`Answer`, `Failure`), `REQUEST_TOTAL`, a report's attempt bounded by its progress (`ReportRequest`), and the client of report uploads (`Uploads`) |
+| `src/http.rs` | `Transport`, the sorting of answers (`Answer`, `Failure`), `REQUEST_TOTAL`, a report's attempt bounded by its progress (`ReportRequest`, `Progress`), the client of report uploads (`Uploads`) with its counted connections (`Counted`, `Socket`), and the test seam counters `outbox.upload_checked` and `outbox.sent` |
 | `src/outbox.rs` | The Report outbox: identities `r<n>`, freezing, sending, retries, ACKs and refusals, connection ends, the record `report.dropped`, and the test seam counter `outbox.answered` |
 | `src/report_deadline.rs` | A report attempt's total and `STALL_LIMIT` |
 | `src/clock.rs` | The clock the outbox reads |

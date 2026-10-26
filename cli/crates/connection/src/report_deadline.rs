@@ -11,9 +11,9 @@ pub const REPORT_TOTAL: Duration = Duration::from_secs(10);
 /// The bytes that each [`REPORT_TOTAL`] of a size-scaled report covers.
 pub const SCALE_BYTES: usize = 65_536;
 
-/// The longest an attempt goes without progress: from its start to the
-/// first byte taken, which covers connecting and the handshake, between
-/// bytes, and from the last byte to the answer.
+/// The longest an attempt goes without progress: from its start until its
+/// connection is up, which covers connecting and the handshake, between rises
+/// of its acknowledged bytes, and from the body's being sent to the answer.
 pub const STALL_LIMIT: Duration = Duration::from_secs(10);
 
 /// Whether a report's total grows with its size: a tool-status or drive-sync

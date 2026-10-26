@@ -707,7 +707,7 @@ mod tests {
     }
 
     fn spawn_outbox(
-        url: &str,
+        transport: Arc<Transport>,
         directory: &std::path::Path,
         clock: &TestClock,
         times: OutboxTimes,
@@ -716,7 +716,7 @@ mod tests {
         let (events, receiver) = mpsc::unbounded_channel();
         let outbox = Outbox::spawn(OutboxConfig {
             directory: directory.to_owned(),
-            transport: Arc::new(Transport::new(url)),
+            transport,
             key: protocol::bootstrap::Bootstrap::decode(
                 br#"{"server_url":"http://127.0.0.1:1","instance_id":"inst_a","credential_id":"cred_a","connection_key":"tetral_ck_a","expires_at":"2099-01-01T00:00:00Z"}"#,
             )
@@ -735,8 +735,8 @@ mod tests {
         state::outbox::reset(&directory).unwrap();
         let engine = Engine::start(replies, directory.clone()).await;
         let clock = test_clock();
-        let (outbox, events) =
-            spawn_outbox(&engine.url, &directory, &clock, OutboxTimes::default());
+        let transport = Arc::new(Transport::new(&engine.url));
+        let (outbox, events) = spawn_outbox(transport, &directory, &clock, OutboxTimes::default());
         Setup {
             outbox,
             engine,
@@ -887,7 +887,9 @@ mod tests {
         /// An `https` endpoint that accepts the TCP connection and never
         /// answers the TLS handshake.
         Handshake,
-        /// One that reads the request's headers and nothing of its body.
+        /// One that reads nothing of the request, so that its body stops
+        /// short of being acknowledged; a read would let the kernel open its
+        /// window again at a time of its own.
         Body,
         /// One that reads the whole request and never answers.
         Answer,
@@ -899,11 +901,28 @@ mod tests {
     struct Seen {
         accepted: Vec<Duration>,
         read: usize,
+        /// The connections a body stall reads nothing from.
+        unread: Vec<std::net::TcpStream>,
     }
 
-    /// A local listener that stalls each connection as `stall` says.
+    impl Seen {
+        /// The bytes that the first unread connection's kernel has taken.
+        fn queued(&self) -> u64 {
+            let mut buffer = vec![0; 1 << 20];
+            self.unread[0]
+                .peek(&mut buffer)
+                .map_or(0, |count| count as u64)
+        }
+    }
+
+    /// A local listener that stalls each connection as `stall` says. Its
+    /// receive buffer is far smaller than a report, so that a body it does not
+    /// read stops short of being acknowledged.
     async fn stalling(stall: Stall, clock: TestClock) -> (String, Arc<Mutex<Seen>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listening = tokio::net::TcpSocket::new_v4().unwrap();
+        listening.set_recv_buffer_size(4_096).unwrap();
+        listening.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = listening.listen(16).unwrap();
         let scheme = match stall {
             Stall::Handshake => "https",
             Stall::Body | Stall::Answer => "http",
@@ -915,8 +934,14 @@ mod tests {
             let mut held = Vec::new();
             while let Ok((stream, _)) = listener.accept().await {
                 log.lock().unwrap().accepted.push(clock.now());
+                if matches!(stall, Stall::Body) {
+                    let mut seen = log.lock().unwrap();
+                    seen.unread.push(stream.into_std().unwrap());
+                    seen.read += 1;
+                    continue;
+                }
                 let mut stream = BufReader::new(stream);
-                if !matches!(stall, Stall::Handshake) {
+                if matches!(stall, Stall::Answer) {
                     let mut length = 0;
                     let mut line = String::new();
                     while stream.read_line(&mut line).await.unwrap() > 2 {
@@ -927,10 +952,8 @@ mod tests {
                         }
                         line.clear();
                     }
-                    if matches!(stall, Stall::Answer) {
-                        let mut body = vec![0; length];
-                        stream.read_exact(&mut body).await.unwrap();
-                    }
+                    let mut body = vec![0; length];
+                    stream.read_exact(&mut body).await.unwrap();
                 }
                 log.lock().unwrap().read += 1;
                 held.push(stream);
@@ -980,14 +1003,39 @@ mod tests {
                 backoff_max: Duration::ZERO,
                 ..OutboxTimes::default()
             };
-            let (outbox, _events) = spawn_outbox(&url, &root.path().join("outbox"), &clock, times);
+            let transport = Arc::new(Transport::new(&url));
+            let (outbox, _events) = spawn_outbox(
+                transport.clone(),
+                &root.path().join("outbox"),
+                &clock,
+                times,
+            );
             outbox.connection_started(1, id("conn_a"), false);
             outbox.submit(tool_list(100_000));
             // The clock stands still until the listener has read the first
-            // request as far as it reads it, so its bytes were taken then.
+            // request as far as it reads it.
             let start = std::time::Instant::now();
             while seen.lock().unwrap().read == 0 {
                 assert!(start.elapsed() < WAIT_LIMIT, "{stall:?}: no first attempt");
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            // The attempt sees its socket's acknowledgements only when it
+            // reads the socket, and the listener's kernel may acknowledge the
+            // last bytes it takes only after a delay of its own, so the clock
+            // stands still until the attempt has seen them: all that the
+            // unread connection holds, or the body sent.
+            while !match stall {
+                Stall::Handshake => true,
+                Stall::Body => {
+                    transport.attempts()[0].acknowledged == Some(seen.lock().unwrap().queued())
+                }
+                Stall::Answer => transport.attempts()[0].sent,
+            } {
+                assert!(
+                    start.elapsed() < WAIT_LIMIT,
+                    "{stall:?}: {:?}",
+                    transport.attempts()
+                );
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
             // Coarse steps up to 9.5 seconds, then fine ones, so that a retry
