@@ -518,11 +518,16 @@ mod tests {
     }
 
     /// What the owners of the tests share: an App Server whose ready lists
-    /// `exec_command`.
+    /// every tool.
     fn shared() -> Shared {
+        shared_listing(&["exec_command", "edit", "view_image"])
+    }
+
+    /// [`shared`], with a ready that lists only `tools`.
+    fn shared_listing(tools: &[&str]) -> Shared {
         let capability = json!({
             "schema_version": 1,
-            "tools": ["exec_command", "edit", "view_image"],
+            "tools": tools,
             "controls": ["stdin", "cancel"],
             "sandbox_policy_versions": [1],
             "network_modes": ["disabled", "direct"],
@@ -589,13 +594,21 @@ mod tests {
     /// Starts an owner whose Session's current binding is `bind_1`, prepared,
     /// with the rejections it submits.
     fn owner_with_binding<S: TaskStarter>(starter: S) -> (SessionMailbox, Arc<Rejections>) {
+        owner_with_binding_in(starter, shared())
+    }
+
+    /// [`owner_with_binding`] with `shared`.
+    fn owner_with_binding_in<S: TaskStarter>(
+        starter: S,
+        shared: Shared,
+    ) -> (SessionMailbox, Arc<Rejections>) {
         let (mailbox, messages) = mpsc::unbounded_channel();
         let rejections = Arc::new(Rejections::default());
         let preparation = Preparation {
             session_id: SafeId::new("sess_1").unwrap(),
             connection: Arc::new(NoConnection),
             reports: rejections.clone(),
-            shared: shared(),
+            shared,
         };
         let mut owner = SessionOwner::new(Some(preparation), starter, mailbox.clone());
         owner.record = Some(record_with(SessionState::Prepared));
@@ -875,7 +888,15 @@ mod tests {
 
     #[tokio::test]
     async fn the_first_failing_admission_step_decides_a_tool_execute_rejection() {
-        let (mailbox, rejections) = owner_with_binding(NoTasks);
+        let (mailbox, rejections) =
+            owner_with_binding_in(NoTasks, shared_listing(&["exec_command"]));
+        let unsupported = json!({
+            "schema_version": 2,
+            "filesystem": {"rules": []},
+            "network": {"mode": "disabled"},
+        });
+        let mut oversized = unsupported.clone();
+        oversized["extension"] = json!("x".repeat(65_536));
         let rows = [
             (
                 "an input.task_id equal to the outer task_id",
@@ -894,6 +915,36 @@ mod tests {
                     "exec_command",
                     json!({"cmd": "true", "task_id": "task-elsewhere"}),
                     admitted_policy(),
+                ),
+                Some("invalid_input"),
+            ),
+            (
+                "a policy of schema_version 2",
+                execute(
+                    "task-unsupported",
+                    "exec_command",
+                    json!({"cmd": "true"}),
+                    unsupported.clone(),
+                ),
+                Some("unsupported_policy"),
+            ),
+            (
+                "view_image, which the ready does not list, under a policy of schema_version 2",
+                execute(
+                    "task-unlisted",
+                    "view_image",
+                    json!({"path": "picture.png"}),
+                    unsupported,
+                ),
+                Some("invalid_input"),
+            ),
+            (
+                "a policy of schema_version 2 that takes the metadata over 65,536 bytes",
+                execute(
+                    "task-oversized",
+                    "exec_command",
+                    json!({"cmd": "true"}),
+                    oversized,
                 ),
                 Some("invalid_input"),
             ),

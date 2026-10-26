@@ -15,7 +15,9 @@ description, schemas and fixtures are in `protocol/` at the repository root.
   a lone surrogate, a number that is not finite as a 64-bit float, an
   integer outside the signed 64-bit range, and objects and arrays nested
   deeper than `strict::MAX_NESTING` (127) levels; typed decoding; then the
-  rules of `Message::check`.
+  rules of `Message::check`. `decode_replaced` replaces a member before
+  typed decoding, for a reader that judges that member by its own rules,
+  while `Message::check` still measures the text as read.
 - Each type has the members of its schema definition, under their exact
   names. Unknown members are dropped, except in the objects the schema
   closes, such as `sandbox_policy` and a commit request, which refuse them.

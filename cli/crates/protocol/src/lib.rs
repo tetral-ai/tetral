@@ -71,6 +71,17 @@ pub fn decode<M: Message>(input: &[u8]) -> Result<M, DecodeError> {
 
 /// [`decode`], also returning the message as read.
 pub fn decode_value<M: Message>(input: &[u8]) -> Result<(M, Value), DecodeError> {
+    decode_replaced(input, |_| ())
+}
+
+/// [`decode_value`] with `replace` applied to the value as read before its
+/// typed members are read, while [`Message::check`] still measures the text
+/// as read: for a reader that sets one member aside to judge it by its own
+/// rules, so that the rest is judged as it was sent.
+pub fn decode_replaced<M: Message>(
+    input: &[u8],
+    replace: impl FnOnce(&mut Value),
+) -> Result<(M, Value), DecodeError> {
     if input.len() > M::MAX_BYTES {
         return Err(DecodeError::TooLarge {
             size: input.len(),
@@ -78,7 +89,7 @@ pub fn decode_value<M: Message>(input: &[u8]) -> Result<(M, Value), DecodeError>
         });
     }
     let negative_zeros = strict::read(input)?;
-    let value: Value = if negative_zeros.is_empty() {
+    let mut value: Value = if negative_zeros.is_empty() {
         serde_json::from_slice(input)
     } else {
         // `serde_json` reads the integer `-0` as the float `-0.0`, which an
@@ -91,6 +102,7 @@ pub fn decode_value<M: Message>(input: &[u8]) -> Result<(M, Value), DecodeError>
         serde_json::from_slice(&unsigned)
     }
     .map_err(|error| DecodeError::Shape(error.to_string()))?;
+    replace(&mut value);
     let message = M::deserialize(&value).map_err(|error| DecodeError::Shape(error.to_string()))?;
     message.check(&Received {
         value: &value,

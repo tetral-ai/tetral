@@ -575,7 +575,7 @@ fn validated(
             },
             value,
         )) => (payload, value),
-        _ => return Err(schema_failure(call)),
+        _ => return Err(schema_failure(shared, call)),
     };
     check_tool(shared, call, &payload.tool)?;
     let root = &shared.paths.canonical;
@@ -624,27 +624,40 @@ fn check_tool(shared: &Shared, call: &ToolCall, tool: &ToolInput) -> Result<(), 
 }
 
 /// The rejection of a `tool.execute` that does not decode: `invalid_input`,
-/// unless it decodes with a valid stand-in for its policy, when its own
-/// policy decides as step 4 judges it.
-fn schema_failure(call: &ToolCall) -> Body {
+/// unless it passes step 3 with a valid stand-in for its policy, its budgets
+/// measured on the instruction as sent, when its own policy decides as step 4
+/// judges it.
+fn schema_failure(shared: &Shared, call: &ToolCall) -> Body {
     let invalid = || {
         rejected(
             RejectionCode::InvalidInput,
             "the instruction does not match its schema or exceeds a size budget",
         )
     };
-    let Ok(mut value) = serde_json::from_str::<Value>(&call.data) else {
-        return invalid();
-    };
-    let Some(policy) = value
-        .get_mut("payload")
-        .and_then(|payload| payload.get_mut("sandbox_policy"))
+    let mut policy = None;
+    let decoded = protocol::decode_replaced::<Downstream>(call.data.as_bytes(), |value| {
+        if let Some(own) = value
+            .get_mut("payload")
+            .and_then(|payload| payload.get_mut("sandbox_policy"))
+        {
+            policy = Some(std::mem::replace(own, stand_in_policy()));
+        }
+    });
+    let (
+        Ok((
+            Downstream {
+                payload: DownstreamPayload::ToolExecute(payload),
+                ..
+            },
+            _,
+        )),
+        Some(policy),
+    ) = (decoded, policy)
     else {
         return invalid();
     };
-    let policy = std::mem::replace(policy, stand_in_policy());
-    if protocol::decode::<Downstream>(&protocol::encode(&value)).is_err() {
-        return invalid();
+    if let Err(body) = check_tool(shared, call, &payload.tool) {
+        return body;
     }
     match validate(Some(&policy)) {
         Err(rejection) => Body::Rejected(rejection),
