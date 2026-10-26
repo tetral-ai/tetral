@@ -8,9 +8,11 @@
 //! observed, or given up on, and the `terminal` report has been handed to the
 //! outbox; and `cleaned` once every report of the task is acknowledged or
 //! dropped and the task's files are gone. The supervisor answers the task's
-//! controls in every state but `staged`, whose `tool.stdin` wait for the
-//! start or for the cancel or the binding's close that prevents it, which
-//! makes the task's `terminal` report at once: each waiting reply is a timer and a
+//! controls in every state but `staged` and the availability check that
+//! begins `starting`, during which its `tool.stdin` wait and its messages are
+//! still read: a cancel or the binding's close prevents the start and makes
+//! the task's `terminal` report at once, and the connection's end discards
+//! the task without one. Each waiting reply is a timer and a
 //! waiter of the supervisor, which meanwhile keeps reading output and
 //! handling the exit and other controls. Every wait reads the seam clock.
 //! A file tool's task runs its child instead of a command
@@ -29,8 +31,10 @@
 //! Server's shutdown ends it through the termination procedure.
 
 use std::collections::{HashSet, VecDeque};
+use std::future::Future;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,7 +57,7 @@ use crate::capture::StreamCapture;
 use crate::cleanup;
 use crate::exec::{self, ExecCall, ExitFacts, OnExpiry, Outcome};
 use crate::file_tools::{FileCall, Pipes};
-use crate::isolation::{Command, Isolation, LaunchError, Process};
+use crate::isolation::{Available, Command, Isolation, LaunchError, Process};
 use crate::limits::Visible;
 use crate::policy::{PolicyRejection, TaskPermissions};
 use crate::process::{self, Leader};
@@ -112,6 +116,10 @@ const LAUNCH_STATUS: &str = "task.launch_status";
 
 /// The test seam counter of each end of an output pipe.
 const OUTPUT_ENDED: &str = "task.output_ended";
+
+/// The test seam barrier that holds the availability check before it runs,
+/// so that a test can control a task while its start is undecided.
+const AVAILABILITY_CHECK: &str = "task.availability_check";
 
 /// The message of every failure to start other than a directory's.
 const NOT_STARTED: &str = "process could not start";
@@ -257,6 +265,7 @@ pub fn spawn(spec: TaskSpec, context: Context) -> SupervisorMailbox {
         out: Stream::new(None::<tokio::process::ChildStdout>),
         err: Stream::new(None::<tokio::process::ChildStderr>),
         stdin: None,
+        held: Vec::new(),
         ending: None,
         exit: None,
         ended: None,
@@ -297,6 +306,8 @@ struct Supervisor {
     err: Stream,
     /// The command's stdin, until it closes for good.
     stdin: Option<ChildStdin>,
+    /// The `tool.stdin` that arrived before the start was decided.
+    held: Vec<Control<StdinPayload>>,
     ending: Option<(Termination, Expiry)>,
     /// The shell's exit facts and when they were observed.
     exit: Option<(ExitFacts, Duration)>,
@@ -340,6 +351,9 @@ impl Work {
         }
     }
 }
+
+/// The availability check while it runs.
+type Checking = Pin<Box<dyn Future<Output = Result<Available, PolicyRejection>> + Send>>;
 
 /// Why a task did not reach `running`.
 enum Start {
@@ -394,9 +408,11 @@ struct Waiter {
     written: Option<u64>,
 }
 
-/// How the staged state ended.
+/// How the time before the start ended.
 enum Staged {
-    Started,
+    /// The availability check ended with this result.
+    Started(Result<Available, PolicyRejection>),
+    /// A cancel or the binding's close prevented the start.
     Cancelled,
     /// The binding owner forgot the task, its connection ended or the App
     /// Server shuts down: it ends without a report.
@@ -405,69 +421,104 @@ enum Staged {
 
 impl Supervisor {
     async fn run(mut self) {
-        match self.staged().await {
+        let checked = match self.staged().await {
             Staged::Discarded => {
                 self.confirm_gone();
                 return;
             }
-            Staged::Cancelled => {}
-            Staged::Started => match self.launch(Work::of(&self.spec.tool, &self.spec.cwd)).await {
-                Err(Start::Rejected(rejection)) => {
-                    self.submit(
-                        self.spec.correlation.clone(),
-                        &self.spec.connection_id.clone(),
-                        self.spec.traceparent.clone(),
-                        Body::Rejected(ProtocolError {
-                            code: rejection.code,
-                            message: rejection.message,
-                        }),
-                    );
-                    self.ended = Some(State {
-                        ended: true,
-                        ..State::default()
-                    });
+            Staged::Cancelled => None,
+            Staged::Started(checked) => Some(checked),
+        };
+        for control in std::mem::take(&mut self.held) {
+            self.stdin(control);
+        }
+        match checked {
+            None => {}
+            Some(Err(rejection)) => self.reject(rejection),
+            Some(Ok(available)) => {
+                let work = Work::of(&self.spec.tool, &self.spec.cwd);
+                match self.launch(&available, work).await {
+                    Err(Start::Rejected(rejection)) => self.reject(rejection),
+                    Err(Start::Failed(error)) => self.report_start_failure(error),
+                    Ok((Work::Exec(call), status)) => self.running(call, status).await,
+                    Ok((Work::File(call), status)) => self.file_running(call, status).await,
                 }
-                Err(Start::Failed(error)) => self.report_start_failure(error),
-                Ok((Work::Exec(call), status)) => self.running(call, status).await,
-                Ok((Work::File(call), status)) => self.file_running(call, status).await,
-            },
+            }
         }
         self.settle().await;
     }
 
-    /// `staged`: the task's `tool.stdin` wait, until the start or a cancel
-    /// that prevents it.
+    /// `staged`, then the availability check: the task's `tool.stdin` wait
+    /// and its messages are read, until the check ends, a cancel or the
+    /// binding's close prevents the start, or the task is discarded. A
+    /// check that a message overtakes is dropped, its probes with it.
     async fn staged(&mut self) -> Staged {
-        let mut held = Vec::new();
-        let staged = loop {
-            match self.messages.recv().await {
+        let mut check: Option<Checking> = None;
+        loop {
+            let message = match check.as_mut() {
+                None => self.messages.recv().await,
+                Some(checking) => tokio::select! {
+                    checked = checking.as_mut() => return Staged::Started(checked),
+                    message = self.messages.recv() => message,
+                },
+            };
+            match message {
                 None
                 | Some(SupervisorMessage::ConnectionEnded)
                 | Some(SupervisorMessage::Shutdown) => return Staged::Discarded,
                 Some(SupervisorMessage::Start) => {
-                    self.left_queue = Some(state::seams::now());
-                    break Staged::Started;
+                    if check.is_none() {
+                        self.left_queue = Some(state::seams::now());
+                        check = Some(self.availability());
+                    }
                 }
                 Some(SupervisorMessage::Cancel(control)) => {
-                    self.left_queue = Some(state::seams::now());
+                    self.left_queue.get_or_insert_with(state::seams::now);
                     self.cancel(*control);
-                    break Staged::Cancelled;
+                    return Staged::Cancelled;
                 }
                 Some(SupervisorMessage::Prevent) => {
-                    self.left_queue = Some(state::seams::now());
+                    self.left_queue.get_or_insert_with(state::seams::now);
                     self.report_cancelled_staged();
-                    break Staged::Cancelled;
+                    return Staged::Cancelled;
                 }
-                Some(SupervisorMessage::Stdin(control)) => held.push(*control),
+                Some(SupervisorMessage::Stdin(control)) => self.held.push(*control),
                 Some(SupervisorMessage::Outcome(report, _)) => {
                     self.awaited.remove(&report);
                 }
             }
-        };
-        for control in held {
-            self.stdin(control);
         }
-        staged
+    }
+
+    /// The availability check of the task, borrowing nothing of the
+    /// supervisor, which reads its messages while it runs.
+    fn availability(&self) -> Checking {
+        let isolation = self.context.isolation;
+        let permissions = self.spec.permissions.clone();
+        let cwd = self.spec.cwd.clone();
+        let tetral = self.context.tetral.clone();
+        Box::pin(async move {
+            state::seams::barrier(AVAILABILITY_CHECK).await;
+            isolation.check(&permissions, &cwd, &tetral).await
+        })
+    }
+
+    /// The `rejected` report of a call that the availability check or the
+    /// transform refused; no process of the task started.
+    fn reject(&mut self, rejection: PolicyRejection) {
+        self.submit(
+            self.spec.correlation.clone(),
+            &self.spec.connection_id.clone(),
+            self.spec.traceparent.clone(),
+            Body::Rejected(ProtocolError {
+                code: rejection.code,
+                message: rejection.message,
+            }),
+        );
+        self.ended = Some(State {
+            ended: true,
+            ..State::default()
+        });
     }
 
     /// `ended` and `cleaned`: controls are answered from what the task
@@ -567,18 +618,17 @@ impl Supervisor {
         self.cleaned = true;
     }
 
-    /// `starting`: the availability check, the task's files, the
-    /// environment and the launch; gives the work and the launch-status
-    /// pipe.
-    async fn launch(&mut self, work: Work) -> Result<(Work, Receiver), Start> {
+    /// The rest of `starting`, after the availability check: the task's
+    /// files, the environment and the launch; gives the work and the
+    /// launch-status pipe.
+    async fn launch(
+        &mut self,
+        available: &Available,
+        work: Work,
+    ) -> Result<(Work, Receiver), Start> {
         let context = &self.context;
         let spec = &self.spec;
         let failed = |message: &str| Start::Failed(start_error(&work, message));
-        let available = context
-            .isolation
-            .check(&spec.permissions, &spec.cwd, &context.tetral)
-            .await
-            .map_err(Start::Rejected)?;
         spec.files
             .create()
             .map_err(|failure| failed(&failure.to_string()))?;
@@ -618,7 +668,7 @@ impl Supervisor {
         let mut process = context
             .isolation
             .launch(
-                &available,
+                available,
                 command,
                 &spec.permissions,
                 &spec.cwd,

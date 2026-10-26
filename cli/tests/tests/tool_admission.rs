@@ -5,7 +5,8 @@
 //! it, 65,536 bytes for every type without a larger one. With a prepared
 //! Session running `exec_command` tasks: an instruction delivered again or
 //! its payload issued again, a `task_id` issued again with other content,
-//! tasks staged behind a withheld `prepared` ACK, the replay ledger's
+//! tasks staged behind a withheld `prepared` ACK, a cancel and a close while
+//! a task's availability check is held, the replay ledger's
 //! entries of tasks, kept until a resume or freed by each ACK, and, with
 //! only the ledger's reserve free, new tasks refused while a running task's
 //! controls, its binding's close and its report are recorded. The seam
@@ -26,8 +27,8 @@ use tetral_tests::record::Case;
 use tetral_tests::reference::ReferenceServer;
 use tetral_tests::socket_directory;
 use tetral_tests::tasks::{
-    BINDING, HEARTBEAT_INTERVAL, LAUNCH, SESSION, TaskMachine, WAIT_CHECKED, millis,
-    policy as project_policy,
+    AVAILABILITY_CHECK, BINDING, HEARTBEAT_INTERVAL, LAUNCH, SESSION, TaskMachine, WAIT_CHECKED,
+    millis, policy as project_policy,
 };
 
 /// The Session these instructions name, which the machine never prepared:
@@ -151,6 +152,27 @@ const LEDGER_ROOM: usize = 4_032;
 /// The age at which the reference control server ends a stream with a
 /// stream-only `disconnect`.
 const MAXIMUM_STREAM_AGE: Duration = Duration::from_secs(30 * 60);
+
+/// What the `terminal` report of a task that never started says: its
+/// sequence, status, `cancelled`, exit facts, `duration_ms` and streams.
+fn unstarted(report: &Value) -> Value {
+    let result = &report["result"]["result"];
+    json!([
+        report["report_seq"],
+        report["result"]["status"],
+        result["cancelled"],
+        result["exit_code"],
+        result["signal"],
+        result["duration_ms"],
+        result["stdout"]["text"],
+        result["stderr"]["text"],
+    ])
+}
+
+/// The report of a task cancelled before it started.
+fn cancelled_unstarted() -> Value {
+    json!([1, "success", true, null, null, 0, "", ""])
+}
 
 /// The accepted report that answers `message_id`, once it has come.
 fn answer_to(tasks: &TaskMachine, message_id: &str) -> Value {
@@ -556,25 +578,72 @@ fn a_task_staged_behind_a_withheld_prepared_ack_starts_only_after_it_and_never_o
     );
     // The close prevents the start at once, before the ACK.
     let closed = tasks.terminal("task_closed");
-    let result = &closed["result"]["result"];
-    assert_eq!(
-        json!([
-            closed["report_seq"],
-            closed["result"]["status"],
-            result["cancelled"],
-            result["exit_code"],
-            result["signal"],
-            result["duration_ms"],
-            result["stdout"]["text"],
-            result["stderr"]["text"],
-        ]),
-        json!([1, "success", true, null, null, 0, "", ""]),
-        "{closed:#}"
-    );
+    assert_eq!(unstarted(&closed), cancelled_unstarted(), "{closed:#}");
     release_answers(&tasks);
     handled(&tasks, "sess_closed", "bind_closed");
     assert_eq!(seams.count(SPAWN), spawns + 2);
     case.observe("no process before the released ACK, then one; the cancelled task never launched, a later task of its binding did; the closed binding's task never launched and reported cancelled at the close");
+}
+
+#[test]
+fn a_cancel_or_a_close_while_the_availability_check_is_held_answers_at_once_and_nothing_starts() {
+    let _socket_dir = socket_directory::shared();
+    let mut case = tetral_tests::record!().case(
+        "two tasks held before their availability checks run: a cancel of one, a close of the other's binding, then the checks released",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    let seams = &tasks.machine().seams;
+    let policy = project_policy(&tasks.project, "disabled");
+    let spawns = seams.count(SPAWN);
+    seams.hold(AVAILABILITY_CHECK);
+
+    tasks.execute(
+        "task_cancelled",
+        json!({"cmd": "touch cancelled"}),
+        policy.clone(),
+    );
+    seams.wait_until_waiting(AVAILABILITY_CHECK, 1);
+    let cancel = tasks.cancel("task_cancelled", json!({}));
+    let reply = tasks.reply(&cancel);
+    let result = &reply["result"]["result"];
+    assert_eq!(
+        json!([result["cancelled"], result["was_running"]]),
+        json!([true, false]),
+        "{reply:#}"
+    );
+    let cancelled = tasks.terminal("task_cancelled");
+    assert_eq!(
+        unstarted(&cancelled),
+        cancelled_unstarted(),
+        "{cancelled:#}"
+    );
+
+    let issued = tasks.prepare("sess_closed", "bind_closed", &tasks.project, None);
+    tasks.wait_prepared(&issued);
+    tasks.execute_with(
+        "sess_closed",
+        "bind_closed",
+        "task_closed",
+        json!({"cmd": "touch closed"}),
+        policy.clone(),
+        None,
+    );
+    seams.wait_until_waiting(AVAILABILITY_CHECK, 2);
+    tasks.engine.control(
+        "close",
+        json!({"instance_id": INSTANCE, "payload": {"session_id": "sess_closed", "binding_id": "bind_closed"}}),
+    );
+    let closed = tasks.terminal("task_closed");
+    assert_eq!(unstarted(&closed), cancelled_unstarted(), "{closed:#}");
+
+    seams.release(AVAILABILITY_CHECK);
+    tasks.execute("task_after", json!({"cmd": "true"}), policy);
+    tasks.terminal("task_after");
+    assert_eq!(seams.count(SPAWN), spawns + 1);
+    assert!(!tasks.project.join("cancelled").exists());
+    assert!(!tasks.project.join("closed").exists());
+    case.observe("the cancel replied cancelled, not running, while the check was held, and both tasks reported cancelled before starting; after the release only a later task launched");
 }
 
 #[test]

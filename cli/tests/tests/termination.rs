@@ -5,7 +5,8 @@
 //! at the SIGKILL after the grace while a process stays blocked, and at the
 //! end of the wait after the SIGKILL when the task's exit is never observed,
 //! a shutdown that ends a running task through the procedure, a
-//! connection's end with SIGKILL at once, a resume that keeps a task
+//! connection's end with SIGKILL at once that discards a task whose
+//! availability check is held, a resume that keeps a task
 //! running, processes that stay after SIGKILL and the `cleanup_pending` of
 //! their Session, an old connection's late events, and the records an App
 //! Server killed with SIGKILL leaves for the next start.
@@ -28,8 +29,8 @@ use tetral_tests::app_server::{request, wait_until};
 use tetral_tests::machine::{INSTANCE, answer_fault, seconds, send, wait_for_requests};
 use tetral_tests::socket_directory;
 use tetral_tests::tasks::{
-    ENDING_CHECKED, EXIT_OBSERVED, GONE_CHECKED, REPLY_WAITING, SESSION, TaskMachine, WAIT_CHECKED,
-    millis, policy, process_running,
+    AVAILABILITY_CHECK, ENDING_CHECKED, EXIT_OBSERVED, GONE_CHECKED, REPLY_WAITING, SESSION,
+    TaskMachine, WAIT_CHECKED, millis, policy, process_running,
 };
 
 /// The test seam barrier before a record an earlier App Server left is
@@ -329,6 +330,46 @@ fn a_shutdown_ends_a_running_task_through_its_term_trap_and_the_app_server_exits
     case.observe(format!(
         "m held t; no sleep 1231 and no task record were left; the App Server exited 0, {took:?} after the shutdown"
     ));
+}
+
+#[test]
+fn a_connections_end_while_the_availability_check_is_held_discards_the_task_before_it_starts() {
+    let _socket_dir = socket_directory::shared();
+    let mut case = tetral_tests::record!().case(
+        "a task held before its availability check runs: a connection-ending disconnect, a new connection, then the check released",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    let seams = &tasks.machine().seams;
+    let spawns = seams.count("process.spawn");
+    seams.hold(AVAILABILITY_CHECK);
+    tasks.execute(
+        "task_checking",
+        json!({"cmd": "touch checking"}),
+        policy(&tasks.project, "disabled"),
+    );
+    seams.wait_until_waiting(AVAILABILITY_CHECK, 1);
+    end_connection(&tasks);
+    reconnect(&tasks, seconds(1.2));
+    // Discarded at the connection's end, the task keeps no Session
+    // `cleanup_pending` while its check is still held.
+    assert_eq!(
+        prepared(&tasks, SESSION, "bind_new"),
+        json!(["prepared", null])
+    );
+    seams.release(AVAILABILITY_CHECK);
+    tasks.execute_with(
+        SESSION,
+        "bind_new",
+        "task_after",
+        json!({"cmd": "true"}),
+        policy(&tasks.project, "disabled"),
+        None,
+    );
+    tasks.terminal("task_after");
+    assert_eq!(seams.count("process.spawn"), spawns + 1);
+    assert!(!tasks.project.join("checking").exists());
+    case.observe("the Session prepared on the new connection while the check was held; after the release only the later task launched, and the held one never ran");
 }
 
 #[test]

@@ -15,7 +15,8 @@
 //! `task.output_ended`. The supervisor's observation of the launched
 //! process's exit waits at the barrier `task.exit_observed`, and each of its
 //! reads of the launch-status pipe before the command's start at
-//! `task.launch_status`.
+//! `task.launch_status`; a task's availability check waits at
+//! `task.availability_check` before it runs.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -77,6 +78,9 @@ pub const OUTPUT_ENDED: &str = "task.output_ended";
 /// The barrier of each read of the launch-status pipe before the command's
 /// start.
 pub const LAUNCH_STATUS: &str = "task.launch_status";
+
+/// The barrier of a task's availability check before it runs.
+pub const AVAILABILITY_CHECK: &str = "task.availability_check";
 
 /// How often the reference control server sends a heartbeat, on its clock.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
