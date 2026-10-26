@@ -116,7 +116,7 @@ func (server *Server) issue(conn *connection, spec instructionSpec, bypass bool)
 	if messageID == "" {
 		messageID = server.newID("msg")
 	}
-	encoded, err := json.Marshal(envelope{
+	encoded, err := marshalAsGiven(envelope{
 		ProtocolVersion: wire.ProtocolVersion, MessageID: messageID, ConnectionID: conn.id,
 		Type: spec.Type, Payload: payload.Bytes(), Traceparent: spec.Traceparent,
 	})
@@ -129,7 +129,7 @@ func (server *Server) issue(conn *connection, spec instructionSpec, bypass bool)
 		for name, value := range spec.Extra {
 			members[name] = value
 		}
-		if encoded, err = json.Marshal(members); err != nil {
+		if encoded, err = marshalAsGiven(members); err != nil {
 			return nil, err
 		}
 	}
@@ -155,6 +155,18 @@ func (server *Server) issue(conn *connection, spec instructionSpec, bypass bool)
 	}
 	server.dispatch(conn, instruction)
 	return instruction, nil
+}
+
+// marshalAsGiven is json.Marshal without its escaping of `<`, `>` and `&`,
+// which would change the length of a payload that holds them.
+func marshalAsGiven(value any) ([]byte, error) {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(encoded.Bytes(), []byte("\n")), nil
 }
 
 // envelope is a downstream event as the server writes it.

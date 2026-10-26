@@ -59,6 +59,32 @@ func execResult(phase string, stdout string) map[string]any {
 	return map[string]any{"kind": "execution", "phase": phase, "report_seq": 1, "result": envelope}
 }
 
+func TestAToolInstructionIsWrittenWithTheBytesOfItsPayload(t *testing.T) {
+	ts := startServer(t)
+	stream, _ := ts.online()
+	// Two commands of equal length, one of characters that HTML escaping
+	// would lengthen, each written by hand into the control's body so that
+	// no encoder of the test escapes them.
+	for messageID, cmd := range map[string]string{"msg_html": "<a&b>", "msg_text": "xaxbx"} {
+		body := `{"instance_id":"inst_a","message_id":"` + messageID + `","payload":{"session_id":"sess_1",` +
+			`"binding_id":"bind_1","tool_use_event_id":"call_task_1","task_id":"task_1","tool":"exec_command",` +
+			`"input":{"cmd":"` + cmd + `"},"sandbox_policy":{"schema_version":1,"filesystem":{"rules":[]},` +
+			`"network":{"mode":"disabled"}}}}`
+		response, err := http.Post(ts.control.URL+"/control/execute", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if sent := payload(stream.expect("tool.execute")); sent["input"].(map[string]any)["cmd"] != cmd {
+			t.Errorf("sent %v", sent)
+		}
+	}
+	sizes := stream.dataBytes()
+	if html, text := sizes[len(sizes)-2], sizes[len(sizes)-1]; html != text {
+		t.Errorf("the events are %d and %d bytes", html, text)
+	}
+}
+
 func TestToolControlsIssueToolInstructionsWithTheirPayloadAsGiven(t *testing.T) {
 	ts := startServer(t)
 	stream, connectionID := ts.online()

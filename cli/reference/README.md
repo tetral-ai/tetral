@@ -25,7 +25,8 @@ its own protocol types in `wire/`; `tetral` never depends on it.
 - A Session instruction is queued until the connection's ready is accepted,
   and past 64 Session instructions until the connection's first Session report
   is stored (`StagingLimit`). An instruction's payload is sent as the test
-  gives it, so a test can send one that fails its schema; the server reads its
+  gives it, byte for byte, with no character escaped again, so a test can
+  send one that fails its schema or sits at a byte limit; the server reads its
   identities only to accept the reports that answer it and, once a prepare is
   issued, to grant its binding's Git tickets.
 - A tool-status report is accepted only when it answers a tool instruction
