@@ -153,11 +153,13 @@ which owns that task's process tree; the translation of a call's
   (`terminate`, `supervisor`).
 - A task stays tracked until its processes are confirmed gone: on Linux, no
   process this user can inspect in its PID namespace, checked every
-  `cleanup::CHECK_INTERVAL`. Once the namespace's first process exists the
-  supervisor writes `execution/<task name>.json` with the boot ID, that
-  process's ID and start time and the namespace's inode, and reports the
-  namespace to the binding owner; confirmation deletes the record, and the
-  task's files wait for it (`process`, `cleanup::Record`, `supervisor`).
+  `cleanup::CHECK_INTERVAL`. When the task's child reports `child::STARTED`
+  on descriptor 3, or, without that report, while the task is being ended,
+  the supervisor finds the namespace's first process and writes
+  `execution/<task name>.json` with the boot ID, that process's ID and start
+  time and the namespace's inode, and reports the namespace to the binding
+  owner; confirmation deletes the record, and the task's files wait for it
+  (`process`, `cleanup::Record`, `supervisor`).
 - At its start an App Server reads the records an earlier one left: one of
   another boot is confirmed at once and signals nothing; otherwise the
   recorded process, the same ID with the same start time, gets SIGKILL, and

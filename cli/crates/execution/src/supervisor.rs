@@ -21,9 +21,11 @@
 //! without one, and a cancel ends the child through the termination
 //! procedure.
 //!
-//! Once the task's first process inside its sandbox exists, the supervisor
-//! writes the task's record ([`cleanup::Record`]) and tells its binding
-//! owner the task's PID namespace. After the `terminal` report the task's
+//! When the task's child reports its start on descriptor 3, or, without
+//! that report, while the task is being ended, the supervisor finds the
+//! task's first process inside its sandbox, writes the task's record
+//! ([`cleanup::Record`]) and tells its binding owner the task's PID
+//! namespace. After the `terminal` report the task's
 //! processes are checked every [`cleanup::CHECK_INTERVAL`] until they are
 //! confirmed gone; only then do the record and, once every report has its
 //! outcome, the task's files go. A connection's end discards a staged task
