@@ -47,6 +47,13 @@ fn frozen_reports(root: &Path) -> Vec<PathBuf> {
     reports
 }
 
+/// `reports` in the order of their `message_id`: the outbox sends reports
+/// concurrently, so the reference server gets them in any order.
+fn by_message_id(mut reports: Vec<Value>) -> Vec<Value> {
+    reports.sort_by_key(|report| report["message_id"].as_str().unwrap().to_owned());
+    reports
+}
+
 fn message_ids(requests: &[Value]) -> Vec<&str> {
     requests
         .iter()
@@ -105,7 +112,7 @@ fn a_refused_report_is_never_sent_again_and_a_stale_connection_ends_the_connecti
     machine.advance(seconds(PAST_FIRST_RETRY));
     send_data(&engine, "{}");
     wait_for_received(&engine, "protocol-error", 1);
-    let sent = engine.requests("protocol-error");
+    let sent = by_message_id(engine.requests("protocol-error"));
     assert_eq!(message_ids(&sent), ["r1", "r2", "r3"]);
     assert!(frozen_reports(&machine.root).is_empty());
     case.observe("both refused reports were recorded as dropped, their files deleted, and neither was sent again past the first retry wait");
@@ -131,7 +138,7 @@ fn a_refused_report_is_never_sent_again_and_a_stale_connection_ends_the_connecti
     assert_eq!(events[1]["query"]["resume"], "false");
     assert!(frozen_reports(&machine.root).is_empty());
     assert_eq!(
-        message_ids(&engine.requests("protocol-error")),
+        message_ids(&by_message_id(engine.requests("protocol-error"))),
         ["r1", "r2", "r3", "r4"]
     );
     case.observe("the connection ended: the next attempt names it as the predecessor of a new connection, and its refused report was deleted and not sent again");
@@ -177,7 +184,7 @@ fn a_protocol_error_names_the_message_it_answers_only_when_its_message_id_can_be
         r#"{"message_id":"msg_readable","type":"session.close"}"#,
     );
     send_data(&engine, r#"{"message_id":7,"type":"session.close"}"#);
-    let reports = wait_for_received(&engine, "protocol-error", 3);
+    let reports = by_message_id(wait_for_received(&engine, "protocol-error", 3));
     let correlations: Vec<(&str, Option<&str>)> = reports
         .iter()
         .map(|report| {
@@ -228,8 +235,7 @@ fn a_session_instruction_delivered_again_is_routed_once_and_its_message_id_with_
     // Events are handled in stream order and reports are numbered in the
     // order they are submitted, so the last event's report is r2 only when
     // exactly one protocol error came before it.
-    let mut reports = wait_for_received(&engine, "protocol-error", 2);
-    reports.sort_by_key(|report| report["message_id"].as_str().unwrap().to_owned());
+    let reports = by_message_id(wait_for_received(&engine, "protocol-error", 2));
     let reported: Vec<(&str, &str, Option<&str>)> = reports
         .iter()
         .map(|report| {
