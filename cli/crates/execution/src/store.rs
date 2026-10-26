@@ -6,7 +6,11 @@
 //! Before its launch a task gets its directory under its Session, holding its
 //! two logs, and then its temporary directory (`TaskFiles::create`); both go
 //! once the task has ended and its reports are acknowledged
-//! (`TaskFiles::remove`). Nothing else is created or deleted here.
+//! (`TaskFiles::remove`). What an earlier App Server's tasks left goes too:
+//! the entries of `T` at the start (`clear_task_parent`), and a Session's
+//! task directories once its earlier records are confirmed
+//! (`clear_session_tasks`, from `cleanup`). Nothing else is created or
+//! deleted here.
 
 use std::fs::{self, DirBuilder, File};
 use std::io::{self, Write};
