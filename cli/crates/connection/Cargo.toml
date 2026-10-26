@@ -34,3 +34,4 @@ tracing.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread"] }
+tracing-subscriber.workspace = true

@@ -18,6 +18,7 @@ pub mod sessions;
 pub mod staging;
 pub mod status;
 pub mod stream;
+pub mod task_pressure;
 
 pub use outbox::{Outbox, OutboxConfig, OutboxEvent, OutboxTimes};
 pub use owner::{Config, Connection, Credential, Instruction, Times};

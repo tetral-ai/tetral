@@ -67,6 +67,7 @@ use crate::sessions::{Owners, Port, PortMessage, RECORDS_MAX, SessionsView};
 use crate::staging::{Admission, STAGING_MAX, Staging};
 use crate::status::{ConnectionStatus, Reconnect, Reported};
 use crate::stream::{EVENT_MAX_BYTES, EventLimit, TOOL_EVENT_MAX_BYTES};
+use crate::task_pressure::TaskPressure;
 
 /// The time from `connected` within which the ready ACK must arrive.
 pub const REGISTRATION_DEADLINE: Duration = Duration::from_secs(45);
@@ -103,6 +104,8 @@ pub struct Times {
     pub outbox: OutboxTimes,
     pub records_max: usize,
     pub probe_slots: SlotLimits,
+    /// The quiet interval of the task pressure point's episodes.
+    pub task_pressure_quiet: Duration,
 }
 
 impl Default for Times {
@@ -122,6 +125,7 @@ impl Default for Times {
             outbox: OutboxTimes::default(),
             records_max: RECORDS_MAX,
             probe_slots: SlotLimits::default(),
+            task_pressure_quiet: observe::pressure::QUIET_INTERVAL,
         }
     }
 }
@@ -430,6 +434,8 @@ struct Owner {
     reported: Reported,
     owners: Owners,
     slots: ProbeSlots,
+    /// The task pressure point `tetral_tasks`.
+    task_pressure: TaskPressure,
     /// The replies to stop, sent once no probe holds a slot and every
     /// Session's tasks are confirmed gone.
     stop_replies: Vec<oneshot::Sender<()>>,
@@ -449,6 +455,7 @@ impl Owner {
         Owner {
             owners,
             slots: ProbeSlots::new(times.probe_slots),
+            task_pressure: TaskPressure::new(observe::registry(), times.task_pressure_quiet),
             stop_replies: Vec::new(),
             tasks_pending: BTreeSet::new(),
             transport,
@@ -603,6 +610,17 @@ impl Owner {
                 self.tasks_pending.remove(&session_id);
                 self.answer_stop();
             }
+            PortMessage::TaskStaged(staged) => {
+                self.task_pressure.staged(staged, state::seams::now());
+            }
+            PortMessage::TaskUnstaged(staged) => {
+                self.task_pressure.unstaged(staged, state::seams::now());
+            }
+            PortMessage::TaskStarted(staged) => {
+                self.task_pressure.started(staged, state::seams::now());
+            }
+            PortMessage::TaskEnded => self.task_pressure.ended(state::seams::now()),
+            PortMessage::TaskRefused => self.task_pressure.refused(state::seams::now()),
         }
     }
 
@@ -675,6 +693,7 @@ impl Owner {
         for requester in self.slots.expire(now) {
             self.owners.answer(&requester, ProbeSlot::Exhausted);
         }
+        self.task_pressure.show(now);
         self.reported.change(self.state());
         state::seams::count("connection.checked");
     }
@@ -1467,6 +1486,15 @@ impl Owner {
             self.protocol_error(&held.id, kind, Some(message_id), trace.as_ref());
             return;
         };
+        // The factory rejects a new `tool.execute` of a Session without an
+        // owner that the ledger could not record `resource_exhausted`, at
+        // its first step.
+        if !recorded
+            && message.envelope.kind == DownstreamType::ToolExecute
+            && !self.owners.owns(&message.session_id)
+        {
+            self.task_pressure.refused(state::seams::now());
+        }
         let payload = serde_json::Value::Object(std::mem::take(&mut message.envelope.payload));
         self.owners.tool(ToolCall {
             connection_id: held.id.clone(),

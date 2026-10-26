@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use protocol::id::{Id, SafeId};
 use protocol::local::SessionEntry;
@@ -28,6 +29,11 @@ pub(crate) enum PortMessage {
     Free,
     RecordGone(SafeId),
     TasksGone(SafeId),
+    TaskStaged(Duration),
+    TaskUnstaged(Duration),
+    TaskStarted(Option<Duration>),
+    TaskEnded,
+    TaskRefused,
 }
 
 /// The Connection owner's side of `ConnectionPort`: each call is a message
@@ -61,6 +67,26 @@ impl ConnectionPort for Port {
 
     fn tasks_gone(&self, session_id: &SafeId) {
         self.send(PortMessage::TasksGone(session_id.clone()));
+    }
+
+    fn task_staged(&self, staged: Duration) {
+        self.send(PortMessage::TaskStaged(staged));
+    }
+
+    fn task_unstaged(&self, staged: Duration) {
+        self.send(PortMessage::TaskUnstaged(staged));
+    }
+
+    fn task_started(&self, staged: Option<Duration>) {
+        self.send(PortMessage::TaskStarted(staged));
+    }
+
+    fn task_ended(&self) {
+        self.send(PortMessage::TaskEnded);
+    }
+
+    fn task_refused(&self) {
+        self.send(PortMessage::TaskRefused);
     }
 }
 
@@ -136,6 +162,14 @@ impl Owners {
     /// Hands `call` to its Session's owner, or, for a Session without one,
     /// to the factory, which rejects it; it never creates an owner or a
     /// record.
+    /// Whether the Session `session_id` has an owner here, which then
+    /// admits its tool instructions.
+    pub fn owns(&self, session_id: &str) -> bool {
+        SafeId::new(session_id)
+            .ok()
+            .is_some_and(|session_id| self.owners.contains_key(&session_id))
+    }
+
     pub fn tool(&self, call: ToolCall) {
         let owned = SafeId::new(call.session_id.as_str())
             .ok()

@@ -88,7 +88,7 @@ owners; they send messages and await replies.
 
 | Owner | How many | Crate | Owns |
 |---|---|---|---|
-| Connection | One per App Server | `connection` | The connection to Engine: authentication, the event stream and its resume, ready, heartbeats, credential renewal, and the routing of Session instructions; the count of Session records and the directory probe slots |
+| Connection | One per App Server | `connection` | The connection to Engine: authentication, the event stream and its resume, ready, heartbeats, credential renewal, and the routing of Session instructions; the count of Session records, the directory probe slots and the task pressure point `tetral_tasks` |
 | Session binding | One per Session on this machine | `session` | The Session record, its bindings and their states, and the admission of new work |
 | Task supervisor | One per task | `execution` | One task's process tree |
 | Report outbox | One per App Server | `connection` | The frozen reports, their sending and their retries |

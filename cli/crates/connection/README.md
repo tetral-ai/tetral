@@ -5,8 +5,9 @@ Server:
 
 - the **Connection owner**, which owns the connection to Engine, from
   authentication and the event stream to the classification and routing of
-  Session instructions, and also the count of Session records and the
-  **probe slots**, the right to run one directory probe;
+  Session instructions, and also the count of Session records, the
+  **probe slots**, the right to run one directory probe, and the task
+  pressure point `tetral_tasks`;
 - the **Report outbox**, which owns every report that answers or follows an
   instruction, from the moment it is frozen until Engine acknowledges it.
 
@@ -80,6 +81,14 @@ Server:
   deadline (`probe_slots`, `owner`). The stop has the owners end their tasks
   before it ends the connection, so that the tasks get the termination
   procedure's grace (`owner`).
+- The task pressure point counts what the Session binding owners report
+  through `ConnectionPort`: a `tool.execute` staged, one that leaves its
+  staging queue without starting, a task's start, from the queue with its
+  wait or at its admission, its end, and each `tool.execute` they reject
+  `resource_exhausted`; the Connection owner counts that rejection itself
+  for a Session without an owner, whose factory rejects such an
+  instruction at its first step. Its series are set at each change and at
+  each check of the owner's times (`task_pressure`, `owner`).
 - A stream reads one event of up to `stream::EVENT_MAX_BYTES` until the CLI
   starts submitting a ready that advertises `tool_execution`, and of up to
   `stream::TOOL_EVENT_MAX_BYTES` from then on, a resumed stream of that
@@ -102,9 +111,9 @@ for an attempt, connecting, a held connection in `registering`, `online` or
 connection held, which a new connection names as its predecessor, the staged
 instructions, the held connection's replay ledger and the bindings it routed
 a `session.prepare` for, the handle of each Session binding owner and whether
-it holds a record, the probe slots, and the status fields
-`connection_state`, `connection_id`, `credential_id`, `expires_at` and
-`last_error`.
+it holds a record, the probe slots, the task pressure point, and the status
+fields `connection_state`, `connection_id`, `credential_id`, `expires_at`
+and `last_error`.
 
 The Report outbox owns the current connection's number and identity and its
 pending reports, each with its `r<n>` identity, its frozen file, its backoff
@@ -136,6 +145,7 @@ and its running attempt.
 | `src/owner.rs` | The Connection owner: its phases, timers, the answers to the events request, ready and heartbeats, `disconnect`, the order of an event's handling and the ledger's admission (`admit`), staging and routing, the admission of a `session.prepare` and its `failed` report, the record `protocol.foreign_connection`, and the test seam counters `connection.attempt`, `connection.checked`, `connection.granted`, `connection.answered` and `route.session` |
 | `src/sessions.rs` | The Session binding owners as the Connection owner reaches them (`Owners`), `RECORDS_MAX`, and its side of `protocol::ports::ConnectionPort` |
 | `src/probe_slots.rs` | The probe slots, their waiting requests, `PROBES_MAX` and `PROBE_WAIT`, and the pressure point `tetral_probes`: its series and its rejection episodes |
+| `src/task_pressure.rs` | The pressure point `tetral_tasks`: the running tasks, the staged `tool.execute` instructions and their waits, the `resource_exhausted` rejections, its series and its rejection episodes |
 | `src/classify.rs` | The reading of an event's envelope and identities, and the content fingerprint |
 | `src/protocol_error.rs` | The classes of protocol errors, their codes and texts, and their reports |
 | `src/attempt.rs` | One attempt's query by its kind, the validity of `connected`, and the task that reads its stream; `ATTEMPT_TOTAL` |

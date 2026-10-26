@@ -273,6 +273,21 @@ pub trait ConnectionPort: Send + Sync {
     /// After the shutdown, every task of the Session is confirmed gone
     /// (`TasksGone`).
     fn tasks_gone(&self, session_id: &SafeId);
+    /// A `tool.execute` staged at `staged`, on the seam clock, waits in its
+    /// binding's staging queue (`TaskStaged`).
+    fn task_staged(&self, staged: Duration);
+    /// The `tool.execute` staged at `staged` left its queue without
+    /// starting: a cancel or a close prevented it, or its connection's end
+    /// discarded it (`TaskUnstaged`).
+    fn task_unstaged(&self, staged: Duration);
+    /// A task starts: from its staging queue when it was staged at `staged`,
+    /// otherwise at its admission (`TaskStarted`).
+    fn task_started(&self, staged: Option<Duration>);
+    /// A started task ended: its processes are confirmed gone, or its start
+    /// was rejected (`TaskEnded`).
+    fn task_ended(&self);
+    /// A `tool.execute` was rejected `resource_exhausted` (`TaskRefused`).
+    fn task_refused(&self);
 }
 
 #[cfg(test)]

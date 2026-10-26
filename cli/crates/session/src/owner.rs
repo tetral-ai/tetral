@@ -645,6 +645,11 @@ mod tests {
         fn probe_slot_free(&self) {}
         fn record_gone(&self, _session_id: &SafeId) {}
         fn tasks_gone(&self, _session_id: &SafeId) {}
+        fn task_staged(&self, _staged: Duration) {}
+        fn task_unstaged(&self, _staged: Duration) {}
+        fn task_started(&self, _staged: Option<Duration>) {}
+        fn task_ended(&self) {}
+        fn task_refused(&self) {}
     }
 
     struct NoReports;
