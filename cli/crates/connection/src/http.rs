@@ -206,9 +206,10 @@ impl Transport {
 /// the machine.
 const UPLOAD_SEND_BUFFER_BYTES: usize = 65_536;
 
-/// The most bytes of a report's body that hyper holds before writing them,
-/// its least: it takes the next chunk, which counts as progress, only once the
-/// chunk before is in the socket's send buffer.
+/// hyper's write buffer limit, its least: hyper takes the next chunk of a
+/// report's body, which counts as progress, only while fewer bytes than this
+/// wait in its buffer, so it holds less than this plus one chunk
+/// ([`CHUNK_BYTES`]) ahead of the socket's send buffer.
 const UPLOAD_WRITE_BUFFER_BYTES: usize = 8_192;
 
 /// The client of report uploads. reqwest sets no socket send buffer, so
