@@ -37,8 +37,10 @@ which owns that task's process tree; the translation of a call's
   `PATH` that this user can modify or replace comes before every one it
   cannot, the availability check rejects the call `sandbox_unavailable`
   naming that path, before any probe, and `tetral` as `codex-linux-sandbox`
-  ends the command with that message before the launch
-  (`isolation::planted_launcher`, `isolation/linux.rs`).
+  ends the command with that message before the launch. The check walks the
+  App Server's `PATH`; the helper walks the command's, which Codex's lookup
+  in `run_main` uses too (`isolation::planted_launcher`,
+  `isolation/linux.rs`).
 - A missing protected path stays uncreatable. The Codex crates mount an
   empty read-only entry at a missing top-level `.git` of a writable path, and
   at a missing `read` or `deny` path inside one, which `bwrap` must first

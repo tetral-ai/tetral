@@ -125,8 +125,10 @@ pub(super) fn bwrap_candidates(tetral: &Path, cwd: &Path) -> Vec<PathBuf> {
 /// this user can change is never chosen and is ignored. The walk resolves
 /// candidates as Codex's lookup does and judges each as Codex's
 /// `current_user_can_modify` and `current_user_can_replace_child` do, whatever
-/// the profile; the availability check runs it before any `bwrap`, and
-/// `tetral` as `codex-linux-sandbox` again before the launch.
+/// the profile; the availability check runs it on the App Server's `PATH`
+/// before any `bwrap`, and `tetral` as `codex-linux-sandbox` again before the
+/// launch, on the command's `PATH`, which Codex's lookup in `run_main` uses
+/// too.
 pub(super) fn planted_launcher() -> Option<String> {
     let search_path = std::env::var_os("PATH")?;
     let cwd = std::env::current_dir().ok()?;
