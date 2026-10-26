@@ -822,10 +822,11 @@ fn check_offer(case: &mut Case, offer: Offer) {
 }
 
 #[test]
-fn an_unusable_bwrap_rejects_the_call_before_any_process_starts() {
+fn each_bwrap_offer_runs_the_command_rejects_the_call_or_has_the_helper_refuse_it() {
     let record = tetral_tests::record!();
-    let mut case = record
-        .case("an unusable bwrap rejects the call sandbox_unavailable before any process starts");
+    let mut case = record.case(
+        "each bwrap offer: the command runs, the call is rejected sandbox_unavailable before any process starts, or tetral as codex-linux-sandbox refuses a planted bwrap before running it",
+    );
     let host_bwrap_bytes = fs::read(host_bwrap()).unwrap();
     let digest_build = binaries::tetral_with_bwrap_digest(&sha256_hex(&host_bwrap_bytes));
     let scratch = tempfile::tempdir().unwrap();
