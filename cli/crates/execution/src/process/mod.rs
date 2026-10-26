@@ -1,10 +1,10 @@
 //! A task's processes as the operating system shows them. On Linux they
 //! are the processes of the task's PID namespace, whose first process the
 //! task's record names by its ID and start time, so that no later process
-//! with a reused ID is taken for it, and whose namespace is held open while
-//! the task's supervisor runs, so that no later namespace with a reused
-//! inode is taken for it (`hold_namespace`). Where no isolation runs a task,
-//! there are none.
+//! with a reused ID is taken for it, and whose namespace is held open until
+//! its processes are confirmed gone, so that no later namespace with a
+//! reused inode is taken for it (`hold_namespace`). Where no isolation runs
+//! a task, there are none.
 
 #[cfg(target_os = "linux")]
 mod linux;

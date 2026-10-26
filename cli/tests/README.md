@@ -177,7 +177,8 @@ temporary directories. No workspace crate depends on this package.
   its result marked `truncated`, files
   that cannot be created and a log that cannot be written, task files that
   no other task reaches, `TMPDIR` with files and Unix sockets, the files'
-  removal after the ACKs, and `T` after the App Server's death.
+  removal after the ACKs with no descriptor of the task's PID namespace
+  left in the App Server, and `T` after the App Server's death.
 - `tests/termination.rs`: the end of tasks: a cancel's grace for the
   command's TERM trap, a cancelled task's report at the SIGKILL after the
   grace while a process stays blocked on a FUSE mount, and at the end of

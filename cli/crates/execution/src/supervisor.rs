@@ -363,9 +363,8 @@ struct Supervisor {
     shutting_down: bool,
     /// The task's first process inside its sandbox, once seen.
     leader: Option<Leader>,
-    /// The leader's PID namespace, held open so that the inode that the
-    /// gone check and the binding owner look for is the task's alone
-    /// ([`process::hold_namespace`]).
+    /// The leader's PID namespace, held open until the task's processes are
+    /// confirmed gone ([`process::hold_namespace`]).
     _namespace: Option<std::fs::File>,
     /// Whether the task's processes are confirmed gone.
     gone: bool,
@@ -652,6 +651,7 @@ impl Supervisor {
             return;
         }
         self.gone = true;
+        self._namespace = None;
         cleanup::remove(&self.spec.record);
         self.spec.listener.gone();
     }

@@ -501,7 +501,9 @@ impl<S: TaskStarter> SessionOwner<S> {
     }
 
     /// The `task_id` of the task whose PID namespace holds the host process
-    /// `pid`, among the tasks whose supervisors reported their namespace.
+    /// `pid`, among the tasks whose supervisors reported their namespace and
+    /// whose processes are not confirmed gone: a confirmed task's namespace
+    /// holds no process, and its inode may name a later namespace.
     pub(crate) fn task_owner(&self, pid: u32, reply: TaskOwnerReply) {
         let owner = process::namespace(pid).and_then(|namespace| {
             let record = self.record.as_ref()?;
@@ -509,7 +511,7 @@ impl<S: TaskStarter> SessionOwner<S> {
                 .into_iter()
                 .flatten()
                 .flat_map(|binding| binding.tasks.registry.iter())
-                .find(|(_, task)| task.namespace == Some(namespace))
+                .find(|(_, task)| !task.gone && task.namespace == Some(namespace))
                 .map(|(task_id, _)| task_id.clone())
         });
         reply(owner);

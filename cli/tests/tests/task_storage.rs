@@ -4,7 +4,8 @@
 //! what a stream keeps, cut on character boundaries; a task whose files
 //! cannot be created and a log that cannot be written; task files that no
 //! other task reaches and a `TMPDIR` that holds files and sockets; the
-//! files' removal once the reports are acknowledged; and `T` after the App
+//! files' removal once the reports are acknowledged, with no descriptor of
+//! the task's PID namespace left in the App Server; and `T` after the App
 //! Server's death. The test seams these tests use are those
 //! `tetral_tests::tasks` names.
 
@@ -20,6 +21,17 @@ use tetral_tests::tasks::{LAUNCH, SESSION, TaskMachine, WAIT_CHECKED, millis, po
 
 fn stdout(report: &Value) -> &Value {
     &report["result"]["result"]["stdout"]
+}
+
+/// The links of the App Server's descriptors that name a PID namespace.
+#[cfg(target_os = "linux")]
+fn namespace_descriptors(app_server: u32) -> Vec<String> {
+    fs::read_dir(format!("/proc/{app_server}/fd"))
+        .unwrap()
+        .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
+        .map(|link| link.to_string_lossy().into_owned())
+        .filter(|link| link.starts_with("pid:["))
+        .collect()
 }
 
 fn only(paths: Vec<PathBuf>) -> PathBuf {
@@ -259,7 +271,12 @@ fn a_tasks_files_go_once_its_reports_are_acknowledged_and_its_project_files_stay
     );
     tasks.wait_files_removed(SESSION);
     assert!(tasks.project.join("kept").exists());
-    case.observe("both directories stayed while the ACK was withheld and went after it; kept stayed in the project");
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        namespace_descriptors(tasks.machine().app_server.pid()),
+        Vec::<String>::new()
+    );
+    case.observe("both directories stayed while the ACK was withheld and went after it; kept stayed in the project; the App Server kept no descriptor of the task's PID namespace");
 }
 
 #[test]

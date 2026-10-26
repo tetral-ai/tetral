@@ -171,7 +171,7 @@ which owns that task's process tree; the translation of a call's
   the supervisor finds the namespace's first process and writes
   `execution/<task name>.json` with the boot ID, that process's ID and start
   time and the namespace's inode, and reports the namespace to the binding
-  owner; it holds the namespace open while it runs, so that no later
+  owner; it holds the namespace open until confirmation, so that no later
   namespace takes the inode. Confirmation deletes the record, and the task's
   files wait for it (`process`, `cleanup::Record`, `supervisor`).
 - At its start an App Server reads the records an earlier one left: one of
