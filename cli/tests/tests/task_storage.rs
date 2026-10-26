@@ -54,6 +54,7 @@ fn output_beyond_what_a_stream_keeps_completes_with_its_head_and_tail_cut_on_cha
         })
     );
     assert_eq!(large["result"]["result"]["exit_code"], 0);
+    assert_eq!(large["result"]["truncated"], true);
 
     tasks.execute(
         "task_characters",
@@ -71,7 +72,19 @@ fn output_beyond_what_a_stream_keeps_completes_with_its_head_and_tail_cut_on_cha
             "returned_bytes": 51_198, "truncated": true,
         })
     );
-    case.observe("the 50,000,000 bytes completed with 25,600 bytes, the marker and 25,600 bytes; the characters were cut to 8,533 whole characters on each side");
+    assert_eq!(characters["result"]["truncated"], true);
+
+    tasks.execute(
+        "task_small",
+        json!({"cmd": "echo ok"}),
+        policy(&tasks.project, "disabled"),
+    );
+    let small = tasks.terminal("task_small");
+    assert_eq!(
+        json!([stdout(&small)["truncated"], small["result"]["truncated"]]),
+        json!([false, false])
+    );
+    case.observe("the 50,000,000 bytes completed with 25,600 bytes, the marker and 25,600 bytes; the characters were cut to 8,533 whole characters on each side; both results were truncated, and the result of a short output was not");
 }
 
 #[test]

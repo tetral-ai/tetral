@@ -168,7 +168,8 @@ temporary directories. No workspace crate depends on this package.
   `chars`, U+0003, and cancels: their cumulative output, the one
   termination that repeated cancels join, and a cancel during a blocked
   write.
-- `tests/task_storage.rs`: a task's output beyond what a stream keeps, files
+- `tests/task_storage.rs`: a task's output beyond what a stream keeps and
+  its result marked `truncated`, files
   that cannot be created and a log that cannot be written, task files that
   no other task reaches, `TMPDIR` with files and Unix sockets, the files'
   removal after the ACKs, and `T` after the App Server's death.

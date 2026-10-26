@@ -194,11 +194,13 @@ pub struct Outcome {
 }
 
 impl Outcome {
+    /// The envelope, `truncated` when either stream's snapshot is; the
+    /// fitting of its report may mark it too (`report::fit`).
     pub fn envelope(self) -> HelperEnvelope {
         HelperEnvelope {
             tool: self.tool,
             status: self.status,
-            truncated: false,
+            truncated: self.stdout.truncated || self.stderr.truncated,
             error: self.error,
             result: ToolResult::Exec(ExecResult {
                 task_id: Nullable(Some(self.task_id)),
