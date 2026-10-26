@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -21,9 +22,21 @@ import (
 // its connection's ready is accepted.
 const HeartbeatInterval = 15 * time.Second
 
-// streamWriteTimeout bounds one event write outside a pass, whose writes
-// share its deadline instead; a client that stops reading breaks its stream.
-const streamWriteTimeout = 10 * time.Second
+// streamStallTimeout is how long a write may go without the stream's socket
+// accepting a byte of it. A write has no total deadline, but a reader that
+// frees no room in the socket's send buffer for that long loses its stream:
+// one that stops, or one far below 1 MB per 10 seconds behind a backlog
+// beyond the buffer, since the kernel frees room in batches of about a third
+// of the buffer. The write is made in pieces of at most streamWritePiece
+// bytes, each under its own stall deadline.
+const (
+	streamStallTimeout = 10 * time.Second
+	streamWritePiece   = 16 << 10
+)
+
+// errStreamCut is a write cut because the stream's connection ended or
+// moved (watch).
+var errStreamCut = errors.New("computer-hub: the stream's write was cut")
 
 // StreamClock schedules a stream's heartbeats and its age limit. Tests drive
 // it by hand.
@@ -71,6 +84,8 @@ type clientStream struct {
 	bound int64
 	all   bool
 	wake  chan struct{}
+	// notified is signalled by every notice, like wake, for watch.
+	notified chan struct{}
 
 	drain     chan struct{}
 	drainOnce sync.Once
@@ -110,7 +125,7 @@ func (s *Streams) hold(ws workspace.ID, connectionID string, count int64) *clien
 		return nil
 	}
 	stream := &clientStream{workspace: ws, connection: connectionID, count: count, all: true,
-		wake: make(chan struct{}, 1), drain: make(chan struct{}), done: make(chan struct{})}
+		wake: make(chan struct{}, 1), notified: make(chan struct{}, 1), drain: make(chan struct{}), done: make(chan struct{})}
 	if s.draining {
 		stream.beginDrain()
 	}
@@ -189,9 +204,11 @@ func (c *clientStream) release(issueSeq int64, all bool) {
 	c.bound = max(c.bound, issueSeq)
 	c.all = c.all || all
 	c.mu.Unlock()
-	select {
-	case c.wake <- struct{}{}:
-	default:
+	for _, signal := range []chan struct{}{c.wake, c.notified} {
+		select {
+		case signal <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -233,7 +250,7 @@ func (s *Streams) ageLimit() time.Duration {
 // stream's transaction committed it. The n-th heartbeat of the stream counted
 // s carries s*instance.HeartbeatSeqStride+n.
 func (s *Streams) serve(ctx context.Context, w http.ResponseWriter, stream *clientStream, started instance.Connection, resumed bool) {
-	writer := sseWriter{w: w, controller: http.NewResponseController(w), connectionID: started.ID}
+	writer := sseWriter{w: w, controller: http.NewResponseController(w), connectionID: started.ID, cutOff: new(atomic.Bool)}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
@@ -259,13 +276,22 @@ func (s *Streams) serve(ctx context.Context, w http.ResponseWriter, stream *clie
 		next = s.clock.After(HeartbeatInterval)
 		return true
 	}
+	state.beat = func() bool {
+		select {
+		case <-next:
+			return heartbeat()
+		default:
+			return true
+		}
+	}
 	if state.accepted && resumed && !heartbeat() {
 		return
 	}
 	var retry <-chan time.Time
 	for pass := true; ; {
 		if pass {
-			switch s.deliver(ctx, state) {
+			outcome := s.deliver(ctx, state)
+			switch outcome {
 			case passFailed:
 				retry = s.clock.After(state.retryAfter(rand.Float64() * 0.2)) //nolint:gosec // G404: spreads retries, not a secret.
 			case passEnded, passMoved, passBroken:
@@ -276,7 +302,12 @@ func (s *Streams) serve(ctx context.Context, w http.ResponseWriter, stream *clie
 			if state.accepted && next == nil {
 				next = s.clock.After(HeartbeatInterval)
 			}
-			pass = false
+			if pass = outcome == passWrote; pass {
+				if !state.beat() {
+					return
+				}
+				continue
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -323,13 +354,13 @@ func disconnectCode(connection instance.Connection) (protocol.ErrorCode, bool) {
 }
 
 // sseWriter writes one envelope per event as a single data line followed by
-// a blank line, and flushes it at once, by until when it is set and within
-// streamWriteTimeout otherwise.
+// a blank line, flushed as it goes, under streamStallTimeout. cutOff, shared
+// by its copies, is set by cut.
 type sseWriter struct {
 	w            http.ResponseWriter
 	controller   *http.ResponseController
 	connectionID string
-	until        time.Time
+	cutOff       *atomic.Bool
 }
 
 func (s sseWriter) write(messageID string, payload protocol.DownstreamPayload) error {
@@ -339,21 +370,32 @@ func (s sseWriter) write(messageID string, payload protocol.DownstreamPayload) e
 func (s sseWriter) writeEnvelope(envelope []byte) error {
 	event := make([]byte, 0, len(envelope)+8)
 	event = append(append(append(event, "data: "...), envelope...), "\n\n"...)
-	deadline := s.until
-	if deadline.IsZero() {
-		deadline = time.Now().Add(streamWriteTimeout)
-	}
-	if err := s.controller.SetWriteDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		return err
-	}
-	if _, err := s.w.Write(event); err != nil {
-		return err
-	}
-	if err := s.controller.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		return err
+	for len(event) > 0 {
+		piece := event[:min(len(event), streamWritePiece)]
+		if err := s.controller.SetWriteDeadline(time.Now().Add(streamStallTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return err
+		}
+		// Checked after the deadline is set, since cut sets its own after
+		// the flag: a cut is never overwritten by a later piece's deadline.
+		if s.cutOff.Load() {
+			return errStreamCut
+		}
+		if _, err := s.w.Write(piece); err != nil {
+			return err
+		}
+		if err := s.controller.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return err
+		}
+		event = event[len(piece):]
 	}
 	if err := s.controller.SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		return err
 	}
 	return nil
+}
+
+// cut ends the writer's write in progress and every later one.
+func (s sseWriter) cut() {
+	s.cutOff.Store(true)
+	_ = s.controller.SetWriteDeadline(time.Now())
 }

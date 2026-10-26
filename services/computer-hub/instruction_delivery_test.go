@@ -373,7 +373,7 @@ func TestRevocationAndInstructionWritesNeverInterleave(t *testing.T) {
 		}
 	}
 
-	t.Run("a write holding the row commits first", func(t *testing.T) {
+	t.Run("a pass holding the row chooses before the revocation commits", func(t *testing.T) {
 		cli, stream := f.openOnline()
 		// A first instruction, written and committed, shows that no earlier
 		// pass is still running when the pause is set.
@@ -388,15 +388,20 @@ func TestRevocationAndInstructionWritesNeverInterleave(t *testing.T) {
 		revoked := revoke(cli)
 		select {
 		case <-revoked:
-			t.Fatal("the revocation committed while a write held the connection row")
+			t.Fatal("the revocation committed while a pass held the connection row")
 		case <-time.After(300 * time.Millisecond):
 		}
 		close(pause.release)
+		// The pass writes its choice after it commits, and the revocation's
+		// notice may cut that write: the stream ends with at most the
+		// instruction, then the disconnect.
 		events := stream.ended()
-		if len(events) != 2 || !bytes.Equal(events[0].Data, f.envelopeOf(instruction)) {
-			t.Fatalf("events = %d; want the instruction, then the disconnect", len(events))
+		if len(events) > 2 || len(events) > 0 && !bytes.Equal(events[0].Data, f.envelopeOf(instruction)) {
+			t.Fatalf("events = %d; want at most the instruction, then the disconnect", len(events))
 		}
-		requireDisconnect(events[1])
+		if len(events) == 2 {
+			requireDisconnect(events[1])
+		}
 		if status := <-revoked; status != http.StatusNoContent {
 			t.Fatalf("revocation = %d", status)
 		}
@@ -610,28 +615,42 @@ func TestAPassHeldPastItsDeadlineFailsAndRetries(t *testing.T) {
 	f.requireInstructions(stream, instruction)
 }
 
-// TestFirstWriteOfAFailedPassIsRecordedWithoutAResend fails a pass after it
-// wrote an instruction, at the update that records the write and at the
-// pass's commit: the stream's next pass records that first write and does
-// not write the instruction again.
-func TestFirstWriteOfAFailedPassIsRecordedWithoutAResend(t *testing.T) {
-	for _, row := range []struct{ name, fail string }{
-		{"the update", "SET first_written_at"},
-		{"the commit", "commit"},
+// TestFirstWriteIsRecordedWithoutAResendWhenItsRecordingPassFails fails the
+// pass that records an earlier pass's first write of an instruction, at its
+// update and at its commit: the stream's next pass records that write and
+// does not write the instruction again.
+func TestFirstWriteIsRecordedWithoutAResendWhenItsRecordingPassFails(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		commit bool
+	}{
+		{"the update", false},
+		{"the commit", true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			f := newHubFixture(t, 720*time.Hour)
 			_, stream := f.openOnline()
 			f.clock.waitTimers(t, 2)
 			// Stored and announced outside the hub's pool, so that only the
-			// pass runs the failing statement.
+			// passes run the failing statement: the one that writes the
+			// instruction after its commit, then the one that records it.
 			instruction := f.storeWithoutNotice(stream.connectionID, "sess_failed_pass")
-			f.failOn(row.fail)
+			var record *statementPause
+			if row.commit {
+				record = f.pauseOn("SET first_written_at")
+			} else {
+				f.failOn("SET first_written_at")
+			}
 			notice, _ := json.Marshal(instance.ConnectionNotice{WorkspaceID: string(f.ws), ConnectionID: stream.connectionID, IssueSeq: 1})
 			if _, err := f.admin.ExecContext(f.ctx, `SELECT pg_notify($1,$2)`, instance.ConnectionNoticeChannel(hubTestPod), string(notice)); err != nil {
 				t.Fatal(err)
 			}
 			f.requireInstructions(stream, instruction)
+			if record != nil {
+				<-record.reached
+				f.failOn("commit")
+				close(record.release)
+			}
 			f.clock.waitTimers(t, 3)
 			if f.count(`SELECT count(*) FROM connection_instructions WHERE message_id=$1 AND first_written_at IS NULL`, instruction) != 1 {
 				t.Fatal("the failed pass recorded the instruction's first write")

@@ -224,8 +224,11 @@ the ready's record and the latest heartbeat's; other messages are rows of
   is checked again and answers `404`.
 
 Streams (`stream.go`): each event is one `data:` line holding one envelope
-and a blank line, flushed at once, with no `event:`, `id:` or comment; a
-write that takes more than 10 seconds breaks the stream. `connected` and
+and a blank line, flushed as it is written, with no `event:`, `id:` or
+comment. A write has no total deadline: it is made in pieces of at most
+16 KiB, and a piece that the stream's socket does not accept within 10
+seconds breaks the stream (`streamStallTimeout`), so a reader that frees no
+room in that socket's send buffer for 10 seconds loses its stream. `connected` and
 `disconnect` get a new `msg_` ID. Once the connection's ready is accepted the
 stream writes `heartbeat` every 15 seconds, the first one 15 seconds after it
 learns of the acceptance, or right after `connected` on a resumed stream of an
@@ -238,37 +241,47 @@ it, drawn per stream and counted from `connected`, the stream writes
 `disconnect` with `scope: "stream"` and closes. On shutdown the pod turns
 unready, refuses new streams, writes that `disconnect` to each of its n
 streams, the i-th at i/n of `TETRAL_COMPUTER_HUB_STREAM_DRAIN_WINDOW`, and
-only then stops; each listener drains within the window plus 10 seconds.
+only then stops; a stream whose pass is writing when its drain is due is
+closed at the window's end without a `disconnect`. Each listener drains
+within the window plus 10 seconds.
 
 Instruction writes (`dispatch.go`): a stream writes renewals and Session
 instructions in passes, one at its start and one each time a notice or the listener's return
-wakes it, inside a transaction that reads the connection without a lock and
-then locks the instance, the connection's credential and the connection `FOR
-SHARE`, in that order. An
+wakes it. A pass chooses what to write inside a transaction that reads the
+connection without a lock and then locks the instance, the connection's
+credential and the connection `FOR SHARE`, in that order, and writes it only
+after that transaction commits. An
 ended connection writes `disconnect` with `scope: "connection"`, `retryable:
 false` and `code` `credential_revoked` (revoked) or `instance_unavailable`
 (deregistered), none for `lease_expired`, and closes the stream; a
 connection whose `hub_pod` or `stream_count` names another stream closes it
 without one. While the lease has passed, the credential is revoked or
 expired, the instance is deregistered or the ready is unaccepted, the pass
-writes nothing. Otherwise it writes `credential.renew` once per stream for
+chooses nothing. Otherwise it chooses `credential.renew` once per stream for
 each `pending`, unexpired renewal of the connection, under `message_id`
 `renew_<credential_id>` on every stream; then, in issue order and each once
 per stream, the stored envelope of every instruction without `reported_at`
 whose `issue_seq` is at most the stream's bound, and until
 `first_session_report_at` is set only `issue_seq` 1 to 64. The bound is the
 highest `issue_seq` a notice released; a stream start and the listener's
-return release all the connection row counts. A pass has 10 seconds for its
-transaction and its writes. A pass that fails, by a database error or by that
-deadline, runs again after 1 second, the wait doubling after each failed pass
-up to 30 seconds and multiplied by 1 + r, r uniform in 0 to 0.2; a pass that
-commits returns the wait to 1 second. A write the deadline cuts off leaves the
-response unusable, so that stream ends and its CLI resumes. The first write of an instruction to any stream sets
-`first_written_at`, observes `computerhub_instructions_queue_wait_seconds`
-and, when the instruction has a `trace_context`, is one span
-`instruction.deliver` in that trace with `connection.id`, `message.id` and
-`message.type`, each once its pass commits; when the pass fails, the stream's
-next pass records that write without writing the instruction again.
+return release all the connection row counts. Before each instruction a pass
+writes, and before the pass that follows one that wrote, the stream writes a
+heartbeat that fell due; one that falls due while an instruction is being
+written waits until that instruction is written. While a pass writes, a notice
+that finds the connection, read without a lock, ended or held by another
+stream, or the stream's close, cuts the write and ends the stream; any other
+write in progress ends by its stall timeout. A pass's
+transaction has 10 seconds. A pass whose transaction fails, by a database
+error or by that deadline, runs again after 1 second, the wait doubling after
+each failed pass up to 30 seconds and multiplied by 1 + r, r uniform in 0 to
+0.2; a pass that commits returns the wait to 1 second. A pass that wrote
+instructions is followed at once by one whose transaction records their
+first write to any stream: it sets `first_written_at`, observes
+`computerhub_instructions_queue_wait_seconds` and, when the instruction has a
+`trace_context`, is one span `instruction.deliver` in that trace with
+`connection.id`, `message.id` and `message.type`, each once that transaction
+commits; when it fails, the stream's next pass records the write without
+writing the instruction again.
 
 Connection notices (`notice.go`): each pod listens on `tetral_hub_` and the
 first 16 hexadecimal characters of the SHA-256 of
@@ -395,9 +408,17 @@ termination grace period carry the drain, which is why Helm refuses a
   10-minute age; a notice on the holding pod's channel only, and an
   instruction whose notice was lost written after a listener restart and a
   resume; 64 of 70 instructions before the first Session report; a
-  revocation never followed by a write; the stored traceparent on a resend,
+  revocation waiting for a pass that holds the row and ending the stream,
+  and a pass after a revocation choosing nothing; the stored traceparent on a resend,
   one `instruction.deliver` span and the started counter; the pressure gauges
   of a written and a queued instruction whose stream is gone.
+- `slow_reader_test.go`, with a test CLI whose socket receive buffer is
+  4 KiB: a 16 MB backlog read at 1 MiB/s arriving whole on
+  one stream; one read for more than 45 seconds keeping its connection, the
+  two heartbeats that fell due written between its edits and answered; a
+  reader that stops losing its stream 10 seconds after its last
+  byte and then resuming on a second hub server; a revocation committing while a
+  write is blocked and closing the stream.
 - `credential_renewal_test.go`: a stream issuance on an online connection
   answering `202` with one notice and one `credential.renew`, its replay `202`,
   and `409 instance_offline_error` with nothing written without a connection

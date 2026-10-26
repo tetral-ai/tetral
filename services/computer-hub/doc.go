@@ -14,8 +14,8 @@
 //     changes anything, and a refusal changes nothing (client_checks.go).
 //   - A stream is the only writer of its response. A connection notice only
 //     wakes it; the stream reads its connection and instructions itself, in
-//     write passes that each run one transaction (stream.go, dispatch.go,
-//     notice.go).
+//     write passes that each choose in one transaction and write after it
+//     commits (stream.go, dispatch.go, notice.go).
 //   - Any pod serves any request and holds only the streams it serves, so a
 //     CLI resumes on another pod when its pod drains or dies (Streams.Drain).
 //   - Every time a request or pass compares is the database clock
