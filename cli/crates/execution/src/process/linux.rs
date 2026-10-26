@@ -50,9 +50,9 @@ pub fn namespace_empty(namespace: u64) -> bool {
 }
 
 /// The PID namespace of `process` held open, when its inode is
-/// `namespace`. Once a namespace is freed, the kernel gives its inode to the
-/// next namespace created; an open namespace is not freed, so while the file
-/// is open the inode names no other namespace.
+/// `namespace`. Once a namespace is freed, the kernel may give its inode to
+/// a namespace created later; an open namespace is not freed, so while the
+/// file is open the inode names no other namespace.
 pub fn hold_namespace(process: u32, namespace: u64) -> Option<File> {
     let file = File::open(format!("/proc/{process}/ns/pid")).ok()?;
     (file.metadata().ok()?.ino() == namespace).then_some(file)
