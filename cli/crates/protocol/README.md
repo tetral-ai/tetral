@@ -9,8 +9,8 @@ description, schemas and fixtures are in `protocol/` at the repository root.
 ## Design rules
 
 - It depends on no other workspace crate and records nothing.
-- `decode` reads a message in four steps: its size against the type's
-  `Message::MAX_BYTES`, refused before anything is parsed; `strict::check`
+- `decode` reads a message in four steps: its size as read against the
+  type's `Message::MAX_BYTES`, refused before anything is parsed; `strict::check`
   over the raw bytes, which refuses a repeated member name, a `\u` escape of
   a lone surrogate, a number that is not finite as a 64-bit float, an
   integer outside the signed 64-bit range, and objects and arrays nested
@@ -29,8 +29,9 @@ description, schemas and fixtures are in `protocol/` at the repository root.
 - Only the `state` crate turns a `SafeId` into a path component (`id`).
 - Beyond the schema, a decoder checks the rules of `Message::check`: the
   narrower size limit of a downstream event, `connection::MESSAGE_MAX_BYTES`
-  or, for a tool instruction, its type's own limit through
-  `tool::check_instruction`, and relations between members. A tool-status
+  or, for a tool instruction, its type's own limits through
+  `tool::check_instruction`, each measured on the compact JSON as written
+  (`strict::compact_len`), and relations between members. A tool-status
   report is read under the media limit whatever it holds (`tool::ToolStatus`).
   A response is read
   with `decode_answer` against the request it answers, and an error body

@@ -44,6 +44,9 @@ pub trait Message: Serialize + DeserializeOwned {
 /// A message as it was read, unknown members included.
 pub struct Received<'a> {
     pub value: &'a Value,
+    /// The text as read.
+    pub text: &'a [u8],
+    /// The size of the text as compact JSON (`strict::compact_len`).
     pub bytes: usize,
 }
 
@@ -91,7 +94,8 @@ pub fn decode_value<M: Message>(input: &[u8]) -> Result<(M, Value), DecodeError>
     let message = M::deserialize(&value).map_err(|error| DecodeError::Shape(error.to_string()))?;
     message.check(&Received {
         value: &value,
-        bytes: input.len(),
+        text: input,
+        bytes: strict::compact_len(input),
     })?;
     Ok((message, value))
 }

@@ -57,6 +57,31 @@ pub fn check(input: &[u8]) -> Result<(), StrictError> {
     read(input).map(drop)
 }
 
+/// The bytes of `json`, a text that [`check`] accepts, without its
+/// insignificant whitespace: the size of the JSON as written, every string and
+/// number token counted with its escapes and form.
+pub(crate) fn compact_len(json: &[u8]) -> usize {
+    let mut in_string = false;
+    let mut escaped = false;
+    json.iter()
+        .filter(|&&byte| {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    in_string = false;
+                }
+                true
+            } else {
+                in_string = byte == b'"';
+                !matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
+            }
+        })
+        .count()
+}
+
 /// [`check`], returning the offset of each integer token `-0`.
 pub(crate) fn read(input: &[u8]) -> Result<Vec<usize>, StrictError> {
     if let Err(error) = std::str::from_utf8(input) {

@@ -3,7 +3,8 @@
 //! a member sent as `null` where its schema refuses `null`; an identity that
 //! is empty or holds U+0000; and an unknown member in an object that the
 //! schemas close. And what they keep that no fixture sends: an optional
-//! member sent as the `null` its schema allows.
+//! member sent as the `null` its schema allows. And the size by which a tool
+//! instruction is judged: its compact JSON as written.
 
 mod common;
 
@@ -11,7 +12,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use common::{FILES, Fixture, by_name, decode_fixture, fixtures, read_json, validator};
 use jsonschema::Validator;
-use protocol::connection::Heartbeat;
+use protocol::connection::{Downstream, Heartbeat};
 use protocol::drive_transfer::ListFilesResponse;
 use protocol::{DecodeError, StrictErrorKind, decode, strict};
 use serde_json::Value;
@@ -103,6 +104,91 @@ fn the_decoder_reads_through_the_strict_pass_and_keeps_integers_exact() {
         decode::<Heartbeat>(repeated.as_bytes()),
         Err(DecodeError::Strict(error)) if error.kind == StrictErrorKind::DuplicateMember
     ));
+}
+
+#[test]
+fn a_tool_instruction_is_sized_as_the_compact_json_it_was_written_as() {
+    let event = |kind: &str, members: &str| {
+        format!(
+            r#"{{"protocol_version":1,"connection_id":"c","message_id":"m","type":"{kind}","payload":{{"session_id":"s","binding_id":"b","tool_use_event_id":"u","task_id":"t",{members}}}}}"#
+        )
+    };
+    let policy = r#""sandbox_policy":{"schema_version":1,"filesystem":{"rules":[{"path":"/p","access":"read"}]},"network":{"mode":"disabled"}}"#;
+    let execute = |input: &str| {
+        event(
+            "tool.execute",
+            &format!(r#""tool":"exec_command","input":{input},{policy}"#),
+        )
+    };
+    // Each `\u0041` is six bytes as written and one once decoded.
+    let escaped = |count: usize| r"\u0041".repeat(count);
+    let padded_cancel = event("tool.cancel", r#""reason":"requested""#).replacen(
+        '{',
+        &format!("{{{}", " ".repeat(70_000)),
+        1,
+    );
+    let rows: [(&str, String, Option<DecodeError>); 7] = [
+        (
+            "a tool.cancel padded with 70,000 spaces",
+            padded_cancel,
+            None,
+        ),
+        (
+            "a tool.cancel whose reason is an escaped quote and 65,536 spaces",
+            event(
+                "tool.cancel",
+                &format!(r#""reason":"\"{}""#, " ".repeat(65_536)),
+            ),
+            Some(DecodeError::Rule("tool instruction over its limit")),
+        ),
+        (
+            "a tool.execute whose input holds 4,194,305 spaces between its members",
+            execute(&format!(r#"{{"cmd":"x"{}}}"#, " ".repeat(4_194_305))),
+            None,
+        ),
+        (
+            "a tool.execute whose input is 4,194,305 bytes as written, 699,050 once decoded",
+            execute(&format!(r#"{{"cmd":"{}x"}}"#, escaped(699_049))),
+            Some(DecodeError::Rule("tool.execute input over its limit")),
+        ),
+        (
+            "a tool.execute whose envelope member is 66,000 bytes as written, 11,000 once decoded",
+            execute(r#"{"cmd":"x"}"#).replacen(
+                r#""type""#,
+                &format!(r#""extension":"{}","type""#, escaped(11_000)),
+                1,
+            ),
+            Some(DecodeError::Rule(
+                "tool instruction metadata over its limit",
+            )),
+        ),
+        (
+            "a tool.stdin whose chars are 32,768 escapes, 196,608 bytes as written",
+            event(
+                "tool.stdin",
+                &format!(r#""chars":"{}","write_seq":1"#, escaped(32_768)),
+            ),
+            None,
+        ),
+        (
+            "an mcp.call whose arguments are 65,536 bytes, the event more",
+            event(
+                "mcp.call",
+                &format!(
+                    r#""server":"cua","tool":"t","arguments":{{"a":"{}"}}"#,
+                    "x".repeat(65_528)
+                ),
+            ),
+            None,
+        ),
+    ];
+    for (case, text, refused) in rows {
+        assert_eq!(
+            decode::<Downstream>(text.as_bytes()).err(),
+            refused,
+            "{case}"
+        );
+    }
 }
 
 const TOOL: &str = "tool-execution-v1";

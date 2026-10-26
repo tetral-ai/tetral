@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 
 use crate::field::{
@@ -14,7 +15,7 @@ use crate::field::{
     Nullable, PositiveInt, Text, True, Unique,
 };
 use crate::id::Id;
-use crate::{DecodeError, Message, Received, rule};
+use crate::{DecodeError, Message, Received, rule, strict};
 
 pub type ProtocolVersion = ConstInt<{ crate::PROTOCOL_VERSION }>;
 pub type SchemaVersion = ConstInt<1>;
@@ -287,22 +288,29 @@ pub struct McpCallPayload {
 /// The size budgets of each tool instruction type, and a `tool.stdin` that
 /// writes only with its `write_seq`: the event within its type's limit, a
 /// `tool.execute`'s `input` and a `tool.stdin`'s raw `chars` within theirs,
-/// and the message's metadata, its compact JSON with that content replaced
-/// by an empty value of its type, within `METADATA_JSON_BYTES`.
+/// and the message's metadata, its compact JSON with the large content
+/// (`input`, `chars`, an `mcp.call`'s `arguments`) replaced by an empty value
+/// of its type, within `METADATA_JSON_BYTES`. Every size is of the JSON as
+/// written ([`strict::compact_len`]), so that it is the one its sender
+/// measured.
 pub(crate) fn check_instruction(
     instruction: &ToolInstruction<'_>,
     received: &Received<'_>,
 ) -> Result<(), DecodeError> {
-    let payload = &received.value["payload"];
+    let written: Written<'_> = serde_json::from_slice(received.text)
+        .map_err(|error| DecodeError::Shape(error.to_string()))?;
+    let size = |member: Option<&RawValue>| {
+        member.map_or(0, |member| strict::compact_len(member.get().as_bytes()))
+    };
     // The compact bytes of the large content and of its empty replacement.
     let (limit, content) = match instruction {
         ToolInstruction::Execute(_) => {
-            let input = compact_len(&payload["input"]);
+            let input = size(written.payload.input);
             rule(
                 input <= limits::TOOL_INPUT_JSON_BYTES,
                 "tool.execute input over its limit",
             )?;
-            (limits::EXECUTE_SSE_JSON_BYTES, Some((input, "{}".len())))
+            (limits::EXECUTE_SSE_JSON_BYTES, (input, "{}".len()))
         }
         ToolInstruction::Stdin(stdin) => {
             rule(
@@ -313,35 +321,38 @@ pub(crate) fn check_instruction(
                 stdin.chars.len() <= limits::STDIN_UTF8_BYTES,
                 "tool.stdin chars over its limit",
             )?;
-            let chars = compact_len(&payload["chars"]);
-            (limits::STDIN_SSE_JSON_BYTES, Some((chars, "\"\"".len())))
+            let chars = size(written.payload.chars);
+            (limits::STDIN_SSE_JSON_BYTES, (chars, "\"\"".len()))
         }
-        ToolInstruction::Cancel(_) => (limits::DEFAULT_MESSAGE_JSON_BYTES, None),
-        ToolInstruction::McpCall(_) => (limits::MCP_CALL_SSE_JSON_BYTES, None),
+        ToolInstruction::Cancel(_) => (limits::DEFAULT_MESSAGE_JSON_BYTES, (0, 0)),
+        ToolInstruction::McpCall(_) => {
+            let arguments = size(written.payload.arguments);
+            (limits::MCP_CALL_SSE_JSON_BYTES, (arguments, "{}".len()))
+        }
     };
     rule(received.bytes <= limit, "tool instruction over its limit")?;
-    let (content, empty) = content.unwrap_or_default();
+    let (content, empty) = content;
     rule(
-        compact_len(received.value) - content + empty <= limits::METADATA_JSON_BYTES,
+        received.bytes - content + empty <= limits::METADATA_JSON_BYTES,
         "tool instruction metadata over its limit",
     )
 }
 
-/// The bytes of `value` as compact JSON, counted without keeping them.
-fn compact_len(value: &Value) -> usize {
-    struct Counter(usize);
-    impl std::io::Write for Counter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 += bytes.len();
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut counter = Counter(0);
-    serde_json::to_writer(&mut counter, value).expect("a JSON value always serializes");
-    counter.0
+/// The text of a tool instruction's large content as written.
+#[derive(Deserialize)]
+struct Written<'a> {
+    #[serde(borrow)]
+    payload: WrittenPayload<'a>,
+}
+
+#[derive(Deserialize)]
+struct WrittenPayload<'a> {
+    #[serde(borrow, default)]
+    input: Option<&'a RawValue>,
+    #[serde(borrow, default)]
+    chars: Option<&'a RawValue>,
+    #[serde(borrow, default)]
+    arguments: Option<&'a RawValue>,
 }
 
 /// The payload of a tool instruction, borrowed from its envelope.
