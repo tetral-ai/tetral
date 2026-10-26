@@ -8,9 +8,12 @@
 //! On Linux SIGTERM goes to the PID namespace's first process, Codex's inner
 //! stage, which passes it on to the command's process group; one sent to the
 //! launched process group would end the whole sandbox at once, through
-//! `bwrap`'s `--die-with-parent`, and leave the command no grace. SIGKILL to
-//! the namespace's first process makes the kernel end every other process of
-//! the namespace. On macOS both go to the process group.
+//! `bwrap`'s `--die-with-parent`, and leave the command no grace. Where no
+//! first process is found (`process::namespace_leader`), because the sandbox
+//! has no PID namespace yet or the kernel lists no children in `/proc`, the
+//! signal goes to the launched process group, which ends the sandbox at once.
+//! SIGKILL to the namespace's first process makes the kernel end every other
+//! process of the namespace. On macOS both go to the process group.
 
 use std::time::Duration;
 
