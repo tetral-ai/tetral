@@ -150,6 +150,9 @@ impl<S> Factory<S> {
     }
 }
 
+/// The test seam barrier of an unbound Session's admission before it runs.
+const UNBOUND_ADMISSION: &str = "session.unbound_admission";
+
 impl<S: TaskStarter + Clone + Sync> SessionFactory for Factory<S> {
     fn create(
         &self,
@@ -169,8 +172,15 @@ impl<S: TaskStarter + Clone + Sync> SessionFactory for Factory<S> {
         Arc::new(Handle { mailbox })
     }
 
+    /// The admission reads the filesystem (the trusted programs' `stat`s),
+    /// so it runs on a blocking thread, never on the Connection owner's task
+    /// that calls this.
     fn unbound_tool(&self, call: ToolCall, reports: Arc<dyn ReportSink>) {
-        tools::unbound(&self.shared, call, reports.as_ref());
+        let shared = self.shared.clone();
+        tokio::task::spawn_blocking(move || {
+            state::seams::barrier_blocking(UNBOUND_ADMISSION);
+            tools::unbound(&shared, call, reports.as_ref());
+        });
     }
 }
 

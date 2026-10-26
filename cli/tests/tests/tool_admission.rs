@@ -28,8 +28,8 @@ use tetral_tests::machine::{
 use tetral_tests::record::Case;
 use tetral_tests::reference::ReferenceServer;
 use tetral_tests::tasks::{
-    AVAILABILITY_CHECK, BINDING, HEARTBEAT_INTERVAL, LAUNCH, SESSION, TaskMachine, WAIT_CHECKED,
-    millis, policy as project_policy,
+    AVAILABILITY_CHECK, BINDING, HEARTBEAT_INTERVAL, LAUNCH, SESSION, TaskMachine,
+    UNBOUND_ADMISSION, WAIT_CHECKED, millis, policy as project_policy,
 };
 use tetral_tests::{binaries, socket_directory};
 
@@ -697,6 +697,36 @@ fn a_task_whose_start_is_rejected_leaves_the_registry_so_its_controls_find_no_ta
     assert_eq!(rejection(&answer_to(&tasks, &second)), unavailable);
     assert!(!tasks.project.join("ran").exists());
     case.observe("the start was rejected sandbox_unavailable; the held read and a later cancel found no task; the instruction issued again was rejected again; nothing ran");
+}
+
+#[test]
+fn the_admission_of_a_session_without_an_owner_never_holds_the_connection() {
+    let _socket_dir = socket_directory::shared();
+    let mut case = tetral_tests::record!().case(
+        "a tool.execute of a Session never prepared held at its admission, then a preparation of another Session",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    let seams = &tasks.machine().seams;
+    seams.hold(UNBOUND_ADMISSION);
+    tasks.execute_with(
+        "sess_unprepared",
+        "bind_unprepared",
+        "task_unbound",
+        json!({"cmd": "true"}),
+        project_policy(&tasks.project, "disabled"),
+        None,
+    );
+    seams.wait_until_waiting(UNBOUND_ADMISSION, 1);
+    let issued = tasks.prepare("sess_other", "bind_other", &tasks.project, None);
+    tasks.wait_prepared(&issued);
+    seams.release(UNBOUND_ADMISSION);
+    let rejected = tasks.report("task_unbound", "rejected");
+    assert_eq!(
+        rejected["error"]["code"], "binding_unavailable",
+        "{rejected:#}"
+    );
+    case.observe("another Session was prepared while the admission was held; once released, the instruction was rejected binding_unavailable");
 }
 
 #[test]

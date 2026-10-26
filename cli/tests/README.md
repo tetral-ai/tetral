@@ -135,7 +135,9 @@ temporary directories. No workspace crate depends on this package.
   issued again with other content, tasks staged behind a withheld
   `prepared` ACK and the controls they held when their start fails or is
   rejected, after which the task leaves the registry, a
-  cancel and a close while a task's availability check is held, the
+  cancel and a close while a task's availability check is held, another
+  Session's preparation while the admission of a Session without an owner
+  is held, the
   replay-ledger entries of tasks, kept until a resume
   or freed by each ACK, also of an instruction that joined a task, and, with only the ledger's reserve free, new tasks
   refused while a running task's controls, its binding's close and its

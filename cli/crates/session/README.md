@@ -65,7 +65,9 @@ that is no longer the binding's is discarded.
   (`protocol::ports::TaskOwnership`, `tools`).
 - Owners follow the owner rules of `cli/README.md`. An owner reaches the
   Connection owner only through `protocol::ports::ConnectionPort` and hands
-  its reports to `protocol::ports::ReportSink`.
+  its reports to `protocol::ports::ReportSink`. The tool instruction of a
+  Session without an owner is rejected on a blocking thread, since its
+  admission reads the filesystem (`Factory::unbound_tool`).
 - A preparation's result is committed only while its connection, binding and
   operation are all still current (`prepare`). A binding enters `prepared`
   only on the ACK of a report of its result (`SessionOwner::report_outcome`).
