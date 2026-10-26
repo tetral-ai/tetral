@@ -19,13 +19,15 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tetral_tests::binaries;
-use tetral_tests::machine::INSTANCE;
+use tetral_tests::machine::{INSTANCE, seconds};
 use tetral_tests::other_user::RootDirectory;
 use tetral_tests::record::Case;
 use tetral_tests::run::Tetral;
 use tetral_tests::seams::Seams;
 use tetral_tests::socket_directory;
-use tetral_tests::tasks::{BINDING, SESSION, TaskMachine};
+use tetral_tests::tasks::{
+    BINDING, SESSION, TaskMachine, WAIT_CHECKED, millis, policy as task_policy,
+};
 
 /// The `argv[0]` under which `tetral` built with `test-seams` reads one
 /// request on stdin, runs its command through the check and the launch, and
@@ -1078,6 +1080,56 @@ fn disabled_blocks_tcp_and_udp_and_direct_reaches_them_and_local_services() {
             assert_eq!(datagrams, reached, "{mode}: datagrams at {address}");
         }
     }
+}
+
+#[test]
+fn a_disabled_task_leaves_the_connection_its_heartbeats_and_a_direct_tasks_connect_working() {
+    let _socket_dir = socket_directory::shared();
+    let mut case = tetral_tests::record!().case(
+        "a disabled task running across 20 seconds of the clock while a direct task connects to a TCP listener on the host's LAN address",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    let seams = &tasks.machine().seams;
+    let address = lan_address();
+    let listener = TcpListener::bind((address, 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let checked = seams.count(WAIT_CHECKED);
+    tasks.execute(
+        "task_disabled",
+        json!({"cmd": "while [ ! -e stop ]; do sleep 0.05; done", "wait_ms": 250, "on_wait_expiry": "detach"}),
+        task_policy(&tasks.project, "disabled"),
+    );
+    tasks.wait_for_start(checked);
+    seams.advance(millis(250));
+    tasks.report("task_disabled", "running");
+    tasks.execute(
+        "task_direct",
+        json!({"cmd": format!("exec 3<>/dev/tcp/{address}/{port}")}),
+        task_policy(&tasks.project, "direct"),
+    );
+    let direct = tasks.terminal("task_direct");
+    assert_eq!(direct["result"]["result"]["exit_code"], 0, "{direct:#}");
+    assert_eq!(pending_connections(&listener), 1);
+
+    // Each 15 seconds of the clock wait for Engine's heartbeat and the ACK
+    // that grants the connection more time.
+    let heartbeats = tasks.engine.received("heartbeat").len();
+    tasks.advance(seconds(20.0));
+    assert_eq!(tasks.engine.received("heartbeat").len(), heartbeats + 1);
+    assert_eq!(tasks.machine().state(), "online");
+    assert!(
+        tasks
+            .reports("task_disabled")
+            .iter()
+            .all(|report| report["phase"] != "terminal")
+    );
+    fs::write(tasks.project.join("stop"), "").unwrap();
+    let disabled = tasks.terminal("task_disabled");
+    assert_eq!(disabled["result"]["result"]["exit_code"], 0, "{disabled:#}");
+    case.observe("the direct task's connect reached the listener while the disabled task ran; across 20 seconds of the clock the heartbeat was ACKed and the connection stayed online; the disabled task ran until stopped and exited 0");
 }
 
 /// A directory holding only an executable `bwrap` script with `body`.

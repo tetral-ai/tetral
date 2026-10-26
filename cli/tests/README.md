@@ -211,6 +211,7 @@ temporary directories. No workspace crate depends on this package.
   paths and, where a probe reads or writes one file, as `view_image` and
   `edit` calls, and the cua-driver that `config.toml` records;
   `disabled` and `direct` against TCP, UDP and HTTP on the loopback and the
-  LAN address; each unusable
+  LAN address, and a `disabled` task across 20 seconds of the clock while
+  the heartbeats are ACKed and a `direct` task connects; each unusable
   `bwrap`, one that the test user could have planted among them, rejected
   before any process starts; and the bundled `bwrap` with its digest.
