@@ -151,6 +151,10 @@ const SPAWN: &str = "process.spawn";
 /// ledger that holds this many refuses a new operation.
 const LEDGER_ROOM: usize = 4_032;
 
+/// The entries the ledger keeps in reserve for the controls, closes and
+/// reports of what it holds.
+const LEDGER_RESERVE: usize = 64;
+
 /// The age at which the reference control server ends a stream with a
 /// stream-only `disconnect`.
 const MAXIMUM_STREAM_AGE: Duration = Duration::from_secs(30 * 60);
@@ -944,6 +948,55 @@ fn five_thousand_tasks_on_one_stream_each_issued_after_the_previous_terminal_ack
     );
     assert_eq!(tasks.engine.requests("events").len(), 1);
     case.observe("5,000 terminal reports with status success on the connection's one stream");
+}
+
+#[test]
+fn with_the_ledger_full_a_tasks_controls_are_resource_exhausted_and_leave_it_unchanged() {
+    let _socket_dir = socket_directory::shared();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "a running task waiting for go, and closes until no entry is free, reserve included: a write and a cancel, then go, after which the task says whether its stdin holds input",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    let seams = &tasks.machine().seams;
+    let checked = seams.count(WAIT_CHECKED);
+    tasks.execute(
+        "task_waiting",
+        json!({
+            "cmd": "while [ ! -e go ]; do sleep 0.05; done; if read -t 0; then echo pending; else echo empty; fi",
+            "wait_ms": 250, "on_wait_expiry": "detach",
+        }),
+        project_policy(&tasks.project, "disabled"),
+    );
+    tasks.wait_for_start(checked);
+    seams.advance(millis(250));
+    tasks.report("task_waiting", "running");
+    // The task's instruction holds the last entry.
+    fill_ledger(&tasks, LEDGER_ROOM + LEDGER_RESERVE - 1);
+
+    let write = tasks.stdin("task_waiting", json!({"chars": "x", "write_seq": 1}));
+    let cancel = tasks.cancel("task_waiting", json!({}));
+    for (name, message_id) in [("write", &write), ("cancel", &cancel)] {
+        let reply = tasks.reply(message_id);
+        assert_eq!(
+            reply["error"]["code"], "resource_exhausted",
+            "{name}: {reply:#}"
+        );
+    }
+    fs::write(tasks.project.join("go"), "").unwrap();
+    let terminal = tasks.terminal("task_waiting");
+    let result = &terminal["result"]["result"];
+    assert_eq!(
+        json!([
+            result["exit_code"],
+            result["cancelled"],
+            result["stdout"]["text"]
+        ]),
+        json!([0, null, "empty\n"]),
+        "{terminal:#}"
+    );
+    case.observe("the write and the cancel each got resource_exhausted; after go the task found no input on its stdin and exited 0, not cancelled");
 }
 
 #[test]

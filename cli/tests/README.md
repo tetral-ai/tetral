@@ -139,7 +139,9 @@ temporary directories. No workspace crate depends on this package.
   Session's preparation while the admission of a Session without an owner
   is held, the
   replay-ledger entries of tasks, kept until a resume
-  or freed by each ACK, also of an instruction that joined a task, and, with only the ledger's reserve free, new tasks
+  or freed by each ACK, also of an instruction that joined a task, a
+  running task's write and cancel with no entry free, which leave it
+  unchanged, and, with only the ledger's reserve free, new tasks
   refused while a running task's controls, its binding's close and its
   report are recorded.
 - `tests/capability.rs`: the `tool_execution` that ready advertises from
