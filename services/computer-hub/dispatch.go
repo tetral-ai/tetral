@@ -66,6 +66,9 @@ type streamState struct {
 	// beat writes the stream's heartbeat when one is due, and reports
 	// whether the stream may go on.
 	beat func() bool
+	// end is the cause the stream's end is counted under once serve returns
+	// (computerhub_streams_ended_total).
+	end string
 }
 
 type passOutcome int
@@ -230,13 +233,18 @@ func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
 	}
 	defer s.watch(ctx, state)()
 	for _, credentialID := range chosen.renewals {
-		if state.writer.write(renewMessageID(credentialID), protocol.CredentialRenewPayload{CredentialID: credentialID}) != nil {
+		if err := state.writer.write(renewMessageID(credentialID), protocol.CredentialRenewPayload{CredentialID: credentialID}); err != nil {
+			state.end = state.writer.endCause(err)
 			return passBroken
 		}
 		state.written[renewMessageID(credentialID)] = true
 	}
 	for _, instruction := range chosen.instructions {
-		if !state.beat() || state.writer.writeEnvelope(instruction.Envelope) != nil {
+		if !state.beat() {
+			return passBroken
+		}
+		if err := state.writer.writeEnvelope(instruction.Envelope); err != nil {
+			state.end = state.writer.endCause(err)
 			return passBroken
 		}
 		state.written[instruction.MessageID] = true
@@ -261,11 +269,11 @@ func (s *Streams) watch(ctx context.Context, state *streamState) func() {
 			case <-ctx.Done():
 				return
 			case <-state.stream.done:
-				state.writer.cut()
+				state.writer.cut(state.stream.closedBy)
 				return
 			case <-state.stream.notified:
-				if s.endedOrMoved(ctx, state.stream) {
-					state.writer.cut()
+				if cause := s.endedOrMoved(ctx, state.stream); cause != "" {
+					state.writer.cut(cause)
 					return
 				}
 			}
@@ -277,16 +285,25 @@ func (s *Streams) watch(ctx context.Context, state *streamState) func() {
 	}
 }
 
-// endedOrMoved reports whether stream's connection, read without a lock, has
-// ended or is held by another stream.
-func (s *Streams) endedOrMoved(ctx context.Context, stream *clientStream) bool {
+// endedOrMoved reads stream's connection without a lock and returns
+// endConnectionEnded when it has ended, endMoved when another stream holds
+// it, and "" otherwise or when the read fails.
+func (s *Streams) endedOrMoved(ctx context.Context, stream *clientStream) string {
 	var connection instance.Connection
 	err := s.database.WithWorkspaceReadOnlyTx(ctx, string(stream.workspace), "computer_hub.stream_watch", func(tx *dbconnect.Tx) error {
 		var err error
 		connection, err = instance.ReadConnection(ctx, tx, stream.workspace, stream.connection)
 		return err
 	})
-	return err == nil && (connection.EndedAt != nil || connection.HubPod != s.podName || connection.StreamCount != stream.count)
+	switch {
+	case err != nil:
+		return ""
+	case connection.EndedAt != nil:
+		return endConnectionEnded
+	case connection.HubPod != s.podName || connection.StreamCount != stream.count:
+		return endMoved
+	}
+	return ""
 }
 
 // errCredentialMoved is a connection whose credential changed between a

@@ -172,6 +172,7 @@ func TestStreamWritesWaitForSlowReadersButNotForStoppedOnes(t *testing.T) {
 
 	t.Run("a reader that stops loses its stream 10 seconds after its last byte and resumes", func(t *testing.T) {
 		cli, stream, body := f.openSlow(rate, 6<<20)
+		before := streamEnds(t, a.metrics, nil)
 		backlog := f.issueBacklog(stream.connectionID, 4, 4_000_000)
 		<-body.stopped
 		last := *body.last.Load()
@@ -181,6 +182,10 @@ func TestStreamWritesWaitForSlowReadersButNotForStoppedOnes(t *testing.T) {
 		// later than that read.
 		if after := f.streamClosedAt(a, 20*time.Second).Sub(last); after < 8500*time.Millisecond || after > 10500*time.Millisecond {
 			t.Fatalf("the stream closed %v after the reader's last byte; want 10 seconds", after)
+		}
+		waitUntil(t, func() bool { return len(streamEnds(t, a.metrics, before)) > 0 })
+		if ends := streamEnds(t, a.metrics, before); len(ends) != 1 || ends["stalled"] != 1 {
+			t.Fatalf("stream ends = %v; want the stream once as stalled", ends)
 		}
 		fast := *cli
 		fast.HTTP = nil

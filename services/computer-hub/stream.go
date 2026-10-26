@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,7 +36,7 @@ const (
 )
 
 // errStreamCut is a write cut because the stream's connection ended or
-// moved (watch).
+// moved, or the stream was closed (watch).
 var errStreamCut = errors.New("computer-hub: the stream's write was cut")
 
 // StreamClock schedules a stream's heartbeats and its age limit. Tests drive
@@ -91,6 +92,10 @@ type clientStream struct {
 	drainOnce sync.Once
 	done      chan struct{}
 	doneOnce  sync.Once
+	// closedBy is the end cause the stream's close gives, set before done
+	// closes: endMoved when a later stream of the connection on this pod
+	// replaced it, endDrain when Run ended.
+	closedBy string
 }
 
 // NewStreams returns the streams of the pod named podName over database,
@@ -130,7 +135,7 @@ func (s *Streams) hold(ws workspace.ID, connectionID string, count int64) *clien
 		stream.beginDrain()
 	}
 	if previous := s.streams[connectionID]; previous != nil {
-		previous.close()
+		previous.close(endMoved)
 	}
 	s.streams[connectionID] = stream
 	return stream
@@ -143,7 +148,7 @@ func (s *Streams) release(stream *clientStream) {
 	if s.streams[stream.connection] == stream {
 		delete(s.streams, stream.connection)
 	}
-	stream.close()
+	stream.close(endClientClosed)
 }
 
 func (s *Streams) lookup(connectionID string) *clientStream {
@@ -167,7 +172,7 @@ func (s *Streams) closeAll() {
 	defer s.mu.Unlock()
 	s.closed = true
 	for _, stream := range s.streams {
-		stream.close()
+		stream.close(endDrain)
 	}
 }
 
@@ -194,7 +199,13 @@ func (s *Streams) Drain(ctx context.Context, window time.Duration) {
 	}
 }
 
-func (c *clientStream) close()      { c.doneOnce.Do(func() { close(c.done) }) }
+func (c *clientStream) close(cause string) {
+	c.doneOnce.Do(func() {
+		c.closedBy = cause
+		close(c.done)
+	})
+}
+
 func (c *clientStream) beginDrain() { c.drainOnce.Do(func() { close(c.drain) }) }
 
 // release raises the stream's bound to issueSeq, or, with all, asks for
@@ -248,21 +259,24 @@ func (s *Streams) ageLimit() time.Duration {
 // drains or shuts down, the stream reaches its age limit, the connection
 // moves to another stream or ends. started is the connection as the
 // stream's transaction committed it. The n-th heartbeat of the stream counted
-// s carries s*instance.HeartbeatSeqStride+n.
+// s carries s*instance.HeartbeatSeqStride+n. When it returns it counts the
+// stream's end under its first cause.
 func (s *Streams) serve(ctx context.Context, w http.ResponseWriter, stream *clientStream, started instance.Connection, resumed bool) {
-	writer := sseWriter{w: w, controller: http.NewResponseController(w), connectionID: started.ID, cutOff: new(atomic.Bool)}
+	writer := sseWriter{w: w, controller: http.NewResponseController(w), connectionID: started.ID, cutOff: new(atomic.Pointer[string])}
+	state := &streamState{stream: stream, writer: writer, written: map[string]bool{}, unmarked: map[string]bool{}, accepted: started.ReadyAcceptedAt != nil, end: endClientClosed}
+	defer func() { s.metrics.streamEndedBy(state.end) }()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	// The age limit counts from connected; its timer is set first so it is
 	// pending once the client reads connected.
 	age := s.clock.After(s.ageLimit())
-	if writer.write(id.New("msg_"), protocol.ConnectedPayload{Resumed: resumed}) != nil {
+	if err := writer.write(id.New("msg_"), protocol.ConnectedPayload{Resumed: resumed}); err != nil {
+		state.end = writer.endCause(err)
 		return
 	}
 	s.metrics.streamStarted(resumed)
 	defer s.metrics.streamEnded()
-	state := &streamState{stream: stream, writer: writer, written: map[string]bool{}, unmarked: map[string]bool{}, accepted: started.ReadyAcceptedAt != nil}
 	var (
 		next <-chan time.Time
 		sent int64
@@ -270,7 +284,8 @@ func (s *Streams) serve(ctx context.Context, w http.ResponseWriter, stream *clie
 	heartbeat := func() bool {
 		sent++
 		seq := started.StreamCount*instance.HeartbeatSeqStride + sent
-		if writer.write(instance.HeartbeatMessageID(started.ID, seq), protocol.HeartbeatPayload{HeartbeatSeq: seq}) != nil {
+		if err := writer.write(instance.HeartbeatMessageID(started.ID, seq), protocol.HeartbeatPayload{HeartbeatSeq: seq}); err != nil {
+			state.end = writer.endCause(err)
 			return false
 		}
 		next = s.clock.After(HeartbeatInterval)
@@ -294,7 +309,13 @@ func (s *Streams) serve(ctx context.Context, w http.ResponseWriter, stream *clie
 			switch outcome {
 			case passFailed:
 				retry = s.clock.After(state.retryAfter(rand.Float64() * 0.2)) //nolint:gosec // G404: spreads retries, not a secret.
-			case passEnded, passMoved, passBroken:
+			case passEnded:
+				state.end = endConnectionEnded
+				return
+			case passMoved:
+				state.end = endMoved
+				return
+			case passBroken:
 				return
 			default:
 				state.retryBase = 0
@@ -315,16 +336,20 @@ func (s *Streams) serve(ctx context.Context, w http.ResponseWriter, stream *clie
 		case <-stream.done:
 			// Run closes every stream once the last drain is due, so a
 			// stream whose drain began writes its disconnect first.
+			state.end = stream.closedBy
 			select {
 			case <-stream.drain:
+				state.end = endDrain
 				_ = writer.write(id.New("msg_"), protocol.DisconnectPayload{Scope: "stream"})
 			default:
 			}
 			return
 		case <-stream.drain:
+			state.end = endDrain
 			_ = writer.write(id.New("msg_"), protocol.DisconnectPayload{Scope: "stream"})
 			return
 		case <-age:
+			state.end = endAgeLimit
 			_ = writer.write(id.New("msg_"), protocol.DisconnectPayload{Scope: "stream"})
 			return
 		case <-stream.wake:
@@ -355,12 +380,12 @@ func disconnectCode(connection instance.Connection) (protocol.ErrorCode, bool) {
 
 // sseWriter writes one envelope per event as a single data line followed by
 // a blank line, flushed as it goes, under streamStallTimeout. cutOff, shared
-// by its copies, is set by cut.
+// by its copies, holds the end cause of the first cut.
 type sseWriter struct {
 	w            http.ResponseWriter
 	controller   *http.ResponseController
 	connectionID string
-	cutOff       *atomic.Bool
+	cutOff       *atomic.Pointer[string]
 }
 
 func (s sseWriter) write(messageID string, payload protocol.DownstreamPayload) error {
@@ -377,7 +402,7 @@ func (s sseWriter) writeEnvelope(envelope []byte) error {
 		}
 		// Checked after the deadline is set, since cut sets its own after
 		// the flag: a cut is never overwritten by a later piece's deadline.
-		if s.cutOff.Load() {
+		if s.cutOff.Load() != nil {
 			return errStreamCut
 		}
 		if _, err := s.w.Write(piece); err != nil {
@@ -394,8 +419,21 @@ func (s sseWriter) writeEnvelope(envelope []byte) error {
 	return nil
 }
 
-// cut ends the writer's write in progress and every later one.
-func (s sseWriter) cut() {
-	s.cutOff.Store(true)
+// cut ends the writer's write in progress and every later one, for cause.
+func (s sseWriter) cut(cause string) {
+	s.cutOff.CompareAndSwap(nil, &cause)
 	_ = s.controller.SetWriteDeadline(time.Now())
+}
+
+// endCause is the end cause of the stream that err, a failed write, ends: the
+// cut's cause, endStalled when the socket accepted no byte of a piece within
+// streamStallTimeout, endClientClosed otherwise.
+func (s sseWriter) endCause(err error) string {
+	if cause := s.cutOff.Load(); cause != nil {
+		return *cause
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return endStalled
+	}
+	return endClientClosed
 }

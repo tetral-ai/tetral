@@ -10,15 +10,28 @@ import (
 )
 
 // hubMetrics are the hub's own families of this pod: the streams it holds,
-// which its autoscaler averages, the connected events it wrote and the
-// queue wait of each instruction's first write. The instruction pressure
-// gauges are read from the database at scrape (instructionPressure).
+// which its autoscaler averages, the connected events it wrote, the end of
+// each stream it held by cause and the queue wait of each instruction's
+// first write. The instruction pressure gauges are read from the database at
+// scrape (instructionPressure).
 type hubMetrics struct {
 	registry    *workload.Registry
 	openStreams *workload.Gauge
 	started     *workload.Counter
+	ended       *workload.Counter
 	queueWait   *workload.Histogram
 }
+
+// The causes of computerhub_streams_ended_total; a stream counts under the
+// first one that ended it.
+const (
+	endDrain           = "drain"
+	endAgeLimit        = "age_limit"
+	endStalled         = "stalled"
+	endConnectionEnded = "connection_ended"
+	endMoved           = "moved"
+	endClientClosed    = "client_closed"
+)
 
 func newHubMetrics() *hubMetrics {
 	registry := workload.NewRegistry(ServiceName)
@@ -26,6 +39,7 @@ func newHubMetrics() *hubMetrics {
 		registry:    registry,
 		openStreams: registry.Gauge("computerhub_open_streams", "Client streams this pod holds."),
 		started:     registry.Counter("computerhub_connections_started_total", "Connected events written, by new or resumed connection.", "kind"),
+		ended:       registry.Counter("computerhub_streams_ended_total", "Streams this pod held, each counted once when it ends, by the first cause that ended it.", "cause"),
 		queueWait:   registry.Histogram("computerhub_instructions_queue_wait_seconds", "Time from storing a Session instruction to its first write to a stream."),
 	}
 	m.openStreams.Set(0)
@@ -47,6 +61,12 @@ func (m *hubMetrics) streamStarted(resumed bool) {
 func (m *hubMetrics) streamEnded() {
 	if m != nil {
 		m.openStreams.Add(-1)
+	}
+}
+
+func (m *hubMetrics) streamEndedBy(cause string) {
+	if m != nil {
+		m.ended.Add(1, cause)
 	}
 }
 

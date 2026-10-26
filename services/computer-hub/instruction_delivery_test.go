@@ -287,6 +287,11 @@ func TestEveryStreamOfAStoppingPodGetsItsDisconnect(t *testing.T) {
 			t.Fatalf("stream %d wrote %d events before it closed; want only the stream-only disconnect", i, len(events))
 		}
 	}
+	metrics := f.pods[hubTestPod].metrics
+	waitUntil(t, func() bool { return streamEnds(t, metrics, nil)["drain"] == count })
+	if ends := streamEnds(t, metrics, nil); len(ends) != 1 {
+		t.Fatalf("stream ends = %v; want each of the %d streams once as drain", ends, count)
+	}
 }
 
 func TestNoticesReachOnlyThePodHoldingTheStream(t *testing.T) {
@@ -756,6 +761,25 @@ func metricValue(t *testing.T, metrics *hubMetrics, family, value string) float6
 		}
 	}
 	return 0
+}
+
+// streamEnds is computerhub_streams_ended_total of metrics, by cause, less
+// since, an earlier reading.
+func streamEnds(t *testing.T, metrics *hubMetrics, since map[string]float64) map[string]float64 {
+	t.Helper()
+	samples, err := metrics.registry.Collector()(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ends := map[string]float64{}
+	for _, sample := range samples {
+		if sample.Name == "computerhub_streams_ended_total" && len(sample.Labels) == 1 {
+			if value := sample.Value - since[sample.Labels[0].Value]; value != 0 {
+				ends[sample.Labels[0].Value] = value
+			}
+		}
+	}
+	return ends
 }
 
 func waitUntil(t *testing.T, condition func() bool) {

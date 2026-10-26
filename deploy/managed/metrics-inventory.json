@@ -443,6 +443,20 @@
         "type": "gauge",
         "audience": "operators",
         "labels": {}
+      },
+      "computerhub_streams_ended_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "cause": [
+            "age_limit",
+            "client_closed",
+            "connection_ended",
+            "drain",
+            "moved",
+            "stalled"
+          ]
+        }
       }
     },
     "db-prepare": {},

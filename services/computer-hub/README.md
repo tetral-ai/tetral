@@ -299,7 +299,14 @@ Delivery of a `disconnect` is best effort.
 
 Metrics: `computerhub_open_streams`, the streams this pod holds, which the
 autoscaler averages; `computerhub_connections_started_total{kind}`, each
-`connected` written, `new` or `resumed`; the pressure point
+`connected` written, `new` or `resumed`;
+`computerhub_streams_ended_total{cause}`, each stream the pod held, once when
+it ends, by the first cause that ended it: `drain` (the pod's drain or
+shutdown closed it, with or without its `disconnect`), `age_limit`,
+`stalled` (the socket accepted no byte of a write for 10 seconds),
+`connection_ended` (lease expiry, revocation or deregistration), `moved` (it
+resumed on another stream) or `client_closed` (the client closed it, or a
+read or write failed otherwise); the pressure point
 `computerhub_instructions`: `_in_progress` (written, final report not
 stored), `_queued` (stored, never written) and `_oldest_queued_seconds` (by
 the database clock), read at scrape over the unreported instructions of every
@@ -405,7 +412,9 @@ termination grace period carry the drain, which is why Helm refuses a
   connection and a fresh start refused with nothing replaced;
   `previous_connection_active` with the remaining lease, then a new connection
   once it passed; the stream-only disconnect between 10 and 11 minutes of a
-  10-minute age; a notice on the holding pod's channel only, and an
+  10-minute age; each stream of a stopping pod held in a pass getting its
+  stream-only disconnect and counted once as `drain`; a notice on the
+  holding pod's channel only, and an
   instruction whose notice was lost written after a listener restart and a
   resume; 64 of 70 instructions before the first Session report; a
   revocation waiting for a pass that holds the row and ending the stream,
@@ -413,12 +422,12 @@ termination grace period carry the drain, which is why Helm refuses a
   one `instruction.deliver` span and the started counter; the pressure gauges
   of a written and a queued instruction whose stream is gone.
 - `slow_reader_test.go`, with a test CLI whose socket receive buffer is
-  4 KiB: a 16 MB backlog read at 1 MiB/s arriving whole on
-  one stream; one read for more than 45 seconds keeping its connection, the
-  two heartbeats that fell due written between its edits and answered; a
-  reader that stops losing its stream 10 seconds after its last
-  byte and then resuming on a second hub server; a revocation committing while a
-  write is blocked and closing the stream.
+  4 KiB: a 16 MB backlog read at 1 MiB/s arriving whole on one stream; one
+  read for more than 45 seconds keeping its connection, the two heartbeats
+  that fell due written between its edits and answered; a reader that stops
+  losing its stream 10 seconds after its last byte, counted once as
+  `stalled`, and then resuming on a second hub server; a revocation
+  committing while a write is blocked and closing the stream.
 - `credential_renewal_test.go`: a stream issuance on an online connection
   answering `202` with one notice and one `credential.renew`, its replay `202`,
   and `409 instance_offline_error` with nothing written without a connection
