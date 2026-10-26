@@ -30,7 +30,7 @@ use tetral_tests::machine::{INSTANCE, answer_fault, seconds, send, wait_for_requ
 use tetral_tests::socket_directory;
 use tetral_tests::tasks::{
     AVAILABILITY_CHECK, ENDING_CHECKED, EXIT_OBSERVED, GONE_CHECKED, REPLY_WAITING, SESSION,
-    TaskMachine, WAIT_CHECKED, millis, policy, process_running,
+    TaskMachine, WAIT_CHECKED, millis, namespace_has_processes, policy, process_running,
 };
 
 /// The test seam barrier before a record an earlier App Server left is
@@ -757,10 +757,12 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
     assert_eq!(written["session_id"], SESSION);
     tasks.machine().seams.hold(CONFIRMED);
     tasks.kill_and_restart(|_| {});
-    let marker = tasks.project.join("marker");
-    let size = fs::metadata(&marker).unwrap().len();
-    std::thread::sleep(Duration::from_millis(500));
-    assert_eq!(fs::metadata(&marker).unwrap().len(), size);
+    // Only the command, inside the recorded namespace, appends to the
+    // marker.
+    let namespace = written["pid_namespace"].as_u64().unwrap();
+    wait_until("the recorded namespace without a process", || {
+        !namespace_has_processes(namespace)
+    });
     let status = tasks.machine().status();
     assert_eq!(
         status["last_error"]["code"], "cleanup_pending",
@@ -785,7 +787,7 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
         prepared(&tasks, SESSION, "bind_confirmed"),
         json!(["prepared", null])
     );
-    case.observe("the marker stopped growing; last_error was cleanup_pending and the Session's preparation failed so until the record was confirmed, then null and the preparation succeeded");
+    case.observe("the recorded namespace, the only writer of the marker, held no process; last_error was cleanup_pending and the Session's preparation failed so until the record was confirmed, then null and the preparation succeeded");
     drop(tasks);
 
     let mut case = record.case(

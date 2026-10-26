@@ -473,12 +473,27 @@ pub fn millis(value: u64) -> Duration {
     Duration::from_millis(value)
 }
 
+/// Whether a process this user can inspect is in the PID namespace whose
+/// inode is `namespace`.
+pub fn namespace_has_processes(namespace: u64) -> bool {
+    let wanted = std::path::PathBuf::from(format!("pid:[{namespace}]"));
+    processes()
+        .any(|process| std::fs::read_link(process.join("ns/pid")).is_ok_and(|link| link == wanted))
+}
+
 /// Whether a process of this machine runs with the argument list `argv`.
 pub fn process_running(argv: &[&str]) -> bool {
     let wanted: Vec<u8> = argv
         .iter()
         .flat_map(|argument| [argument.as_bytes(), b"\0"].concat())
         .collect();
+    processes().any(|process| {
+        std::fs::read(process.join("cmdline")).is_ok_and(|cmdline| cmdline == wanted)
+    })
+}
+
+/// The `/proc` directories of this machine's processes.
+fn processes() -> impl Iterator<Item = PathBuf> {
     std::fs::read_dir("/proc")
         .into_iter()
         .flatten()
@@ -490,7 +505,5 @@ pub fn process_running(argv: &[&str]) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit())
         })
-        .any(|entry| {
-            std::fs::read(entry.path().join("cmdline")).is_ok_and(|cmdline| cmdline == wanted)
-        })
+        .map(|entry| entry.path())
 }
