@@ -1,6 +1,7 @@
 //! Real restricted processes on Linux. Each case runs commands through the
 //! isolation's availability check and launch, as the task supervisor does,
-//! by starting `tetral` as its isolation harness, and observes from outside
+//! by starting `tetral` as its isolation harness, or through a running App
+//! Server where the case needs its configuration, and observes from outside
 //! every sandbox what the commands could reach.
 
 #![cfg(target_os = "linux")]
@@ -20,6 +21,8 @@ use tetral_tests::other_user::RootDirectory;
 use tetral_tests::record::Case;
 use tetral_tests::run::Tetral;
 use tetral_tests::seams::Seams;
+use tetral_tests::socket_directory;
+use tetral_tests::tasks::{SESSION, TaskMachine};
 
 /// The `argv[0]` under which `tetral` built with `test-seams` reads one
 /// request on stdin, runs its command through the check and the launch, and
@@ -547,6 +550,56 @@ fn a_rule_for_a_regular_file_and_a_deny_path_under_one_leave_the_command_running
         "{shown}"
     );
     case.observe("f ended with y; under <p>/f/x deny, cat <p>/f ran and printed f");
+}
+
+#[test]
+fn the_cua_driver_that_config_toml_records_stays_read_only_under_a_writable_rule() {
+    let _socket_dir = socket_directory::shared();
+    let mut case = tetral_tests::record!().case(
+        "a cua-driver recorded in config.toml through a symbolic link to a directory of the read_write project: write a file beside it, then write and replace the driver",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let mut tasks = TaskMachine::start(&mut case, directory.path());
+    let bin = tasks.project.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let driver = bin.join("cua-driver");
+    fs::write(&driver, "driver\n").unwrap();
+    // Recorded through a symbolic link, as a driver on a linked directory is.
+    let link = directory.path().join("link");
+    symlink(&bin, &link).unwrap();
+    let recorded_driver = link.join("cua-driver");
+    let config = tasks.root.join("config.toml");
+    tasks.kill_and_restart(|_| {
+        let recorded = format!(
+            "{}\n[computer_use]\nenabled = false\ndriver = \"{}\"\n",
+            fs::read_to_string(&config).unwrap(),
+            recorded_driver.display()
+        );
+        fs::write(&config, recorded).unwrap();
+    });
+    let issued = tasks.prepare(SESSION, "bind_recorded", &tasks.project, None);
+    tasks.wait_prepared(&issued);
+    let rules = json!([
+        {"path": "/", "access": "read"},
+        {"path": tasks.project, "access": "read_write"},
+    ]);
+    tasks.execute_with(
+        SESSION,
+        "bind_recorded",
+        "task_driver",
+        json!({"cmd": "printf y > bin/other; printf x > bin/cua-driver; printf z > r && mv -f r bin/cua-driver"}),
+        policy(rules, "disabled"),
+        None,
+    );
+    let terminal = tasks.terminal("task_driver");
+    assert_ne!(
+        terminal["result"]["result"]["exit_code"],
+        json!(0),
+        "{terminal}"
+    );
+    assert_eq!(fs::read_to_string(bin.join("other")).unwrap(), "y");
+    assert_eq!(fs::read_to_string(&driver).unwrap(), "driver\n");
+    case.observe("the file beside the driver holds y; the write and the replacement of the recorded driver failed, which still holds driver");
 }
 
 /// The host's LAN address: the source address of its default route.

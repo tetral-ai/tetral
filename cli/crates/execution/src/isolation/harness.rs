@@ -72,7 +72,7 @@ async fn run_request(request: &Value) -> Value {
         task_directories: path("task_directories"),
         task_temporary_directory: path("task_temporary_directory"),
         drives,
-        trusted_programs: super::trusted_programs(&tetral, &cwd),
+        trusted_programs: super::trusted_programs(&tetral, None, &cwd),
     };
     let command = Command {
         argv: strings(&request["argv"]).map(str::to_owned).collect(),

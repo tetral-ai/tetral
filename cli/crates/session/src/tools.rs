@@ -54,6 +54,9 @@ pub struct ToolContext {
     pub socket_directory: PathBuf,
     /// The running `tetral`, canonical.
     pub tetral: PathBuf,
+    /// The cua-driver that `config.toml` recorded when the App Server
+    /// started.
+    pub cua_driver: Option<PathBuf>,
 }
 
 /// An admitted task as its task supervisor starts it.
@@ -586,7 +589,11 @@ fn validated(
         task_temporary_directory: store::task_temporary_directory(&parent, task_name),
         task_directories: parent,
         drives: None,
-        trusted_programs: isolation::trusted_programs(&shared.tools.tetral, cwd),
+        trusted_programs: isolation::trusted_programs(
+            &shared.tools.tetral,
+            shared.tools.cua_driver.as_deref(),
+            cwd,
+        ),
     };
     let permissions = TaskPermissions::admit(value["payload"].get("sandbox_policy"), &inputs)
         .map_err(Body::Rejected)?;

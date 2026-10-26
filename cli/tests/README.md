@@ -202,7 +202,8 @@ temporary directories. No workspace crate depends on this package.
   against the credential, the control socket, a second Session's files, the
   `tetral` executable, `.git` and the metadata names, symbolic links, path
   aliases and inherited descriptors, a missing deny path in a directory of
-  another user, and a rule for a regular file and a deny path under one;
+  another user, a rule for a regular file and a deny path under one, and
+  the cua-driver that `config.toml` records;
   `disabled` and `direct` against TCP, UDP and HTTP on the loopback and the
   LAN address; each unusable `bwrap`,
   one that the test user could have planted among them, rejected before any

@@ -190,6 +190,11 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
         capability: capabilities.tool_execution.clone(),
         socket_directory,
         tetral: tetral.clone(),
+        cua_driver: configuration
+            .config
+            .computer_use
+            .as_ref()
+            .and_then(|computer_use| computer_use.driver.clone()),
     };
     let sessions = Factory::new(
         Shared {

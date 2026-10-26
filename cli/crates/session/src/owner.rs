@@ -553,6 +553,7 @@ mod tests {
                 capability: Some(serde_json::from_value(capability).unwrap()),
                 socket_directory: "/sockets".into(),
                 tetral: "/tetral".into(),
+                cua_driver: None,
             }),
             leftovers: Leftovers::none(),
         }

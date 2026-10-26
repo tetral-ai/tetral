@@ -92,11 +92,20 @@ pub fn planted_launcher() -> Option<String> {
 }
 
 /// The trusted programs of a call whose working directory is `cwd`: the
-/// running `tetral` and, on Linux, every `bwrap` that its launch could
-/// select, each canonical and found with `stat`, none run. The profile keeps
-/// each of them read-only (`policy::TranslationInputs`).
-pub fn trusted_programs(tetral: &Path, cwd: &Path) -> Vec<PathBuf> {
+/// running `tetral`, the cua-driver that `config.toml` records, canonical
+/// when it exists and as recorded otherwise, and, on Linux, every `bwrap`
+/// that its launch could select, each canonical and found with `stat`, none
+/// run. The profile keeps each of them read-only (`policy::TranslationInputs`).
+pub fn trusted_programs(tetral: &Path, cua_driver: Option<&Path>, cwd: &Path) -> Vec<PathBuf> {
     let mut programs = vec![tetral.to_path_buf()];
+    if let Some(driver) = cua_driver {
+        let driver = driver
+            .canonicalize()
+            .unwrap_or_else(|_| driver.to_path_buf());
+        if !programs.contains(&driver) {
+            programs.push(driver);
+        }
+    }
     #[cfg(target_os = "linux")]
     for bwrap in linux::bwrap_candidates(tetral, cwd) {
         if !programs.contains(&bwrap) {
