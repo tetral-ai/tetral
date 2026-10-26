@@ -1444,7 +1444,7 @@ fn each_bwrap_offer_runs_the_command_rejects_the_call_or_has_the_helper_refuse_i
             tetral: binaries::tetral(),
             path: &planted_last,
             beside: None,
-            command_path: SYSTEM_PATH,
+            command_path: &planted_last,
             expected: Expected::Runs {
                 ignored: Some(&planted),
             },
