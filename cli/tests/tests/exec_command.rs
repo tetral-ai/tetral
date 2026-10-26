@@ -11,9 +11,6 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -475,101 +472,120 @@ fn a_file_as_working_directory_is_cwd_not_directory() {
     case.observe("cwd_not_directory naming the file");
 }
 
-/// Threads that keep every CPU busy until dropped, so that the App Server
-/// is often descheduled between a command's last write and its exit.
-struct CpuSpinners {
-    stop: Arc<AtomicBool>,
-    threads: Vec<thread::JoinHandle<()>>,
-}
+/// A command's last output and a background process that keeps its pipes:
+/// cases that only an operating system where a process can outlive the
+/// shell decides. On Linux the end of the task's PID namespace closes every
+/// holder of the pipes before the exit is observed, so the drain after the
+/// exit has nothing left to read there.
+#[cfg(target_os = "macos")]
+mod pipes_past_the_exit {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
-impl CpuSpinners {
-    fn start() -> CpuSpinners {
-        let stop = Arc::new(AtomicBool::new(false));
-        let count = 2 * thread::available_parallelism().map_or(1, usize::from);
-        let threads = (0..count)
-            .map(|_| {
-                let stop = stop.clone();
-                thread::spawn(move || {
-                    let mut spins = 0u64;
-                    while !stop.load(Ordering::Relaxed) {
-                        spins += 1;
-                        if spins.is_multiple_of(1_024) {
-                            thread::yield_now();
-                        }
-                    }
-                })
-            })
-            .collect();
-        CpuSpinners { stop, threads }
+    use serde_json::json;
+    use tetral_tests::socket_directory;
+    use tetral_tests::tasks::{TaskMachine, policy};
+
+    use super::{exited, summary};
+
+    /// Threads that keep every CPU busy until dropped, so that the App Server
+    /// is often descheduled between a command's last write and its exit.
+    struct CpuSpinners {
+        stop: Arc<AtomicBool>,
+        threads: Vec<thread::JoinHandle<()>>,
     }
-}
 
-impl Drop for CpuSpinners {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        for thread in self.threads.drain(..) {
-            let _ = thread.join();
+    impl CpuSpinners {
+        fn start() -> CpuSpinners {
+            let stop = Arc::new(AtomicBool::new(false));
+            let count = 2 * thread::available_parallelism().map_or(1, usize::from);
+            let threads = (0..count)
+                .map(|_| {
+                    let stop = stop.clone();
+                    thread::spawn(move || {
+                        let mut spins = 0u64;
+                        while !stop.load(Ordering::Relaxed) {
+                            spins += 1;
+                            if spins.is_multiple_of(1_024) {
+                                thread::yield_now();
+                            }
+                        }
+                    })
+                })
+                .collect();
+            CpuSpinners { stop, threads }
         }
     }
-}
 
-#[test]
-fn the_last_bytes_a_command_writes_before_it_exits_are_in_its_terminal_report() {
-    let _socket_dir = socket_directory::shared();
-    let record = tetral_tests::record!();
-    let mut case = record.case(
+    impl Drop for CpuSpinners {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            for thread in self.threads.drain(..) {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    #[test]
+    fn the_last_bytes_a_command_writes_before_it_exits_are_in_its_terminal_report() {
+        let _socket_dir = socket_directory::shared();
+        let record = tetral_tests::record!();
+        let mut case = record.case(
         "fifty commands that fill the pipe's 65,536 bytes, then print a sentinel and exit, with every CPU busy",
     );
-    let directory = tempfile::tempdir().unwrap();
-    let tasks = TaskMachine::start(&mut case, directory.path());
-    let _spinners = CpuSpinners::start();
-    for index in 0..50 {
-        let task = format!("task_drain_{index}");
-        tasks.execute(
+        let directory = tempfile::tempdir().unwrap();
+        let tasks = TaskMachine::start(&mut case, directory.path());
+        let _spinners = CpuSpinners::start();
+        for index in 0..50 {
+            let task = format!("task_drain_{index}");
+            tasks.execute(
             &task,
             json!({"cmd": format!(r"head -c 65536 /dev/zero | tr '\0' x; printf 'final-sentinel-{index:02}\n'")}),
             policy(&tasks.project, "disabled"),
         );
-        let terminal = tasks.terminal(&task);
-        let text = terminal["result"]["result"]["stdout"]["text"]
-            .as_str()
-            .unwrap();
-        assert!(
-            text.ends_with(&format!("final-sentinel-{index:02}\n")),
-            "{task}: …{}",
-            &text[text.len().saturating_sub(64)..]
-        );
+            let terminal = tasks.terminal(&task);
+            let text = terminal["result"]["result"]["stdout"]["text"]
+                .as_str()
+                .unwrap();
+            assert!(
+                text.ends_with(&format!("final-sentinel-{index:02}\n")),
+                "{task}: …{}",
+                &text[text.len().saturating_sub(64)..]
+            );
+        }
+        case.observe("each terminal stdout ends with its sentinel");
     }
-    case.observe("each terminal stdout ends with its sentinel");
-}
 
-#[test]
-fn a_background_process_that_holds_the_pipes_does_not_delay_the_terminal_report() {
-    let _socket_dir = socket_directory::shared();
-    let record = tetral_tests::record!();
-    let mut case = record.case("printf a sentinel, then sleep 5 in the background, and exit");
-    let directory = tempfile::tempdir().unwrap();
-    let tasks = TaskMachine::start(&mut case, directory.path());
-    let issued_at = Instant::now();
-    tasks.execute(
-        "task_holder",
-        json!({"cmd": r"printf 'foreground-sentinel\n'; sleep 5 &"}),
-        policy(&tasks.project, "disabled"),
-    );
-    let terminal = tasks.terminal("task_holder");
-    let elapsed = issued_at.elapsed();
-    assert_eq!(
-        summary(&terminal),
-        exited("foreground-sentinel\n"),
-        "{terminal:#}"
-    );
-    assert!(
-        elapsed < Duration::from_secs(4),
-        "the terminal report after {elapsed:?}"
-    );
-    case.observe(format!(
-        "terminal success with the sentinel {elapsed:?} after the instruction"
-    ));
+    #[test]
+    fn a_background_process_that_holds_the_pipes_does_not_delay_the_terminal_report() {
+        let _socket_dir = socket_directory::shared();
+        let record = tetral_tests::record!();
+        let mut case = record.case("printf a sentinel, then sleep 5 in the background, and exit");
+        let directory = tempfile::tempdir().unwrap();
+        let tasks = TaskMachine::start(&mut case, directory.path());
+        let issued_at = Instant::now();
+        tasks.execute(
+            "task_holder",
+            json!({"cmd": r"printf 'foreground-sentinel\n'; sleep 5 &"}),
+            policy(&tasks.project, "disabled"),
+        );
+        let terminal = tasks.terminal("task_holder");
+        let elapsed = issued_at.elapsed();
+        assert_eq!(
+            summary(&terminal),
+            exited("foreground-sentinel\n"),
+            "{terminal:#}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "the terminal report after {elapsed:?}"
+        );
+        case.observe(format!(
+            "terminal success with the sentinel {elapsed:?} after the instruction"
+        ));
+    }
 }
 
 #[test]
