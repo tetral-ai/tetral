@@ -1,8 +1,9 @@
 //! Real restricted processes on Linux. Each case runs commands through the
 //! isolation's availability check and launch, as the task supervisor does,
-//! by starting `tetral` as its isolation harness, or through a running App
-//! Server where the case needs its configuration, and observes from outside
-//! every sandbox what the commands could reach.
+//! by starting `tetral` as its isolation harness, or as tool calls of a
+//! running App Server, which meet its own state root, control socket, task
+//! directories and configuration, and observes from outside every sandbox
+//! what the commands could reach.
 
 #![cfg(target_os = "linux")]
 
@@ -12,17 +13,19 @@ use std::net::{IpAddr, TcpListener, UdpSocket};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tetral_tests::binaries;
+use tetral_tests::machine::INSTANCE;
 use tetral_tests::other_user::RootDirectory;
 use tetral_tests::record::Case;
 use tetral_tests::run::Tetral;
 use tetral_tests::seams::Seams;
 use tetral_tests::socket_directory;
-use tetral_tests::tasks::{SESSION, TaskMachine};
+use tetral_tests::tasks::{BINDING, SESSION, TaskMachine};
 
 /// The `argv[0]` under which `tetral` built with `test-seams` reads one
 /// request on stdin, runs its command through the check and the launch, and
@@ -141,16 +144,33 @@ impl World {
             "env": {"PATH": path, "HOME": self.task_temporary},
         })
     }
+}
 
-    /// Runs one command through the harness of the world's `tetral`.
-    fn run(&self, policy: &Value, cwd: &Path, argv: &[&str]) -> Value {
-        harness(
-            &self.tetral,
-            &self.request(policy, cwd, argv, SYSTEM_PATH),
-            SYSTEM_PATH,
-            None,
-        )
-    }
+/// What TE-20's probes name, as a command sees it: the state root `R`, the
+/// control socket, the project `p` with a `.git` directory and the project
+/// `q` without one, both in `base` beside `R`, the `tetral` executable at
+/// `<p>/bin/tetral`, and the task's private temporary directory as a shell
+/// word.
+struct Targets {
+    /// Tells this runner's paths outside every grant from another's.
+    label: &'static str,
+    base: PathBuf,
+    root: PathBuf,
+    socket: PathBuf,
+    project: PathBuf,
+    bare: PathBuf,
+    tetral: PathBuf,
+    temporary: String,
+}
+
+/// How a case runs its commands: through the isolation harness of a world,
+/// or as calls of a running App Server.
+trait Runner {
+    fn targets(&self) -> Targets;
+
+    /// Runs `argv`, a shell with `-c` and a script, under `policy` in `cwd`
+    /// and gives its `exit_code`, `stdout` and `stderr`.
+    fn run(&self, policy: &Value, cwd: &Path, argv: &[&str]) -> Value;
 
     /// Runs `probes` in one `bash` command and asserts each one's outcome.
     fn probe(
@@ -162,6 +182,138 @@ impl World {
     ) {
         let outcome = self.run(policy, cwd, &["/bin/bash", "-c", &script(probes)]);
         check_probes(case, policy, &outcome, probes);
+    }
+}
+
+impl Runner for World {
+    fn targets(&self) -> Targets {
+        Targets {
+            label: "harness",
+            base: self.base.clone(),
+            root: self.root.clone(),
+            socket: self.socket.clone(),
+            project: self.project.clone(),
+            bare: self.bare.clone(),
+            tetral: self.tetral.clone(),
+            temporary: quoted(&self.task_temporary),
+        }
+    }
+
+    /// Runs one command through the harness of the world's `tetral`.
+    fn run(&self, policy: &Value, cwd: &Path, argv: &[&str]) -> Value {
+        harness(
+            &self.tetral,
+            &self.request(policy, cwd, argv, SYSTEM_PATH),
+            SYSTEM_PATH,
+            None,
+        )
+    }
+}
+
+/// An App Server started from a link of the test build at `<p>/bin/tetral`,
+/// with `q` beside `p` and a second Session's files planted in its state
+/// root, whose `exec_command`, `edit` and `view_image` calls meet its own
+/// state root, control socket and task directories.
+struct Served {
+    tasks: TaskMachine,
+    base: PathBuf,
+    calls: AtomicU64,
+    _directory: tempfile::TempDir,
+}
+
+impl Served {
+    fn start(case: &mut Case) -> Served {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let bin = base.join("project/bin");
+        fs::create_dir_all(&bin).unwrap();
+        link_or_copy(binaries::tetral(), &bin.join("tetral"));
+        let tasks = TaskMachine::start_from(case, &base, &bin.join("tetral"), SYSTEM_PATH);
+        let (p, root) = (&tasks.project, &tasks.root);
+        for directory in [
+            &p.join(".git"),
+            &p.join("secret"),
+            &base.join("q"),
+            &root.join("sessions/S2/drives/d"),
+            &root.join("sessions/S2/tasks/t"),
+        ] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        for (path, bytes) in [
+            (root.join("sessions/S2/drives/d/f"), "drive"),
+            (root.join("sessions/S2/tasks/t/stdout.log"), "log"),
+            (p.join(".git/config"), "[core]\n"),
+            (p.join("a"), "a"),
+            (p.join("secret/f"), "secret"),
+        ] {
+            fs::write(path, bytes).unwrap();
+        }
+        symlink(root, p.join("l")).unwrap();
+        assert!(root.join("credentials.json").is_file());
+        Served {
+            tasks,
+            base,
+            calls: AtomicU64::new(0),
+            _directory: directory,
+        }
+    }
+
+    fn next_task(&self) -> String {
+        format!("task_probe_{}", self.calls.fetch_add(1, Ordering::SeqCst))
+    }
+
+    /// Runs `tool` with `input` under `policy` and gives its terminal
+    /// envelope: its status, error and result.
+    fn file_tool(&self, tool: &str, input: Value, policy: &Value) -> Value {
+        let task = self.next_task();
+        self.tasks.engine.control(
+            "execute",
+            json!({"instance_id": INSTANCE, "payload": {
+                "session_id": SESSION, "binding_id": BINDING,
+                "tool_use_event_id": format!("call_{task}"), "task_id": task,
+                "tool": tool, "input": input, "sandbox_policy": policy,
+            }}),
+        );
+        self.tasks.terminal(&task)["result"].clone()
+    }
+}
+
+impl Runner for Served {
+    fn targets(&self) -> Targets {
+        let project = self.tasks.project.clone();
+        Targets {
+            label: "exec_command",
+            base: self.base.clone(),
+            root: self.tasks.root.clone(),
+            socket: self
+                .tasks
+                .machine()
+                .app_server
+                .socket
+                .canonicalize()
+                .unwrap(),
+            bare: self.base.join("q"),
+            tetral: project.join("bin/tetral"),
+            project,
+            temporary: "\"$TMPDIR\"".to_owned(),
+        }
+    }
+
+    /// Runs the script of `argv` as an `exec_command` call, whose shell is
+    /// `bash`.
+    fn run(&self, policy: &Value, cwd: &Path, argv: &[&str]) -> Value {
+        let [_, "-c", script] = argv else {
+            panic!("a shell with -c and a script: {argv:?}");
+        };
+        let task = self.next_task();
+        self.tasks
+            .execute(&task, json!({"cmd": script, "cwd": cwd}), policy.clone());
+        let result = &self.tasks.terminal(&task)["result"]["result"];
+        json!({
+            "exit_code": result["exit_code"],
+            "stdout": result["stdout"]["text"],
+            "stderr": result["stderr"]["text"],
+        })
     }
 }
 
@@ -259,32 +411,35 @@ fn check_probes(
 
 /// The probes that every grant must fail: the credential, the control
 /// socket, the second Session's planted files and the `tetral` executable.
-fn protected_probes(world: &World) -> Vec<(&'static str, String, Expect)> {
-    let replacement = world.project.join("replacement");
+fn protected_probes(targets: &Targets) -> Vec<(&'static str, String, Expect)> {
+    let replacement = targets.project.join("replacement");
     vec![
         (
             "read R/credentials.json",
-            format!("cat {}", quoted(&world.root.join("credentials.json"))),
+            format!("cat {}", quoted(&targets.root.join("credentials.json"))),
             Fails,
         ),
         (
             "connect to the control socket in S",
             format!(
                 "python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])' {}",
-                quoted(&world.socket)
+                quoted(&targets.socket)
             ),
             Fails,
         ),
         (
             "read the second Session's drive file",
-            format!("cat {}", quoted(&world.root.join("sessions/S2/drives/d/f"))),
+            format!(
+                "cat {}",
+                quoted(&targets.root.join("sessions/S2/drives/d/f"))
+            ),
             Fails,
         ),
         (
             "read the second Session's task log",
             format!(
                 "cat {}",
-                quoted(&world.root.join("sessions/S2/tasks/t/stdout.log"))
+                quoted(&targets.root.join("sessions/S2/tasks/t/stdout.log"))
             ),
             Fails,
         ),
@@ -293,7 +448,7 @@ fn protected_probes(world: &World) -> Vec<(&'static str, String, Expect)> {
             format!(
                 "cp /bin/true {r} && mv -f {r} {t}",
                 r = quoted(&replacement),
-                t = quoted(&world.tetral)
+                t = quoted(&targets.tetral)
             ),
             Fails,
         ),
@@ -304,15 +459,23 @@ fn protected_probes(world: &World) -> Vec<(&'static str, String, Expect)> {
 fn every_grant_reaches_only_what_its_rules_allow_and_never_the_protected_paths() {
     let mut case = tetral_tests::record!()
         .case("every grant reaches only what its rules allow and never the protected paths");
-    let world = World::new();
-    let p = &world.project;
+    grants_reach_only_what_their_rules_allow(&mut case, &World::new());
+}
+
+/// TE-20's probes under `/` read with `<p>` read_write, of a missing
+/// top-level `.git`, of the descriptors, under `/` read_write, under no rule
+/// and under a deny rule inside `<p>`.
+fn grants_reach_only_what_their_rules_allow(case: &mut Case, runner: &impl Runner) {
+    let targets = runner.targets();
+    let p = &targets.project;
     // Outside every grant, and removed even when a probe wrongly writes it.
     let outside = tempfile::TempPath::try_from_path(format!(
-        "/tmp/tetral-isolation-probe-{}",
-        std::process::id()
+        "/tmp/tetral-isolation-probe-{}-{}",
+        std::process::id(),
+        targets.label
     ))
     .unwrap();
-    let tetral_inode = fs::metadata(&world.tetral).unwrap().ino();
+    let tetral_inode = fs::metadata(&targets.tetral).unwrap().ino();
 
     let mut probes = vec![
         (
@@ -327,7 +490,7 @@ fn every_grant_reaches_only_what_its_rules_allow_and_never_the_protected_paths()
         ),
         (
             "write a file in the task's temporary directory",
-            format!("printf x > {}", quoted(&world.task_temporary.join("f"))),
+            format!("printf x > {}/f", targets.temporary),
             Succeeds,
         ),
         (
@@ -356,16 +519,16 @@ fn every_grant_reaches_only_what_its_rules_allow_and_never_the_protected_paths()
             Succeeds,
         ));
     }
-    probes.extend(protected_probes(&world));
+    probes.extend(protected_probes(&targets));
     probes.push((
         "read R/credentials.json through the link <p>/l",
         format!("cat {}", quoted(&p.join("l/credentials.json"))),
         Fails,
     ));
-    let relative = world.root.strip_prefix(&world.base).unwrap();
+    let relative = targets.root.strip_prefix(&targets.base).unwrap();
     let doubled = format!(
         "{}//{}///credentials.json",
-        world.base.display(),
+        targets.base.display(),
         relative.display()
     );
     for (name, alias) in [
@@ -377,22 +540,22 @@ fn every_grant_reaches_only_what_its_rules_allow_and_never_the_protected_paths()
         (
             "through /proc/self/root",
             Path::new("/proc/self/root")
-                .join(world.root.strip_prefix("/").unwrap())
+                .join(targets.root.strip_prefix("/").unwrap())
                 .join("credentials.json"),
         ),
     ] {
         probes.push((name, format!("cat {}", quoted(&alias)), Fails));
     }
-    world.probe(&mut case, &read_write(p), p, &probes);
+    runner.probe(case, &read_write(p), p, &probes);
     assert!(!outside.exists(), "{} was written", outside.display());
     assert!(p.join(".git/config").is_file() && !p.join("g").exists());
-    assert_eq!(fs::metadata(&world.tetral).unwrap().ino(), tetral_inode);
+    assert_eq!(fs::metadata(&targets.tetral).unwrap().ino(), tetral_inode);
 
     // A missing top-level .git stays uncreatable, and the isolation leaves no
     // metadata name behind.
-    let q = &world.bare;
-    world.probe(
-        &mut case,
+    let q = &targets.bare;
+    runner.probe(
+        case,
         &read_write(q),
         q,
         &[
@@ -417,7 +580,7 @@ fn every_grant_reaches_only_what_its_rules_allow_and_never_the_protected_paths()
     }
     case.observe("after the commands under <q> read_write: no <q>/.git, .agents, .codex or .aws");
 
-    let descriptors = world.run(
+    let descriptors = runner.run(
         &read_write(p),
         p,
         &[
@@ -439,12 +602,14 @@ fn every_grant_reaches_only_what_its_rules_allow_and_never_the_protected_paths()
         format!("printf x >> {}", quoted(&p.join(".git/config"))),
         Succeeds,
     )];
-    probes.extend(protected_probes(&world));
-    world.probe(&mut case, &everything, p, &probes);
-    assert_eq!(fs::metadata(&world.tetral).unwrap().ino(), tetral_inode);
+    probes.extend(protected_probes(&targets));
+    runner.probe(case, &everything, p, &probes);
+    assert_eq!(fs::metadata(&targets.tetral).unwrap().ino(), tetral_inode);
 
-    let nothing = policy(json!([]), "direct");
-    let shell = world.run(
+    // Under `disabled` the test build passes the launcher entry no seam
+    // variable, which it could not use with nothing readable.
+    let nothing = policy(json!([]), "disabled");
+    let shell = runner.run(
         &nothing,
         p,
         &["/bin/sh", "-c", &format!("cat {}", quoted(&p.join("a")))],
@@ -464,8 +629,8 @@ fn every_grant_reaches_only_what_its_rules_allow_and_never_the_protected_paths()
         ]),
         "direct",
     );
-    world.probe(
-        &mut case,
+    runner.probe(
+        case,
         &denied_inside,
         p,
         &[(
@@ -481,11 +646,20 @@ fn a_missing_deny_path_under_a_directory_of_another_user_stays_uncreatable_and_t
     let mut case = tetral_tests::record!().case(
         "a missing deny path under a directory of another user stays uncreatable and the command runs",
     );
+    a_missing_deny_path_stays_uncreatable(&mut case, &World::new());
+}
+
+/// TE-20's probe of a deny rule for a path below a missing `/<m>`.
+fn a_missing_deny_path_stays_uncreatable(case: &mut Case, runner: &impl Runner) {
     if !case.runs_as_non_root("root may create entries in /") {
         return;
     }
-    let world = World::new();
-    let missing = PathBuf::from(format!("/tetral-isolation-missing-{}", std::process::id()));
+    let targets = runner.targets();
+    let missing = PathBuf::from(format!(
+        "/tetral-isolation-missing-{}-{}",
+        std::process::id(),
+        targets.label
+    ));
     assert!(!missing.exists());
     let denied_missing = policy(
         json!([
@@ -494,10 +668,10 @@ fn a_missing_deny_path_under_a_directory_of_another_user_stays_uncreatable_and_t
         ]),
         "direct",
     );
-    world.probe(
-        &mut case,
+    runner.probe(
+        case,
         &denied_missing,
-        &world.project,
+        &targets.project,
         &[("mkdir /<m>", format!("mkdir {}", quoted(&missing)), Fails)],
     );
     assert!(!missing.exists(), "{} exists", missing.display());
@@ -508,8 +682,14 @@ fn a_rule_for_a_regular_file_and_a_deny_path_under_one_leave_the_command_running
     let mut case = tetral_tests::record!().case(
         "a read_write rule for a regular file, and a deny path under a regular file, in a writable project",
     );
-    let world = World::new();
-    let p = &world.project;
+    regular_file_rules_leave_the_command_running(&mut case, &World::new());
+}
+
+/// TE-20's probes of a `read_write` rule for a regular file and of a deny
+/// rule below one.
+fn regular_file_rules_leave_the_command_running(case: &mut Case, runner: &impl Runner) {
+    let targets = runner.targets();
+    let p = &targets.project;
     let f = p.join("f");
     fs::write(&f, "x\n").unwrap();
     let file_rule = policy(
@@ -520,8 +700,8 @@ fn a_rule_for_a_regular_file_and_a_deny_path_under_one_leave_the_command_running
         ]),
         "direct",
     );
-    world.probe(
-        &mut case,
+    runner.probe(
+        case,
         &file_rule,
         p,
         &[(
@@ -539,7 +719,7 @@ fn a_rule_for_a_regular_file_and_a_deny_path_under_one_leave_the_command_running
         ]),
         "direct",
     );
-    let shown = world.run(
+    let shown = runner.run(
         &under_file,
         p,
         &["/bin/sh", "-c", &format!("cat {}", quoted(&f))],
@@ -550,6 +730,186 @@ fn a_rule_for_a_regular_file_and_a_deny_path_under_one_leave_the_command_running
         "{shown}"
     );
     case.observe("f ended with y; under <p>/f/x deny, cat <p>/f ran and printed f");
+}
+
+#[test]
+fn the_probes_run_again_as_calls_of_an_app_server_against_its_own_paths() {
+    let _socket_dir = socket_directory::shared();
+    let mut case = tetral_tests::record!().case(
+        "TE-20's probes as exec_command calls of an App Server started from <p>/bin/tetral, and those that read or write one file as view_image and edit calls, against its own state root, control socket and task directories",
+    );
+    let served = Served::start(&mut case);
+    grants_reach_only_what_their_rules_allow(&mut case, &served);
+    regular_file_rules_leave_the_command_running(&mut case, &served);
+    file_probes(&mut case, &served);
+}
+
+#[test]
+fn a_missing_deny_path_stays_uncreatable_as_an_exec_command_call() {
+    let _socket_dir = socket_directory::shared();
+    let mut case = tetral_tests::record!().case(
+        "a missing deny path under a directory of another user, as an exec_command call of an App Server",
+    );
+    let served = Served::start(&mut case);
+    a_missing_deny_path_stays_uncreatable(&mut case, &served);
+}
+
+/// Whether a `view_image` call read its file: an image, or a file in which
+/// it found no image; not when the file could not be read.
+fn read_by_view_image(envelope: &Value) -> Expect {
+    if envelope["status"] == "success" {
+        return Succeeds;
+    }
+    match envelope["error"]["kind"].as_str() {
+        Some("unsupported_format") => Succeeds,
+        Some("not_found") => Fails,
+        _ => panic!("an outcome that tells nothing of the read: {envelope}"),
+    }
+}
+
+/// TE-20's probes that read or write one file, as `view_image` and `edit`
+/// calls of `served`.
+fn file_probes(case: &mut Case, served: &Served) {
+    let targets = served.targets();
+    let p = &targets.project;
+    let relative = targets.root.strip_prefix(&targets.base).unwrap();
+    let credentials = targets.root.join("credentials.json");
+    let protected = [
+        ("R/credentials.json", credentials.clone()),
+        (
+            "the second Session's drive file",
+            targets.root.join("sessions/S2/drives/d/f"),
+        ),
+        (
+            "the second Session's task log",
+            targets.root.join("sessions/S2/tasks/t/stdout.log"),
+        ),
+    ];
+    let mut reads = vec![("/etc/hostname", PathBuf::from("/etc/hostname"), Succeeds)];
+    reads.extend(
+        protected
+            .iter()
+            .map(|(name, path)| (*name, path.clone(), Fails)),
+    );
+    reads.extend([
+        (
+            "R/credentials.json through the link <p>/l",
+            p.join("l/credentials.json"),
+            Fails,
+        ),
+        (
+            "R/credentials.json through <p>/..",
+            p.join("..").join(relative).join("credentials.json"),
+            Fails,
+        ),
+        (
+            "R/credentials.json with repeated /",
+            PathBuf::from(format!(
+                "{}//{}///credentials.json",
+                targets.base.display(),
+                relative.display()
+            )),
+            Fails,
+        ),
+        (
+            "R/credentials.json through /proc/self/root",
+            Path::new("/proc/self/root").join(credentials.strip_prefix("/").unwrap()),
+            Fails,
+        ),
+    ]);
+    let shown = |envelope: &Value| {
+        json!([
+            envelope["status"],
+            envelope["error"]["kind"],
+            envelope["error"]["message"]
+        ])
+    };
+    let view = |case: &mut Case, policy: &Value, name: &str, path: &Path, expected: Expect| {
+        let envelope = served.file_tool("view_image", json!({"path": path}), policy);
+        case.observe(format!(
+            "rules {}: view_image {name}: {}",
+            policy["filesystem"]["rules"],
+            shown(&envelope)
+        ));
+        assert_eq!(
+            read_by_view_image(&envelope),
+            expected,
+            "view_image {name}: {envelope}"
+        );
+    };
+    let edit =
+        |case: &mut Case, policy: &Value, name: &str, path: &Path, old: &str, expected: Expect| {
+            let before = fs::read(path).unwrap();
+            let envelope = served.file_tool(
+                "edit",
+                json!({"path": path, "old_string": old, "new_string": "edited"}),
+                policy,
+            );
+            case.observe(format!(
+                "rules {}: edit {name}: {}",
+                policy["filesystem"]["rules"],
+                shown(&envelope)
+            ));
+            let actual = if envelope["status"] == "success" {
+                Succeeds
+            } else {
+                Fails
+            };
+            assert_eq!(actual, expected, "edit {name}: {envelope}");
+            if expected == Fails {
+                assert_eq!(fs::read(path).unwrap(), before, "edit {name} changed it");
+            }
+        };
+
+    let grant = read_write(p);
+    for (name, path, expected) in &reads {
+        view(case, &grant, name, path, *expected);
+    }
+    let e = p.join("e");
+    fs::write(&e, "old").unwrap();
+    edit(case, &grant, "<p>/e", &e, "old", Succeeds);
+    assert_eq!(fs::read_to_string(&e).unwrap(), "edited");
+    // Outside every grant, and removed even when an edit wrongly writes it.
+    let outside = tempfile::TempPath::try_from_path(format!(
+        "/tmp/tetral-isolation-probe-{}-edit",
+        std::process::id()
+    ))
+    .unwrap();
+    fs::write(&outside, "o").unwrap();
+    edit(case, &grant, "a file in /tmp", &outside, "o", Fails);
+    let config = p.join(".git/config");
+    edit(case, &grant, "<p>/.git/config", &config, "[core]", Fails);
+
+    let everything = policy(json!([{"path": "/", "access": "read_write"}]), "direct");
+    edit(
+        case,
+        &everything,
+        "<p>/.git/config",
+        &config,
+        "[core]",
+        Succeeds,
+    );
+    for (name, path) in &protected {
+        view(case, &everything, name, path, Fails);
+    }
+
+    let g = p.join("g");
+    fs::write(&g, "x\n").unwrap();
+    let under_file = policy(
+        json!([
+            {"path": "/", "access": "read"},
+            {"path": p, "access": "read_write"},
+            {"path": g.join("x"), "access": "deny"},
+        ]),
+        "direct",
+    );
+    view(
+        case,
+        &under_file,
+        "<p>/g under a deny rule for <p>/g/x",
+        &g,
+        Succeeds,
+    );
 }
 
 #[test]

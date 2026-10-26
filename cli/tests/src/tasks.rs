@@ -140,8 +140,9 @@ impl TaskMachine {
 
     fn prepared(engine: ReferenceServer, machine: Machine, directory: &Path) -> TaskMachine {
         machine.wait_for("online");
+        // A test may have put files there before the App Server started.
         let project = directory.join("project");
-        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
         let tasks = TaskMachine {
             engine,
             root: machine.root.canonicalize().unwrap(),

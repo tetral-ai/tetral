@@ -206,9 +206,11 @@ temporary directories. No workspace crate depends on this package.
   against the credential, the control socket, a second Session's files, the
   `tetral` executable, `.git` and the metadata names, symbolic links, path
   aliases and inherited descriptors, a missing deny path in a directory of
-  another user, a rule for a regular file and a deny path under one, and
-  the cua-driver that `config.toml` records;
+  another user, a rule for a regular file and a deny path under one, each
+  of them again as `exec_command` calls of an App Server against its own
+  paths and, where a probe reads or writes one file, as `view_image` and
+  `edit` calls, and the cua-driver that `config.toml` records;
   `disabled` and `direct` against TCP, UDP and HTTP on the loopback and the
-  LAN address; each unusable `bwrap`,
-  one that the test user could have planted among them, rejected before any
-  process starts; and the bundled `bwrap` with its digest.
+  LAN address; each unusable
+  `bwrap`, one that the test user could have planted among them, rejected
+  before any process starts; and the bundled `bwrap` with its digest.
