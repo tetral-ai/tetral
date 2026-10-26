@@ -92,11 +92,12 @@ type instructionSpec struct {
 	Extra map[string]json.RawMessage `json:"extra"`
 }
 
-// issue issues a Session instruction on conn. The payload is sent as
-// given, so a test can issue one that fails its schema; its identities are
-// read only to accept the reports that answer it. Unless bypass is set the
-// instruction is queued while the connection's ready is not accepted, and
-// beyond the staging limit until the first Session report is stored.
+// issue issues a Session instruction on conn. The payload is sent as the
+// compact JSON of what is given, so a test can issue one that fails its
+// schema; its identities are read only to accept the reports that answer
+// it. Unless bypass is set the instruction is queued while the connection's
+// ready is not accepted, and beyond the staging limit until the first
+// Session report is stored.
 func (server *Server) issue(conn *connection, spec instructionSpec, bypass bool) (*issuedInstruction, error) {
 	if spec.Type != "session.prepare" && spec.Type != "session.close" && !slices.Contains(toolInstructionTypes, spec.Type) {
 		return nil, errUnsupported(spec.Type)
