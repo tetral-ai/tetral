@@ -131,8 +131,9 @@ temporary directories. No workspace crate depends on this package.
   with its own report or protocol error; with a prepared Session, an
   instruction delivered again or its payload issued again, a `task_id`
   issued again with other content, tasks staged behind a withheld
-  `prepared` ACK, a cancel and a close while a task's availability check is
-  held, the replay-ledger entries of tasks, kept until a resume
+  `prepared` ACK and the controls they held when their start fails, a
+  cancel and a close while a task's availability check is held, the
+  replay-ledger entries of tasks, kept until a resume
   or freed by each ACK, and, with only the ledger's reserve free, new tasks
   refused while a running task's controls, its binding's close and its
   report are recorded.

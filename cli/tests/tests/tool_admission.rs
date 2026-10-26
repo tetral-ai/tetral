@@ -5,8 +5,9 @@
 //! it, 65,536 bytes for every type without a larger one. With a prepared
 //! Session running `exec_command` tasks: an instruction delivered again or
 //! its payload issued again, a `task_id` issued again with other content,
-//! tasks staged behind a withheld `prepared` ACK, a cancel and a close while
-//! a task's availability check is held, the replay ledger's
+//! tasks staged behind a withheld `prepared` ACK and the controls they held
+//! when their start fails, a cancel and a close while a task's availability
+//! check is held, the replay ledger's
 //! entries of tasks, kept until a resume or freed by each ACK, and, with
 //! only the ledger's reserve free, new tasks refused while a running task's
 //! controls, its binding's close and its report are recorded. The seam
@@ -583,6 +584,59 @@ fn a_task_staged_behind_a_withheld_prepared_ack_starts_only_after_it_and_never_o
     handled(&tasks, "sess_closed", "bind_closed");
     assert_eq!(seams.count(SPAWN), spawns + 2);
     case.observe("no process before the released ACK, then one; the cancelled task never launched, a later task of its binding did; the closed binding's task never launched and reported cancelled at the close");
+}
+
+#[test]
+fn a_read_and_a_write_held_by_a_staged_task_are_answered_when_its_start_fails() {
+    let _socket_dir = socket_directory::shared();
+    let mut case = tetral_tests::record!().case(
+        "a staged exec_command whose env holds U+0000, with a read and a write sent while it is staged, then the prepared ACK",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    prepare_pending(&tasks, "sess_held", "bind_held");
+    tasks.execute_with(
+        "sess_held",
+        "bind_held",
+        "task_held",
+        json!({"cmd": "true", "env": {"BROKEN": "a\u{0}b"}}),
+        project_policy(&tasks.project, "disabled"),
+        None,
+    );
+    let control = |members: Value| {
+        let mut payload = json!({
+            "session_id": "sess_held", "binding_id": "bind_held",
+            "tool_use_event_id": format!("call_{}", members["write_seq"]), "task_id": "task_held",
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(members.as_object().cloned().unwrap());
+        let issued = tasks.engine.control(
+            "stdin",
+            json!({"instance_id": INSTANCE, "payload": payload}),
+        );
+        issued["message_id"].as_str().unwrap().to_owned()
+    };
+    let read = control(json!({"chars": "", "wait_ms": 5_000}));
+    let write = control(json!({"chars": "x", "write_seq": 1}));
+    handled(&tasks, "sess_held", "bind_held");
+    release_answers(&tasks);
+    let failed = tasks.terminal("task_held");
+    assert_eq!(failed["result"]["error"]["kind"], "exec_spawn_failed");
+    let read = tasks.reply(&read);
+    assert_eq!(
+        json!([
+            read["error"],
+            read["result"]["status"],
+            read["result"]["result"]["exit_code"]
+        ]),
+        json!([null, "success", null]),
+        "{read:#}"
+    );
+    let write = tasks.reply(&write);
+    assert_eq!(write["error"]["code"], "stdin_closed", "{write:#}");
+    case.observe("the start failed exec_spawn_failed; the held read was answered as of the ended task and the held write stdin_closed");
 }
 
 #[test]

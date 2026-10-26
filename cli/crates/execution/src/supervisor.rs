@@ -429,23 +429,43 @@ impl Supervisor {
             Staged::Cancelled => None,
             Staged::Started(checked) => Some(checked),
         };
-        for control in std::mem::take(&mut self.held) {
-            self.stdin(control);
-        }
+        // The held `tool.stdin` are handled once the start is decided: with
+        // the launched task, or as of a task that has ended.
         match checked {
-            None => {}
-            Some(Err(rejection)) => self.reject(rejection),
+            None => self.release_held(),
+            Some(Err(rejection)) => {
+                self.reject(rejection);
+                self.release_held();
+            }
             Some(Ok(available)) => {
                 let work = Work::of(&self.spec.tool, &self.spec.cwd);
                 match self.launch(&available, work).await {
-                    Err(Start::Rejected(rejection)) => self.reject(rejection),
-                    Err(Start::Failed(error)) => self.report_start_failure(error),
-                    Ok((Work::Exec(call), status)) => self.running(call, status).await,
-                    Ok((Work::File(call), status)) => self.file_running(call, status).await,
+                    Err(Start::Rejected(rejection)) => {
+                        self.reject(rejection);
+                        self.release_held();
+                    }
+                    Err(Start::Failed(error)) => {
+                        self.report_start_failure(error);
+                        self.release_held();
+                    }
+                    Ok((Work::Exec(call), status)) => {
+                        self.release_held();
+                        self.running(call, status).await;
+                    }
+                    Ok((Work::File(call), status)) => {
+                        self.release_held();
+                        self.file_running(call, status).await;
+                    }
                 }
             }
         }
         self.settle().await;
+    }
+
+    fn release_held(&mut self) {
+        for control in std::mem::take(&mut self.held) {
+            self.stdin(control);
+        }
     }
 
     /// `staged`, then the availability check: the task's `tool.stdin` wait
