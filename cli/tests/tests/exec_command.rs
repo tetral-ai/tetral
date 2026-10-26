@@ -104,27 +104,27 @@ fn a_command_runs_in_its_directory_with_the_cleaned_environment_and_separate_str
     let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
     let mut case = record
-        .case("a relative cwd and an env that sets FOO, PAGER, TERM, NO_COLOR and a TETRAL_ name");
+        .case("a relative cwd and an env that sets FOO, PAGER, TERM, NO_COLOR, TETRAL_HOME and another TETRAL_ name");
     let directory = tempfile::tempdir().unwrap();
     let tasks = TaskMachine::start(&mut case, directory.path());
     fs::create_dir(tasks.project.join("work")).unwrap();
     tasks.execute(
         "task_env",
         json!({
-            "cmd": r#"printf '%s:%s:%s:%s:%s:%s:%s:%s' "$FOO" "$TERM" "$NO_COLOR" "$PAGER" "$GIT_PAGER" "${TETRAL_HOME-unset}" "${TETRAL_EXTRA-unset}" "$(pwd)"; printf err >&2"#,
+            "cmd": r#"printf '%s:%s:%s:%s:%s:[%s]:%s' "$FOO" "$TERM" "$NO_COLOR" "$PAGER" "$GIT_PAGER" "$(env | sed -n 's/^\(TETRAL_[^=]*\)=.*/\1/p' | tr '\n' ' ')" "$(pwd)"; printf err >&2"#,
             "cwd": "work",
-            "env": {"FOO": "bar", "PAGER": "less", "TERM": "xterm", "NO_COLOR": "0", "TETRAL_EXTRA": "x"},
+            "env": {"FOO": "bar", "PAGER": "less", "TERM": "xterm", "NO_COLOR": "0", "TETRAL_HOME": "/elsewhere", "TETRAL_EXTRA": "x"},
         }),
         policy(&tasks.project, "disabled"),
     );
     let terminal = tasks.terminal("task_env");
     let mut expected = exited(&format!(
-        "bar:dumb:1:cat:cat:unset:unset:{}",
+        "bar:dumb:1:cat:cat:[]:{}",
         tasks.project.join("work").display()
     ));
     expected["stderr"] = json!("err");
     assert_eq!(summary(&terminal), expected, "{terminal:#}");
-    case.observe("FOO from env; TERM, NO_COLOR, PAGER and GIT_PAGER fixed; the App Server's TETRAL_HOME and the call's TETRAL_EXTRA absent; pwd the joined directory; stderr apart");
+    case.observe("FOO from env; TERM, NO_COLOR, PAGER and GIT_PAGER fixed; no name beginning with TETRAL_ in the command's environment, neither the App Server's nor the call's TETRAL_HOME and TETRAL_EXTRA; pwd the joined directory; stderr apart");
 }
 
 #[test]
