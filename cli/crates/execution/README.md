@@ -143,7 +143,13 @@ which owns that task's process tree; the translation of a call's
   more, and never cut or split (`child/view_image.rs`).
 - A command's environment is the App Server's without any `TETRAL_` name,
   then the call's `env`, then entries that `env` cannot override and
-  `TMPDIR`; a file tool's child gets the same without `env` (`env`).
+  `TMPDIR`; a file tool's child gets the same without `env`. An inherited
+  entry whose name or value is not UTF-8 is left out, since Codex's command
+  environment holds UTF-8 strings (`env`). Under `test-seams` only, the
+  child of a task whose network is not `disabled` also gets
+  `TETRAL_TEST_SEAMS`, which the launcher entry removes before the exec;
+  the seccomp filter of `disabled` refuses its connection to the harness
+  (`supervisor`, `child/exec.rs`).
 - A call's waits take their defaults and clamps from `exec::ExecCall`. On
   Linux an exit status from 129 to 192 is a death by signal `status - 128`,
   which the sandbox's stages report that way (`exec::ExitFacts::observed`).
