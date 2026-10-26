@@ -1035,6 +1035,19 @@ fn with_only_the_ledgers_reserve_free_new_tasks_are_refused_and_a_running_tasks_
         let report = answer_to(&tasks, message_id);
         assert_eq!(json!([report["phase"], report["error"]["code"]]), exhausted);
     }
+    // Both rejections come at one time of the controlled clock, so they
+    // open one episode of the task pressure point.
+    let rejecting = || -> Vec<Value> {
+        tasks
+            .records("pressure.rejecting_started")
+            .into_iter()
+            .filter(|record| record["pressure.point"] == "tetral_tasks")
+            .collect()
+    };
+    wait_until(
+        "a pressure.rejecting_started record of tetral_tasks",
+        || !rejecting().is_empty(),
+    );
     let read = tasks.stdin("task_running", json!({"chars": "", "wait_ms": 0}));
     assert_eq!(tasks.reply(&read)["result"]["status"], "running");
     let cancel = tasks.cancel("task_running", json!({}));
@@ -1068,5 +1081,8 @@ fn with_only_the_ledgers_reserve_free_new_tasks_are_refused_and_a_running_tasks_
         json!(["rejected", "binding_unavailable"])
     );
     assert_eq!(seams.count(SPAWN), spawns);
-    case.observe("the staged and the new tool.execute each resource_exhausted; the read replied running, the cancel cancelled, and the terminal report said cancelled, terminated; nothing launched after the ACK; once the ACKs were in, a new task of the closed binding was binding_unavailable");
+    let started = rejecting();
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["pressure.cause"], "resource_exhausted");
+    case.observe("the staged and the new tool.execute each resource_exhausted, recorded as one pressure.rejecting_started of tetral_tasks with cause resource_exhausted; the read replied running, the cancel cancelled, and the terminal report said cancelled, terminated; nothing launched after the ACK; once the ACKs were in, a new task of the closed binding was binding_unavailable");
 }
