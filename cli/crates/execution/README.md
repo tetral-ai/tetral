@@ -222,3 +222,15 @@ which owns that task's process tree; the translation of a call's
 - `isolation/harness.rs`: the test entry `tetral-isolation-harness`, under the
   feature `test-seams`: one command through admission, the check and the
   launch.
+- Tests: `tests/capture.rs`, the capture buffer's retention, counters,
+  snapshot budgets, UTF-8 boundaries and windows; `tests/exec_call.rs`, an
+  `exec_command` call's defaults and clamps and the exit facts of a wait
+  status; `tests/file_tool_results.rs`, the result a file tool's supervisor
+  reads from a real child, up to 14,680,064 bytes, and each `helper_failure`;
+  `tests/policy_table.rs`, each policy's rejection code and each profile's
+  entries with Codex's resolution of them; `tests/report_bounds.rs`, a
+  process result fitted to the ordinary limits and an error's bounds;
+  `tests/visible_limits.rs`, an instruction's `limits` against each
+  stream's budget. Unit tests: `isolation/mod.rs`, the inherited
+  descriptors at exec with and without `close_range`; `child/edit.rs`, the
+  bounded read of a file.
