@@ -619,7 +619,7 @@ fn a_terminal_reports_metrics_measured_between_its_phases_on_the_controlled_cloc
     let _socket_dir = socket_directory::shared();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "sleep 1 while the clock moves 1,000 ms, and true staged behind a prepared ACK withheld for 500 ms",
+        "sleep 1 while the clock moves 1,000 ms before its exit is observed, and true staged behind a prepared ACK withheld for 500 ms",
     );
     let directory = tempfile::tempdir().unwrap();
     let tasks = TaskMachine::start(&mut case, directory.path());
@@ -633,6 +633,9 @@ fn a_terminal_reports_metrics_measured_between_its_phases_on_the_controlled_cloc
         metrics["wall_time_ms"].as_i64().unwrap() >= phases
     };
 
+    // The exit is observed only after the clock has moved, however long
+    // the real second of the sleep takes.
+    machine.seams.hold(EXIT_OBSERVED);
     let checked = machine.seams.count(WAIT_CHECKED);
     tasks.execute(
         "task_run",
@@ -641,6 +644,7 @@ fn a_terminal_reports_metrics_measured_between_its_phases_on_the_controlled_cloc
     );
     tasks.wait_for_start(checked);
     machine.seams.advance(millis(1_000));
+    machine.seams.release(EXIT_OBSERVED);
     let run = metrics(&tasks.terminal("task_run"));
     assert!(run["run_ms"].as_i64().unwrap() >= 1_000, "{run}");
     assert!(within_wall(&run), "{run}");
