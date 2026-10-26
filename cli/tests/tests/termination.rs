@@ -749,11 +749,13 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
         "a record of another boot naming a running process started outside any task, written with a task directory of its Session before the App Server starts",
     );
     let mut tasks = TaskMachine::start(&mut case, &directory.path().join("other_boot"));
-    let mut outside = std::process::Command::new("sleep")
-        .arg("1231")
-        .spawn()
-        .unwrap();
-    let pid = outside.id();
+    let mut outside = Outside(
+        std::process::Command::new("sleep")
+            .arg("1231")
+            .spawn()
+            .unwrap(),
+    );
+    let pid = outside.0.id();
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
     let start_time: u64 = stat
         .rsplit_once(')')
@@ -799,10 +801,19 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
         prepared(&tasks, SESSION, "bind_other_boot"),
         json!(["prepared", null])
     );
-    assert!(outside.try_wait().unwrap().is_none());
-    outside.kill().unwrap();
-    outside.wait().unwrap();
+    assert!(outside.0.try_wait().unwrap().is_none());
     case.observe("the record was confirmed at the start: last_error null, the record and the Session's task directory gone, the Session prepared, and the named process still running");
+}
+
+/// A process that a case starts outside the App Server, killed and reaped
+/// when the case ends, a failed assertion included.
+struct Outside(std::process::Child);
+
+impl Drop for Outside {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 fn listing(directory: &Path) -> Vec<std::path::PathBuf> {
