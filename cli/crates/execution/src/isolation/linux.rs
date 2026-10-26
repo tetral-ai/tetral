@@ -458,3 +458,72 @@ async fn read_bounded(stream: impl AsyncRead + Unpin, limit: usize) -> String {
         .await;
     String::from_utf8_lossy(&bytes).into_owned()
 }
+
+/// The bytes of one read of `/proc/self/fd`.
+const DESCRIPTOR_LIST_READ_BYTES: usize = 4_096;
+
+/// Marks close-on-exec every descriptor from `first` up that `/proc/self/fd`
+/// lists. It runs between fork and exec, so it reads the directory with
+/// `getdents64` into a buffer on the stack and allocates nothing; a failure
+/// leaves the remaining descriptors as they are.
+pub(super) fn mark_listed_close_on_exec(first: std::os::fd::RawFd) {
+    // SAFETY: the path is NUL-terminated, and open allocates nothing.
+    let directory = unsafe {
+        libc::open(
+            c"/proc/self/fd".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if directory == -1 {
+        return;
+    }
+    let mut buffer = [0_u8; DESCRIPTOR_LIST_READ_BYTES];
+    'read: loop {
+        // SAFETY: getdents64 writes at most `buffer.len()` bytes into it.
+        let count = unsafe {
+            libc::syscall(
+                libc::SYS_getdents64,
+                directory,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+            )
+        };
+        if count == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        let Ok(count) = usize::try_from(count) else {
+            break;
+        };
+        if count == 0 {
+            break;
+        }
+        let mut entries = &buffer[..count];
+        // Each entry: an inode and an offset of 8 bytes each, its length in
+        // 2 bytes, its type in 1, then its NUL-terminated name.
+        while !entries.is_empty() {
+            let length = match entries.get(16..18) {
+                Some(&[low, high]) => usize::from(u16::from_ne_bytes([low, high])),
+                _ => break 'read,
+            };
+            if length < 20 || length > entries.len() {
+                break 'read;
+            }
+            if let Ok(name) = std::ffi::CStr::from_bytes_until_nul(&entries[19..length])
+                && let Ok(name) = name.to_str()
+                && let Ok(descriptor) = name.parse::<std::os::fd::RawFd>()
+                && descriptor >= first
+            {
+                // SAFETY: fcntl changes only this descriptor's flags.
+                unsafe {
+                    let flags = libc::fcntl(descriptor, libc::F_GETFD);
+                    if flags != -1 && flags & libc::FD_CLOEXEC == 0 {
+                        libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+                    }
+                }
+            }
+            entries = &entries[length..];
+        }
+    }
+    // SAFETY: closes the descriptor that this function opened.
+    unsafe { libc::close(directory) };
+}

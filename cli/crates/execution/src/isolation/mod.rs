@@ -283,22 +283,122 @@ fn prepare_child(passed: Option<RawFd>, parent: libc::pid_t) -> io::Result<()> {
     Ok(())
 }
 
-/// Marks every descriptor from `first` up close-on-exec, where the system
-/// can, rather than closing it: the spawn still reports a failed exec on its
-/// own close-on-exec pipe. One left unmarked is close-on-exec already in a
-/// process that opens files only with that flag.
+/// Marks every descriptor from `first` up close-on-exec rather than closing
+/// it: the spawn still reports a failed exec on its own close-on-exec pipe.
+/// Where `close_range` is refused, by a kernel before 5.11 or a seccomp
+/// filter, each descriptor that `/proc/self/fd` lists is marked instead
+/// (`linux::mark_listed_close_on_exec`), as Codex's spawn does.
 fn close_on_exec_from(first: RawFd) {
     #[cfg(target_os = "linux")]
-    // SAFETY: close_range takes integers only and changes only this child's
-    // descriptors.
-    unsafe {
-        libc::syscall(
-            libc::SYS_close_range,
-            first as libc::c_uint,
-            libc::c_uint::MAX,
-            libc::CLOSE_RANGE_CLOEXEC,
-        );
+    {
+        // SAFETY: close_range takes integers only and changes only this
+        // child's descriptors.
+        let marked = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                first as libc::c_uint,
+                libc::c_uint::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            )
+        } == 0;
+        if !marked {
+            linux::mark_listed_close_on_exec(first);
+        }
     }
     #[cfg(not(target_os = "linux"))]
     let _ = first;
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    use super::close_on_exec_from;
+
+    /// Makes `close_range` fail with `EPERM` in this process, through a
+    /// seccomp filter; it runs between fork and exec and allocates nothing.
+    fn refuse_close_range() -> std::io::Result<()> {
+        let mut filter = [
+            libc::sock_filter {
+                code: (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+                jt: 0,
+                jf: 0,
+                k: std::mem::offset_of!(libc::seccomp_data, nr) as u32,
+            },
+            libc::sock_filter {
+                code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+                jt: 0,
+                jf: 1,
+                k: libc::SYS_close_range as u32,
+            },
+            libc::sock_filter {
+                code: (libc::BPF_RET | libc::BPF_K) as u16,
+                jt: 0,
+                jf: 0,
+                k: libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
+            },
+            libc::sock_filter {
+                code: (libc::BPF_RET | libc::BPF_K) as u16,
+                jt: 0,
+                jf: 0,
+                k: libc::SECCOMP_RET_ALLOW,
+            },
+        ];
+        let program = libc::sock_fprog {
+            len: filter.len() as u16,
+            filter: filter.as_mut_ptr(),
+        };
+        // SAFETY: the kernel copies the filter, which lives on this stack,
+        // before prctl returns.
+        let installed = unsafe {
+            libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0
+                && libc::prctl(
+                    libc::PR_SET_SECCOMP,
+                    libc::SECCOMP_MODE_FILTER,
+                    &raw const program,
+                    0,
+                    0,
+                ) == 0
+        };
+        if installed {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[test]
+    fn an_inherited_descriptor_is_closed_at_exec_with_close_range_and_without_it() {
+        let (pipe, _writer) = std::io::pipe().unwrap();
+        // An inheritable copy above every descriptor of the test runner.
+        // SAFETY: F_DUPFD makes a new descriptor and replaces none.
+        let inherited = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_DUPFD, 200) };
+        assert!(inherited >= 200, "{}", std::io::Error::last_os_error());
+        let seen = |prepare: Option<bool>| {
+            let mut command = Command::new("/bin/sh");
+            command.arg("-c").arg(format!(
+                "[ -e /proc/self/fd/{inherited} ] && echo inherited || echo closed"
+            ));
+            if let Some(refused) = prepare {
+                // SAFETY: the closure makes only system calls.
+                unsafe {
+                    command.pre_exec(move || {
+                        if refused {
+                            refuse_close_range()?;
+                        }
+                        close_on_exec_from(3);
+                        Ok(())
+                    });
+                }
+            }
+            String::from_utf8(command.output().unwrap().stdout).unwrap()
+        };
+        assert_eq!(seen(None), "inherited\n");
+        assert_eq!(seen(Some(false)), "closed\n");
+        assert_eq!(seen(Some(true)), "closed\n");
+        // SAFETY: closes the copy this test made.
+        unsafe { libc::close(inherited) };
+    }
 }
