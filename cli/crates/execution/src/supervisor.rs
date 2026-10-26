@@ -303,6 +303,7 @@ pub fn spawn(spec: TaskSpec, tool: ToolInput, context: Context) -> SupervisorMai
         stopped: false,
         shutting_down: false,
         leader: None,
+        _namespace: None,
         gone: false,
         checked: Duration::ZERO,
     };
@@ -362,6 +363,10 @@ struct Supervisor {
     shutting_down: bool,
     /// The task's first process inside its sandbox, once seen.
     leader: Option<Leader>,
+    /// The leader's PID namespace, held open so that the inode that the
+    /// gone check and the binding owner look for is the task's alone
+    /// ([`process::hold_namespace`]).
+    _namespace: Option<std::fs::File>,
     /// Whether the task's processes are confirmed gone.
     gone: bool,
     /// When they were last checked.
@@ -661,6 +666,7 @@ impl Supervisor {
             return;
         };
         self.leader = Some(leader);
+        self._namespace = process::hold_namespace(leader.pid, leader.namespace);
         if let Some(boot_id) = &self.context.boot_id {
             let record =
                 cleanup::Record::new(self.spec.correlation.session_id.as_str(), boot_id, leader);

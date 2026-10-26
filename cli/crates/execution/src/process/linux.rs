@@ -4,6 +4,8 @@
 //! the boot ID of the running system.
 
 use std::collections::VecDeque;
+use std::fs::File;
+use std::os::unix::fs::MetadataExt;
 
 use super::Leader;
 
@@ -45,6 +47,15 @@ pub fn namespace_empty(namespace: u64) -> bool {
         .flatten()
         .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
         .any(|process| self::namespace(process) == Some(namespace))
+}
+
+/// The PID namespace of `process` held open, when its inode is
+/// `namespace`. Once a namespace is freed, the kernel gives its inode to the
+/// next namespace created; an open namespace is not freed, so while the file
+/// is open the inode names no other namespace.
+pub fn hold_namespace(process: u32, namespace: u64) -> Option<File> {
+    let file = File::open(format!("/proc/{process}/ns/pid")).ok()?;
+    (file.metadata().ok()?.ino() == namespace).then_some(file)
 }
 
 /// The inode of the PID namespace of `process`, from `/proc/<pid>/ns/pid`,

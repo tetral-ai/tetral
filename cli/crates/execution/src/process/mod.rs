@@ -1,13 +1,17 @@
 //! A task's processes as the operating system shows them. On Linux they
 //! are the processes of the task's PID namespace, whose first process the
 //! task's record names by its ID and start time, so that no later process
-//! with a reused ID is taken for it. Where no isolation runs a task, there
-//! are none.
+//! with a reused ID is taken for it, and whose namespace is held open while
+//! the task's supervisor runs, so that no later namespace with a reused
+//! inode is taken for it (`hold_namespace`). Where no isolation runs a task,
+//! there are none.
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-pub use linux::{boot_id, leader, namespace, namespace_empty, namespace_leader, start_time};
+pub use linux::{
+    boot_id, hold_namespace, leader, namespace, namespace_empty, namespace_leader, start_time,
+};
 
 /// The first of a task's processes inside its sandbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +43,10 @@ mod none {
         None
     }
 
+    pub fn hold_namespace(_process: u32, _namespace: u64) -> Option<std::fs::File> {
+        None
+    }
+
     pub fn start_time(_process: u32) -> Option<u64> {
         None
     }
@@ -48,4 +56,6 @@ mod none {
     }
 }
 #[cfg(not(target_os = "linux"))]
-pub use none::{boot_id, leader, namespace, namespace_empty, namespace_leader, start_time};
+pub use none::{
+    boot_id, hold_namespace, leader, namespace, namespace_empty, namespace_leader, start_time,
+};

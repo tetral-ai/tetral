@@ -171,8 +171,9 @@ which owns that task's process tree; the translation of a call's
   the supervisor finds the namespace's first process and writes
   `execution/<task name>.json` with the boot ID, that process's ID and start
   time and the namespace's inode, and reports the namespace to the binding
-  owner; confirmation deletes the record, and the task's files wait for it
-  (`process`, `cleanup::Record`, `supervisor`).
+  owner; it holds the namespace open while it runs, so that no later
+  namespace takes the inode. Confirmation deletes the record, and the task's
+  files wait for it (`process`, `cleanup::Record`, `supervisor`).
 - At its start an App Server reads the records an earlier one left: one of
   another boot is confirmed at once and signals nothing; otherwise the
   recorded process, the same ID with the same start time, gets SIGKILL, and
@@ -218,7 +219,8 @@ which owns that task's process tree; the translation of a call's
   child's stdin and stdout as the supervisor drives them.
 - `terminate.rs`: `Termination`, its `Steps` and `interrupt`.
 - `process/mod.rs`, `process/linux.rs`: a task's `Leader`, its PID
-  namespace and whether the namespace is empty, start times and the boot ID.
+  namespace, held open (`hold_namespace`), and whether the namespace is
+  empty, start times and the boot ID.
 - `cleanup.rs`: a task's `Record` and its path; `read`, `Check`, the records
   an earlier App Server left and their checks, and `Leftovers`, which
   Sessions they keep `cleanup_pending`.
