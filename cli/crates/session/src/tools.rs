@@ -577,18 +577,7 @@ fn validated(
         )) => (payload, value),
         _ => return Err(schema_failure(call)),
     };
-    let listed = shared.tools.capability.as_ref().is_some_and(|capability| {
-        capability
-            .tools
-            .iter()
-            .any(|tool| *tool == tool_of(&payload.tool))
-    });
-    if !listed {
-        return Err(rejected(
-            RejectionCode::InvalidInput,
-            "tool is not one that this CLI's ready lists",
-        ));
-    }
+    check_tool(shared, call, &payload.tool)?;
     let root = &shared.paths.canonical;
     let parent = store::task_parent(root);
     let inputs = TranslationInputs {
@@ -602,6 +591,36 @@ fn validated(
     let permissions = TaskPermissions::admit(value["payload"].get("sandbox_policy"), &inputs)
         .map_err(Body::Rejected)?;
     Ok((payload, permissions))
+}
+
+/// The rest of step 3 for a decoded `tool`: one that the ready lists, and for
+/// `exec_command` an `input.task_id`, when given, equal to the outer
+/// `task_id`.
+fn check_tool(shared: &Shared, call: &ToolCall, tool: &ToolInput) -> Result<(), Body> {
+    let listed = shared.tools.capability.as_ref().is_some_and(|capability| {
+        capability
+            .tools
+            .iter()
+            .any(|listed| *listed == tool_of(tool))
+    });
+    if !listed {
+        return Err(rejected(
+            RejectionCode::InvalidInput,
+            "tool is not one that this CLI's ready lists",
+        ));
+    }
+    if let ToolInput::ExecCommand(input) = tool
+        && input
+            .task_id
+            .value()
+            .is_some_and(|task_id| *task_id != call.task_id)
+    {
+        return Err(rejected(
+            RejectionCode::InvalidInput,
+            "input.task_id differs from the instruction's task_id",
+        ));
+    }
+    Ok(())
 }
 
 /// The rejection of a `tool.execute` that does not decode: `invalid_input`,

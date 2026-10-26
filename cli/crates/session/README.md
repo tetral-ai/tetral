@@ -28,7 +28,8 @@ that is no longer the binding's is discarded.
   report, its `terminal` or `rejected`, then ends it too, so that its
   replay-ledger entry goes with that report's ACK; another is
   `task_conflict`), the replay ledger's room, its schema, budgets and tool
-  against the ready's list, its policy, its binding. Step 3 judges
+  against the ready's list with an `exec_command`'s `input.task_id` equal to
+  the outer one, its policy, its binding. Step 3 judges
   everything but the policy, which step 4 judges by `execution::policy`,
   translated with the paths of a task name chosen just before it
   (`execution::store`); only a registered task keeps its name (`tools`).

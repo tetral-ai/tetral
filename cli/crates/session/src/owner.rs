@@ -553,24 +553,32 @@ mod tests {
         }
     }
 
-    /// The `task_id` of each `rejected` report submitted.
+    /// The `task_id` and code of each `rejected` report submitted.
     #[derive(Default)]
-    struct Rejections(Mutex<Vec<String>>);
+    struct Rejections(Mutex<Vec<(String, String)>>);
 
     impl Rejections {
         fn of(&self, task_id: &str) -> bool {
-            self.0.lock().unwrap().iter().any(|task| task == task_id)
+            self.code(task_id).is_some()
+        }
+
+        fn code(&self, task_id: &str) -> Option<String> {
+            let rejections = self.0.lock().unwrap();
+            let (_, code) = rejections.iter().find(|(task, _)| task == task_id)?;
+            Some(code.clone())
         }
     }
 
     impl ReportSink for Rejections {
         fn submit(&self, submission: Submission) -> ReportId {
             let bytes = (submission.build)(&id("conn_1"), &id("r1")).unwrap();
-            if let ToolStatus::Execution(ExecutionReport::Rejected { header, .. }) =
+            if let ToolStatus::Execution(ExecutionReport::Rejected { header, error }) =
                 protocol::decode::<ToolStatus>(&bytes).unwrap()
             {
                 let task_id = header.task_id.as_str().to_owned();
-                self.0.lock().unwrap().push(task_id);
+                let code = serde_json::to_value(error.code).unwrap();
+                let code = code.as_str().unwrap().to_owned();
+                self.0.lock().unwrap().push((task_id, code));
             }
             ReportId(0)
         }
@@ -730,8 +738,32 @@ mod tests {
         starts: usize,
     }
 
+    /// A policy that every admission step admits.
+    fn admitted_policy() -> serde_json::Value {
+        json!({
+            "schema_version": 1,
+            "filesystem": {"rules": [{"path": "/project", "access": "read_write"}]},
+            "network": {"mode": "disabled"},
+        })
+    }
+
     /// A `tool.execute` of `bind_1` that every other admission step admits.
     fn tool(task_id: &str) -> SessionMessage {
+        execute(
+            task_id,
+            "exec_command",
+            json!({"cmd": "true"}),
+            admitted_policy(),
+        )
+    }
+
+    /// A `tool.execute` of `bind_1` running `tool` with `input` under `policy`.
+    fn execute(
+        task_id: &str,
+        tool: &str,
+        input: serde_json::Value,
+        policy: serde_json::Value,
+    ) -> SessionMessage {
         let data = json!({
             "protocol_version": 1,
             "connection_id": "conn_1",
@@ -742,13 +774,9 @@ mod tests {
                 "binding_id": "bind_1",
                 "tool_use_event_id": format!("call_{task_id}"),
                 "task_id": task_id,
-                "tool": "exec_command",
-                "input": {"cmd": "true"},
-                "sandbox_policy": {
-                    "schema_version": 1,
-                    "filesystem": {"rules": [{"path": "/project", "access": "read_write"}]},
-                    "network": {"mode": "disabled"},
-                },
+                "tool": tool,
+                "input": input,
+                "sandbox_policy": policy,
             },
         });
         SessionMessage::Tool(Box::new(ToolCall {
@@ -842,6 +870,42 @@ mod tests {
             assert!(!outcome.refused, "round {round}");
             assert_eq!(outcome.starts_after_close, 0, "round {round}");
             assert_eq!(outcome.starts, 1, "round {round}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_first_failing_admission_step_decides_a_tool_execute_rejection() {
+        let (mailbox, rejections) = owner_with_binding(NoTasks);
+        let rows = [
+            (
+                "an input.task_id equal to the outer task_id",
+                execute(
+                    "task-same",
+                    "exec_command",
+                    json!({"cmd": "true", "task_id": "task-same"}),
+                    admitted_policy(),
+                ),
+                None,
+            ),
+            (
+                "an input.task_id that differs from the outer task_id",
+                execute(
+                    "task-other",
+                    "exec_command",
+                    json!({"cmd": "true", "task_id": "task-elsewhere"}),
+                    admitted_policy(),
+                ),
+                Some("invalid_input"),
+            ),
+        ];
+        for (name, message, code) in rows {
+            let SessionMessage::Tool(call) = &message else {
+                unreachable!()
+            };
+            let task_id = call.task_id.as_str().to_owned();
+            assert!(mailbox.send(message).is_ok());
+            handled(&mailbox).await;
+            assert_eq!(rejections.code(&task_id).as_deref(), code, "{name}");
         }
     }
 
