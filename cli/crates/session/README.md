@@ -85,10 +85,11 @@ that is no longer the binding's is discarded.
   compared lexically, fails before any filesystem access
   (`prepare::inside_state_root`); everything else is checked by the directory
   probe, a child process of the running executable (`probe_child`).
-- On Linux the probe is launched through `/proc/self/exe`, so replacement or
-  unlink of the installation does not change its running version. An
-  inaccessible procfs entry is a spawn failure, with no installation-path
-  fallback. Probe input contains validated UTF-8 strings and is encoded
+- The probe uses the same canonical executable path that App Server startup
+  resolved for tool launches. A later change to the installer's `current`
+  symlink does not change that path; the installer retains the version's
+  executable and helpers unchanged until its App Servers exit, as
+  `appserver/README.md` defines. Probe input contains validated UTF-8 strings and is encoded
   before spawn. Directory creation uses `O_PATH | O_DIRECTORY` search
   handles, retaining `O_NOFOLLOW` for new components; mkdir and final chdir
   enforce write/search permissions without requiring directory read access.

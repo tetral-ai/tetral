@@ -11,7 +11,7 @@
 //! spawned probe unreaped.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -26,20 +26,6 @@ pub const PROBE_LIMIT: Duration = Duration::from_secs(5);
 
 /// The bytes of a probe's stdout that are read; its one line is far shorter.
 pub const OUTPUT_MAX_BYTES: u64 = 65_536;
-
-/// The production probe entry. On Linux this resolves to the process
-/// doing the spawn, so replacing or unlinking its installation cannot
-/// change the version used for a later directory check.
-pub fn probe_program() -> io::Result<PathBuf> {
-    #[cfg(target_os = "linux")]
-    {
-        Ok(PathBuf::from("/proc/self/exe"))
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        std::env::current_exe()
-    }
-}
 
 /// A spawned probe. Dropping it kills the probe, as [`Probe::kill`] does.
 #[derive(Debug)]

@@ -10,6 +10,16 @@ ones it uses belong here too.
 
 ## Design rules
 
+- Startup resolves the running executable to one canonical path and shares
+  it with capability checks, directory probes, policy translation and every
+  tool supervisor (`Started::tetral`). The application or Controller installs
+  an upgrade in a separate version directory and keeps the old executable
+  and bundled helpers present and unchanged until every App Server using
+  that version exits. Changing an external `current` symlink affects later
+  starts; it does not redirect a running server's children. Restart from the
+  new version to switch, then remove an old version only when unused. The
+  CLI does not copy itself at startup or own an updater, and this contract
+  does not support overwriting or unlinking a live version.
 - Every task here that holds App Server state follows the owner rules of
   `cli/README.md`. The lifecycle task owns the server state; local API
   handlers and the signal task only send it messages. A status is read from
@@ -21,8 +31,8 @@ ones it uses belong here too.
   priority never clears the restrictions owned by cleanup.
 - The capabilities that ready advertises are assembled once at start from
   the providers this build has (`capabilities`). `tool_execution` lists the
-  tools whose startup checks pass: all three while the running `tetral`
-  resolves to an executable regular file, and `exec_command` only while
+  tools whose startup checks pass: all three while the resolved `tetral`
+  is an executable regular file, and `exec_command` only while
   `/bin/bash` or `/bin/sh` is executable; with none, the ready carries no
   `tool_execution`. A `test-seams` build advertises instead the fragment in
   `TETRAL_TEST_TOOL_EXECUTION` when it is set; a value that does not decode

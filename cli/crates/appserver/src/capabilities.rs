@@ -21,10 +21,10 @@ pub const TEST_TOOL_EXECUTION_VARIABLE: &str = "TETRAL_TEST_TOOL_EXECUTION";
 
 /// The capabilities, or a start error when a `test-seams` build is given a
 /// value that is not a `tool_execution` fragment.
-pub fn assemble() -> Result<Capabilities, StartError> {
+pub fn assemble(tetral: &Path) -> Result<Capabilities, StartError> {
     let tool_execution = match test_tool_execution()? {
         Some(fragment) => Some(fragment),
-        None => execution::capability::fragment(startup_checks()),
+        None => execution::capability::fragment(startup_checks(tetral)),
     };
     Ok(Capabilities {
         session_preparation: True,
@@ -36,9 +36,9 @@ pub fn assemble() -> Result<Capabilities, StartError> {
 
 /// The startup checks of tool execution: the running `tetral`, which every
 /// tool's restricted child runs, and a shell for `exec_command`.
-fn startup_checks() -> StartupChecks {
+fn startup_checks(tetral: &Path) -> StartupChecks {
     StartupChecks {
-        restricted_child: std::env::current_exe().is_ok_and(|tetral| executable(&tetral)),
+        restricted_child: executable(tetral),
         shell: ["/bin/bash", "/bin/sh"]
             .into_iter()
             .any(|shell| executable(Path::new(shell))),

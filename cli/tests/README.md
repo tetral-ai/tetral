@@ -181,6 +181,13 @@ the isolated harness tests without starting the CLI.
   its report are recorded.
 - `tests/capability.rs`: the `tool_execution` that ready advertises from
   the App Server's own startup checks, with all tools and without a shell.
+- `tests/versioned_launch.rs`: on Linux, a normal `current` symlink switch
+  between two intact version directories. After the switch, the old server
+  prepares a Session and runs all three tools; existing barriers and `/proc`
+  show its actual tool entries and bundled bubblewrap still come from the
+  old directory. After orderly shutdown, a server started through `current`
+  uses the new directory. Both servers advertise their normal capabilities;
+  no live executable or helper is overwritten or removed.
 - `tests/tool_reports.rs`: the reports of tool instructions: an ACK that
   names another report and one without `accepted` release nothing, and the
   report is sent again byte for byte; a media report that the server reads

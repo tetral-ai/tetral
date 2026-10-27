@@ -7,6 +7,13 @@ which owns that task's process tree; the translation of a call's
 ## Design rules
 
 - Supervisors follow the owner rules of `cli/README.md`.
+- The executable path comes from App Server startup's canonical version
+  directory. The outer sandbox launcher and the `exec_command`, `edit` and
+  `view_image` entries all use that path; bundled helper lookup starts beside
+  that executable. Changing an installer's `current` symlink cannot switch
+  a running server to another version. The application or Controller must
+  retain that version's executable and helpers unchanged until its servers
+  exit (`appserver/README.md`); tool execution does not manage upgrades.
 - A call's permissions are decided before any side effect, read no user file
   and start no process. `policy::TaskPermissions::admit` validates the
   `sandbox_policy` value, where the first failing check decides between

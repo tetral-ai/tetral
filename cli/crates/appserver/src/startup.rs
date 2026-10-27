@@ -32,6 +32,9 @@ pub struct Started {
     pub listener: UnixListener,
     pub ownership: SocketOwnership,
     pub capabilities: Capabilities,
+    /// The running executable resolved once into its retained version directory.
+    /// Capability checks, directory probes and tool launches share this path.
+    pub tetral: PathBuf,
     /// The state root as `TETRAL_HOME` gives it.
     pub root: PathBuf,
     /// The state root's canonical path.
@@ -86,6 +89,8 @@ pub enum StartError {
     Unsafe(CheckError),
     #[error(transparent)]
     Io(#[from] IoFailure),
+    #[error("cannot resolve the running executable: {0}")]
+    Executable(std::io::Error),
     #[cfg(feature = "test-seams")]
     #[error("{0}")]
     TestToolExecution(String),
@@ -129,7 +134,10 @@ pub fn lock(root: &StateRoot) -> Result<RootLock, StartError> {
 /// with mode `0600` before it accepts a connection.
 pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
     let configuration = configuration::read(root)?;
-    let capabilities = capabilities::assemble()?;
+    let tetral = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .map_err(StartError::Executable)?;
+    let capabilities = capabilities::assemble(&tetral)?;
     let canonical_root =
         std::fs::canonicalize(root.path()).map_err(|error| IoFailure::new(root.path(), error))?;
     observe::STARTUP.config_loaded(state::seams::now());
@@ -157,6 +165,7 @@ pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
         socket,
         listener,
         capabilities,
+        tetral,
         root: root.path().to_path_buf(),
         canonical_root,
         leftovers,

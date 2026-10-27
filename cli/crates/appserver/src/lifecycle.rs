@@ -182,13 +182,12 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
         socket,
         listener,
         capabilities,
+        tetral,
         root,
         canonical_root,
         leftovers: (check, leftovers),
     } = started;
-    let probe_program = session::probe::probe_program()?;
     let socket_directory = socket.parent().unwrap_or(&socket).canonicalize()?;
-    let tetral = probe_program.canonicalize()?;
     let tools = ToolContext {
         capability: capabilities.tool_execution.clone(),
         socket_directory,
@@ -208,7 +207,7 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
                     .expect("startup validates the canonical root")
                     .to_owned(),
                 canonical: canonical_root,
-                probe_program,
+                probe_program: tetral.clone(),
             }),
             times: times.session,
             tools: Arc::new(tools),
