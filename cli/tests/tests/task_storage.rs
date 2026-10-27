@@ -44,7 +44,7 @@ fn only(paths: Vec<PathBuf>) -> PathBuf {
 #[test]
 fn output_beyond_what_a_stream_keeps_completes_with_its_head_and_tail_cut_on_character_boundaries()
 {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case =
         record.case("50,000,000 bytes of a, then 30,000 three-byte characters, with no limits");
@@ -97,12 +97,13 @@ fn output_beyond_what_a_stream_keeps_completes_with_its_head_and_tail_cut_on_cha
         json!([false, false])
     );
     case.observe("the 50,000,000 bytes completed with 25,600 bytes, the marker and 25,600 bytes; the characters were cut to 8,533 whole characters on each side; both results were truncated, and the result of a short output was not");
+    case.pass();
 }
 
 #[test]
 fn a_task_whose_files_cannot_be_created_never_starts_and_a_failing_log_leaves_its_report_complete()
 {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "a read-only sessions/<session_id>/tasks/, then a stdout.log made read-only at task.launch",
@@ -165,11 +166,12 @@ fn a_task_whose_files_cannot_be_created_never_starts_and_a_failing_log_leaves_it
         (&json!("WARN"), &json!("output_write_failed"))
     );
     case.observe(format!("the start failed exec_spawn_failed ({message}) with process.spawn 0; the unwritable log left stdout complete, 200,015 bytes ending in complete-output, and one WARN task.output_write_failed of the task"));
+    case.pass();
 }
 
 #[test]
 fn task_files_are_reachable_from_no_other_task_and_tmpdir_holds_files_and_unix_sockets() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "a running task of S1 that writes $TMPDIR/x, talks over $TMPDIR/s and reads its own stdout.log, read by another task of S1 and one of S2",
@@ -244,11 +246,12 @@ accepted, _ = listener.accept(); client.sendall(b"ping"); print(" socket", accep
     let owner = tasks.terminal("task_owner");
     assert_eq!(stdout(&owner)["text"], "secret socket ping\nown-denied\n");
     case.observe("the owner wrote $TMPDIR/x, exchanged ping over $TMPDIR/s and could not read its own stdout.log; another task of its Session and a task of another Session could read neither its stdout.log nor $TMPDIR/x");
+    case.pass();
 }
 
 #[test]
 fn a_tasks_files_go_once_its_reports_are_acknowledged_and_its_project_files_stay() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("touch kept, its terminal report's ACK withheld, then released");
     let directory = tempfile::tempdir().unwrap();
@@ -277,11 +280,12 @@ fn a_tasks_files_go_once_its_reports_are_acknowledged_and_its_project_files_stay
         Vec::<String>::new()
     );
     case.observe("both directories stayed while the ACK was withheld and went after it; kept stayed in the project; the App Server kept no descriptor of the task's PID namespace");
+    case.pass();
 }
 
 #[test]
 fn after_the_app_server_dies_during_a_task_its_next_start_empties_t() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case =
         record.case("the App Server killed with SIGKILL during sleep 120, then started again");
@@ -299,4 +303,5 @@ fn after_the_app_server_dies_during_a_task_its_next_start_empties_t() {
     assert_eq!(left.len(), 1, "{left:?}");
     assert_eq!(tasks.temporary_directories(), Vec::<PathBuf>::new());
     case.observe("T held the task's temporary directory after the kill and was empty once the App Server was online again");
+    case.pass();
 }

@@ -5,27 +5,32 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::Child;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::run::{self, Run, Tetral};
+use crate::run::{self, Run, RunningChild, Tetral};
 use crate::seams::WAIT_LIMIT;
-use crate::socket_directory::socket_dir;
+use crate::socket_directory::{self, SocketContext};
 
 /// The root's socket as the local API's protocol derives it: `S/<h>.sock`,
 /// `<h>` the first 16 hexadecimal characters of the SHA-256 of the root's
 /// canonical path.
 pub fn socket_path(root: &Path) -> PathBuf {
+    socket_path_in(root, &socket_directory::context())
+}
+
+fn socket_path_in(root: &Path, context: &SocketContext) -> PathBuf {
     let canonical = root.canonicalize().expect("the root exists");
     let digest = Sha256::digest(canonical.as_os_str().as_encoded_bytes());
     let name: String = digest[..8]
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    socket_dir().join(format!("{name}.sock"))
+    let path = context.socket_dir().join(format!("{name}.sock"));
+    assert!(path.starts_with(context.paths().parent()));
+    path
 }
 
 /// An answer of the local API.
@@ -74,10 +79,11 @@ pub fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
     }
 }
 
-/// A running `server run`, killed when dropped, which also removes the
-/// socket that the killed process leaves in the shared `S`.
+/// A running `server run`, reaped when dropped. Its owned test parent handles
+/// stale paths after every related process is gone; this guard never unlinks
+/// a socket that a successor may now own.
 pub struct AppServer {
-    child: Option<Child>,
+    child: Option<RunningChild>,
     pub socket: PathBuf,
 }
 
@@ -85,18 +91,25 @@ impl AppServer {
     /// Starts `tetral`, a `server run` command line, and waits until its
     /// socket answers `GET /v1/status`.
     pub fn start(tetral: Tetral, root: &Path) -> AppServer {
-        let socket = socket_path(root);
-        let mut child = tetral.spawn();
-        wait_until("the App Server's status", || {
-            if let Ok(Some(status)) = child.try_wait() {
-                panic!("server run exited with {status}");
-            }
-            request(&socket, "GET", "/v1/status").is_some_and(|response| response.status == 200)
-        });
-        AppServer {
-            child: Some(child),
+        let socket = socket_path_in(root, tetral.socket_context());
+        let mut server = AppServer {
+            child: Some(tetral.spawn()),
             socket,
-        }
+        };
+        wait_until("the App Server's status", || {
+            if let Ok(Some(_)) = server.child.as_mut().unwrap().try_wait() {
+                let run = run::finish(server.child.take().unwrap());
+                panic!(
+                    "server run exited with {}; stdout: {}; stderr: {}",
+                    run.status,
+                    String::from_utf8_lossy(&run.stdout),
+                    String::from_utf8_lossy(&run.stderr)
+                );
+            }
+            request(&server.socket, "GET", "/v1/status")
+                .is_some_and(|response| response.status == 200)
+        });
+        server
     }
 
     pub fn status(&self) -> Value {
@@ -139,15 +152,5 @@ impl AppServer {
         let mut child = self.child.take().expect("the process runs");
         child.kill().expect("SIGKILL reaches the process");
         let _ = child.wait();
-    }
-}
-
-impl Drop for AppServer {
-    fn drop(&mut self) {
-        if let Some(child) = &mut self.child {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = std::fs::remove_file(&self.socket);
-        }
     }
 }

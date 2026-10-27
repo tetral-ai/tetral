@@ -5,10 +5,22 @@ tests: those that run the `tetral` binary and the reference control server of
 `cli/reference/` as separate processes, over real HTTP and SSE, on real
 temporary directories. No workspace crate depends on this package.
 
+Run Cargo from `cli/`, so its pinned toolchain applies. For this package:
+
+```sh
+TETRAL_ACCEPTANCE_DIR=/absolute/path/to/acceptance cargo test --locked -p tetral-tests
+```
+
+The records stay in that directory, with one file per test executable and
+run. A filtered run records its test arguments and covers only that selection.
+The cross-process cases also need Go for the reference server and the host
+facilities described below. `cargo test --locked -p tetral-tests --lib` runs
+the isolated harness tests without starting the CLI.
+
 ## Design rules
 
 - A cross-process test runs `binaries::tetral()`, built once per test process
-  with `cargo build -p tetral --features test-seams --target-dir
+  with `cargo build --locked -p tetral --features test-seams --target-dir
   target/test-seams` in `cli/`, so that its seams answer to the test, and
   `binaries::reference_server()`, built with `go build` at the repository
   root. It never runs a binary of the target directory that `cargo test`
@@ -33,18 +45,38 @@ temporary directories. No workspace crate depends on this package.
   `binaries::tetral_with_bwrap_digest`, built into its own target directory.
 - Each run of a test file of `tests/` writes its acceptance record into the
   directory that `TETRAL_ACCEPTANCE_DIR` names (`record`), and fails at once
-  when it is unset. A case that needs a non-root user is recorded as not run,
-  with its reason, when the test runs as root
-  (`record::Case::runs_as_non_root`); no case skips silently.
+  when it is unset. Cases start as `incomplete`; call `case.pass()` only after
+  their assertions. An unfinished case stays incomplete on an ordinary
+  return or becomes failed during a panic. Completed cases keep their own
+  outcome when a later case fails. Each execution has a separate run identity
+  and records its revision, uncommitted changes, platform, toolchain and test
+  arguments. Set `TETRAL_ACCEPTANCE_CONTEXT` to describe a targeted mutation
+  or another special run; include what changed and which tests were selected.
+  A case that needs a non-root user is recorded as not run, with its reason,
+  when a local test runs as root; under GitHub Actions this fails the required
+  case (`record::Case::runs_as_non_root`). No case skips silently.
 - A test reads the one result object of a command's stdout (`run::Run`). A
   case that a command must not change compares a snapshot of the root's
   paths, kinds, owners, modes and bytes taken before and after it
   (`snapshot`).
-- `S`, the directory of control sockets, is shared by every App Server of the
-  user on the machine. A test that may meet `S` holds a shared lock on a file
-  beside it for as long as it runs, and a test that replaces `S` holds that
-  lock exclusively for as long as `S` is replaced and puts `S` back when it
-  releases it (`socket_directory::ReplacedSocketDir`).
+- Each test uses `socket_directory::isolated()` to own a short temporary
+  parent for `S`. Related child commands capture this context and receive
+  `TETRAL_TEST_SOCKET_PARENT`; SDK clients receive an explicit
+  `state::paths::TestSocketContext`. Only `test-seams` builds expose the
+  override. The uid directory, root hash and permission checks remain the
+  production rules. Tests never rename or delete the user's shared `S`, and
+  never mutate the test process's environment. Parent cleanup waits until
+  the scope and all related child handles have released it.
+- `run::RunningChild` drains stdout and stderr concurrently from spawn,
+  retains at most 16 MiB per stream and keeps draining beyond that limit.
+  An acceptance run fails explicitly if capture was truncated or did not
+  reach EOF; it never treats partial diagnostics as complete evidence.
+  Child handles reap on drop, including startup failure and panic. Pipe
+  workers use cancellable nonblocking I/O, with at most one second of
+  shared reader completion waiting after exit. A log-backpressure case
+  must opt into `Tetral::stderr_backpressure()`, which fills the pipe with
+  blank lines before spawn and waits for explicit draining; ordinary tests drain.
+  Harness output tests use Python 3 and exceed pipe capacity on both streams.
 - A case that needs `S` owned by another user, or a `bwrap` that this user
   can neither modify nor replace, has root make it with `sudo -n`; where that
   fails the case is recorded as not run, and under GitHub Actions the test
@@ -68,7 +100,7 @@ temporary directories. No workspace crate depends on this package.
 - `src/record.rs`: `Record`, `Case` and the `record!` macro.
 - `src/snapshot.rs`: `snapshot`, every path under a directory with its kind,
   owner, mode and bytes.
-- `src/socket_directory.rs`: the locks on `S` and its replacements for a case.
+- `src/socket_directory.rs`: owned temporary socket parents and per-test scopes.
 - `src/other_user.rs`: a directory that another user owns, `sudo -n` under
   the rule above, and `RootDirectory`, a directory that root makes in
   `/tmp`.
@@ -114,7 +146,9 @@ temporary directories. No workspace crate depends on this package.
   refusal that ends the connection, a report whose ACK was lost sent again
   byte for byte and recorded once, a Session instruction delivered again
   routed once and its `message_id` with other content a conflict, and the
-  correlation of protocol errors.
+  correlation of protocol errors. A preparation rejected before any probe
+  keeps one final report identity across a lost ACK and instruction replay;
+  another instruction for the same binding owns a separate result.
 - `tests/preparation.rs`: Session preparation against the reference control
   server: each failed check and what it creates or never creates, links into
   the state root and to a project, `create_cwd`, a repeated, held, retargeted
@@ -155,7 +189,7 @@ temporary directories. No workspace crate depends on this package.
   body is acknowledged and is sent again unchanged.
 - `tests/edit_view_image.rs`: `edit` and `view_image` through their
   restricted children: each step of an edit, the curly-quote fallback, the
-  file's mode kept, the images at and past image acceptance's limits, files
+  file's ordinary permission bits kept, the images at and past image acceptance's limits, files
   that are no image, files the policy denies or the CLI protects, a missing
   file, a directory and an overlong path, each failure of the working
   directory, the input budget and a cancel after the child's start.
@@ -195,11 +229,13 @@ temporary directories. No workspace crate depends on this package.
 - `tests/local_service.rs`: `server run`, `server status` and `server stop`
   and the local API: status while Engine is unreachable, the wrong routes,
   shutdown on request, on each signal and with a handler blocked, one owner
-  per root, restart after SIGKILL with the frozen reports deleted, 16 SDK
+  per root, restart after SIGKILL with the stale socket replaced, 16 SDK
   clients at once, the socket's path,
   modes and hourly modification time, an unsafe `S`, every result and failure
   code with the root unchanged, a log file that cannot be opened, and no key
-  in status.
+  in status. An early command failure with prefilled stderr proves the caller
+  waits for its final queued record when drained and exits at the shared
+  flush deadline if the pipe stays full.
 - `tests/crate_graph.rs`: the rules of the crate graph, checked over the
   output of `cargo metadata`, and the rule that no library crate prints,
   checked over the library crates' sources.

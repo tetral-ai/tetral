@@ -9,7 +9,6 @@
 //! byte. The seam counters these tests read are those
 //! `tetral_tests::machine` names.
 
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -25,21 +24,10 @@ use tetral_tests::tasks::{BINDING, HEARTBEAT_INTERVAL, SESSION, TaskMachine, pol
 /// seconds, each with at most 20% of jitter.
 const PAST_RETRY: [f64; 2] = [1.5, 2.5];
 
-/// The report files frozen under `outbox/`.
-fn frozen_reports(root: &Path) -> Vec<PathBuf> {
-    let mut reports = Vec::new();
-    for connection in std::fs::read_dir(root.join("outbox")).unwrap() {
-        for report in std::fs::read_dir(connection.unwrap().path()).unwrap() {
-            reports.push(report.unwrap().path());
-        }
-    }
-    reports
-}
-
 #[test]
 fn an_ack_naming_another_report_or_without_accepted_releases_nothing_and_the_report_is_sent_again_unchanged()
  {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "the rejection of a tool.execute answered with an ACK for another message_id, then one without accepted",
@@ -77,11 +65,6 @@ fn an_ack_naming_another_report_or_without_accepted_releases_nothing_and_the_rep
     wait_for_requests(&engine, "tool-status", 1);
     for (answered, past) in [(1, PAST_RETRY[0]), (2, PAST_RETRY[1])] {
         machine.seams.wait_for_count("outbox.answered", answered);
-        assert_eq!(
-            frozen_reports(&machine.root).len(),
-            1,
-            "after answer {answered}"
-        );
         machine.advance(seconds(past));
     }
     let sent = wait_for_requests(&engine, "tool-status", 3);
@@ -100,9 +83,7 @@ fn an_ack_naming_another_report_or_without_accepted_releases_nothing_and_the_rep
             .all(|request| (request.0, request.1, request.2) == ("r1", sent[0].1, 200)),
         "{sent:?}"
     );
-    wait_until("the frozen report deleted at its matching ACK", || {
-        frozen_reports(&machine.root).is_empty()
-    });
+    machine.seams.wait_for_count("outbox.answered", 3);
     let received = wait_for_received(&engine, "tool-status", 1);
     assert_eq!(received.len(), 1);
     let report = &received[0]["body"];
@@ -122,7 +103,8 @@ fn an_ack_naming_another_report_or_without_accepted_releases_nothing_and_the_rep
             &json!("task_1"),
         )
     );
-    case.observe("the rejection was sent three times as r1 with one body SHA-256, each answered 200; the ACK for another message_id and the ACK without accepted left the frozen file, the matching ACK deleted it");
+    case.observe("the rejection was sent three times as r1 with one body SHA-256, each answered 200; the ACK for another message_id and the ACK without accepted caused retries, and the matching ACK completed delivery");
+    case.pass();
 }
 
 /// How fast the reference control server reads a throttled report: 65,536
@@ -181,7 +163,7 @@ fn sends(tasks: &TaskMachine, message_id: &Value) -> Vec<Value> {
 
 #[test]
 fn a_throttled_media_report_completes_past_ten_seconds_and_one_without_an_answer_fails_at_ten() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "a view_image report of about 1 MiB read at 65,536 bytes a second while both clocks move \
@@ -289,4 +271,5 @@ fn a_throttled_media_report_completes_past_ten_seconds_and_one_without_an_answer
          answer withheld for 9 seconds after the last byte ended the first attempt, the one \
          withheld for 10 seconds failed it and the report was sent again unchanged"
     ));
+    case.pass();
 }

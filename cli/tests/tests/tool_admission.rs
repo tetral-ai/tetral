@@ -278,8 +278,40 @@ fn resume_at_maximum_age(tasks: &TaskMachine) {
 }
 
 #[test]
+fn a_resumed_stream_keeps_the_tool_limit_for_a_valid_large_command() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case =
+        record.case("a ready tool connection resumes, then executes a command larger than 64 KiB");
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    let connection = tasks.machine().status()["connection_id"].clone();
+    resume(&tasks);
+    tasks.machine().wait_for("online");
+    assert_eq!(tasks.machine().status()["connection_id"], connection);
+    let streams = tasks.engine.requests("events").len();
+    // The padding is a shell comment, so the legal large input has a small,
+    // exact result.
+    let input = json!({"cmd": format!("printf resumed\n#{}", "x".repeat(70_000))});
+    assert!(input.to_string().len() > 65_536);
+    let instruction = tasks.execute(
+        "task_after_resume",
+        input,
+        project_policy(&tasks.project, "disabled"),
+    );
+    let report = tasks.terminal("task_after_resume");
+    assert_eq!(report["request_message_id"], instruction);
+    assert_eq!(report["result"]["status"], "success");
+    assert_eq!(report["result"]["result"]["stdout"]["text"], "resumed");
+    assert_eq!(tasks.machine().status()["connection_state"], "online");
+    assert_eq!(tasks.engine.requests("events").len(), streams);
+    case.observe("the same logical connection resumed and accepted a legal command over 64 KiB, returning resumed without another stream loss");
+    case.pass();
+}
+
+#[test]
 fn an_event_of_up_to_4_259_840_bytes_is_read_and_a_larger_one_closes_the_stream_unread() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("the event limit of a connection that advertises tool_execution");
     let directory = tempfile::tempdir().unwrap();
@@ -303,11 +335,12 @@ fn an_event_of_up_to_4_259_840_bytes_is_read_and_a_larger_one_closes_the_stream_
     assert_eq!(machine.routed(), routed + 1);
     assert!(engine.requests("protocol-error").is_empty());
     case.observe("an event of 4,259,841 bytes closed the stream unread: nothing routed and no protocol error, and the connection is resuming");
+    case.pass();
 }
 
 #[test]
 fn each_tool_instruction_is_judged_by_its_type_budgets() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case =
         record.case("tool.execute and control budgets, each instruction with its own report");
@@ -400,11 +433,12 @@ fn each_tool_instruction_is_judged_by_its_type_budgets() {
         (&json!("msg_close_over"), &json!("invalid_message"))
     );
     case.observe("a session.close of 65,537 bytes: the protocol error invalid_message");
+    case.pass();
 }
 
 #[test]
 fn a_tool_execute_delivered_again_or_issued_again_with_its_payload_runs_once() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "printf x >> f held at its launch: its instruction delivered again, then its payload issued again under another message_id",
@@ -441,12 +475,13 @@ fn a_tool_execute_delivered_again_or_issued_again_with_its_payload_runs_once() {
     case.observe(format!(
         "one process launched; one terminal report, answering {original}; none answering {again}; f holds x once"
     ));
+    case.pass();
 }
 
 #[test]
 fn a_task_id_issued_again_with_another_command_or_policy_is_a_conflict_that_leaves_the_task_alone()
 {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "a detached task held at its launch, then running: its task_id with another cmd and with network disabled, before and after its start",
@@ -500,12 +535,13 @@ fn a_task_id_issued_again_with_another_command_or_policy_is_a_conflict_that_leav
         .collect();
     assert_eq!(kept, [json!(["running", 1]), json!(["terminal", 2])]);
     case.observe("each of the four task_conflict; the task ran its own command and reported running 1 and terminal 2");
+    case.pass();
 }
 
 #[test]
 fn a_task_staged_behind_a_withheld_prepared_ack_starts_only_after_it_and_never_once_cancelled_or_closed()
  {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "three bindings whose prepared ACK is withheld, each with a staged exec_command: the ACK released; a cancel, then the ACK; a close, then the ACK",
@@ -584,11 +620,12 @@ fn a_task_staged_behind_a_withheld_prepared_ack_starts_only_after_it_and_never_o
     handled(&tasks, "sess_closed", "bind_closed");
     assert_eq!(seams.count(SPAWN), spawns + 2);
     case.observe("no process before the released ACK, then one; the cancelled task never launched, a later task of its binding did; the closed binding's task never launched and reported cancelled at the close");
+    case.pass();
 }
 
 #[test]
 fn a_read_and_a_write_held_by_a_staged_task_are_answered_when_its_start_fails() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let mut case = tetral_tests::record!().case(
         "a staged exec_command whose env holds U+0000, with a read and a write sent while it is staged, then the prepared ACK",
     );
@@ -637,11 +674,12 @@ fn a_read_and_a_write_held_by_a_staged_task_are_answered_when_its_start_fails() 
     let write = tasks.reply(&write);
     assert_eq!(write["error"]["code"], "stdin_closed", "{write:#}");
     case.observe("the start failed exec_spawn_failed; the held read was answered as of the ended task and the held write stdin_closed");
+    case.pass();
 }
 
 #[test]
 fn a_task_whose_start_is_rejected_leaves_the_registry_so_its_controls_find_no_task() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let mut case = tetral_tests::record!().case(
         "an App Server whose PATH holds no bwrap: a staged exec_command with a read sent while it is staged, then the ACK; a cancel after its rejection; the same instruction issued again",
     );
@@ -696,11 +734,12 @@ fn a_task_whose_start_is_rejected_leaves_the_registry_so_its_controls_find_no_ta
     assert_eq!(rejection(&answer_to(&tasks, &second)), unavailable);
     assert!(!tasks.project.join("ran").exists());
     case.observe("the start was rejected sandbox_unavailable; the held read and a later cancel found no task; the instruction issued again was rejected again; nothing ran");
+    case.pass();
 }
 
 #[test]
 fn the_admission_of_a_session_without_an_owner_never_holds_the_connection() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let mut case = tetral_tests::record!().case(
         "a tool.execute of a Session never prepared held at its admission, then a preparation of another Session",
     );
@@ -726,11 +765,12 @@ fn the_admission_of_a_session_without_an_owner_never_holds_the_connection() {
         "{rejected:#}"
     );
     case.observe("another Session was prepared while the admission was held; once released, the instruction was rejected binding_unavailable");
+    case.pass();
 }
 
 #[test]
 fn a_cancel_or_a_close_while_the_availability_check_is_held_answers_at_once_and_nothing_starts() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let mut case = tetral_tests::record!().case(
         "two tasks held before their availability checks run: a cancel of one, a close of the other's binding, then the checks released",
     );
@@ -787,12 +827,13 @@ fn a_cancel_or_a_close_while_the_availability_check_is_held_answers_at_once_and_
     assert!(!tasks.project.join("cancelled").exists());
     assert!(!tasks.project.join("closed").exists());
     case.observe("the cancel replied cancelled, not running, while the check was held, and both tasks reported cancelled before starting; after the release only a later task launched");
+    case.pass();
 }
 
 #[test]
 fn an_instruction_whose_final_ack_comes_after_a_resume_keeps_its_ledger_entry_until_the_next_resume()
  {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     for (name, next_resume) in [
         ("a stream-only disconnect", resume as fn(&TaskMachine)),
@@ -837,12 +878,13 @@ fn an_instruction_whose_final_ack_comes_after_a_resume_keeps_its_ledger_entry_un
         case.observe(format!(
             "the resent instruction launched nothing and f holds x once; the new task before the next resume was resource_exhausted; after the resume at {name} a new task ran"
         ));
+        case.pass();
     }
 }
 
 #[test]
 fn a_tool_execute_that_joins_a_task_takes_its_final_report_and_frees_its_ledger_entry_with_it() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     for (name, after_terminal) in [
         ("while the task runs", false),
@@ -903,13 +945,14 @@ fn a_tool_execute_that_joins_a_task_takes_its_final_report_and_frees_its_ledger_
         case.observe(format!(
             "joined {name}, the task's terminal report answered both instructions; after its ACK a running task and a new task were both admitted"
         ));
+        case.pass();
     }
 }
 
 #[test]
 fn five_thousand_tasks_on_one_stream_each_issued_after_the_previous_terminal_ack_are_all_admitted()
 {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "5,000 exec_command true, each issued once the App Server has applied the ACK of the one before's terminal report",
@@ -943,11 +986,12 @@ fn five_thousand_tasks_on_one_stream_each_issued_after_the_previous_terminal_ack
     );
     assert_eq!(tasks.engine.requests("events").len(), 1);
     case.observe("5,000 terminal reports with status success on the connection's one stream");
+    case.pass();
 }
 
 #[test]
 fn with_the_ledger_full_a_tasks_controls_are_resource_exhausted_and_leave_it_unchanged() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "a running task waiting for go, and closes until no entry is free, reserve included: a write and a cancel, then go, after which the task says whether its stdin holds input",
@@ -992,12 +1036,13 @@ fn with_the_ledger_full_a_tasks_controls_are_resource_exhausted_and_leave_it_unc
         "{terminal:#}"
     );
     case.observe("the write and the cancel each got resource_exhausted; after go the task found no input on its stdin and exited 0, not cancelled");
+    case.pass();
 }
 
 #[test]
 fn with_only_the_ledgers_reserve_free_new_tasks_are_refused_and_a_running_tasks_controls_and_report_answered()
  {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "a running task, a binding whose prepared ACK is withheld, and closes until 64 entries are free: a staged and a new tool.execute, a read, a cancel and a close of the task's binding, then the ACK",
@@ -1085,4 +1130,5 @@ fn with_only_the_ledgers_reserve_free_new_tasks_are_refused_and_a_running_tasks_
     assert_eq!(started.len(), 1, "{started:?}");
     assert_eq!(started[0]["pressure.cause"], "resource_exhausted");
     case.observe("the staged and the new tool.execute each resource_exhausted, recorded as one pressure.rejecting_started of tetral_tasks with cause resource_exhausted; the read replied running, the cancel cancelled, and the terminal report said cancelled, terminated; nothing launched after the ACK; once the ACKs were in, a new task of the closed binding was binding_unavailable");
+    case.pass();
 }

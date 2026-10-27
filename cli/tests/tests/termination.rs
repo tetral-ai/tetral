@@ -161,7 +161,7 @@ fn prepared_once_gone(tasks: &TaskMachine, session: &str, binding: &str) -> Valu
 
 #[test]
 fn a_cancel_gives_the_command_its_grace_to_run_its_term_trap_and_exit() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("trap 'echo t >> m' TERM; sleep 100; echo after, then a cancel");
     let directory = tempfile::tempdir().unwrap();
@@ -194,12 +194,13 @@ fn a_cancel_gives_the_command_its_grace_to_run_its_term_trap_and_exit() {
         "{marks:?}"
     );
     case.observe("within the grace m held t, stdout after, and the terminal report exit_code 0 with cancelled");
+    case.pass();
 }
 
 #[test]
 fn a_cancel_of_a_task_ignoring_sigterm_reports_its_sigkill_two_seconds_later_with_a_read_left_blocked()
  {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "trap '' TERM; sleep 1241 & cat mnt/f > out 2>&1; wait, with the read blocked on a FUSE mount that never answers, then a cancel",
@@ -253,11 +254,12 @@ fn a_cancel_of_a_task_ignoring_sigterm_reports_its_sigkill_two_seconds_later_wit
     release(&held);
     drop(session);
     case.observe("at 1,999 ms after the cancel sleep ran and no terminal report had come; at 2,000 ms the terminal report came with signal killed and cancelled while cat stayed blocked in the read");
+    case.pass();
 }
 
 #[test]
 fn a_cancelled_task_whose_exit_is_never_observed_reports_no_exit_four_seconds_after_the_cancel() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "trap '' TERM; sleep 1251, then a cancel, with the observation of the launched process's exit held at task.exit_observed",
@@ -290,12 +292,13 @@ fn a_cancelled_task_whose_exit_is_never_observed_reports_no_exit_four_seconds_af
     );
     seams.release(EXIT_OBSERVED);
     case.observe("with the exit held, no terminal report had come at 3,999 ms after the cancel; at 4,000 ms it came with exit_code and signal null and cancelled");
+    case.pass();
 }
 
 #[test]
 fn a_shutdown_ends_a_running_task_through_its_term_trap_and_the_app_server_exits_within_five_seconds()
  {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("trap 'echo t >> m' TERM; sleep 1231, then POST /v1/shutdown");
     let directory = tempfile::tempdir().unwrap();
@@ -330,11 +333,12 @@ fn a_shutdown_ends_a_running_task_through_its_term_trap_and_the_app_server_exits
     case.observe(format!(
         "m held t; no sleep 1231 and no task record were left; the App Server exited 0, {took:?} after the shutdown"
     ));
+    case.pass();
 }
 
 #[test]
 fn a_connections_end_while_the_availability_check_is_held_discards_the_task_before_it_starts() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let mut case = tetral_tests::record!().case(
         "a task held before its availability check runs: a connection-ending disconnect, a new connection, then the check released",
     );
@@ -370,11 +374,12 @@ fn a_connections_end_while_the_availability_check_is_held_discards_the_task_befo
     assert_eq!(seams.count("process.spawn"), spawns + 1);
     assert!(!tasks.project.join("checking").exists());
     case.observe("the Session prepared on the new connection while the check was held; after the release only the later task launched, and the held one never ran");
+    case.pass();
 }
 
 #[test]
 fn a_connections_end_discards_its_staged_tasks_and_kills_its_running_ones_at_once() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "a task staged behind a withheld prepared ACK, and a running task with a TERM trap, a sleep child and a child that called setsid: a connection-ending disconnect",
@@ -419,11 +424,12 @@ fn a_connections_end_discards_its_staged_tasks_and_kills_its_running_ones_at_onc
     case.observe(format!(
         "both children gone {took:?} after the disconnect was sent, with no SIGTERM (no m); the staged task never ran (no staged)"
     ));
+    case.pass();
 }
 
 #[test]
 fn a_resume_during_a_task_keeps_it_running_also_one_40_seconds_after_the_last_grant() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "a task waiting for a file: a stream break and its resume, then a resume that succeeds 40 seconds after the last grant, and the clock past the earlier deadline",
@@ -485,11 +491,12 @@ fn a_resume_during_a_task_keeps_it_running_also_one_40_seconds_after_the_last_gr
         json!([0, "done\n"])
     );
     case.observe("the task ran across both resumes and past the deadline of the grant before the late one, and its result arrived");
+    case.pass();
 }
 
 #[test]
 fn a_running_task_ends_at_the_connections_deadline_after_a_withheld_resume_or_a_step_past_it() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
 
@@ -526,6 +533,7 @@ fn a_running_task_ends_at_the_connections_deadline_after_a_withheld_resume_or_a_
     assert!(!tasks.project.join("m").exists());
     case.observe("the connection ended at its deadline with the resume withheld, which killed the task without SIGTERM (no m); the next connection was a fresh one");
     drop(tasks);
+    case.pass();
 
     let mut case = record.case(
         "a running task; the clock moved past the connection's deadline in one step with the stream open",
@@ -542,11 +550,12 @@ fn a_running_task_ends_at_the_connections_deadline_after_a_withheld_resume_or_a_
     let took = stepped.elapsed();
     assert!(took < seconds(1.0), "{took:?}");
     case.observe(format!("the task's process gone {took:?} after the step"));
+    case.pass();
 }
 
 #[test]
 fn an_old_connections_waiter_and_late_output_change_nothing_of_the_new_one() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "a task printing all the time with a write's reply waiting, its connection ended with the observation of its exit held; on the next connection another Session's task of the same task_id running when the old task's ending ends, then the Session prepared again and a task of the same task_id",
@@ -665,11 +674,12 @@ fn an_old_connections_waiter_and_late_output_change_nothing_of_the_new_one() {
     assert_eq!(bindings, [json!(["bind_new", new, "prepared"])]);
     assert_ne!(old, new);
     case.observe("the old task's ending ended after the next connection was online and another Session's task of the same task_id was running; no reply or report of the old task reached any connection; the other task and the new task of the same task_id reported only their own output; the Session's binding is the new prepared one");
+    case.pass();
 }
 
 #[test]
 fn processes_left_after_sigkill_keep_their_session_cleanup_pending_while_others_prepare() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "a task ignoring SIGTERM whose child is blocked in a read on a FUSE mount that never answers; its connection ended",
@@ -735,11 +745,12 @@ fn processes_left_after_sigkill_keep_their_session_cleanup_pending_while_others_
     assert!(claimed.is_empty(), "{claimed:?}");
     drop(session);
     case.observe("while the read was unanswered the Session's preparations failed cleanup_pending and another Session prepared; once the mount answered the next preparation succeeded; no terminal report claimed an exit");
+    case.pass();
 }
 
 #[test]
 fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_start() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
 
@@ -792,6 +803,7 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
     );
     case.observe("the recorded namespace, the only writer of the marker, held no process; last_error was cleanup_pending and the Session's preparation failed so until the record was confirmed, then null and the preparation succeeded");
     drop(tasks);
+    case.pass();
 
     let mut case = record.case(
         "a record of another boot naming a running process started outside any task, written with a task directory of its Session before the App Server starts",
@@ -851,6 +863,7 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
     );
     assert!(outside.0.try_wait().unwrap().is_none());
     case.observe("the record was confirmed at the start: last_error null, the record and the Session's task directory gone, the Session prepared, and the named process still running");
+    case.pass();
 }
 
 /// A process that a case starts outside the App Server, killed and reaped

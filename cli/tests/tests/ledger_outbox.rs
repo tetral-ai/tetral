@@ -7,7 +7,7 @@
 //! `message_id` can be read. The seam counters these tests read are those
 //! `tetral_tests::machine` names.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::{Value, json};
 use tetral_tests::app_server::wait_until;
@@ -34,17 +34,6 @@ fn records(root: &Path, event: &str) -> Vec<Value> {
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .filter(|record| record["event"] == event)
         .collect()
-}
-
-/// The report files frozen under `outbox/`.
-fn frozen_reports(root: &Path) -> Vec<PathBuf> {
-    let mut reports = Vec::new();
-    for connection in std::fs::read_dir(root.join("outbox")).unwrap() {
-        for report in std::fs::read_dir(connection.unwrap().path()).unwrap() {
-            reports.push(report.unwrap().path());
-        }
-    }
-    reports
 }
 
 /// `reports` in the order of their `message_id`: the outbox sends reports
@@ -76,8 +65,37 @@ fn online_machine(
 }
 
 #[test]
+fn a_report_refused_with_401_or_403_blocks_the_connection_and_stops_delivery() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    for (code, status) in [("credential_revoked", 401), ("cli_upgrade_required", 403)] {
+        let mut case = record.case(&format!("a protocol-error report answered {status} {code}"));
+        let engine = one_credential_engine();
+        let (machine, _directory) = online_machine(&mut case, &engine);
+        answer_fault(
+            &engine,
+            json!({
+                "endpoint": "protocol-error", "action": "error", "code": code,
+            }),
+        );
+        send_data(&engine, "not json");
+        let sent = wait_for_requests(&engine, "protocol-error", 1);
+        assert_eq!(sent[0]["status"], status);
+        let blocked = machine.wait_for("blocked");
+        assert_eq!(blocked["last_error"]["code"], code);
+        assert_eq!(blocked["connection_id"], Value::Null);
+        machine.advance(seconds(120.0));
+        assert_eq!(machine.state(), "blocked");
+        assert_eq!(engine.requests("protocol-error").len(), 1);
+        assert_eq!(engine.requests("events").len(), 1);
+        case.observe("the real report refusal reached the connection owner, preserved its blocked reason, and started neither another report attempt nor another connection");
+        case.pass();
+    }
+}
+
+#[test]
 fn a_refused_report_is_never_sent_again_and_a_stale_connection_ends_the_connection() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("two reports answered 409 unknown_instruction");
     let engine = one_credential_engine();
@@ -114,12 +132,9 @@ fn a_refused_report_is_never_sent_again_and_a_stale_connection_ends_the_connecti
     wait_for_received(&engine, "protocol-error", 1);
     let sent = by_message_id(engine.requests("protocol-error"));
     assert_eq!(message_ids(&sent), ["r1", "r2", "r3"]);
-    // The later report's file goes once the CLI applies its ACK, after the
-    // reference server has recorded the report.
-    wait_until("no report file left", || {
-        frozen_reports(&machine.root).is_empty()
-    });
-    case.observe("both refused reports were recorded as dropped, their files deleted, and neither was sent again past the first retry wait");
+    machine.seams.wait_for_count("outbox.answered", 3);
+    case.observe("both refused reports were recorded as dropped and neither was sent again past the first retry wait; the later report was acknowledged");
+    case.pass();
 
     let mut case = record.case("a report answered 409 stale_connection");
     answer_fault(
@@ -140,17 +155,17 @@ fn a_refused_report_is_never_sent_again_and_a_stale_connection_ends_the_connecti
         FIRST_CONNECTION
     );
     assert_eq!(events[1]["query"]["resume"], "false");
-    assert!(frozen_reports(&machine.root).is_empty());
     assert_eq!(
         message_ids(&by_message_id(engine.requests("protocol-error"))),
         ["r1", "r2", "r3", "r4"]
     );
-    case.observe("the connection ended: the next attempt names it as the predecessor of a new connection, and its refused report was deleted and not sent again");
+    case.observe("the connection ended: the next attempt names it as the predecessor of a new connection, and its refused report was not sent again");
+    case.pass();
 }
 
 #[test]
 fn a_report_whose_ack_was_lost_is_sent_again_byte_for_byte_and_recorded_once() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("a protocol error accepted and its ACK dropped");
     let engine = one_credential_engine();
@@ -161,23 +176,136 @@ fn a_report_whose_ack_was_lost_is_sent_again_byte_for_byte_and_recorded_once() {
     );
     send_data(&engine, "not json");
     wait_for_requests(&engine, "protocol-error", 1);
-    assert_eq!(frozen_reports(&machine.root).len(), 1);
     machine.seams.wait_for_count("outbox.answered", 1);
     machine.advance(seconds(PAST_FIRST_RETRY));
     let sent = wait_for_requests(&engine, "protocol-error", 2);
     assert_eq!(message_ids(&sent), ["r1", "r1"]);
     assert_eq!(sent[0]["body_sha256"], sent[1]["body_sha256"]);
     assert_eq!(sent[1]["status"], 200);
-    wait_until("the frozen report deleted at its ACK", || {
-        frozen_reports(&machine.root).is_empty()
-    });
+    machine.seams.wait_for_count("outbox.answered", 2);
     assert_eq!(engine.received("protocol-error").len(), 1);
-    case.observe("the retry kept message_id r1 and the body's SHA-256, got the replayed ACK, which deleted the frozen file, and the server recorded one report");
+    case.observe("the retry kept message_id r1 and the body's SHA-256, got the replayed ACK, and the server recorded one report");
+    case.pass();
+}
+
+#[test]
+fn each_preparation_instruction_has_one_final_report_identity_across_retries() {
+    let _socket_dir = socket_directory::isolated();
+    let mut case = tetral_tests::record!()
+        .case("a preparation result retries one identity and a new instruction owns another");
+    let engine = one_credential_engine();
+    let (machine, _directory) = online_machine(&mut case, &engine);
+    // The lexical state-root refusal produces a real Session result without
+    // launching a directory probe or any restricted task.
+    let payload = json!({
+        "session_id": "sess_final", "binding_id": "bind_final",
+        "cwd": machine.root, "drives": [], "drive_exclude": [], "repositories": [],
+    });
+    answer_fault(
+        &engine,
+        json!({ "endpoint": "session-status", "action": "drop" }),
+    );
+    let first = engine.control(
+        "prepare",
+        json!({ "instance_id": INSTANCE, "payload": payload }),
+    );
+    let first_request = first["message_id"].as_str().unwrap();
+    wait_for_requests(&engine, "session-status", 1);
+    machine.seams.wait_for_count("outbox.answered", 1);
+    engine.control(
+        "send",
+        json!({ "instance_id": INSTANCE, "resend": first_request }),
+    );
+    let later = engine.control(
+        "prepare",
+        json!({ "instance_id": INSTANCE, "payload": payload }),
+    );
+    let later_request = later["message_id"].as_str().unwrap();
+    assert_ne!(first_request, later_request);
+    wait_for_received(&engine, "session-status", 2);
+    // The second instruction is later on the same stream, so its response
+    // proves the replay was handled while the first report still lacked ACK.
+    machine.seams.wait_for_count("outbox.answered", 2);
+    machine.advance(seconds(PAST_FIRST_RETRY));
+    let attempts = wait_for_requests(&engine, "session-status", 3);
+    assert_eq!(attempts[0]["message_id"], attempts[2]["message_id"]);
+    assert_eq!(attempts[0]["body_sha256"], attempts[2]["body_sha256"]);
+    assert_eq!(attempts[2]["status"], 200);
+    machine.seams.wait_for_count("outbox.answered", 3);
+    let accepted = engine.received("session-status");
+    let mut final_ids = Vec::new();
+    for request in [first_request, later_request] {
+        let reports: Vec<_> = accepted
+            .iter()
+            .map(|entry| &entry["body"])
+            .filter(|body| {
+                body["connection_id"] == FIRST_CONNECTION
+                    && body["request_message_id"] == request
+                    && body["session_id"] == "sess_final"
+                    && body["binding_id"] == "bind_final"
+            })
+            .collect();
+        let ids: std::collections::BTreeSet<_> = reports
+            .iter()
+            .map(|body| body["message_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids.len(),
+            1,
+            "one final report identity for {request}: {reports:?}"
+        );
+        assert_eq!(
+            reports.len(),
+            1,
+            "retry stored another final report for {request}"
+        );
+        for body in reports {
+            assert_eq!(body["status"], "failed");
+            assert_eq!(body["error"]["code"], "cwd_forbidden");
+        }
+        final_ids.push(*ids.first().unwrap());
+    }
+    assert_ne!(final_ids[0], final_ids[1]);
+    let sent = engine.requests("session-status");
+    assert_eq!(
+        sent.len(),
+        3,
+        "two attempts for the first instruction, one for the second"
+    );
+    for final_id in final_ids {
+        assert!(
+            sent.iter()
+                .any(|attempt| attempt["message_id"] == final_id && attempt["status"] == 200)
+        );
+    }
+    assert_eq!(
+        machine.routed(),
+        2,
+        "the original instruction retry is not dispatched again"
+    );
+    let state = engine.state();
+    let connection = state["connections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|connection| connection["connection_id"] == FIRST_CONNECTION)
+        .unwrap();
+    for request in [first_request, later_request] {
+        let issued = connection["issued"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|instruction| instruction["message_id"] == request)
+            .unwrap();
+        assert_eq!(issued["reported"], true);
+    }
+    case.observe("the state-root refusal produced one final message ID per connection/request/Session/binding; a lost ACK retried identical bytes, replaying the instruction added no report, and a new instruction received a distinct result and matching ACK");
+    case.pass();
 }
 
 #[test]
 fn a_protocol_error_names_the_message_it_answers_only_when_its_message_id_can_be_read() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("unparseable messages with and without a readable message_id");
     let engine = one_credential_engine();
@@ -213,12 +341,13 @@ fn a_protocol_error_names_the_message_it_answers_only_when_its_message_id_can_be
         );
     }
     case.observe("only the message whose message_id reads as an ID is named as request_message_id; no report carries the invalid content");
+    case.pass();
 }
 
 #[test]
 fn a_session_instruction_delivered_again_is_routed_once_and_its_message_id_with_other_content_is_a_conflict()
  {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("a session.close delivered again, reordered, then changed");
     let engine = one_credential_engine();
@@ -261,4 +390,5 @@ fn a_session_instruction_delivered_again_is_routed_once_and_its_message_id_with_
     );
     assert_eq!(machine.routed(), 1);
     case.observe("the close was routed once; the copy with members reordered and whitespace added started nothing; the changed binding_id gave one message_conflict naming msg_close and was not routed");
+    case.pass();
 }

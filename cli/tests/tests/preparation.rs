@@ -197,7 +197,7 @@ fn directory_with_marker(path: PathBuf) -> PathBuf {
 
 #[test]
 fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepares_its_target() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path();
@@ -233,6 +233,7 @@ fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepa
     assert_eq!(listing(&machine.root), root_listing);
     assert_eq!(sessions(&machine), Vec::<Value>::new());
     case.observe("each failed with invalid_input; the App Server's working directory and the state root are unchanged and no Session is listed");
+    case.pass();
 
     let mut case = record.case("a session_id .. and a drive_id holding /");
     let mut drive = payload("sess_drive", "bind_drive", &project);
@@ -253,6 +254,7 @@ fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepa
     case.observe(
         "both failed with invalid_input naming the Session as given; no Session is listed",
     );
+    case.pass();
 
     let mut case = record
         .case("a missing path, a regular file, the state root, links into it and to a project");
@@ -286,6 +288,7 @@ fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepa
     assert_eq!(state_of(&machine, "sess_file"), "failed");
     assert!(!base.join("missing").exists());
     case.observe("cwd_not_found, cwd_not_directory, cwd_forbidden for the root with no probe spawned and for the link into it, and prepared with the link's canonical target");
+    case.pass();
 
     let mut case = record.case("a directory the App Server's user cannot enter");
     if case.runs_as_non_root("root enters a directory of mode 0000") {
@@ -296,8 +299,8 @@ fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepa
         assert_eq!(outcome(&engine, &message_id), failed("cwd_inaccessible"));
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
         case.observe("cwd_inaccessible");
+        case.pass();
     }
-    drop(case);
 
     let mut case = record.case("a link to a directory whose name is not UTF-8");
     if cfg!(target_os = "linux") {
@@ -316,10 +319,10 @@ fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepa
         assert_eq!(reports_for(&engine, &message_id)[0]["error"], error);
         assert_eq!(entries(&machine, "sess_latin1")[0]["error"], error);
         case.observe("cwd_inaccessible with exactly the message the working directory's canonical path is not UTF-8, in the report and in GET /v1/sessions");
+        case.pass();
     } else {
         case.not_run("macOS file systems hold only UTF-8 names");
     }
-    drop(case);
 
     let mut case = record
         .case("create_cwd with a missing directory, without it, and below a link into the root");
@@ -340,6 +343,7 @@ fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepa
     assert_eq!(outcome(&engine, &message_id), failed("cwd_forbidden"));
     assert_eq!(listing(&machine.root), root_listing);
     case.observe("the missing directory was created and prepared; without create_cwd cwd_not_found and nothing created; below the link into the state root cwd_forbidden and nothing created there");
+    case.pass();
 
     let mut case = record.case("create_cwd with a .. after a missing directory and after a link");
     let into_run = base.join("into_run");
@@ -356,11 +360,12 @@ fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepa
     assert_eq!(listing(base), base_listing);
     assert_eq!(listing(&machine.root), root_listing);
     case.observe("after a missing directory cwd_not_found; after a link into the state root, which the .. leaves for the state root itself, cwd_forbidden; nothing created in either place");
+    case.pass();
 }
 
 #[test]
 fn a_repeated_preparation_starts_one_probe_and_two_app_servers_keep_their_own_bindings() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path();
@@ -420,6 +425,7 @@ fn a_repeated_preparation_starts_one_probe_and_two_app_servers_keep_their_own_bi
     assert_eq!(state_of(&two, "sess_b"), "prepared");
     case.observe("the closed binding is closing; the other three stay prepared");
     drop(two);
+    case.pass();
 
     let mut case = record.case(
         "a probe held at its barrier while the preparation is repeated, with its ACKs withheld",
@@ -449,6 +455,7 @@ fn a_repeated_preparation_starts_one_probe_and_two_app_servers_keep_their_own_bi
     wait_until("sess_c prepared", || state_of(&one, "sess_c") == "prepared");
     assert_eq!(one.seams.count(PROBE_SPAWN), spawned + 1);
     case.observe("one probe.spawn; both instructions got prepared reports; prepared_pending_ack while their ACKs were withheld, prepared after");
+    case.pass();
 
     let mut case = record.case("a retargeted link and a repeat, then a changed payload");
     let target_two = directory_with_marker(base.join("target_two"));
@@ -464,11 +471,12 @@ fn a_repeated_preparation_starts_one_probe_and_two_app_servers_keep_their_own_bi
     assert_eq!(state_of(&one, "sess_c"), "prepared");
     assert_eq!(entries(&one, "sess_c")[0]["cwd"], prepared(&target_one).1);
     case.observe("the repeat reported the saved cwd of the first target with no new probe; the changed payload got binding_conflict and the binding stayed prepared");
+    case.pass();
 }
 
 #[test]
 fn a_removed_directory_leaves_its_binding_prepared_and_a_new_connection_checks_it_again() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path();
@@ -494,6 +502,7 @@ fn a_removed_directory_leaves_its_binding_prepared_and_a_new_connection_checks_i
     assert_eq!(state_of(&machine, "sess_kept"), "prepared");
     assert!(!removed.exists());
     case.observe("both stayed prepared, the heartbeat was answered, nothing was recreated");
+    case.pass();
 
     let mut case = record.case("a new connection prepares both Sessions again");
     new_connection(&engine, &machine);
@@ -505,6 +514,7 @@ fn a_removed_directory_leaves_its_binding_prepared_and_a_new_connection_checks_i
     case.observe(
         "the removed directory's Session failed with cwd_not_found and the other prepared",
     );
+    case.pass();
 
     let mut case = record.case("the directory restored and a new binding without a close");
     let restored = directory_with_marker(removed.clone());
@@ -523,11 +533,12 @@ fn a_removed_directory_leaves_its_binding_prepared_and_a_new_connection_checks_i
     case.observe(
         "the new binding replaced the failed one and prepared; the directory kept its content",
     );
+    case.pass();
 }
 
 #[test]
 fn a_probe_result_after_a_new_connection_changes_no_binding_and_a_resumed_stream_starts_no_probe() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path();
@@ -566,6 +577,7 @@ fn a_probe_result_after_a_new_connection_changes_no_binding_and_a_resumed_stream
         assert!(reports_for(&engine, message_id).is_empty());
     }
     case.observe("the reaped probe's result changed no binding: all eight are unavailable without a cwd and none was reported; the new connection's preparation prepared");
+    case.pass();
 
     let mut case = record.case("a resumed stream and a preparation written again");
     let spawned = machine.seams.count(PROBE_SPAWN);
@@ -587,6 +599,7 @@ fn a_probe_result_after_a_new_connection_changes_no_binding_and_a_resumed_stream
     assert_eq!(machine.seams.count(PROBE_SPAWN), spawned + 1);
     assert_eq!(state_of(&machine, "sess_9"), "prepared");
     case.observe("the resumed connection kept the binding prepared; the preparation written again started no probe, only the later one did");
+    case.pass();
 }
 
 fn send_resend(engine: &ReferenceServer, message_id: &str) {
@@ -598,7 +611,7 @@ fn send_resend(engine: &ReferenceServer, message_id: &str) {
 
 #[test]
 fn a_waiting_preparation_spawns_only_once_a_probe_is_reaped_and_never_once_closed() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path();
@@ -639,6 +652,7 @@ fn a_waiting_preparation_spawns_only_once_a_probe_is_reaped_and_never_once_close
     case.observe(
         "the ninth spawned nothing while eight ran and spawned once one of them was reaped",
     );
+    case.pass();
 
     let mut case = record.case("a tenth preparation closed while it waits");
     prepare(&engine, &payload("sess_10", "bind_1", &project));
@@ -653,11 +667,12 @@ fn a_waiting_preparation_spawns_only_once_a_probe_is_reaped_and_never_once_close
     assert_eq!(machine.seams.count(PROBE_SPAWN), 9);
     case.observe("the closed preparation never spawned, also once a slot came back");
     machine.seams.release(PROBE_STARTED);
+    case.pass();
 }
 
 #[test]
 fn a_freed_probe_slot_goes_to_the_longest_waiting_preparation() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path();
@@ -690,11 +705,12 @@ fn a_freed_probe_slot_goes_to_the_longest_waiting_preparation() {
     assert_eq!(machine.seams.count(PROBE_SPAWN), 9);
     case.observe("once one of the eight was reaped the ninth spawned and the tenth still waited: at 5 seconds the ninth's probe timed out with cwd_check_timeout and the tenth's wait ended with resource_exhausted");
     machine.seams.release(PROBE_STARTED);
+    case.pass();
 }
 
 #[test]
 fn eight_probes_held_for_five_seconds_time_out_and_keep_their_slots_until_reaped() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path();
@@ -743,6 +759,7 @@ fn eight_probes_held_for_five_seconds_time_out_and_keep_their_slots_until_reaped
         (&json!("tetral_probes"), &json!("timeout"))
     );
     case.observe("all nine were preparing at 4.999 seconds; at 5 the ninth failed with resource_exhausted, the eight with cwd_check_timeout, probe.spawn counts 8, and one pressure.rejecting_started names tetral_probes and timeout");
+    case.pass();
 
     let mut case =
         record.case("a preparation after the timeouts while the eight are still unreaped");
@@ -756,11 +773,12 @@ fn eight_probes_held_for_five_seconds_time_out_and_keep_their_slots_until_reaped
     case.observe(
         "the timed-out probes kept their slots until reaped; then the tenth spawned and prepared",
     );
+    case.pass();
 }
 
 #[test]
 fn a_new_session_beyond_one_hundred_twenty_eight_records_is_refused_and_existing_ones_still_work() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path();
@@ -785,6 +803,7 @@ fn a_new_session_beyond_one_hundred_twenty_eight_records_is_refused_and_existing
     assert!(entries(&machine, "sess_128").is_empty());
     assert_eq!(machine.seams.count(PROBE_SPAWN), spawned);
     case.observe("the 129th Session failed with resource_exhausted with no record and no probe; 128 are listed");
+    case.pass();
 
     let mut case = record.case("a repeat and a close of existing Sessions at the limit");
     let repeat = prepare(&engine, &first[0].1);
@@ -793,11 +812,12 @@ fn a_new_session_beyond_one_hundred_twenty_eight_records_is_refused_and_existing
     quiesce(&machine, 131);
     assert_eq!(state_of(&machine, "sess_1"), "closing");
     case.observe("the repeat got its saved result and the close was handled");
+    case.pass();
 }
 
 #[test]
 fn a_held_probe_blocks_neither_heartbeats_nor_the_shutdown() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path();
@@ -820,6 +840,7 @@ fn a_held_probe_blocks_neither_heartbeats_nor_the_shutdown() {
     assert_eq!(outcome(&engine, &held), failed("cwd_check_timeout"));
     machine.seams.wait_until_waiting(PROBE_STARTED, 1);
     case.observe("sixty seconds after the ready the connection was online: each heartbeat's ACK moved its deadline while the probe, timed out after five seconds, stayed held unreaped");
+    case.pass();
 
     let mut case = record.case("POST /v1/shutdown with the probe still held");
     let shutdown = request(&machine.app_server.socket, "POST", "/v1/shutdown").unwrap();
@@ -836,15 +857,17 @@ fn a_held_probe_blocks_neither_heartbeats_nor_the_shutdown() {
     } = machine;
     let (run, _) = app_server.exited();
     case.command("tetral server run --app app_one", &run.exit());
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert_eq!(run.object()["connection_state"], "stopped");
     assert_eq!(seams.count("shutdown.waiting"), 1);
     case.observe("the shutdown still waited for the unreaped probe once it had read 4.999 seconds on the controlled clock, and the process exited 0 at 5 seconds");
     seams.release(PROBE_STARTED);
+    case.pass();
 }
 
 #[test]
 fn get_sessions_lists_a_staged_preparation_and_the_error_of_a_failed_one() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path();
@@ -882,7 +905,7 @@ fn get_sessions_lists_a_staged_preparation_and_the_error_of_a_failed_one() {
     );
     answer_fault(&engine, json!({ "action": "release" }));
     assert_eq!(outcome(&engine, &staged), prepared(&project));
-    drop(case);
+    case.pass();
 
     let mut case = record.case("a preparation that failed");
     let missing = prepare(
@@ -898,6 +921,7 @@ fn get_sessions_lists_a_staged_preparation_and_the_error_of_a_failed_one() {
         (&json!("failed"), &reported)
     );
     case.observe("its entry is failed and carries the reported error's code and message");
+    case.pass();
 }
 
 /// Writes a `session.prepare` with `payload` on the instance's stream under
@@ -917,7 +941,7 @@ fn send_prepare(engine: &ReferenceServer, machine: &Machine, message_id: &str, p
 
 #[test]
 fn a_report_for_an_unissued_instruction_or_another_binding_is_refused_and_never_sent_again() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path();
@@ -938,6 +962,7 @@ fn a_report_for_an_unissued_instruction_or_another_binding_is_refused_and_never_
         (Some(409), Some("unknown_instruction"))
     );
     case.observe("its prepared report got 409 unknown_instruction");
+    case.pass();
 
     let mut case = record.case("a preparation whose message_id Engine issued for another binding");
     machine.seams.hold(PROBE_STARTED);
@@ -964,6 +989,7 @@ fn a_report_for_an_unissued_instruction_or_another_binding_is_refused_and_never_
         (Some(409), Some("unknown_instruction"))
     );
     case.observe("Engine's copy under the same message_id was a message_conflict; the report for the binding the CLI prepared got 409 unknown_instruction");
+    case.pass();
 
     let mut case = record.case("past the first retry wait, a later report");
     wait_until("two report.dropped records", || {
@@ -985,11 +1011,12 @@ fn a_report_for_an_unissued_instruction_or_another_binding_is_refused_and_never_
     message_ids.dedup();
     assert_eq!(message_ids.len(), 3);
     case.observe("both refusals were recorded as report.dropped and neither report was sent again; the later report was accepted");
+    case.pass();
 }
 
 #[test]
 fn a_new_binding_finds_no_room_in_a_replay_ledger_with_only_its_reserve_free() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path();
@@ -1020,11 +1047,12 @@ fn a_new_binding_finds_no_room_in_a_replay_ledger_with_only_its_reserve_free() {
     assert_eq!(sessions(&machine), Vec::<Value>::new());
     assert_eq!(machine.seams.count(PROBE_SPAWN), 0);
     case.observe("the preparation failed with resource_exhausted, with no record and no probe");
+    case.pass();
 }
 
 #[test]
 fn a_preparation_addressed_to_an_earlier_connection_fails_with_stale_connection() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path();
@@ -1082,4 +1110,5 @@ fn a_preparation_addressed_to_an_earlier_connection_fails_with_stale_connection(
     assert!(entries(&machine, "sess_stale").is_empty());
     assert_eq!(machine.seams.count(PROBE_SPAWN), 0);
     case.observe("the copy naming the first connection failed with stale_connection on the second; the Session lists no binding and no probe was spawned");
+    case.pass();
 }

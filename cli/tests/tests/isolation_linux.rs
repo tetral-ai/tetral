@@ -462,6 +462,7 @@ fn every_grant_reaches_only_what_its_rules_allow_and_never_the_protected_paths()
     let mut case = tetral_tests::record!()
         .case("every grant reaches only what its rules allow and never the protected paths");
     grants_reach_only_what_their_rules_allow(&mut case, &World::new());
+    case.pass();
 }
 
 /// The probes under `/` read with `<p>` read_write, of a missing
@@ -648,14 +649,15 @@ fn a_missing_deny_path_under_a_directory_of_another_user_stays_uncreatable_and_t
     let mut case = tetral_tests::record!().case(
         "a missing deny path under a directory of another user stays uncreatable and the command runs",
     );
+    if !case.runs_as_non_root("root may create entries in /") {
+        return;
+    }
     a_missing_deny_path_stays_uncreatable(&mut case, &World::new());
+    case.pass();
 }
 
 /// The probe of a deny rule for a path below a missing `/<m>`.
 fn a_missing_deny_path_stays_uncreatable(case: &mut Case, runner: &impl Runner) {
-    if !case.runs_as_non_root("root may create entries in /") {
-        return;
-    }
     let targets = runner.targets();
     let missing = PathBuf::from(format!(
         "/tetral-isolation-missing-{}-{}",
@@ -685,6 +687,7 @@ fn a_rule_for_a_regular_file_and_a_deny_path_under_one_leave_the_command_running
         "a read_write rule for a regular file, and a deny path under a regular file, in a writable project",
     );
     regular_file_rules_leave_the_command_running(&mut case, &World::new());
+    case.pass();
 }
 
 /// The probes of a `read_write` rule for a regular file and of a deny
@@ -736,7 +739,7 @@ fn regular_file_rules_leave_the_command_running(case: &mut Case, runner: &impl R
 
 #[test]
 fn the_probes_run_again_as_calls_of_an_app_server_against_its_own_paths() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let mut case = tetral_tests::record!().case(
         "the isolation probes as exec_command calls of an App Server started from <p>/bin/tetral, and those that read or write one file as view_image and edit calls, against its own state root, control socket and task directories",
     );
@@ -744,16 +747,21 @@ fn the_probes_run_again_as_calls_of_an_app_server_against_its_own_paths() {
     grants_reach_only_what_their_rules_allow(&mut case, &served);
     regular_file_rules_leave_the_command_running(&mut case, &served);
     file_probes(&mut case, &served);
+    case.pass();
 }
 
 #[test]
 fn a_missing_deny_path_stays_uncreatable_as_an_exec_command_call() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let mut case = tetral_tests::record!().case(
         "a missing deny path under a directory of another user, as an exec_command call of an App Server",
     );
+    if !case.runs_as_non_root("root may create entries in /") {
+        return;
+    }
     let served = Served::start(&mut case);
     a_missing_deny_path_stays_uncreatable(&mut case, &served);
+    case.pass();
 }
 
 /// Whether a `view_image` call read its file: an image, or a file in which
@@ -937,7 +945,7 @@ fn file_probes(case: &mut Case, served: &Served) {
 
 #[test]
 fn the_cua_driver_that_config_toml_records_stays_read_only_under_a_writable_rule() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let mut case = tetral_tests::record!().case(
         "a cua-driver recorded in config.toml through a symbolic link to a directory of the read_write project: write a file beside it, then write and replace the driver",
     );
@@ -983,6 +991,7 @@ fn the_cua_driver_that_config_toml_records_stays_read_only_under_a_writable_rule
     assert_eq!(fs::read_to_string(bin.join("other")).unwrap(), "y");
     assert_eq!(fs::read_to_string(&driver).unwrap(), "driver\n");
     case.observe("the file beside the driver holds y; the write and the replacement of the recorded driver failed, which still holds driver");
+    case.pass();
 }
 
 /// The host's LAN address: the source address of its default route.
@@ -1101,11 +1110,12 @@ fn disabled_blocks_tcp_and_udp_and_direct_reaches_them_and_local_services() {
             assert_eq!(datagrams, reached, "{mode}: datagrams at {address}");
         }
     }
+    case.pass();
 }
 
 #[test]
 fn a_disabled_task_leaves_the_connection_its_heartbeats_and_a_direct_tasks_connect_working() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let mut case = tetral_tests::record!().case(
         "a disabled task running across 20 seconds of the clock while a direct task connects to a TCP listener on the host's LAN address",
     );
@@ -1151,6 +1161,7 @@ fn a_disabled_task_leaves_the_connection_its_heartbeats_and_a_direct_tasks_conne
     let disabled = tasks.terminal("task_disabled");
     assert_eq!(disabled["result"]["result"]["exit_code"], 0, "{disabled:#}");
     case.observe("the direct task's connect reached the listener while the disabled task ran; across 20 seconds of the clock the heartbeat was ACKed and the connection stayed online; the disabled task ran until stopped and exited 0");
+    case.pass();
 }
 
 /// A directory holding only an executable `bwrap` script with `body`.
@@ -1164,8 +1175,7 @@ fn fake_bwrap(directory: &Path, body: &str) -> PathBuf {
 
 /// One way of offering a `bwrap` to the isolation: the `tetral` build, the
 /// App Server's `PATH`, the bytes of a `bwrap` beside `tetral`, and the
-/// command's own `PATH`, which the launch hands to `tetral` as
-/// `codex-linux-sandbox`.
+/// command's own `PATH`, applied only at the isolated command exec.
 #[derive(Clone)]
 struct Offer<'a> {
     name: &'a str,
@@ -1184,10 +1194,6 @@ enum Expected<'a> {
     /// The check rejects the call `sandbox_unavailable` and nothing starts;
     /// for a planted `bwrap`, the message names it and it never runs.
     Unavailable { planted: Option<&'a Path> },
-    /// The launch starts `tetral` as `codex-linux-sandbox`, which ends with
-    /// exit status 1 naming the planted `bwrap` on stderr before it runs it
-    /// or the command.
-    RefusedByTheHelper { planted: &'a Path },
 }
 
 /// The marker that a planted `bwrap` writes when it runs.
@@ -1204,14 +1210,10 @@ enum Via {
     ToolExecute,
 }
 
-/// Checks `offer` by the harness and, unless the helper refuses it, which
-/// only the harness's request can set up, as a `tool.execute`.
+/// Checks `offer` by the harness and as a `tool.execute`.
 fn check_offer_both_ways(case: &mut Case, offer: Offer) {
-    let refused = matches!(offer.expected, Expected::RefusedByTheHelper { .. });
     check_offer(case, offer.clone(), Via::Harness);
-    if !refused {
-        check_offer(case, offer, Via::ToolExecute);
-    }
+    check_offer(case, offer, Via::ToolExecute);
 }
 
 /// Runs a command that writes a marker through `offer` `via` the harness or
@@ -1276,11 +1278,6 @@ fn check_offer(case: &mut Case, offer: Offer, via: Via) {
             if let Some(planted) = planted {
                 names(outcome["rejected"]["message"].as_str().unwrap(), planted);
             }
-        }
-        Expected::RefusedByTheHelper { planted } => {
-            assert_eq!(outcome["exit_code"], 1, "{name}: {outcome}");
-            assert_eq!((spawned, marker.exists()), (1, false), "{name}");
-            names(outcome["stderr"].as_str().unwrap(), planted);
         }
     }
 }
@@ -1350,7 +1347,6 @@ fn check_offered_call(
                 );
             }
         }
-        Expected::RefusedByTheHelper { .. } => unreachable!("only the harness sets it up"),
     }
 }
 
@@ -1460,18 +1456,20 @@ fn each_bwrap_offer_runs_the_command_rejects_the_call_or_has_the_helper_refuse_i
             },
         },
         Offer {
-            name: "that copy first only on the command's PATH, as if planted after the check",
+            name: "a task-only PATH cannot change the sandbox launcher selection",
             tetral: binaries::tetral(),
             path: SYSTEM_PATH,
             beside: None,
             command_path: &planted_path,
-            expected: Expected::RefusedByTheHelper { planted: &planted },
+            expected: Expected::Runs {
+                ignored: Some(&planted),
+            },
         },
     ];
     for offer in rows {
         check_offer_both_ways(&mut case, offer);
     }
-    drop(case);
+    case.pass();
 
     let mut case = record.case(
         "bwrap files in directories that root owns: one root owns whose --help lacks --as-pid-1, alone on PATH, and one the test user owns, ahead of the system bwrap",
@@ -1525,6 +1523,7 @@ fn each_bwrap_offer_runs_the_command_rejects_the_call_or_has_the_helper_refuse_i
     ] {
         check_offer_both_ways(&mut case, offer);
     }
+    case.pass();
 }
 
 #[test]
@@ -1599,4 +1598,5 @@ fn the_bundled_bwrap_with_its_digest_runs_tools_where_no_system_bwrap_exists() {
     let outcome = harness(&world.tetral, &request, path, None);
     check_probes(&mut case, &policy, &outcome, &probes);
     assert!(!outside.exists(), "{} was written", outside.display());
+    case.pass();
 }

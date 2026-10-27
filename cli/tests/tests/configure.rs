@@ -53,6 +53,7 @@ fn configured_root(case: &mut Case, directory: &Path) -> PathBuf {
         "tetral configure --app app_one --from-stdin (first bootstrap)",
         &run.exit(),
     );
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert_eq!(run.object(), json!({}), "the first configure succeeds");
     root
 }
@@ -79,8 +80,40 @@ fn fails_and_changes_nothing(
 }
 
 #[test]
+fn unsupported_root_encoding_is_refused_before_configuration_writes() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let record = tetral_tests::record!();
+    let mut case = record.case("given and resolved state roots must be UTF-8 before command work");
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory
+        .path()
+        .join(OsString::from_vec(b"root-\xff".to_vec()));
+    fs::create_dir(&target).unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+    let alias = directory.path().join("alias");
+    symlink(&target, &alias).unwrap();
+    let missing = alias.join("missing/root");
+    let configured = configure(&missing, bytes(&bootstrap("tetral_ck_unused"))).run();
+    assert_eq!(configured.error_code(), "unsafe_control_path");
+    assert_eq!(configured.message(), "the state root path is not UTF-8");
+    assert!(!target.join("missing").exists());
+    let status = Tetral::new(["server", "status", "--app", APP])
+        .home(&target)
+        .run();
+    assert_eq!(status.error_code(), "unsafe_control_path");
+    assert_eq!(status.message(), configured.message());
+    assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+    let version = Tetral::new(["--version"]).home(&target).run();
+    assert!(version.status.success());
+    case.observe("configure refused the resolved non-UTF-8 root before creating its missing prefix; server status refused the given root; --version still succeeded without root access");
+    case.pass();
+}
+
+#[test]
 fn refused_arguments_input_and_root_paths_fail_and_change_nothing() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
 
     let mut case = record.case("arguments are refused with invalid_arguments");
@@ -112,7 +145,7 @@ fn refused_arguments_input_and_root_paths_fail_and_change_nothing() {
     for (command, tetral) in rows {
         fails_and_changes_nothing(&mut case, &root, command, tetral, "invalid_arguments");
     }
-    drop(case);
+    case.pass();
 
     let mut case = record.case("a refused bootstrap creates no missing root");
     let missing = directory.path().join("missing");
@@ -121,7 +154,7 @@ fn refused_arguments_input_and_root_paths_fail_and_change_nothing() {
     assert_eq!(run.error_code(), "invalid_bootstrap");
     assert!(!missing.exists(), "a refused configure created the root");
     case.observe("invalid_bootstrap; the root was not created");
-    drop(case);
+    case.pass();
 
     let mut case = record.case("bootstraps that break a rule are refused with invalid_bootstrap");
     let directory = tempfile::tempdir().unwrap();
@@ -173,6 +206,12 @@ fn refused_arguments_input_and_root_paths_fail_and_change_nothing() {
         missing.as_object_mut().unwrap().remove(member);
         rows.push((format!("{member} missing"), bytes(&missing)));
     }
+    let mut invalid_utf8 = bytes(&bootstrap("tetral_ck_second"));
+    invalid_utf8.push(0xff);
+    rows.push(("invalid UTF-8".into(), invalid_utf8));
+    let mut trailing_value = bytes(&bootstrap("tetral_ck_second"));
+    trailing_value.extend_from_slice(b" {}");
+    rows.push(("a second JSON value".into(), trailing_value));
     assert_eq!(rows[1].1.len(), 65_537);
     for (input, stdin) in rows {
         let command =
@@ -185,7 +224,7 @@ fn refused_arguments_input_and_root_paths_fail_and_change_nothing() {
             "invalid_bootstrap",
         );
     }
-    drop(case);
+    case.pass();
 
     let mut case = record.case("a root recorded for another app is refused with app_mismatch");
     let directory = tempfile::tempdir().unwrap();
@@ -200,7 +239,7 @@ fn refused_arguments_input_and_root_paths_fail_and_change_nothing() {
         other_app,
         "app_mismatch",
     );
-    drop(case);
+    case.pass();
 
     let mut case =
         record.case("unsafe control paths in the root are refused with unsafe_control_path");
@@ -275,7 +314,7 @@ fn refused_arguments_input_and_root_paths_fail_and_change_nothing() {
         assert!(run.message().contains(link.to_str().unwrap()));
         assert!(run.message().contains("symbolic link"));
     }
-    drop(case);
+    case.pass();
 
     let mut case = record.case("a root owned by another user is refused with unsafe_control_path");
     match other_user::directory() {
@@ -288,6 +327,7 @@ fn refused_arguments_input_and_root_paths_fail_and_change_nothing() {
                 "unsafe_control_path",
             );
             assert!(run.message().contains("owned by another user"));
+            case.pass();
         }
         Err(reason) => case.not_run(reason),
     }
@@ -295,12 +335,14 @@ fn refused_arguments_input_and_root_paths_fail_and_change_nothing() {
 
 #[test]
 fn an_unsafe_socket_directory_is_refused_and_changes_nothing() {
-    let mut socket_dir = socket_directory::replaced();
+    let mut socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
     let valid = bytes(&bootstrap("tetral_ck_second"));
 
-    let root = configured_root(&mut record.case("a configured root"), directory.path());
+    let mut case = record.case("a configured root");
+    let root = configured_root(&mut case, directory.path());
+    case.pass();
     for socket_mode in [0o755, 0o500] {
         let mut case = record.case(&format!(
             "a socket directory with mode {socket_mode:04o} is refused with unsafe_control_path"
@@ -316,6 +358,7 @@ fn an_unsafe_socket_directory_is_refused_and_changes_nothing() {
         assert!(run.message().contains(socket_dir.path().to_str().unwrap()));
         assert_eq!(mode(&socket_dir.path()), socket_mode);
         fs::remove_dir(socket_dir.path()).unwrap();
+        case.pass();
     }
 
     let mut case = record
@@ -333,7 +376,7 @@ fn an_unsafe_socket_directory_is_refused_and_changes_nothing() {
     );
     assert!(run.message().contains("symbolic link"));
     fs::remove_file(socket_dir.path()).unwrap();
-    drop(case);
+    case.pass();
 
     let mut case =
         record.case("a socket directory owned by another user is refused with unsafe_control_path");
@@ -348,6 +391,7 @@ fn an_unsafe_socket_directory_is_refused_and_changes_nothing() {
                     "unsafe_control_path",
                 );
                 assert!(run.message().contains("owned by another user"));
+                case.pass();
             }
             Err(reason) => case.not_run(reason),
         }
@@ -389,7 +433,7 @@ fn version_needs_no_root_and_touches_nothing() {
     case.observe(format!(
         "stdout is exactly {expected:?}, stderr is empty, nothing is created"
     ));
-    drop(case);
+    case.pass();
 
     let mut case = record.case("tetral --version with a root owned by another user");
     match other_user::directory() {
@@ -402,10 +446,10 @@ fn version_needs_no_root_and_touches_nothing() {
             case.observe(format!(
                 "stdout is exactly {expected:?}, stderr is empty, the root checks did not run"
             ));
+            case.pass();
         }
         Err(reason) => case.not_run(reason),
     }
-    drop(case);
 
     let mut case = record.case("--help and --version with another argument are invalid_arguments");
     for arguments in [vec!["--help"], vec!["--version", "--app", "x"]] {
@@ -414,11 +458,40 @@ fn version_needs_no_root_and_touches_nothing() {
         assert_eq!(run.error_code(), "invalid_arguments", "{arguments:?}");
     }
     assert!(!missing.exists());
+    case.pass();
+}
+
+#[test]
+fn an_oversized_bootstrap_is_refused_without_waiting_for_stdin_eof() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case =
+        record.case("an oversized bootstrap is refused while its stdin writer stays open");
+    let directory = tempfile::tempdir().unwrap();
+    let root = configured_root(&mut case, directory.path());
+    let before = snapshot(&root);
+    let mut padded = bootstrap("tetral_ck_second");
+    padded["padding"] = json!("");
+    let fill = 65_536 - bytes(&padded).len();
+    padded["padding"] = json!("p".repeat(fill));
+    let mut input = bytes(&padded);
+    assert_eq!(input.len(), 65_536);
+    assert!(serde_json::from_slice::<serde_json::Value>(&input).is_ok());
+    input.push(b' ');
+    let run = configure(&root, input).keep_stdin_open().run();
+    case.command(
+        "configure with 65,537 bytes and stdin kept open",
+        &run.exit(),
+    );
+    assert_eq!(run.error_code(), "invalid_bootstrap");
+    assert_eq!(snapshot(&root), before);
+    case.observe("the valid 65,536-byte JSON followed by one space was rejected before EOF, leaving the installed configuration unchanged");
+    case.pass();
 }
 
 #[test]
 fn configure_installs_a_bootstrap_of_the_size_limit_with_private_modes() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case =
         record.case("a bootstrap of exactly 65,536 bytes installs a new root with private modes");
@@ -462,11 +535,12 @@ fn configure_installs_a_bootstrap_of_the_size_limit_with_private_modes() {
         "app = \"app_one\"\nserver_url = \"https://engine.example.com\"\ninstance_id = \"inst_one\"\ndrives_enabled = false\n"
     );
     case.observe("stdout is {} and a newline; the root and run/ have mode 0700, config.toml, credentials.json and run/app-server.lock 0600; credentials.json holds the bootstrap without the unknown member");
+    case.pass();
 }
 
 #[test]
 fn each_failure_code_of_configure_leaves_the_root_unchanged() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let valid = bytes(&bootstrap("tetral_ck_second"));
 
@@ -486,7 +560,7 @@ fn each_failure_code_of_configure_leaves_the_root_unchanged() {
         "server_running",
     );
     drop(lock);
-    drop(case);
+    case.pass();
 
     let mut case = record
         .case("configure with a config.toml that is not TOML fails with invalid_configuration");
@@ -500,7 +574,7 @@ fn each_failure_code_of_configure_leaves_the_root_unchanged() {
         configure(&root, valid.clone()),
         "invalid_configuration",
     );
-    drop(case);
+    case.pass();
 
     let mut case = record.case("configure on a root whose run/ has mode 0500 fails with io_failed");
     if case.runs_as_non_root("root may write into a directory of mode 0500") {
@@ -523,8 +597,8 @@ fn each_failure_code_of_configure_leaves_the_root_unchanged() {
             run.message()
         );
         fs::set_permissions(root.join("run"), fs::Permissions::from_mode(0o700)).unwrap();
+        case.pass();
     }
-    drop(case);
 
     let mut case = record
         .case("configure under a directory of mode 0500 fails with io_failed naming the new root");
@@ -547,12 +621,13 @@ fn each_failure_code_of_configure_leaves_the_root_unchanged() {
             run.message()
         );
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        case.pass();
     }
 }
 
 #[test]
 fn configure_installs_over_a_root_that_another_run_left() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut replacement = bootstrap("tetral_ck_second");
     replacement["server_url"] = json!("https://other.example.com");
@@ -602,6 +677,7 @@ fn configure_installs_over_a_root_that_another_run_left() {
             "tetral configure --app app_one --from-stdin < another bootstrap",
             &run.exit(),
         );
+        assert_eq!(run.status.code(), Some(0), "{}", run.exit());
         assert_eq!(run.object(), json!({}));
         let credentials: Value =
             serde_json::from_slice(&fs::read(root.join("credentials.json")).unwrap()).unwrap();
@@ -619,6 +695,7 @@ fn configure_installs_over_a_root_that_another_run_left() {
         names.sort();
         assert_eq!(names, ["config.toml", "credentials.json", "run"]);
         case.observe("both files hold the new bootstrap's server_url and instance_id; the root holds only config.toml, credentials.json and run/");
+        case.pass();
     }
 
     let mut case = record.case("configure keeps the local options of the existing config.toml");
@@ -638,6 +715,7 @@ fn configure_installs_over_a_root_that_another_run_left() {
         "tetral configure --app app_one --from-stdin < another bootstrap",
         &run.exit(),
     );
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert_eq!(run.object(), json!({}));
     let config = fs::read_to_string(root.join("config.toml")).unwrap();
     assert!(config.contains("drives_enabled = true"), "{config}");
@@ -647,11 +725,12 @@ fn configure_installs_over_a_root_that_another_run_left() {
     );
     assert!(config.contains("instance_id = \"inst_two\""), "{config}");
     case.observe("config.toml holds the new instance_id with drives_enabled = true and the [computer_use] table kept");
+    case.pass();
 }
 
 #[test]
 fn no_key_reaches_the_output_or_the_argument_list() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("a canary key reaches neither stdout, stderr nor the argument list");
     let directory = tempfile::tempdir().unwrap();
@@ -670,6 +749,7 @@ fn no_key_reaches_the_output_or_the_argument_list() {
     seams.release("configure.locked");
     let run = run::finish(child);
     case.command("TETRAL_LOG_LEVEL=debug tetral configure --app app_one --from-stdin < bootstrap with a canary key, held at configure.locked", &run.exit());
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert_eq!(run.object(), json!({}));
     for (stream, bytes) in [("stdout", &run.stdout), ("stderr", &run.stderr)] {
         assert!(
@@ -680,6 +760,7 @@ fn no_key_reaches_the_output_or_the_argument_list() {
     case.observe(format!(
         "argument list while held: {arguments:?}; stdout and stderr hold no canary"
     ));
+    case.pass();
 }
 
 /// The argument list of a running process, as the operating system shows it.
@@ -755,7 +836,7 @@ fn request_count(engine: &ReferenceServer) -> usize {
 
 #[test]
 fn server_run_after_an_interrupted_configure_authenticates_with_one_whole_credential() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let engine = engine(&[
         ("inst_one", "ccred_old", "tetral_ck_old", "active"),
@@ -776,6 +857,7 @@ fn server_run_after_an_interrupted_configure_authenticates_with_one_whole_creden
             "tetral configure --app app_one --from-stdin (old bootstrap)",
             &run.exit(),
         );
+        assert_eq!(run.status.code(), Some(0), "{}", run.exit());
         assert_eq!(run.object(), json!({}));
         let seams = Seams::serve(directory.path(), Duration::from_secs(1));
         seams.hold(barrier);
@@ -813,12 +895,13 @@ fn server_run_after_an_interrupted_configure_authenticates_with_one_whole_creden
                 ));
             }
         }
+        case.pass();
     }
 }
 
 #[test]
 fn configure_beside_an_online_app_server_leaves_its_connection_alone() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("configure while an App Server is online");
     let engine = engine(&[("inst_one", "ccred_one", "tetral_ck_one", "active")]);
@@ -852,11 +935,12 @@ fn configure_beside_an_online_app_server_leaves_its_connection_alone() {
     );
     assert_eq!(app_server.status(), online);
     case.observe("configure failed with server_running; the reference server recorded no new events request and no 401, and the App Server is online on the same connection");
+    case.pass();
 }
 
 #[test]
 fn a_broken_configuration_never_reaches_engine() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let engine = engine(&[
         (
@@ -925,6 +1009,7 @@ fn a_broken_configuration_never_reaches_engine() {
         assert_eq!(request_count(&engine), before);
         case.observe("invalid_configuration; the reference server recorded no request");
         if !repairable {
+            case.pass();
             continue;
         }
         let run = configure(&root, bytes(&bootstrap)).run();
@@ -932,17 +1017,19 @@ fn a_broken_configuration_never_reaches_engine() {
             "tetral configure --app app_one --from-stdin (again)",
             &run.exit(),
         );
+        assert_eq!(run.status.code(), Some(0), "{}", run.exit());
         assert_eq!(run.object(), json!({}));
         let app_server = AppServer::start(server_run(&root, &seams), &root);
         case.command("tetral server run --app app_one", "running");
         wait_for_state(&app_server, "online");
         case.observe("after configure replaced the configuration, server run reached online");
+        case.pass();
     }
 }
 
 #[test]
 fn no_key_reaches_the_output_log_or_arguments_of_a_server_run_that_connects() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("a server run that connects, gets a 401 and is shut down");
     let canary = format!("tetral_ck_CANARY_RUN{}", std::process::id());
@@ -977,8 +1064,10 @@ fn no_key_reaches_the_output_log_or_arguments_of_a_server_run_that_connects() {
         .home(&root)
         .run();
     case.command("tetral server stop --app app_one", &stop.exit());
+    assert_eq!(stop.status.code(), Some(0), "{}", stop.exit());
     let (run, _) = app_server.exited();
     case.command("tetral server run --app app_one", &run.exit());
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     let log = fs::read(root.join("logs/tetral.log")).unwrap();
     for (place, bytes) in [
         ("stdout", &run.stdout),
@@ -994,4 +1083,5 @@ fn no_key_reaches_the_output_log_or_arguments_of_a_server_run_that_connects() {
     case.observe(format!(
         "blocked with credential_revoked; argument list {arguments:?}; status, stdout, stderr and the log file hold no canary"
     ));
+    case.pass();
 }

@@ -34,7 +34,7 @@ fn shell_directories() -> Vec<PathBuf> {
 
 #[test]
 fn the_ready_advertises_the_tools_whose_startup_checks_pass() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
 
     let mut case = record.case("an App Server on a host with /bin/bash and /bin/sh");
@@ -48,6 +48,7 @@ fn the_ready_advertises_the_tools_whose_startup_checks_pass() {
     let fragment: Value = serde_json::from_str(&tool_execution_fragment()).unwrap();
     assert_eq!(advertised(&engine), fragment);
     case.observe("tool_execution equals the fixture ready_direct_and_disabled's");
+    case.pass();
 
     let mut case = record.case(
         "an App Server whose mount namespace has empty file systems over the directories of \
@@ -80,4 +81,5 @@ fn the_ready_advertises_the_tools_whose_startup_checks_pass() {
         "tools are edit and view_image; controls, policy versions, network modes and limits \
          are the fixture's",
     );
+    case.pass();
 }

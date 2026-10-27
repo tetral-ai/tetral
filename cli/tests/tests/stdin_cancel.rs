@@ -112,7 +112,7 @@ fn sent_again(tasks: &TaskMachine, answered: u64, message_id: &Value) -> Vec<Val
 
 #[test]
 fn a_write_is_recorded_by_its_write_seq_and_its_lost_reply_is_sent_again_unchanged() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "cat > f: write 1 with its reply's answer dropped, a read, write 2, write 1 again, write 4, then write 3",
@@ -166,11 +166,12 @@ fn a_write_is_recorded_by_its_write_seq_and_its_lost_reply_is_sent_again_unchang
         "write 1's reply sent {} times with one body; f holds one, two and four once each; the repeated write 1 reused written_bytes 4; write 3 below 4 was invalid_input",
         bodies.len()
     ));
+    case.pass();
 }
 
 #[test]
 fn failed_controls_leave_the_task_and_its_reports_unchanged() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "cat > f after write 1: a conflicting write 1, an unknown task, stdin to an edit task and a read whose ACK names another report, then write 2",
@@ -238,11 +239,12 @@ fn failed_controls_leave_the_task_and_its_reports_unchanged() {
         "write_conflict, task_not_found and unsupported_control with no result; the read reply under a wrong-identity ACK sent {} times unchanged; f holds x and z; the task's one report is running",
         bodies.len()
     ));
+    case.pass();
 }
 
 #[test]
 fn a_write_after_its_tasks_cleanup_is_result_unavailable_and_the_files_stay_deleted() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("true, its files removed, then a write with write_seq 1");
     let directory = tempfile::tempdir().unwrap();
@@ -272,11 +274,12 @@ fn a_write_after_its_tasks_cleanup_is_result_unavailable_and_the_files_stay_dele
     case.observe(
         "result_unavailable with no result; no task directory and no entry of T came back",
     );
+    case.pass();
 }
 
 #[test]
 fn a_cancel_replies_with_the_cumulative_output_and_repeated_cancels_join_one_termination() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "trap '' TERM; printf abcdef; cat > f with its window read: two cancels 1 second apart, the first with visible_bytes 4, and one after the exit",
@@ -344,11 +347,12 @@ fn a_cancel_replies_with_the_cumulative_output_and_repeated_cancels_join_one_ter
         .collect();
     assert_eq!(reports, ["running", "terminal"]);
     case.observe("the first cancel cancelled and running, with 4 of the 6 bytes already read; the second, 1 second later while the TERM was ignored, cancelled and running too; one terminal report killed 2 seconds after the first; a cancel after it cancelled false with signal killed");
+    case.pass();
 }
 
 #[test]
 fn reads_and_writes_wait_as_long_as_their_bounds_and_never_extend_the_task() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "a read with wait_ms 0, one that waits for output, one whose wait ends, a write's wait, a write's wait_ms of 40,000, and reads repeated over a lifetime of 1,000 ms",
@@ -434,11 +438,12 @@ fn reads_and_writes_wait_as_long_as_their_bounds_and_never_extend_the_task() {
         "{terminal:#}"
     );
     case.observe(format!("the immediate read after {elapsed:?}; the waiting read at the first output; the waiting read at 5,000 ms and not at 4,999 (duration_ms 5,250); the write's reply at 250 ms and not at 249 (duration_ms 5,500); the write with wait_ms 40,000 replied at 30,000 ms and not at 29,999 (duration_ms 35,500); three reads of 250 ms, then the terminal report at 1,000 ms with timed_out"));
+    case.pass();
 }
 
 #[test]
 fn a_lost_read_reply_returns_the_same_output_and_the_next_read_the_next_window() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "A before the running report, B read with its reply's answer dropped, C read next, then the exit",
@@ -477,11 +482,12 @@ fn a_lost_read_reply_returns_the_same_output_and_the_next_read_the_next_window()
     let terminal = tasks.terminal("task_windows");
     assert_eq!(terminal["result"]["result"]["stdout"]["text"], "ABC");
     case.observe(format!("the running report held A; the read reply holding B was sent {} times unchanged; the next read, with C already read, replied at once with only C; the terminal report held ABC", bodies.len()));
+    case.pass();
 }
 
 #[test]
 fn a_reply_and_the_terminal_report_of_an_exit_during_its_wait_are_acknowledged_apart() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "a read waiting when the command exits, its reply's ACK withheld, then a write to the ended task",
@@ -556,11 +562,12 @@ fn a_reply_and_the_terminal_report_of_an_exit_during_its_wait_are_acknowledged_a
     );
     tasks.wait_files_removed(tetral_tests::tasks::SESSION);
     case.observe("the read reply's and the terminal report's ACKs were withheld and only the terminal report's released; the reply said success with exit_code 3; a write to the ended task was stdin_closed with the exit facts; two reads of it replied at once with success and exit_code 3; the task's directory stayed until the held ACK was released");
+    case.pass();
 }
 
 #[test]
 fn write_replies_take_the_window_of_their_wait_within_their_limits() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "a command that prints got: for each line, then the line once a file of its name exists: write 1, write 2 with visible_bytes 4, and write 1 again while write 2's reply waits",
@@ -611,11 +618,12 @@ fn write_replies_take_the_window_of_their_wait_within_their_limits() {
     );
 
     case.observe("write 1's reply held got:one, read in two parts during its wait; write 1 repeated while got:two waited in the window reported the counters 16 bytes and 2 lines with no text; write 2's reply then held 4 of got:two's 8 bytes");
+    case.pass();
 }
 
 #[test]
 fn a_write_to_a_full_pipe_ends_stdin_closed_with_the_bytes_written_and_is_never_repeated() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "writes of 32,768, 16,384 and 32,768 bytes to a command that does not read, write 3 again, then the command counts its stdin",
@@ -680,11 +688,12 @@ fn a_write_to_a_full_pipe_ends_stdin_closed_with_the_bytes_written_and_is_never_
         format!("{}\n", 32_768 + 16_384 + partial)
     );
     case.observe(format!("writes 1 and 2 written whole; write 3 ended stdin_closed after {partial} bytes, and its repeat wrote nothing; the command counted {} bytes; no terminal report before its exit", 32_768 + 16_384 + partial));
+    case.pass();
 }
 
 #[test]
 fn writes_sent_together_are_written_in_write_seq_order() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "a command that reads stdin into f once go exists: two writes that fill its pipe, then writes 3, 4 and 5 sent together and go",
@@ -731,11 +740,12 @@ fn writes_sent_together_are_written_in_write_seq_order() {
     }
 
     case.observe("f ended with 345 after the 65,536 bytes that filled the pipe");
+    case.pass();
 }
 
 #[test]
 fn a_cancel_is_answered_during_a_blocked_write_which_ends_stdin_closed() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case =
         record.case("sleep 120: two writes that fill its pipe, a third that blocks, then a cancel");
@@ -777,11 +787,12 @@ fn a_cancel_is_answered_during_a_blocked_write_which_ends_stdin_closed() {
         json!([true, "terminated"])
     );
     case.observe("the cancel was answered while write 3 was blocked, with the clock never moved; write 3 ended stdin_closed; the terminal report said cancelled, terminated");
+    case.pass();
 }
 
 #[test]
 fn chars_needing_six_byte_escapes_reach_the_command_byte_for_byte() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case =
         record.case("32,768 U+0001 characters, each escaped as \\u0001 in the instruction");
@@ -810,11 +821,12 @@ fn chars_needing_six_byte_escapes_reach_the_command_byte_for_byte() {
     case.observe(format!(
         "f holds the 32,768 bytes; the instruction was issued as {sent}"
     ));
+    case.pass();
 }
 
 #[test]
 fn u_0003_interrupts_the_commands_process_group_and_the_shell_goes_on() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("trap 'echo i >> m' INT; sleep 100; echo after, then U+0003");
     let directory = tempfile::tempdir().unwrap();
@@ -855,4 +867,5 @@ fn u_0003_interrupts_the_commands_process_group_and_the_shell_goes_on() {
     case.observe(format!(
         "m held i and stdout after {elapsed:?} after U+0003; the reply's written_bytes 0"
     ));
+    case.pass();
 }

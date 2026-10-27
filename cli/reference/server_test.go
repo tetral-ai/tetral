@@ -1,12 +1,95 @@
 package reference
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
 )
+
+func TestDistinctFinalSessionReportsAreAcknowledgedWithoutRepeatingInstructionState(t *testing.T) {
+	ts := startServer(t)
+	stream, connectionID := ts.online()
+	requestID := ts.prepare("sess_1", "bind_1")
+	stream.expect("session.prepare")
+	report := preparedReport(connectionID, "report_first", requestID, "sess_1", "bind_1")
+	first := ts.post("session-status", "tetral_ck_a", report)
+	if first.status != http.StatusOK || first.member("accepted") != true || first.member("message_id") != "report_first" {
+		t.Fatalf("first report: %d %s", first.status, first.body)
+	}
+	afterFirst := ts.connection(connectionID)
+	if !afterFirst.FirstReportStored || len(afterFirst.Issued) != 1 || !afterFirst.Issued[0].Reported {
+		t.Fatalf("first report did not settle its instruction: %+v", afterFirst)
+	}
+	events := ts.state().Events
+	retry := ts.post("session-status", "tetral_ck_a", report)
+	if retry.status != http.StatusOK || string(retry.body) != string(first.body) {
+		t.Fatalf("same identity retry: %d %s; want %s", retry.status, retry.body, first.body)
+	}
+	report["message_id"] = "report_second"
+	second := ts.post("session-status", "tetral_ck_a", report)
+	if second.status != http.StatusOK || second.member("accepted") != true || second.member("message_id") != "report_second" {
+		t.Fatalf("another valid report identity: %d %s", second.status, second.body)
+	}
+	if after := ts.connection(connectionID); !reflect.DeepEqual(after, afterFirst) {
+		t.Fatalf("duplicate final results changed instruction state: before=%+v after=%+v", afterFirst, after)
+	}
+	if after := ts.state().Events; !reflect.DeepEqual(after, events) {
+		t.Fatalf("duplicate final results emitted downstream events: before=%+v after=%+v", events, after)
+	}
+
+	// A new instruction for the same Session and binding owns a separate answer.
+	laterRequest := ts.prepare("sess_1", "bind_1")
+	stream.expect("session.prepare")
+	if laterRequest == requestID {
+		t.Fatal("the later instruction reused the first identity")
+	}
+	later := ts.post("session-status", "tetral_ck_a", preparedReport(connectionID, "report_later", laterRequest, "sess_1", "bind_1"))
+	if later.status != http.StatusOK || later.member("accepted") != true || later.member("message_id") != "report_later" {
+		t.Fatalf("later instruction's final result: %d %s", later.status, later.body)
+	}
+	state := ts.state()
+	identities := map[string]map[string]bool{}
+	stored := map[string]int{}
+	for _, received := range state.Received {
+		if received.Endpoint != "session-status" || received.ConnectionID != connectionID {
+			continue
+		}
+		var body struct {
+			RequestMessageID string `json:"request_message_id"`
+			SessionID        string `json:"session_id"`
+			BindingID        string `json:"binding_id"`
+		}
+		if err := json.Unmarshal(received.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.SessionID != "sess_1" || body.BindingID != "bind_1" {
+			t.Fatalf("unexpected report scope: %+v", body)
+		}
+		if identities[body.RequestMessageID] == nil {
+			identities[body.RequestMessageID] = map[string]bool{}
+		}
+		identities[body.RequestMessageID][received.MessageID] = true
+		stored[body.RequestMessageID]++
+	}
+	if len(identities[requestID]) != 2 || len(identities[laterRequest]) != 1 {
+		t.Fatalf("distinct final identities per instruction: %v", identities)
+	}
+	if stored[requestID] != 2 || stored[laterRequest] != 1 {
+		t.Fatalf("same-identity retry stored another report: %v", stored)
+	}
+	// The reference accepts both valid identities; CLI acceptance must count
+	// them, rather than treating accepted status or one state transition as
+	// evidence that the CLI emitted only one final report.
+	for _, instruction := range ts.connection(connectionID).Issued {
+		if !instruction.Reported {
+			t.Fatalf("instruction was not reported: %+v", instruction)
+		}
+	}
+}
 
 func TestTheServerRefusesWhatEngineRefuses(t *testing.T) {
 	credentialRows := []struct {

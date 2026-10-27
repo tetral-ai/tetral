@@ -1,8 +1,8 @@
 //! `tetral server run`, `server status` and `server stop` as separate
 //! processes, and the local API as the SDK and raw HTTP reach it: status
 //! while Engine is unreachable, shutdown on request, signal and with a
-//! blocked handler, one owner per root, restart after SIGKILL with the killed
-//! App Server's frozen reports deleted, many clients
+//! blocked handler, one owner per root, restart after SIGKILL with the stale
+//! socket replaced, many clients
 //! at once, the socket's path, modes and hourly freshness, every result and
 //! failure code of the server commands, no key in status, the log file's
 //! records and a log file that cannot be opened, the removal of interrupted replacements at start, and the
@@ -33,6 +33,108 @@ const KEY: &str = "tetral_ck_canary_status_4f1d";
 /// attempt fails at once and Engine stays unreachable.
 const UNREACHABLE_ENGINE: &str = "http://127.0.0.1:1";
 
+#[test]
+fn command_exit_flush_waits_for_blocked_stderr_and_respects_its_deadline() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    for drain in [true, false] {
+        let mut case = record.case(if drain {
+            "an early command failure flushes its final queued log after stderr is drained"
+        } else {
+            "an early command failure exits at the shared flush deadline with stderr still full"
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("root-is-a-file");
+        fs::write(&root, b"not a state directory").unwrap();
+        let seams = Seams::serve(directory.path(), Duration::from_secs(1_000));
+        let mut child = server("run", &root)
+            .seams(&seams)
+            .stderr_backpressure()
+            .spawn();
+        // Startup reads the clock for the harness check and process start;
+        // the third read fixes the flush deadline. The prefilled pipe prevents its
+        // queued config-start record from completing before we drain it.
+        // A command with its flush removed exits instead, and the final-log
+        // assertion below observes the missing record after that exit.
+        tetral_tests::app_server::wait_until("exit flush or command exit", || {
+            seams.clock_reads() >= 3 || child.try_wait().unwrap().is_some()
+        });
+        if drain {
+            child.drain_stderr();
+        } else {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "flush returned before its deadline"
+            );
+            seams.advance(Duration::from_secs(1));
+            tetral_tests::app_server::wait_until("the command's flush deadline", || {
+                child.try_wait().unwrap().is_some()
+            });
+            child.drain_stderr();
+        }
+        let run = run::finish(child);
+        case.command(
+            "tetral server run --app app_one with a prefilled stderr pipe",
+            &run.exit(),
+        );
+        assert_eq!(run.error_code(), "unsafe_control_path");
+        let logs: Vec<Value> = std::str::from_utf8(&run.stderr)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str(line).expect("complete log record"))
+            .collect();
+        if drain {
+            assert!(
+                logs.iter()
+                    .any(|log| log["event"] == "cold_start.phase_started"
+                        && log["cold_start.phase"] == "config"),
+                "the command lost its final queued record: {logs:?}"
+            );
+            assert_eq!(seams.now(), Duration::from_secs(1_000));
+            case.observe("with the seam clock frozen, draining stderr delivered the final queued config-start record and the command then exited with its expected error");
+        } else {
+            assert!(
+                logs.is_empty(),
+                "stderr remained full until after the command exited"
+            );
+            case.observe("the full stderr pipe remained undrained; advancing the shared exit-flush clock by one second allowed the expected error exit without waiting for the log writer");
+        }
+        case.pass();
+    }
+}
+
+#[test]
+fn socket_cleanup_finishes_before_a_successor_can_own_the_root() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case("socket removal while the predecessor still owns the root lock");
+    let directory = tempfile::tempdir().unwrap();
+    let root = configured_root(&mut case, directory.path());
+    let seams = Seams::serve(directory.path(), Duration::from_secs(1_000));
+    seams.hold("shutdown.socket_removed");
+    let predecessor = AppServer::start(server("run", &root).seams(&seams), &root);
+    let accepted = request(&predecessor.socket, "POST", "/v1/shutdown").unwrap();
+    assert_eq!(accepted.status, 202);
+    seams.wait_until_waiting("shutdown.socket_removed", 1);
+    assert!(!predecessor.socket.exists());
+    assert!(!lock_is_free(&root));
+    let contender = server("run", &root).run();
+    assert_eq!(contender.status.code(), Some(1), "{}", contender.exit());
+    assert_eq!(contender.error_code(), "server_running");
+    seams.release("shutdown.socket_removed");
+    let (run, _) = predecessor.exited();
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
+    let successor = AppServer::start(server("run", &root), &root);
+    assert_eq!(successor.status()["server_state"], "running");
+    let accepted = request(&successor.socket, "POST", "/v1/shutdown").unwrap();
+    assert_eq!(accepted.status, 202);
+    let (run, _) = successor.exited();
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
+    case.observe("the competing process was refused after unlink and before unlock; the successor then served its own socket");
+    case.pass();
+}
+
 fn bootstrap() -> Vec<u8> {
     serde_json::to_vec(&json!({
         "server_url": UNREACHABLE_ENGINE,
@@ -53,6 +155,7 @@ fn configured_root(case: &mut Case, directory: &Path) -> PathBuf {
         .stdin(bootstrap())
         .run();
     case.command("tetral configure --app app_one --from-stdin", &run.exit());
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert_eq!(run.object(), json!({}));
     root
 }
@@ -68,7 +171,12 @@ fn start(case: &mut Case, root: &Path) -> AppServer {
 }
 
 fn client(root: &Path) -> sdk::Client {
-    sdk::Client::new(&StateRoot::new(root.as_os_str()).unwrap()).unwrap()
+    sdk::Client::with_test_socket_context(
+        &StateRoot::new(root.as_os_str()).unwrap(),
+        socket_directory::context().paths(),
+        sdk::RESPONSE_MAX_BYTES,
+    )
+    .unwrap()
 }
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -142,7 +250,7 @@ fn lock_is_free(root: &Path) -> bool {
 
 #[test]
 fn status_answers_without_engine_and_shutdown_ends_the_process() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
 
     let mut case = record.case("status, wrong routes and shutdown through the SDK");
@@ -165,8 +273,12 @@ fn status_answers_without_engine_and_shutdown_ends_the_process() {
         expected_status("running", "disconnected")
     );
     case.observe("status through the SDK: running, connection disconnected");
-    let limited =
-        sdk::Client::with_response_limit(&StateRoot::new(root.as_os_str()).unwrap(), 64).unwrap();
+    let limited = sdk::Client::with_test_socket_context(
+        &StateRoot::new(root.as_os_str()).unwrap(),
+        socket_directory::context().paths(),
+        64,
+    )
+    .unwrap();
     let refused = runtime.block_on(limited.status());
     assert!(matches!(refused, Err(sdk::Error::Decode(_))), "{refused:?}");
     case.observe("an SDK client limited to 64 bytes refuses the status body");
@@ -178,13 +290,14 @@ fn status_answers_without_engine_and_shutdown_ends_the_process() {
     let (run, took) = app_server.exited();
     case.command("tetral server run --app app_one", &run.exit());
     assert!(took < Duration::from_secs(5), "the exit took {took:?}");
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert_eq!(run.object(), expected_status("stopping", "stopped"));
     assert!(!String::from_utf8_lossy(&run.stdout).contains("tetral_ck_"));
     assert!(fs::symlink_metadata(socket_path(&root)).is_err());
     case.observe(format!(
         "exit 0 within {took:?}; stdout holds the status as of the exit; the socket is gone"
     ));
-    drop(case);
+    case.pass();
 
     let mut case = record.case("SIGINT and SIGTERM each end the process");
     for (signal, name) in [
@@ -197,15 +310,17 @@ fn status_answers_without_engine_and_shutdown_ends_the_process() {
         let (run, took) = app_server.exited();
         case.command(&format!("{name} to tetral server run"), &run.exit());
         assert!(took < Duration::from_secs(5), "the exit took {took:?}");
+        assert_eq!(run.status.code(), Some(0), "{}", run.exit());
         assert_eq!(run.object(), expected_status("stopping", "stopped"));
         assert!(lock_is_free(&root));
         case.observe(format!("{name}: exit 0 within {took:?} with the status"));
     }
+    case.pass();
 }
 
 #[test]
 fn one_app_server_owns_a_root_and_others_disturb_nothing() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
 
@@ -257,7 +372,7 @@ fn one_app_server_owns_a_root_and_others_disturb_nothing() {
         ));
     }
     drop(app_server);
-    drop(case);
+    case.pass();
 
     let mut case = record.case("configure while the test holds the root's lock");
     let lock = File::open(root.join("run/app-server.lock")).unwrap();
@@ -272,16 +387,21 @@ fn one_app_server_owns_a_root_and_others_disturb_nothing() {
         configure,
         "server_running",
     );
+    case.pass();
 }
 
 #[test]
-fn a_killed_app_server_leaves_a_socket_and_reports_that_the_next_start_replaces() {
-    let _socket_dir = socket_directory::shared();
+fn a_killed_app_server_leaves_a_socket_that_the_next_start_replaces() {
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("SIGKILL, then another server run");
     let directory = tempfile::tempdir().unwrap();
     let root = configured_root(&mut case, directory.path());
     let app_server = start(&mut case, &root);
+    assert!(
+        !root.join("outbox").exists(),
+        "reports are not stored on disk"
+    );
     let socket = app_server.socket.clone();
     app_server.kill();
     case.command("SIGKILL to tetral server run", "killed");
@@ -293,22 +413,23 @@ fn a_killed_app_server_leaves_a_socket_and_reports_that_the_next_start_replaces(
     );
     assert!(request(&socket, "GET", "/v1/status").is_none());
     case.observe("the killed App Server's socket remains and refuses connections");
-    // A report frozen by the killed App Server and never acknowledged.
-    fs::create_dir_all(root.join("outbox/1")).unwrap();
-    fs::write(root.join("outbox/1/r1.json"), b"{}").unwrap();
     let next = start(&mut case, &root);
+    assert_eq!(next.socket, socket);
     assert_eq!(
         while_unreachable(next.status()),
         expected_status("running", "disconnected")
     );
-    assert_eq!(fs::read_dir(root.join("outbox")).unwrap().count(), 0);
-    assert_eq!(mode(&root.join("outbox")), 0o700);
-    case.observe("the next server run serves status at the same path, and its outbox/ is empty with mode 0700");
+    assert!(
+        !root.join("outbox").exists(),
+        "restart creates no report directory"
+    );
+    case.observe("the next server run serves status at the same socket path without creating a report directory");
+    case.pass();
 }
 
 #[test]
 fn sixteen_sdk_clients_at_once_all_succeed() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "16 SDK clients call status and sessions at once while another connection holds half a request",
@@ -358,11 +479,12 @@ fn sixteen_sdk_clients_at_once_all_succeed() {
         "all 16 status and 16 sessions calls succeeded while the half request stayed open",
     );
     drop(half);
+    case.pass();
 }
 
 #[test]
 fn server_commands_write_their_results_and_each_failure_code() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
 
@@ -372,6 +494,7 @@ fn server_commands_write_their_results_and_each_failure_code() {
     let app_server = start(&mut case, &root);
     let status = server("status", &root).run();
     case.command("tetral server status --app app_one", &status.exit());
+    assert_eq!(status.status.code(), Some(0), "{}", status.exit());
     assert_eq!(
         while_unreachable(status.object()),
         expected_status("running", "disconnected")
@@ -382,14 +505,16 @@ fn server_commands_write_their_results_and_each_failure_code() {
     );
     let stop = server("stop", &root).run();
     case.command("tetral server stop --app app_one", &stop.exit());
+    assert_eq!(stop.status.code(), Some(0), "{}", stop.exit());
     assert_eq!(stop.object(), json!({}));
     let (run, _) = app_server.exited();
     case.command("tetral server run --app app_one", &run.exit());
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert_eq!(run.object(), expected_status("stopping", "stopped"));
     case.observe(
         "status writes the status object, stop writes {}, run writes the status as of its exit; the temporary file of an interrupted replacement is gone once the App Server runs",
     );
-    drop(case);
+    case.pass();
 
     let mut case = record.case("server_running and server_not_running");
     let app_server = start(&mut case, &root);
@@ -406,7 +531,7 @@ fn server_commands_write_their_results_and_each_failure_code() {
             "server_not_running",
         );
     }
-    drop(case);
+    case.pass();
 
     let mut case = record.case("app_mismatch and unsafe_control_path");
     for command in ["run", "status", "stop"] {
@@ -437,7 +562,7 @@ fn server_commands_write_their_results_and_each_failure_code() {
         );
     }
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-    drop(case);
+    case.pass();
 
     let mut case = record.case("invalid_arguments");
     let run_with = |arguments: &[&str]| Tetral::new(["server"].iter().chain(arguments)).home(&root);
@@ -476,12 +601,11 @@ fn server_commands_write_their_results_and_each_failure_code() {
     for (command, tetral) in rows {
         fails_and_changes_nothing(&mut case, &root, command, tetral, "invalid_arguments");
     }
-    drop(case);
+    case.pass();
 
     let mut case =
-        record.case("invalid_configuration for server run, with a report left in outbox/");
-    fs::create_dir_all(root.join("outbox/1")).unwrap();
-    fs::write(root.join("outbox/1/r1.json"), b"{}").unwrap();
+        record.case("invalid_configuration for server run leaves existing files untouched");
+    fs::write(root.join("kept.txt"), b"keep").unwrap();
     let credentials = fs::read(root.join("credentials.json")).unwrap();
     let config = fs::read_to_string(root.join("config.toml")).unwrap();
     fs::remove_file(root.join("credentials.json")).unwrap();
@@ -524,7 +648,7 @@ fn server_commands_write_their_results_and_each_failure_code() {
         server("run", &directory.path().join("missing/root")),
         "invalid_configuration",
     );
-    drop(case);
+    case.pass();
 
     let mut case = record.case("io_failed for server run");
     if case.runs_as_non_root("root may write into a directory of mode 0500") {
@@ -544,6 +668,7 @@ fn server_commands_write_their_results_and_each_failure_code() {
             run.message()
         );
         fs::set_permissions(root.join("run"), fs::Permissions::from_mode(0o700)).unwrap();
+        case.pass();
     }
 }
 
@@ -562,7 +687,7 @@ fn modified(path: &Path) -> SystemTime {
 
 #[test]
 fn the_socket_lies_in_a_private_directory_and_stays_fresh() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
 
     let mut case = record.case("a root under a 200-byte directory path");
@@ -577,6 +702,8 @@ fn the_socket_lies_in_a_private_directory_and_stays_fresh() {
     assert_eq!(mode(&app_server.socket), 0o600);
     assert!(app_server.socket.as_os_str().len() <= 57);
     let status = server("status", &root).run();
+    case.command("tetral server status --app app_one", &status.exit());
+    assert_eq!(status.status.code(), Some(0), "{}", status.exit());
     assert_eq!(
         while_unreachable(status.object()),
         expected_status("running", "disconnected")
@@ -587,7 +714,7 @@ fn the_socket_lies_in_a_private_directory_and_stays_fresh() {
         app_server.socket.display(),
         app_server.socket.as_os_str().len()
     ));
-    drop(case);
+    case.pass();
 
     let mut case =
         record.case("each hour of the controlled clock refreshes the socket's modification time");
@@ -613,21 +740,24 @@ fn the_socket_lies_in_a_private_directory_and_stays_fresh() {
             "hour {hour}: the modification time moved from 2000-01-01 to now"
         ));
     }
-    drop(case);
+    case.pass();
 
     let mut case = record.case("server stop removes the socket and keeps S");
     let stop = server("stop", &root).run();
     case.command("tetral server stop --app app_one", &stop.exit());
+    assert_eq!(stop.status.code(), Some(0), "{}", stop.exit());
     let (run, _) = app_server.exited();
     case.command("tetral server run --app app_one", &run.exit());
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert!(fs::symlink_metadata(socket_path(&root)).is_err());
     assert_eq!(mode(&socket_dir()), 0o700);
     case.observe("the socket is gone and S remains with mode 0700");
+    case.pass();
 }
 
 #[test]
 fn an_unsafe_socket_directory_stops_server_run_and_stays_as_it_is() {
-    let mut socket_dir = socket_directory::replaced();
+    let mut socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
 
@@ -645,7 +775,7 @@ fn an_unsafe_socket_directory_stops_server_run_and_stays_as_it_is() {
     assert!(run.message().contains(socket_dir.path().to_str().unwrap()));
     assert_eq!(snapshot(&socket_dir.path()), before);
     fs::remove_dir(socket_dir.path()).unwrap();
-    drop(case);
+    case.pass();
 
     let mut case = record.case("S as a symbolic link");
     let target = directory.path().join("socket-target");
@@ -662,7 +792,7 @@ fn an_unsafe_socket_directory_stops_server_run_and_stays_as_it_is() {
     assert_eq!(fs::read_link(socket_dir.path()).unwrap(), target);
     assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
     fs::remove_file(socket_dir.path()).unwrap();
-    drop(case);
+    case.pass();
 
     let mut case = record.case("S owned by another user");
     if case.runs_as_non_root("root owns every directory it makes") {
@@ -676,6 +806,7 @@ fn an_unsafe_socket_directory_stops_server_run_and_stays_as_it_is() {
                     "unsafe_control_path",
                 );
                 assert!(run.message().contains("owned by another user"));
+                case.pass();
             }
             Err(reason) => case.not_run(reason),
         }
@@ -684,7 +815,7 @@ fn an_unsafe_socket_directory_stops_server_run_and_stays_as_it_is() {
 
 #[test]
 fn the_log_file_takes_every_record_of_server_run_or_its_failure_is_recorded() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("the log file holds the records made before it opened and at exit");
     let directory = tempfile::tempdir().unwrap();
@@ -694,6 +825,7 @@ fn the_log_file_takes_every_record_of_server_run_or_its_failure_is_recorded() {
     assert_eq!(shutdown.status, 202);
     let (run, _) = app_server.exited();
     case.command("tetral server run --app app_one", &run.exit());
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert!(
         records(&run).any(|record| record["event"] == "cold_start.phase_started"
             && record["cold_start.phase"] == "config"),
@@ -708,7 +840,7 @@ fn the_log_file_takes_every_record_of_server_run_or_its_failure_is_recorded() {
     case.observe(
         "logs/tetral.log holds exactly the records of stderr, the config phase's start among them",
     );
-    drop(case);
+    case.pass();
 
     let mut case = record.case("a file stands where the log directory belongs");
     let directory = tempfile::tempdir().unwrap();
@@ -720,6 +852,7 @@ fn the_log_file_takes_every_record_of_server_run_or_its_failure_is_recorded() {
     assert_eq!(shutdown.status, 202);
     let (run, _) = app_server.exited();
     case.command("tetral server run --app app_one", &run.exit());
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert_eq!(run.object(), expected_status("stopping", "stopped"));
     let failures: Vec<Value> = String::from_utf8(run.stderr)
         .unwrap()
@@ -740,11 +873,12 @@ fn the_log_file_takes_every_record_of_server_run_or_its_failure_is_recorded() {
     case.observe(
         "stderr holds one WARN log.file_open_failed record; the App Server served status and exited 0 on shutdown",
     );
+    case.pass();
 }
 
 #[test]
 fn shutdown_ends_the_process_while_a_handler_is_blocked() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("a client holds a connection with half a request sent");
     let directory = tempfile::tempdir().unwrap();
@@ -770,6 +904,7 @@ fn shutdown_ends_the_process_while_a_handler_is_blocked() {
     let took = posted.elapsed();
     case.command("tetral server run --app app_one", &run.exit());
     assert!(took < Duration::from_secs(5), "the exit took {took:?}");
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert_eq!(run.object(), expected_status("stopping", "stopped"));
     assert!(fs::symlink_metadata(socket_path(&root)).is_err());
     assert!(lock_is_free(&root));
@@ -777,11 +912,12 @@ fn shutdown_ends_the_process_while_a_handler_is_blocked() {
         "the process still ran with its socket once the shutdown had read 4.999 seconds after the POST on its controlled clock; at 5 seconds it exited 0, {took:?} after the POST; the socket is gone and the lock is free"
     ));
     drop(half);
+    case.pass();
 }
 
 #[test]
 fn the_seams_hold_a_barrier_and_drive_the_clock_of_the_process_under_test() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
     let seams = Seams::serve(directory.path(), Duration::from_secs(1_000));
@@ -805,11 +941,12 @@ fn the_seams_hold_a_barrier_and_drive_the_clock_of_the_process_under_test() {
         "tetral configure --app app_one --from-stdin, held at configure.locked",
         &run.exit(),
     );
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert_eq!(run.object(), json!({}));
     case.observe(
         "configure was still running at the held barrier and exited 0 with {} after its release",
     );
-    drop(case);
+    case.pass();
 
     let mut case =
         record.case("one hour of the controlled clock makes server run touch its socket once");
@@ -821,10 +958,13 @@ fn the_seams_hold_a_barrier_and_drive_the_clock_of_the_process_under_test() {
     assert_eq!(seams.count("socket.touched"), 1);
     let stop = server("stop", &root).run();
     case.command("tetral server stop --app app_one", &stop.exit());
+    assert_eq!(stop.status.code(), Some(0), "{}", stop.exit());
     let (run, _) = app_server.exited();
     case.command("tetral server run --app app_one", &run.exit());
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert_eq!(seams.count("socket.touched"), 1);
     case.observe(
         "socket.touched read 0 at start, 1 after the clock moved one hour, and still 1 once the process exited",
     );
+    case.pass();
 }

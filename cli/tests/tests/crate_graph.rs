@@ -285,7 +285,10 @@ fn violations(metadata: &Value) -> Vec<Violation> {
         for dependency in package["dependencies"].as_array().into_iter().flatten() {
             let target = str_value(&dependency["name"]);
             // A default that reaches the seams is the target crate's own breach.
-            let enables_seams = dependency["kind"].is_null()
+            // The harness itself needs explicit in-process socket contexts.
+            // Its exclusion from the release graph is checked separately.
+            let enables_seams = name != TEST_PACKAGE
+                && dependency["kind"].is_null()
                 && features.reaches_test_seams(
                     dependency_features(dependency).map(|feature| (target, feature)),
                 );
@@ -469,6 +472,7 @@ fn the_workspace_holds_the_layered_crates_and_the_test_package() {
     expected.insert(TEST_PACKAGE.to_owned());
     assert_eq!(workspace_names(&metadata(&mut case)), expected);
     case.observe(format!("the members are exactly {expected:?}"));
+    case.pass();
 }
 
 #[test]
@@ -476,6 +480,30 @@ fn the_workspace_graph_breaks_no_rule() {
     let mut case = tetral_tests::record!().case("the workspace graph breaks no rule");
     assert_eq!(violations(&metadata(&mut case)), Vec::new());
     case.observe("no violation of the five rules");
+    case.pass();
+}
+
+#[test]
+fn harness_socket_seams_do_not_allow_the_harness_into_the_release_graph() {
+    let mut case =
+        tetral_tests::record!().case("test-only socket contexts cannot enter the release graph");
+    let mut metadata = metadata(&mut case);
+    assert_eq!(violations(&metadata), Vec::new());
+    add_dependency(
+        &mut metadata,
+        "tetral",
+        TEST_PACKAGE,
+        Value::Null,
+        json!([]),
+        &workspace_dir().join("tests"),
+    );
+    assert!(
+        violations(&metadata).contains(&Violation::TestCodeInRelease {
+            package: TEST_PACKAGE.to_owned()
+        })
+    );
+    case.observe("the harness can enable in-process seams, but a normal dependency from tetral to the harness remains a release-graph violation");
+    case.pass();
 }
 
 #[test]
@@ -570,6 +598,7 @@ fn each_injected_breach_is_reported_once_by_its_rule() {
         ]
     );
     case.observe("seven injected breaches, each reported once by its rule, in order");
+    case.pass();
 }
 
 #[test]
@@ -664,6 +693,7 @@ fn breaches_reached_through_features_or_patches_are_reported() {
         let rules: Vec<u8> = expected.iter().map(Violation::rule).collect();
         case.observe(format!("{name}: reported by rule {rules:?}"));
     }
+    case.pass();
 }
 
 const PRINT_MACROS: &[&str] = &["print", "println", "eprint", "eprintln", "dbg"];
@@ -831,7 +861,7 @@ fn code_only(text: &str) -> String {
 
 #[test]
 fn no_library_crate_prints() {
-    let _case = tetral_tests::record!().case("no library crate prints");
+    let case = tetral_tests::record!().case("no library crate prints");
     let sources = library_sources(&workspace_dir().join("crates"));
     for name in library_crates() {
         let lib = workspace_dir().join("crates").join(name).join("src/lib.rs");
@@ -842,11 +872,12 @@ fn no_library_crate_prints() {
         );
     }
     assert_eq!(print_calls(&sources), Vec::new());
+    case.pass();
 }
 
 #[test]
 fn each_injected_print_call_is_reported_once() {
-    let _case = tetral_tests::record!().case("each injected print call is reported once");
+    let case = tetral_tests::record!().case("each injected print call is reported once");
     for call in [
         "print!(\"done\")",
         "println!(\"done\")",
@@ -875,11 +906,12 @@ fn each_injected_print_call_is_reported_once() {
             "{call}"
         );
     }
+    case.pass();
 }
 
 #[test]
 fn a_print_call_is_found_after_any_literal_and_never_inside_a_comment_or_literal() {
-    let _case = tetral_tests::record!()
+    let case = tetral_tests::record!()
         .case("a print call is found after any literal and never inside a comment or literal");
     let injected = PathBuf::from("injected.rs");
     let rows: &[(&str, &[usize])] = &[
@@ -904,4 +936,5 @@ fn a_print_call_is_found_after_any_literal_and_never_inside_a_comment_or_literal
             .collect();
         assert_eq!(found, *lines, "{source}");
     }
+    case.pass();
 }

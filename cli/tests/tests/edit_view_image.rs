@@ -107,7 +107,7 @@ fn entries(directory: &Path) -> Vec<String> {
 
 #[test]
 fn each_step_of_an_edit_decides_its_result_and_only_a_success_writes() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "edits of real files in the binding's directory: a unique match, identical strings, two \
@@ -246,7 +246,7 @@ fn each_step_of_an_edit_decides_its_result_and_only_a_success_writes() {
         .unwrap()
         .permissions()
         .mode();
-    assert_eq!(mode & 0o7777, 0o7640, "{mode:o}");
+    assert_eq!(mode & 0o777, 0o640, "{mode:o}");
     assert_eq!(fs::read_to_string(path("special.txt")).unwrap(), "new");
 
     fs::create_dir(path("data")).unwrap();
@@ -276,13 +276,14 @@ fn each_step_of_an_edit_decides_its_result_and_only_a_success_writes() {
     case.observe(
         "each edit's only report is terminal with report_seq 1 and decodes; only the successes \
          changed their files; the read-only file kept its content and no temporary file stayed \
-         beside it; the special mode bits 07640 stayed",
+         beside it; the ordinary permission bits 0640 stayed",
     );
+    case.pass();
 }
 
 #[test]
 fn the_curly_quote_fallback_replaces_only_the_matched_span() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "old_string don't against a file with U+2019 in don’t and other curly quotes around it",
@@ -309,11 +310,12 @@ fn the_curly_quote_fallback_replaces_only_the_matched_span() {
     );
     assert_eq!(fs::read_to_string(&file).unwrap(), written);
     case.observe("one replacement; every curly quote outside the span kept");
+    case.pass();
 }
 
 #[test]
 fn an_edit_that_fails_its_schema_or_budget_is_rejected_and_one_within_its_budget_runs() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "an empty old_string, file_path without path, and an input of exactly 4,194,304 bytes",
@@ -360,11 +362,12 @@ fn an_edit_that_fails_its_schema_or_budget_is_rejected_and_one_within_its_budget
     assert_eq!(edited(&tasks, "task_exact"), success(1, filler as u64));
     assert_eq!(fs::read(&file).unwrap(), vec![b'x'; filler]);
     case.observe("both rejected invalid_input with no change; the 4 MiB input ran to success");
+    case.pass();
 }
 
 #[test]
 fn files_the_policy_denies_or_the_cli_protects_are_neither_edited_nor_viewed() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "an edit and a view_image under a deny rule inside the writable binding, and a \
@@ -419,6 +422,7 @@ fn files_the_policy_denies_or_the_cli_protects_are_neither_edited_nor_viewed() {
         .map(|outcome| outcome["error"].to_string())
         .collect();
     case.observe(format!("{}; the note kept its content", errors.join("; ")));
+    case.pass();
 }
 
 /// The input of `tool` for `path`: an `edit` of `old` to `new`.
@@ -431,7 +435,7 @@ fn file_input(tool: &str, path: Value) -> Value {
 
 #[test]
 fn a_missing_or_overlong_path_and_each_failure_of_the_working_directory_give_their_kinds() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record
         .case("edits of a missing file, of a directory and of an absolute path of 400,000 bytes");
@@ -494,6 +498,8 @@ fn a_missing_or_overlong_path_and_each_failure_of_the_working_directory_give_the
             );
         }
     };
+    case.pass();
+
     let mut case = record.case(
         "an edit and a view_image by relative path with the binding's directory removed, then \
          replaced by a file",
@@ -507,6 +513,7 @@ fn a_missing_or_overlong_path_and_each_failure_of_the_working_directory_give_the
         "cwd_not_found naming the directory, which was not created, then cwd_not_directory, for \
          both tools",
     );
+    case.pass();
 
     let mut case = record.case(
         "an edit and a view_image by relative path with the binding's directory of mode 0000",
@@ -525,11 +532,12 @@ fn a_missing_or_overlong_path_and_each_failure_of_the_working_directory_give_the
         std::panic::resume_unwind(panic);
     }
     case.observe("cwd_inaccessible naming the directory for both tools");
+    case.pass();
 }
 
 #[test]
 fn a_cancel_of_an_edit_whose_child_has_started_ends_it_cancelled_after_the_start() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("tool.cancel while the edit's child waits at file_tool.started");
     let directory = tempfile::tempdir().unwrap();
@@ -563,6 +571,7 @@ fn a_cancel_of_an_edit_whose_child_has_started_ends_it_cancelled_after_the_start
         "old"
     );
     case.observe("the reply cancelled and was_running; terminal cancelled after the call started");
+    case.pass();
 }
 
 /// A PNG that an encoder wrote, of 33×17 pixels.
@@ -656,7 +665,7 @@ fn refusal(bytes: &[u8], width: u32, height: u32, path: &Path) -> Value {
 
 #[test]
 fn an_image_at_the_acceptance_limits_is_viewed_whole_and_one_past_any_limit_is_too_large() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "PNGs of 7,500,000 bytes at 2000x2000, of 7,500,001 bytes, of 8001x10, of 6000x6000, and \
@@ -712,11 +721,12 @@ fn an_image_at_the_acceptance_limits_is_viewed_whole_and_one_past_any_limit_is_t
          three over a limit too_large with their size and dimensions; the cut IHDR \
          unsupported_format",
     );
+    case.pass();
 }
 
 #[test]
 fn each_image_format_is_recognized_by_its_content_and_anything_else_is_refused() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "a PNG, a JPEG, a GIF87a, a GIF89a and a WebP that encoders wrote; text named .png, an \
@@ -818,4 +828,5 @@ fn each_image_format_is_recognized_by_its_content_and_anything_else_is_refused()
          file and the named pipe empty file, without blocking; the directory is_directory; the \
          missing path not_found",
     );
+    case.pass();
 }

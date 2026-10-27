@@ -81,7 +81,7 @@ fn issued(engine: &ReferenceServer) -> Vec<Value> {
 
 #[test]
 fn a_command_that_exits_within_its_wait_reports_its_output_once_as_terminal() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("printf hello with kill and wait_ms 1000, the clock never moved");
     let directory = tempfile::tempdir().unwrap();
@@ -97,11 +97,12 @@ fn a_command_that_exits_within_its_wait_reports_its_output_once_as_terminal() {
     case.observe(
         "one execution report: terminal, report_seq 1, success, exit_code 0, stdout hello",
     );
+    case.pass();
 }
 
 #[test]
 fn a_command_runs_in_its_directory_with_the_cleaned_environment_and_separate_streams() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record
         .case("a relative cwd and an env that sets FOO, PAGER, TERM, NO_COLOR, TETRAL_HOME and another TETRAL_ name");
@@ -125,11 +126,12 @@ fn a_command_runs_in_its_directory_with_the_cleaned_environment_and_separate_str
     expected["stderr"] = json!("err");
     assert_eq!(summary(&terminal), expected, "{terminal:#}");
     case.observe("FOO from env; TERM, NO_COLOR, PAGER and GIT_PAGER fixed; no name beginning with TETRAL_ in the command's environment, neither the App Server's nor the call's TETRAL_HOME and TETRAL_EXTRA; pwd the joined directory; stderr apart");
+    case.pass();
 }
 
 #[test]
 fn a_detach_wait_is_clamped_reports_running_and_the_lifetime_then_ends_the_task() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "sleep 120 under detach with wait_ms 60,000 and lifetime 60,000, then wait_ms 1 and lifetime 1,000",
@@ -184,11 +186,12 @@ fn a_detach_wait_is_clamped_reports_running_and_the_lifetime_then_ends_the_task(
             running_at - 1
         ));
     }
+    case.pass();
 }
 
 #[test]
 fn a_kill_wait_ends_every_process_of_the_command_with_the_timeout_error_and_its_partial_output() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case =
         record.case("printf partial with two sleeps, one in the background, kill at wait_ms 1,000");
@@ -219,11 +222,12 @@ fn a_kill_wait_ends_every_process_of_the_command_with_the_timeout_error_and_its_
     assert_eq!(terminal["result"]["error"]["message"], "command timed out");
     assert!(!process_running(&["sleep", "1204"]) && !process_running(&["sleep", "1205"]));
     case.observe("terminal timeout, timed_out, signal terminated, stdout partial; neither sleep runs when the report arrives");
+    case.pass();
 }
 
 #[test]
 fn a_command_that_does_not_start_within_its_wait_is_ended_without_a_running_report() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case =
         record.case("sleep 1 under detach at wait_ms 250 while the launcher waits at task.launch");
@@ -251,11 +255,12 @@ fn a_command_that_does_not_start_within_its_wait_is_ended_without_a_running_repo
     );
     assert_eq!(tasks.reports("task_unstarted").len(), 1);
     case.observe("no running report; terminal exec_spawn_failed \"process did not start within the wait\" after the wait of 250 ms ended the held launcher");
+    case.pass();
 }
 
 #[test]
 fn a_detached_command_reports_terminal_at_its_exit_without_a_read_or_the_running_ack() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "sleep 2; echo done under detach at wait_ms 250, the running report's answer delayed 30 seconds",
@@ -323,11 +328,12 @@ fn a_detached_command_reports_terminal_at_its_exit_without_a_read_or_the_running
     );
     tasks.engine.advance(seconds(30.0));
     case.observe(format!("running at 250 ms, terminal report_seq 2 {elapsed:?} after the instruction with no tool.stdin issued; the running report sent again after the terminal one left the reference server's task reported"));
+    case.pass();
 }
 
 #[test]
 fn a_missing_working_directory_is_cwd_not_found_without_a_fallback_or_a_rerun() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "the binding's directory removed, then removed while the launcher waits at task.launch",
@@ -414,11 +420,12 @@ fn a_missing_working_directory_is_cwd_not_found_without_a_fallback_or_a_rerun() 
     assert_eq!(path(&late), json!(absent));
     assert!(!tasks.project.join("ran.log").exists());
     case.observe("cwd_not_found naming the binding's directory, which stays missing; an absolute cwd and another Session's call ran; the removal at task.launch is cwd_not_found, and after the directory came back a new call ran and the failed one did not; a failure read after the exit and both pipes' ends is cwd_not_found");
+    case.pass();
 }
 
 #[test]
 fn a_working_directory_the_user_cannot_enter_is_cwd_inaccessible_and_the_command_does_not_run() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("a cwd of mode 0000");
     if !case.runs_as_non_root("a directory of mode 0000 keeps out only a user who is not root") {
@@ -444,11 +451,12 @@ fn a_working_directory_the_user_cannot_enter_is_cwd_inaccessible_and_the_command
     assert_eq!(terminal["result"]["error"]["path"], json!(locked));
     assert!(!tasks.project.join("ran").exists());
     case.observe("cwd_inaccessible naming the directory; no ran file");
+    case.pass();
 }
 
 #[test]
 fn a_file_as_working_directory_is_cwd_not_directory() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("a cwd that is a regular file");
     let directory = tempfile::tempdir().unwrap();
@@ -470,6 +478,7 @@ fn a_file_as_working_directory_is_cwd_not_directory() {
         json!(tasks.project.join("file.txt"))
     );
     case.observe("cwd_not_directory naming the file");
+    case.pass();
 }
 
 /// A command's last output and a background process that keeps its pipes:
@@ -530,7 +539,7 @@ mod pipes_past_the_exit {
 
     #[test]
     fn the_last_bytes_a_command_writes_before_it_exits_are_in_its_terminal_report() {
-        let _socket_dir = socket_directory::shared();
+        let _socket_dir = socket_directory::isolated();
         let record = tetral_tests::record!();
         let mut case = record.case(
         "fifty commands that fill the pipe's 65,536 bytes, then print a sentinel and exit, with every CPU busy",
@@ -556,11 +565,12 @@ mod pipes_past_the_exit {
             );
         }
         case.observe("each terminal stdout ends with its sentinel");
+        case.pass();
     }
 
     #[test]
     fn a_background_process_that_holds_the_pipes_does_not_delay_the_terminal_report() {
-        let _socket_dir = socket_directory::shared();
+        let _socket_dir = socket_directory::isolated();
         let record = tetral_tests::record!();
         let mut case = record.case("printf a sentinel, then sleep 5 in the background, and exit");
         let directory = tempfile::tempdir().unwrap();
@@ -585,12 +595,13 @@ mod pipes_past_the_exit {
         case.observe(format!(
             "terminal success with the sentinel {elapsed:?} after the instruction"
         ));
+        case.pass();
     }
 }
 
 #[test]
 fn the_app_servers_death_ends_its_running_tasks() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("the App Server killed with SIGKILL while sleep 1203 runs");
     let directory = tempfile::tempdir().unwrap();
@@ -612,11 +623,12 @@ fn the_app_servers_death_ends_its_running_tasks() {
     case.observe(format!(
         "sleep 1203 gone {gone_after:?} after the App Server's SIGKILL"
     ));
+    case.pass();
 }
 
 #[test]
 fn a_terminal_reports_metrics_measured_between_its_phases_on_the_controlled_clock() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "sleep 1 while the clock moves 1,000 ms before its exit is observed, and true staged behind a prepared ACK withheld for 500 ms",
@@ -676,11 +688,12 @@ fn a_terminal_reports_metrics_measured_between_its_phases_on_the_controlled_cloc
     assert!(queued["queued_ms"].as_i64().unwrap() >= 500, "{queued}");
     assert!(within_wall(&queued), "{queued}");
     case.observe(format!("sleep 1: {run}; staged true: {queued}"));
+    case.pass();
 }
 
 #[test]
 fn a_tasks_reports_and_records_carry_its_instructions_trace_context_and_an_unusable_one_none() {
-    let _socket_dir = socket_directory::shared();
+    let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "a prepare and an execute with a valid traceparent, an execute resent after a stream resume, and executes with an all-zero trace ID and a 10-character traceparent",
@@ -787,6 +800,7 @@ fn a_tasks_reports_and_records_carry_its_instructions_trace_context_and_an_unusa
         fs::read_to_string(tasks.project.join("runs")).unwrap(),
         "run\nrun\nrun\n"
     );
+    case.pass();
 }
 
 /// Breaks the machine's stream, waits for its resume, and writes the

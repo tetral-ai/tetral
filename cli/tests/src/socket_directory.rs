@@ -1,100 +1,121 @@
-//! The directory of control sockets, `S`, that every App Server of this user
-//! on the machine shares. A test either uses `S` as it is or replaces it for
-//! one case; tests in every process take a lock on a file beside `S`, shared
-//! to use it and exclusive to replace it, so no test sees another's
-//! replacement.
+//! Each test owns a short temporary parent for its control sockets. Related
+//! child processes capture the same context at construction; in-process SDK
+//! clients receive it explicitly. No test moves or removes the user's `S`.
 
+use std::cell::RefCell;
 use std::ffi::OsStr;
-use std::fs::{self, File};
+use std::fs;
+use std::marker::PhantomData;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
+use std::sync::{Arc, Weak};
 
-use rustix::fs::FlockOperation;
+use state::paths::TestSocketContext;
 
-/// `S` as the protocol of the local API derives it, independently of the
-/// code under test: `/tmp/tetral-sock-<uid>` on Linux and
-/// `/private/tmp/tetral-sock-<uid>` on macOS.
+struct OwnedParent {
+    paths: TestSocketContext,
+    _directory: tempfile::TempDir,
+}
+
+/// A shared lifetime for one test's socket parent, captured by its children.
+#[derive(Clone)]
+pub struct SocketContext(Arc<OwnedParent>);
+
+impl SocketContext {
+    fn new() -> Self {
+        let parent = if cfg!(target_os = "macos") {
+            "/private/tmp"
+        } else {
+            "/tmp"
+        };
+        let directory = tempfile::Builder::new()
+            .prefix("tt-")
+            .tempdir_in(parent)
+            .unwrap();
+        let paths = TestSocketContext::new(directory.path()).unwrap();
+        assert!(paths.socket_dir().starts_with(paths.parent()));
+        Self(Arc::new(OwnedParent {
+            paths,
+            _directory: directory,
+        }))
+    }
+
+    pub fn paths(&self) -> &TestSocketContext {
+        &self.0.paths
+    }
+
+    pub fn socket_dir(&self) -> PathBuf {
+        // Derive the expected uid directory independently of production code.
+        self.paths().parent().join(format!(
+            "tetral-sock-{}",
+            rustix::process::getuid().as_raw()
+        ))
+    }
+}
+
+thread_local! {
+    static CURRENT: RefCell<Weak<OwnedParent>> = const { RefCell::new(Weak::new()) };
+}
+
+/// The current test's context. A command without an explicit test scope gets
+/// its own parent too, so it can never fall back to the user's socket path.
+pub fn context() -> SocketContext {
+    CURRENT.with(|current| {
+        if let Some(parent) = current.borrow().upgrade() {
+            return SocketContext(parent);
+        }
+        let context = SocketContext::new();
+        *current.borrow_mut() = Arc::downgrade(&context.0);
+        context
+    })
+}
+
 pub fn socket_dir() -> PathBuf {
-    let parent = if cfg!(target_os = "macos") {
-        "/private/tmp"
-    } else {
-        "/tmp"
-    };
-    PathBuf::from(format!(
-        "{parent}/tetral-sock-{}",
-        rustix::process::getuid().as_raw()
-    ))
+    context().socket_dir()
 }
 
-fn lock(operation: FlockOperation) -> File {
-    let mut path = socket_dir().into_os_string();
-    path.push(".tests.lock");
-    let file = File::options()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .unwrap_or_else(|error| panic!("open {path:?}: {error}"));
-    rustix::fs::flock(&file, operation).expect("flock on the socket directory's test lock");
-    file
-}
-
-/// Permission to use `S` as it is, while held.
-pub struct SharedSocketDir {
-    _lock: File,
-}
-
-pub fn shared() -> SharedSocketDir {
-    SharedSocketDir {
-        _lock: lock(FlockOperation::LockShared),
-    }
-}
-
-/// `S` moved aside while this is held, so that the test can put something
-/// else at its path; dropping it removes that and puts `S` back.
-pub struct ReplacedSocketDir {
-    _lock: File,
-    saved: Option<PathBuf>,
+/// An isolated scope shared by all commands and clients of this test thread.
+/// The guard stays on that thread; child processes own cloned contexts.
+pub struct IsolatedSocketDir {
+    context: SocketContext,
+    previous: Weak<OwnedParent>,
     owned_by_root: bool,
+    _thread: PhantomData<Rc<()>>,
 }
 
-pub fn replaced() -> ReplacedSocketDir {
-    let held = lock(FlockOperation::LockExclusive);
-    let path = socket_dir();
-    let saved = fs::symlink_metadata(&path).is_ok().then(|| {
-        let mut saved = path.clone().into_os_string();
-        saved.push(format!(".saved-{}", std::process::id()));
-        let saved = PathBuf::from(saved);
-        fs::rename(&path, &saved).unwrap_or_else(|error| panic!("move {path:?} aside: {error}"));
-        saved
-    });
-    ReplacedSocketDir {
-        _lock: held,
-        saved,
+pub fn isolated() -> IsolatedSocketDir {
+    let context = SocketContext::new();
+    let previous = CURRENT.with(|current| current.replace(Arc::downgrade(&context.0)));
+    IsolatedSocketDir {
+        context,
+        previous,
         owned_by_root: false,
+        _thread: PhantomData,
     }
 }
 
-impl ReplacedSocketDir {
+impl IsolatedSocketDir {
     pub fn path(&self) -> PathBuf {
-        socket_dir()
+        let path = self.context.socket_dir();
+        assert_eq!(path.parent(), Some(self.context.paths().parent()));
+        path
     }
 
-    /// `S` as a directory of this user with `mode`.
+    /// The test's `S`, owned by the current user with `mode`.
     pub fn directory_with_mode(&self, mode: u32) {
         let path = self.path();
         fs::create_dir(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
     }
 
-    /// `S` as a symbolic link to `target`.
     pub fn link_to(&self, target: &Path) {
         symlink(target, self.path()).unwrap();
     }
 
-    /// `S` as a directory of mode `0700` owned by root, made with
-    /// `sudo -n` (`other_user::sudo`); the reason when that is not possible
-    /// here.
+    /// Creates only this scope's directory as root, for the owner-rejection
+    /// case. The tested process itself continues to run as the invoking user.
     pub fn directory_owned_by_root(&mut self) -> Result<(), String> {
         let path = self.path();
         crate::other_user::sudo(
@@ -108,23 +129,40 @@ impl ReplacedSocketDir {
     }
 }
 
-impl Drop for ReplacedSocketDir {
+impl Drop for IsolatedSocketDir {
     fn drop(&mut self) {
-        let path = self.path();
         if self.owned_by_root {
             let _ = Command::new("sudo")
                 .args(["-n", "rmdir"])
-                .arg(&path)
+                .arg(self.path())
                 .status();
-        } else if let Ok(metadata) = fs::symlink_metadata(&path) {
-            if metadata.is_dir() {
-                let _ = fs::remove_dir_all(&path);
-            } else {
-                let _ = fs::remove_file(&path);
-            }
         }
-        if let Some(saved) = &self.saved {
-            let _ = fs::rename(saved, &path);
+        CURRENT.with(|current| *current.borrow_mut() = self.previous.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_and_parallel_scopes_have_distinct_owned_parents() {
+        let first = isolated();
+        let first_context = context();
+        assert_eq!(first.path(), first_context.paths().socket_dir());
+        {
+            let second = isolated();
+            assert_ne!(second.path(), first.path());
+            assert_eq!(socket_dir(), second.path());
         }
+        assert_eq!(socket_dir(), first.path());
+        let other = std::thread::spawn(|| {
+            let scope = isolated();
+            (scope.path(), context())
+        })
+        .join()
+        .unwrap();
+        assert_ne!(first.path(), other.0);
+        assert!(other.1.paths().parent().is_dir());
     }
 }

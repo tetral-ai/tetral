@@ -35,6 +35,7 @@ struct Shared {
 #[derive(Default)]
 struct State {
     clock: Duration,
+    clock_reads: u64,
     held: HashSet<String>,
     /// Per held barrier, how many more processes may pass it.
     passes: HashMap<String, usize>,
@@ -74,6 +75,11 @@ impl Seams {
 
     pub fn now(&self) -> Duration {
         self.shared.lock().clock
+    }
+
+    /// Clock requests actually received from the process under test.
+    pub fn clock_reads(&self) -> u64 {
+        self.shared.lock().clock_reads
     }
 
     pub fn advance(&self, step: Duration) {
@@ -172,7 +178,11 @@ impl Shared {
         }
         let words: Vec<&str> = line.split_whitespace().collect();
         let answer = match words.as_slice() {
-            [PROTOCOL, _pid, "clock"] => self.lock().clock.as_nanos().to_string(),
+            [PROTOCOL, _pid, "clock"] => {
+                let mut state = self.lock();
+                state.clock_reads += 1;
+                state.clock.as_nanos().to_string()
+            }
             [PROTOCOL, _pid, "barrier", name] => {
                 self.pass(name);
                 "released".to_owned()
