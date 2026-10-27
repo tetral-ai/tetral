@@ -132,3 +132,40 @@ impl WriteRecords {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn read_and_write_waits_use_their_distinct_bounds() {
+        let mut payload = json!({
+            "session_id": "s", "binding_id": "b", "tool_use_event_id": "e", "task_id": "t",
+            "chars": "", "wait_ms": 60_000,
+        });
+        let read: StdinPayload = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(
+            Request::of(&read),
+            Request::Read {
+                wait: Duration::from_millis(50_000)
+            }
+        );
+        payload["chars"] = json!("input");
+        payload["write_seq"] = json!(7);
+        payload["wait_ms"] = json!(0);
+        let write: StdinPayload = serde_json::from_value(payload).unwrap();
+        let Request::Write {
+            write_seq,
+            chars,
+            wait,
+            ..
+        } = Request::of(&write)
+        else {
+            panic!("nonempty stdin is a write");
+        };
+        assert_eq!(write_seq, 7);
+        assert_eq!(chars, "input");
+        assert_eq!(wait, Duration::from_millis(250));
+    }
+}

@@ -148,10 +148,90 @@ fn each_window_holds_only_its_own_output_with_the_streams_counters() {
 }
 
 #[test]
-fn a_cut_inside_a_character_moves_to_its_boundary() {
+fn adjacent_retained_ranges_preserve_the_character_at_their_join() {
     let snapshot = written(6, "αβγ".as_bytes()).snapshot(6, 2_000);
+    assert_eq!(parts(snapshot), ("αβγ".into(), 6, 0, 6, false));
+}
+
+#[test]
+fn a_real_gap_omits_the_characters_cut_at_its_boundaries() {
     assert_eq!(
-        parts(snapshot),
-        ("α\n[... 2 bytes truncated ...]\nγ".into(), 6, 0, 4, true)
+        parts(written(6, "αβγδ".as_bytes()).snapshot(6, 2_000)),
+        ("α\n[... 4 bytes truncated ...]\nδ".into(), 8, 0, 4, true)
     );
+}
+
+#[test]
+fn invalid_and_incomplete_bytes_do_not_hide_valid_output_or_claim_truncation() {
+    let mut incomplete = vec![b'a'; 30_000];
+    incomplete.extend_from_slice(&[0xe2, 0x9c]);
+    let chinese = "中".repeat(10_000);
+    for (bytes, expected) in [
+        (incomplete, "a".repeat(30_000)),
+        (b"A\xffB\xfeC".to_vec(), "ABC".into()),
+        (b"\x9c\x93ready".to_vec(), "ready".into()),
+        (vec![0xff, 0xe2, 0x9c], String::new()),
+        (chinese.as_bytes().to_vec(), chinese),
+    ] {
+        let mut capture = written(65_536, &bytes);
+        for snapshot in [
+            capture.snapshot(51_200, 2_000),
+            capture.take_window().snapshot(51_200, 2_000),
+        ] {
+            assert_eq!(snapshot.text, expected);
+            assert_eq!(snapshot.total_bytes.get(), bytes.len() as i64);
+            assert_eq!(snapshot.returned_bytes.get(), expected.len() as i64);
+            assert!(!snapshot.truncated);
+        }
+        assert_eq!(capture.stored_text(), expected);
+    }
+}
+
+#[test]
+fn invalid_bytes_in_retained_text_are_not_counted_as_limit_omissions() {
+    assert_eq!(
+        parts(written(12, b"a\xffbcdefghij\xfe").snapshot(6, 2_000)),
+        ("ab\n[... 6 bytes truncated ...]\nij".into(), 12, 0, 4, true)
+    );
+}
+
+#[test]
+fn invalid_bytes_near_selection_edges_keep_text_and_raw_omission_counts() {
+    for (input, expected) in [
+        (
+            &b"A\xe2BCDEFGHIJK"[..],
+            "ABC\n[... 4 bytes truncated ...]\nHIJK",
+        ),
+        (
+            &b"ABCDEFGH\x80IJK"[..],
+            "ABCD\n[... 4 bytes truncated ...]\nIJK",
+        ),
+    ] {
+        let snapshot = written(12, input).snapshot(8, 2_000);
+        assert_eq!(snapshot.text, expected);
+        assert_eq!(snapshot.returned_bytes.get(), 7);
+    }
+}
+
+#[test]
+fn storage_boundaries_distinguish_invalid_input_from_valid_split_characters() {
+    for (input, expected) in [
+        (&b"abcdef\x80XY"[..], "abc\n[... 3 bytes truncated ...]\nXY"),
+        ("αβγδ".as_bytes(), "α\n[... 4 bytes truncated ...]\nδ"),
+        (&b"ab\xe2defXYZ"[..], "ab\n[... 3 bytes truncated ...]\nXYZ"),
+        ("ab🌍XY".as_bytes(), "ab\n[... 4 bytes truncated ...]\nXY"),
+    ] {
+        for chunk_size in 1..=input.len() {
+            let mut capture = capture(6);
+            for chunk in input.chunks(chunk_size) {
+                capture.write(chunk);
+            }
+            assert_eq!(
+                capture.snapshot(6, 2000).text,
+                expected,
+                "chunk size {chunk_size}, input {input:?}"
+            );
+            assert!(capture.stored_bytes() <= 12);
+        }
+    }
 }

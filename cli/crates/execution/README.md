@@ -59,8 +59,11 @@ which owns that task's process tree; the translation of a call's
   consumes, and the window, which each `running` report and `tool.stdin`
   reply takes, each keep `STORED_HALF_BYTES` of head and of tail and count
   the bytes between. A snapshot splits a byte and a line budget between head
-  and tail, cuts both on UTF-8 boundaries and marks the rest
-  `\n[... <n> bytes truncated ...]\n` (`capture`).
+  and tail. Adjacent ranges are decoded together; invalid or incomplete
+  input bytes are ignored while all valid fragments remain. Only bytes
+  omitted by storage or display limits produce the marker
+  `\n[... <n> bytes truncated ...]\n`; raw input counters remain unchanged
+  (`capture`).
 - A reply returns at most `VISIBLE_BYTES` and `VISIBLE_LINES` of each stream;
   an instruction's `limits` can only lower them (`limits`).
 - A task is named during its admission, before its policy is translated,
@@ -138,10 +141,10 @@ which owns that task's process tree; the translation of a call's
 - An edit reads at most `child::edit::MAX_BYTES` and one byte more, finds
   `old_string` exactly or, only when that finds nothing, with curly quotes
   mapped to ASCII, which locates spans and changes no written byte, and
-  writes through a new file beside the target, renamed over it with the
-  target's mode, or, when the target is a mount point that a rename cannot
-  replace, as a file that its own rule mounts, into the target in place
-  (`child/edit.rs`).
+  writes the validated replacement directly to the existing file. It needs
+  no writable parent directory, creates no file, and does not restore special
+  permission bits or explicitly sync the write. A failed or interrupted write
+  can leave partial content (`child/edit.rs`).
 - An image is recognized by its first bytes and refused from its header,
   by `protocol::image` acceptance of its `stat` size and dimensions, before
   the rest is read; it is read whole, bounded at that size and one byte

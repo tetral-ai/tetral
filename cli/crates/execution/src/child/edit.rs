@@ -1,15 +1,14 @@
 //! `edit`'s launcher entry, `__tetral-task edit`: replaces an exact
 //! substring of one existing UTF-8 file and writes the new content in its
-//! place atomically. It never creates the file. The first failing step
+//! place directly. It never creates the file. The first failing step
 //! decides the error: the input, the working directory of a relative path,
 //! the file's `stat`, its size, its bounded read, its encoding, the match
 //! and the new content's size, then the write.
 
-use std::fs::{self, File, OpenOptions, Permissions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::ops::Range;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use protocol::field::Count;
 use protocol::tool::{EditInput, EditResult, ToolError, ToolResult};
@@ -23,9 +22,6 @@ pub const KIND: &str = "edit";
 /// The most bytes of a file that `edit` reads, and of the content it
 /// writes.
 pub const MAX_BYTES: u64 = 33_554_432;
-
-/// How many names a temporary file of the write tries before it fails.
-const TEMPORARY_NAME_ATTEMPTS: usize = 16;
 
 pub(super) fn run(cwd: &Path, input: serde_json::Value) -> Option<Result<ToolResult, ToolError>> {
     let input: EditInput = serde_json::from_value(input).ok()?;
@@ -94,12 +90,7 @@ fn edit(cwd: &Path, input: &EditInput, max_bytes: u64) -> Result<EditResult, Too
         kept = span.end;
     }
     next.push_str(&content[kept..]);
-    write_atomically(
-        &path,
-        next.as_bytes(),
-        metadata.permissions().mode() & 0o7777,
-    )
-    .map_err(|_| failed("write_failed", "write failed"))?;
+    write_in_place(&path, next.as_bytes()).map_err(|_| failed("write_failed", "write failed"))?;
     Ok(EditResult {
         replacements: Count::saturating(spans.len() as u64),
         bytes_written: Count::saturating(next.len() as u64),
@@ -159,78 +150,81 @@ fn straight_quotes(text: &str) -> (String, Vec<usize>) {
     (mapped, quotes)
 }
 
-/// Writes `content` in place of the regular file at `path` through a new
-/// file beside the file `path` names, through any symbolic link: created
-/// exclusively, written, synced, given `mode` and renamed over it, then its
-/// directory synced when possible. A file that cannot be renamed over
-/// because it is a mount point, as one that its own rule mounts, is written
-/// in place instead. Any failure removes the new file.
-fn write_atomically(path: &Path, content: &[u8], mode: u32) -> io::Result<()> {
-    let target = fs::canonicalize(path)?;
-    let (directory, name) = target
-        .parent()
-        .zip(target.file_name())
-        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let (mut file, temporary) =
-        create_temporary(directory, &name.to_string_lossy(), TEMPORARY_NAME_ATTEMPTS)?;
-    let written = file
+/// Writes the validated replacement into the existing file. Opening does
+/// not require creating a sibling file. A failed or interrupted write can
+/// leave partial content, as with an ordinary file write.
+fn write_in_place(path: &Path, content: &[u8]) -> io::Result<()> {
+    OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)?
         .write_all(content)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| {
-            drop(file);
-            fs::set_permissions(&temporary, Permissions::from_mode(mode))
-        })
-        .and_then(|()| fs::rename(&temporary, &target));
-    if let Err(error) = written {
-        let _ = fs::remove_file(&temporary);
-        if error.raw_os_error() == Some(rustix::io::Errno::BUSY.raw_os_error()) {
-            return write_in_place(&target, content, mode);
-        }
-        return Err(error);
-    }
-    if let Ok(directory) = File::open(directory) {
-        let _ = directory.sync_all();
-    }
-    Ok(())
-}
-
-/// Writes `content` into the file at `target`: truncated, written and
-/// synced, with `mode`, which a write by this user may have cleared of its
-/// setuid and setgid bits, set again.
-fn write_in_place(target: &Path, content: &[u8], mode: u32) -> io::Result<()> {
-    let mut file = OpenOptions::new().write(true).truncate(true).open(target)?;
-    file.write_all(content)?;
-    file.sync_all()?;
-    file.set_permissions(Permissions::from_mode(mode))
-}
-
-/// A new file `.<name>.tetral-tmp-<16 hexadecimal characters>` in
-/// `directory`, created exclusively with mode 0600, with at most `attempts`
-/// names tried.
-fn create_temporary(directory: &Path, name: &str, attempts: usize) -> io::Result<(File, PathBuf)> {
-    for _ in 0..attempts {
-        let suffix: String = rand::random::<[u8; 8]>()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        let temporary = directory.join(format!(".{name}.tetral-tmp-{suffix}"));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)
-        {
-            Ok(file) => return Ok((file, temporary)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::from(io::ErrorKind::AlreadyExists))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn editing_an_existing_writable_file_needs_no_writable_parent() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("document.txt");
+        fs::write(&path, "old text").unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o500)).unwrap();
+        let input = serde_json::from_value(
+            json!({"path":"document.txt","old_string":"old","new_string":"new"}),
+        )
+        .unwrap();
+        let result = edit(directory.path(), &input, MAX_BYTES);
+        let sibling = fs::write(directory.path().join("sibling"), "not allowed");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            sibling.is_err(),
+            "this permission fixture requires an unprivileged user"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new text");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_validation_and_a_read_only_file_keep_the_original_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("document.txt");
+        fs::write(&path, "old old").unwrap();
+        for (old, new, all, cap, expected) in [
+            ("missing", "new", false, MAX_BYTES, "match_not_found"),
+            ("old", "new", false, MAX_BYTES, "match_ambiguous"),
+            ("old", "too much text", true, 7, "too_large"),
+        ] {
+            let input = serde_json::from_value(
+                json!({"path":"document.txt","old_string":old,"new_string":new,"replace_all":all}),
+            )
+            .unwrap();
+            assert_eq!(
+                edit(directory.path(), &input, cap)
+                    .unwrap_err()
+                    .kind
+                    .as_str(),
+                expected
+            );
+            assert_eq!(fs::read(&path).unwrap(), b"old old");
+        }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+        let input = serde_json::from_value(
+            json!({"path":"document.txt","old_string":"old","new_string":"new","replace_all":true}),
+        )
+        .unwrap();
+        let result = edit(directory.path(), &input, MAX_BYTES);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            result.unwrap_err().kind.as_str(),
+            "write_failed",
+            "this permission fixture requires an unprivileged user"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"old old");
+    }
 
     #[test]
     fn the_read_of_a_file_stops_one_byte_past_the_cap() {

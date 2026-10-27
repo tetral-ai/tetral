@@ -40,3 +40,19 @@ pub fn fragment(checks: StartupChecks) -> Option<ToolExecutionCapability> {
         limits: TransportLimits::default(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_shell_without_a_restricted_child_exposes_no_tools() {
+        assert!(
+            fragment(StartupChecks {
+                restricted_child: false,
+                shell: true
+            })
+            .is_none()
+        );
+    }
+}

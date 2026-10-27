@@ -1072,7 +1072,7 @@ Engine sends all three in the SSE envelope. Each payload contains `session_id`,
   `workdir` as `cwd`, and the computer's `working_directory` when the model
   gives none.
 
-**`edit`.** It never creates a file. Each failure is a terminal result with
+**`edit`.** It validates and builds the replacement in memory, then writes directly to the existing file. It requires no writable parent directory and creates no sibling temporary file. A failed or interrupted write can leave partial content; no special permission restoration or explicit sync is promised. Each failure is a terminal result with
 `status: error`, `result: {}` and an `error.kind` that names it:
 
 | `error.kind` | When |
@@ -1418,6 +1418,10 @@ control error answers only its control and never changes the target execution.
 
 - Each reply returns at most 50 KiB and 2,000 lines per stream, with truncation
   markers and counters, under head and tail retention.
+- Invalid and incomplete UTF-8 bytes are omitted without replacing them or
+  hiding later valid text. That decoding alone adds no truncation marker.
+  Limit truncation counts omitted original byte ranges once; a complete
+  character split by a retention boundary is omitted as a whole character.
 - Trimming never changes identities, report sequences, the phase, the exit
   state, counters or `drive_sync`; their space is reserved first. Media is never
   truncated.
