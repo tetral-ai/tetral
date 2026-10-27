@@ -925,7 +925,11 @@ fn file_probes(case: &mut Case, served: &Served) {
         Succeeds,
     );
     assert_eq!(fs::read_to_string(&g).unwrap(), "edited\n");
-    assert_eq!(fs::metadata(&g).unwrap().mode() & 0o7777, 0o7640);
+    let mode = fs::metadata(&g).unwrap().mode();
+    assert_eq!(mode & 0o777, 0o640, "{mode:o}");
+    // The kernel clears setuid on this unprivileged in-place write. The
+    // editor must not restore special permission bits after changing data.
+    assert_eq!(mode & 0o4000, 0, "{mode:o}");
     let under_file = policy(
         json!([
             {"path": "/", "access": "read"},
