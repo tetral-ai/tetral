@@ -244,9 +244,17 @@ impl Sinks {
 /// `tetral.log.2` before a record would make it exceed its limit.
 pub struct LogFile {
     directory: OwnedFd,
-    file: File,
+    file: Option<File>,
+    rotation: Rotation,
     size: u64,
     limit: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Rotation {
+    Ready,
+    MoveCurrent,
+    OpenCurrent,
 }
 
 impl LogFile {
@@ -271,27 +279,45 @@ impl LogFile {
         let size = file.metadata()?.len();
         Ok(LogFile {
             directory,
-            file,
+            file: Some(file),
+            rotation: Rotation::Ready,
             size,
             limit,
         })
     }
 
     fn rotate(&mut self) -> io::Result<()> {
+        self.rotate_with(|directory| open_log(directory, OFlags::EXCL))
+    }
+
+    /// Each successful filesystem operation advances the saved phase.
+    /// A failed reopen never repeats the history rotation or writes the old fd.
+    fn rotate_with(&mut self, open: impl FnOnce(&OwnedFd) -> io::Result<File>) -> io::Result<()> {
         let [current, first, second] = LOG_NAMES;
-        match rustix::fs::renameat_with(
-            &self.directory,
-            first,
-            &self.directory,
-            second,
-            RenameFlags::empty(),
-        ) {
-            Ok(()) | Err(rustix::io::Errno::NOENT) => {}
-            Err(error) => return Err(error.into()),
+        if self.rotation == Rotation::Ready {
+            match rustix::fs::renameat_with(
+                &self.directory,
+                first,
+                &self.directory,
+                second,
+                RenameFlags::empty(),
+            ) {
+                Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+                Err(error) => return Err(error.into()),
+            }
+            self.rotation = Rotation::MoveCurrent;
         }
-        rustix::fs::renameat(&self.directory, current, &self.directory, first)?;
-        self.file = open_log(&self.directory, OFlags::EXCL)?;
+        if self.rotation == Rotation::MoveCurrent {
+            match rustix::fs::renameat(&self.directory, current, &self.directory, first) {
+                Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+                Err(error) => return Err(error.into()),
+            }
+            self.file = None;
+            self.rotation = Rotation::OpenCurrent;
+        }
+        self.file = Some(open(&self.directory)?);
         self.size = 0;
+        self.rotation = Rotation::Ready;
         Ok(())
     }
 }
@@ -302,28 +328,44 @@ fn open_log(directory: &OwnedFd, extra: OFlags) -> io::Result<File> {
         | OFlags::CREATE
         | OFlags::NOFOLLOW
         | OFlags::CLOEXEC
+        | OFlags::NONBLOCK
         | extra;
-    Ok(File::from(rustix::fs::openat(
+    let file = File::from(rustix::fs::openat(
         directory,
         LOG_NAMES[0],
         flags,
         Mode::from_raw_mode(0o600),
-    )?))
+    )?);
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the log must be a regular file",
+        ));
+    }
+    Ok(file)
 }
 
 impl Write for LogFile {
     /// Writes one whole record, after rotating when it would not fit.
     fn write(&mut self, record: &[u8]) -> io::Result<usize> {
-        if self.size > 0 && self.size + record.len() as u64 > self.limit {
+        if self.rotation != Rotation::Ready
+            || (self.size > 0 && self.size + record.len() as u64 > self.limit)
+        {
             self.rotate()?;
         }
-        self.file.write_all(record)?;
+        self.file
+            .as_mut()
+            .expect("a ready log holds its file")
+            .write_all(record)?;
         self.size += record.len() as u64;
         Ok(record.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.file.flush()
+        match self.file.as_mut() {
+            Some(file) => file.flush(),
+            None => Ok(()),
+        }
     }
 }
 
@@ -366,6 +408,72 @@ pub(crate) mod tests {
         let mut line = vec![b'x'; size - 1];
         line.push(b'\n');
         line
+    }
+
+    #[test]
+    fn a_failed_reopen_resumes_without_rotating_history_again() {
+        let root = tempfile::tempdir().unwrap();
+        let logs = root.path().join("logs");
+        let mut file = LogFile::open_with_limit(&logs, 10).unwrap();
+        file.write_all(b"current").unwrap();
+        fs::write(logs.join("tetral.log.1"), b"previous").unwrap();
+        fs::write(logs.join("tetral.log.2"), b"oldest").unwrap();
+        for _ in 0..3 {
+            assert!(
+                file.rotate_with(|_| Err(io::Error::from_raw_os_error(24)))
+                    .is_err()
+            );
+            assert_eq!(fs::read(logs.join("tetral.log.1")).unwrap(), b"current");
+            assert_eq!(fs::read(logs.join("tetral.log.2")).unwrap(), b"previous");
+            assert!(!logs.join("tetral.log").exists());
+        }
+        // This record fits the old file, but must go into the new current.
+        file.write_all(b"new").unwrap();
+        assert_eq!(fs::read(logs.join("tetral.log")).unwrap(), b"new");
+        assert_eq!(fs::read(logs.join("tetral.log.1")).unwrap(), b"current");
+        assert_eq!(fs::read(logs.join("tetral.log.2")).unwrap(), b"previous");
+    }
+
+    #[test]
+    fn a_missing_current_log_recovers_and_an_unexpected_replacement_is_not_adopted() {
+        let root = tempfile::tempdir().unwrap();
+        let logs = root.path().join("logs");
+        let mut file = LogFile::open_with_limit(&logs, 5).unwrap();
+        file.write_all(b"first").unwrap();
+        fs::remove_file(logs.join("tetral.log")).unwrap();
+        file.write_all(b"next").unwrap();
+        assert_eq!(fs::read(logs.join("tetral.log")).unwrap(), b"next");
+        assert!(
+            file.rotate_with(|_| Err(io::Error::other("reopen unavailable")))
+                .is_err()
+        );
+        fs::write(logs.join("tetral.log"), b"unexpected").unwrap();
+        assert!(file.write_all(b"x").is_err());
+        assert_eq!(fs::read(logs.join("tetral.log")).unwrap(), b"unexpected");
+        assert_eq!(fs::read(logs.join("tetral.log.1")).unwrap(), b"next");
+        fs::remove_file(logs.join("tetral.log")).unwrap();
+        file.write_all(b"restored").unwrap();
+        assert_eq!(fs::read(logs.join("tetral.log")).unwrap(), b"restored");
+    }
+
+    #[test]
+    fn fifo_logs_are_rejected_with_and_without_a_reader() {
+        let root = tempfile::tempdir().unwrap();
+        let logs = root.path().join("logs");
+        fs::create_dir(&logs).unwrap();
+        let path = logs.join("tetral.log");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &path,
+            rustix::fs::FileType::Fifo,
+            Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+        assert!(LogFile::open(&logs).is_err());
+        let _reader =
+            rustix::fs::open(&path, OFlags::RDONLY | OFlags::NONBLOCK, Mode::empty()).unwrap();
+        assert!(LogFile::open(&logs).is_err());
     }
 
     #[test]

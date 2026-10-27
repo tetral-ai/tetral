@@ -39,6 +39,16 @@ registry, trace context and stopwatches.
   siblings (`check_pressure_point`). Its owner records its rejections by
   episode, one per cause (`pressure::Episodes`).
 
+- Logs use nonblocking, no-follow opens and accept only regular files after
+  inspecting the opened descriptor. A FIFO cannot stall initialization.
+- Rotation remembers completed steps. After moving history it retries only
+  the current-file move, then only exclusive creation of the new current
+  file. A failed reopen drops that record and leaves history in place; the
+  next record retries. An unexpected current path is not adopted or removed.
+- Both sinks share one flush deadline. Flushing completes queued writes or
+  their normal failure handling; it adds no per-record fsync. Exit at the
+  deadline may leave queued records unwritten and not individually counted.
+
 ## Entry points
 
 - `install(level, clock)` makes the record layer the process's subscriber,
