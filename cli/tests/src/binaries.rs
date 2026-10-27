@@ -10,7 +10,7 @@ use crate::{repository_root, workspace_dir};
 /// running `cargo test` holds.
 pub const TARGET_DIR: &str = "target/test-seams";
 
-/// `tetral` with its test seams: `cargo build -p tetral --features
+/// `tetral` with its test seams: `cargo build --locked -p tetral --features
 /// test-seams --target-dir target/test-seams` in `cli/`.
 pub fn tetral() -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
@@ -18,6 +18,7 @@ pub fn tetral() -> &'static Path {
         run(Command::new(cargo())
             .args([
                 "build",
+                "--locked",
                 "-p",
                 "tetral",
                 "--features",
@@ -45,6 +46,7 @@ pub fn tetral_with_bwrap_digest(digest: &str) -> &'static Path {
         run(Command::new(cargo())
             .args([
                 "build",
+                "--locked",
                 "-p",
                 "tetral",
                 "--features",

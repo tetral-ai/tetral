@@ -54,6 +54,7 @@ func TestInventoryMapsRepresentativeOwnersAndCrossBoundaryRelations(t *testing.T
 		"cli/crates/protocol/src/lib.rs":                  {"cli"},
 		"cli/README.md":                                   {"cli", "repository"},
 		"cli/reference/server.go":                         {"cli", "go", "go-static", "repository"},
+		"internal/pathvalidation/norm.go":                 {"cli", "go", "go-static", "repository"},
 	}
 	for path, expected := range want {
 		matches := inventory.MatchPath(path)

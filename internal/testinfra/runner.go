@@ -449,8 +449,8 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 		// Every test file of the CLI's tests package writes its acceptance
 		// record into the directory this variable names, and fails without it.
 		return []commandSpec{
-			{Arguments: []string{"cargo", "build"}, WorkingDir: "cli"},
-			{Arguments: []string{"cargo", "test"}, WorkingDir: "cli", Environment: []string{"TETRAL_ACCEPTANCE_DIR=" + filepath.Join(outputDir, "acceptance")}},
+			{Arguments: []string{"cargo", "build", "--locked"}, WorkingDir: "cli"},
+			{Arguments: []string{"cargo", "test", "--locked"}, WorkingDir: "cli", Environment: []string{"TETRAL_ACCEPTANCE_DIR=" + filepath.Join(outputDir, "acceptance")}},
 		}, nil
 	case "sandbox-image":
 		return []commandSpec{

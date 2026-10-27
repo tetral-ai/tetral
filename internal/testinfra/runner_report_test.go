@@ -75,7 +75,7 @@ func TestCLISelectionBuildsThenTestsTheCargoWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := [][]string{{"cargo", "build"}, {"cargo", "test"}}
+	want := [][]string{{"cargo", "build", "--locked"}, {"cargo", "test", "--locked"}}
 	wantEnvironment := [][]string{nil, {"TETRAL_ACCEPTANCE_DIR=" + filepath.Join(outputDir, "acceptance")}}
 	if len(commands) != len(want) {
 		t.Fatalf("cli commands = %v; want %v", commands, want)

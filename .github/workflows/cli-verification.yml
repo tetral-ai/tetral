@@ -46,11 +46,26 @@ jobs:
           # would miss the pattern.
           changed="$RUNNER_TEMP/changed-paths"
           git diff --name-only --no-renames -z "$BASE_SHA...$HEAD_SHA" > "$changed"
-          if grep -qzE '^(cli/|protocol/|\.github/workflows/cli-verification\.yml$)' "$changed"; then
-            echo "cli=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "cli=false" >> "$GITHUB_OUTPUT"
-          fi
+          cli=false
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              cli/*|protocol/*|go.mod|go.sum|internal/pathvalidation/*|.github/workflows/cli-verification.yml)
+                cli=true
+                break
+                ;;
+              # These owners do not enter the CLI build or its reference
+              # server. Keep this list aligned with their dependencies.
+              services/*|deploy/*|docs/*|README.md)
+                ;;
+              # Unknown ownership runs verification, including new build
+              # configuration and dependencies outside the CLI workspace.
+              *)
+                cli=true
+                break
+                ;;
+            esac
+          done < "$changed"
+          echo "cli=$cli" >> "$GITHUB_OUTPUT"
 
   linux:
     needs: changed
@@ -84,12 +99,12 @@ jobs:
         run: rustup toolchain install
       - name: Build
         working-directory: cli
-        run: cargo build
+        run: cargo build --locked
       - name: Test
         working-directory: cli
         env:
           TETRAL_ACCEPTANCE_DIR: ${{ runner.temp }}/acceptance
-        run: cargo test
+        run: cargo test --locked
 
   results:
     name: CLI results
@@ -102,19 +117,19 @@ jobs:
         env:
           CHANGED_RESULT: ${{ needs.changed.result }}
           CLI_CHANGED: ${{ needs.changed.outputs.cli }}
-          BUILD_RESULTS: ${{ needs.linux.result }}
+          BUILD_RESULT: ${{ needs.linux.result }}
         run: |
           set -euo pipefail
           if [ "$CHANGED_RESULT" != "success" ]; then
             echo "the changed job ended with $CHANGED_RESULT"
             exit 1
           fi
-          if [ "$CLI_CHANGED" = "false" ]; then
-            exit 0
-          fi
-          for result in $BUILD_RESULTS; do
-            if [ "$result" != "success" ]; then
-              echo "a build job ended with $result"
+          case "$CLI_CHANGED:$BUILD_RESULT" in
+            true:success|false:skipped|false:success)
+              exit 0
+              ;;
+            *)
+              echo "CLI selection was '$CLI_CHANGED' and its build ended with '$BUILD_RESULT'"
               exit 1
-            fi
-          done
+              ;;
+          esac
