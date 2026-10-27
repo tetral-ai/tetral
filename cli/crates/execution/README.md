@@ -20,13 +20,15 @@ which owns that task's process tree; the translation of a call's
   that check can call. The launch has Codex's sandbox manager compile the
   task's profile, filesystem and network together, into one `bwrap` and
   seccomp command with the preference `Require`, so that no grant runs
-  unsandboxed, and starts it with exactly the environment the tool gives,
-  as the leader of a new session and process group, and with no descriptor
-  beyond its pipes and the one it passes at `PASSED_DESCRIPTOR`
+  unsandboxed, and starts it with a controlled launcher environment,
+  as the leader of a new session and process group, with only its pipes,
+  the launch-status descriptor 3 and, for exec, environment-data descriptor 4
   (`isolation/mod.rs`).
 - The `bwrap` is the one Codex's helper picks for the same command: the
   system `bwrap` on `PATH` that passes the `--help` probe, otherwise the
-  bundled one beside `tetral` whose digest matches `CODEX_BWRAP_SHA256`. None,
+  bundled one beside `tetral`. A valid, nonzero `CODEX_BWRAP_SHA256` checks
+  its digest; the existing development mode with a missing or all-zero
+  digest skips that check. None,
   WSL1 or a refusal of user namespaces rejects the call
   `sandbox_unavailable`; a command the transform cannot build rejects it
   `unsupported_policy`; neither starts a process (`isolation/linux.rs`).
@@ -38,8 +40,8 @@ which owns that task's process tree; the translation of a call's
   cannot, the availability check rejects the call `sandbox_unavailable`
   naming that path, before any probe, and `tetral` as `codex-linux-sandbox`
   ends the command with that message before the launch. The check walks the
-  App Server's `PATH`; the helper walks the command's, which Codex's lookup
-  in `run_main` uses too (`isolation::planted_launcher`,
+  App Server's `PATH`; the helper uses that same trusted launcher `PATH`,
+  independently of the task's requested environment (`isolation::planted_launcher`,
   `isolation/linux.rs`).
 - A missing protected path stays uncreatable. The Codex crates mount an
   empty read-only entry at a missing top-level `.git` of a writable path, and
@@ -47,6 +49,26 @@ which owns that task's process tree; the translation of a call's
   create; where no process of the user could create it, the launch profile
   leaves the protection to the operating system instead
   (`isolation/linux.rs`, `launch_profile`).
+- Linux launch profiles also deny existing host D-Bus and systemd control
+  sockets: `/run/dbus/system_bus_socket`, `/run/systemd/private`, and the
+  effective user's `/run/user/<uid>/bus` and `systemd/private`. Discovery
+  checks their `/var/run` spellings, `bus` and `systemd/private` under an
+  absolute App Server `XDG_RUNTIME_DIR`, and absolute `unix:path=` addresses
+  in its `DBUS_SESSION_BUS_ADDRESS` and `DBUS_SYSTEM_BUS_ADDRESS`. Percent
+  escapes and address lists are decoded before lookup. Existing sockets are
+  canonicalized and deduplicated; a symlink such as `/var/run` reaches the
+  same masked target. These explicit denies survive broader read or write
+  grants, without changing the task's network policy. Programs that need
+  these host services cannot use those endpoints from a task
+  (`isolation/host_ipc.rs`).
+  This is bounded filesystem masking, not comprehensive host-service
+  isolation: abstract Unix sockets, TCP or autolaunch D-Bus addresses,
+  unlisted service endpoints, undiscovered bind-mount aliases, and sockets
+  first appearing after discovery are not covered. Missing paths and paths
+  that are not sockets are omitted, so discovery creates no host entries or
+  stops any service. Runtime denial and ordinary-network controls still need
+  behavioral acceptance; unit tests establish candidate selection, address
+  parsing and deny precedence only.
 - No report is handed to the Report outbox that Engine could never accept:
   an error's `message` and `path` are cut to `ERROR_MESSAGE_MAX_BYTES` and
   `ERROR_PATH_MAX_BYTES` on UTF-8 boundaries and its `detail` rebuilt within
@@ -74,9 +96,12 @@ which owns that task's process tree; the translation of a call's
   which must be a directory of this user with no permission for group or
   others; a failure names the path (`store::TaskFiles::create`). Each log
   receives its stream's first `LOG_HEAD_BYTES` as they arrive and, at the
-  end, the capture's stored text (`store::Log`). Both directories go once the
-  task has ended and its reports are acknowledged, never following a
-  symbolic link out of them (`TaskFiles::remove`).
+  end, the capture's stored text (`store::Log`). Both directories are cleaned once the
+  processes are gone and reports are acknowledged or dropped. Removal restores
+  only the owning user's directory permissions within the task temporary tree
+  and never follows symbolic links. Each directory is attempted independently;
+  failures record its task, cleanup part and OS error, without changing the
+  tool result or retaining its output for another attempt (`TaskFiles::remove`).
 - Each probe of a `bwrap` candidate is bounded by `PROBE_TIMEOUT` and
   `PROBE_OUTPUT_LIMIT_BYTES`, which `Isolation::with_probe_bounds`
   overrides.
@@ -118,7 +143,7 @@ which owns that task's process tree; the translation of a call's
   are those of the Go Helper in `internal/sandbox/helper/`, case by case
   (`exec`, `stdin`, `child`).
 - `exec_command` runs as `tetral __tetral-task exec <directory> <shell>
-  <cmd>` through the restricted path; inside the sandbox the launcher entry
+  -c <cmd>` through the restricted path; inside the sandbox the launcher entry
   checks and enters the directory, with no fallback, and executes
   `[<shell>, "-c", <cmd>]`. It reports on the launch-status pipe at
   descriptor 3: `child::STARTED` right before the exec, whose arrival is the
@@ -151,13 +176,16 @@ which owns that task's process tree; the translation of a call's
   more, and never cut or split (`child/view_image.rs`).
 - A command's environment is the App Server's without any `TETRAL_` name,
   then the call's `env`, then entries that `env` cannot override and
-  `TMPDIR`; a file tool's child gets the same without `env`. An inherited
-  entry whose name or value is not UTF-8 is left out, since Codex's command
-  environment holds UTF-8 strings (`env`). Under `test-seams` only, the
-  child of a task whose network is not `disabled` also gets
-  `TETRAL_TEST_SEAMS`, which the launcher entry removes before the exec;
-  the seccomp filter of `disabled` refuses its connection to the harness
-  (`supervisor`, `child/exec.rs`).
+  `TMPDIR`. An inherited entry whose name or value is not UTF-8 is left out.
+  The parent serializes this environment into an anonymous seekable file;
+  descriptor 4 carries it through setup. The isolated exec entry reads and
+  closes it, then installs the environment only for the final program exec.
+  Launchers and file-tool entries receive only the App Server's trusted
+  `PATH` and `HOME`, never the command's environment. Under `test-seams`
+  only, a launcher whose network is not `disabled` also gets
+  `TETRAL_TEST_SEAMS`; it is absent from the final command's environment.
+  The seccomp filter of `disabled` refuses its connection to the harness
+  (`env`, `isolation`, `child/exec.rs`).
 - A call's waits take their defaults and clamps from `exec::ExecCall`. On
   Linux an exit status from 129 to 192 is a death by signal `status - 128`,
   which the sandbox's stages report that way (`exec::ExitFacts::observed`).
@@ -238,6 +266,8 @@ which owns that task's process tree; the translation of a call's
 - `isolation/linux.rs`: the choice of `bwrap` and its candidates, the walk
   for a planted `bwrap`, the digest check of the bundled one, the WSL1 test,
   the namespace probe and the launch profile.
+- `isolation/host_ipc.rs`: known filesystem service endpoints and the
+  mandatory denies appended to Linux launch profiles.
 - `capture.rs`: `StreamCapture`, a stream's two buffers and counters, the
   `Window` taken from it, and their snapshots.
 - `limits.rs`: `Visible`, the byte and line budget of each stream in a reply.
@@ -258,6 +288,22 @@ which owns that task's process tree; the translation of a call's
   entries with Codex's resolution of them; `tests/report_bounds.rs`, a
   process result fitted to the ordinary limits and an error's bounds;
   `tests/visible_limits.rs`, an instruction's `limits` against each
-  stream's budget. Unit tests: `isolation/mod.rs`, the inherited
-  descriptors at exec with and without `close_range`; `child/edit.rs`, the
-  bounded read of a file.
+  stream's budget. Component integration tests in `isolation/mod.rs` check
+  inherited descriptors at exec with and without `close_range`;
+  `child/edit.rs` checks a real file's bounded read. Tests using files or
+  subprocesses are component integration evidence regardless of Rust module
+  placement.
+
+A normal result must enter the App Server's retained-report budget before it
+can be queued. If it does not fit, execution releases that new body and uses
+a compact `resource_exhausted` error. A running result that cannot be retained
+starts the normal termination procedure; the terminal error waits for process
+confirmation. Control errors preserve already observed write and cancel facts.
+Already admitted reports are never rewritten to make room.
+
+After processes are confirmed gone, all prior reports have a terminal outcome,
+and cleanup has been attempted, the execution supervisor is released. A small
+`FinishedTask` keeps the existing receiver, end facts, output counters and write
+records for late controls. It holds no process, task specification, sandbox
+policy or output text. These protocol records remain until their binding drops
+them; this is not a constant-RSS or timed-eviction guarantee.

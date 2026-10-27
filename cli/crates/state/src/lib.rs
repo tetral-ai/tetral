@@ -4,7 +4,6 @@
 pub mod config;
 pub mod credentials;
 pub mod files;
-pub mod outbox;
 pub mod paths;
 pub mod private;
 pub mod seams;

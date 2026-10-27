@@ -1,19 +1,11 @@
-//! The Report outbox: one task per App Server that owns every report that
-//! answers or follows an instruction, from the moment it is frozen under
-//! `outbox/` until Engine acknowledges or refuses it or its connection ends.
-//!
-//! A report gets the next `r<n>` identity of its connection, at most
-//! `protocol::ports::LONGEST_REPORT_MESSAGE_ID`, is built and checked by its
-//! own decoder, frozen in `outbox/<n>/<message_id>.json` and sent at once in
-//! its own request; each retry sends the frozen file again, so its bytes
-//! never change. Reports are sent concurrently with no count
-//! limit and apart from the Connection owner's requests, so a heartbeat never
-//! waits behind one. A report is never sent on another connection: the end
-//! of its connection cancels its uploads at once and deletes its directory.
+//! In-memory reports, admitted before the mailbox and shared unchanged by
+//! pending delivery and every HTTP attempt. The last body reference releases
+//! its budget; a connection end cancels delivery and drops pending reports.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use bytes::Bytes;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -21,7 +13,8 @@ use protocol::bootstrap::BootstrapKey;
 use protocol::errors::{ErrorBody, ErrorCode};
 use protocol::id::Id;
 use protocol::ports::{
-    ReportEndpoint, ReportId, ReportListener, ReportOutcome, ReportSink, Submission,
+    ReportAdmissionError, ReportEndpoint, ReportId, ReportListener, ReportOutcome, ReportSink,
+    Submission,
 };
 use protocol::tool::Acknowledgement;
 use tokio::sync::mpsc;
@@ -29,8 +22,9 @@ use tokio::task::AbortHandle;
 
 use crate::backoff::{BASE_MAX, BASE_START, Backoff, random_jitter};
 use crate::clock::Clock;
-use crate::http::{Answer, Failure, ReportRequest, Transport};
+use crate::http::{Answer, ReportRequest, Transport};
 use crate::report_deadline::{self, REPORT_TOTAL, STALL_LIMIT};
+use crate::report_memory::{Budget, NORMAL_BYTES, RESERVED_BYTES};
 
 /// The durations the outbox runs by, each a constant but for tests.
 #[derive(Debug, Clone, Copy)]
@@ -62,20 +56,21 @@ pub enum OutboxEvent {
     /// `409 stale_connection`, which end the connection; the report waits
     /// for that end.
     Refused { connection: Id, error: ErrorBody },
+    /// Even reserved capacity could not retain a control reply or compact error.
+    ResourceExhausted { connection: Id },
 }
 
 impl OutboxEvent {
     pub fn connection(&self) -> &Id {
         match self {
             OutboxEvent::FinalAcked { connection, .. }
-            | OutboxEvent::Refused { connection, .. } => connection,
+            | OutboxEvent::Refused { connection, .. }
+            | OutboxEvent::ResourceExhausted { connection } => connection,
         }
     }
 }
 
 pub struct OutboxConfig {
-    /// `outbox/` in the state root, empty at the start.
-    pub directory: PathBuf,
     pub transport: Arc<Transport>,
     pub key: BootstrapKey,
     pub times: OutboxTimes,
@@ -88,6 +83,9 @@ pub struct OutboxConfig {
 pub struct Outbox {
     mailbox: mpsc::UnboundedSender<Message>,
     ids: Arc<AtomicU64>,
+    admission: Arc<Mutex<Option<(Id, u64)>>>,
+    budget: Arc<Budget>,
+    events: mpsc::UnboundedSender<OutboxEvent>,
 }
 
 impl std::fmt::Debug for Outbox {
@@ -97,11 +95,10 @@ impl std::fmt::Debug for Outbox {
 }
 
 enum Message {
-    Submit(ReportId, Submission),
+    Submit(ReportId, Admitted),
     Cancel(ReportId),
     AddFinal(ReportId, Id),
     ConnectionStarted {
-        number: u64,
         connection: Id,
         tool_execution: bool,
     },
@@ -117,6 +114,11 @@ enum Message {
 
 impl Outbox {
     pub fn spawn(config: OutboxConfig) -> Outbox {
+        Self::with_budget(config, Budget::new(NORMAL_BYTES, RESERVED_BYTES))
+    }
+
+    pub(crate) fn with_budget(config: OutboxConfig, budget: Arc<Budget>) -> Outbox {
+        let events = config.events.clone();
         let (mailbox, inbox) = mpsc::unbounded_channel();
         let owner = Owner {
             config,
@@ -128,20 +130,31 @@ impl Outbox {
         Outbox {
             mailbox,
             ids: Arc::new(AtomicU64::new(0)),
+            admission: Arc::new(Mutex::new(None)),
+            budget,
+            events,
         }
     }
 
     /// The connection `connection`, the App Server's `number`th, is new;
     /// `tool_execution` says whether its ready advertised tool execution.
-    pub fn connection_started(&self, number: u64, connection: Id, tool_execution: bool) {
+    pub fn connection_started(&self, _number: u64, connection: Id, tool_execution: bool) {
+        let mut admission = self.admission.lock().expect("report admission lock");
+        *admission = Some((connection.clone(), 0));
         self.send(Message::ConnectionStarted {
-            number,
             connection,
             tool_execution,
         });
     }
 
     pub fn connection_ended(&self, connection: Id) {
+        let mut admission = self.admission.lock().expect("report admission lock");
+        if admission
+            .as_ref()
+            .is_some_and(|(current, _)| *current == connection)
+        {
+            *admission = None;
+        }
         self.send(Message::ConnectionEnded { connection });
     }
 
@@ -152,11 +165,86 @@ impl Outbox {
     }
 }
 
+impl Outbox {
+    fn admit(
+        &self,
+        submission: Submission,
+        reserve: bool,
+    ) -> Result<ReportId, ReportAdmissionError> {
+        let report = ReportId(self.ids.fetch_add(1, Ordering::Relaxed) + 1);
+        let message_id = {
+            let mut admission = self.admission.lock().expect("report admission lock");
+            match admission
+                .as_mut()
+                .filter(|(connection, _)| *connection == submission.connection_id)
+            {
+                Some((_, last)) => {
+                    *last += 1;
+                    Id::new(format!("r{last}")).expect("r<n> is an Id")
+                }
+                None => {
+                    drop(admission);
+                    tell(&submission.listener, report, ReportOutcome::Dropped);
+                    return Ok(report);
+                }
+            }
+        };
+        // Build and sender-check without holding either admission or budget locks.
+        let Ok(bytes) = (submission.build)(&submission.connection_id, &message_id) else {
+            observe::error!(
+                "protocol.sender_check_failed",
+                connection.id = observe::Id(submission.connection_id.as_str()),
+                message.id = observe::Id(message_id.as_str()),
+                error.code = observe::Code("sender_check_failed")
+            );
+            tell(&submission.listener, report, ReportOutcome::Dropped);
+            return Ok(report);
+        };
+        let mut admission = self.admission.lock().expect("report admission lock");
+        if !admission
+            .as_ref()
+            .is_some_and(|(connection, _)| *connection == submission.connection_id)
+        {
+            drop(admission);
+            tell(&submission.listener, report, ReportOutcome::Dropped);
+            return Ok(report);
+        }
+        let Some(bytes) = self.budget.retain(bytes, reserve) else {
+            if !reserve {
+                return Err(ReportAdmissionError::ResourceExhausted);
+            }
+            *admission = None;
+            drop(admission);
+            tell(&submission.listener, report, ReportOutcome::Dropped);
+            let _ = self.events.send(OutboxEvent::ResourceExhausted {
+                connection: submission.connection_id,
+            });
+            return Ok(report);
+        };
+        self.send(Message::Submit(
+            report,
+            Admitted {
+                connection_id: submission.connection_id,
+                message_id,
+                bytes,
+                endpoint: submission.endpoint,
+                final_for: submission.final_for,
+                traceparent: submission.traceparent,
+                listener: submission.listener,
+            },
+        ));
+        Ok(report)
+    }
+}
+
 impl ReportSink for Outbox {
     fn submit(&self, submission: Submission) -> ReportId {
-        let report = ReportId(self.ids.fetch_add(1, Ordering::Relaxed) + 1);
-        self.send(Message::Submit(report, submission));
-        report
+        self.admit(submission, true)
+            .expect("reserved admission ends the connection on exhaustion")
+    }
+
+    fn try_submit(&self, submission: Submission) -> Result<ReportId, ReportAdmissionError> {
+        self.admit(submission, false)
     }
 
     fn cancel(&self, report: ReportId) {
@@ -197,18 +285,25 @@ struct Owner {
 
 /// The current connection and its reports.
 struct Current {
-    number: u64,
     id: Id,
     tool_execution: bool,
-    /// The number of its last report, whose `message_id` is `r<n>`.
-    last: u64,
     reports: HashMap<ReportId, Pending>,
+}
+
+struct Admitted {
+    connection_id: Id,
+    message_id: Id,
+    bytes: Bytes,
+    endpoint: ReportEndpoint,
+    final_for: Vec<Id>,
+    traceparent: Option<String>,
+    listener: Option<Arc<dyn ReportListener>>,
 }
 
 struct Pending {
     message_id: Id,
     endpoint: ReportEndpoint,
-    size: usize,
+    bytes: Bytes,
     final_for: Vec<Id>,
     traceparent: Option<String>,
     listener: Option<Arc<dyn ReportListener>>,
@@ -233,7 +328,6 @@ impl Owner {
                 }
             }
             Message::ConnectionStarted {
-                number,
                 connection,
                 tool_execution,
             } => {
@@ -242,10 +336,8 @@ impl Owner {
                     self.connection_ended(&ended).await;
                 }
                 self.current = Some(Current {
-                    number,
                     id: connection,
                     tool_execution,
-                    last: 0,
                     reports: HashMap::new(),
                 });
             }
@@ -258,7 +350,7 @@ impl Owner {
         }
     }
 
-    async fn submit(&mut self, report: ReportId, submission: Submission) {
+    async fn submit(&mut self, report: ReportId, submission: Admitted) {
         let Some(current) = self
             .current
             .as_mut()
@@ -267,42 +359,13 @@ impl Owner {
             tell(&submission.listener, report, ReportOutcome::Dropped);
             return;
         };
-        current.last += 1;
-        let message_id = Id::new(format!("r{}", current.last)).expect("r<n> is an Id");
-        let Ok(bytes) = (submission.build)(&current.id, &message_id) else {
-            observe::error!(
-                "protocol.sender_check_failed",
-                connection.id = observe::Id(current.id.as_str()),
-                message.id = observe::Id(message_id.as_str()),
-                error.code = observe::Code("sender_check_failed")
-            );
-            tell(&submission.listener, report, ReportOutcome::Dropped);
-            return;
-        };
-        let (directory, number) = (self.config.directory.clone(), current.number);
-        let name = message_id.as_str().to_owned();
-        let frozen = bytes.clone();
-        let written = tokio::task::spawn_blocking(move || {
-            state::outbox::write(&directory, number, &name, &frozen)
-        })
-        .await;
-        if !matches!(written, Ok(Ok(()))) {
-            observe::error!(
-                "report.dropped",
-                connection.id = observe::Id(current.id.as_str()),
-                message.id = observe::Id(message_id.as_str()),
-                error.code = observe::Code("report_not_written")
-            );
-            tell(&submission.listener, report, ReportOutcome::Dropped);
-            return;
-        }
         let times = self.config.times;
         current.reports.insert(
             report,
             Pending {
-                message_id,
+                message_id: submission.message_id,
+                bytes: submission.bytes,
                 endpoint: submission.endpoint,
-                size: bytes.len(),
                 final_for: submission.final_for,
                 traceparent: submission.traceparent,
                 listener: submission.listener,
@@ -311,12 +374,11 @@ impl Owner {
                 attempt: None,
             },
         );
-        self.attempt(report, Some(bytes));
+        self.attempt(report);
     }
 
-    /// Starts an attempt of `report`, sending `bytes` or, for a retry, the
-    /// frozen file.
-    fn attempt(&mut self, report: ReportId, bytes: Option<Vec<u8>>) {
+    /// Every attempt shares the original immutable body and its budget charge.
+    fn attempt(&mut self, report: ReportId) {
         self.last_attempt += 1;
         let tag = self.last_attempt;
         let Some(current) = self.current.as_mut() else {
@@ -328,43 +390,25 @@ impl Owner {
         let total = report_deadline::total(
             self.config.times.report_total,
             pending.endpoint,
-            pending.size,
+            pending.bytes.len(),
             current.tool_execution,
         );
         let path = pending.endpoint.path();
-        let size = pending.size;
+        let bytes = pending.bytes.clone();
         let traceparent = pending.traceparent.clone();
-        let (directory, number) = (self.config.directory.clone(), current.number);
-        let name = pending.message_id.as_str().to_owned();
         let transport = self.config.transport.clone();
         let key = self.config.key.clone();
         let clock = self.config.clock.clone();
         let stall = self.config.times.stall;
         let mailbox = self.mailbox.clone();
         let task = tokio::spawn(async move {
-            let bytes = match bytes {
-                Some(bytes) => Some(bytes),
-                None => tokio::task::spawn_blocking(move || {
-                    state::outbox::read(&directory, number, &name, size)
-                })
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .flatten()
-                .filter(|bytes| bytes.len() == size),
+            let request = ReportRequest {
+                bytes,
+                traceparent,
+                deadline: clock.now() + total,
+                stall,
             };
-            let answer = match bytes {
-                Some(bytes) => {
-                    let request = ReportRequest {
-                        bytes,
-                        traceparent,
-                        deadline: clock.now() + total,
-                        stall,
-                    };
-                    transport.post_report(path, &key, request, &clock).await
-                }
-                None => Answer::Failed(Failure::Unreadable),
-            };
+            let answer = transport.post_report(path, &key, request, &clock).await;
             let _ = mailbox.send(Message::Answered {
                 report,
                 attempt: tag,
@@ -449,16 +493,9 @@ impl Owner {
         }
     }
 
-    /// Takes `report` from the current connection and deletes its file.
+    /// Releases the pending owner; a live transport reference remains charged.
     async fn remove(&mut self, report: ReportId) -> Option<Pending> {
-        let current = self.current.as_mut()?;
-        let pending = current.reports.remove(&report)?;
-        let (directory, number) = (self.config.directory.clone(), current.number);
-        let name = pending.message_id.as_str().to_owned();
-        let _ =
-            tokio::task::spawn_blocking(move || state::outbox::remove(&directory, number, &name))
-                .await;
-        Some(pending)
+        self.current.as_mut()?.reports.remove(&report)
     }
 
     async fn connection_ended(&mut self, connection: &Id) {
@@ -470,11 +507,6 @@ impl Owner {
                 task.abort();
             }
         }
-        let (directory, number) = (self.config.directory.clone(), current.number);
-        let _ = tokio::task::spawn_blocking(move || {
-            state::outbox::remove_connection(&directory, number)
-        })
-        .await;
         for (report, pending) in current.reports {
             tell(&pending.listener, report, ReportOutcome::Dropped);
         }
@@ -505,7 +537,7 @@ impl Owner {
             })
             .collect();
         for report in due {
-            self.attempt(report, None);
+            self.attempt(report);
         }
     }
 }
@@ -543,8 +575,6 @@ mod tests {
     struct Request {
         headers: Vec<(String, String)>,
         body: Vec<u8>,
-        /// Whether the report's frozen file existed when the request came.
-        frozen_then: bool,
     }
 
     impl Request {
@@ -564,6 +594,8 @@ mod tests {
     #[derive(Debug, Clone, Copy)]
     enum Reply {
         Unavailable,
+        LostAck,
+        Refused,
         WrongAck,
         Ack,
     }
@@ -576,7 +608,7 @@ mod tests {
     }
 
     impl Engine {
-        async fn start(replies: Vec<Reply>, outbox: PathBuf) -> Engine {
+        async fn start(replies: Vec<Reply>) -> Engine {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let requests = Arc::new(Mutex::new(Vec::new()));
@@ -584,7 +616,7 @@ mod tests {
             let log = requests.clone();
             tokio::spawn(async move {
                 while let Ok((stream, _)) = listener.accept().await {
-                    let (log, replies, outbox) = (log.clone(), replies.clone(), outbox.clone());
+                    let (log, replies) = (log.clone(), replies.clone());
                     tokio::spawn(async move {
                         let mut stream = BufReader::new(stream);
                         let mut headers = Vec::new();
@@ -607,18 +639,7 @@ mod tests {
                         stream.read_exact(&mut body).await.unwrap();
                         let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
                         let message_id = report["message_id"].as_str().unwrap().to_owned();
-                        let frozen_then = std::fs::read_dir(&outbox).unwrap().any(|connection| {
-                            connection
-                                .unwrap()
-                                .path()
-                                .join(format!("{message_id}.json"))
-                                .exists()
-                        });
-                        log.lock().unwrap().push(Request {
-                            headers,
-                            body,
-                            frozen_then,
-                        });
+                        log.lock().unwrap().push(Request { headers, body });
                         let reply = replies.lock().unwrap().pop_front();
                         let ack = |message_id: &str| {
                             serde_json::json!({
@@ -630,6 +651,14 @@ mod tests {
                         };
                         let (status, answer) = match reply.unwrap_or(Reply::Unavailable) {
                             Reply::Unavailable => (503, String::new()),
+                            Reply::LostAck => return,
+                            Reply::Refused => (
+                                400,
+                                serde_json::json!({
+                                    "code": "invalid_message", "message": "invalid report"
+                                })
+                                .to_string(),
+                            ),
                             Reply::WrongAck => (200, ack("r999")),
                             Reply::Ack => (200, ack(&message_id)),
                         };
@@ -696,10 +725,8 @@ mod tests {
         outbox: Outbox,
         engine: Engine,
         clock: TestClock,
-        directory: PathBuf,
         outcomes: Arc<Outcomes>,
         _events: mpsc::UnboundedReceiver<OutboxEvent>,
-        _root: tempfile::TempDir,
     }
 
     fn test_clock() -> TestClock {
@@ -708,14 +735,11 @@ mod tests {
 
     fn spawn_outbox(
         transport: Arc<Transport>,
-        directory: &std::path::Path,
         clock: &TestClock,
         times: OutboxTimes,
     ) -> (Outbox, mpsc::UnboundedReceiver<OutboxEvent>) {
-        state::outbox::reset(directory).unwrap();
         let (events, receiver) = mpsc::unbounded_channel();
         let outbox = Outbox::spawn(OutboxConfig {
-            directory: directory.to_owned(),
             transport,
             key: protocol::bootstrap::Bootstrap::decode(
                 br#"{"server_url":"http://127.0.0.1:1","instance_id":"inst_a","credential_id":"cred_a","connection_key":"tetral_ck_a","expires_at":"2099-01-01T00:00:00Z"}"#,
@@ -730,21 +754,16 @@ mod tests {
     }
 
     async fn setup(replies: Vec<Reply>) -> Setup {
-        let root = tempfile::tempdir().unwrap();
-        let directory = root.path().join("outbox");
-        state::outbox::reset(&directory).unwrap();
-        let engine = Engine::start(replies, directory.clone()).await;
+        let engine = Engine::start(replies).await;
         let clock = test_clock();
         let transport = Arc::new(Transport::new(&engine.url));
-        let (outbox, events) = spawn_outbox(transport, &directory, &clock, OutboxTimes::default());
+        let (outbox, events) = spawn_outbox(transport, &clock, OutboxTimes::default());
         Setup {
             outbox,
             engine,
             clock,
-            directory,
             outcomes: Arc::new(Outcomes::default()),
             _events: events,
-            _root: root,
         }
     }
 
@@ -782,10 +801,201 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn admission_charges_the_mailbox_and_rejects_only_the_new_result() {
+        let mut setup = setup(vec![]).await;
+        setup.outbox.budget = Budget::new(512, 512);
+        setup.outbox.connection_started(1, id("conn_a"), false);
+        // This current-thread task has not yielded since the submission;
+        // the outbox owner has not read its mailbox yet.
+        let first = setup
+            .outbox
+            .try_submit(protocol_error(&setup, "conn_a", None))
+            .unwrap();
+        let held = setup.outbox.budget.used()[0];
+        assert!(held > 0);
+        let witnesses = setup.outbox.budget.witnesses();
+        assert_eq!(witnesses.len(), 1);
+        assert!(witnesses[0].upgrade().is_some());
+        // A complete legal larger report cannot use the reserved capacity.
+        assert_eq!(
+            setup.outbox.try_submit(tool_list(1_000)),
+            Err(ReportAdmissionError::ResourceExhausted)
+        );
+        assert_eq!(setup.outbox.budget.used(), [held, 0]);
+        assert!(setup.outcomes.of(first).is_empty());
+        setup.outbox.cancel(first);
+        until(&setup, "cancelled body destroyed", || {
+            witnesses[0].upgrade().is_none()
+        })
+        .await;
+        assert_eq!(setup.outbox.budget.used(), [0, 0]);
+        assert!(
+            setup.outcomes.of(first).is_empty(),
+            "explicit cancel promises no callback"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_terminal_ack_and_a_rejected_new_result_leave_the_unacked_running_body_unchanged() {
+        let mut setup = setup(vec![Reply::Unavailable, Reply::Ack, Reply::Unavailable]).await;
+        setup.outbox.budget = Budget::new(4_096, 512);
+        setup.outbox.connection_started(1, id("conn_a"), true);
+        let report = |phase: &'static str, status: &'static str, seq: i64| {
+            let mut submission = Submission::new(id("conn_a"), move |connection_id, message_id| {
+                serde_json::from_value::<protocol::tool::ToolStatus>(serde_json::json!({
+                    "protocol_version": 1, "connection_id": connection_id, "message_id": message_id,
+                    "session_id": "sess_a", "binding_id": "bind_a", "task_id": "task_a",
+                    "tool_use_event_id": "call_a", "request_message_id": "msg_execute",
+                    "kind": "execution", "phase": phase, "report_seq": seq,
+                    "result": {
+                        "schema_version": 1, "tool": "exec_command", "status": status,
+                        "truncated": false, "error": null, "result": {
+                            "task_id": "task_a", "exit_code": if phase == "terminal" { Some(0) } else { None },
+                            "signal": null, "timed_out": false, "duration_ms": 0,
+                            "stdout": { "text": "", "total_bytes": 0, "total_lines": 0, "returned_bytes": 0, "truncated": false },
+                            "stderr": { "text": "", "total_bytes": 0, "total_lines": 0, "returned_bytes": 0, "truncated": false },
+                        },
+                        "metrics": { "wall_time_ms": 0, "queued_ms": 0, "drive_wait_ms": 0, "run_ms": 0, "sync_ms": 0 },
+                    },
+                })).unwrap()
+            });
+            submission.listener = Some(setup.outcomes.clone());
+            submission
+        };
+        let running = setup
+            .outbox
+            .try_submit(report("running", "running", 1))
+            .unwrap();
+        let running_bytes = setup.outbox.budget.used()[0];
+        tokio::time::timeout(WAIT_LIMIT, async {
+            while setup.engine.requests().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let terminal = setup
+            .outbox
+            .try_submit(report("terminal", "success", 2))
+            .unwrap();
+        let witnesses = setup.outbox.budget.witnesses();
+        assert_eq!(witnesses.len(), 2);
+        tokio::time::timeout(WAIT_LIMIT, async {
+            while setup.outcomes.of(terminal) != [ReportOutcome::Acked]
+                || witnesses[1].upgrade().is_some()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(setup.outcomes.of(running).is_empty());
+        assert!(witnesses[0].upgrade().is_some());
+        assert_eq!(setup.outbox.budget.used(), [running_bytes, 0]);
+        assert_eq!(
+            setup.outbox.try_submit(tool_list(5_000)),
+            Err(ReportAdmissionError::ResourceExhausted)
+        );
+        assert_eq!(setup.outbox.budget.used(), [running_bytes, 0]);
+        setup.clock.advance(Duration::from_secs(2));
+        until(&setup, "the unconfirmed running report retried", || {
+            setup.engine.requests().len() >= 3
+        })
+        .await;
+        let requests = setup.engine.requests();
+        assert_eq!(requests[0].message_id(), requests[2].message_id());
+        assert_eq!(requests[0].body, requests[2].body);
+        setup.outbox.connection_ended(id("conn_a"));
+        until(&setup, "the remaining body released", || {
+            witnesses[0].upgrade().is_none()
+        })
+        .await;
+        assert_eq!(setup.outbox.budget.used(), [0, 0]);
+    }
+
+    #[tokio::test]
+    async fn a_prepared_reply_uses_reserve_and_only_its_matching_ack_completes_it() {
+        use protocol::connection::{SessionOutcome, SessionStatus};
+        let mut setup = setup(vec![Reply::WrongAck, Reply::Ack]).await;
+        setup.outbox.budget = Budget::new(0, 4_096);
+        setup.outbox.connection_started(1, id("conn_a"), false);
+        let mut submission =
+            Submission::new(id("conn_a"), |connection_id, message_id| SessionStatus {
+                connection_id,
+                message_id,
+                request_message_id: id("msg_prepare"),
+                session_id: id("sess_a"),
+                binding_id: id("bind_a"),
+                outcome: SessionOutcome::Prepared {
+                    cwd: serde_json::from_str("\"/tmp\"").unwrap(),
+                    drive_mount_failures: None,
+                    repository_failures: None,
+                },
+            });
+        submission.final_for.push(id("msg_prepare"));
+        submission.listener = Some(setup.outcomes.clone());
+        let report = setup.outbox.submit(submission);
+        assert_eq!(setup.outbox.budget.used()[0], 0);
+        assert!(setup.outbox.budget.used()[1] > 0);
+        until(&setup, "prepared reply acknowledged", || {
+            setup.outcomes.of(report) == [ReportOutcome::Acked]
+        })
+        .await;
+        let requests = setup.engine.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].body, requests[1].body);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&requests[0].body).unwrap()["status"],
+            "prepared"
+        );
+        assert!(
+            matches!(setup._events.recv().await, Some(OutboxEvent::FinalAcked { instruction, .. }) if instruction == id("msg_prepare"))
+        );
+        until(&setup, "reserved body released", || {
+            setup.outbox.budget.used() == [0, 0]
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn exhausted_reserve_ends_admission_without_acknowledging_any_report() {
+        let mut setup = setup(vec![]).await;
+        setup.outbox.budget = Budget::new(0, 0);
+        setup.outbox.connection_started(1, id("conn_a"), false);
+        let report = setup.outbox.submit(protocol_error(&setup, "conn_a", None));
+        assert_eq!(setup.outcomes.of(report), [ReportOutcome::Dropped]);
+        assert!(
+            matches!(setup._events.recv().await, Some(OutboxEvent::ResourceExhausted { connection }) if connection == id("conn_a"))
+        );
+        let later = setup.outbox.submit(protocol_error(&setup, "conn_a", None));
+        assert_eq!(setup.outcomes.of(later), [ReportOutcome::Dropped]);
+        assert!(setup._events.try_recv().is_err());
+        assert!(setup.engine.requests().is_empty());
+        assert_eq!(setup.outbox.budget.used(), [0, 0]);
+    }
+
+    #[tokio::test]
+    async fn a_deterministic_refusal_drops_and_destroys_the_body() {
+        let setup = setup(vec![Reply::Refused]).await;
+        setup.outbox.connection_started(1, id("conn_a"), false);
+        let report = setup.outbox.submit(protocol_error(&setup, "conn_a", None));
+        let witnesses = setup.outbox.budget.witnesses();
+        until(&setup, "refused body dropped", || {
+            setup.outcomes.of(report) == [ReportOutcome::Dropped]
+        })
+        .await;
+        until(&setup, "refused body destroyed", || {
+            witnesses.iter().all(|body| body.upgrade().is_none())
+        })
+        .await;
+        assert!(setup.engine.requests().len() == 1);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_report_is_sent_again_from_its_frozen_file_until_its_matching_ack() {
+    async fn a_report_retries_the_same_bytes_until_its_matching_ack() {
         let setup = setup(vec![
-            Reply::Unavailable,
+            Reply::LostAck,
             Reply::Unavailable,
             Reply::WrongAck,
             Reply::Ack,
@@ -808,7 +1018,6 @@ mod tests {
         let first = attempts[0].body.clone();
         for (index, attempt) in attempts.iter().take(4).enumerate() {
             assert_eq!(attempt.body, first, "attempt {index}");
-            assert!(attempt.frozen_then, "attempt {index}");
             assert_eq!(
                 attempt.header("traceparent"),
                 Some(TRACEPARENT),
@@ -820,7 +1029,18 @@ mod tests {
             );
         }
         assert_eq!(attempts[0].message_id(), "r1");
-        assert!(!setup.directory.join("1/r1.json").exists());
+        until(&setup, "the acknowledged body released", || {
+            setup.outbox.budget.used() == [0, 0]
+        })
+        .await;
+        assert!(
+            setup
+                .outbox
+                .budget
+                .witnesses()
+                .iter()
+                .all(|body| body.upgrade().is_none())
+        );
 
         let untraced = setup.outbox.submit(protocol_error(&setup, "conn_a", None));
         until(&setup, "the second report's ACK", || {
@@ -844,7 +1064,7 @@ mod tests {
             setup.engine.requests().len() >= 2
         })
         .await;
-        assert!(setup.directory.join("1").is_dir());
+        assert!(setup.outbox.budget.used()[0] > 0);
         setup.outbox.connection_ended(id("conn_a"));
         until(&setup, "both reports dropped", || {
             reports
@@ -852,7 +1072,10 @@ mod tests {
                 .all(|report| setup.outcomes.of(*report) == [ReportOutcome::Dropped])
         })
         .await;
-        assert!(!setup.directory.join("1").exists());
+        until(&setup, "ended bodies released", || {
+            setup.outbox.budget.used() == [0, 0]
+        })
+        .await;
         setup.clock.advance(Duration::from_secs(120));
 
         setup.outbox.connection_started(2, id("conn_b"), false);
@@ -994,7 +1217,6 @@ mod tests {
             Duration::from_secs(20)
         );
         for stall in [Stall::Handshake, Stall::Body, Stall::Answer] {
-            let root = tempfile::tempdir().unwrap();
             let clock = test_clock();
             let (url, seen) = stalling(stall, clock.clone()).await;
             // A retry follows the end of an attempt at the same time.
@@ -1004,12 +1226,7 @@ mod tests {
                 ..OutboxTimes::default()
             };
             let transport = Arc::new(Transport::new(&url));
-            let (outbox, _events) = spawn_outbox(
-                transport.clone(),
-                &root.path().join("outbox"),
-                &clock,
-                times,
-            );
+            let (outbox, _events) = spawn_outbox(transport.clone(), &clock, times);
             outbox.connection_started(1, id("conn_a"), false);
             outbox.submit(tool_list(100_000));
             // The clock stands still until the listener has read the first

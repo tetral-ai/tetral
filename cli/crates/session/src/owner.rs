@@ -86,8 +86,8 @@ pub trait TaskStarter: Send + 'static {
     }
 }
 
-/// The starter of an App Server that executes no tool: its ready advertises
-/// no `tool_execution`, so no tool instruction is admitted.
+/// A test starter that returns no execution supervisor. Ready capabilities
+/// are assembled by the App Server, independently of this convenience type.
 #[derive(Debug, Clone, Copy)]
 pub struct NoTasks;
 
@@ -109,6 +109,9 @@ pub struct RootPaths {
     pub given: PathBuf,
     /// The state root's canonical path.
     pub canonical: PathBuf,
+    /// Its UTF-8 representation, checked at the state-root boundary before
+    /// this context is constructed, for the probe's JSON input.
+    pub canonical_utf8: String,
     /// The running executable, which runs as the directory probe.
     pub probe_program: PathBuf,
 }
@@ -502,7 +505,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use protocol::connection::{DownstreamType, PreparationError, PreparationErrorCode};
+    use protocol::connection::{
+        DownstreamType, PreparationError, PreparationErrorCode, SessionOutcome, SessionStatus,
+    };
     use protocol::field::AbsolutePath;
     use protocol::local::SessionEntry;
     use protocol::ports::Submission;
@@ -569,6 +574,7 @@ mod tests {
             paths: Arc::new(RootPaths {
                 given: "/root".into(),
                 canonical: "/root".into(),
+                canonical_utf8: "/root".into(),
                 probe_program: "/probe".into(),
             }),
             times: Times::default(),
@@ -630,7 +636,7 @@ mod tests {
         let rejections = Arc::new(Rejections::default());
         let preparation = Preparation {
             session_id: SafeId::new("sess_1").unwrap(),
-            connection: Arc::new(NoConnection),
+            connection: Arc::new(TestConnection::default()),
             reports: rejections.clone(),
             shared,
         };
@@ -650,12 +656,23 @@ mod tests {
         read.await.unwrap();
     }
 
-    struct NoConnection;
+    #[derive(Default)]
+    struct TestConnection {
+        requests: Mutex<Vec<ProbeRequest>>,
+        withdrawn: Mutex<Vec<ProbeRequest>>,
+        freed: AtomicUsize,
+    }
 
-    impl ConnectionPort for NoConnection {
-        fn probe_slot(&self, _session_id: &SafeId, _request: ProbeRequest) {}
-        fn probe_slot_withdraw(&self, _session_id: &SafeId, _request: ProbeRequest) {}
-        fn probe_slot_free(&self) {}
+    impl ConnectionPort for TestConnection {
+        fn probe_slot(&self, _session_id: &SafeId, request: ProbeRequest) {
+            self.requests.lock().unwrap().push(request);
+        }
+        fn probe_slot_withdraw(&self, _session_id: &SafeId, request: ProbeRequest) {
+            self.withdrawn.lock().unwrap().push(request);
+        }
+        fn probe_slot_free(&self) {
+            self.freed.fetch_add(1, Ordering::SeqCst);
+        }
         fn record_gone(&self, _session_id: &SafeId) {}
         fn tasks_gone(&self, _session_id: &SafeId) {}
         fn task_staged(&self, _staged: Duration) {}
@@ -665,11 +682,17 @@ mod tests {
         fn task_refused(&self) {}
     }
 
-    struct NoReports;
+    #[derive(Default)]
+    struct PreparationReports(Mutex<Vec<SessionStatus>>);
 
-    impl ReportSink for NoReports {
-        fn submit(&self, _submission: Submission) -> ReportId {
-            ReportId(0)
+    impl ReportSink for PreparationReports {
+        fn submit(&self, submission: Submission) -> ReportId {
+            let mut reports = self.0.lock().unwrap();
+            let number = reports.len() as u64 + 1;
+            let bytes =
+                (submission.build)(&submission.connection_id, &id(&format!("r{number}"))).unwrap();
+            reports.push(protocol::decode(&bytes).unwrap());
+            ReportId(number)
         }
         fn cancel(&self, _report: ReportId) {}
         fn add_final(&self, _report: ReportId, _instruction: Id) {}
@@ -681,6 +704,121 @@ mod tests {
             message_id: id("msg_close"),
             binding_id: id(binding_id),
         }
+    }
+
+    fn probe_owner(
+        program: PathBuf,
+    ) -> (
+        SessionOwner<NoTasks>,
+        Arc<TestConnection>,
+        Arc<PreparationReports>,
+    ) {
+        let (mailbox, _messages) = mpsc::unbounded_channel();
+        let connection = Arc::new(TestConnection::default());
+        let reports = Arc::new(PreparationReports::default());
+        let mut shared = shared();
+        Arc::make_mut(&mut shared.paths).probe_program = program;
+        let preparation = Preparation {
+            session_id: SafeId::new("sess_1").unwrap(),
+            connection: connection.clone(),
+            reports: reports.clone(),
+            shared,
+        };
+        (
+            SessionOwner::new(Some(preparation), NoTasks, mailbox),
+            connection,
+            reports,
+        )
+    }
+
+    fn prepare_binding(binding: &str) -> SessionMessage {
+        let payload = json!({
+            "session_id": "sess_1", "binding_id": binding, "cwd": "/project",
+            "drives": [], "drive_exclude": [], "repositories": [],
+        });
+        SessionMessage::Prepare(Box::new(Prepare {
+            connection_id: id("conn_1"),
+            addressed_connection_id: id("conn_1"),
+            message_id: id(&format!("prepare_{binding}")),
+            fingerprint: protocol::fingerprint::fingerprint(&payload),
+            payload: serde_json::from_value(payload).unwrap(),
+            traceparent: None,
+        }))
+    }
+
+    #[tokio::test]
+    async fn a_granted_probe_slot_after_withdrawal_is_returned_without_spawning() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut owner, connection, reports) = probe_owner(directory.path().join("missing-probe"));
+        owner.handle(prepare_binding("bind_1"));
+        let request = connection.requests.lock().unwrap()[0];
+        let operation = owner.requests[&request];
+        owner.end_operation(operation);
+        assert!(owner.requests.is_empty());
+        assert_eq!(*connection.withdrawn.lock().unwrap(), vec![request]);
+        assert_eq!(connection.freed.load(Ordering::SeqCst), 0);
+        owner.handle(SessionMessage::ProbeSlot {
+            request,
+            answer: ProbeSlot::Granted,
+        });
+        assert_eq!(connection.freed.load(Ordering::SeqCst), 1);
+        assert!(owner.probes.is_empty());
+        assert!(reports.0.lock().unwrap().is_empty());
+        // An attempted spawn of the missing executable would fail this
+        // still-preparing binding and report failure. Neither occurs.
+        assert_eq!(
+            owner
+                .record
+                .as_ref()
+                .unwrap()
+                .current
+                .as_ref()
+                .unwrap()
+                .state,
+            SessionState::Preparing
+        );
+        owner.handle(SessionMessage::ProbeDone {
+            operation,
+            output: None,
+        });
+        assert_eq!(connection.freed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_missing_probe_executable_returns_its_slot_and_reports_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("missing-probe");
+        assert!(!program.exists());
+        let (mut owner, connection, reports) = probe_owner(program);
+        // A new binding can retry after failed spawn. Every grant returns
+        // exactly once without installing a running-probe owner.
+        for (index, binding) in ["bind_1", "bind_2"].into_iter().enumerate() {
+            owner.handle(prepare_binding(binding));
+            let request = connection.requests.lock().unwrap()[index];
+            owner.handle(SessionMessage::ProbeSlot {
+                request,
+                answer: ProbeSlot::Granted,
+            });
+            assert!(owner.requests.is_empty());
+            assert!(owner.probes.is_empty());
+            assert_eq!(connection.freed.load(Ordering::SeqCst), index + 1);
+            let current = owner.record.as_ref().unwrap().current.as_ref().unwrap();
+            assert_eq!(current.binding_id, id(binding));
+            assert_eq!(current.state, SessionState::Failed);
+            assert!(current.waiting.is_empty());
+            assert_eq!(current.reports.len(), 1);
+            let reports = reports.0.lock().unwrap();
+            assert_eq!(reports.len(), index + 1);
+            let report = &reports[index];
+            assert_eq!(report.request_message_id, id(&format!("prepare_{binding}")));
+            assert_eq!(report.binding_id, id(binding));
+            let SessionOutcome::Failed { error } = &report.outcome else {
+                panic!("spawn failure must report a failed preparation");
+            };
+            assert_eq!(error.code, PreparationErrorCode::ResourceExhausted);
+            assert_eq!(current.error.as_ref(), Some(error));
+        }
+        assert!(connection.withdrawn.lock().unwrap().is_empty());
     }
 
     /// The close's reply, which the owner sends once it admits the close, as
@@ -1019,8 +1157,8 @@ mod tests {
         let (mailbox, messages) = mpsc::unbounded_channel();
         let preparation = Preparation {
             session_id: SafeId::new("sess_1").unwrap(),
-            connection: Arc::new(NoConnection),
-            reports: Arc::new(NoReports),
+            connection: Arc::new(TestConnection::default()),
+            reports: Arc::new(PreparationReports::default()),
             shared: shared(),
         };
         let mut owner = SessionOwner::new(Some(preparation), NoTasks, mailbox.clone());

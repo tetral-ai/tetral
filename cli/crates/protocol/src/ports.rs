@@ -122,12 +122,31 @@ pub trait ReportListener: Send + Sync {
     fn outcome(&self, report: ReportId, outcome: ReportOutcome);
 }
 
+/// A new tool result did not fit the local retained-report budget. The
+/// submission and its encoded body have been released; nothing was sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportAdmissionError {
+    ResourceExhausted,
+}
+
 /// Takes every upstream report that `session`, `execution`, `drive` and `mcp`
 /// build; its implementation belongs to the Report outbox of `connection`.
 pub trait ReportSink: Send + Sync {
-    /// Freezes the report and sends it until its matching ACK or the end of
-    /// its connection.
+    /// Submits a non-tool control reply or a compact tool error. It can use
+    /// the reserved report budget when ordinary capacity is exhausted. If
+    /// neither has room, the logical connection ends and the report is
+    /// dropped. Only a matching ACK confirms delivery.
     fn submit(&self, submission: Submission) -> ReportId;
+
+    /// Encodes and admits an ordinary tool result before it enters the
+    /// mailbox. Capacity failure returns to the execution owner, which
+    /// releases the result and submits a compact resource error, stopping
+    /// and reaping a still-running command first. Admitted reports keep the
+    /// same immutable bytes through every attempt. Existing sender-check
+    /// failures and reports of ended connections still produce Dropped.
+    fn try_submit(&self, submission: Submission) -> Result<ReportId, ReportAdmissionError> {
+        Ok(self.submit(submission))
+    }
 
     /// Stops the report's retries and deletes it.
     fn cancel(&self, report: ReportId);

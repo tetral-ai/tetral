@@ -38,10 +38,10 @@ pub fn read_input(reader: impl Read, max_bytes: u64) -> Vec<u8> {
 /// The probe's stdin, one JSON object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Input {
-    pub cwd: PathBuf,
+    pub cwd: String,
     pub create_cwd: bool,
     /// The state root's canonical path.
-    pub state_root: PathBuf,
+    pub state_root: String,
 }
 
 /// The probe's one line of stdout.
@@ -87,7 +87,7 @@ pub fn run(input: &[u8]) -> Vec<u8> {
 fn check(input: &Input) -> Result<PathBuf, PreparationError> {
     let resolved = match std::fs::canonicalize(&input.cwd) {
         Err(error) if error.kind() == io::ErrorKind::NotFound && input.create_cwd => {
-            create_missing(&input.cwd, &input.state_root)?;
+            create_missing(Path::new(&input.cwd), Path::new(&input.state_root))?;
             std::fs::canonicalize(&input.cwd).map_err(|error| resolution(&error))?
         }
         resolved => resolved.map_err(|error| resolution(&error))?,
@@ -136,7 +136,13 @@ fn create_missing(target: &Path, state_root: &Path) -> Result<(), PreparationErr
     if resolved.starts_with(state_root) {
         return Err(failure(PreparationErrorCode::CwdForbidden, None));
     }
-    let directory_flags = OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC;
+    // Linux search handles do not require directory read permission.
+    // mkdirat and the final chdir still enforce write/search permissions.
+    #[cfg(target_os = "linux")]
+    let directory_access = OFlags::PATH;
+    #[cfg(not(target_os = "linux"))]
+    let directory_access = OFlags::RDONLY;
+    let directory_flags = OFlags::DIRECTORY | directory_access | OFlags::CLOEXEC;
     let mut directory = rustix::fs::openat(CWD, &resolved, directory_flags, Mode::empty())
         .map_err(|errno| resolution(&io::Error::from(errno)))?;
     for name in missing.iter().rev() {
@@ -237,5 +243,100 @@ mod tests {
             code(&run(&read_input(&input[..], limit - 1))),
             PreparationErrorCode::InvalidInput
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn directory_creation_uses_search_permissions_and_keeps_partial_prefixes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Permission refusals need the same unprivileged user as production.
+        assert!(!rustix::process::geteuid().is_root());
+        let base = tempfile::tempdir().unwrap();
+        for (name, parent_mode, umask, succeeds, leaves_prefix) in [
+            ("search_and_write", 0o300, 0o477, true, true),
+            ("no_write", 0o100, 0o022, false, false),
+            ("no_search", 0o200, 0o022, false, false),
+            ("no_child_search", 0o700, 0o777, false, true),
+        ] {
+            let parent = base.path().join(name);
+            std::fs::create_dir(&parent).unwrap();
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(parent_mode))
+                .unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "probe_child::tests::directory_creation_child",
+                    "--nocapture",
+                ])
+                .env("TETRAL_PROBE_TEST_PARENT", &parent)
+                .env("TETRAL_PROBE_TEST_UMASK", umask.to_string())
+                .env("TETRAL_PROBE_TEST_SUCCESS", succeeds.to_string())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert_eq!(
+                std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
+                parent_mode
+            );
+            // Restore only fixture access after the child's operation so the
+            // test can inspect its result and remove the temporary directory.
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let first = parent.join("first");
+            assert_eq!(first.exists(), leaves_prefix, "{name}");
+            if leaves_prefix {
+                assert_eq!(
+                    std::fs::metadata(&first).unwrap().permissions().mode() & 0o777,
+                    0o777 & !umask
+                );
+                std::fs::set_permissions(&first, std::fs::Permissions::from_mode(0o700)).unwrap();
+                let second = first.join("second");
+                assert_eq!(second.exists(), succeeds, "{name}");
+                if succeeds {
+                    assert_eq!(
+                        std::fs::metadata(&second).unwrap().permissions().mode() & 0o777,
+                        0o777 & !umask
+                    );
+                    std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o700))
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn directory_creation_child() {
+        let Some(parent) = std::env::var_os("TETRAL_PROBE_TEST_PARENT") else {
+            return;
+        };
+        let umask = std::env::var("TETRAL_PROBE_TEST_UMASK")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let succeeds = std::env::var("TETRAL_PROBE_TEST_SUCCESS").unwrap() == "true";
+        rustix::process::umask(Mode::from_raw_mode(umask));
+        let input = Input {
+            cwd: Path::new(&parent)
+                .join("first/second")
+                .to_str()
+                .unwrap()
+                .to_owned(),
+            create_cwd: true,
+            state_root: "/unrelated-state-root".into(),
+        };
+        let result = check(&input);
+        if succeeds {
+            assert_eq!(result.unwrap(), std::env::current_dir().unwrap());
+        } else {
+            assert_eq!(
+                result.unwrap_err().code,
+                PreparationErrorCode::CwdInaccessible
+            );
+        }
     }
 }

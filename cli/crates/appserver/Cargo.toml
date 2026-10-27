@@ -23,3 +23,6 @@ session.workspace = true
 state.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "signal", "sync", "time"] }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -76,6 +76,10 @@ pub struct Transport {
     /// move the clock only once an attempt has seen what the kernel did.
     #[cfg(test)]
     attempts: Mutex<Vec<AttemptSeen>>,
+    /// Controlled socket observations for deadline tests. Real socket and TLS
+    /// tests exercise the production progress source separately.
+    #[cfg(test)]
+    progress_sample: Option<Arc<dyn Fn(Duration) -> (u64, u64, bool) + Send + Sync>>,
 }
 
 /// The acknowledged bytes a report attempt last read, and whether it saw its
@@ -101,6 +105,8 @@ impl Transport {
             server_url: server_url.to_owned(),
             #[cfg(test)]
             attempts: Mutex::default(),
+            #[cfg(test)]
+            progress_sample: None,
         }
     }
 
@@ -108,6 +114,13 @@ impl Transport {
     #[cfg(test)]
     pub(crate) fn attempts(&self) -> Vec<AttemptSeen> {
         self.attempts.lock().unwrap().clone()
+    }
+
+    #[cfg(test)]
+    fn with_uploads(server_url: &str, proxies: Matcher, tls: rustls::ClientConfig) -> Transport {
+        let mut transport = Self::new(server_url);
+        transport.uploads = Uploads::configured(proxies, Arc::new(tls));
+        transport
     }
 
     fn url(&self, path: &str) -> Url {
@@ -142,7 +155,7 @@ impl Transport {
         }
     }
 
-    /// `POST <path>` of a frozen report with its exact `Content-Length` and
+    /// `POST <path>` of an immutable report with its exact `Content-Length` and
     /// the `traceparent` of its instruction. The attempt fails at `deadline`
     /// on `clock`, and earlier once `stall` passes without progress: until
     /// its connection is up, between rises of the bytes that the other end
@@ -174,7 +187,7 @@ impl Transport {
         }
         let taken = Arc::new(OnceLock::new());
         let Ok(mut request) = request.body(ReportBody {
-            bytes: Some(Bytes::from(bytes)),
+            bytes: Some(bytes),
             connection: None,
             taken: taken.clone(),
         }) else {
@@ -201,8 +214,8 @@ impl Transport {
             if socket.is_none() {
                 socket = socket_of(&connection);
             }
-            if let Some(socket) = &socket {
-                progress.read(socket, &taken, clock.now());
+            self.read_progress(&mut progress, socket.as_deref(), &taken, clock.now());
+            if socket.is_some() {
                 state::seams::count("outbox.upload_checked");
             }
             #[cfg(test)]
@@ -220,6 +233,24 @@ impl Transport {
                 answer = &mut answer => return answer,
                 () = clock.sleep_step(until) => {}
             }
+        }
+    }
+
+    fn read_progress(
+        &self,
+        progress: &mut Progress,
+        socket: Option<&Socket>,
+        taken: &OnceLock<u64>,
+        now: Duration,
+    ) {
+        #[cfg(test)]
+        if let Some(sample) = &self.progress_sample {
+            let (acknowledged, held, written) = sample(now);
+            progress.observe(acknowledged, held, written, now);
+            return;
+        }
+        if let Some(socket) = socket {
+            progress.read(socket, taken, now);
         }
     }
 
@@ -279,6 +310,10 @@ impl Progress {
         let Some((acknowledged, held)) = socket.state() else {
             return;
         };
+        self.observe(acknowledged, held, written, now);
+    }
+
+    fn observe(&mut self, acknowledged: u64, held: u64, written: bool, now: Duration) {
         if self.acknowledged.is_none_or(|before| acknowledged > before) {
             self.last = now;
         }
@@ -383,10 +418,13 @@ struct Uploads {
 
 impl Uploads {
     fn new(proxies: Matcher) -> Uploads {
+        Self::configured(proxies, Arc::new(tls_config()))
+    }
+
+    fn configured(proxies: Matcher, tls: Arc<rustls::ClientConfig>) -> Uploads {
         let mut http = HttpConnector::new();
         http.enforce_http(false);
         http.set_nodelay(true);
-        let tls = Arc::new(tls_config());
         let proxies = Arc::new(proxies);
         let connector = UploadConnector {
             https: HttpsConnector::from((CountingConnector(http), tls.clone())),
@@ -663,10 +701,10 @@ impl hyper::rt::Write for UploadStream {
     }
 }
 
-/// One attempt of a frozen report.
+/// One attempt of an immutable report.
 #[derive(Debug)]
 pub struct ReportRequest {
-    pub bytes: Vec<u8>,
+    pub bytes: Bytes,
     pub traceparent: Option<String>,
     /// The end of the attempt on the outbox's clock.
     pub deadline: Duration,
@@ -767,6 +805,251 @@ mod tests {
             bytes: Some(Bytes::copy_from_slice(bytes)),
             connection: None,
             taken: Arc::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transport_frame_keeps_the_body_charge_after_other_owners_drop() {
+        let budget = crate::report_memory::Budget::new(8, 0);
+        let pending = budget.retain(vec![1; 8], false).unwrap();
+        let witness = budget.witnesses().pop().unwrap();
+        let mut body = ReportBody {
+            bytes: Some(pending.clone()),
+            connection: None,
+            taken: Arc::default(),
+        };
+        let frame = body.frame().await.unwrap().unwrap();
+        drop(body);
+        drop(pending);
+        assert_eq!(budget.used(), [8, 0]);
+        assert!(witness.upgrade().is_some());
+        drop(frame);
+        assert_eq!(budget.used(), [0, 0]);
+        assert!(witness.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn observed_progress_moves_only_the_stall_deadline_and_never_the_total() {
+        for continuing in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                // Keep the real request open without producing an HTTP answer.
+                std::future::pending::<()>().await;
+                drop(stream);
+            });
+            let tick = Arc::new(AtomicU64::new(0));
+            let now = tick.clone();
+            let clock = Clock::new(
+                move || Duration::from_secs(now.load(Ordering::SeqCst)),
+                Duration::from_millis(1),
+            );
+            let sampled = Arc::new(AtomicU64::new(u64::MAX));
+            let seen = sampled.clone();
+            let mut transport = Transport::new(&format!("http://{address}"));
+            transport.progress_sample = Some(Arc::new(move |now| {
+                seen.store(now.as_secs(), Ordering::SeqCst);
+                let acknowledged = u64::from(now >= Duration::from_secs(7))
+                    + u64::from(continuing && now >= Duration::from_secs(14));
+                (acknowledged, 1, false)
+            }));
+            let key = protocol::bootstrap::Bootstrap::decode(
+                br#"{"server_url":"http://127.0.0.1:1","instance_id":"inst_a","credential_id":"cred_a","connection_key":"tetral_ck_a","expires_at":"2099-01-01T00:00:00Z"}"#,
+            ).unwrap().connection_key;
+            let upload = tokio::spawn(async move {
+                transport
+                    .post_report(
+                        "/v1/client/tool-status",
+                        &key,
+                        ReportRequest {
+                            bytes: Bytes::from_static(b"{}"),
+                            traceparent: None,
+                            deadline: Duration::from_secs(20),
+                            stall: Duration::from_secs(10),
+                        },
+                        &clock,
+                    )
+                    .await
+            });
+            let before_end: &[u64] = if continuing {
+                &[0, 7, 10, 14, 19]
+            } else {
+                &[0, 7, 10, 16]
+            };
+            for &second in before_end {
+                tick.store(second, Ordering::SeqCst);
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while sampled.load(Ordering::SeqCst) != second {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("attempt samples the controlled progress at this time");
+                assert!(
+                    !upload.is_finished(),
+                    "attempt ended at {second}s, continuing={continuing}"
+                );
+            }
+            let end = if continuing { 20 } else { 17 };
+            tick.store(end, Ordering::SeqCst);
+            let answer = tokio::time::timeout(Duration::from_secs(2), upload)
+                .await
+                .expect("attempt ends at the owning deadline")
+                .unwrap();
+            assert!(matches!(answer, Answer::Failed(Failure::Timeout)));
+            assert_eq!(sampled.load(Ordering::SeqCst), end);
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn tls_uploads_preserve_socket_progress_directly_and_through_connect() {
+        use rustls::pki_types::PrivatePkcs8KeyDer;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio::sync::oneshot;
+
+        for through_proxy in [false, true] {
+            let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+            let certificate = certified.cert.der().clone();
+            let private = PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
+            let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+            let server = rustls::ServerConfig::builder_with_provider(provider.clone())
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![certificate.clone()], private.into())
+                .unwrap();
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add(certificate).unwrap();
+            let client = rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.set_recv_buffer_size(4_096).unwrap();
+            socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let listener = socket.listen(1).unwrap();
+            let address = listener.local_addr().unwrap();
+            let (read_body, may_read) = oneshot::channel();
+            let (answer, may_answer) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let tls = tokio_rustls::TlsAcceptor::from(Arc::new(server))
+                    .accept(socket)
+                    .await
+                    .unwrap();
+                let mut stream = BufReader::new(tls);
+                let mut line = String::new();
+                let mut length = 0;
+                while stream.read_line(&mut line).await.unwrap() > 2 {
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length: ")
+                    {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                    line.clear();
+                }
+                may_read.await.unwrap();
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).await.unwrap();
+                assert_eq!(body, vec![b'x'; 524_288]);
+                may_answer.await.unwrap();
+                stream
+                    .get_mut()
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+                    )
+                    .await
+                    .unwrap();
+            });
+            let (proxies, proxy) = if through_proxy {
+                let socket = tokio::net::TcpSocket::new_v4().unwrap();
+                socket.set_recv_buffer_size(4_096).unwrap();
+                socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+                let listener = socket.listen(1).unwrap();
+                let proxy_url = format!("http://{}", listener.local_addr().unwrap());
+                let proxy = tokio::spawn(async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut stream = BufReader::new(stream);
+                    let mut line = String::new();
+                    stream.read_line(&mut line).await.unwrap();
+                    assert!(line.starts_with("CONNECT localhost:"), "{line}");
+                    loop {
+                        line.clear();
+                        if stream.read_line(&mut line).await.unwrap() <= 2 {
+                            break;
+                        }
+                    }
+                    stream
+                        .get_mut()
+                        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                        .await
+                        .unwrap();
+                    let mut upstream = TcpStream::connect(address).await.unwrap();
+                    let _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
+                });
+                (Matcher::builder().https(proxy_url).build(), Some(proxy))
+            } else {
+                (Matcher::builder().build(), None)
+            };
+            let transport = Arc::new(Transport::with_uploads(
+                &format!("https://localhost:{}", address.port()),
+                proxies,
+                client,
+            ));
+            let start = std::time::Instant::now();
+            let clock = Clock::new(move || start.elapsed(), Duration::from_millis(1));
+            let key = protocol::bootstrap::Bootstrap::decode(
+                br#"{"server_url":"http://127.0.0.1:1","instance_id":"inst_a","credential_id":"cred_a","connection_key":"tetral_ck_a","expires_at":"2099-01-01T00:00:00Z"}"#,
+            ).unwrap().connection_key;
+            let posting = transport.clone();
+            let upload = tokio::spawn(async move {
+                posting
+                    .post_report(
+                        "/v1/client/tool-status",
+                        &key,
+                        ReportRequest {
+                            bytes: Bytes::from(vec![b'x'; 524_288]),
+                            traceparent: None,
+                            deadline: Duration::from_secs(10),
+                            stall: Duration::from_secs(10),
+                        },
+                        &clock,
+                    )
+                    .await
+            });
+            let first = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(seen) = transport.attempts().first().copied()
+                        && let Some(acknowledged) = seen.acknowledged
+                        && acknowledged > 0
+                    {
+                        break acknowledged;
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("TLS upload exposes TCP acknowledgement progress");
+            read_body.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let seen = transport.attempts()[0];
+                    if seen.sent && seen.acknowledged.is_some_and(|bytes| bytes > first) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("body completion advances the captured TCP acknowledgement counter");
+            answer.send(()).unwrap();
+            assert!(matches!(upload.await.unwrap(), Answer::Success(_)));
+            server.await.unwrap();
+            if let Some(proxy) = proxy {
+                proxy.abort();
+            }
         }
     }
 

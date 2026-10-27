@@ -14,9 +14,11 @@ ones it uses belong here too.
   `cli/README.md`. The lifecycle task owns the server state; local API
   handlers and the signal task only send it messages. A status is read from
   the lifecycle task, the Connection owner, which owns the connection's
-  fields, the records an earlier App Server left, which make `last_error`
-  `cleanup_pending` while one is unconfirmed, and the fields that do not
-  change while the App Server runs (`local_api::StatusSources`).
+  fields, the records an earlier App Server left, and the fields that do not
+  change while the App Server runs (`local_api::StatusSources`). A blocked
+  connection's error takes precedence over `cleanup_pending`; otherwise
+  unconfirmed old processes take precedence over connection errors. Display
+  priority never clears the restrictions owned by cleanup.
 - The capabilities that ready advertises are assembled once at start from
   the providers this build has (`capabilities`). `tool_execution` lists the
   tools whose startup checks pass: all three while the running `tetral`
@@ -27,7 +29,7 @@ ones it uses belong here too.
   as one fails the start.
 - Startup runs its steps in order and a failure leaves every later step
   undone: the lock, the removal of the temporary files that interrupted
-  replacements left, the configuration read under it, `outbox/` emptied, the
+  replacements left, the configuration read under it, the
   entries of `T` deleted when `T` passes its checks
   (`execution::store::clear_task_parent`), the records of `execution/` read
   before the first connection, whose checks then go on every second
@@ -35,6 +37,11 @@ ones it uses belong here too.
   and checked, a socket left by an App Server that died removed, and
   the socket bound with mode `0600` before it accepts a connection
   (`startup`). A held lock is `Running` and touches nothing in `S`.
+  `SocketOwnership` removes this process's socket before releasing its root
+  lock on normal shutdown and on setup failure; the listener closes first.
+  No report directory is created or reset. Signal handlers are installed
+  before actors and the local listener start. Before installation, signals
+  keep their system default behavior.
 - Only a held lock or an answering socket shows that an App Server runs; a
   lock file, a socket file or a process ID alone shows nothing (`lock`).
 - A local API handler reads only the state the owners report and never waits
@@ -48,7 +55,14 @@ ones it uses belong here too.
   waiting for the Connection owner and the handlers only until
   `SHUTDOWN_DEADLINE` after
   the trigger on the seam clock; it counts the start of its wait for the
-  handlers as the test seam counter `shutdown.waiting` (`shutdown`).
+  handlers as the test seam counter `shutdown.waiting` (`shutdown`). Every
+  stage shares that deadline; late listener registration stops immediately.
+  At the deadline the server stops waiting, closes the listener and completes
+  socket/lock cleanup. Its final status uses the connection's published
+  snapshot, so it does not start another owner request after the deadline.
+  Unconfirmed task records remain for the next start; the deadline does not
+  prove all processes have been reaped. Log flushing receives the remaining
+  budget and has its own one-second maximum.
 - While it runs, the App Server sets the socket's modification time to now
   every `SOCKET_TOUCH_INTERVAL` of the seam clock and counts each as the test
   seam counter `socket.touched` (`startup::keep_socket_fresh`).

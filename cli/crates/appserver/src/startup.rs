@@ -1,6 +1,6 @@
 //! The start of `server run` after the command's own checks, in this order:
 //! the state-root lock, the removal of interrupted replacements, the
-//! configuration read under the lock, an empty `outbox/`, the entries of `T`
+//! configuration read under the lock, the entries of `T`
 //! deleted, the records an earlier App Server left in `execution/` read, the
 //! socket directory `S`, and the socket. A failure at any step leaves the
 //! steps before it and touches nothing after it; without the lock, nothing
@@ -27,11 +27,10 @@ use crate::lock::{self, LockError, RootLock};
 /// What a started App Server holds until it exits.
 #[derive(Debug)]
 pub struct Started {
-    pub lock: RootLock,
     pub configuration: Configuration,
     pub socket: PathBuf,
     pub listener: UnixListener,
-    pub outbox: PathBuf,
+    pub ownership: SocketOwnership,
     pub capabilities: Capabilities,
     /// The state root as `TETRAL_HOME` gives it.
     pub root: PathBuf,
@@ -40,6 +39,41 @@ pub struct Started {
     /// The records an earlier App Server left, read before the first
     /// connection, and which Sessions they keep `cleanup_pending`.
     pub leftovers: (Check, Leftovers),
+}
+
+/// Owns the socket name for exactly as long as its root lock is held.
+/// The listener must be closed before this value is dropped.
+#[derive(Debug)]
+pub struct SocketOwnership {
+    socket: Option<PathBuf>,
+    _lock: RootLock,
+}
+
+impl SocketOwnership {
+    pub(crate) fn new(lock: RootLock) -> Self {
+        Self {
+            socket: None,
+            _lock: lock,
+        }
+    }
+}
+
+impl Drop for SocketOwnership {
+    fn drop(&mut self) {
+        if let Some(socket) = self.socket.take() {
+            if let Err(error) = std::fs::remove_file(&socket) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    observe::warn!(
+                        "server.socket_cleanup_failed",
+                        error.os_code = error.raw_os_error().unwrap_or(0),
+                        error.code = observe::Code("socket_cleanup_failed")
+                    );
+                }
+            }
+        }
+        // The lock field is dropped only after this cleanup returns.
+        state::seams::barrier_blocking("shutdown.socket_removed");
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -89,8 +123,7 @@ pub fn lock(root: &StateRoot) -> Result<RootLock, StartError> {
 }
 
 /// The steps after the lock: the configuration and the capabilities;
-/// `outbox/` emptied, whose reports belong to connections of an earlier
-/// process, `T` emptied of its tasks' temporary directories and the records
+/// `T` emptied of its tasks' temporary directories and the records
 /// of `execution/` read, only once both are valid, so that a start that
 /// fails on them leaves the root as it was; then `S` and the socket, bound
 /// with mode `0600` before it accepts a connection.
@@ -100,7 +133,7 @@ pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
     let canonical_root =
         std::fs::canonicalize(root.path()).map_err(|error| IoFailure::new(root.path(), error))?;
     observe::STARTUP.config_loaded(state::seams::now());
-    state::outbox::reset(&root.join(paths::OUTBOX))?;
+    private::check_canonical_root_utf8(&canonical_root)?;
     execution::store::clear_task_parent(&execution::store::task_parent(&canonical_root));
     let leftovers = execution::cleanup::read(&canonical_root)?;
 
@@ -113,15 +146,16 @@ pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(IoFailure::new(&socket, error).into()),
     }
+    let mut ownership = SocketOwnership::new(lock);
     let listener = UnixListener::bind(&socket).map_err(|error| IoFailure::new(&socket, error))?;
+    ownership.socket = Some(socket.clone());
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
         .map_err(|error| IoFailure::new(&socket, error))?;
     Ok(Started {
-        lock,
+        ownership,
         configuration,
         socket,
         listener,
-        outbox: root.join(paths::OUTBOX),
         capabilities,
         root: root.path().to_path_buf(),
         canonical_root,

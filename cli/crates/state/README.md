@@ -3,7 +3,7 @@
 The App Server's files and time belong here: the state root and the names in
 it, the control socket's path, the checks that the control paths are private,
 the private creation and atomic replacement of files, the configuration and
-credential files, the files of the Report outbox, the clock and the test
+credential files, the clock and the test
 seams.
 
 ## Design rules
@@ -14,6 +14,14 @@ seams.
   without a trailing `/` or a `.` component (`StateRoot`). A path it builds
   for others, the control socket's among them, starts from the root's
   canonical path, resolved when it is built.
+- Commands using the root require both the given and resolved root paths to
+  be UTF-8. The shared check rejects unsupported paths as
+  `unsafe_control_path` before configuration is read or files are created.
+  For a missing root, it resolves existing ancestors and projects missing
+  directories without creating them, preserving symbolic-link and `..`
+  semantics. Startup repeats the resolved-path check while holding the lock.
+  This narrows accepted root paths; working-directory encoding rules are
+  unchanged. `--version` alone still reads no environment or files.
 - A check of a control path reads it without following a symbolic link and
   creates nothing (`private::check_root`); ancestors of the root may be
   symbolic links.
@@ -50,8 +58,6 @@ seams.
 | `credentials.json` | The bootstrap object, connection key included; its format is that of `protocol::bootstrap` | `0600` |
 | `run/` | Directory | `0700` |
 | `run/app-server.lock` | The lock that the one process owning the root holds; never unlinked or replaced | `0600` |
-| `outbox/` | Directory, deleted and created again empty at each App Server start (`outbox::reset`) | `0700` |
-| `outbox/<n>/<message_id>.json` | A report frozen before its first send, in the directory of its connection's number `<n>`, which goes when that connection ends (`outbox`) | `0600` |
 
 The root itself has mode `0700`, and the check accepts no permission bit for
 group or others on any of these paths. `server run` also creates `logs/` for
@@ -68,6 +74,14 @@ exactly `0700` and the socket a socket of the current user with mode `0600`
 mode and refuses one of another owner or mode, or a symbolic link, leaving it
 as it is (`private::create_socket_dir`).
 
+Only `test-seams` builds accept `TETRAL_TEST_SOCKET_PARENT` for child
+processes. In-process test clients use `paths::TestSocketContext` and
+`private::check_socket_in` explicitly, without modifying global environment.
+The override changes only `S`'s parent: uid naming, root hashing, owner/type
+checks and modes remain unchanged. Invalid test parents fail instead of
+falling back to the user's directory. Production builds always use the
+platform parent and contain no override entry point.
+
 ## Where things are
 
 - `lib.rs`: this documentation and the print lints that `cli/README.md` states.
@@ -80,6 +94,5 @@ as it is (`private::create_socket_dir`).
 - `config.rs`: `Config`, its reading and its replacement.
 - `credentials.rs`: the bounded reading and the replacement of
   `credentials.json`.
-- `outbox.rs`: the reset of `outbox/` and its report files.
 - `seams.rs`: the clock, `sleep_until`, the barriers, the counters and, under
   `test-seams`, the process side of the seam protocol.

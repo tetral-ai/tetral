@@ -9,7 +9,7 @@ Server:
   **probe slots**, the right to run one directory probe, and the task
   pressure point `tetral_tasks`;
 - the **Report outbox**, which owns every report that answers or follows an
-  instruction, from the moment it is frozen until Engine acknowledges it.
+  instruction, from admission until its matching ACK, refusal or connection end.
 
 ## Design rules
 
@@ -59,14 +59,28 @@ Server:
   is the bytes written to its TCP socket less those the socket still holds
   unacknowledged, as the kernel counts them, so that a body waiting in the
   send buffer is not taken for one that has left (`http::Progress`).
-- A report is frozen under `outbox/` before its first send, and each retry
-  sends that file again, until its matching ACK, a refusal or its
-  connection's end, which cancels its uploads and deletes its directory; no
-  report is sent on another connection (`outbox`). An attempt ends at its
-  total, which grows with the size of a size-scaled report, and earlier
-  after 10 seconds without progress: until its connection is up, between
-  rises of its acknowledged bytes, and from the body's being sent, every
-  byte of it acknowledged, to the answer (`report_deadline`, `http`).
+- Every report is encoded and sender-checked before entering the mailbox.
+  The App Server retains at most 256 MiB of complete encoded report bodies,
+  including 8 MiB reserved for compact tool errors and non-tool control replies.
+  Ordinary tool results cannot consume that reserve. An admission failure returns
+  to execution, which releases the unpublished result and reports
+  `resource_exhausted`; a running command is stopped and reaped first. Control
+  replies try ordinary capacity and then reserve, without changing their content.
+  If even reserve cannot retain a reply, the logical connection ends and pending
+  reports are dropped; unconfirmed results may be unknown (`outbox`, `report_memory`).
+- Pending delivery and HTTP frames share one immutable body. Every retry preserves
+  identity and bytes. The last body reference releases its charge, including
+  transport references surviving cancellation. A new logical connection shares
+  the same budget. This is a retained-body limit, not a process RSS limit.
+  Reports have no disk copy and are not recovered after process restart.
+- A matching ACK, deterministic refusal, explicit cancellation or logical
+  connection end releases the corresponding report owner. Only ACK confirms
+  delivery or advances Session and ledger success state. Explicit cancellation
+  retains its existing no-callback guarantee. Temporary stream loss retains
+  reports on their original logical connection; connection end cancels uploads.
+  An attempt ends at its size-scaled total or after 10 seconds without TCP
+  acknowledgment progress, including connection establishment and waiting for
+  the response (`report_deadline`, `http`).
 - A `session.prepare` is admitted before it reaches its Session binding
   owner: a payload that fails its schema gets `invalid_input`, and a Session
   without a record while `sessions::RECORDS_MAX` exist or a new operation
@@ -119,15 +133,17 @@ it holds a record, the probe slots, the task pressure point, and the status
 fields `connection_state`, `connection_id`, `credential_id`, `expires_at`
 and `last_error`.
 
-The Report outbox owns the current connection's number and identity and its
-pending reports, each with its `r<n>` identity, its frozen file, its backoff
-and its running attempt.
+The Report outbox owns the current connection's identity and pending reports,
+each with its `r<n>` identity, shared immutable body, backoff and running attempt.
+Its shared admission handle allocates identities and charges encoded bodies before
+mailbox submission; the body owner releases the budget on its last reference.
 
 ## Entry points
 
 - `Connection::spawn(Config)` starts the Connection owner and its Report
   outbox, with the `protocol::ports::SessionFactory` that creates each
   Session binding owner; `status()` gives its `ConnectionStatus`,
+  while `status_snapshot()` reads the last published owner status without waiting,
   `sessions()` the entries of `GET /v1/sessions`, and `stop()` stops it,
   after which it stays `stopped`. It routes each Session instruction as an
   `Instruction`: the instruction as read, whether the ledger recorded it and
@@ -159,7 +175,8 @@ and its running attempt.
 | `src/ledger.rs` | The replay ledger, its limits and reserve, and when an entry goes |
 | `src/backoff.rs` | The backoff of reconnects and of each message's retries |
 | `src/http.rs` | `Transport`, the sorting of answers (`Answer`, `Failure`), `REQUEST_TOTAL`, a report's attempt bounded by its progress (`ReportRequest`, `Progress`), the client of report uploads (`Uploads`) with its counted connections (`Counted`, `Socket`), and the test seam counters `outbox.upload_checked` and `outbox.sent` |
-| `src/outbox.rs` | The Report outbox: identities `r<n>`, freezing, sending, retries, ACKs and refusals, connection ends, the record `report.dropped`, and the test seam counter `outbox.answered` |
+| `src/outbox.rs` | The Report outbox: identities `r<n>`, admission, sending, retries, ACKs and refusals, connection ends, the record `report.dropped`, and the test seam counter `outbox.answered` |
+| `src/report_memory.rs` | Shared report body ownership and ordinary/reserved byte accounting |
 | `src/report_deadline.rs` | A report attempt's total and `STALL_LIMIT` |
 | `src/clock.rs` | The clock the outbox reads |
 | `src/stream.rs` | The bounded reading of an event stream (`Events`), its shared limit (`EventLimit`), `EVENT_MAX_BYTES` and `TOOL_EVENT_MAX_BYTES` |

@@ -74,14 +74,23 @@ async fn run_request(request: &Value) -> Value {
         drives,
         trusted_programs: super::trusted_programs(&tetral, None, &cwd),
     };
+    let mut argv = vec![
+        tetral.display().to_string(),
+        crate::child::ENTRY.to_owned(),
+        crate::child::exec::KIND.to_owned(),
+        cwd.display().to_string(),
+    ];
+    argv.extend(strings(&request["argv"]).map(str::to_owned));
     let command = Command {
-        argv: strings(&request["argv"]).map(str::to_owned).collect(),
-        env: request["env"]
-            .as_object()
-            .into_iter()
-            .flatten()
-            .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_owned())))
-            .collect::<HashMap<_, _>>(),
+        argv,
+        env: Some(
+            request["env"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_owned())))
+                .collect::<HashMap<_, _>>(),
+        ),
         directory: Some(cwd.clone()),
     };
 
@@ -94,8 +103,19 @@ async fn run_request(request: &Value) -> Value {
         Ok(available) => available,
         Err(rejection) => return rejected(rejection),
     };
+    let status = match std::fs::OpenOptions::new().write(true).open("/dev/null") {
+        Ok(status) => status,
+        Err(error) => return json!({"spawn_error": error.to_string()}),
+    };
     let mut process = match isolation
-        .launch(&available, command, &permissions, &cwd, &tetral, None)
+        .launch(
+            &available,
+            command,
+            &permissions,
+            &cwd,
+            &tetral,
+            Some(status.into()),
+        )
         .await
     {
         Ok(process) => process,

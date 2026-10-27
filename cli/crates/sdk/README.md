@@ -14,7 +14,9 @@ The typed client of the App Server's local API belongs here, for apps that run
   an `Io` error of kind `PermissionDenied`.
 - Every endpoint returns its `protocol::local` type, `shutdown` nothing on
   the body `{}`, or an `Error`:
-  `NotRunning` when the socket is missing or refuses the connection, `Http`
+  `NotRunning` when the socket is missing or refuses the connection,
+  `NotResponding` when status or shutdown exceeds its five-second total
+  deadline (connect through the complete response body), `Http`
   with the status and body of any answer but the endpoint's success,
   `Decode` for a body that does not decode or exceeds the response limit, and
   `Io` for every other failure.
@@ -25,3 +27,12 @@ The typed client of the App Server's local API belongs here, for apps that run
 
 - `lib.rs`: this documentation, the print lints that `cli/README.md` states,
   `Client` with `status`, `sessions` and `shutdown`, and `Error`.
+
+Status and shutdown cancel their connection driver on completion or timeout.
+A timeout does not establish whether shutdown was accepted or completed.
+
+The optional `test-seams` feature exposes `Client::with_test_socket_context`
+for harness clients. It accepts an explicit `state::paths::TestSocketContext`
+and response limit, retaining the normal socket derivation and permission
+checks. Tests need no process-wide environment changes; production builds
+have no such constructor.

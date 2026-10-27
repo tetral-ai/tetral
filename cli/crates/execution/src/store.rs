@@ -5,8 +5,8 @@
 //! that a Unix socket below `TMPDIR` fits the platforms' socket path limits.
 //! Before its launch a task gets its directory under its Session, holding its
 //! two logs, and then its temporary directory (`TaskFiles::create`); both go
-//! once the task has ended and its reports are acknowledged
-//! (`TaskFiles::remove`). What an earlier App Server's tasks left goes too:
+//! once the task has ended and its reports are acknowledged or dropped
+//! (`TaskFiles::remove`). Startup also attempts to remove what an earlier App Server left:
 //! the entries of `T` at the start (`clear_task_parent`), and a Session's
 //! task directories once its earlier records are confirmed
 //! (`clear_session_tasks`, from `cleanup`). Nothing else is created or
@@ -15,7 +15,7 @@
 use std::fs::{self, DirBuilder, File};
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{Mode, OFlags};
@@ -150,18 +150,49 @@ impl TaskFiles {
         Ok(())
     }
 
-    /// Deletes the temporary directory and then the task's directory, each
-    /// where it exists, never following a symbolic link out of them.
-    pub fn remove(&self) -> Result<(), IoFailure> {
-        for directory in [&self.temporary, &self.directory] {
-            match fs::remove_dir_all(directory) {
-                Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                    return Err(IoFailure::new(directory, error));
-                }
-                _ => {}
-            }
-        }
-        Ok(())
+    /// Attempts both cleanups independently. A task may leave read-only
+    /// directories in its private temporary tree; restore only this user's
+    /// directory permissions needed for removal, without following symlinks.
+    pub fn remove(&self) -> [(&'static str, Result<(), IoFailure>); 2] {
+        [
+            (
+                "temporary",
+                remove_task_tree(&self.temporary)
+                    .map_err(|error| IoFailure::new(&self.temporary, error)),
+            ),
+            (
+                "logs",
+                remove_directory(&self.directory)
+                    .map_err(|error| IoFailure::new(&self.directory, error)),
+            ),
+        ]
+    }
+}
+
+/// Removes only the task-owned tree. The task's processes have ended
+/// before this is called; symlinks are removed as entries, never traversed.
+fn remove_task_tree(path: &Path) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_dir() {
+        return fs::remove_file(path);
+    }
+    if metadata.uid() == rustix::process::geteuid().as_raw() && metadata.mode() & 0o700 != 0o700 {
+        fs::set_permissions(path, fs::Permissions::from_mode(metadata.mode() | 0o700))?;
+    }
+    for entry in fs::read_dir(path)? {
+        remove_task_tree(&entry?.path())?;
+    }
+    fs::remove_dir(path)
+}
+
+fn remove_directory(path: &Path) -> io::Result<()> {
+    match fs::remove_dir_all(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
     }
 }
 

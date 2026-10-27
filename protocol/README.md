@@ -1647,6 +1647,18 @@ replacing large content with an empty value of the same type (`input` and an
 `{}`); identities, permissions, errors and unknown optional fields together take
 at most 64 KiB (`metadata_json_bytes`).
 
+Engine measures `tool.execute` input using `runtimecontrol.MarshalDataJSON`
+and embeds that same measured `json.RawMessage` in the instruction. It encodes
+the complete instruction once and preserves those exact bytes through storage,
+first delivery and replay. Stored text or bytes must not be reconstructed from
+`jsonb`, since re-encoding can change whitespace and escaping. The designated
+encoder disables HTML escaping and adds no newline; all remaining escapes,
+including U+2028 and U+2029, count toward the limits. Boundary tests must cover
+input, metadata and complete-envelope limits with dense `<`, `>`, `&` and
+U+2028 content, and compare the measured, stored and transmitted bytes.
+These are sender requirements; receiver validation alone does not establish
+that persistence and replay preserve the measured representation.
+
 | Object | Limit in bytes | `TransportLimits` field |
 |---|---|---|
 | `tool.execute` `input` JSON | 4 MiB = 4,194,304 | `tool_input_json_bytes` |

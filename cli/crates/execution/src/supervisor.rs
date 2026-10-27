@@ -47,7 +47,7 @@ use protocol::id::Id;
 use protocol::ports::{ReportId, ReportListener, ReportOutcome, ReportSink};
 use protocol::tool::{
     CancelPayload, ControlErrorCode, HelperEnvelope, HelperStatus, HelperTool, Metrics,
-    ProtocolError, ReportPhase, StdinPayload, StreamSnapshot, ToolError, ToolInput,
+    ProtocolError, ReportPhase, StdinPayload, StreamSnapshot, ToolError, ToolInput, ToolResult,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::pipe::Receiver;
@@ -289,6 +289,8 @@ pub fn spawn(spec: TaskSpec, tool: ToolInput, context: Context) -> SupervisorMai
         held: Vec::new(),
         joined: Vec::new(),
         final_report: None,
+        report_exhausted: false,
+        pending_failure: None,
         withdrawn: false,
         ending: None,
         exit: None,
@@ -339,6 +341,9 @@ struct Supervisor {
     joined: Vec<Id>,
     /// The task's final report, once submitted.
     final_report: Option<ReportId>,
+    report_exhausted: bool,
+    /// A compact terminal error, submitted only after all processes are gone.
+    pending_failure: Option<Body>,
     /// The start was rejected and the registration withdrawn.
     withdrawn: bool,
     ending: Option<(Termination, Expiry)>,
@@ -408,6 +413,8 @@ enum Expiry {
     Wait,
     /// A detached command's lifetime passed.
     Lifetime,
+    /// A running result could not enter the retained-report budget.
+    ReportCapacity,
     /// A `tool.cancel`.
     Cancel,
     /// The task's connection ended.
@@ -583,12 +590,24 @@ impl Supervisor {
     /// left; the task's processes are checked until they are confirmed
     /// gone, and its files go once they are and every report has its
     /// outcome.
-    async fn settle(&mut self) {
+    async fn settle(mut self) {
         let mut open = true;
         self.check_gone();
         loop {
-            if !self.cleaned && self.gone && self.awaited.is_empty() {
+            if self.gone
+                && let Some(body) = self.pending_failure.take()
+            {
+                self.submit_reserved(
+                    self.spec.correlation.clone(),
+                    self.spec.connection_id.clone(),
+                    self.spec.traceparent.clone(),
+                    body,
+                );
+            }
+            if self.gone && self.awaited.is_empty() {
                 self.clean();
+                tokio::spawn(FinishedTask::from_supervisor(self).run());
+                return;
             }
             if !open && self.gone {
                 break;
@@ -678,7 +697,24 @@ impl Supervisor {
     /// Removes the task's files and lets go of its output, keeping only the
     /// streams' counters for a repeated write's reply.
     fn clean(&mut self) {
-        let _ = self.spec.files.remove();
+        for (part, result) in self.spec.files.remove() {
+            if let Err(error) = result {
+                observe::warn!(
+                    "task.cleanup_failed",
+                    task.id = observe::Id(self.spec.correlation.task_id.as_str()),
+                    cleanup.part = observe::Id(part),
+                    cleanup.directory = observe::Id(
+                        error
+                            .path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("unknown")
+                    ),
+                    error.os_code = error.source.raw_os_error().unwrap_or(0),
+                    error.code = observe::Code("task_cleanup_failed")
+                );
+            }
+        }
         self.kept = (self.out.capture.counters(), self.err.capture.counters());
         self.out.capture = StreamCapture::new();
         self.err.capture = StreamCapture::new();
@@ -708,24 +744,17 @@ impl Supervisor {
         spec.files
             .create()
             .map_err(|failure| failed(&failure.to_string()))?;
-        let call_env = match &work {
-            Work::Exec(call) => call.env.as_ref(),
+        let env = match &work {
+            Work::Exec(call) => Some(
+                crate::env::command_environment(
+                    std::env::vars_os(),
+                    call.env.as_ref(),
+                    spec.files.temporary(),
+                )
+                .map_err(|_| failed(NOT_STARTED))?,
+            ),
             Work::File(_) => None,
         };
-        let mut env =
-            crate::env::command_environment(std::env::vars_os(), call_env, spec.files.temporary())
-                .map_err(|_| failed(NOT_STARTED))?;
-        // A launcher entry without network cannot reach the test harness,
-        // since Codex's seccomp refuses its `connect`; it gets none.
-        if spec
-            .permissions
-            .profile()
-            .network_sandbox_policy()
-            .is_enabled()
-            && let Some((name, value)) = state::seams::harness_variable()
-        {
-            env.insert(name.to_owned(), value.to_string_lossy().into_owned());
-        }
         let (status, status_writer) = std::io::pipe().map_err(|_| failed(NOT_STARTED))?;
         let mut argv = vec![context.tetral.display().to_string()];
         match &work {
@@ -1185,16 +1214,89 @@ impl Supervisor {
         traceparent: Option<String>,
         body: Body,
     ) {
-        let report = Report { correlation, body };
-        let mut submission = report.submission(connection_id.clone());
-        let task_final =
-            submission.final_for.first() == Some(&self.spec.correlation.request_message_id);
-        if task_final {
+        // Control errors and rejected admissions are already compact. Ordinary
+        // results must not consume the reserve before their owner handles failure.
+        if matches!(body, Body::Rejected(_) | Body::Control { result: None, .. }) {
+            self.submit_reserved(correlation, connection_id.clone(), traceparent, body);
+            return;
+        }
+        let running = matches!(
+            body,
+            Body::Result {
+                phase: ReportPhase::Running,
+                ..
+            }
+        );
+        let terminal = matches!(
+            body,
+            Body::Result {
+                phase: ReportPhase::Terminal,
+                ..
+            }
+        );
+        let fallback = capacity_error(&body);
+        if terminal && self.report_exhausted {
+            drop(body);
+            self.tool = None;
+            self.pending_failure = Some(fallback);
+            return;
+        }
+        let report = Report {
+            correlation: correlation.clone(),
+            body,
+        };
+        let submission = self.submission(report, connection_id.clone(), traceparent.clone());
+        match self.context.reports.try_submit(submission) {
+            Ok(id) => self.track(id, terminal),
+            Err(_) if running => {
+                // Admission failed before publication. The eventual terminal
+                // error is the first report and must still have sequence 1.
+                self.report_seq -= 1;
+                self.report_exhausted = true;
+                let pid = self.process.as_ref().map_or(0, |process| process.pid);
+                self.stop(pid, Expiry::ReportCapacity);
+            }
+            Err(_) if terminal => {
+                self.tool = None;
+                self.pending_failure = Some(fallback);
+            }
+            Err(_) => {
+                self.submit_reserved(correlation, connection_id.clone(), traceparent, fallback)
+            }
+        }
+    }
+
+    fn submission(
+        &self,
+        report: Report,
+        connection: Id,
+        trace: Option<String>,
+    ) -> protocol::ports::Submission {
+        let mut submission = report.submission(connection);
+        if submission.final_for.first() == Some(&self.spec.correlation.request_message_id) {
             submission.final_for.extend(self.joined.iter().cloned());
         }
-        submission.traceparent = traceparent;
+        submission.traceparent = trace;
         submission.listener = Some(self.listener.clone());
+        submission
+    }
+
+    fn submit_reserved(
+        &mut self,
+        correlation: Correlation,
+        connection: Id,
+        trace: Option<String>,
+        body: Body,
+    ) {
+        let report = Report { correlation, body };
+        let task_final = report.is_final()
+            && report.correlation.request_message_id == self.spec.correlation.request_message_id;
+        let submission = self.submission(report, connection, trace);
         let id = self.context.reports.submit(submission);
+        self.track(id, task_final);
+    }
+
+    fn track(&mut self, id: ReportId, task_final: bool) {
         if task_final {
             self.final_report = Some(id);
         }
@@ -1666,6 +1768,226 @@ impl Supervisor {
     }
 }
 
+const REPORT_CAPACITY_MESSAGE: &str = "the result could not be retained because the local report budget is exhausted; the tool may have performed work";
+
+/// Retains only facts already observed, never the rejected output body.
+fn capacity_error(body: &Body) -> Body {
+    match body {
+        Body::Result {
+            phase,
+            report_seq,
+            result,
+        } => Body::Result {
+            phase: *phase,
+            report_seq: *report_seq,
+            result: Box::new(capacity_envelope(result)),
+        },
+        Body::Control { result, .. } => Body::Control {
+            result: result.as_deref().map(capacity_envelope).map(Box::new),
+            error: Some(ProtocolError {
+                code: ControlErrorCode::ResourceExhausted,
+                message: REPORT_CAPACITY_MESSAGE.to_owned(),
+            }),
+        },
+        Body::Rejected(error) => Body::Rejected(error.clone()),
+    }
+}
+
+fn capacity_envelope(envelope: &HelperEnvelope) -> HelperEnvelope {
+    let result = match &envelope.result {
+        ToolResult::Exec(result) => ToolResult::Exec(protocol::tool::ExecResult {
+            task_id: result.task_id.clone(),
+            exit_code: result.exit_code.clone(),
+            signal: result.signal.clone(),
+            timed_out: result.timed_out,
+            cancelled: result.cancelled,
+            was_running: result.was_running,
+            written_bytes: result.written_bytes,
+            stdout: stream_counters(&result.stdout),
+            stderr: stream_counters(&result.stderr),
+            duration_ms: result.duration_ms,
+        }),
+        _ => ToolResult::Object(Default::default()),
+    };
+    HelperEnvelope {
+        tool: envelope.tool,
+        status: HelperStatus::Error,
+        truncated: false,
+        error: Some(exec::tool_error(
+            "resource_exhausted",
+            REPORT_CAPACITY_MESSAGE,
+            None,
+        )),
+        result,
+        metrics: envelope.metrics.clone(),
+        drive_sync: None,
+    }
+}
+
+fn stream_counters(stream: &StreamSnapshot) -> StreamSnapshot {
+    StreamSnapshot {
+        text: String::new(),
+        total_bytes: stream.total_bytes,
+        total_lines: stream.total_lines,
+        returned_bytes: protocol::field::Count::saturating(0),
+        truncated: false,
+    }
+}
+
+/// The protocol record that outlives execution. It owns no process, task
+/// specification, sandbox policy, output buffer or execution tracing span.
+struct FinishedTask {
+    messages: mpsc::UnboundedReceiver<SupervisorMessage>,
+    reports: Arc<dyn ReportSink>,
+    task_id: Id,
+    state: State,
+    counters: (StreamSnapshot, StreamSnapshot),
+    records: WriteRecords,
+    withdrawn: bool,
+}
+
+impl FinishedTask {
+    fn from_supervisor(supervisor: Supervisor) -> Self {
+        let state = supervisor.state();
+        Self {
+            messages: supervisor.messages,
+            reports: supervisor.context.reports,
+            task_id: supervisor.spec.correlation.task_id,
+            state,
+            counters: supervisor.kept,
+            records: supervisor.records,
+            withdrawn: supervisor.withdrawn,
+        }
+    }
+
+    async fn run(mut self) {
+        state::seams::count("task.execution_released");
+        while let Some(message) = self.messages.recv().await {
+            match message {
+                SupervisorMessage::Stdin(control) => self.stdin(*control),
+                SupervisorMessage::Cancel(control) => {
+                    if self.withdrawn {
+                        self.error(&control, ControlErrorCode::TaskNotFound, TASK_NOT_FOUND);
+                    } else {
+                        let mut outcome = self.outcome(HelperTool::Cancel, HelperStatus::Success);
+                        outcome.cancelled = Some(false);
+                        outcome.was_running = Some(false);
+                        // Cleared cumulative output has the same empty counters
+                        // that the old cleaned supervisor returned for cancel.
+                        outcome.stdout = exec::empty_stream();
+                        outcome.stderr = exec::empty_stream();
+                        self.reply(&control, outcome, None);
+                    }
+                }
+                // Joined final reports are already gone. No terminal message
+                // can restart execution or reconstruct an acknowledged body.
+                SupervisorMessage::Start
+                | SupervisorMessage::Prevent
+                | SupervisorMessage::Joined(_)
+                | SupervisorMessage::Outcome(_, _)
+                | SupervisorMessage::ConnectionEnded
+                | SupervisorMessage::Shutdown => {}
+            }
+        }
+    }
+
+    fn stdin(&self, control: Control<StdinPayload>) {
+        if self.withdrawn {
+            self.error(&control, ControlErrorCode::TaskNotFound, TASK_NOT_FOUND);
+            return;
+        }
+        if let Request::Write {
+            write_seq, digest, ..
+        } = Request::of(&control.payload)
+            && let Check::Repeat(record) = self.records.check(write_seq, &digest)
+        {
+            let closed = record.error == Some(ControlErrorCode::StdinClosed);
+            let mut outcome = self.outcome(
+                HelperTool::Stdin,
+                if closed {
+                    HelperStatus::Error
+                } else {
+                    HelperStatus::Success
+                },
+            );
+            outcome.written_bytes = Some(record.written_bytes);
+            if closed {
+                outcome.error = Some(exec::tool_error("stdin_closed", STDIN_CLOSED, None));
+            }
+            self.reply(&control, outcome, closed.then(closed_error));
+        } else {
+            self.error(
+                &control,
+                ControlErrorCode::ResultUnavailable,
+                "the task's output is no longer kept",
+            );
+        }
+    }
+
+    fn outcome(&self, tool: HelperTool, status: HelperStatus) -> Outcome {
+        Outcome {
+            tool,
+            task_id: self.task_id.clone(),
+            status,
+            error: None,
+            exit: self.state.exit.clone(),
+            timed_out: self.state.timed_out,
+            stdout: self.counters.0.clone(),
+            stderr: self.counters.1.clone(),
+            duration: self.state.duration,
+            metrics: None,
+            cancelled: None,
+            was_running: None,
+            written_bytes: None,
+        }
+    }
+
+    fn error<P>(&self, control: &Control<P>, code: ControlErrorCode, message: &str) {
+        let body = Body::Control {
+            result: None,
+            error: Some(ProtocolError {
+                code,
+                message: message.to_owned(),
+            }),
+        };
+        self.send(control, body, true);
+    }
+
+    fn reply<P>(
+        &self,
+        control: &Control<P>,
+        outcome: Outcome,
+        error: Option<ProtocolError<ControlErrorCode>>,
+    ) {
+        self.send(
+            control,
+            Body::Control {
+                result: Some(Box::new(outcome.envelope())),
+                error,
+            },
+            false,
+        );
+    }
+
+    fn send<P>(&self, control: &Control<P>, body: Body, reserved: bool) {
+        let fallback = capacity_error(&body);
+        let submission = |body| {
+            let mut value = Report {
+                correlation: control.correlation.clone(),
+                body,
+            }
+            .submission(control.connection_id.clone());
+            value.traceparent = control.traceparent.clone();
+            value
+        };
+        if reserved {
+            self.reports.submit(submission(body));
+        } else if self.reports.try_submit(submission(body)).is_err() {
+            self.reports.submit(submission(fallback));
+        }
+    }
+}
+
 fn closed_error() -> ProtocolError<ControlErrorCode> {
     ProtocolError {
         code: ControlErrorCode::StdinClosed,
@@ -1834,4 +2156,421 @@ fn output_write_failed() {
         "task.output_write_failed",
         error.code = observe::Code("output_write_failed")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::ports::{ReportAdmissionError, Submission};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Recorded {
+        id: ReportId,
+        body: serde_json::Value,
+        listener: Option<Arc<dyn ReportListener>>,
+    }
+
+    struct Reports {
+        next: AtomicU64,
+        full: bool,
+        sent: mpsc::UnboundedSender<Recorded>,
+    }
+
+    impl ReportSink for Reports {
+        fn submit(&self, submission: Submission) -> ReportId {
+            let id = ReportId(self.next.fetch_add(1, Ordering::Relaxed));
+            let message = Id::new(format!("r{}", id.0)).unwrap();
+            let bytes = (submission.build)(&submission.connection_id, &message).unwrap();
+            self.sent
+                .send(Recorded {
+                    id,
+                    body: serde_json::from_slice(&bytes).unwrap(),
+                    listener: submission.listener,
+                })
+                .unwrap();
+            id
+        }
+        fn try_submit(&self, submission: Submission) -> Result<ReportId, ReportAdmissionError> {
+            if self.full {
+                Err(ReportAdmissionError::ResourceExhausted)
+            } else {
+                Ok(self.submit(submission))
+            }
+        }
+        fn cancel(&self, _: ReportId) {}
+        fn add_final(&self, _: ReportId, _: Id) {}
+    }
+
+    struct TaskEvents(mpsc::UnboundedSender<()>);
+    impl TaskListener for TaskEvents {
+        fn started(&self, _: u64) {
+            panic!("this fixture never launches a process")
+        }
+        fn gone(&self) {
+            self.0.send(()).unwrap();
+        }
+        fn withdrawn(&self) {}
+    }
+
+    fn id(value: &str) -> Id {
+        Id::new(value).unwrap()
+    }
+
+    fn correlation(request: &str) -> Correlation {
+        Correlation {
+            session_id: id("session"),
+            binding_id: id("binding"),
+            tool_use_event_id: id("event"),
+            task_id: id("task"),
+            request_message_id: id(request),
+        }
+    }
+
+    fn staged_task(
+        root: &std::path::Path,
+        full: bool,
+    ) -> (
+        SupervisorMailbox,
+        mpsc::UnboundedReceiver<Recorded>,
+        mpsc::UnboundedReceiver<()>,
+        std::sync::Weak<TaskEvents>,
+    ) {
+        let (sent, received) = mpsc::unbounded_channel();
+        let (gone, gone_received) = mpsc::unbounded_channel();
+        let listener = Arc::new(TaskEvents(gone));
+        let witness = Arc::downgrade(&listener);
+        let policy =
+            json!({"schema_version":1,"filesystem":{"rules":[]},"network":{"mode":"disabled"}});
+        let inputs = crate::policy::TranslationInputs {
+            state_root: root.join("state"),
+            socket_directory: root.join("socket"),
+            task_directories: root.join("temporary"),
+            task_temporary_directory: root.join("temporary/task"),
+            drives: None,
+            trusted_programs: Vec::new(),
+        };
+        let spec = TaskSpec {
+            connection_id: id("connection"),
+            correlation: correlation("execute"),
+            permissions: TaskPermissions::admit(Some(&policy), &inputs).unwrap(),
+            limits: Visible::requested(None),
+            cwd: root.to_owned(),
+            files: TaskFiles::new(root.join("task"), root.join("temporary/task"), 1024),
+            traceparent: None,
+            received: state::seams::now(),
+            record: root.join("record"),
+            listener,
+        };
+        let context = Context {
+            tetral: root.join("unused"),
+            isolation: Isolation::new(),
+            reports: Arc::new(Reports {
+                next: AtomicU64::new(1),
+                full,
+                sent,
+            }),
+            bounds: Bounds::default(),
+            boot_id: None,
+        };
+        let tool: ToolInput =
+            serde_json::from_value(json!({"tool":"exec_command","input":{"cmd":"unused"}}))
+                .unwrap();
+        (spawn(spec, tool, context), received, gone_received, witness)
+    }
+
+    #[tokio::test]
+    async fn settled_reports_release_execution_and_the_same_mailbox_answers_late_controls() {
+        for outcome in [ReportOutcome::Acked, ReportOutcome::Dropped] {
+            let root = tempfile::tempdir().unwrap();
+            let (mailbox, mut reports, mut gone, witness) = staged_task(root.path(), false);
+            mailbox.send(SupervisorMessage::Prevent).unwrap();
+            let terminal = reports.recv().await.unwrap();
+            gone.recv().await.unwrap();
+            assert!(
+                witness.upgrade().is_some(),
+                "the report still owns the execution wait"
+            );
+            terminal.listener.unwrap().outcome(terminal.id, outcome);
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while witness.upgrade().is_some() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let payload = json!({"session_id":"session","binding_id":"binding","tool_use_event_id":"event","task_id":"task","chars":""});
+            mailbox
+                .send(SupervisorMessage::Stdin(Box::new(Control {
+                    connection_id: id("connection"),
+                    correlation: correlation("read"),
+                    traceparent: None,
+                    payload: serde_json::from_value(payload).unwrap(),
+                })))
+                .unwrap();
+            let reply = reports.recv().await.unwrap();
+            assert_eq!(reply.body["error"]["code"], "result_unavailable");
+            assert_eq!(reply.body["request_message_id"], "read");
+            mailbox.send(SupervisorMessage::Cancel(Box::new(Control {
+                connection_id: id("connection"), correlation: correlation("cancel"), traceparent: None,
+                payload: serde_json::from_value(json!({"session_id":"session","binding_id":"binding","tool_use_event_id":"event","task_id":"task"})).unwrap(),
+            }))).unwrap();
+            let reply = reports.recv().await.unwrap();
+            assert_eq!(reply.body["result"]["result"]["cancelled"], false);
+            assert_eq!(reply.body["result"]["result"]["was_running"], false);
+            mailbox
+                .send(SupervisorMessage::Joined(id("joined")))
+                .unwrap();
+            drop(mailbox);
+            assert!(
+                reports.recv().await.is_none(),
+                "no duplicate final reply is reconstructed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unadmitted_terminal_result_uses_a_compact_error_and_waits_for_its_outcome() {
+        let root = tempfile::tempdir().unwrap();
+        let (mailbox, mut reports, mut gone, witness) = staged_task(root.path(), true);
+        mailbox.send(SupervisorMessage::Prevent).unwrap();
+        gone.recv().await.unwrap();
+        let terminal = reports.recv().await.unwrap();
+        assert_eq!(terminal.body["phase"], "terminal");
+        assert_eq!(
+            terminal.body["result"]["error"]["kind"],
+            "resource_exhausted"
+        );
+        assert_eq!(terminal.body["result"]["result"]["cancelled"], true);
+        assert!(witness.upgrade().is_some());
+        terminal
+            .listener
+            .unwrap()
+            .outcome(terminal.id, ReportOutcome::Dropped);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while witness.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(mailbox);
+        assert!(reports.recv().await.is_none());
+    }
+
+    fn recorded_write(request: &str, sequence: i64, chars: &str) -> Control<StdinPayload> {
+        Control {
+            connection_id: id("connection"),
+            correlation: correlation(request),
+            traceparent: None,
+            payload: serde_json::from_value(json!({
+                "session_id": "session", "binding_id": "binding",
+                "tool_use_event_id": "event", "task_id": "task",
+                "chars": chars, "write_seq": sequence, "wait_ms": 30_000,
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn finished_task(
+        withdrawn: bool,
+    ) -> (
+        FinishedTask,
+        SupervisorMailbox,
+        mpsc::UnboundedReceiver<Recorded>,
+    ) {
+        let (mailbox, messages) = mpsc::unbounded_channel();
+        let (sent, reports) = mpsc::unbounded_channel();
+        let mut output = StreamCapture::new();
+        output.write(b"finished output\n");
+        let task = FinishedTask {
+            messages,
+            reports: Arc::new(Reports {
+                next: AtomicU64::new(1),
+                full: false,
+                sent,
+            }),
+            task_id: id("task"),
+            state: State {
+                ended: true,
+                exit: ExitFacts {
+                    exit_code: Some(7),
+                    signal: None,
+                },
+                timed_out: true,
+                duration: Duration::from_millis(425),
+            },
+            counters: (output.counters(), exec::empty_stream()),
+            records: WriteRecords::default(),
+            withdrawn,
+        };
+        (task, mailbox, reports)
+    }
+
+    #[tokio::test]
+    async fn finished_writes_repeat_recorded_facts_without_output_or_another_write() {
+        let (mut task, mailbox, mut reports) = finished_task(false);
+        for (sequence, chars, written, error) in [
+            (1, "complete", 8, None),
+            (2, "partial", 3, Some(ControlErrorCode::StdinClosed)),
+        ] {
+            let control = recorded_write("seed", sequence, chars);
+            let Request::Write { digest, .. } = Request::of(&control.payload) else {
+                panic!("the fixture must describe a write");
+            };
+            task.records.record(sequence, digest, written, error);
+        }
+        let owner = tokio::spawn(task.run());
+        for repetition in 0..2 {
+            for (sequence, chars, written, status) in
+                [(1, "complete", 8, "success"), (2, "partial", 3, "error")]
+            {
+                let request = format!("repeat_{sequence}_{repetition}");
+                mailbox
+                    .send(SupervisorMessage::Stdin(Box::new(recorded_write(
+                        &request, sequence, chars,
+                    ))))
+                    .unwrap();
+                let reply = tokio::time::timeout(Duration::from_secs(2), reports.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(reply.body["request_message_id"], request);
+                assert_eq!(reply.body["result"]["tool"], "stdin");
+                assert_eq!(reply.body["result"]["status"], status);
+                let result = &reply.body["result"]["result"];
+                assert_eq!(result["written_bytes"], written);
+                assert_eq!(result["exit_code"], 7);
+                assert_eq!(result["signal"], serde_json::Value::Null);
+                assert_eq!(result["timed_out"], true);
+                assert_eq!(result["duration_ms"], 425);
+                assert_eq!(
+                    result["stdout"],
+                    json!({
+                        "text": "", "total_bytes": 16, "total_lines": 1,
+                        "returned_bytes": 0, "truncated": false,
+                    })
+                );
+                assert_eq!(
+                    result["stderr"],
+                    serde_json::to_value(exec::empty_stream()).unwrap()
+                );
+                if sequence == 2 {
+                    assert_eq!(reply.body["error"]["code"], "stdin_closed");
+                    assert_eq!(reply.body["result"]["error"]["kind"], "stdin_closed");
+                } else {
+                    assert!(reply.body["error"].is_null());
+                    assert!(reply.body["result"]["error"].is_null());
+                }
+            }
+        }
+        // Cleanup keeps the old precedence: even a conflicting write
+        // is unavailable, unless its exact original content was recorded.
+        for (request, sequence, chars) in [("conflict", 1, "other"), ("new", 3, "new input")] {
+            mailbox
+                .send(SupervisorMessage::Stdin(Box::new(recorded_write(
+                    request, sequence, chars,
+                ))))
+                .unwrap();
+            let reply = tokio::time::timeout(Duration::from_secs(2), reports.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(reply.body["request_message_id"], request);
+            assert_eq!(reply.body["error"]["code"], "result_unavailable");
+        }
+        drop(mailbox);
+        tokio::time::timeout(Duration::from_secs(2), owner)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            reports.recv().await.is_none(),
+            "one reply per control, no duplicate report"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_withdrawn_finished_task_refuses_both_control_kinds() {
+        let (task, mailbox, mut reports) = finished_task(true);
+        let owner = tokio::spawn(task.run());
+        mailbox
+            .send(SupervisorMessage::Stdin(Box::new(recorded_write(
+                "write", 1, "unused",
+            ))))
+            .unwrap();
+        mailbox
+            .send(SupervisorMessage::Cancel(Box::new(Control {
+                connection_id: id("connection"),
+                correlation: correlation("cancel"),
+                traceparent: None,
+                payload: serde_json::from_value(json!({
+                    "session_id": "session", "binding_id": "binding",
+                    "tool_use_event_id": "event", "task_id": "task",
+                }))
+                .unwrap(),
+            })))
+            .unwrap();
+        for request in ["write", "cancel"] {
+            let reply = tokio::time::timeout(Duration::from_secs(2), reports.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(reply.body["request_message_id"], request);
+            assert_eq!(reply.body["error"]["code"], "task_not_found");
+            assert!(reply.body["result"].is_null());
+        }
+        drop(mailbox);
+        tokio::time::timeout(Duration::from_secs(2), owner)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(reports.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cleanup_failure_releases_execution_after_the_report_outcome() {
+        let root = tempfile::tempdir().unwrap();
+        // An ordinary file in place of the temporary parent makes removal
+        // fail with ENOTDIR on every user, without special permissions.
+        std::fs::write(root.path().join("temporary"), b"retained obstruction").unwrap();
+        std::fs::create_dir(root.path().join("task")).unwrap();
+        std::fs::write(root.path().join("task/stdout.log"), b"task output").unwrap();
+        let (mailbox, mut reports, mut gone, witness) = staged_task(root.path(), false);
+        mailbox.send(SupervisorMessage::Prevent).unwrap();
+        let terminal = reports.recv().await.unwrap();
+        gone.recv().await.unwrap();
+        assert!(witness.upgrade().is_some());
+        assert!(root.path().join("task/stdout.log").exists());
+        terminal
+            .listener
+            .unwrap()
+            .outcome(terminal.id, ReportOutcome::Acked);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while witness.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join("temporary")).unwrap(),
+            b"retained obstruction"
+        );
+        assert!(
+            !root.path().join("task").exists(),
+            "log cleanup is independent"
+        );
+        assert!(
+            reports.try_recv().is_err(),
+            "cleanup failure does not rewrite the result"
+        );
+        drop(mailbox);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), reports.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 }

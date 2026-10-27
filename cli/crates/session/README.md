@@ -75,6 +75,9 @@ that is no longer the binding's is discarded.
 - A preparation's result is committed only while its connection, binding and
   operation are all still current (`prepare`). A binding enters `prepared`
   only on the ACK of a report of its result (`SessionOwner::report_outcome`).
+  These control replies can use the Report outbox's reserved body budget when
+  ordinary capacity is full. Exhausting both pools ends the logical connection;
+  dropping a reply never advances the binding to `prepared`.
 - The cases of a `session.prepare` against the Session's binding are one
   decision (`cases::decide`).
 - The App Server never inspects a target directory before a probe and never
@@ -82,6 +85,16 @@ that is no longer the binding's is discarded.
   compared lexically, fails before any filesystem access
   (`prepare::inside_state_root`); everything else is checked by the directory
   probe, a child process of the running executable (`probe_child`).
+- On Linux the probe is launched through `/proc/self/exe`, so replacement or
+  unlink of the installation does not change its running version. An
+  inaccessible procfs entry is a spawn failure, with no installation-path
+  fallback. Probe input contains validated UTF-8 strings and is encoded
+  before spawn. Directory creation uses `O_PATH | O_DIRECTORY` search
+  handles, retaining `O_NOFOLLOW` for new components; mkdir and final chdir
+  enforce write/search permissions without requiring directory read access.
+  Creation preserves umask and existing modes. Failure after creation starts
+  can leave directory prefixes, which are not rolled back. A failed binding
+  retains its result; retrying directory preparation requires a new binding.
 - A probe is spawned only with a probe slot of the Connection owner, which it
   holds until it is reaped. Its task alone kills its process group, and only
   before reaping it (`probe`). The owner reads the seam clock for the probe's

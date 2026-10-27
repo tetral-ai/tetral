@@ -15,6 +15,7 @@ use crate::paths::{self, StateRoot};
 /// Why a control path is not private to the current user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unsafe {
+    NotUtf8,
     SymbolicLink,
     OtherOwner,
     NotDirectory,
@@ -27,6 +28,7 @@ pub enum Unsafe {
 impl fmt::Display for Unsafe {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Unsafe::NotUtf8 => f.write_str("is not UTF-8"),
             Unsafe::SymbolicLink => f.write_str("is a symbolic link"),
             Unsafe::OtherOwner => f.write_str("is owned by another user"),
             Unsafe::NotDirectory => f.write_str("is not a directory"),
@@ -42,10 +44,38 @@ impl fmt::Display for Unsafe {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CheckError {
-    #[error("{} {reason}", path.display())]
+    #[error("{}", unsafe_path_message(path, reason))]
     Unsafe { path: PathBuf, reason: Unsafe },
     #[error(transparent)]
     Io(#[from] IoFailure),
+}
+
+fn unsafe_path_message(path: &Path, reason: &Unsafe) -> String {
+    if *reason == Unsafe::NotUtf8 {
+        "the state root path is not UTF-8".to_owned()
+    } else {
+        format!("{} {reason}", path.display())
+    }
+}
+
+/// Checks the root's given and resolved forms before configure can create
+/// anything or a command reads configuration. Missing directories are only
+/// projected; existing components keep their filesystem resolution rules.
+pub fn check_root_utf8(root: &StateRoot) -> Result<(), CheckError> {
+    check_canonical_root_utf8(root.path())?;
+    let resolved = root
+        .resolved_for_creation()
+        .map_err(|error| IoFailure::new(root.path(), error))?;
+    check_canonical_root_utf8(&resolved)
+}
+
+/// Checks the canonical root computed while startup owns its lock. The
+/// same refusal is used before command dispatch and during startup.
+pub fn check_canonical_root_utf8(root: &Path) -> Result<(), CheckError> {
+    root.to_str().map(|_| ()).ok_or_else(|| CheckError::Unsafe {
+        path: root.to_path_buf(),
+        reason: Unsafe::NotUtf8,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -71,7 +101,10 @@ enum Permissions {
 /// root's socket a socket of the current user with mode `0600`. Ancestors of
 /// the root may be symbolic links.
 pub fn check_root(root: &StateRoot) -> Result<(), CheckError> {
-    if !check(root.path(), Kind::Directory, Permissions::Private)? {
+    check_canonical_root_utf8(root.path())?;
+    let exists = check(root.path(), Kind::Directory, Permissions::Private)?;
+    check_root_utf8(root)?;
+    if !exists {
         return Ok(());
     }
     check(
@@ -91,7 +124,25 @@ pub fn check_root(root: &StateRoot) -> Result<(), CheckError> {
 pub fn check_socket(root: &StateRoot) -> Result<Option<PathBuf>, CheckError> {
     let socket = paths::socket_path(root).map_err(|error| IoFailure::new(root.path(), error))?;
     let directory = paths::socket_dir();
-    if check(&directory, Kind::Directory, Permissions::Exactly(0o700))?
+    check_socket_paths(socket, &directory)
+}
+
+#[cfg(feature = "test-seams")]
+pub fn check_socket_in(
+    root: &StateRoot,
+    context: &paths::TestSocketContext,
+) -> Result<Option<PathBuf>, CheckError> {
+    let socket = context
+        .socket_path(root)
+        .map_err(|error| IoFailure::new(root.path(), error))?;
+    check_socket_paths(socket, &context.socket_dir())
+}
+
+fn check_socket_paths(
+    socket: Option<PathBuf>,
+    directory: &Path,
+) -> Result<Option<PathBuf>, CheckError> {
+    if check(directory, Kind::Directory, Permissions::Exactly(0o700))?
         && let Some(socket) = &socket
     {
         check(socket, Kind::Socket, Permissions::Exactly(0o600))?;
@@ -161,5 +212,100 @@ fn reason(metadata: &Metadata, kind: Kind, permissions: Permissions) -> Option<U
             found: mode,
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::fs;
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::symlink;
+
+    use super::*;
+
+    #[test]
+    fn root_encoding_is_checked_before_any_missing_directory_is_created() {
+        let base = tempfile::tempdir().unwrap();
+        let non_utf8 = base.path().join(OsString::from_vec(b"root-\xff".to_vec()));
+        fs::create_dir(&non_utf8).unwrap();
+        let link = base.path().join("alias");
+        symlink(&non_utf8, &link).unwrap();
+        let rows = [
+            non_utf8.clone(),
+            non_utf8.join("missing"),
+            link.clone(),
+            link.join("missing/child"),
+        ];
+        for path in rows {
+            let root = StateRoot::new(path.as_os_str()).unwrap();
+            let error = check_root_utf8(&root).unwrap_err();
+            assert!(matches!(
+                error,
+                CheckError::Unsafe {
+                    reason: Unsafe::NotUtf8,
+                    ..
+                }
+            ));
+            assert_eq!(error.to_string(), "the state root path is not UTF-8");
+        }
+        assert!(!non_utf8.join("missing").exists());
+    }
+
+    #[test]
+    fn missing_root_resolution_keeps_filesystem_symlinks_and_parent_components() {
+        let base = tempfile::tempdir().unwrap();
+        let canonical_base = base.path().canonicalize().unwrap();
+        let non_utf8 = base.path().join(OsString::from_vec(b"root-\xff".to_vec()));
+        fs::create_dir_all(non_utf8.join("child")).unwrap();
+        let alias = base.path().join("alias");
+        symlink(non_utf8.join("child"), &alias).unwrap();
+
+        let forbidden = StateRoot::new(alias.join("../missing").as_os_str()).unwrap();
+        assert!(matches!(
+            check_root_utf8(&forbidden),
+            Err(CheckError::Unsafe {
+                reason: Unsafe::NotUtf8,
+                ..
+            })
+        ));
+        // Leaving both resolved ancestors reaches the UTF-8 base. A lexical
+        // normalization of the original alias would choose a different path.
+        let outside = StateRoot::new(alias.join("../../missing").as_os_str()).unwrap();
+        check_root_utf8(&outside).unwrap();
+        assert_eq!(
+            outside.resolved_for_creation().unwrap(),
+            canonical_base.join("missing")
+        );
+
+        // Once a prospective directory is left, existing links are resolved
+        // again rather than treated as part of a purely lexical suffix.
+        let reentered =
+            StateRoot::new(base.path().join("missing/../alias/../new").as_os_str()).unwrap();
+        assert!(matches!(
+            check_root_utf8(&reentered),
+            Err(CheckError::Unsafe {
+                reason: Unsafe::NotUtf8,
+                ..
+            })
+        ));
+        assert!(!base.path().join("missing").exists());
+        assert!(!non_utf8.join("new").exists());
+    }
+
+    #[test]
+    fn a_dangling_root_link_keeps_its_existing_unsafe_path_refusal() {
+        let base = tempfile::tempdir().unwrap();
+        let link = base.path().join("root");
+        symlink(base.path().join("missing"), &link).unwrap();
+        let root = StateRoot::new(link.as_os_str()).unwrap();
+        assert!(matches!(
+            check_root(&root),
+            Err(CheckError::Unsafe {
+                reason: Unsafe::SymbolicLink,
+                ..
+            })
+        ));
+        assert!(!base.path().join("missing").exists());
     }
 }

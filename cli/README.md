@@ -30,7 +30,8 @@ the repository's Go module, and depends on no Engine code.
   on the event stream, such as a Session's preparation, its close or a tool
   call; a report is the CLI's answer to an instruction, or a later message
   about it, sent as an HTTP request. A report is **frozen** once its body is
-  final and written to disk; every send of it, retries included, carries
+  final and admitted to the retained-report memory budget; every send,
+  retries included, carries
   those bytes.
 - **Ready**: the message the CLI sends on each new connection to declare its
   versions and capabilities, before Engine sends it any Session instruction.
@@ -50,8 +51,10 @@ the resolved graph, development and build dependencies included, may be
 licensed under the AGPL. The normal dependencies of `tetral`, followed to the
 end, must hold neither `tetral-tests` nor the test-only `jsonschema`. Test
 seams must sit behind a crate feature named `test-seams`, which no crate may
-enable by default and no normal dependency may enable, directly or through
-other features, so that the released binary holds none.
+enable by default and no product crate's normal dependency may enable,
+directly or through other features, so that the released binary holds none.
+The test-only harness may enable seams for explicit in-process test contexts;
+it remains forbidden from the release dependency graph.
 `tests/tests/crate_graph.rs` checks these rules over `cargo metadata`.
 
 | Layer | Crate | Responsible for |

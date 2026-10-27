@@ -6,6 +6,8 @@
 #[cfg(feature = "test-seams")]
 pub mod harness;
 #[cfg(target_os = "linux")]
+mod host_ipc;
+#[cfg(target_os = "linux")]
 mod linux;
 
 use std::collections::HashMap;
@@ -47,12 +49,14 @@ impl Default for Isolation {
 #[derive(Debug)]
 pub struct Available(());
 
-/// A tool's command: the program and its arguments, exactly the environment
-/// it gets, and the directory it starts in.
+/// A tool's isolated entry and the environment data for its final command.
+/// Launchers use a separate, controlled environment throughout setup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Command {
     pub argv: Vec<String>,
-    pub env: HashMap<String, String>,
+    /// Read by the exec entry after isolation, never installed in a launcher.
+    /// File tools have no command environment.
+    pub env: Option<HashMap<String, String>>,
     /// `None` starts it in the App Server's own working directory, the one
     /// against which the availability check and Codex's helper both resolve
     /// `PATH`, so that the check judges the `bwrap` the launch runs; a task
@@ -63,6 +67,9 @@ pub struct Command {
 /// The descriptor on which a launched command finds the descriptor that its
 /// launch passes it.
 pub const PASSED_DESCRIPTOR: RawFd = 3;
+
+/// The exec entry's anonymous command-environment carrier.
+pub const ENVIRONMENT_DESCRIPTOR: RawFd = 4;
 
 /// A started sandboxed command, with its stdin, stdout and stderr piped. Its
 /// first process leads its own session and process group, so that a signal
@@ -172,6 +179,28 @@ impl Isolation {
         tetral: &Path,
         passed: Option<OwnedFd>,
     ) -> Result<Process, LaunchError> {
+        let environment = command
+            .env
+            .as_ref()
+            .map(crate::env::command_environment_file)
+            .transpose()
+            .map_err(LaunchError::Spawn)?;
+        // Sources above both destinations cannot overwrite one another when
+        // pre_exec installs the launch-status and environment descriptors.
+        let duplicate = |fd: OwnedFd| {
+            rustix::io::fcntl_dupfd_cloexec(&fd, ENVIRONMENT_DESCRIPTOR + 1)
+                .map_err(|error| LaunchError::Spawn(error.into()))
+        };
+        let passed = passed.map(duplicate).transpose()?;
+        let environment = environment.map(OwnedFd::from).map(duplicate).transpose()?;
+        let mut launcher_environment = crate::env::launcher_environment(std::env::vars_os());
+        // A launcher without network cannot reach the test harness because
+        // seccomp refuses connect. Production builds have no harness value.
+        if permissions.profile().network_sandbox_policy().is_enabled()
+            && let Some((name, value)) = state::seams::harness_variable()
+        {
+            launcher_environment.insert(name.to_owned(), value.to_string_lossy().into_owned());
+        }
         let manager = SandboxManager::new();
         #[cfg(target_os = "linux")]
         let profile = &linux::launch_profile(permissions.profile());
@@ -197,7 +226,7 @@ impl Isolation {
                     program: program.into(),
                     args: argv.collect(),
                     cwd: start_uri,
-                    env: command.env,
+                    env: launcher_environment,
                     managed_network: None,
                     additional_permissions: None,
                 },
@@ -237,15 +266,17 @@ impl Isolation {
             child.arg0(arg0);
         }
         let passed_raw = passed.as_ref().map(AsRawFd::as_raw_fd);
+        let environment_raw = environment.as_ref().map(AsRawFd::as_raw_fd);
         let parent = rustix::process::getpid().as_raw_nonzero().get();
         // SAFETY: the closure runs between fork and exec and makes only
         // system calls, which allocate nothing.
         unsafe {
-            child.pre_exec(move || prepare_child(passed_raw, parent));
+            child.pre_exec(move || prepare_child(passed_raw, environment_raw, parent));
         }
         state::seams::count("process.spawn");
         let child = child.spawn().map_err(LaunchError::Spawn)?;
         drop(passed);
+        drop(environment);
         let pid = child
             .id()
             .ok_or_else(|| LaunchError::Spawn(io::Error::other("the command has no process ID")))?;
@@ -256,30 +287,34 @@ impl Isolation {
 /// The child's side of a launch, as Codex's pipe spawn prepares it: a new
 /// session, so that the command has no terminal and its process group is its
 /// own; on Linux, SIGTERM once the App Server `parent` ends; and no
-/// descriptor but its pipes and the passed one, at [`PASSED_DESCRIPTOR`].
-fn prepare_child(passed: Option<RawFd>, parent: libc::pid_t) -> io::Result<()> {
+/// descriptors but its pipes, launch status and optional environment data.
+fn prepare_child(
+    passed: Option<RawFd>,
+    environment: Option<RawFd>,
+    parent: libc::pid_t,
+) -> io::Result<()> {
     codex_utils_pty::process_group::detach_from_tty()?;
     codex_utils_pty::process_group::set_parent_death_signal(parent)?;
-    let kept = match passed {
-        Some(raw) => {
-            // SAFETY: `raw` is open in this process until exec; dup2 onto
-            // the passed descriptor clears its close-on-exec flag, and the
-            // same descriptor needs the flag cleared by hand.
-            let placed = unsafe {
-                if raw == PASSED_DESCRIPTOR {
-                    libc::fcntl(raw, libc::F_SETFD, 0)
-                } else {
-                    libc::dup2(raw, PASSED_DESCRIPTOR)
-                }
-            };
+    prepare_descriptors(passed, environment)
+}
+
+/// Installs the two private data channels without changing process identity.
+/// Both source descriptors have already been duplicated above destinations.
+fn prepare_descriptors(passed: Option<RawFd>, environment: Option<RawFd>) -> io::Result<()> {
+    close_on_exec_from(PASSED_DESCRIPTOR);
+    for (source, destination) in [
+        (passed, PASSED_DESCRIPTOR),
+        (environment, ENVIRONMENT_DESCRIPTOR),
+    ] {
+        if let Some(raw) = source {
+            // SAFETY: sources are open above the reserved destinations;
+            // dup2 installs one and clears its close-on-exec flag.
+            let placed = unsafe { libc::dup2(raw, destination) };
             if placed < 0 {
                 return Err(io::Error::last_os_error());
             }
-            PASSED_DESCRIPTOR
         }
-        None => PASSED_DESCRIPTOR - 1,
-    };
-    close_on_exec_from(kept + 1);
+    }
     Ok(())
 }
 
@@ -316,6 +351,84 @@ mod tests {
     use std::process::Command;
 
     use super::close_on_exec_from;
+
+    #[test]
+    fn command_environment_is_data_until_the_final_exec() {
+        let directory = tempfile::tempdir().unwrap();
+        let requested = std::collections::BTreeMap::from([
+            ("HANDOFF_VALUE".into(), "requested value".into()),
+            ("TERM".into(), "xterm".into()),
+            ("TETRAL_SECRET".into(), "excluded".into()),
+        ]);
+        let environment = crate::env::command_environment(
+            [("PATH".into(), "/usr/bin:/bin".into())],
+            Some(&requested),
+            directory.path(),
+        )
+        .unwrap();
+        let environment = crate::env::command_environment_file(&environment).unwrap();
+        let status = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .unwrap();
+        let environment =
+            rustix::io::fcntl_dupfd_cloexec(&environment, super::ENVIRONMENT_DESCRIPTOR + 1)
+                .unwrap();
+        let status =
+            rustix::io::fcntl_dupfd_cloexec(&status, super::ENVIRONMENT_DESCRIPTOR + 1).unwrap();
+        let environment_raw = environment.as_raw_fd();
+        let status_raw = status.as_raw_fd();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "isolation::tests::command_environment_child",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("TETRAL_ENVIRONMENT_TEST_CHILD", "1")
+            .env("LAUNCHER_ONLY", "launcher value")
+            .current_dir(directory.path());
+        // SAFETY: descriptor preparation makes only system calls and all
+        // source descriptors remain owned until the child has started.
+        unsafe {
+            command.pre_exec(move || {
+                super::prepare_descriptors(Some(status_raw), Some(environment_raw))
+            });
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("environment handoff complete"));
+    }
+
+    #[test]
+    fn command_environment_child() {
+        if std::env::var_os("TETRAL_ENVIRONMENT_TEST_CHILD").is_none() {
+            return;
+        }
+        assert!(std::env::var_os("HANDOFF_VALUE").is_none());
+        assert_eq!(std::env::var("LAUNCHER_ONLY").unwrap(), "launcher value");
+        let directory = std::env::current_dir().unwrap();
+        let script = r#"
+            test "$HANDOFF_VALUE" = 'requested value' &&
+            test "$TERM:$NO_COLOR:$PAGER:$GIT_PAGER" = 'dumb:1:cat:cat' &&
+            test "$TMPDIR" = "$PWD" &&
+            test -z "${LAUNCHER_ONLY+x}" &&
+            test -z "${TETRAL_SECRET+x}" &&
+            test -z "${TETRAL_ENVIRONMENT_TEST_CHILD+x}" &&
+            test ! -e /proc/self/fd/3 &&
+            test ! -e /proc/self/fd/4 &&
+            printf 'environment handoff complete\n'
+        "#;
+        let arguments = crate::child::exec::arguments(&directory, "/bin/sh", script);
+        let result = crate::child::run(&arguments[1..]);
+        panic!("the command entry returned {result:?}");
+    }
 
     /// Makes `close_range` fail with `EPERM` in this process, through a
     /// seccomp filter; it runs between fork and exec and allocates nothing.

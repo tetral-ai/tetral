@@ -33,6 +33,7 @@ tower-service.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "aws_lc_rs"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread"] }
 tracing-subscriber.workspace = true

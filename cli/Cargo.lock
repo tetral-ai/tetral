@@ -161,6 +161,7 @@ dependencies = [
  "serde_json",
  "session",
  "state",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
 ]
@@ -1259,6 +1260,7 @@ dependencies = [
  "observe",
  "protocol",
  "rand 0.10.3",
+ "rcgen",
  "reqwest 0.13.5",
  "rustls",
  "rustls-platform-verifier",
@@ -5739,6 +5741,7 @@ dependencies = [
  "serde",
  "serde_json",
  "state",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
 ]

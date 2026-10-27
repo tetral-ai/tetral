@@ -11,13 +11,12 @@
 //! `shutdown.checked`, and the end of the wait for the Connection owner is
 //! `shutdown.waiting`.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use connection::Connection;
 
 use crate::lifecycle::{Lifecycle, Listener};
-use crate::lock::RootLock;
+use crate::startup::SocketOwnership;
 
 /// The time after the trigger at which the shutdown stops waiting.
 pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
@@ -25,8 +24,7 @@ pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
 pub(crate) struct Sequence {
     /// The seam clock's time at which waiting stops.
     pub deadline: Duration,
-    pub socket: PathBuf,
-    pub lock: RootLock,
+    pub ownership: SocketOwnership,
     pub connection: Connection,
     pub listener: Option<Listener>,
 }
@@ -37,15 +35,17 @@ pub(crate) async fn run(sequence: Sequence, lifecycle: Lifecycle) {
         () = state::seams::sleep_until_counted(sequence.deadline, "shutdown.checked") => {}
     }
 
-    if let Some(listener) = sequence.listener {
+    if let Some(mut listener) = sequence.listener {
         let _ = listener.stop.send(());
         state::seams::count("shutdown.waiting");
         tokio::select! {
-            _ = listener.served => {}
-            () = state::seams::sleep_until_counted(sequence.deadline, "shutdown.checked") => {}
+            _ = &mut listener.served => {}
+            () = state::seams::sleep_until_counted(sequence.deadline, "shutdown.checked") => {
+                listener.served.abort();
+                let _ = listener.served.await;
+            }
         }
     }
-    let _ = std::fs::remove_file(&sequence.socket);
-    drop(sequence.lock);
+    drop(sequence.ownership);
     lifecycle.finished(sequence.deadline);
 }

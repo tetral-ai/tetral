@@ -161,7 +161,7 @@ impl<S: TaskStarter> SessionOwner<S> {
         let input = Input {
             cwd: binding.requested_cwd.as_str().into(),
             create_cwd: binding.create_cwd,
-            state_root: preparation.shared.paths.canonical.clone(),
+            state_root: preparation.shared.paths.canonical_utf8.clone(),
         };
         let mailbox = self.mailbox.clone();
         let done = move |output| {

@@ -11,7 +11,7 @@
 //! spawned probe unreaped.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -26,6 +26,20 @@ pub const PROBE_LIMIT: Duration = Duration::from_secs(5);
 
 /// The bytes of a probe's stdout that are read; its one line is far shorter.
 pub const OUTPUT_MAX_BYTES: u64 = 65_536;
+
+/// The production probe entry. On Linux this resolves to the process
+/// doing the spawn, so replacing or unlinking its installation cannot
+/// change the version used for a later directory check.
+pub fn probe_program() -> io::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(PathBuf::from("/proc/self/exe"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::env::current_exe()
+    }
+}
 
 /// A spawned probe. Dropping it kills the probe, as [`Probe::kill`] does.
 #[derive(Debug)]
@@ -59,6 +73,7 @@ pub fn spawn(
     output_max_bytes: u64,
     done: impl FnOnce(Option<Output>) + Send + 'static,
 ) -> io::Result<Probe> {
+    let line = serde_json::to_vec(input).map_err(io::Error::other)?;
     let mut command = tokio::process::Command::new(program);
     command
         .arg0(PROBE_NAME)
@@ -77,7 +92,6 @@ pub fn spawn(
         .and_then(|id| Pid::from_raw(i32::try_from(id).ok()?))
         .ok_or_else(|| io::Error::other("the spawned probe has no process ID"))?;
     state::seams::count("probe.spawn");
-    let line = serde_json::to_vec(input).expect("the probe's input encodes");
     let (stdin, stdout) = (child.stdin.take(), child.stdout.take());
     let (kill, mut killed) = oneshot::channel::<()>();
     tokio::spawn(async move {

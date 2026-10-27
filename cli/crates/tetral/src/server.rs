@@ -69,6 +69,9 @@ fn sdk_failed(error: sdk::Error) -> CommandError {
         sdk::Error::NotRunning => {
             CommandError::new(Code::ServerNotRunning, "no App Server owns the state root")
         }
+        sdk::Error::NotResponding => {
+            CommandError::new(Code::ServerNotResponding, error.to_string())
+        }
         other => CommandError::new(Code::IoFailed, other.to_string()),
     }
 }

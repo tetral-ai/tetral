@@ -127,8 +127,9 @@ pub(super) fn bwrap_candidates(tetral: &Path, cwd: &Path) -> Vec<PathBuf> {
 /// `current_user_can_modify` and `current_user_can_replace_child` do, whatever
 /// the profile; the availability check runs it on the App Server's `PATH`
 /// before any `bwrap`, and `tetral` as `codex-linux-sandbox` again before the
-/// launch, on the command's `PATH`, which Codex's lookup in `run_main` uses
-/// too.
+/// launch, on the same trusted launcher `PATH`, which Codex's lookup in
+/// `run_main` uses too. A task's requested PATH takes effect only at its
+/// isolated command exec.
 pub(super) fn planted_launcher() -> Option<String> {
     let search_path = std::env::var_os("PATH")?;
     let cwd = std::env::current_dir().ok()?;
@@ -316,6 +317,9 @@ pub(super) fn launch_profile(profile: &PermissionProfile) -> PermissionProfile {
             ));
         }
     }
+    // Added after the missing-path adjustment: these are existing host
+    // sockets, protected even when the task grants access to their parents.
+    super::host_ipc::deny_host_services(&mut adjusted);
     PermissionProfile::Managed {
         file_system: ManagedFileSystemPermissions::Restricted {
             entries: adjusted,

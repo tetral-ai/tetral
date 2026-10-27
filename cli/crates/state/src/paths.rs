@@ -3,7 +3,7 @@
 use std::ffi::OsStr;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
@@ -62,6 +62,48 @@ impl StateRoot {
             Err(error) => Err(error),
         }
     }
+
+    /// Resolves existing components and projects only the directories that
+    /// `configure` would create. Existing symbolic links and `..` are
+    /// resolved by the filesystem; a `..` below a missing component leaves
+    /// that prospective directory before resolution resumes. Nothing is
+    /// created, including when an existing link has a missing target.
+    pub fn resolved_for_creation(&self) -> io::Result<PathBuf> {
+        let mut resolved = PathBuf::new();
+        let mut missing = 0_usize;
+        for component in self.0.components() {
+            if missing > 0 {
+                match component {
+                    Component::ParentDir => {
+                        resolved.pop();
+                        missing -= 1;
+                    }
+                    Component::Normal(name) => {
+                        resolved.push(name);
+                        missing += 1;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            resolved.push(component.as_os_str());
+            match resolved.canonicalize() {
+                Ok(path) => resolved = path,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    // An existing dangling link cannot be a directory that
+                    // configure creates. Preserve its resolution failure.
+                    match std::fs::symlink_metadata(&resolved) {
+                        Err(missing_error) if missing_error.kind() == io::ErrorKind::NotFound => {
+                            missing = 1;
+                        }
+                        _ => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(resolved)
+    }
 }
 
 /// The directory of the Session `session_id` under the root's canonical path
@@ -80,6 +122,12 @@ const SOCKET_PARENT: &str = "/private/tmp";
 /// `/tmp/tetral-sock-<uid>` on Linux and `/private/tmp/tetral-sock-<uid>` on
 /// macOS, `<uid>` being the process's real user ID.
 pub fn socket_dir() -> PathBuf {
+    #[cfg(feature = "test-seams")]
+    if let Some(parent) = std::env::var_os(TEST_SOCKET_PARENT_VARIABLE) {
+        return TestSocketContext::new(Path::new(&parent))
+            .expect("the test socket parent must be an existing absolute directory")
+            .socket_dir();
+    }
     socket_dir_of(rustix::process::getuid().as_raw())
 }
 
@@ -96,20 +144,80 @@ const SOCKET_NAME_DIGEST_BYTES: usize = 8;
 /// root's canonical path, resolved now; `None` when the root does not exist.
 /// The path is at most 57 bytes, within every platform's socket path limit.
 pub fn socket_path(root: &StateRoot) -> io::Result<Option<PathBuf>> {
+    socket_path_in(root, &socket_dir())
+}
+
+fn socket_path_in(root: &StateRoot, directory: &Path) -> io::Result<Option<PathBuf>> {
     let Some(canonical) = root.canonical()? else {
         return Ok(None);
     };
-    let uid = rustix::process::getuid().as_raw();
-    Ok(Some(socket_path_of(uid, canonical.as_os_str().as_bytes())))
+    Ok(Some(socket_path_under(
+        directory,
+        canonical.as_os_str().as_bytes(),
+    )))
 }
 
+#[cfg(test)]
 fn socket_path_of(uid: u32, canonical: &[u8]) -> PathBuf {
+    socket_path_under(&socket_dir_of(uid), canonical)
+}
+
+fn socket_path_under(directory: &Path, canonical: &[u8]) -> PathBuf {
     let digest = Sha256::digest(canonical);
     let name: String = digest[..SOCKET_NAME_DIGEST_BYTES]
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    socket_dir_of(uid).join(format!("{name}.sock"))
+    directory.join(format!("{name}.sock"))
+}
+
+/// The test build's socket-parent override, supplied only to child processes.
+#[cfg(feature = "test-seams")]
+pub const TEST_SOCKET_PARENT_VARIABLE: &str = "TETRAL_TEST_SOCKET_PARENT";
+
+/// An explicit test context for in-process clients. It changes only the
+/// parent of `S`; the uid directory, root digest and permission checks stay
+/// the same. Production builds expose neither this type nor the override.
+#[cfg(feature = "test-seams")]
+#[derive(Debug, Clone)]
+pub struct TestSocketContext {
+    parent: PathBuf,
+}
+
+#[cfg(feature = "test-seams")]
+impl TestSocketContext {
+    pub fn new(parent: &Path) -> io::Result<Self> {
+        if !parent.is_absolute() || !parent.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the test socket parent must be an existing absolute directory",
+            ));
+        }
+        let parent = parent.canonicalize()?;
+        // The longest uid and socket name must fit macOS's sockaddr_un too.
+        if parent.as_os_str().len() + "/tetral-sock-4294967295/0000000000000000.sock".len() >= 104 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the test socket parent is too long",
+            ));
+        }
+        Ok(Self { parent })
+    }
+
+    pub fn parent(&self) -> &Path {
+        &self.parent
+    }
+
+    pub fn socket_dir(&self) -> PathBuf {
+        self.parent.join(format!(
+            "tetral-sock-{}",
+            rustix::process::getuid().as_raw()
+        ))
+    }
+
+    pub fn socket_path(&self, root: &StateRoot) -> io::Result<Option<PathBuf>> {
+        socket_path_in(root, &self.socket_dir())
+    }
 }
 
 #[cfg(test)]

@@ -14,6 +14,7 @@ pub mod probe_slots;
 pub mod protocol_error;
 pub mod ready;
 pub mod report_deadline;
+mod report_memory;
 pub mod sessions;
 pub mod staging;
 pub mod status;

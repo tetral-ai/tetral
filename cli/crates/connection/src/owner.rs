@@ -29,7 +29,6 @@
 //! until its own deadline.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -146,8 +145,6 @@ pub struct Config {
     pub ready: ReadyFields,
     /// The App Server's start on the seam clock.
     pub started: Duration,
-    /// `outbox/` in the state root, emptied at App Server start.
-    pub outbox: PathBuf,
     /// Creates the Session binding owner of each Session.
     pub sessions: Arc<dyn SessionFactory>,
     pub times: Times,
@@ -205,6 +202,7 @@ pub(crate) enum Message {
 #[derive(Debug, Clone)]
 pub struct Connection {
     mailbox: mpsc::UnboundedSender<Message>,
+    status: tokio::sync::watch::Receiver<ConnectionStatus>,
 }
 
 impl std::fmt::Debug for Message {
@@ -221,7 +219,6 @@ impl Connection {
         let (events, reports) = mpsc::unbounded_channel();
         let transport = Arc::new(Transport::new(&config.server_url));
         let outbox = Outbox::spawn(OutboxConfig {
-            directory: config.outbox.clone(),
             transport: transport.clone(),
             key: config.credential.key.clone(),
             times: config.times.outbox,
@@ -239,8 +236,17 @@ impl Connection {
             config.times.records_max,
         );
         let owner = Owner::new(config, transport, outbox, owners, mailbox.clone());
-        tokio::spawn(own(owner, inbox, reports));
-        Connection { mailbox }
+        let (status, snapshot) = tokio::sync::watch::channel(owner.status());
+        tokio::spawn(own(owner, inbox, reports, status));
+        Connection {
+            mailbox,
+            status: snapshot,
+        }
+    }
+
+    /// The last status published by the owner, without waiting for its mailbox.
+    pub fn status_snapshot(&self) -> ConnectionStatus {
+        self.status.borrow().clone()
     }
 
     pub async fn status(&self) -> ConnectionStatus {
@@ -295,8 +301,10 @@ async fn own(
     mut owner: Owner,
     mut inbox: mpsc::UnboundedReceiver<Message>,
     mut reports: mpsc::UnboundedReceiver<OutboxEvent>,
+    status: tokio::sync::watch::Sender<ConnectionStatus>,
 ) {
     owner.start();
+    status.send_replace(owner.status());
     loop {
         let wake = owner.wake_in();
         let message = tokio::select! {
@@ -313,6 +321,7 @@ async fn own(
             owner.handle(message);
         }
         owner.check();
+        status.send_replace(owner.status());
     }
 }
 
@@ -352,8 +361,6 @@ struct Held {
     deadline: Option<Duration>,
     /// Until the ready ACK.
     registration: Option<Registration>,
-    /// Whether the confirmed heartbeat came.
-    confirmed: bool,
     /// The number of the last upstream message, its `message_id` `c<n>`.
     messages: u64,
     heartbeats: Heartbeats,
@@ -389,6 +396,8 @@ struct Registration {
 /// An upstream message that is sent again, with its `message_id` and first
 /// send time, until it is answered.
 struct Outgoing {
+    /// The stream that delivered the event, preserved through retries.
+    stream: u64,
     message_id: Id,
     body: Vec<u8>,
     first_send: Duration,
@@ -400,11 +409,15 @@ struct Outgoing {
 #[derive(Clone)]
 enum Operation {
     Ready,
-    Heartbeat {
-        seq: i64,
-        message_id: Id,
-        first_send: Duration,
-    },
+    Heartbeat(HeartbeatRequest),
+}
+
+#[derive(Clone)]
+struct HeartbeatRequest {
+    seq: i64,
+    message_id: Id,
+    first_send: Duration,
+    stream: u64,
 }
 
 struct Pending {
@@ -742,11 +755,12 @@ impl Owner {
             && heartbeat.retry_at.is_some_and(|at| now >= at)
         {
             heartbeat.retry_at = None;
-            let operation = Operation::Heartbeat {
+            let operation = Operation::Heartbeat(HeartbeatRequest {
                 seq: heartbeat.seq,
                 message_id: heartbeat.message_id.clone(),
                 first_send: heartbeat.first_send,
-            };
+                stream: heartbeat.stream,
+            });
             let body = heartbeat.body.clone();
             self.post(&held.id, HEARTBEAT_PATH, operation, body);
         }
@@ -974,7 +988,6 @@ impl Owner {
             stream: Stream::Live { stream, task },
             deadline: None,
             registration: None,
-            confirmed: false,
             messages: 0,
             heartbeats: Heartbeats::default(),
             heartbeat: None,
@@ -985,6 +998,7 @@ impl Owner {
         let message_id = held.next_message_id();
         let built = ready::ready(&self.ready, &held.id, message_id.clone(), now);
         let ready = ready::checked(&built, &held.id, &message_id).map(|body| Outgoing {
+            stream,
             message_id,
             body,
             first_send: now,
@@ -1168,10 +1182,22 @@ impl Owner {
                 Phase::Held(held)
             }
             OutboxEvent::Refused { error, .. } => self.request_refused(held, &error, now),
+            OutboxEvent::ResourceExhausted { .. } => {
+                observe::error!(
+                    "report.memory_exhausted",
+                    connection.id = observe::Id(held.id.as_str()),
+                    error.code = observe::Code("report_memory_exhausted")
+                );
+                self.end(Phase::Held(held), now)
+            }
         }
     }
 
     fn heartbeat_event(&mut self, held: &mut Held, event: Id, seq: PositiveInt, now: Duration) {
+        let Stream::Live { stream, .. } = &held.stream else {
+            return;
+        };
+        let stream = *stream;
         if !held.heartbeats.admit(&event, seq.get()) {
             return;
         }
@@ -1187,13 +1213,15 @@ impl Owner {
         let Some(body) = ready::checked(&message, &held.id, &message_id) else {
             return;
         };
-        let operation = Operation::Heartbeat {
+        let operation = Operation::Heartbeat(HeartbeatRequest {
             seq: seq.get(),
             message_id: message_id.clone(),
             first_send: now,
-        };
+            stream,
+        });
         self.post(&held.id, HEARTBEAT_PATH, operation, body.clone());
         held.heartbeat = Some(Outgoing {
+            stream,
             message_id,
             body,
             first_send: now,
@@ -1239,14 +1267,9 @@ impl Owner {
         match (answer, pending.operation) {
             (Answer::Refused(error), _) => self.request_refused(held, &error, now),
             (answer, Operation::Ready) => self.ready_answered(held, &answer, now),
-            (
-                answer,
-                Operation::Heartbeat {
-                    seq,
-                    message_id,
-                    first_send,
-                },
-            ) => self.heartbeat_answered(held, &answer, seq, &message_id, first_send, now),
+            (answer, Operation::Heartbeat(heartbeat)) => {
+                self.heartbeat_answered(held, &answer, heartbeat, now)
+            }
         }
     }
 
@@ -1302,13 +1325,17 @@ impl Owner {
         &mut self,
         mut held: Box<Held>,
         answer: &Answer,
-        seq: i64,
-        message_id: &Id,
-        first_send: Duration,
+        heartbeat: HeartbeatRequest,
         now: Duration,
     ) -> Phase {
+        let HeartbeatRequest {
+            seq,
+            message_id,
+            first_send,
+            stream,
+        } = heartbeat;
         let granted = match answer {
-            Answer::Success(body) => ready::grant(body, &held.id, message_id, first_send, now),
+            Answer::Success(body) => ready::grant(body, &held.id, &message_id, first_send, now),
             _ => None,
         };
         let latest = held.heartbeats.is_latest(seq);
@@ -1320,8 +1347,11 @@ impl Owner {
                 if held.registration.is_none() && held.heartbeats.acknowledge(seq) {
                     held.deadline = Some(deadline);
                     state::seams::count("connection.granted");
-                    if !held.confirmed {
-                        held.confirmed = true;
+                    // A lease ACK may arrive after its stream ended. It can
+                    // extend the lease, but only a heartbeat received on the
+                    // current live stream confirms this recovery.
+                    if matches!(&held.stream, Stream::Live { stream: current, .. } if *current == stream)
+                    {
                         self.backoff.reset();
                     }
                 }
@@ -1659,6 +1689,312 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+
+    struct NoSessions;
+
+    impl SessionFactory for NoSessions {
+        fn create(
+            &self,
+            _: SafeId,
+            _: Arc<dyn protocol::ports::ConnectionPort>,
+            _: Arc<dyn ReportSink>,
+        ) -> Arc<dyn protocol::ports::SessionHandle> {
+            panic!("this connection fixture admits no Session")
+        }
+        fn unbound_tool(&self, _: ToolCall, _: Arc<dyn ReportSink>) {
+            panic!("this connection fixture admits no tools")
+        }
+    }
+
+    fn owner_with_budget(
+        budget: Arc<crate::report_memory::Budget>,
+    ) -> (Owner, mpsc::UnboundedReceiver<OutboxEvent>) {
+        owner_at(budget, "http://127.0.0.1:1")
+    }
+
+    fn owner_at(
+        budget: Arc<crate::report_memory::Budget>,
+        server_url: &str,
+    ) -> (Owner, mpsc::UnboundedReceiver<OutboxEvent>) {
+        let bootstrap = protocol::bootstrap::Bootstrap::decode(
+            br#"{"server_url":"http://127.0.0.1:1","instance_id":"inst_a","credential_id":"cred_a","connection_key":"tetral_ck_a","expires_at":"2099-01-01T00:00:00Z"}"#,
+        ).unwrap();
+        let config = Config {
+            server_url: server_url.into(),
+            instance_id: Id::new("inst_a").unwrap(),
+            credential: Credential {
+                credential_id: Id::new("cred_a").unwrap(),
+                key: bootstrap.connection_key.clone(),
+                expires_at: bootstrap.expires_at,
+            },
+            ready: ReadyFields {
+                cli_version: serde_json::from_value(json!("0.1.0")).unwrap(),
+                capabilities: serde_json::from_value(
+                    json!({"session_preparation": true, "drives": {"mount": false}}),
+                )
+                .unwrap(),
+            },
+            started: Duration::ZERO,
+            sessions: Arc::new(NoSessions),
+            times: Times::default(),
+        };
+        let transport = Arc::new(Transport::new(&config.server_url));
+        let (events, reports) = mpsc::unbounded_channel();
+        let outbox = Outbox::with_budget(
+            OutboxConfig {
+                transport: transport.clone(),
+                key: bootstrap.connection_key,
+                times: OutboxTimes::default(),
+                clock: Clock::seams(),
+                events,
+            },
+            budget,
+        );
+        let (mailbox, _inbox) = mpsc::unbounded_channel();
+        let owners = Owners::new(
+            config.sessions.clone(),
+            Arc::new(Port {
+                mailbox: mailbox.clone(),
+            }),
+            Arc::new(outbox.clone()),
+            128,
+        );
+        let mut owner = Owner::new(config, transport, outbox, owners, mailbox);
+        owner.backoff = Backoff::new(BASE_START, BASE_MAX, || 0.0);
+        (owner, reports)
+    }
+
+    fn held(stream: u64) -> (Box<Held>, tokio::task::JoinHandle<()>) {
+        let task = tokio::spawn(std::future::pending());
+        (
+            Box::new(Held {
+                id: Id::new("conn_a").unwrap(),
+                stream: Stream::Live {
+                    stream,
+                    task: task.abort_handle(),
+                },
+                deadline: Some(Duration::from_secs(300)),
+                registration: None,
+                messages: 0,
+                heartbeats: Heartbeats::default(),
+                heartbeat: None,
+                ledger: Ledger::new(ledger::Limits::default()),
+                routed: HashSet::new(),
+                event_max_bytes: crate::stream::TOOL_EVENT_MAX_BYTES,
+            }),
+            task,
+        )
+    }
+
+    fn heartbeat_ack(seq: i64, stream: u64) -> (HeartbeatRequest, Answer) {
+        let message_id = Id::new(format!("heartbeat_{seq}")).unwrap();
+        let answer = Answer::Success(
+            serde_json::to_vec(&json!({
+                "connection_id": "conn_a", "message_id": message_id,
+                "accepted": true, "valid_for_ms": 45_000,
+            }))
+            .unwrap(),
+        );
+        (
+            HeartbeatRequest {
+                seq,
+                message_id,
+                first_send: Duration::ZERO,
+                stream,
+            },
+            answer,
+        )
+    }
+
+    #[tokio::test]
+    async fn each_resumed_streams_own_heartbeat_resets_backoff_and_old_acks_do_not() {
+        let (mut owner, _) = owner_with_budget(crate::report_memory::Budget::new(512, 512));
+        for stream in 1..=3 {
+            // Earlier failures have accumulated a longer delay.
+            for _ in 0..3 {
+                owner.backoff.next_wait();
+            }
+            let (held, task) = held(stream);
+            let (heartbeat, answer) = heartbeat_ack(stream as i64, stream);
+            let phase = owner.heartbeat_answered(held, &answer, heartbeat, Duration::from_secs(1));
+            let Phase::Held(held) = owner.stream_ended(phase, stream, Duration::from_secs(2))
+            else {
+                panic!("held connection");
+            };
+            assert!(matches!(held.stream, Stream::Waiting { at } if at == Duration::from_secs(3)));
+            task.abort();
+        }
+        owner.backoff.reset();
+        assert_eq!(owner.backoff.next_wait(), Duration::from_secs(1));
+        assert_eq!(owner.backoff.next_wait(), Duration::from_secs(2));
+        let (held, task) = held(10);
+        let (old, answer) = heartbeat_ack(1, 9);
+        let Phase::Held(held) =
+            owner.heartbeat_answered(held, &answer, old, Duration::from_secs(1))
+        else {
+            panic!("held connection");
+        };
+        assert_eq!(
+            held.deadline,
+            Some(Duration::from_secs(45)),
+            "old valid ACK still grants its lease"
+        );
+        let Phase::Held(held) = owner.stream_ended(Phase::Held(held), 10, Duration::from_secs(2))
+        else {
+            panic!("held connection");
+        };
+        assert!(
+            matches!(held.stream, Stream::Waiting { at } if at == Duration::from_secs(6)),
+            "the old ACK did not reset the four-second recovery wait"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_real_final_report_ack_releases_only_its_instruction_from_the_owner_ledger() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (release, released) = oneshot::channel();
+        let (received, body_received) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            let mut length = 0;
+            while stream.read_line(&mut line).await.unwrap() > 2 {
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length: ") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+                line.clear();
+            }
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).await.unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            received.send(()).unwrap();
+            released.await.unwrap();
+            let ack = json!({"connection_id": body["connection_id"], "message_id": body["message_id"], "accepted": true}).to_string();
+            stream
+                .get_mut()
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{ack}",
+                        ack.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let (mut owner, mut events) = owner_at(crate::report_memory::Budget::new(4_096, 512), &url);
+        let (held, stream_task) = held(1);
+        // A prepare with readable identities but a missing cwd reaches the
+        // ledger, then receives the normal invalid_input final report.
+        let first = message(
+            "session.prepare",
+            "msg_first",
+            json!({
+                "session_id": "sess_a", "binding_id": "bind_a",
+            }),
+        );
+        let other = close("msg_other", "bind_b");
+        let connection = held.id.clone();
+        owner
+            .outbox
+            .connection_started(1, connection.clone(), false);
+        owner.phase = Phase::Held(held);
+        owner.handle(Message::Event {
+            stream: 1,
+            data: first.data.clone(),
+        });
+        owner.handle(Message::Event {
+            stream: 1,
+            data: other.data.clone(),
+        });
+        tokio::time::timeout(Duration::from_secs(2), body_received)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            events.try_recv().is_err(),
+            "receiving the body alone does not acknowledge its instruction"
+        );
+        let Phase::Held(held) = &owner.phase else {
+            panic!("held connection");
+        };
+        assert_eq!(held.ledger.len(), 2);
+        release.send(()).unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&event, OutboxEvent::FinalAcked { instruction, .. } if *instruction == first.envelope.message_id)
+        );
+        owner.handle(Message::Outbox(event));
+        let Phase::Held(held) = &mut owner.phase else {
+            panic!("held connection");
+        };
+        assert_eq!(held.ledger.len(), 1);
+        assert_eq!(
+            held.ledger
+                .seen(&first.envelope.message_id, &first.fingerprint, 1),
+            Seen::New
+        );
+        assert_eq!(
+            held.ledger
+                .seen(&other.envelope.message_id, &other.fingerprint, 1),
+            Seen::Duplicate
+        );
+        server.await.unwrap();
+        stream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn reserve_exhaustion_reaches_logical_connection_release() {
+        let budget = crate::report_memory::Budget::new(512, 0);
+        let (mut owner, mut reports) = owner_with_budget(budget.clone());
+        let (held, stream_task) = held(1);
+        let connection = held.id.clone();
+        owner.last_held = Some(connection.clone());
+        owner
+            .outbox
+            .connection_started(1, connection.clone(), false);
+        owner.phase = Phase::Held(held);
+        let report =
+            protocol_error::report(connection.clone(), ProtocolErrorKind::Unparseable, None);
+        owner.outbox.submit(report);
+        let witnesses = budget.witnesses();
+        assert_eq!(witnesses.len(), 1);
+        let report = Submission::new(connection.clone(), |connection_id, message_id| {
+            protocol::tool::ProtocolErrorReport {
+                protocol_version: Default::default(),
+                connection_id,
+                message_id,
+                request_message_id: None,
+                error: protocol::tool::ProtocolError {
+                    code: protocol::tool::ProtocolErrorCode::InvalidMessage,
+                    message: "x".repeat(1_000),
+                },
+            }
+        });
+        owner.outbox.submit(report);
+        let event = reports.recv().await.unwrap();
+        assert!(matches!(event, OutboxEvent::ResourceExhausted { .. }));
+        owner.handle(Message::Outbox(event));
+        assert!(
+            matches!(&owner.phase, Phase::Waiting { kind: AttemptKind::Fresh { previous: Some(previous) }, .. } if *previous == connection)
+        );
+        assert!(stream_task.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while witnesses[0].upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("ended connection releases pending and transport body owners");
+        assert_eq!(budget.used(), [0, 0]);
+    }
 
     fn message(kind: &str, message_id: &str, payload: Value) -> SessionMessage {
         let data = json!({
