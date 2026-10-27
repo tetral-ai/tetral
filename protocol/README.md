@@ -54,6 +54,13 @@ a rule of this README, and an invalid request adds `error`, the `status` and
 
 The protocol has five parts:
 
+All JSON readers enforce at most 127 nested objects or arrays in the complete
+message. The outer container is level one; strings and scalars add no level.
+Envelope fields and unknown fields share this limit. It applies independently
+of byte limits and is enforced before typed decoding, including fields that
+typed decoding ignores. Senders account for envelope wrapping when validating
+an accepted payload; they reject excessive input rather than truncating it.
+
 - [Client connection](#client-connection): the stream, ready, heartbeats,
   credentials, Session preparation and close, and errors.
 - [Tool execution](#tool-execution): tool instructions, `sandbox_policy`,

@@ -94,8 +94,11 @@ pub const REPLACEMENT_PREFIX: &str = ".replace-";
 
 /// Replaces `path` with `bytes`: a temporary file of mode `0600` in the same
 /// directory is written and synced, renamed over `path`, and the directory is
-/// synced, so that a reader sees the old or the new bytes and a failure leaves
-/// `path` as it was; a symbolic link at `path` is replaced, never followed.
+/// synced, so a reader opening the path sees complete old or new bytes.
+/// Failures before rename leave the target unchanged; a failure opening or
+/// syncing the parent after rename leaves the new target visible without
+/// confirmed durability. There is no rollback. A symbolic link at `path` is
+/// replaced, never followed.
 pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), IoFailure> {
     let directory = path.parent().unwrap_or(Path::new("/"));
     let mut temporary = tempfile::Builder::new()
@@ -140,4 +143,23 @@ pub fn remove_interrupted_replacements(directory: &Path) -> Result<(), IoFailure
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn replacement_keeps_open_readers_on_the_complete_old_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("configuration");
+        fs::write(&path, b"old complete contents").unwrap();
+        let mut old = fs::File::open(&path).unwrap();
+        replace(&path, b"new contents").unwrap();
+        let mut contents = Vec::new();
+        old.read_to_end(&mut contents).unwrap();
+        assert_eq!(contents, b"old complete contents");
+        assert_eq!(fs::read(&path).unwrap(), b"new contents");
+    }
 }

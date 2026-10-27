@@ -8,8 +8,9 @@
 
 use std::fmt;
 
-/// Objects and arrays nested deeper than this are rejected. `serde_json`, the
-/// typed decoder, refuses one level more, so both passes accept the same input.
+/// Maximum object/array nesting in the complete JSON value, including its
+/// envelope and unknown fields. The outer container is level one; scalars
+/// and strings add no level. This also fits the typed decoder's limit.
 pub const MAX_NESTING: usize = 127;
 
 /// Why the strict pass rejected the input, with the byte offset where it did.

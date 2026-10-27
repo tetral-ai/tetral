@@ -46,6 +46,24 @@ func TestTheStrictReaderRefusesAmbiguousJSON(t *testing.T) {
 	}
 }
 
+func TestUnknownFieldsShareTheEnvelopesNestingBudget(t *testing.T) {
+	for _, arrays := range []int{126, 127} {
+		nested := strings.Repeat("[", arrays) + "0" + strings.Repeat("]", arrays)
+		message := []byte(`{"protocol_version":1,"connection_id":"c","message_id":"m","request_message_id":"r","heartbeat_seq":1,"extension":` + nested + `}`)
+		decoded, err := Decode[Heartbeat](message)
+		if arrays == 126 {
+			if err != nil || decoded.HeartbeatSeq != 1 {
+				t.Fatalf("127 total levels: %+v, %v", decoded, err)
+			}
+		} else {
+			var refused *DecodeError
+			if !errors.As(err, &refused) || refused.Kind != Strict || refused.Strict.Kind != TooDeep {
+				t.Fatalf("128 total levels: %v", err)
+			}
+		}
+	}
+}
+
 func TestTheDecoderReadsThroughTheStrictPassAndKeepsIntegersExact(t *testing.T) {
 	heartbeat := func(seq string) []byte {
 		return []byte(`{"protocol_version":1,"connection_id":"c","message_id":"m","request_message_id":"r","heartbeat_seq":` + seq + `}`)

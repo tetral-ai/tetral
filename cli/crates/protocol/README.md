@@ -14,7 +14,9 @@ description, schemas and fixtures are in `protocol/` at the repository root.
   over the raw bytes, which refuses a repeated member name, a `\u` escape of
   a lone surrogate, a number that is not finite as a 64-bit float, an
   integer outside the signed 64-bit range, and objects and arrays nested
-  deeper than `strict::MAX_NESTING` (127) levels; typed decoding; then the
+  deeper than `strict::MAX_NESTING` (127) levels in the complete message,
+  including its envelope and unknown fields (outer container is level one;
+  strings and scalars add no level); typed decoding; then the
   rules of `Message::check`. `decode_replaced` replaces a member before
   typed decoding, for a reader that judges that member by its own rules,
   while `Message::check` still measures the text as read.

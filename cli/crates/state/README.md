@@ -23,7 +23,15 @@ seams.
   state-root lock removes the temporary files that an interrupted replacement
   left (`files::remove_interrupted_replacements`). Every operating-system
   failure under the root is an `IoFailure` naming its path.
-- An unknown member of `config.toml` is ignored (`config::Config`).
+- An unknown member of `config.toml` is ignored (`config::Config`). Configure
+  encodes the complete merged configuration and checks its 65,536-byte limit
+  before replacing either file. The same encoded bytes are then written.
+  An app field that cannot fit by itself is `invalid_arguments`; an oversized
+  merged configuration is `invalid_bootstrap`.
+- Atomic replacement keeps old content only when failure precedes rename.
+  Parent-directory open or sync failure after rename leaves new content
+  visible with unconfirmed durability. Credentials and configuration are
+  separate replacements, not a two-file transaction.
 - Every timer and deadline of the CLI reads `seams::now`, a clock that counts
   the time the machine sleeps, never `std::time::Instant` (`seams`). A task
   waits for a deadline with `seams::sleep_until`, which reads the clock again

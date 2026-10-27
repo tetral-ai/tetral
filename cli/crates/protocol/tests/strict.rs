@@ -82,6 +82,24 @@ fn the_strict_pass_and_the_typed_decoder_accept_the_same_nesting() {
 }
 
 #[test]
+fn unknown_fields_share_the_envelopes_nesting_budget() {
+    for (arrays, accepted) in [(126, true), (127, false)] {
+        let nested = "[".repeat(arrays) + "0" + &"]".repeat(arrays);
+        let message = format!(
+            r#"{{"protocol_version":1,"connection_id":"c","message_id":"m","request_message_id":"r","heartbeat_seq":1,"extension":{nested}}}"#
+        );
+        let decoded = decode::<Heartbeat>(message.as_bytes());
+        if accepted {
+            assert_eq!(decoded.unwrap().heartbeat_seq.get(), 1);
+        } else {
+            assert!(
+                matches!(decoded, Err(DecodeError::Strict(error)) if error.kind == StrictErrorKind::TooDeep)
+            );
+        }
+    }
+}
+
+#[test]
 fn the_decoder_reads_through_the_strict_pass_and_keeps_integers_exact() {
     let heartbeat = |seq: &str| {
         format!(

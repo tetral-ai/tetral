@@ -69,10 +69,6 @@ fn commit(
     {
         return Err(app_mismatch());
     }
-    credentials::replace(root, &bootstrap.encode()).map_err(io_failed)?;
-    if !reached("configure.credentials_replaced") {
-        return Ok(());
-    }
     let config = Config {
         app: app.to_owned(),
         server_url: bootstrap.server_url.as_str().to_owned(),
@@ -82,7 +78,14 @@ fn commit(
             .is_some_and(|existing| existing.drives_enabled),
         computer_use: existing.and_then(|existing| existing.computer_use),
     };
-    config::replace(root, &config).map_err(io_failed)?;
+    let encoded = config
+        .encode()
+        .map_err(|error| CommandError::new(Code::InvalidBootstrap, error.to_string()))?;
+    credentials::replace(root, &bootstrap.encode()).map_err(io_failed)?;
+    if !reached("configure.credentials_replaced") {
+        return Ok(());
+    }
+    encoded.replace(root).map_err(io_failed)?;
     reached("configure.config_replaced");
     Ok(())
 }
@@ -116,6 +119,73 @@ mod tests {
         Old,
         New,
         Mismatch,
+    }
+
+    #[test]
+    fn configuration_capacity_is_checked_before_replacing_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = StateRoot::new(directory.path().join("root").as_os_str()).unwrap();
+        files::create_private_dirs(&root.join(paths::RUN)).unwrap();
+        let _held = lock::acquire(&root).unwrap();
+        let old = bootstrap(
+            "https://example.com",
+            "old",
+            "old",
+            "tetral_ck_old",
+            "2027-01-01T00:00:00Z",
+        );
+        commit(&root, "app", &old, &mut |_| true).unwrap();
+        let before_config = std::fs::read(root.join(paths::CONFIG)).unwrap();
+        let before_credentials = credentials::read(&root).unwrap();
+        let oversized = bootstrap(
+            "https://example.com",
+            &"\u{7f}".repeat(12_000),
+            "new",
+            "tetral_ck_new",
+            "2027-01-01T00:00:00Z",
+        );
+        let error = commit(&root, "app", &oversized, &mut |_| true).unwrap_err();
+        assert_eq!(error.code, Code::InvalidBootstrap);
+        assert!(!error.message.contains("tetral_ck_"));
+        assert_eq!(
+            std::fs::read(root.join(paths::CONFIG)).unwrap(),
+            before_config
+        );
+        assert_eq!(credentials::read(&root).unwrap(), before_credentials);
+        assert_eq!(configuration::read(&root).unwrap().credentials, old);
+    }
+
+    #[test]
+    fn configuration_commit_rechecks_the_app_from_the_locked_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = StateRoot::new(directory.path().join("root").as_os_str()).unwrap();
+        files::create_private_dirs(&root.join(paths::RUN)).unwrap();
+        let _held = lock::acquire(&root).unwrap();
+        let old = bootstrap(
+            "https://example.com",
+            "old",
+            "old",
+            "tetral_ck_old",
+            "2027-01-01T00:00:00Z",
+        );
+        commit(&root, "app", &old, &mut |_| true).unwrap();
+        let credentials_before = credentials::read(&root).unwrap();
+        let mut config_before = Vec::new();
+        let error = commit(&root, "app", &old, &mut |stage| {
+            assert_eq!(stage, "configure.locked");
+            let mut current = config::read(&root).unwrap().unwrap();
+            current.app = "other-app".into();
+            current.encode().unwrap().replace(&root).unwrap();
+            config_before = std::fs::read(root.join(paths::CONFIG)).unwrap();
+            true
+        })
+        .unwrap_err();
+        assert_eq!(error.code, Code::AppMismatch);
+        assert_eq!(
+            std::fs::read(root.join(paths::CONFIG)).unwrap(),
+            config_before
+        );
+        assert_eq!(credentials::read(&root).unwrap(), credentials_before);
     }
 
     #[test]

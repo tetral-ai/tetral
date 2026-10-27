@@ -77,6 +77,8 @@ pub enum BootstrapError {
     TooLarge { limit: usize },
     #[error("the bootstrap is not valid JSON: {0}")]
     Strict(#[from] StrictError),
+    #[error("the bootstrap is not valid JSON")]
+    InvalidJson,
     #[error("the bootstrap is not a JSON object")]
     NotAnObject,
     #[error("{member} is missing")]
@@ -116,8 +118,8 @@ impl Bootstrap {
             return Err(BootstrapError::TooLarge { limit: max_bytes });
         }
         strict::check(input)?;
-        let value: Value = serde_json::from_slice(input)
-            .expect("the strict pass accepts only what serde_json reads");
+        let value: Value =
+            serde_json::from_slice(input).map_err(|_| BootstrapError::InvalidJson)?;
         let Value::Object(members) = value else {
             return Err(BootstrapError::NotAnObject);
         };

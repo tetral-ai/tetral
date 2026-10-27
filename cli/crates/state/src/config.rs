@@ -77,7 +77,81 @@ fn parse(path: &Path, bytes: &[u8], max_bytes: usize) -> Result<Config, ConfigEr
     toml::from_str(text).map_err(|_| format())
 }
 
-pub fn replace(root: &StateRoot, config: &Config) -> Result<(), IoFailure> {
-    let text = toml::to_string(config).expect("a configuration always serializes");
-    files::replace(&root.join(paths::CONFIG), text.as_bytes())
+/// A complete configuration encoded and checked before any credential is replaced.
+pub struct EncodedConfig(String);
+
+#[derive(Debug, thiserror::Error)]
+pub enum EncodeError {
+    #[error(
+        "the bootstrap and existing local settings produce a configuration larger than 65,536 bytes"
+    )]
+    TooLarge,
+    #[error("the configuration cannot be encoded as TOML")]
+    Format,
+}
+
+impl Config {
+    pub fn encode(&self) -> Result<EncodedConfig, EncodeError> {
+        let text = toml::to_string(self).map_err(|_| EncodeError::Format)?;
+        if text.len() > CONFIG_MAX_BYTES {
+            return Err(EncodeError::TooLarge);
+        }
+        Ok(EncodedConfig(text))
+    }
+}
+
+impl EncodedConfig {
+    /// Writes exactly the bytes checked by `Config::encode`.
+    pub fn replace(&self, root: &StateRoot) -> Result<(), IoFailure> {
+        files::replace(&root.join(paths::CONFIG), self.0.as_bytes())
+    }
+}
+
+/// Whether the app field alone can fit in a readable configuration. TOML
+/// escaping counts toward the byte limit; no separate character limit applies.
+pub fn app_fits(app: &str) -> bool {
+    toml::to_string(&std::collections::BTreeMap::from([("app", app)]))
+        .is_ok_and(|text| text.len() <= CONFIG_MAX_BYTES)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoded_configuration_and_app_limits_count_toml_escaping() {
+        assert!(app_fits("app"));
+        assert!(!app_fits(&"\u{7f}".repeat(12_000)));
+        let mut config = Config {
+            app: "app".into(),
+            server_url: "https://example.com".into(),
+            instance_id: "i".into(),
+            drives_enabled: true,
+            computer_use: None,
+        };
+        let encoded = config.encode().unwrap();
+        assert_eq!(
+            parse(
+                Path::new("config.toml"),
+                encoded.0.as_bytes(),
+                CONFIG_MAX_BYTES
+            )
+            .unwrap(),
+            config
+        );
+        let room = CONFIG_MAX_BYTES - encoded.0.len();
+        config.instance_id.push_str(&"a".repeat(room));
+        let encoded = config.encode().unwrap();
+        assert_eq!(encoded.0.len(), 65_536);
+        assert!(
+            parse(
+                Path::new("config.toml"),
+                encoded.0.as_bytes(),
+                CONFIG_MAX_BYTES
+            )
+            .is_ok()
+        );
+        config.instance_id.push('a');
+        assert!(matches!(config.encode(), Err(EncodeError::TooLarge)));
+    }
 }

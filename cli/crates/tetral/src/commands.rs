@@ -128,6 +128,11 @@ pub fn run(arguments: Vec<OsString>) -> Result<Value, CommandError> {
         .filter(|app| !app.is_empty())
         .ok_or_else(|| invalid_arguments("--app must name the app"))?
         .to_owned();
+    if !config::app_fits(&app) {
+        return Err(invalid_arguments(
+            "--app cannot fit in the configuration's 65,536-byte limit",
+        ));
+    }
     let level = observe::Level::from_env().map_err(|error| invalid_arguments(error.to_string()))?;
     match &cli.command {
         Command::Configure { from_stdin, .. } if !from_stdin => {
