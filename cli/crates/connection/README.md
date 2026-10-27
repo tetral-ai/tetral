@@ -62,10 +62,12 @@ Server:
 - Every report is encoded and sender-checked before entering the mailbox.
   The App Server retains at most 256 MiB of complete encoded report bodies,
   including 8 MiB reserved for compact tool errors and non-tool control replies.
-  Ordinary tool results cannot consume that reserve. An admission failure returns
+  Ordinary tool results, including result-bearing `tool.stdin` and `tool.cancel`
+  replies, cannot consume that reserve. An admission failure returns
   to execution, which releases the unpublished result and reports
-  `resource_exhausted`; a running command is stopped and reaped first. Control
-  replies try ordinary capacity and then reserve, without changing their content.
+  `resource_exhausted`; a running command is stopped and reaped first.
+  Reserve-eligible replies try ordinary capacity and then reserve without changing
+  their content.
   If even reserve cannot retain a reply, the logical connection ends and pending
   reports are dropped; unconfirmed results may be unknown (`outbox`, `report_memory`).
 - Pending delivery and HTTP frames share one immutable body. Every retry preserves
