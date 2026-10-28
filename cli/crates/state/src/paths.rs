@@ -21,8 +21,6 @@ pub const RUN: &str = "run";
 pub const LOCK: &str = "run/app-server.lock";
 /// The directory of `server run`'s log files.
 pub const LOGS: &str = "logs";
-/// The directory where the Report outbox freezes its reports (`outbox`).
-pub const OUTBOX: &str = "outbox";
 /// The directory that holds one directory of files per Session.
 pub const SESSIONS: &str = "sessions";
 

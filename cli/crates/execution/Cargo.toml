@@ -31,3 +31,6 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
 tracing.workspace = true
 which.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

@@ -1,13 +1,16 @@
-//! The Task supervisor: the one owner of a task and its process tree, from
-//! the task's admission until its Session binding owner forgets it. A task
+//! The Task supervisor owns a task's execution from admission through process
+//! disappearance, report outcomes and file cleanup. It then transfers the
+//! existing mailbox to [`FinishedTask`], which retains only counters, exit and
+//! write facts for late controls until the Session binding forgets the task. A task
 //! is `staged` until the binding owner starts it ([`SupervisorMessage::Start`]);
 //! it is then `starting` while its supervisor checks the isolation, creates
 //! the task's files and launches the command; `running` from the command's
 //! actual start, while the supervisor reads both pipes into the task's
 //! capture and writes its stdin; `ended` once the shell's exit has been
 //! observed, or given up on, and the `terminal` report has been handed to the
-//! outbox; and `cleaned` once every report of the task is acknowledged or
-//! dropped and the task's files are gone. The supervisor answers the task's
+//! outbox. Once the processes are gone and every report is acknowledged or
+//! dropped, cleanup is attempted and the full supervisor is released; cleanup
+//! failures are logged without retaining execution for a retry. It answers the task's
 //! `tool.cancel` at receipt in every state, and its `tool.stdin` in every
 //! state but `staged` and the availability check that begins `starting`,
 //! during which that `tool.stdin` waits and the task's other messages are
@@ -254,7 +257,6 @@ impl ReportListener for Listener {
 /// tool, `staged` until its mailbox gets [`SupervisorMessage::Start`]; it
 /// runs inside its instruction's span.
 pub fn spawn(spec: TaskSpec, tool: ToolInput, context: Context) -> SupervisorMailbox {
-    let (mailbox, messages) = mpsc::unbounded_channel();
     let trace = spec.traceparent.as_deref().and_then(TraceContext::parse);
     let correlation = &spec.correlation;
     let span = observe::correlation_span(
@@ -271,44 +273,7 @@ pub fn spawn(spec: TaskSpec, tool: ToolInput, context: Context) -> SupervisorMai
         ],
         trace.as_ref(),
     );
-    let supervisor = Supervisor {
-        spec,
-        tool: Some(tool),
-        context,
-        listener: Arc::new(Listener(mailbox.downgrade())),
-        messages,
-        awaited: HashSet::new(),
-        report_seq: 0,
-        left_queue: None,
-        process: None,
-        spawned: Duration::ZERO,
-        start: None,
-        out: Stream::new(),
-        err: Stream::new(),
-        stdin: None,
-        held: Vec::new(),
-        joined: Vec::new(),
-        final_report: None,
-        report_exhausted: false,
-        pending_failure: None,
-        withdrawn: false,
-        ending: None,
-        exit: None,
-        ended: None,
-        cleaned: false,
-        kept: (exec::empty_stream(), exec::empty_stream()),
-        cancelled: false,
-        records: WriteRecords::default(),
-        writes: VecDeque::new(),
-        writing: None,
-        waiters: Vec::new(),
-        stopped: false,
-        shutting_down: false,
-        leader: None,
-        _namespace: None,
-        gone: false,
-        checked: Duration::ZERO,
-    };
+    let (supervisor, mailbox) = Supervisor::new(spec, tool, context);
     tokio::spawn(supervisor.run().instrument(span));
     mailbox
 }
@@ -351,7 +316,6 @@ struct Supervisor {
     exit: Option<(ExitFacts, Duration)>,
     /// What the `terminal` report said, once it was made.
     ended: Option<State>,
-    cleaned: bool,
     /// The streams' counters once the task is cleaned.
     kept: (StreamSnapshot, StreamSnapshot),
     cancelled: bool,
@@ -360,7 +324,7 @@ struct Supervisor {
     writes: VecDeque<Control<StdinPayload>>,
     writing: Option<Writing>,
     waiters: Vec<Waiter>,
-    /// A connection's end or the shutdown stopped the task's writes.
+    /// Connection end, shutdown or report-capacity exhaustion stopped writes.
     stopped: bool,
     /// The App Server's shutdown has begun: the end of the connection that
     /// it brings ends the task through the termination procedure, with its
@@ -463,6 +427,48 @@ enum Staged {
 }
 
 impl Supervisor {
+    fn new(spec: TaskSpec, tool: ToolInput, context: Context) -> (Self, SupervisorMailbox) {
+        let (mailbox, messages) = mpsc::unbounded_channel();
+        let supervisor = Supervisor {
+            spec,
+            tool: Some(tool),
+            context,
+            listener: Arc::new(Listener(mailbox.downgrade())),
+            messages,
+            awaited: HashSet::new(),
+            report_seq: 0,
+            left_queue: None,
+            process: None,
+            spawned: Duration::ZERO,
+            start: None,
+            out: Stream::new(),
+            err: Stream::new(),
+            stdin: None,
+            held: Vec::new(),
+            joined: Vec::new(),
+            final_report: None,
+            report_exhausted: false,
+            pending_failure: None,
+            withdrawn: false,
+            ending: None,
+            exit: None,
+            ended: None,
+            kept: (exec::empty_stream(), exec::empty_stream()),
+            cancelled: false,
+            records: WriteRecords::default(),
+            writes: VecDeque::new(),
+            writing: None,
+            waiters: Vec::new(),
+            stopped: false,
+            shutting_down: false,
+            leader: None,
+            _namespace: None,
+            gone: false,
+            checked: Duration::ZERO,
+        };
+        (supervisor, mailbox)
+    }
+
     async fn run(mut self) {
         let checked = match self.staged().await {
             Staged::Discarded => {
@@ -586,10 +592,9 @@ impl Supervisor {
         }
     }
 
-    /// `ended` and `cleaned`: controls are answered from what the task
-    /// left; the task's processes are checked until they are confirmed
-    /// gone, and its files go once they are and every report has its
-    /// outcome.
+    /// Checks ended processes until they are confirmed gone, then attempts
+    /// file cleanup once every report has its outcome. Ownership of the same
+    /// mailbox passes to the minimal finished task; this supervisor ends.
     async fn settle(mut self) {
         let mut open = true;
         self.check_gone();
@@ -640,9 +645,7 @@ impl Supervisor {
                 }
             }
         }
-        if !self.cleaned {
-            self.clean();
-        }
+        self.clean();
     }
 
     /// Confirms the task's processes gone when, on Linux, no process is in
@@ -719,7 +722,6 @@ impl Supervisor {
         self.out.capture = StreamCapture::new();
         self.err.capture = StreamCapture::new();
         self.tool = None;
-        self.cleaned = true;
     }
 
     /// The tool's input, which only the start and the reports of a task
@@ -1367,13 +1369,7 @@ impl Supervisor {
     fn stdin(&mut self, control: Control<StdinPayload>) {
         match Request::of(&control.payload) {
             Request::Read { wait } => {
-                if self.cleaned {
-                    self.control_error(
-                        &control,
-                        ControlErrorCode::ResultUnavailable,
-                        "the task's output is no longer kept",
-                    );
-                } else if self.state().ended
+                if self.state().ended
                     || self.out.capture.window_has_output()
                     || self.err.capture.window_has_output()
                     || wait.is_zero()
@@ -1418,14 +1414,6 @@ impl Supervisor {
                 continue;
             };
             let check = self.records.check(write_seq, &digest);
-            if self.cleaned && !matches!(check, Check::Repeat(_)) {
-                self.control_error(
-                    &control,
-                    ControlErrorCode::ResultUnavailable,
-                    "the task's output is no longer kept",
-                );
-                continue;
-            }
             match check {
                 Check::Conflict => self.control_error(
                     &control,
@@ -1560,8 +1548,8 @@ impl Supervisor {
         }
     }
 
-    /// The task's connection ended or the App Server shuts down: writes stop
-    /// as at a cancel, and the termination procedure ends the task, at a
+    /// Connection end, App Server shutdown or report-capacity exhaustion:
+    /// writes stop as at a cancel, and termination ends the task, at a
     /// connection's end with SIGKILL at once, also one already in its grace.
     /// Once the shutdown has begun, the end of the connection that it brings
     /// counts as the shutdown.
@@ -1699,14 +1687,10 @@ impl Supervisor {
             outcome.error = Some(exec::tool_error("stdin_closed", STDIN_CLOSED, None));
         }
         let limits = Visible::requested(control.payload.limits.as_ref());
-        let (stdout, stderr) = if self.cleaned {
-            (Counters(self.kept.0.clone()), Counters(self.kept.1.clone()))
-        } else {
-            (
-                Counters(self.out.capture.counters()),
-                Counters(self.err.capture.counters()),
-            )
-        };
+        let (stdout, stderr) = (
+            Counters(self.out.capture.counters()),
+            Counters(self.err.capture.counters()),
+        );
         let error = closed.then(closed_error);
         self.reply(control, outcome, &stdout, &stderr, limits, error);
     }
@@ -2227,10 +2211,11 @@ mod tests {
         }
     }
 
-    fn staged_task(
+    fn staged_supervisor(
         root: &std::path::Path,
         full: bool,
     ) -> (
+        Supervisor,
         SupervisorMailbox,
         mpsc::UnboundedReceiver<Recorded>,
         mpsc::UnboundedReceiver<()>,
@@ -2276,7 +2261,168 @@ mod tests {
         let tool: ToolInput =
             serde_json::from_value(json!({"tool":"exec_command","input":{"cmd":"unused"}}))
                 .unwrap();
-        (spawn(spec, tool, context), received, gone_received, witness)
+        let (supervisor, mailbox) = Supervisor::new(spec, tool, context);
+        (supervisor, mailbox, received, gone_received, witness)
+    }
+
+    fn staged_task(
+        root: &std::path::Path,
+        full: bool,
+    ) -> (
+        SupervisorMailbox,
+        mpsc::UnboundedReceiver<Recorded>,
+        mpsc::UnboundedReceiver<()>,
+        std::sync::Weak<TaskEvents>,
+    ) {
+        let (supervisor, mailbox, reports, gone, witness) = staged_supervisor(root, full);
+        tokio::spawn(supervisor.run());
+        (mailbox, reports, gone, witness)
+    }
+
+    // The shell confirms that it is executing, then blocks on its own stdin.
+    // It has no descendants and lives in a dedicated process group. kill_on_drop
+    // bounds cleanup even if an assertion or a mutation's watchdog fails.
+    async fn live_command(supervisor: &mut Supervisor) -> tokio::process::ChildStdin {
+        use std::process::Stdio;
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .args(["-c", "printf ready; read release"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut ready = [0; 5];
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            child.stdout.take().unwrap().read_exact(&mut ready),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&ready, b"ready");
+        assert!(child.try_wait().unwrap().is_none());
+        let release = child.stdin.take().unwrap();
+        let pid = child.id().unwrap();
+        supervisor.process = Some(Process { child, pid });
+        supervisor.spawned = state::seams::now();
+        supervisor.start = Some(supervisor.spawned);
+        release
+    }
+
+    #[tokio::test]
+    async fn refused_running_report_stops_the_live_command_and_preserves_first_report_sequence() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut supervisor, mailbox, mut reports, mut gone, _) =
+            staged_supervisor(root.path(), true);
+        let _release = live_command(&mut supervisor).await;
+        let pid = supervisor.process.as_ref().unwrap().pid;
+        // The command has started and its initial wait has expired under detach.
+        let mut call = match Work::of(supervisor.input(), root.path()) {
+            Work::Exec(call) => call,
+            _ => unreachable!(),
+        };
+        call.wait = Duration::ZERO;
+        call.on_expiry = OnExpiry::Detach;
+        let (writer, status) = tokio::net::unix::pipe::pipe().unwrap();
+        drop(writer);
+        tokio::time::timeout(Duration::from_secs(3), supervisor.running(call, status))
+            .await
+            .expect("refusing the running report must end the command");
+        let exited = supervisor
+            .process
+            .as_mut()
+            .unwrap()
+            .child
+            .try_wait()
+            .unwrap();
+        assert!(
+            exited.is_some(),
+            "the command must be reaped before settlement"
+        );
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert!(
+            reports.try_recv().is_err(),
+            "no running report was published"
+        );
+        let owner = tokio::spawn(supervisor.settle());
+        let terminal = tokio::time::timeout(Duration::from_secs(2), reports.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        gone.try_recv()
+            .expect("disappearance is confirmed before publication");
+        assert_eq!(terminal.body["phase"], "terminal");
+        assert_eq!(terminal.body["report_seq"], 1);
+        assert_eq!(
+            terminal.body["result"]["error"]["kind"],
+            "resource_exhausted"
+        );
+        terminal
+            .listener
+            .unwrap()
+            .outcome(terminal.id, ReportOutcome::Acked);
+        tokio::time::timeout(Duration::from_secs(2), owner)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(mailbox);
+        assert!(reports.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn capacity_error_waits_for_confirmed_process_disappearance() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut supervisor, mailbox, mut reports, mut gone, _) =
+            staged_supervisor(root.path(), true);
+        let mut release = live_command(&mut supervisor).await;
+        // Model the running loop having ended its bounded wait for exit with
+        // a pending capacity error. The child is deliberately still alive.
+        supervisor.report_exhausted = true;
+        supervisor.report_start_failure(exec::tool_error("resource_exhausted", "full", None));
+        supervisor.context.bounds.gone_check = Duration::from_millis(1);
+        let mut settling = Box::pin(supervisor.settle());
+        std::future::poll_fn(|cx| {
+            assert!(settling.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        // The single poll ran check_gone and the pending-report branch. This
+        // is an ordering observation, not a guess about task scheduling.
+        assert!(gone.try_recv().is_err());
+        assert!(
+            reports.try_recv().is_err(),
+            "a live command forbids terminal publication"
+        );
+        release.write_all(b"exit\n").await.unwrap();
+        drop(release);
+        let owner = tokio::spawn(settling);
+        let terminal = tokio::time::timeout(Duration::from_secs(2), reports.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        gone.try_recv()
+            .expect("disappearance must precede the terminal report");
+        assert_eq!(terminal.body["phase"], "terminal");
+        assert_eq!(terminal.body["report_seq"], 1);
+        assert_eq!(
+            terminal.body["result"]["error"]["kind"],
+            "resource_exhausted"
+        );
+        terminal
+            .listener
+            .unwrap()
+            .outcome(terminal.id, ReportOutcome::Acked);
+        tokio::time::timeout(Duration::from_secs(2), owner)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(mailbox);
+        assert!(reports.recv().await.is_none());
     }
 
     #[tokio::test]
@@ -2530,6 +2676,34 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_failure_releases_execution_after_the_report_outcome() {
+        use std::io::Write;
+        use std::sync::Mutex;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct LogBytes(Arc<Mutex<Vec<u8>>>);
+        impl Write for LogBytes {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let bytes = LogBytes::default();
+        let sinks = Arc::new(observe::Sinks::new(
+            observe::Sink::spawn_stderr(Box::new(bytes.clone()), observe::registry()),
+            observe::FlushClock {
+                now: state::seams::now,
+                recheck: Duration::from_millis(1),
+            },
+        ));
+        let subscriber = tracing_subscriber::registry().with(observe::RecordLayer::new(
+            observe::Level::Warn,
+            sinks.clone(),
+        ));
+        let _recording = tracing::subscriber::set_default(subscriber);
         let root = tempfile::tempdir().unwrap();
         // An ordinary file in place of the temporary parent makes removal
         // fail with ENOTDIR on every user, without special permissions.
@@ -2565,6 +2739,21 @@ mod tests {
             reports.try_recv().is_err(),
             "cleanup failure does not rewrite the result"
         );
+        sinks.flush(Duration::from_secs(2));
+        let recorded = String::from_utf8(bytes.0.lock().unwrap().clone()).unwrap();
+        let records: Vec<serde_json::Value> = recorded
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let failure = records
+            .iter()
+            .find(|record| record["event"] == "task.cleanup_failed")
+            .expect("the cleanup failure must be recorded");
+        assert_eq!(failure["task.id"], "task");
+        assert_eq!(failure["cleanup.part"], "temporary");
+        assert_eq!(failure["cleanup.directory"], "task");
+        assert_eq!(failure["error.code"], "task_cleanup_failed");
+        assert_eq!(failure["error.os_code"], libc::ENOTDIR);
         drop(mailbox);
         assert!(
             tokio::time::timeout(Duration::from_secs(2), reports.recv())

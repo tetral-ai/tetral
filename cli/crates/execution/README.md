@@ -116,10 +116,13 @@ which owns that task's process tree; the translation of a call's
   until its Session binding owner starts it, `starting` while it checks the
   isolation, creates the task's files and launches the command, `running`
   from the command's actual start, `ended` with its `terminal` report and
-  `cleaned` once every report of the task, control replies included, is
-  acknowledged or dropped and the files are gone; a cleaned task keeps only
-  its streams' counters, its exit facts and its write records, and a stream
-  holds its read buffer only while its pipe is open. It reads both
+  ready for cleanup once its processes are confirmed gone and every report,
+  control replies included, is acknowledged or dropped. After attempting file
+  cleanup, the full supervisor transfers its existing mailbox to a minimal
+  `FinishedTask`, retaining only stream counters, exit facts and write records
+  for late controls. A cleanup failure is logged without retaining execution
+  or scheduling another attempt. A stream holds its read buffer only while
+  its pipe is open. The execution supervisor reads both
   pipes all the time into the capture and the logs, so no command blocks on
   its output, and every wait reads the seam clock (`supervisor`).
 - The supervisor answers the task's `tool.cancel` at receipt in every

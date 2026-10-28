@@ -879,7 +879,10 @@ old access.
 
 ### Resource limits
 
-Each limit is checked before a buffer is allocated or work starts.
+Input and concurrency limits are checked before the corresponding allocation
+or admission. Retained-report capacity is checked against the complete encoded
+body before it is retained for delivery; it does not reserve a task's eventual
+output before execution.
 
 | Resource | Limit | Overflow |
 |---|---|---|
@@ -889,6 +892,7 @@ Each limit is checked before a buffer is allocated or work starts.
 | Retained Session records | 128 | `resource_exhausted` for a new Session |
 | Running directory probes | 8 | The next preparation waits up to 5 seconds for a slot, in arrival order, then fails with `resource_exhausted`; a timed-out probe counts until it is reaped |
 | Directory probe duration | 5 seconds | `cwd_check_timeout`; the late result is discarded |
+| Retained encoded report bodies per App Server | 256 MiB (268,435,456 bytes), including 8 MiB (8,388,608 bytes) reserved for compact tool errors and non-tool control replies | An ordinary result that cannot be retained becomes a compact `resource_exhausted` error. If even the reserve cannot retain a reply, the logical connection ends ([delivery](#acknowledgement-deduplication-and-delivery)) |
 | Per-connection replay ledger | 4,096 entries or 16 MiB (16,777,216 bytes), whichever comes first | `resource_exhausted` for a new operation that cannot be recorded safely ([replay-ledger exhaustion](#replay-ledger-exhaustion)) |
 
 - A Session record exists from the first `session.prepare` for that `session_id`
@@ -1156,9 +1160,9 @@ PNG for `view_image`.
   returns `unsupported_control`.
 - **Output windows.** The first `running` report and the stdin replies share one
   per-task incremental output window. To make a reply, the CLI selects a bounded
-  window, freezes and persists the report, then advances the reported position;
-  later output goes into the next window. A retry resends the frozen report and
-  reads nothing. Cumulative bounded logs (head and tail, with markers and
+  window and advances the window position. If admitted for delivery, the
+  encoded report is immutable and retained in memory; later output goes into
+  the next window. A retry resends those same bytes and reads nothing. Cumulative bounded logs (head and tail, with markers and
   counters) are kept separately, and the terminal output comes from them, so
   reads never consume output the final report needs. Discarded middle output
   cannot be recovered.
@@ -1347,7 +1351,9 @@ instruction's `message_id`. The CLI sends it; Engine ACKs it.
   within its first wait sends `terminal` with `report_seq: 1`. A task still
   running then sends `running` with `report_seq: 1` and, on exit, `terminal`
   with `report_seq: 2`. Its `request_message_id` and `tool_use_event_id` are the
-  original instruction's, never a later control's.
+  original instruction's, never a later control's. A `running` report refused
+  by retained-report capacity is never published and consumes no sequence;
+  its eventual compact terminal error is the first report, with `report_seq: 1`.
 - Background completion needs no polling: the CLI observes the exit, collects
   the bounded output, saves the report and sends `terminal` on its own.
   Generating and sending `terminal` never waits for the `running` report's ACK.
@@ -1549,11 +1555,22 @@ follows the tool-status ACK and retry rules.
 | The same `message_id` with different content | Reports a protocol error (`message_conflict`) |
 | A report upload fails or its ACK is lost | Resends the saved report with the same `message_id`, sequence and content; never re-executes and never rereads output |
 
-- The CLI freezes each report and writes it to disk before sending. Releasing a
-  report keeps the connection's deduplication records and acknowledged report
-  identities until the CLI drops them as [resource limits](#resource-limits)
-  state, so a valid duplicate instruction never executes again. Acknowledged
-  bodies are not kept for replay; Engine uses the reports it persisted.
+- The CLI encodes each admitted report once and retains its immutable body in
+  bounded memory for sending and retries; it writes no report body to disk and
+  cannot recover those bodies after a CLI restart. Releasing a report keeps the
+  connection's deduplication records and acknowledged report identities until
+  the CLI drops them as [resource limits](#resource-limits) state, so a valid
+  duplicate instruction never executes again. Acknowledged bodies are not kept
+  for replay; Engine uses the reports it persisted.
+- Ordinary results, including successful tool-control replies, cannot consume
+  the 8 MiB reserve. Compact tool errors and non-tool control replies try the
+  ordinary capacity first, then the reserve. A refused ordinary result becomes
+  a compact `resource_exhausted` error. If a running command's report is refused,
+  the CLI stops the command and waits for confirmed process disappearance
+  before publishing its terminal error; this does not undo work already done.
+  If even the reserve cannot retain a reply, the CLI ends the logical connection
+  and drops pending reports, so results not confirmed by Engine may remain
+  unknown. The budget bounds retained encoded bodies, not total process memory.
 - After a task completes and its reports are acknowledged, the CLI cleans up its
   releasable logs and temporary files. It never deletes project files written by
   commands.
