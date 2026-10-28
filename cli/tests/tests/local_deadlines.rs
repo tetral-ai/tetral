@@ -108,7 +108,7 @@ fn status_and_stop_allow_responses_within_the_deadline_and_close_incomplete_ones
                     .spawn();
                 ready.recv_timeout(WAIT_LIMIT).unwrap();
                 if completes {
-                    seams.advance(Duration::from_secs(3));
+                    seams.advance(Duration::from_millis(4_900));
                     let observed = seams.count(DEADLINE_CHECKED);
                     // One count can have been in flight before the clock moved;
                     // another is sent before the timeout branch returns. Three
@@ -132,7 +132,7 @@ fn status_and_stop_allow_responses_within_the_deadline_and_close_incomplete_ones
                         String::from_utf8_lossy(&result.stdout)
                     );
                     assert_eq!(result.object(), response(command));
-                    case.observe("a complete valid response at three seconds succeeds after the client has processed the advanced clock");
+                    case.observe("a complete valid response at 4.9 seconds succeeds after the client has processed the advanced clock");
                 } else {
                     assert_eq!(result.error_code(), "server_not_responding");
                     case.observe("an incomplete response at the original five-second deadline fails and closes its connection");
