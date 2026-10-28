@@ -1,0 +1,79 @@
+name: Restore CLI build cache
+description: Read trusted main-produced Rust outputs for one CLI verification profile
+inputs:
+  profile:
+    description: functional, release, or task-capacity
+    required: true
+  evidence-dir:
+    description: Absolute directory for cache metadata
+    default: ${{ runner.temp }}/cli-cache-evidence
+runs:
+  using: composite
+  steps:
+    - name: Prepare compatible keys and check free disk
+      id: prepare
+      shell: bash
+      env:
+        PROFILE: ${{ inputs.profile }}
+        EVIDENCE: ${{ inputs.evidence-dir }}
+      run: ./scripts/cli-build-cache.sh prepare "$PROFILE" "$EVIDENCE"
+    - name: Restore common
+      id: common
+      if: steps.prepare.outputs.restore-allowed == 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      with:
+        path: ${{ steps.prepare.outputs.common-paths }}
+        key: ${{ steps.prepare.outputs.common-key }}
+        restore-keys: ${{ steps.prepare.outputs.common-prefix }}
+    - name: Record common restore
+      id: record-common
+      if: always()
+      shell: bash
+      env:
+        EVIDENCE: ${{ inputs.evidence-dir }}
+        REQUESTED_KEY: ${{ steps.prepare.outputs.common-key }}
+        MATCHED_KEY: ${{ steps.common.outputs.cache-matched-key }}
+        CACHE_HIT: ${{ steps.common.outputs.cache-hit }}
+        RESTORE_OUTCOME: ${{ steps.common.outcome }}
+        RESTORE_STARTED: ${{ steps.prepare.outputs.started }}
+      run: ./scripts/cli-build-cache.sh record common "$EVIDENCE"
+    - name: Restore digest
+      id: digest
+      if: steps.prepare.outputs.restore-allowed == 'true' && steps.prepare.outputs.variant == 'digest'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      with:
+        path: ${{ steps.prepare.outputs.digest-paths }}
+        key: ${{ steps.prepare.outputs.digest-key }}
+        restore-keys: ${{ steps.prepare.outputs.digest-prefix }}
+    - name: Record digest restore
+      id: record-digest
+      if: always() && steps.prepare.outputs.variant == 'digest'
+      shell: bash
+      env:
+        EVIDENCE: ${{ inputs.evidence-dir }}
+        REQUESTED_KEY: ${{ steps.prepare.outputs.digest-key }}
+        MATCHED_KEY: ${{ steps.digest.outputs.cache-matched-key }}
+        CACHE_HIT: ${{ steps.digest.outputs.cache-hit }}
+        RESTORE_OUTCOME: ${{ steps.digest.outcome }}
+        RESTORE_STARTED: ${{ steps.record-common.outputs.started }}
+      run: ./scripts/cli-build-cache.sh record digest "$EVIDENCE"
+    - name: Restore release
+      id: release
+      if: steps.prepare.outputs.restore-allowed == 'true' && steps.prepare.outputs.variant == 'release'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      with:
+        path: ${{ steps.prepare.outputs.release-paths }}
+        key: ${{ steps.prepare.outputs.release-key }}
+        restore-keys: ${{ steps.prepare.outputs.release-prefix }}
+    - name: Record release restore
+      id: record-release
+      if: always() && steps.prepare.outputs.variant == 'release'
+      shell: bash
+      env:
+        EVIDENCE: ${{ inputs.evidence-dir }}
+        REQUESTED_KEY: ${{ steps.prepare.outputs.release-key }}
+        MATCHED_KEY: ${{ steps.release.outputs.cache-matched-key }}
+        CACHE_HIT: ${{ steps.release.outputs.cache-hit }}
+        RESTORE_OUTCOME: ${{ steps.release.outcome }}
+        RESTORE_STARTED: ${{ steps.record-common.outputs.started }}
+      run: ./scripts/cli-build-cache.sh record release "$EVIDENCE"

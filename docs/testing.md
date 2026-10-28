@@ -213,13 +213,27 @@ The readable CI topology is:
   workflow source and run, taking each producer's result from the latest
   attempt that has one, and accepts each only from the job that runs that
   producer.
-- **CLI Verification**: runs on every pull request. Its job `changed` starts
-  the build and tests of the `cli/` Cargo workspace in the job `linux` only
-  when the pull request changes `cli/`, `protocol/` or the workflow itself;
-  **CLI results** is the workflow's result, passing when none of them changed
-  and otherwise only when every job that ran passed. The test inventory's
-  `cli` group runs the same `cargo build` and `cargo test`, so no job of Pull
-  Request Verification runs it.
+- **CLI Verification**: reports on every pull request. Its `changed` job
+  selects CLI verification for changes to the Cargo workspace, its reference
+  server dependencies, workflow, or unknown ownership. Three independent Linux
+  matrix jobs cover ordinary functionality, the release-without-test-seams
+  check, and the serial 5,000-task regression. Matrix failure does not cancel
+  the other jobs. `scripts/verify-cli.py` checks that each isolated test exists
+  exactly once before running it; the ordinary Cargo suite retains unit,
+  integration, and documentation tests and excludes only those two cases.
+  **CLI results** requires the selected matrix to succeed, or accepts a skipped
+  matrix when CLI verification was not selected. Every job uploads command
+  logs, timings, selection, acceptance records and setup outcomes even on
+  failure. A runner forcibly cancelled before upload can still lose evidence.
+  The test inventory's `cli` group continues to run the complete `cargo build`
+  and `cargo test`; no Pull Request Verification job duplicates it.
+  The PR label `cli-build-benchmark`, or manual dispatch with `measure-builds`,
+  disables remote cache restore and
+  measures the relevant compilation phases cold and warm on each job's same
+  runner before executing its full test selection. These are compilation
+  measurements, not cache-transfer or repeated runtime measurements.
+  The label also allows measurement before this workflow reaches the default
+  branch, which is required for GitHub's manual dispatch support.
 - **Main Branch Verification**: the same evidence owners run independently on
   the exact merged commit. Go Race runs the same shards; repository, static,
   Runtime, Gateway, protocol, deployment, image, and security evidence run in
@@ -441,7 +455,8 @@ CLI Verification and `engine-vulncheck.yml` declare `cache-mode: read`, which
 GitHub enforces with scoped cache tokens, and main's Go Race jobs restore with
 the same mode.
 `VerifyGoBuildCacheWorkflows` keeps writes explicit: only the Go Build Cache
-job and CI Benchmark's guarded `produce` job declare a write-capable
+job, CI Benchmark's guarded `produce` job and the separately validated CLI
+Build Cache job declare a write-capable
 `cache-mode` or use `actions/cache/save`, no workflow uses `actions/cache`,
 whose post step saves, and pull request workflows declare `read`. Other
 main-branch jobs keep the default write access of trusted triggers, which
@@ -456,6 +471,65 @@ a stale entry harmless; it does not detect a tampered one. Runner checks still
 run on a hit, but they read binaries built from cached outputs, so they are as
 strong as the writers are trusted, as with setup-go's entry. Other main jobs
 could write any key, but they run merged code, which is trusted.
+
+### CLI build cache
+
+**CLI Build Cache** (`.github/workflows/cli-build-cache.yml`) is the only
+writer of `cli-build-v1-` entries. It runs on main pushes and manual dispatch,
+with a main-only job guard, read-only repository permissions and no persisted
+checkout credentials. Its runs queue without cancelling an upload. CLI
+Verification uses the read-only composite `.github/actions/cli-build-cache`;
+it never saves, including on benchmark dispatches.
+
+`scripts/cli-build-cache.sh` owns the path lists, compatible keys and build
+recipe. The producer looks up each exact key, then builds missing components
+once without executing repository test binaries: ordinary `cargo build
+--locked`, `cargo test --locked --no-run`, the debug test-seams fixture, the
+digest fixture with the actual `/usr/bin/bwrap` SHA-256, and the release
+fixture. Cargo's build scripts still execute as part of compilation. Every
+Cargo command runs in `cli/` to select its pinned Rust toolchain. The existing
+four target directories remain distinct so nested fixture builds do not
+contend with the running test build's Cargo lock.
+
+| Entry | Paths | Consumers |
+| --- | --- | --- |
+| Common | Cargo registry index, archives and sources; Cargo Git databases and checkouts; `cli/target/debug`; `cli/target/test-seams` | Functional, release seams, 5,000 tasks |
+| Digest | `cli/target/test-seams-bwrap-digest/debug` | Functional |
+| Release | `cli/target/release-seams/release` | Release seams |
+
+All entries exclude incremental directories. They contain no Cargo credentials,
+user configuration, acceptance records or cached test outcomes. The common
+entry does not encompass `cli/target`, which would also restore the other
+variants. Keys contain a versioned component namespace, a hash of runner
+OS/architecture/image, Rust/Cargo/Go and native compiler identities, Cargo
+lock/manifests/build scripts and the shared recipe, followed by the producer
+commit. The digest component additionally includes the host bubblewrap digest.
+Consumers can fall back only within this compatible prefix. Cargo and fixture
+builders still check current sources and run every selected test on a hit.
+
+Local extracted outputs were about 8 GiB common, 4 GiB digest and 2 GiB release.
+Restoration requires those components plus 6 GiB headroom: 14 GiB for the
+5,000-task profile, 18 GiB for functional, 16 GiB for release, and 20 GiB for the
+producer's combined restore. Insufficient or unmeasurable free disk skips the
+restore and uses a cold build. These thresholds are an initial extraction and
+rebuild budget, not measured hosted-runner peak usage. Evidence records the
+requested/matched keys, exact/prefix/miss/skipped status, elapsed restore time,
+extracted bytes and free disk; the producer also records pre-save size. Actions
+cache logs supply compressed archive transfer sizes when available.
+
+`VerifyCLIBuildCacheWorkflows` validates this producer independently before the
+global writer scan allows its save steps. Mutation tests reject PR/off-main
+writers, implicit saving actions, unrecognized save jobs, mismatched keys or
+paths, unsafe fallbacks and unguarded variant restores. Script tests exercise
+the actual recipe boundary, build failures, compatible-key invalidation and
+low-disk fallback.
+
+There is no trusted CLI cache until this workflow lands on main and its first
+producer completes. A premerge cold/warm compilation measurement demonstrates
+local Cargo reuse only; it does not establish an Actions cache hit or net
+transfer benefit. The three verification jobs each download common outputs,
+so total runner-minutes and transferred bytes may rise even when feedback is
+faster. Report those separately from concurrent wall time.
 
 ### CI Benchmark
 

@@ -4,7 +4,13 @@ name: CLI Verification
 # required check; the changed job decides whether the build jobs run.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
+    inputs:
+      measure-builds:
+        description: Measure cold and warm builds on the same runner before testing
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -68,21 +74,36 @@ jobs:
           echo "cli=$cli" >> "$GITHUB_OUTPUT"
 
   linux:
+    name: Linux CLI (${{ matrix.profile }})
     needs: changed
     if: needs.changed.outputs.cli == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [functional, release, task-capacity]
+    env:
+      CLI_PROFILE: ${{ matrix.profile }}
     steps:
+      - name: Initialize the evidence directory
+        id: evidence
+        run: |
+          mkdir -p "$RUNNER_TEMP/cli-$CLI_PROFILE"
+          printf 'CLI_EVIDENCE_DIR=%s/cli-%s\n' "$RUNNER_TEMP" "$CLI_PROFILE" >> "$GITHUB_ENV"
       - name: Check out the revision under test
+        id: checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
       - name: Set up Go for the reference control server
+        id: go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
           go-version: '1.26.10'
           cache: false
       - name: Allow unprivileged user namespaces
+        id: namespaces
         run: |
           set -euo pipefail
           sudo sysctl -w kernel.unprivileged_userns_clone=1
@@ -90,21 +111,57 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
       - name: Install bubblewrap for the sandboxed tool processes
+        id: bubblewrap
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bubblewrap
       - name: Install the pinned Rust toolchain
+        id: rust
         working-directory: cli
         run: rustup toolchain install
-      - name: Build
-        working-directory: cli
-        run: cargo build --locked
-      - name: Test
-        working-directory: cli
+      - name: Restore the compiled CLI dependencies and selected artifacts
+        id: cache
+        if: inputs.measure-builds != true && !contains(github.event.pull_request.labels.*.name, 'cli-build-benchmark')
+        uses: ./.github/actions/cli-build-cache
+        with:
+          profile: ${{ matrix.profile }}
+          evidence-dir: ${{ env.CLI_EVIDENCE_DIR }}/cache
+      - name: Measure cold and warm builds without a restored cache
+        id: measure
+        if: inputs.measure-builds == true || contains(github.event.pull_request.labels.*.name, 'cli-build-benchmark')
+        timeout-minutes: 40
         env:
-          TETRAL_ACCEPTANCE_DIR: ${{ runner.temp }}/acceptance
-        run: cargo test --locked
+          CLI_PROFILE: ${{ matrix.profile }}
+        run: |
+          ./scripts/cli-build-cache.sh build "$CLI_PROFILE" cold "$CLI_EVIDENCE_DIR/builds"
+          ./scripts/cli-build-cache.sh build "$CLI_PROFILE" warm "$CLI_EVIDENCE_DIR/builds"
+      - name: Verify the selected CLI behavior
+        id: verify
+        timeout-minutes: 40
+        env:
+          CLI_PROFILE: ${{ matrix.profile }}
+        run: python3 scripts/verify-cli.py "$CLI_PROFILE" --evidence-dir "$CLI_EVIDENCE_DIR/verification"
+      - name: Record setup and verification outcomes
+        if: always()
+        env:
+          STEP_RESULTS: ${{ toJSON(steps) }}
+        run: |
+          mkdir -p "$CLI_EVIDENCE_DIR"
+          printf '%s\n' "$STEP_RESULTS" > "$CLI_EVIDENCE_DIR/steps.json"
+          {
+            printf 'revision=%s\nrunner=%s/%s\n' "$GITHUB_SHA" "$RUNNER_OS" "$RUNNER_ARCH"
+            (cd cli && rustc -vV && cargo -V) || true
+            go version || true
+            df -h .
+          } > "$CLI_EVIDENCE_DIR/environment.txt"
+      - name: Retain CLI logs, timings and acceptance records
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cli-${{ matrix.profile }}-${{ github.run_attempt }}
+          path: ${{ env.CLI_EVIDENCE_DIR }}
+          if-no-files-found: warn
 
   results:
     name: CLI results
