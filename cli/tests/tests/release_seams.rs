@@ -18,7 +18,7 @@ fn a_release_build_holds_no_test_seam() {
     let mut case = tetral_tests::record!().case("a release build holds no test seam");
     let release_command =
         "cargo build --locked --release -p tetral --target-dir target/release-seams";
-    let status = Command::new(binaries::cargo())
+    let status = binaries::cargo_command()
         .args([
             "build",
             "--locked",

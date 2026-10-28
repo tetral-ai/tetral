@@ -24,7 +24,12 @@ the isolated harness tests without starting the CLI.
   target/test-seams` in `cli/`, so that its seams answer to the test, and
   `binaries::reference_server()`, built with `go build` at the repository
   root. It never runs a binary of the target directory that `cargo test`
-  itself holds.
+  itself holds. All nested fixture Cargo builds use `binaries::cargo_command`,
+  which removes the harness's inherited `CARGO_MANIFEST_DIR`, `CARGO_PKG_NAME`
+  and four version-component variables. `ring` tracks these incoming values;
+  removing them preserves reuse of direct builds while Cargo supplies each
+  package's own metadata. Toolchain selection and user build settings remain
+  inherited.
 - A test starts `tetral` as a child process whose environment holds only what
   the test sets (`run::Tetral`), its state on a temporary directory, and wires
   it to the test's `Seams` socket when the test drives its clock or barriers.

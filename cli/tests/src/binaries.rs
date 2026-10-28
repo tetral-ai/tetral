@@ -15,7 +15,7 @@ pub const TARGET_DIR: &str = "target/test-seams";
 pub fn tetral() -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT.get_or_init(|| {
-        run(Command::new(cargo())
+        run(cargo_command()
             .args([
                 "build",
                 "--locked",
@@ -43,7 +43,7 @@ pub const DIGEST_TARGET_DIR: &str = "target/test-seams-bwrap-digest";
 pub fn tetral_with_bwrap_digest(digest: &str) -> &'static Path {
     static BUILT: OnceLock<(String, PathBuf)> = OnceLock::new();
     let (built_digest, path) = BUILT.get_or_init(|| {
-        run(Command::new(cargo())
+        run(cargo_command()
             .args([
                 "build",
                 "--locked",
@@ -87,6 +87,26 @@ pub fn reference_server() -> &'static Path {
 /// The `cargo` that runs the tests, so that the pinned toolchain builds.
 pub fn cargo() -> PathBuf {
     std::env::var_os("CARGO").map_or_else(|| PathBuf::from("cargo"), PathBuf::from)
+}
+
+/// A fixture build with the same package-metadata environment as a direct
+/// Cargo invocation. `cargo test` sets these for this harness; ring's build
+/// script tracks their incoming values, so inheriting them invalidates an
+/// otherwise reusable direct build. Cargo supplies each built package's own
+/// metadata to its build scripts. Keep toolchain and user build settings.
+pub fn cargo_command() -> Command {
+    let mut command = Command::new(cargo());
+    for name in [
+        "CARGO_MANIFEST_DIR",
+        "CARGO_PKG_NAME",
+        "CARGO_PKG_VERSION_MAJOR",
+        "CARGO_PKG_VERSION_MINOR",
+        "CARGO_PKG_VERSION_PATCH",
+        "CARGO_PKG_VERSION_PRE",
+    ] {
+        command.env_remove(name);
+    }
+    command
 }
 
 fn run(command: &mut Command) {

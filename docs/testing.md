@@ -490,6 +490,10 @@ fixture. Cargo's build scripts still execute as part of compilation. Every
 Cargo command runs in `cli/` to select its pinned Rust toolchain. The existing
 four target directories remain distinct so nested fixture builds do not
 contend with the running test build's Cargo lock.
+Nested fixture commands remove the test harness's inherited package metadata;
+Cargo supplies each built package's own metadata. This keeps build-script
+environment fingerprints compatible with direct producer builds while
+preserving compiler flags, toolchain and Cargo configuration.
 
 | Entry | Paths | Consumers |
 | --- | --- | --- |
