@@ -1,0 +1,2670 @@
+[
+  {
+    "name": "list_files_first_page_query",
+    "schema": "ListFilesQuery",
+    "valid": true,
+    "value": {
+      "protocol_version": "1",
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id"
+    }
+  },
+  {
+    "name": "list_files_next_page_query",
+    "schema": "ListFilesQuery",
+    "valid": true,
+    "value": {
+      "protocol_version": "1",
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "after_path": "docs/b.md"
+    }
+  },
+  {
+    "name": "list_files_query_wrong_protocol_version",
+    "schema": "ListFilesQuery",
+    "valid": false,
+    "value": {
+      "protocol_version": "2",
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id"
+    },
+    "expect": [
+      "const@/protocol_version"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "list_files"
+  },
+  {
+    "name": "list_files_query_without_binding_id",
+    "schema": "ListFilesQuery",
+    "valid": false,
+    "value": {
+      "protocol_version": "1",
+      "connection_id": "id_connection_id"
+    },
+    "expect": [
+      "required:binding_id@"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "list_files"
+  },
+  {
+    "name": "list_changes_query",
+    "schema": "ListChangesQuery",
+    "valid": true,
+    "value": {
+      "protocol_version": "1",
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "after_seq": "41"
+    }
+  },
+  {
+    "name": "list_changes_query_inside_commit",
+    "schema": "ListChangesQuery",
+    "valid": true,
+    "value": {
+      "protocol_version": "1",
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "after_seq": "42",
+      "after_index": "999"
+    }
+  },
+  {
+    "name": "list_changes_query_from_beginning",
+    "schema": "ListChangesQuery",
+    "valid": true,
+    "value": {
+      "protocol_version": "1",
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "after_seq": "0"
+    }
+  },
+  {
+    "name": "list_changes_query_without_after_seq",
+    "schema": "ListChangesQuery",
+    "valid": false,
+    "value": {
+      "protocol_version": "1",
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id"
+    },
+    "expect": [
+      "required:after_seq@"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "list_changes"
+  },
+  {
+    "name": "list_changes_query_negative_seq",
+    "schema": "ListChangesQuery",
+    "valid": false,
+    "value": {
+      "protocol_version": "1",
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "after_seq": "-1"
+    },
+    "expect": [
+      "pattern@/after_seq"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "list_changes"
+  },
+  {
+    "name": "content_query",
+    "schema": "CommonQuery",
+    "valid": true,
+    "value": {
+      "protocol_version": "1",
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id"
+    }
+  },
+  {
+    "name": "content_query_without_connection_id",
+    "schema": "CommonQuery",
+    "valid": false,
+    "value": {
+      "protocol_version": "1",
+      "binding_id": "id_binding_id"
+    },
+    "expect": [
+      "required:connection_id@"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "upload_content"
+  },
+  {
+    "name": "drive_path_params",
+    "schema": "DrivePathParams",
+    "valid": true,
+    "value": {
+      "drive_id": "id_drive_id"
+    }
+  },
+  {
+    "name": "content_path_params",
+    "schema": "ContentPathParams",
+    "valid": true,
+    "value": {
+      "drive_id": "id_drive_id",
+      "sha256": "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447"
+    }
+  },
+  {
+    "name": "content_path_params_empty_file",
+    "schema": "ContentPathParams",
+    "valid": true,
+    "value": {
+      "drive_id": "id_drive_id",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  {
+    "name": "content_path_params_uppercase_hash",
+    "schema": "ContentPathParams",
+    "valid": false,
+    "value": {
+      "drive_id": "id_drive_id",
+      "sha256": "A948904F2F0F479B8F8197694B30184B0D2ED1C1CD2A1EC0FB85D299A192A447"
+    },
+    "expect": [
+      "pattern@/sha256"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "download_content"
+  },
+  {
+    "name": "upload_headers",
+    "schema": "UploadContentRequestHeaders",
+    "valid": true,
+    "value": {
+      "Content-Type": "application/octet-stream",
+      "Content-Length": "12"
+    }
+  },
+  {
+    "name": "upload_headers_empty_file",
+    "schema": "UploadContentRequestHeaders",
+    "valid": true,
+    "value": {
+      "Content-Type": "application/octet-stream",
+      "Content-Length": "0"
+    }
+  },
+  {
+    "name": "upload_headers_at_file_limit",
+    "schema": "UploadContentRequestHeaders",
+    "valid": true,
+    "value": {
+      "Content-Type": "application/octet-stream",
+      "Content-Length": "500000000"
+    }
+  },
+  {
+    "name": "upload_headers_over_file_limit",
+    "schema": "UploadContentRequestHeaders",
+    "valid": false,
+    "value": {
+      "Content-Type": "application/octet-stream",
+      "Content-Length": "500000001"
+    },
+    "expect": [
+      "semantic:file_too_large"
+    ],
+    "error": {
+      "status": 413,
+      "code": "file_too_large"
+    },
+    "endpoint": "upload_content"
+  },
+  {
+    "name": "upload_headers_without_content_length",
+    "schema": "UploadContentRequestHeaders",
+    "valid": false,
+    "value": {
+      "Content-Type": "application/octet-stream"
+    },
+    "expect": [
+      "semantic:content_length_missing"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "upload_content"
+  },
+  {
+    "name": "upload_headers_wrong_content_type",
+    "schema": "UploadContentRequestHeaders",
+    "valid": false,
+    "value": {
+      "Content-Type": "text/plain",
+      "Content-Length": "12"
+    },
+    "expect": [
+      "const@/Content-Type"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "upload_content"
+  },
+  {
+    "name": "download_headers_full",
+    "schema": "DownloadContentRequestHeaders",
+    "valid": true,
+    "value": {}
+  },
+  {
+    "name": "download_headers_last_byte",
+    "schema": "DownloadContentRequestHeaders",
+    "valid": true,
+    "value": {
+      "Range": "bytes=11-11"
+    }
+  },
+  {
+    "name": "download_headers_open_range",
+    "schema": "DownloadContentRequestHeaders",
+    "valid": true,
+    "value": {
+      "Range": "bytes=4-"
+    }
+  },
+  {
+    "name": "download_headers_past_end",
+    "schema": "DownloadContentRequestHeaders",
+    "valid": true,
+    "value": {
+      "Range": "bytes=4-999"
+    }
+  },
+  {
+    "name": "download_headers_suffix",
+    "schema": "DownloadContentRequestHeaders",
+    "valid": true,
+    "value": {
+      "Range": "bytes=-5"
+    }
+  },
+  {
+    "name": "download_headers_two_ranges",
+    "schema": "DownloadContentRequestHeaders",
+    "valid": false,
+    "value": {
+      "Range": "bytes=0-1,4-5"
+    },
+    "expect": [
+      "semantic:multiple_ranges"
+    ],
+    "error": {
+      "status": 416,
+      "code": "range_not_satisfiable"
+    },
+    "endpoint": "download_content"
+  },
+  {
+    "name": "download_headers_end_below_start",
+    "schema": "DownloadContentRequestHeaders",
+    "valid": false,
+    "value": {
+      "Range": "bytes=5-3"
+    },
+    "expect": [
+      "semantic:range_end_before_start"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "download_content"
+  },
+  {
+    "name": "download_headers_malformed_range",
+    "schema": "DownloadContentRequestHeaders",
+    "valid": false,
+    "value": {
+      "Range": "bytes=abc"
+    },
+    "expect": [
+      "pattern@/Range"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "download_content"
+  },
+  {
+    "name": "partial_content_headers_last_byte",
+    "schema": "PartialContentResponseHeaders",
+    "valid": true,
+    "value": {
+      "Content-Range": "bytes 11-11/12"
+    },
+    "pair": {
+      "request_headers": "download_headers_last_byte"
+    }
+  },
+  {
+    "name": "partial_content_headers_open_range",
+    "schema": "PartialContentResponseHeaders",
+    "valid": true,
+    "value": {
+      "Content-Range": "bytes 4-11/12"
+    },
+    "pair": {
+      "request_headers": "download_headers_open_range"
+    }
+  },
+  {
+    "name": "partial_content_headers_cut_at_end",
+    "schema": "PartialContentResponseHeaders",
+    "valid": true,
+    "value": {
+      "Content-Range": "bytes 4-11/12"
+    },
+    "pair": {
+      "request_headers": "download_headers_past_end"
+    }
+  },
+  {
+    "name": "partial_content_headers_suffix",
+    "schema": "PartialContentResponseHeaders",
+    "valid": true,
+    "value": {
+      "Content-Range": "bytes 7-11/12"
+    },
+    "pair": {
+      "request_headers": "download_headers_suffix"
+    }
+  },
+  {
+    "name": "partial_content_headers_suffix_from_start",
+    "schema": "PartialContentResponseHeaders",
+    "valid": false,
+    "value": {
+      "Content-Range": "bytes 0-11/12"
+    },
+    "expect": [
+      "semantic:content_range_not_requested"
+    ],
+    "pair": {
+      "request_headers": "download_headers_suffix"
+    }
+  },
+  {
+    "name": "partial_content_headers_past_end",
+    "schema": "PartialContentResponseHeaders",
+    "valid": false,
+    "value": {
+      "Content-Range": "bytes 11-12/12"
+    },
+    "expect": [
+      "semantic:content_range_outside_content"
+    ]
+  },
+  {
+    "name": "rate_limited_headers",
+    "schema": "RateLimitedResponseHeaders",
+    "valid": true,
+    "value": {
+      "Retry-After": "60"
+    }
+  },
+  {
+    "name": "rate_limited_headers_over_60",
+    "schema": "RateLimitedResponseHeaders",
+    "valid": false,
+    "value": {
+      "Retry-After": "61"
+    },
+    "expect": [
+      "pattern@/Retry-After"
+    ]
+  },
+  {
+    "name": "rate_limited_headers_zero",
+    "schema": "RateLimitedResponseHeaders",
+    "valid": false,
+    "value": {
+      "Retry-After": "0"
+    },
+    "expect": [
+      "pattern@/Retry-After"
+    ]
+  },
+  {
+    "name": "list_files_first_page",
+    "schema": "ListFilesResponse",
+    "valid": true,
+    "value": {
+      "files": [
+        {
+          "path": "docs/a.md",
+          "version_id": "id_version_a",
+          "content_sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+          "size_bytes": 2,
+          "executable": false
+        },
+        {
+          "path": "docs/b.md",
+          "version_id": "id_version_b",
+          "content_sha256": "0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f",
+          "size_bytes": 2,
+          "executable": false
+        }
+      ],
+      "has_more": true,
+      "start_seq": 42
+    },
+    "pair": {
+      "query": "list_files_first_page_query"
+    }
+  },
+  {
+    "name": "list_files_last_page",
+    "schema": "ListFilesResponse",
+    "valid": true,
+    "value": {
+      "files": [
+        {
+          "path": "report.md",
+          "version_id": "id_version_report",
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "size_bytes": 7,
+          "executable": false
+        },
+        {
+          "path": "run.sh",
+          "version_id": "id_version_run",
+          "content_sha256": "b5004f26a852b0d60ec1237432c1a33c2307ff2458c374d9d99749d045c7feb9",
+          "size_bytes": 4,
+          "executable": true
+        },
+        {
+          "path": "skills/review/SKILL.md",
+          "version_id": "id_version_skill",
+          "content_sha256": "3088e5b60779a95389e4ed08d2ecee6eaac2311c590dab3f2e4beb3090a54f00",
+          "size_bytes": 6,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "pair": {
+      "query": "list_files_next_page_query"
+    }
+  },
+  {
+    "name": "list_files_empty_drive",
+    "schema": "ListFilesResponse",
+    "valid": true,
+    "value": {
+      "files": [],
+      "has_more": false,
+      "start_seq": 0
+    },
+    "pair": {
+      "query": "list_files_first_page_query"
+    }
+  },
+  {
+    "name": "list_files_first_page_without_start_seq",
+    "schema": "ListFilesResponse",
+    "valid": false,
+    "value": {
+      "files": [
+        {
+          "path": "docs/a.md",
+          "version_id": "id_version_a",
+          "content_sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+          "size_bytes": 2,
+          "executable": false
+        },
+        {
+          "path": "docs/b.md",
+          "version_id": "id_version_b",
+          "content_sha256": "0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f",
+          "size_bytes": 2,
+          "executable": false
+        }
+      ],
+      "has_more": true
+    },
+    "expect": [
+      "semantic:start_seq_presence"
+    ],
+    "pair": {
+      "query": "list_files_first_page_query"
+    }
+  },
+  {
+    "name": "list_files_next_page_with_start_seq",
+    "schema": "ListFilesResponse",
+    "valid": false,
+    "value": {
+      "files": [
+        {
+          "path": "report.md",
+          "version_id": "id_version_report",
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "size_bytes": 7,
+          "executable": false
+        }
+      ],
+      "has_more": false,
+      "start_seq": 42
+    },
+    "expect": [
+      "semantic:start_seq_presence"
+    ],
+    "pair": {
+      "query": "list_files_next_page_query"
+    }
+  },
+  {
+    "name": "list_files_not_in_path_order",
+    "schema": "ListFilesResponse",
+    "valid": false,
+    "value": {
+      "files": [
+        {
+          "path": "docs/b.md",
+          "version_id": "id_version_b",
+          "content_sha256": "0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f",
+          "size_bytes": 2,
+          "executable": false
+        },
+        {
+          "path": "docs/a.md",
+          "version_id": "id_version_a",
+          "content_sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+          "size_bytes": 2,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "semantic:files_not_in_path_order"
+    ]
+  },
+  {
+    "name": "list_files_duplicate_path",
+    "schema": "ListFilesResponse",
+    "valid": false,
+    "value": {
+      "files": [
+        {
+          "path": "docs/a.md",
+          "version_id": "id_version_a",
+          "content_sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+          "size_bytes": 2,
+          "executable": false
+        },
+        {
+          "path": "docs/a.md",
+          "version_id": "id_version_a_2",
+          "content_sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+          "size_bytes": 2,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "semantic:duplicate_path"
+    ]
+  },
+  {
+    "name": "list_files_paths_differ_only_in_case",
+    "schema": "ListFilesResponse",
+    "valid": false,
+    "value": {
+      "files": [
+        {
+          "path": "Report.md",
+          "version_id": "id_version_report",
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "size_bytes": 7,
+          "executable": false
+        },
+        {
+          "path": "report.md",
+          "version_id": "id_version_report_2",
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "size_bytes": 7,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "semantic:paths_differ_only_in_case"
+    ]
+  },
+  {
+    "name": "list_files_paths_equal_under_full_case_folding",
+    "schema": "ListFilesResponse",
+    "valid": false,
+    "value": {
+      "files": [
+        {
+          "path": "STRASSE.md",
+          "version_id": "id_version_report",
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "size_bytes": 7,
+          "executable": false
+        },
+        {
+          "path": "Straße.md",
+          "version_id": "id_version_report_2",
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "size_bytes": 7,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "semantic:paths_differ_only_in_case"
+    ]
+  },
+  {
+    "name": "list_files_file_above_file",
+    "schema": "ListFilesResponse",
+    "valid": false,
+    "value": {
+      "files": [
+        {
+          "path": "a/b",
+          "version_id": "id_version_a",
+          "content_sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+          "size_bytes": 2,
+          "executable": false
+        },
+        {
+          "path": "a/b/c",
+          "version_id": "id_version_b",
+          "content_sha256": "0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f",
+          "size_bytes": 2,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "semantic:file_above_file"
+    ]
+  },
+  {
+    "name": "list_files_absolute_path",
+    "schema": "ListFilesResponse",
+    "valid": false,
+    "value": {
+      "files": [
+        {
+          "path": "/docs/a.md",
+          "version_id": "id_version_a",
+          "content_sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+          "size_bytes": 2,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "pattern@/files/0/path"
+    ]
+  },
+  {
+    "name": "list_files_dot_dot_segment",
+    "schema": "ListFilesResponse",
+    "valid": false,
+    "value": {
+      "files": [
+        {
+          "path": "docs/../a.md",
+          "version_id": "id_version_a",
+          "content_sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+          "size_bytes": 2,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "pattern@/files/0/path"
+    ]
+  },
+  {
+    "name": "list_files_path_not_nfc",
+    "schema": "ListFilesResponse",
+    "valid": false,
+    "value": {
+      "files": [
+        {
+          "path": "café.md",
+          "version_id": "id_version_a",
+          "content_sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+          "size_bytes": 2,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "semantic:path_not_nfc"
+    ]
+  },
+  {
+    "name": "list_files_format_character",
+    "schema": "ListFilesResponse",
+    "valid": false,
+    "value": {
+      "files": [
+        {
+          "path": "a​.md",
+          "version_id": "id_version_a",
+          "content_sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+          "size_bytes": 2,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "semantic:path_control_or_format_character"
+    ]
+  },
+  {
+    "name": "list_files_null_hash",
+    "schema": "ListFilesResponse",
+    "valid": false,
+    "value": {
+      "files": [
+        {
+          "path": "docs/a.md",
+          "version_id": "id_version_a",
+          "content_sha256": null,
+          "size_bytes": 2,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "type@/files/0/content_sha256"
+    ]
+  },
+  {
+    "name": "list_files_file_over_limit",
+    "schema": "ListFilesResponse",
+    "valid": false,
+    "value": {
+      "files": [
+        {
+          "path": "docs/a.md",
+          "version_id": "id_version_a",
+          "content_sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+          "size_bytes": 500000001,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "maximum@/files/0/size_bytes"
+    ]
+  },
+  {
+    "name": "list_files_page_not_after_cursor",
+    "schema": "ListFilesResponse",
+    "valid": false,
+    "value": {
+      "files": [
+        {
+          "path": "docs/b.md",
+          "version_id": "id_version_b",
+          "content_sha256": "0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f",
+          "size_bytes": 2,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "semantic:page_not_after_cursor"
+    ],
+    "pair": {
+      "query": "list_files_next_page_query"
+    }
+  },
+  {
+    "name": "list_files_has_more_on_empty_page",
+    "schema": "ListFilesResponse",
+    "valid": false,
+    "value": {
+      "files": [],
+      "has_more": true
+    },
+    "expect": [
+      "semantic:has_more_on_empty_page"
+    ]
+  },
+  {
+    "name": "list_changes_page",
+    "schema": "ListChangesResponse",
+    "valid": true,
+    "value": {
+      "records": [
+        {
+          "seq": 42,
+          "index": 0,
+          "path": "old.md",
+          "operation": "deleted",
+          "version_id": "id_version_42_0",
+          "content_sha256": null,
+          "size_bytes": 0,
+          "executable": false
+        },
+        {
+          "seq": 42,
+          "index": 1,
+          "path": "report.md",
+          "operation": "created",
+          "version_id": "id_version_42_1",
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "size_bytes": 7,
+          "executable": false
+        },
+        {
+          "seq": 43,
+          "index": 0,
+          "path": "docs/a.md",
+          "operation": "modified",
+          "version_id": "id_version_43_0",
+          "content_sha256": "333d36c15ed252b52c66eda5bf9c1ad3e730b6d6eef9401a336db63ccf7558e7",
+          "size_bytes": 3,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "pair": {
+      "query": "list_changes_query"
+    }
+  },
+  {
+    "name": "list_changes_page_inside_commit",
+    "schema": "ListChangesResponse",
+    "valid": true,
+    "value": {
+      "records": [
+        {
+          "seq": 42,
+          "index": 1000,
+          "path": "data/f1000.csv",
+          "operation": "created",
+          "version_id": "id_version_42_1000",
+          "content_sha256": "46865fa6471cf7300bb2fd0035c0d2b39dc1de3a94235ebedfc3f57ed97331ba",
+          "size_bytes": 9,
+          "executable": false
+        },
+        {
+          "seq": 43,
+          "index": 0,
+          "path": "tmp.txt",
+          "operation": "deleted",
+          "version_id": "id_version_43_0",
+          "content_sha256": null,
+          "size_bytes": 0,
+          "executable": false
+        }
+      ],
+      "has_more": true
+    },
+    "pair": {
+      "query": "list_changes_query_inside_commit"
+    }
+  },
+  {
+    "name": "list_changes_page_from_beginning",
+    "schema": "ListChangesResponse",
+    "valid": true,
+    "value": {
+      "records": [
+        {
+          "seq": 1,
+          "index": 0,
+          "path": "README.md",
+          "operation": "created",
+          "version_id": "id_version_1_0",
+          "content_sha256": "00d75b5176b48ccc71d91bcc1d7b90fc2820429b1629b77fd1d5f4c5dcee4f6d",
+          "size_bytes": 7,
+          "executable": false
+        }
+      ],
+      "has_more": true
+    },
+    "pair": {
+      "query": "list_changes_query_from_beginning"
+    }
+  },
+  {
+    "name": "list_changes_deletion_with_hash",
+    "schema": "ListChangesResponse",
+    "valid": false,
+    "value": {
+      "records": [
+        {
+          "seq": 42,
+          "index": 0,
+          "path": "old.md",
+          "operation": "deleted",
+          "version_id": "id_version_42_0",
+          "content_sha256": "01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee",
+          "size_bytes": 0,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "type@/records/0/content_sha256"
+    ]
+  },
+  {
+    "name": "list_changes_deletion_with_size",
+    "schema": "ListChangesResponse",
+    "valid": false,
+    "value": {
+      "records": [
+        {
+          "seq": 42,
+          "index": 0,
+          "path": "old.md",
+          "operation": "deleted",
+          "version_id": "id_version_42_0",
+          "content_sha256": null,
+          "size_bytes": 5,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "const@/records/0/size_bytes"
+    ]
+  },
+  {
+    "name": "list_changes_creation_without_hash",
+    "schema": "ListChangesResponse",
+    "valid": false,
+    "value": {
+      "records": [
+        {
+          "seq": 42,
+          "index": 0,
+          "path": "old.md",
+          "operation": "deleted",
+          "version_id": "id_version_42_0",
+          "content_sha256": null,
+          "size_bytes": 0,
+          "executable": false
+        },
+        {
+          "seq": 42,
+          "index": 1,
+          "path": "report.md",
+          "operation": "created",
+          "version_id": "id_version_42_1",
+          "content_sha256": null,
+          "size_bytes": 7,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "type@/records/1/content_sha256"
+    ]
+  },
+  {
+    "name": "list_changes_unknown_operation",
+    "schema": "ListChangesResponse",
+    "valid": false,
+    "value": {
+      "records": [
+        {
+          "seq": 42,
+          "index": 0,
+          "path": "report.md",
+          "operation": "renamed",
+          "version_id": "id_version_42_1",
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "size_bytes": 7,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "enum@/records/0/operation"
+    ]
+  },
+  {
+    "name": "list_changes_not_in_order",
+    "schema": "ListChangesResponse",
+    "valid": false,
+    "value": {
+      "records": [
+        {
+          "seq": 43,
+          "index": 0,
+          "path": "docs/a.md",
+          "operation": "modified",
+          "version_id": "id_version_43_0",
+          "content_sha256": "333d36c15ed252b52c66eda5bf9c1ad3e730b6d6eef9401a336db63ccf7558e7",
+          "size_bytes": 3,
+          "executable": false
+        },
+        {
+          "seq": 42,
+          "index": 0,
+          "path": "old.md",
+          "operation": "deleted",
+          "version_id": "id_version_42_0",
+          "content_sha256": null,
+          "size_bytes": 0,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "semantic:records_not_in_order"
+    ]
+  },
+  {
+    "name": "list_changes_write_before_deletion",
+    "schema": "ListChangesResponse",
+    "valid": false,
+    "value": {
+      "records": [
+        {
+          "seq": 42,
+          "index": 0,
+          "path": "report.md",
+          "operation": "created",
+          "version_id": "id_version_42_1",
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "size_bytes": 7,
+          "executable": false
+        },
+        {
+          "seq": 42,
+          "index": 1,
+          "path": "old.md",
+          "operation": "deleted",
+          "version_id": "id_version_42_0",
+          "content_sha256": null,
+          "size_bytes": 0,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "semantic:deletion_after_write"
+    ]
+  },
+  {
+    "name": "list_changes_index_gap",
+    "schema": "ListChangesResponse",
+    "valid": false,
+    "value": {
+      "records": [
+        {
+          "seq": 42,
+          "index": 0,
+          "path": "old.md",
+          "operation": "deleted",
+          "version_id": "id_version_42_0",
+          "content_sha256": null,
+          "size_bytes": 0,
+          "executable": false
+        },
+        {
+          "seq": 42,
+          "index": 2,
+          "path": "report.md",
+          "operation": "created",
+          "version_id": "id_version_42_1",
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "size_bytes": 7,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "semantic:index_gap"
+    ]
+  },
+  {
+    "name": "list_changes_page_not_after_cursor",
+    "schema": "ListChangesResponse",
+    "valid": false,
+    "value": {
+      "records": [
+        {
+          "seq": 40,
+          "index": 0,
+          "path": "old.md",
+          "operation": "created",
+          "version_id": "id_version_40_0",
+          "content_sha256": "01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee",
+          "size_bytes": 4,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "semantic:page_not_after_cursor"
+    ],
+    "pair": {
+      "query": "list_changes_query"
+    }
+  },
+  {
+    "name": "list_changes_seq_zero",
+    "schema": "ListChangesResponse",
+    "valid": false,
+    "value": {
+      "records": [
+        {
+          "seq": 0,
+          "index": 0,
+          "path": "old.md",
+          "operation": "deleted",
+          "version_id": "id_version_42_0",
+          "content_sha256": null,
+          "size_bytes": 0,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "minimum@/records/0/seq"
+    ]
+  },
+  {
+    "name": "list_changes_float_seq",
+    "schema": "ListChangesResponse",
+    "valid": false,
+    "value": {
+      "records": [
+        {
+          "seq": 42.0,
+          "index": 0,
+          "path": "old.md",
+          "operation": "deleted",
+          "version_id": "id_version_42_0",
+          "content_sha256": null,
+          "size_bytes": 0,
+          "executable": false
+        }
+      ],
+      "has_more": false
+    },
+    "expect": [
+      "type@/records/0/seq"
+    ]
+  },
+  {
+    "name": "drive_changed",
+    "schema": "DriveChanged",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "type": "drive.changed",
+      "payload": {
+        "drive_id": "id_drive_id",
+        "seq": 43
+      }
+    }
+  },
+  {
+    "name": "drive_changed_seq_zero",
+    "schema": "DriveChanged",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "type": "drive.changed",
+      "payload": {
+        "drive_id": "id_drive_id",
+        "seq": 0
+      }
+    },
+    "expect": [
+      "minimum@/payload/seq"
+    ]
+  },
+  {
+    "name": "drive_changed_without_drive_id",
+    "schema": "DriveChanged",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "id_connection_id",
+      "message_id": "id_message_id",
+      "type": "drive.changed",
+      "payload": {
+        "seq": 43
+      }
+    },
+    "expect": [
+      "required:drive_id@/payload"
+    ]
+  },
+  {
+    "name": "upload_response",
+    "schema": "UploadContentResponse",
+    "valid": true,
+    "value": {
+      "content_sha256": "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447",
+      "size_bytes": 12
+    },
+    "pair": {
+      "path_params": "content_path_params",
+      "request_headers": "upload_headers"
+    }
+  },
+  {
+    "name": "upload_response_empty_file",
+    "schema": "UploadContentResponse",
+    "valid": true,
+    "value": {
+      "content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    "pair": {
+      "path_params": "content_path_params_empty_file",
+      "request_headers": "upload_headers_empty_file"
+    }
+  },
+  {
+    "name": "upload_response_hash_not_url",
+    "schema": "UploadContentResponse",
+    "valid": false,
+    "value": {
+      "content_sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+      "size_bytes": 12
+    },
+    "expect": [
+      "semantic:hash_differs_from_url"
+    ],
+    "pair": {
+      "path_params": "content_path_params",
+      "request_headers": "upload_headers"
+    }
+  },
+  {
+    "name": "upload_response_size_not_content_length",
+    "schema": "UploadContentResponse",
+    "valid": false,
+    "value": {
+      "content_sha256": "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447",
+      "size_bytes": 13
+    },
+    "expect": [
+      "semantic:size_differs_from_content_length"
+    ],
+    "pair": {
+      "path_params": "content_path_params",
+      "request_headers": "upload_headers"
+    }
+  },
+  {
+    "name": "commit_request",
+    "schema": "CommitRequest",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "changes": [
+        {
+          "path": "old.md",
+          "change": "delete",
+          "base_sha256": "01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee"
+        },
+        {
+          "path": "report.md",
+          "change": "write",
+          "base_sha256": null,
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "executable": false
+        },
+        {
+          "path": "notes.md",
+          "change": "write",
+          "base_sha256": "5087d8fbe184ab5eeed753d2fd69a88955d8e9ae5bbce8bbb0af006672681956",
+          "content_sha256": "44c9caf21a9593f33379f35591c932f16d624ee24dddd4e01a22f49d225d3e74",
+          "executable": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "commit_request_rejections",
+    "schema": "CommitRequest",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "changes": [
+        {
+          "path": "gone.md",
+          "change": "delete",
+          "base_sha256": "b9b7afdd6440523bab1f52c4bc0f325337c2b65df12d248c21195389457e4b01"
+        },
+        {
+          "path": "/abs.md",
+          "change": "write",
+          "base_sha256": null,
+          "content_sha256": "dae00478f0c0251654a6fddfaebb26c12136cb630a9811d07cfe2e0f144e18c7",
+          "executable": false
+        },
+        {
+          "path": "big.bin",
+          "change": "write",
+          "base_sha256": null,
+          "content_sha256": "5e46266be5fda8508117bfafcbb22d0e177a3b476ed603a39e47f1586b2ef4a3",
+          "executable": false
+        },
+        {
+          "path": "docs/a.md",
+          "change": "write",
+          "base_sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+          "content_sha256": "333d36c15ed252b52c66eda5bf9c1ad3e730b6d6eef9401a336db63ccf7558e7",
+          "executable": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "commit_request_delete_of_absent_file",
+    "schema": "CommitRequest",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "changes": [
+        {
+          "path": "never.md",
+          "change": "delete",
+          "base_sha256": "5373c0498ffa79468c5ee480004cfcb6946307e36a5309ff76cddeefbfbc7d73"
+        }
+      ]
+    }
+  },
+  {
+    "name": "commit_request_paths_breaking_path_rules",
+    "schema": "CommitRequest",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "changes": [
+        {
+          "path": "/abs.md",
+          "change": "write",
+          "base_sha256": null,
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "executable": false
+        },
+        {
+          "path": "notes/../x.md",
+          "change": "write",
+          "base_sha256": null,
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "executable": false
+        },
+        {
+          "path": "",
+          "change": "write",
+          "base_sha256": null,
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "executable": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "commit_request_empty_changes",
+    "schema": "CommitRequest",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "changes": []
+    },
+    "expect": [
+      "minItems@/changes"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "commit"
+  },
+  {
+    "name": "commit_request_duplicate_path",
+    "schema": "CommitRequest",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "changes": [
+        {
+          "path": "report.md",
+          "change": "write",
+          "base_sha256": null,
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "executable": false
+        },
+        {
+          "path": "report.md",
+          "change": "write",
+          "base_sha256": null,
+          "content_sha256": "44c9caf21a9593f33379f35591c932f16d624ee24dddd4e01a22f49d225d3e74",
+          "executable": false
+        }
+      ]
+    },
+    "expect": [
+      "semantic:duplicate_path"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "commit"
+  },
+  {
+    "name": "commit_request_write_without_content_hash",
+    "schema": "CommitRequest",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "changes": [
+        {
+          "path": "old.md",
+          "change": "delete",
+          "base_sha256": "01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee"
+        },
+        {
+          "path": "report.md",
+          "change": "write",
+          "base_sha256": null,
+          "executable": false
+        }
+      ]
+    },
+    "expect": [
+      "required:content_sha256@/changes/1"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "commit"
+  },
+  {
+    "name": "commit_request_write_without_base",
+    "schema": "CommitRequest",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "changes": [
+        {
+          "path": "old.md",
+          "change": "delete",
+          "base_sha256": "01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee"
+        },
+        {
+          "path": "report.md",
+          "change": "write",
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "executable": false
+        }
+      ]
+    },
+    "expect": [
+      "required:base_sha256@/changes/1"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "commit"
+  },
+  {
+    "name": "commit_request_delete_with_null_base",
+    "schema": "CommitRequest",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "changes": [
+        {
+          "path": "old.md",
+          "change": "delete",
+          "base_sha256": null
+        }
+      ]
+    },
+    "expect": [
+      "type@/changes/0/base_sha256"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "commit"
+  },
+  {
+    "name": "commit_request_with_writer",
+    "schema": "CommitRequest",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "changes": [
+        {
+          "path": "old.md",
+          "change": "delete",
+          "base_sha256": "01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee"
+        },
+        {
+          "path": "report.md",
+          "change": "write",
+          "base_sha256": null,
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "executable": false
+        },
+        {
+          "path": "notes.md",
+          "change": "write",
+          "base_sha256": "5087d8fbe184ab5eeed753d2fd69a88955d8e9ae5bbce8bbb0af006672681956",
+          "content_sha256": "44c9caf21a9593f33379f35591c932f16d624ee24dddd4e01a22f49d225d3e74",
+          "executable": false
+        }
+      ],
+      "writer": {
+        "type": "session_actor",
+        "session_id": "id_session_id_2",
+        "computer_id": "id_computer_id_2"
+      }
+    },
+    "expect": [
+      "additionalProperties:writer@"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "commit"
+  },
+  {
+    "name": "commit_request_change_with_writer",
+    "schema": "CommitRequest",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "changes": [
+        {
+          "path": "old.md",
+          "change": "delete",
+          "base_sha256": "01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee"
+        },
+        {
+          "path": "report.md",
+          "change": "write",
+          "base_sha256": null,
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "executable": false,
+          "writer": {
+            "type": "session_actor",
+            "session_id": "id_session_id_2",
+            "computer_id": "id_computer_id_2"
+          }
+        }
+      ]
+    },
+    "expect": [
+      "additionalProperties:writer@/changes/1"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "commit"
+  },
+  {
+    "name": "commit_request_with_message_id",
+    "schema": "CommitRequest",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "changes": [
+        {
+          "path": "old.md",
+          "change": "delete",
+          "base_sha256": "01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee"
+        },
+        {
+          "path": "report.md",
+          "change": "write",
+          "base_sha256": null,
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "executable": false
+        },
+        {
+          "path": "notes.md",
+          "change": "write",
+          "base_sha256": "5087d8fbe184ab5eeed753d2fd69a88955d8e9ae5bbce8bbb0af006672681956",
+          "content_sha256": "44c9caf21a9593f33379f35591c932f16d624ee24dddd4e01a22f49d225d3e74",
+          "executable": false
+        }
+      ],
+      "message_id": "id_message_id"
+    },
+    "expect": [
+      "additionalProperties:message_id@"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "commit"
+  },
+  {
+    "name": "commit_request_unknown_change",
+    "schema": "CommitRequest",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "changes": [
+        {
+          "path": "old.md",
+          "change": "rename",
+          "base_sha256": "01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee"
+        }
+      ]
+    },
+    "expect": [
+      "enum@/changes/0/change",
+      "oneOf@/changes/0"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "commit"
+  },
+  {
+    "name": "commit_request_uppercase_hash",
+    "schema": "CommitRequest",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "changes": [
+        {
+          "path": "old.md",
+          "change": "delete",
+          "base_sha256": "01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee"
+        },
+        {
+          "path": "report.md",
+          "change": "write",
+          "base_sha256": null,
+          "content_sha256": "331D26D6D8F862E46BA900811BE8A7A1E4DBAA229B14C99BECFD5E5151490D95",
+          "executable": false
+        }
+      ]
+    },
+    "expect": [
+      "pattern@/changes/1/content_sha256"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "commit"
+  },
+  {
+    "name": "commit_request_wrong_protocol_version",
+    "schema": "CommitRequest",
+    "valid": false,
+    "value": {
+      "protocol_version": 2,
+      "connection_id": "id_connection_id",
+      "binding_id": "id_binding_id",
+      "changes": [
+        {
+          "path": "old.md",
+          "change": "delete",
+          "base_sha256": "01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee"
+        },
+        {
+          "path": "report.md",
+          "change": "write",
+          "base_sha256": null,
+          "content_sha256": "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95",
+          "executable": false
+        },
+        {
+          "path": "notes.md",
+          "change": "write",
+          "base_sha256": "5087d8fbe184ab5eeed753d2fd69a88955d8e9ae5bbce8bbb0af006672681956",
+          "content_sha256": "44c9caf21a9593f33379f35591c932f16d624ee24dddd4e01a22f49d225d3e74",
+          "executable": false
+        }
+      ]
+    },
+    "expect": [
+      "const@/protocol_version"
+    ],
+    "error": {
+      "status": 400,
+      "code": "invalid_message"
+    },
+    "endpoint": "commit"
+  },
+  {
+    "name": "commit_response",
+    "schema": "CommitResponse",
+    "valid": true,
+    "value": {
+      "seq": 43,
+      "results": [
+        {
+          "status": "accepted",
+          "version_id": "id_version_43_0"
+        },
+        {
+          "status": "accepted",
+          "version_id": "id_version_43_1"
+        },
+        {
+          "status": "rejected",
+          "reason": "conflict",
+          "current": {
+            "version_id": "id_version_notes3",
+            "content_sha256": "c83be4c6755d6eb3281ccc5c8fb1e2ab48e91992ee5c62344ad5a2532ed6f32f",
+            "size_bytes": 120,
+            "executable": false,
+            "writer": {
+              "type": "session_actor",
+              "session_id": "id_session_id_2",
+              "computer_id": "id_computer_id_2"
+            }
+          }
+        }
+      ]
+    },
+    "pair": {
+      "request": "commit_request"
+    }
+  },
+  {
+    "name": "commit_response_sent_again",
+    "schema": "CommitResponse",
+    "valid": true,
+    "value": {
+      "seq": null,
+      "results": [
+        {
+          "status": "accepted",
+          "version_id": "id_version_43_0"
+        },
+        {
+          "status": "accepted",
+          "version_id": "id_version_43_1"
+        },
+        {
+          "status": "accepted",
+          "version_id": "id_version_43_2"
+        }
+      ]
+    },
+    "pair": {
+      "request": "commit_request"
+    }
+  },
+  {
+    "name": "commit_response_rejections",
+    "schema": "CommitResponse",
+    "valid": true,
+    "value": {
+      "seq": null,
+      "results": [
+        {
+          "status": "rejected",
+          "reason": "conflict",
+          "current": {
+            "version_id": "id_version_gone2",
+            "content_sha256": "4fe8e2d8b07a10d39a9651e306ea9cdbfa19473a1b66b5e811c85630682b077f",
+            "size_bytes": 10,
+            "executable": false,
+            "writer": {
+              "type": "api_actor",
+              "api_key_id": "id_api_key_id"
+            }
+          }
+        },
+        {
+          "status": "rejected",
+          "reason": "path_rule",
+          "rule": "A path is relative to the drive root, with no leading /"
+        },
+        {
+          "status": "rejected",
+          "reason": "limit",
+          "rule": "Drive limit max_bytes 1000000000"
+        },
+        {
+          "status": "rejected",
+          "reason": "conflict",
+          "current": {
+            "version_id": "id_version_a_deleted",
+            "content_sha256": null,
+            "size_bytes": 0,
+            "executable": false,
+            "writer": {
+              "type": "session_actor",
+              "session_id": "id_session_id_2",
+              "computer_id": "id_computer_id_2"
+            }
+          }
+        }
+      ]
+    },
+    "pair": {
+      "request": "commit_request_rejections"
+    }
+  },
+  {
+    "name": "commit_response_delete_of_absent_file",
+    "schema": "CommitResponse",
+    "valid": true,
+    "value": {
+      "seq": null,
+      "results": [
+        {
+          "status": "accepted",
+          "version_id": null
+        }
+      ]
+    },
+    "pair": {
+      "request": "commit_request_delete_of_absent_file"
+    }
+  },
+  {
+    "name": "commit_response_path_rule_without_rule",
+    "schema": "CommitResponse",
+    "valid": false,
+    "value": {
+      "seq": null,
+      "results": [
+        {
+          "status": "rejected",
+          "reason": "path_rule"
+        }
+      ]
+    },
+    "expect": [
+      "required:rule@/results/0"
+    ]
+  },
+  {
+    "name": "commit_response_limit_without_rule",
+    "schema": "CommitResponse",
+    "valid": false,
+    "value": {
+      "seq": null,
+      "results": [
+        {
+          "status": "rejected",
+          "reason": "limit"
+        }
+      ]
+    },
+    "expect": [
+      "required:rule@/results/0"
+    ]
+  },
+  {
+    "name": "commit_response_unknown_status",
+    "schema": "CommitResponse",
+    "valid": false,
+    "value": {
+      "seq": null,
+      "results": [
+        {
+          "status": "skipped"
+        }
+      ]
+    },
+    "expect": [
+      "enum@/results/0/status",
+      "oneOf@/results/0"
+    ]
+  },
+  {
+    "name": "commit_response_unknown_reason",
+    "schema": "CommitResponse",
+    "valid": false,
+    "value": {
+      "seq": null,
+      "results": [
+        {
+          "status": "rejected",
+          "reason": "quota",
+          "rule": "Drive limit max_bytes 1000000000"
+        }
+      ]
+    },
+    "expect": [
+      "enum@/results/0/reason"
+    ]
+  },
+  {
+    "name": "commit_response_empty_rule",
+    "schema": "CommitResponse",
+    "valid": false,
+    "value": {
+      "seq": null,
+      "results": [
+        {
+          "status": "rejected",
+          "reason": "path_rule",
+          "rule": ""
+        }
+      ]
+    },
+    "expect": [
+      "minLength@/results/0/rule"
+    ]
+  },
+  {
+    "name": "commit_response_rule_over_512_bytes",
+    "schema": "CommitResponse",
+    "valid": false,
+    "value": {
+      "seq": null,
+      "results": [
+        {
+          "status": "rejected",
+          "reason": "path_rule",
+          "rule": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ]
+    },
+    "expect": [
+      "semantic:rule_over_512_bytes"
+    ]
+  },
+  {
+    "name": "commit_response_unknown_writer_type",
+    "schema": "CommitResponse",
+    "valid": false,
+    "value": {
+      "seq": 43,
+      "results": [
+        {
+          "status": "accepted",
+          "version_id": "id_version_43_0"
+        },
+        {
+          "status": "accepted",
+          "version_id": "id_version_43_1"
+        },
+        {
+          "status": "rejected",
+          "reason": "conflict",
+          "current": {
+            "version_id": "id_version_notes3",
+            "content_sha256": "c83be4c6755d6eb3281ccc5c8fb1e2ab48e91992ee5c62344ad5a2532ed6f32f",
+            "size_bytes": 120,
+            "executable": false,
+            "writer": {
+              "type": "machine_actor",
+              "machine_id": "id_machine"
+            }
+          }
+        }
+      ]
+    },
+    "expect": [
+      "oneOf@/results/2/current/writer"
+    ]
+  },
+  {
+    "name": "commit_response_writer_without_computer",
+    "schema": "CommitResponse",
+    "valid": false,
+    "value": {
+      "seq": 43,
+      "results": [
+        {
+          "status": "accepted",
+          "version_id": "id_version_43_0"
+        },
+        {
+          "status": "accepted",
+          "version_id": "id_version_43_1"
+        },
+        {
+          "status": "rejected",
+          "reason": "conflict",
+          "current": {
+            "version_id": "id_version_notes3",
+            "content_sha256": "c83be4c6755d6eb3281ccc5c8fb1e2ab48e91992ee5c62344ad5a2532ed6f32f",
+            "size_bytes": 120,
+            "executable": false,
+            "writer": {
+              "type": "session_actor",
+              "session_id": "id_session_id_2"
+            }
+          }
+        }
+      ]
+    },
+    "expect": [
+      "required:computer_id@/results/2/current/writer"
+    ]
+  },
+  {
+    "name": "commit_response_result_count_mismatch",
+    "schema": "CommitResponse",
+    "valid": false,
+    "value": {
+      "seq": 43,
+      "results": [
+        {
+          "status": "accepted",
+          "version_id": "id_version_43_0"
+        },
+        {
+          "status": "accepted",
+          "version_id": "id_version_43_1"
+        }
+      ]
+    },
+    "expect": [
+      "semantic:result_count_mismatch"
+    ],
+    "pair": {
+      "request": "commit_request"
+    }
+  },
+  {
+    "name": "commit_response_seq_without_new_version",
+    "schema": "CommitResponse",
+    "valid": false,
+    "value": {
+      "seq": 45,
+      "results": [
+        {
+          "status": "rejected",
+          "reason": "conflict",
+          "current": {
+            "version_id": "id_version_gone2",
+            "content_sha256": "4fe8e2d8b07a10d39a9651e306ea9cdbfa19473a1b66b5e811c85630682b077f",
+            "size_bytes": 10,
+            "executable": false,
+            "writer": {
+              "type": "api_actor",
+              "api_key_id": "id_api_key_id"
+            }
+          }
+        },
+        {
+          "status": "rejected",
+          "reason": "path_rule",
+          "rule": "A path is relative to the drive root, with no leading /"
+        },
+        {
+          "status": "rejected",
+          "reason": "limit",
+          "rule": "Drive limit max_bytes 1000000000"
+        },
+        {
+          "status": "rejected",
+          "reason": "conflict",
+          "current": {
+            "version_id": "id_version_a_deleted",
+            "content_sha256": null,
+            "size_bytes": 0,
+            "executable": false,
+            "writer": {
+              "type": "session_actor",
+              "session_id": "id_session_id_2",
+              "computer_id": "id_computer_id_2"
+            }
+          }
+        }
+      ]
+    },
+    "expect": [
+      "semantic:seq_without_new_version"
+    ],
+    "pair": {
+      "request": "commit_request_rejections"
+    }
+  },
+  {
+    "name": "commit_response_write_with_null_version",
+    "schema": "CommitResponse",
+    "valid": false,
+    "value": {
+      "seq": 43,
+      "results": [
+        {
+          "status": "accepted",
+          "version_id": "id_version_43_0"
+        },
+        {
+          "status": "accepted",
+          "version_id": null
+        },
+        {
+          "status": "rejected",
+          "reason": "conflict",
+          "current": {
+            "version_id": "id_version_notes3",
+            "content_sha256": "c83be4c6755d6eb3281ccc5c8fb1e2ab48e91992ee5c62344ad5a2532ed6f32f",
+            "size_bytes": 120,
+            "executable": false,
+            "writer": {
+              "type": "session_actor",
+              "session_id": "id_session_id_2",
+              "computer_id": "id_computer_id_2"
+            }
+          }
+        }
+      ]
+    },
+    "expect": [
+      "semantic:null_version_for_write"
+    ],
+    "pair": {
+      "request": "commit_request"
+    }
+  },
+  {
+    "name": "commit_response_conflict_where_change_already_holds",
+    "schema": "CommitResponse",
+    "valid": false,
+    "value": {
+      "seq": 43,
+      "results": [
+        {
+          "status": "accepted",
+          "version_id": "id_version_43_0"
+        },
+        {
+          "status": "accepted",
+          "version_id": "id_version_43_1"
+        },
+        {
+          "status": "rejected",
+          "reason": "conflict",
+          "current": {
+            "version_id": "id_version_notes3",
+            "content_sha256": "44c9caf21a9593f33379f35591c932f16d624ee24dddd4e01a22f49d225d3e74",
+            "size_bytes": 120,
+            "executable": false,
+            "writer": {
+              "type": "session_actor",
+              "session_id": "id_session_id_2",
+              "computer_id": "id_computer_id_2"
+            }
+          }
+        }
+      ]
+    },
+    "expect": [
+      "semantic:decision_order"
+    ],
+    "pair": {
+      "request": "commit_request"
+    }
+  },
+  {
+    "name": "commit_response_path_rule_on_delete",
+    "schema": "CommitResponse",
+    "valid": false,
+    "value": {
+      "seq": 43,
+      "results": [
+        {
+          "status": "rejected",
+          "reason": "path_rule",
+          "rule": "A path is relative to the drive root, with no leading /"
+        },
+        {
+          "status": "accepted",
+          "version_id": "id_version_43_1"
+        },
+        {
+          "status": "rejected",
+          "reason": "conflict",
+          "current": {
+            "version_id": "id_version_notes3",
+            "content_sha256": "c83be4c6755d6eb3281ccc5c8fb1e2ab48e91992ee5c62344ad5a2532ed6f32f",
+            "size_bytes": 120,
+            "executable": false,
+            "writer": {
+              "type": "session_actor",
+              "session_id": "id_session_id_2",
+              "computer_id": "id_computer_id_2"
+            }
+          }
+        }
+      ]
+    },
+    "expect": [
+      "semantic:decision_order"
+    ],
+    "pair": {
+      "request": "commit_request"
+    }
+  },
+  {
+    "name": "commit_response_limit_on_delete",
+    "schema": "CommitResponse",
+    "valid": false,
+    "value": {
+      "seq": 43,
+      "results": [
+        {
+          "status": "rejected",
+          "reason": "limit",
+          "rule": "Drive limit max_bytes 1000000000",
+          "current": {
+            "version_id": "id_version_old",
+            "content_sha256": "01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee",
+            "size_bytes": 4,
+            "executable": false,
+            "writer": {
+              "type": "session_actor",
+              "session_id": "id_session_id_2",
+              "computer_id": "id_computer_id_2"
+            }
+          }
+        },
+        {
+          "status": "accepted",
+          "version_id": "id_version_43_1"
+        },
+        {
+          "status": "rejected",
+          "reason": "conflict",
+          "current": {
+            "version_id": "id_version_notes3",
+            "content_sha256": "c83be4c6755d6eb3281ccc5c8fb1e2ab48e91992ee5c62344ad5a2532ed6f32f",
+            "size_bytes": 120,
+            "executable": false,
+            "writer": {
+              "type": "session_actor",
+              "session_id": "id_session_id_2",
+              "computer_id": "id_computer_id_2"
+            }
+          }
+        }
+      ]
+    },
+    "expect": [
+      "semantic:decision_order"
+    ],
+    "pair": {
+      "request": "commit_request"
+    }
+  },
+  {
+    "name": "commit_response_current_deletion_with_size",
+    "schema": "CommitResponse",
+    "valid": false,
+    "value": {
+      "seq": null,
+      "results": [
+        {
+          "status": "rejected",
+          "reason": "conflict",
+          "current": {
+            "version_id": "id_version_gone2",
+            "content_sha256": "4fe8e2d8b07a10d39a9651e306ea9cdbfa19473a1b66b5e811c85630682b077f",
+            "size_bytes": 10,
+            "executable": false,
+            "writer": {
+              "type": "api_actor",
+              "api_key_id": "id_api_key_id"
+            }
+          }
+        },
+        {
+          "status": "rejected",
+          "reason": "path_rule",
+          "rule": "A path is relative to the drive root, with no leading /"
+        },
+        {
+          "status": "rejected",
+          "reason": "limit",
+          "rule": "Drive limit max_bytes 1000000000"
+        },
+        {
+          "status": "rejected",
+          "reason": "conflict",
+          "current": {
+            "version_id": "id_version_a_deleted",
+            "content_sha256": null,
+            "size_bytes": 5,
+            "executable": false,
+            "writer": {
+              "type": "session_actor",
+              "session_id": "id_session_id_2",
+              "computer_id": "id_computer_id_2"
+            }
+          }
+        }
+      ]
+    },
+    "expect": [
+      "const@/results/3/current/size_bytes"
+    ]
+  },
+  {
+    "name": "commit_response_conflict_on_null_base_without_file",
+    "schema": "CommitResponse",
+    "valid": false,
+    "value": {
+      "seq": 43,
+      "results": [
+        {
+          "status": "accepted",
+          "version_id": "id_version_43_0"
+        },
+        {
+          "status": "rejected",
+          "reason": "conflict"
+        },
+        {
+          "status": "rejected",
+          "reason": "conflict",
+          "current": {
+            "version_id": "id_version_notes3",
+            "content_sha256": "c83be4c6755d6eb3281ccc5c8fb1e2ab48e91992ee5c62344ad5a2532ed6f32f",
+            "size_bytes": 120,
+            "executable": false,
+            "writer": {
+              "type": "session_actor",
+              "session_id": "id_session_id_2",
+              "computer_id": "id_computer_id_2"
+            }
+          }
+        }
+      ]
+    },
+    "expect": [
+      "semantic:decision_order"
+    ],
+    "pair": {
+      "request": "commit_request"
+    }
+  },
+  {
+    "name": "error_content_missing",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "content_missing",
+      "message": "The drive does not hold 1 named content",
+      "missing_sha256": [
+        "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95"
+      ]
+    },
+    "endpoint": "commit",
+    "status": 409
+  },
+  {
+    "name": "error_stale_binding",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "stale_binding",
+      "message": "The binding is not prepared on this connection"
+    },
+    "endpoint": "list_changes",
+    "status": 409
+  },
+  {
+    "name": "error_drive_access_denied",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "drive_access_denied",
+      "message": "The binding has read_only access to this drive"
+    },
+    "endpoint": "commit",
+    "status": 403
+  },
+  {
+    "name": "error_drive_cursor_expired",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "drive_cursor_expired",
+      "message": "List the drive again"
+    },
+    "endpoint": "list_changes",
+    "status": 410
+  },
+  {
+    "name": "error_rate_limited",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "rate_limited",
+      "message": "The workspace upload budget is exhausted"
+    },
+    "endpoint": "upload_content",
+    "status": 429
+  },
+  {
+    "name": "error_file_too_large",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "file_too_large",
+      "message": "A file holds at most 500000000 bytes"
+    },
+    "endpoint": "upload_content",
+    "status": 413
+  },
+  {
+    "name": "error_content_hash_mismatch",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "content_hash_mismatch",
+      "message": "The body does not hash to the URL"
+    },
+    "endpoint": "upload_content",
+    "status": 400
+  },
+  {
+    "name": "error_request_too_large",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "request_too_large",
+      "message": "A commit holds at most 10000 changes"
+    },
+    "endpoint": "commit",
+    "status": 413
+  },
+  {
+    "name": "error_content_not_found",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "content_not_found",
+      "message": "No version of this drive names this content"
+    },
+    "endpoint": "download_content",
+    "status": 404
+  },
+  {
+    "name": "error_range_not_satisfiable",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "range_not_satisfiable",
+      "message": "The range lies outside the content"
+    },
+    "endpoint": "download_content",
+    "status": 416
+  },
+  {
+    "name": "error_content_missing_without_hashes",
+    "schema": "Error",
+    "valid": false,
+    "value": {
+      "code": "content_missing",
+      "message": "Missing content"
+    },
+    "expect": [
+      "required:missing_sha256@"
+    ],
+    "endpoint": "commit",
+    "status": 409
+  },
+  {
+    "name": "error_unknown_code",
+    "schema": "Error",
+    "valid": false,
+    "value": {
+      "code": "quota_exceeded",
+      "message": "Over quota"
+    },
+    "expect": [
+      "enum@/code"
+    ],
+    "endpoint": "commit",
+    "status": 403
+  },
+  {
+    "name": "error_missing_hash_uppercase",
+    "schema": "Error",
+    "valid": false,
+    "value": {
+      "code": "content_missing",
+      "message": "Missing content",
+      "missing_sha256": [
+        "331D26D6D8F862E46BA900811BE8A7A1E4DBAA229B14C99BECFD5E5151490D95"
+      ]
+    },
+    "expect": [
+      "pattern@/missing_sha256/0"
+    ],
+    "endpoint": "commit",
+    "status": 409
+  },
+  {
+    "name": "error_code_on_wrong_endpoint",
+    "schema": "Error",
+    "valid": false,
+    "value": {
+      "code": "content_missing",
+      "message": "Missing content",
+      "missing_sha256": [
+        "331d26d6d8f862e46ba900811be8a7a1e4dbaa229b14c99becfd5e5151490d95"
+      ]
+    },
+    "expect": [
+      "semantic:code_not_for_endpoint"
+    ],
+    "endpoint": "list_files",
+    "status": 409
+  },
+  {
+    "name": "error_code_with_wrong_status",
+    "schema": "Error",
+    "valid": false,
+    "value": {
+      "code": "stale_binding",
+      "message": "Stale binding"
+    },
+    "expect": [
+      "semantic:code_not_for_endpoint"
+    ],
+    "endpoint": "commit",
+    "status": 400
+  }
+]

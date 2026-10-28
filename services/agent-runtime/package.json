@@ -37,11 +37,11 @@
     "@grpc/grpc-js": "1.14.5",
     "@tetral/gateway-protocol": "file:../gateway/packages/protocol",
     "effect": "4.0.0-beta.66",
-    "zod": "4.4.3"
+    "zod": "4.6.6"
   },
   "overrides": {
     "protobufjs": "7.6.5",
-    "toml": "4.2.0",
-    "zod": "4.4.3"
+    "toml": "5.0.1",
+    "zod": "4.6.6"
   }
 }

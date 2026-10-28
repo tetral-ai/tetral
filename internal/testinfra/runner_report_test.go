@@ -69,6 +69,27 @@ func TestGoCommandsApplyIntegrationPackageWatchdog(t *testing.T) {
 	})
 }
 
+func TestCLISelectionBuildsThenTestsTheCargoWorkspace(t *testing.T) {
+	outputDir := t.TempDir()
+	commands, err := commandsForSelection(Plan{Profile: ProfileAffected}, Selection{Group: "cli"}, t.TempDir(), outputDir, DependencyAuditChanged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{{"cargo", "build", "--locked"}, {"cargo", "test", "--locked"}}
+	wantEnvironment := [][]string{nil, {"TETRAL_ACCEPTANCE_DIR=" + filepath.Join(outputDir, "acceptance")}}
+	if len(commands) != len(want) {
+		t.Fatalf("cli commands = %v; want %v", commands, want)
+	}
+	for index, command := range commands {
+		if !slices.Equal(command.Arguments, want[index]) || command.WorkingDir != "cli" {
+			t.Fatalf("cli command %d = %v in %q; want %v in cli", index, command.Arguments, command.WorkingDir, want[index])
+		}
+		if !slices.Equal(command.Environment, wantEnvironment[index]) {
+			t.Errorf("cli command %d environment = %v; want %v", index, command.Environment, wantEnvironment[index])
+		}
+	}
+}
+
 func TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests(t *testing.T) {
 	commands, err := commandsForSelection(
 		Plan{},

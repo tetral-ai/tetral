@@ -1,0 +1,2588 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tetral tool execution protocol version 1",
+  "description": "The tool execution and local MCP messages between Engine and the CLI. Apply the semantic checks and byte limits that protocol/README.md lists in addition to JSON Schema. ReadyExtension is the tool_execution and local_mcp fragment of the capabilities, not the full ready request.",
+  "$defs": {
+    "VisibleLimits": {
+      "type": "object",
+      "properties": {
+        "visible_bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -9223372036854775808,
+              "maximum": 9223372036854775807
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "visible_lines": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -9223372036854775808,
+              "maximum": 9223372036854775807
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": true
+    },
+    "ExecInput": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "env": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "wait_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -9223372036854775808,
+              "maximum": 9223372036854775807
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "on_wait_expiry": {
+          "enum": [
+            "",
+            "kill",
+            "detach",
+            null
+          ]
+        },
+        "task_lifetime_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -9223372036854775808,
+              "maximum": 9223372036854775807
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "task_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "cmd"
+      ],
+      "additionalProperties": true
+    },
+    "EditInput": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "old_string": {
+          "type": "string",
+          "minLength": 1
+        },
+        "new_string": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "replace_all": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "old_string"
+      ],
+      "additionalProperties": true
+    },
+    "ViewImageInput": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": true
+    },
+    "FilesystemRule": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^/[^\\u0000]*$"
+        },
+        "access": {
+          "enum": [
+            "deny",
+            "read",
+            "read_write"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "access"
+      ],
+      "additionalProperties": false
+    },
+    "FilesystemPolicy": {
+      "type": "object",
+      "properties": {
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FilesystemRule"
+          }
+        }
+      },
+      "required": [
+        "rules"
+      ],
+      "additionalProperties": false
+    },
+    "PortRange": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "to": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "additionalProperties": false
+    },
+    "NetworkDestination": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "host"
+            },
+            "value": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "cidr"
+            },
+            "value": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "NetworkRule": {
+      "type": "object",
+      "properties": {
+        "destination": {
+          "$ref": "#/$defs/NetworkDestination"
+        },
+        "transport": {
+          "enum": [
+            "tcp",
+            "udp"
+          ]
+        },
+        "ports": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PortRange"
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "destination",
+        "transport",
+        "ports"
+      ],
+      "additionalProperties": false
+    },
+    "NetworkListen": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string",
+          "minLength": 1
+        },
+        "transport": {
+          "enum": [
+            "tcp",
+            "udp"
+          ]
+        },
+        "ports": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PortRange"
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "address",
+        "transport",
+        "ports"
+      ],
+      "additionalProperties": false
+    },
+    "ManagedNetworkRules": {
+      "type": "object",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NetworkRule"
+          }
+        },
+        "deny": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NetworkRule"
+          }
+        },
+        "listen": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NetworkListen"
+          }
+        }
+      },
+      "required": [
+        "allow",
+        "deny",
+        "listen"
+      ],
+      "additionalProperties": false
+    },
+    "NetworkPolicy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "disabled",
+                "direct"
+              ]
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "managed"
+            },
+            "rules": {
+              "$ref": "#/$defs/ManagedNetworkRules"
+            }
+          },
+          "required": [
+            "mode",
+            "rules"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "SandboxPolicy": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "filesystem": {
+          "$ref": "#/$defs/FilesystemPolicy"
+        },
+        "network": {
+          "$ref": "#/$defs/NetworkPolicy"
+        }
+      },
+      "required": [
+        "schema_version",
+        "filesystem",
+        "network"
+      ],
+      "additionalProperties": false
+    },
+    "ExecutePayload": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "binding_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "tool_use_event_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "task_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "tool": {
+              "const": "exec_command"
+            },
+            "input": {
+              "$ref": "#/$defs/ExecInput"
+            },
+            "sandbox_policy": {
+              "$ref": "#/$defs/SandboxPolicy"
+            },
+            "limits": {
+              "$ref": "#/$defs/VisibleLimits"
+            }
+          },
+          "required": [
+            "session_id",
+            "binding_id",
+            "tool_use_event_id",
+            "task_id",
+            "tool",
+            "input",
+            "sandbox_policy"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "binding_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "tool_use_event_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "task_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "tool": {
+              "const": "edit"
+            },
+            "input": {
+              "$ref": "#/$defs/EditInput"
+            },
+            "sandbox_policy": {
+              "$ref": "#/$defs/SandboxPolicy"
+            },
+            "limits": {
+              "$ref": "#/$defs/VisibleLimits"
+            }
+          },
+          "required": [
+            "session_id",
+            "binding_id",
+            "tool_use_event_id",
+            "task_id",
+            "tool",
+            "input",
+            "sandbox_policy"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "binding_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "tool_use_event_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "task_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "tool": {
+              "const": "view_image"
+            },
+            "input": {
+              "$ref": "#/$defs/ViewImageInput"
+            },
+            "sandbox_policy": {
+              "$ref": "#/$defs/SandboxPolicy"
+            },
+            "limits": {
+              "$ref": "#/$defs/VisibleLimits"
+            }
+          },
+          "required": [
+            "session_id",
+            "binding_id",
+            "tool_use_event_id",
+            "task_id",
+            "tool",
+            "input",
+            "sandbox_policy"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "StdinPayload": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "binding_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "tool_use_event_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "chars": {
+          "type": "string"
+        },
+        "write_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "wait_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -9223372036854775808,
+              "maximum": 9223372036854775807
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limits": {
+          "$ref": "#/$defs/VisibleLimits"
+        }
+      },
+      "required": [
+        "session_id",
+        "binding_id",
+        "tool_use_event_id",
+        "task_id",
+        "chars"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "chars": {
+                "minLength": 1
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "write_seq"
+            ]
+          }
+        }
+      ]
+    },
+    "CancelPayload": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "binding_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "tool_use_event_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limits": {
+          "$ref": "#/$defs/VisibleLimits"
+        }
+      },
+      "required": [
+        "session_id",
+        "binding_id",
+        "tool_use_event_id",
+        "task_id"
+      ],
+      "additionalProperties": true
+    },
+    "McpCallPayload": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "binding_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "tool_use_event_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "server": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "session_id",
+        "binding_id",
+        "tool_use_event_id",
+        "task_id",
+        "server",
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": true,
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "sandbox_policy"
+            ]
+          },
+          {
+            "required": [
+              "limits"
+            ]
+          }
+        ]
+      }
+    },
+    "Downstream": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "protocol_version": {
+              "const": 1
+            },
+            "connection_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "message_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "type": {
+              "const": "tool.execute"
+            },
+            "payload": {
+              "$ref": "#/$defs/ExecutePayload"
+            },
+            "traceparent": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "protocol_version",
+            "connection_id",
+            "message_id",
+            "type",
+            "payload"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "protocol_version": {
+              "const": 1
+            },
+            "connection_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "message_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "type": {
+              "const": "tool.stdin"
+            },
+            "payload": {
+              "$ref": "#/$defs/StdinPayload"
+            },
+            "traceparent": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "protocol_version",
+            "connection_id",
+            "message_id",
+            "type",
+            "payload"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "protocol_version": {
+              "const": 1
+            },
+            "connection_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "message_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "type": {
+              "const": "tool.cancel"
+            },
+            "payload": {
+              "$ref": "#/$defs/CancelPayload"
+            },
+            "traceparent": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "protocol_version",
+            "connection_id",
+            "message_id",
+            "type",
+            "payload"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "protocol_version": {
+              "const": 1
+            },
+            "connection_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "message_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "type": {
+              "const": "mcp.call"
+            },
+            "payload": {
+              "$ref": "#/$defs/McpCallPayload"
+            },
+            "traceparent": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "protocol_version",
+            "connection_id",
+            "message_id",
+            "type",
+            "payload"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "StreamSnapshot": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "total_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "total_lines": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "returned_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "total_bytes",
+        "total_lines",
+        "returned_bytes",
+        "truncated"
+      ],
+      "additionalProperties": true
+    },
+    "ExecResult": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -9223372036854775808,
+              "maximum": 9223372036854775807
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "signal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timed_out": {
+          "type": "boolean"
+        },
+        "cancelled": {
+          "type": "boolean"
+        },
+        "was_running": {
+          "type": "boolean"
+        },
+        "written_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "stdout": {
+          "$ref": "#/$defs/StreamSnapshot"
+        },
+        "stderr": {
+          "$ref": "#/$defs/StreamSnapshot"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        }
+      },
+      "required": [
+        "task_id",
+        "exit_code",
+        "signal",
+        "timed_out",
+        "stdout",
+        "stderr",
+        "duration_ms"
+      ],
+      "additionalProperties": true
+    },
+    "MediaResult": {
+      "type": "object",
+      "properties": {
+        "mime": {
+          "enum": [
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp"
+          ]
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "data_base64": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mime",
+        "size_bytes",
+        "data_base64"
+      ],
+      "additionalProperties": true
+    },
+    "EditResult": {
+      "type": "object",
+      "properties": {
+        "replacements": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "bytes_written": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        }
+      },
+      "required": [
+        "replacements",
+        "bytes_written"
+      ],
+      "additionalProperties": true
+    },
+    "McpResult": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "structuredContent": {
+          "type": "object"
+        },
+        "isError": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "content"
+      ],
+      "additionalProperties": true,
+      "not": {
+        "required": [
+          "_meta"
+        ]
+      }
+    },
+    "ToolError": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "additionalProperties": true
+    },
+    "McpToolError": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/ToolError"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "mcp_error",
+                "mcp_timeout",
+                "mcp_server_exited",
+                "cancelled",
+                "mcp_result_too_large",
+                "mcp_invalid_result"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "mcp_error"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "detail"
+            ],
+            "properties": {
+              "detail": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "integer",
+                    "minimum": -9223372036854775808,
+                    "maximum": 9223372036854775807
+                  },
+                  "message": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "code",
+                  "message"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "cancelled"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "detail"
+            ],
+            "properties": {
+              "detail": {
+                "type": "object",
+                "properties": {
+                  "sent": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "sent"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "mcp_result_too_large"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "detail"
+            ],
+            "properties": {
+              "detail": {
+                "type": "object",
+                "properties": {
+                  "media_bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9223372036854775807
+                  },
+                  "envelope_bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9223372036854775807
+                  },
+                  "report_bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9223372036854775807
+                  }
+                },
+                "required": [
+                  "media_bytes",
+                  "envelope_bytes",
+                  "report_bytes"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ProtocolError": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "additionalProperties": true
+    },
+    "RejectionCode": {
+      "description": "The code of a rejected execution report.",
+      "enum": [
+        "invalid_input",
+        "task_conflict",
+        "unsupported_policy",
+        "sandbox_unavailable",
+        "binding_unavailable",
+        "resource_exhausted",
+        "mcp_server_unavailable"
+      ]
+    },
+    "ControlErrorCode": {
+      "description": "The code of a control report error.",
+      "enum": [
+        "unsupported_control",
+        "task_not_found",
+        "write_conflict",
+        "invalid_input",
+        "result_unavailable",
+        "stdin_closed",
+        "resource_exhausted"
+      ]
+    },
+    "ProtocolErrorCode": {
+      "description": "The code of a protocol-error report.",
+      "enum": [
+        "message_conflict",
+        "invalid_message"
+      ]
+    },
+    "DriveWriter": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "api_actor"
+            },
+            "api_key_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            }
+          },
+          "required": [
+            "type",
+            "api_key_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "user_actor"
+            },
+            "user_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            }
+          },
+          "required": [
+            "type",
+            "user_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "service_account_actor"
+            },
+            "service_account_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            }
+          },
+          "required": [
+            "type",
+            "service_account_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "session_actor"
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "computer_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            }
+          },
+          "required": [
+            "type",
+            "session_id",
+            "computer_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "DriveRejection": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^/[^\\u0000]*$"
+        },
+        "change": {
+          "enum": [
+            "write",
+            "delete"
+          ]
+        },
+        "reason": {
+          "enum": [
+            "conflict",
+            "path_rule",
+            "limit"
+          ]
+        },
+        "rule": {
+          "type": "string",
+          "minLength": 1
+        },
+        "current_version_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "current_writer": {
+          "$ref": "#/$defs/DriveWriter"
+        }
+      },
+      "required": [
+        "path",
+        "change",
+        "reason"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "path_rule",
+                  "limit"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "rule"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "conflict"
+              }
+            }
+          },
+          "then": {
+            "dependentRequired": {
+              "current_version_id": [
+                "current_writer"
+              ],
+              "current_writer": [
+                "current_version_id"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "DriveNotSynced": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^/[^\\u0000]*$"
+        },
+        "reason": {
+          "enum": [
+            "git_repository",
+            "symlink",
+            "special_file",
+            "uploading",
+            "upload_pending"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "DriveDownload": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^/[^\\u0000]*$"
+        },
+        "downloaded_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        }
+      },
+      "required": [
+        "path",
+        "downloaded_bytes",
+        "size_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "DriveMountFailure": {
+      "type": "object",
+      "properties": {
+        "drive_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "error": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "drive_id",
+        "error"
+      ],
+      "additionalProperties": false
+    },
+    "DriveSyncOutcome": {
+      "type": "object",
+      "properties": {
+        "committed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "deleted": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "rejected": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DriveRejection"
+          },
+          "maxItems": 100
+        },
+        "rejected_total": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "not_synced": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DriveNotSynced"
+          },
+          "maxItems": 100
+        },
+        "not_synced_total": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "downloading": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DriveDownload"
+          },
+          "maxItems": 100
+        },
+        "downloading_total": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "unmounted": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DriveMountFailure"
+          }
+        }
+      },
+      "required": [
+        "committed",
+        "deleted",
+        "rejected",
+        "not_synced"
+      ],
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "properties": {
+            "committed": {
+              "minimum": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "deleted": {
+              "minimum": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "rejected": {
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "not_synced": {
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "required": [
+            "downloading"
+          ],
+          "properties": {
+            "downloading": {
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "required": [
+            "rejected_total"
+          ]
+        },
+        {
+          "required": [
+            "not_synced_total"
+          ]
+        },
+        {
+          "required": [
+            "downloading_total"
+          ]
+        },
+        {
+          "required": [
+            "unmounted"
+          ],
+          "properties": {
+            "unmounted": {
+              "minItems": 1
+            }
+          }
+        }
+      ]
+    },
+    "HelperEnvelope": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "tool": {
+          "enum": [
+            "exec_command",
+            "edit",
+            "view_image",
+            "mcp",
+            "stdin",
+            "cancel"
+          ]
+        },
+        "status": {
+          "enum": [
+            "success",
+            "error",
+            "running"
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result": {
+          "type": "object"
+        },
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "wall_time_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "queued_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "drive_wait_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "run_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "sync_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            }
+          },
+          "required": [
+            "wall_time_ms",
+            "queued_ms",
+            "drive_wait_ms",
+            "run_ms",
+            "sync_ms"
+          ],
+          "additionalProperties": true
+        },
+        "drive_sync": {
+          "$ref": "#/$defs/DriveSyncOutcome"
+        }
+      },
+      "required": [
+        "schema_version",
+        "tool",
+        "status",
+        "truncated",
+        "error",
+        "result"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "error"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error": {
+                "$ref": "#/$defs/ToolError"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "error": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "const": "exec_command"
+              },
+              "status": {
+                "enum": [
+                  "success",
+                  "running"
+                ]
+              },
+              "truncated": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "$ref": "#/$defs/ExecResult"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "const": "stdin"
+              },
+              "status": {
+                "enum": [
+                  "success",
+                  "running"
+                ]
+              },
+              "truncated": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "$ref": "#/$defs/ExecResult"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "const": "cancel"
+              },
+              "status": {
+                "enum": [
+                  "success",
+                  "running"
+                ]
+              },
+              "truncated": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "$ref": "#/$defs/ExecResult"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "const": "edit"
+              },
+              "status": {
+                "enum": [
+                  "success",
+                  "running"
+                ]
+              },
+              "truncated": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "$ref": "#/$defs/EditResult"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "const": "view_image"
+              },
+              "status": {
+                "enum": [
+                  "success",
+                  "running"
+                ]
+              },
+              "truncated": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "$ref": "#/$defs/MediaResult"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "running"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "tool": {
+                "enum": [
+                  "exec_command",
+                  "stdin",
+                  "cancel"
+                ]
+              },
+              "result": {
+                "$ref": "#/$defs/ExecResult"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "enum": [
+                  "exec_command",
+                  "stdin",
+                  "cancel"
+                ]
+              },
+              "status": {
+                "enum": [
+                  "success",
+                  "running"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "$ref": "#/$defs/ExecResult"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "const": "mcp"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "truncated": {
+                "const": false
+              }
+            },
+            "not": {
+              "required": [
+                "drive_sync"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "const": "mcp"
+              },
+              "status": {
+                "const": "success"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "$ref": "#/$defs/McpResult"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "const": "mcp"
+              },
+              "status": {
+                "const": "error"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "maxProperties": 0
+              },
+              "error": {
+                "$ref": "#/$defs/McpToolError"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ExecutionReport": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "protocol_version": {
+              "const": 1
+            },
+            "connection_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "message_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "binding_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "tool_use_event_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "task_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "request_message_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "kind": {
+              "const": "execution"
+            },
+            "phase": {
+              "enum": [
+                "running",
+                "terminal"
+              ]
+            },
+            "report_seq": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            },
+            "result": {
+              "$ref": "#/$defs/HelperEnvelope"
+            }
+          },
+          "required": [
+            "protocol_version",
+            "connection_id",
+            "message_id",
+            "session_id",
+            "binding_id",
+            "tool_use_event_id",
+            "task_id",
+            "request_message_id",
+            "kind",
+            "phase",
+            "report_seq",
+            "result"
+          ],
+          "additionalProperties": true,
+          "not": {
+            "required": [
+              "error"
+            ]
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "phase": {
+                    "const": "terminal"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "result": {
+                    "required": [
+                      "metrics"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "protocol_version": {
+              "const": 1
+            },
+            "connection_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "message_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "binding_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "tool_use_event_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "task_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "request_message_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "kind": {
+              "const": "execution"
+            },
+            "phase": {
+              "const": "rejected"
+            },
+            "error": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/ProtocolError"
+                },
+                {
+                  "properties": {
+                    "code": {
+                      "$ref": "#/$defs/RejectionCode"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "protocol_version",
+            "connection_id",
+            "message_id",
+            "session_id",
+            "binding_id",
+            "tool_use_event_id",
+            "task_id",
+            "request_message_id",
+            "kind",
+            "phase",
+            "error"
+          ],
+          "additionalProperties": true,
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "report_seq"
+                ]
+              },
+              {
+                "required": [
+                  "result"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "ControlReport": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": 1
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "message_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "binding_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "tool_use_event_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "request_message_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "kind": {
+          "const": "control"
+        },
+        "result": {
+          "$ref": "#/$defs/HelperEnvelope"
+        },
+        "error": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ProtocolError"
+            },
+            {
+              "properties": {
+                "code": {
+                  "$ref": "#/$defs/ControlErrorCode"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "protocol_version",
+        "connection_id",
+        "message_id",
+        "session_id",
+        "binding_id",
+        "tool_use_event_id",
+        "task_id",
+        "request_message_id",
+        "kind"
+      ],
+      "additionalProperties": true,
+      "anyOf": [
+        {
+          "required": [
+            "result"
+          ]
+        },
+        {
+          "required": [
+            "error"
+          ]
+        }
+      ],
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "phase"
+            ]
+          },
+          {
+            "required": [
+              "report_seq"
+            ]
+          }
+        ]
+      }
+    },
+    "ToolStatus": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ExecutionReport"
+        },
+        {
+          "$ref": "#/$defs/ControlReport"
+        }
+      ]
+    },
+    "DriveSyncReport": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": 1
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "message_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "binding_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "drive_sync": {
+          "$ref": "#/$defs/DriveSyncOutcome"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "connection_id",
+        "message_id",
+        "session_id",
+        "binding_id",
+        "drive_sync"
+      ],
+      "additionalProperties": true
+    },
+    "Acknowledgement": {
+      "type": "object",
+      "properties": {
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "message_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "accepted": {
+          "const": true
+        }
+      },
+      "required": [
+        "connection_id",
+        "message_id",
+        "accepted"
+      ],
+      "additionalProperties": true
+    },
+    "ProtocolErrorReport": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": 1
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "message_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "request_message_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "error": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ProtocolError"
+            },
+            {
+              "properties": {
+                "code": {
+                  "$ref": "#/$defs/ProtocolErrorCode"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "protocol_version",
+        "connection_id",
+        "message_id",
+        "error"
+      ],
+      "additionalProperties": true
+    },
+    "TransportLimits": {
+      "type": "object",
+      "properties": {
+        "metadata_json_bytes": {
+          "const": 65536
+        },
+        "tool_input_json_bytes": {
+          "const": 4194304
+        },
+        "execute_sse_json_bytes": {
+          "const": 4259840
+        },
+        "stdin_utf8_bytes": {
+          "const": 32768
+        },
+        "stdin_sse_json_bytes": {
+          "const": 262144
+        },
+        "default_message_json_bytes": {
+          "const": 65536
+        },
+        "helper_result_json_bytes": {
+          "const": 262144
+        },
+        "drive_sync_json_bytes": {
+          "const": 65536
+        },
+        "ordinary_tool_status_json_bytes": {
+          "const": 327680
+        },
+        "drive_sync_report_json_bytes": {
+          "const": 131072
+        },
+        "view_image_decoded_bytes": {
+          "const": 10485760
+        },
+        "media_tool_status_json_bytes": {
+          "const": 14680064
+        }
+      },
+      "required": [
+        "metadata_json_bytes",
+        "tool_input_json_bytes",
+        "execute_sse_json_bytes",
+        "stdin_utf8_bytes",
+        "stdin_sse_json_bytes",
+        "default_message_json_bytes",
+        "helper_result_json_bytes",
+        "drive_sync_json_bytes",
+        "ordinary_tool_status_json_bytes",
+        "drive_sync_report_json_bytes",
+        "view_image_decoded_bytes",
+        "media_tool_status_json_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "ManagedNetworkCapability": {
+      "type": "object",
+      "properties": {
+        "transports": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "tcp",
+              "udp"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "listen": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "transports",
+        "listen"
+      ],
+      "additionalProperties": false
+    },
+    "ToolExecutionCapability": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "exec_command",
+              "edit",
+              "view_image"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "controls": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "stdin",
+              "cancel"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "sandbox_policy_versions": {
+          "type": "array",
+          "items": {
+            "const": 1
+          },
+          "uniqueItems": true
+        },
+        "network_modes": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "disabled",
+              "direct",
+              "managed"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "managed_network": {
+          "$ref": "#/$defs/ManagedNetworkCapability"
+        },
+        "limits": {
+          "$ref": "#/$defs/TransportLimits"
+        }
+      },
+      "required": [
+        "schema_version",
+        "tools",
+        "controls",
+        "sandbox_policy_versions",
+        "network_modes",
+        "limits"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "network_modes": {
+                "contains": {
+                  "const": "managed"
+                }
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "managed_network"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "managed_network"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "LocalMcpCapability": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        }
+      },
+      "required": [
+        "schema_version"
+      ],
+      "additionalProperties": true
+    },
+    "ReadyExtension": {
+      "type": "object",
+      "properties": {
+        "tool_execution": {
+          "$ref": "#/$defs/ToolExecutionCapability"
+        },
+        "local_mcp": {
+          "$ref": "#/$defs/LocalMcpCapability"
+        }
+      },
+      "required": [
+        "tool_execution"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "anyOf": [
+    {
+      "$ref": "#/$defs/Downstream"
+    },
+    {
+      "$ref": "#/$defs/ToolStatus"
+    },
+    {
+      "$ref": "#/$defs/DriveSyncReport"
+    },
+    {
+      "$ref": "#/$defs/Acknowledgement"
+    },
+    {
+      "$ref": "#/$defs/ProtocolErrorReport"
+    },
+    {
+      "$ref": "#/$defs/ReadyExtension"
+    }
+  ]
+}

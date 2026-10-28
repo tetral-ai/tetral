@@ -9,7 +9,7 @@
         "@grpc/grpc-js": "1.14.5",
         "@tetral/gateway-protocol": "file:../gateway/packages/protocol",
         "effect": "4.0.0-beta.66",
-        "zod": "4.4.3",
+        "zod": "4.6.6",
       },
       "devDependencies": {
         "@types/bun": "latest",
@@ -25,7 +25,7 @@
       "dependencies": {
         "@tetral/gateway-protocol": "file:../../../gateway/packages/protocol",
         "effect": "4.0.0-beta.66",
-        "zod": "4.4.3",
+        "zod": "4.6.6",
       },
     },
     "packages/protocol": {
@@ -50,8 +50,8 @@
   },
   "overrides": {
     "protobufjs": "7.6.5",
-    "toml": "4.2.0",
-    "zod": "4.4.3",
+    "toml": "5.0.1",
+    "zod": "4.6.6",
   },
   "packages": {
     "@bufbuild/protobuf": ["@bufbuild/protobuf@2.12.0", "", {}, "sha512-B/XlCaFIP8LOwzo+bz5uFzATYokcwCKQcghqnlfwSmM5eX/qTkvDBnDPs+gXtX/RyjxJ4DRikECcPJbyALA8FA=="],
@@ -164,7 +164,7 @@
 
     "strip-ansi": ["strip-ansi@6.0.1", "", { "dependencies": { "ansi-regex": "^5.0.1" } }, "sha512-Y38VPSHcqkFrCpFnQ9vuSXmquuv5oXOKpGeT6aGrr3o3Gc9AlVa6JBfUSOCnbxGGZF+/0ooI7KrPuUSztUdU5A=="],
 
-    "toml": ["toml@4.2.0", "", {}, "sha512-TvAJjbHZlYmI323+srtqHQFyJsoWy6mI09ppkuj9+iRsqsVKG9fvTcOP7FHF2UCb0QSYtjEavffrKzdd0XgClg=="],
+    "toml": ["toml@5.0.1", "", {}, "sha512-EqYNA/YvUNndrA2B3O2ojzLQoTQrBxeZ9UIjQwk8t10oe6n7dwclBwd9IdZQTOKwe6vWX+AXtl6IntXRbepdxQ=="],
 
     "ts-poet": ["ts-poet@6.12.0", "", { "dependencies": { "dprint-node": "^1.0.8" } }, "sha512-xo+iRNMWqyvXpFTaOAvLPA5QAWO6TZrSUs5s4Odaya3epqofBu/fMLHEWl8jPmjhA0s9sgj9sNvF1BmaQlmQkA=="],
 
@@ -188,7 +188,7 @@
 
     "yargs-parser": ["yargs-parser@21.1.1", "", {}, "sha512-tVpsJW7DdjecAiFpbIB1e3qxIQsE6NoPc5/eTdrbbIC4h0LVsWhnoa3g+m2HclBIujHzsxZ4VJVA+GUuc2/LBw=="],
 
-    "zod": ["zod@4.4.3", "", {}, "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="],
+    "zod": ["zod@4.6.6", "", {}, "sha512-4UmzQUF5fxvfcYHlbjBmejU+w+hbDnWFx4aS8kBx7nPBHcO2SqPbpAG8snbdg+Xse4pRefR98hgjFgIMCI/UhA=="],
 
     "@tetral/agent-runtime/@tetral/gateway-protocol": ["@tetral/gateway-protocol@file:../gateway/packages/protocol", { "dependencies": { "@bufbuild/protobuf": "2.12.0", "@grpc/grpc-js": "1.14.5" } }],
 

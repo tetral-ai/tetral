@@ -13,6 +13,8 @@ is restated here.
 | `services/<name>/README.md` | Per-service contract: responsibilities, lifecycle, seams, testing. `services/api` also holds the boot environment, the workspace isolation model, and `/v1` surface status. |
 | `internal/<name>/README.md` | Shared-package contracts: process lifecycle and diagnostics (`internal/workload`), Runtime configuration and control, MCP manifests, TypeScript observability and database pools. |
 | `deploy/**/README.md` | Installation and deployment contracts for the Helm chart (`deploy/helm/tetral`), the raw manifests and any separately installed dependency. |
+| `cli/README.md` | The Tetral CLI: its Cargo workspace, crates, state owners, dependencies, and build and test commands; each crate's own `README.md` is its orientation. |
+| `protocol/README.md` | The protocol between the CLI and Engine: connections, tool execution, the MCP proxy, drive transfer and drives on a machine, with every limit, timeout and error code; its schemas and fixtures sit beside it. |
 | `docs/*.md` | Cross-service guides, for example testing and CI ownership, bootstrap, authentication (`docs/authentication.md`), and the service-stack upgrade from the previous release (`docs/upgrade-service-stack.md`). |
 | `CONTRIBUTING.md` | The pre-PR self-check every contribution runs. |
 
@@ -36,7 +38,8 @@ is restated here.
 ## Build and test
 
 Local test prerequisites include Python 3 (`python3` on PATH) for the release
-command fixtures, in addition to Go and Bun.
+command fixtures and `rustup` for the Tetral CLI's `cli` group, in addition to
+Go and Bun.
 
 Go (one module, run from the repository root): `make build` / `make test` /
 `make test-affected` / `make test-full` / `make lint` / `make vulncheck`;
@@ -51,6 +54,11 @@ role rather than a shared writable schema.
 TypeScript (Bun; run inside `services/agent-runtime` or
 `services/gateway` package dirs): `bun install --frozen-lockfile`,
 `bun run typecheck`, `bun run test`, `bun run build`.
+
+Rust (the Tetral CLI, a Cargo workspace with its own toolchain; run every
+`cargo` command inside `cli/`, never with `--manifest-path` from the root):
+`cargo build`, `cargo test`; `cargo test` writes its acceptance records into
+the directory that `TETRAL_ACCEPTANCE_DIR` names and fails without it.
 
 Pull requests are gated by `.github/workflows/pull-request-verification.yml`;
 its `Merge Gate` job is the repository's required check. Repository-wide

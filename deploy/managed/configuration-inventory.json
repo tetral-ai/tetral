@@ -1202,6 +1202,7 @@
       ],
       "environment_keys": [
         "ENGINE_VAULT_KEY",
+        "TETRAL_ACCEPTANCE_DIR",
         "TETRAL_CI_EVENT_BASE_SHA",
         "TETRAL_CI_EVENT_HEAD_SHA",
         "TETRAL_CI_GO_CACHE_DISK_FREE_AFTER",

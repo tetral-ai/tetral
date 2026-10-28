@@ -445,6 +445,13 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 			commands = append(commands, commandSpec{Arguments: []string{"python3", "scripts/check-envoy-secret-helper.py"}})
 		}
 		return append(commands, commandSpec{Arguments: []string{"go", "test", "./integration/static", "-run", "Test.*Secret|Test.*Redact|Test.*Import|Test.*Boundary|Test.*Log", "-count=1"}}), nil
+	case "cli":
+		// Every test file of the CLI's tests package writes its acceptance
+		// record into the directory this variable names, and fails without it.
+		return []commandSpec{
+			{Arguments: []string{"cargo", "build", "--locked"}, WorkingDir: "cli"},
+			{Arguments: []string{"cargo", "test", "--locked"}, WorkingDir: "cli", Environment: []string{"TETRAL_ACCEPTANCE_DIR=" + filepath.Join(outputDir, "acceptance")}},
+		}, nil
 	case "sandbox-image":
 		return []commandSpec{
 			{Arguments: []string{"./scripts/run-helper-privilege-container.sh"}},

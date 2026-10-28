@@ -269,7 +269,7 @@ func TestPinnedEdgeEnvoyRuntimeAndTranslator(t *testing.T) {
 		t.Fatal("actual matching CLI version differs from selected release")
 	}
 	info, err := buildinfo.ReadFile(helper)
-	if err != nil || info.GoVersion != "go1.26.9" {
+	if err != nil || info.GoVersion != "go1.26.10" {
 		t.Fatal("actual helper uses the wrong isolated toolchain")
 	}
 	found := false

@@ -1,0 +1,945 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tetral drive transfer protocol version 1",
+  "description": "The wire between the CLI and computer-hub for drive content. Query, path and header objects hold decoded HTTP parameters; raw content bodies are not JSON and are described by their header objects and DriveTransferEndpoints. DriveWriter and the rejection reasons come from tool-execution-v1.schema.json; the error body (Error) and the drive.changed envelope (DriveChanged) come from connection-v1.schema.json. Apply the semantic checks that protocol/README.md lists (byte limits, path rules, order, duplicates and request-response relations) in addition to JSON Schema.",
+  "$defs": {
+    "Id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000]+$",
+      "$comment": "An Engine identity: opaque, nonempty, without U+0000."
+    },
+    "Sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "NullableSha256": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "Seq": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "FileSize": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 500000000
+    },
+    "Decimal": {
+      "$comment": "A canonical decimal integer in a query or header value; it must not exceed 9223372036854775807.",
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "DrivePath": {
+      "$comment": "A path Engine returns. The pattern covers no leading /, no empty, . or .. segment and no control character. The 1,024-byte and 255-byte-per-segment limits, NFC, no format character, and, within a listing page, no two paths equal under Unicode full case folding and no file above another file are semantic checks (drive path rules).",
+      "type": "string",
+      "pattern": "^(?!(?:[^/]*/)*\\.{1,2}(?:/|$))[^/\\u0000-\\u001f\\u007f-\\u009f]+(?:/[^/\\u0000-\\u001f\\u007f-\\u009f]+)*$"
+    },
+    "CommonQuery": {
+      "$comment": "Query of GET and PUT content: protocol_version, connection_id and binding_id. Query and header values are decoded strings.",
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": "1"
+        },
+        "connection_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "binding_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "connection_id",
+        "binding_id"
+      ],
+      "additionalProperties": true
+    },
+    "ListFilesQuery": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": "1"
+        },
+        "connection_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "binding_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "after_path": {
+          "$comment": "Exclusive cursor in UTF-8 byte order: the last path of the previous page.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "connection_id",
+        "binding_id"
+      ],
+      "additionalProperties": true
+    },
+    "ListChangesQuery": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": "1"
+        },
+        "connection_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "binding_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "after_seq": {
+          "$ref": "#/$defs/Decimal"
+        },
+        "after_index": {
+          "$ref": "#/$defs/Decimal"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "connection_id",
+        "binding_id",
+        "after_seq"
+      ],
+      "additionalProperties": true
+    },
+    "DrivePathParams": {
+      "type": "object",
+      "properties": {
+        "drive_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "drive_id"
+      ],
+      "additionalProperties": false
+    },
+    "ContentPathParams": {
+      "type": "object",
+      "properties": {
+        "drive_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "drive_id",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "UploadContentRequestHeaders": {
+      "$comment": "The PUT body is the raw content. A wrong Content-Type or a malformed Content-Length fails the shape check (400 invalid_message). After authorization, a missing Content-Length: 400 invalid_message; above 500,000,000: 413 file_too_large; then the upload budget (429 rate_limited with RateLimitedResponseHeaders); all before any byte is read. A body that does not hash to the URL sha256: 400 content_hash_mismatch, nothing kept.",
+      "type": "object",
+      "properties": {
+        "Content-Type": {
+          "const": "application/octet-stream"
+        },
+        "Content-Length": {
+          "$ref": "#/$defs/Decimal"
+        }
+      },
+      "required": [
+        "Content-Type"
+      ],
+      "additionalProperties": true
+    },
+    "DownloadContentRequestHeaders": {
+      "$comment": "Optional Range with one range: bytes=a-b, bytes=a- or the suffix bytes=-n, following RFC 9110. The pattern also admits a list of ranges, which gets 416 range_not_satisfiable, as does a range that selects no byte. A value the pattern refuses, or a range whose end is below its start (semantic check), is malformed: 400 invalid_message.",
+      "type": "object",
+      "properties": {
+        "Range": {
+          "type": "string",
+          "pattern": "^bytes=([0-9]+-[0-9]*|-[0-9]+)([ \\t]*,[ \\t]*([0-9]+-[0-9]*|-[0-9]+))*$"
+        }
+      },
+      "additionalProperties": true
+    },
+    "PartialContentResponseHeaders": {
+      "$comment": "206 response of a range download; the body is the raw bytes a..b of the content, b cut at the last byte. A 200 download carries the whole content as its raw body.",
+      "type": "object",
+      "properties": {
+        "Content-Range": {
+          "type": "string",
+          "pattern": "^bytes (0|[1-9][0-9]*)-(0|[1-9][0-9]*)/(0|[1-9][0-9]*)$"
+        }
+      },
+      "required": [
+        "Content-Range"
+      ],
+      "additionalProperties": true
+    },
+    "RateLimitedResponseHeaders": {
+      "$comment": "Seconds until the upload budget holds the request count, rounded up; at least 1 and at most 60 because a count never exceeds the per-minute amount (upload budget).",
+      "type": "object",
+      "properties": {
+        "Retry-After": {
+          "type": "string",
+          "pattern": "^([1-9]|[1-5][0-9]|60)$"
+        }
+      },
+      "required": [
+        "Retry-After"
+      ],
+      "additionalProperties": true
+    },
+    "FileEntry": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/DrivePath"
+        },
+        "version_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "content_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "size_bytes": {
+          "$ref": "#/$defs/FileSize"
+        },
+        "executable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "version_id",
+        "content_sha256",
+        "size_bytes",
+        "executable"
+      ],
+      "additionalProperties": true
+    },
+    "ListFilesResponse": {
+      "$comment": "Files in strictly increasing UTF-8 byte order of path, after after_path; start_seq on the page requested without after_path, and only there; at most 4 MiB of compact JSON.",
+      "type": "object",
+      "properties": {
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FileEntry"
+          },
+          "maxItems": 1000
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "start_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        }
+      },
+      "required": [
+        "files",
+        "has_more"
+      ],
+      "additionalProperties": true
+    },
+    "ChangeRecord": {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "path": {
+          "$ref": "#/$defs/DrivePath"
+        },
+        "operation": {
+          "enum": [
+            "created",
+            "modified",
+            "deleted"
+          ]
+        },
+        "version_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "content_sha256": {
+          "$ref": "#/$defs/NullableSha256"
+        },
+        "size_bytes": {
+          "$ref": "#/$defs/FileSize"
+        },
+        "executable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "seq",
+        "index",
+        "path",
+        "operation",
+        "version_id",
+        "content_sha256",
+        "size_bytes",
+        "executable"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "operation": {
+                "const": "deleted"
+              }
+            },
+            "required": [
+              "operation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "content_sha256": {
+                "type": "null"
+              },
+              "size_bytes": {
+                "const": 0
+              },
+              "executable": {
+                "const": false
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "content_sha256": {
+                "$ref": "#/$defs/Sha256"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ListChangesResponse": {
+      "$comment": "Records in strictly increasing (seq, index) order after the cursor; one commit numbers its records from 0, deletions first; at most 4 MiB of compact JSON.",
+      "type": "object",
+      "properties": {
+        "records": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChangeRecord"
+          },
+          "maxItems": 1000
+        },
+        "has_more": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "records",
+        "has_more"
+      ],
+      "additionalProperties": true
+    },
+    "DriveChanged": {
+      "$comment": "The drive.changed envelope as connection-v1.schema.json defines it; at most 64 KiB of compact JSON. No ACK.",
+      "allOf": [
+        {
+          "$ref": "connection-v1.schema.json#/$defs/Downstream"
+        }
+      ],
+      "properties": {
+        "type": {
+          "const": "drive.changed"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "UploadContentResponse": {
+      "$comment": "content_sha256 equals the URL sha256 and size_bytes the bytes received; the same 200 when the drive already held the content.",
+      "type": "object",
+      "properties": {
+        "content_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "size_bytes": {
+          "$ref": "#/$defs/FileSize"
+        }
+      },
+      "required": [
+        "content_sha256",
+        "size_bytes"
+      ],
+      "additionalProperties": true
+    },
+    "WriteChange": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "change": {
+          "const": "write"
+        },
+        "base_sha256": {
+          "$ref": "#/$defs/NullableSha256"
+        },
+        "content_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "executable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "change",
+        "base_sha256",
+        "content_sha256",
+        "executable"
+      ],
+      "additionalProperties": false
+    },
+    "DeleteChange": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "change": {
+          "const": "delete"
+        },
+        "base_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "path",
+        "change",
+        "base_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "CommitChange": {
+      "$comment": "A null base means the file must not exist. path is any string: rule b.2 decides the path rules per change (rejected path_rule), so a path never fails the request.",
+      "type": "object",
+      "properties": {
+        "change": {
+          "enum": [
+            "write",
+            "delete"
+          ]
+        }
+      },
+      "required": [
+        "change"
+      ],
+      "oneOf": [
+        {
+          "$ref": "#/$defs/WriteChange"
+        },
+        {
+          "$ref": "#/$defs/DeleteChange"
+        }
+      ]
+    },
+    "CommitRequest": {
+      "$comment": "Closed body. Empty changes, a path twice, or any schema failure: 400 invalid_message. More than 10,000 changes or more than 16 MiB of compact JSON: 413 request_too_large.",
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": 1
+        },
+        "connection_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "binding_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CommitChange"
+          },
+          "minItems": 1,
+          "maxItems": 10000
+        }
+      },
+      "required": [
+        "protocol_version",
+        "connection_id",
+        "binding_id",
+        "changes"
+      ],
+      "additionalProperties": false
+    },
+    "CurrentVersion": {
+      "type": "object",
+      "properties": {
+        "version_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "content_sha256": {
+          "$ref": "#/$defs/NullableSha256"
+        },
+        "size_bytes": {
+          "$ref": "#/$defs/FileSize"
+        },
+        "executable": {
+          "type": "boolean"
+        },
+        "writer": {
+          "$ref": "tool-execution-v1.schema.json#/$defs/DriveWriter"
+        }
+      },
+      "required": [
+        "version_id",
+        "content_sha256",
+        "size_bytes",
+        "executable",
+        "writer"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "content_sha256": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "content_sha256"
+            ]
+          },
+          "then": {
+            "properties": {
+              "size_bytes": {
+                "const": 0
+              },
+              "executable": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    },
+    "AcceptedResult": {
+      "$comment": "version_id is the new version or, when the path already held the change, its current version, a deletion included; null only for a delete of a path of which the drive keeps no version.",
+      "type": "object",
+      "properties": {
+        "status": {
+          "const": "accepted"
+        },
+        "version_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        }
+      },
+      "required": [
+        "status",
+        "version_id"
+      ],
+      "additionalProperties": true
+    },
+    "RejectedResult": {
+      "$comment": "rule is at most 512 UTF-8 bytes (semantic check). current is absent when the drive keeps no version of the path. limit rejects only a write that raises bytes or files beyond a limit.",
+      "type": "object",
+      "properties": {
+        "status": {
+          "const": "rejected"
+        },
+        "reason": {
+          "$ref": "tool-execution-v1.schema.json#/$defs/DriveRejection/properties/reason"
+        },
+        "rule": {
+          "type": "string",
+          "minLength": 1
+        },
+        "current": {
+          "$ref": "#/$defs/CurrentVersion"
+        }
+      },
+      "required": [
+        "status",
+        "reason"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "path_rule",
+                  "limit"
+                ]
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "required": [
+              "rule"
+            ]
+          }
+        }
+      ]
+    },
+    "CommitResult": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "accepted",
+            "rejected"
+          ]
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "oneOf": [
+        {
+          "$ref": "#/$defs/AcceptedResult"
+        },
+        {
+          "$ref": "#/$defs/RejectedResult"
+        }
+      ]
+    },
+    "CommitResponse": {
+      "$comment": "Results in request order, one per change; seq is null when the commit created no version; at most 16 MiB of compact JSON.",
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CommitResult"
+          },
+          "minItems": 1,
+          "maxItems": 10000
+        }
+      },
+      "required": [
+        "seq",
+        "results"
+      ],
+      "additionalProperties": true
+    },
+    "Error": {
+      "$comment": "The client error body as connection-v1.schema.json defines it. DriveTransferEndpoints names the status and code pairs of each endpoint. A 5xx carries no defined body.",
+      "$ref": "connection-v1.schema.json#/$defs/ErrorBody"
+    },
+    "DriveTransferLimits": {
+      "$comment": "Sizes are bytes of compact UTF-8 JSON. PUT and commit total deadline: 10 s x max(1, ceil(request bytes / 65,536)); the GET requests have no total deadline.",
+      "type": "object",
+      "properties": {
+        "list_page_max_items": {
+          "const": 1000
+        },
+        "list_page_max_json_bytes": {
+          "const": 4194304
+        },
+        "commit_min_changes": {
+          "const": 1
+        },
+        "commit_max_changes": {
+          "const": 10000
+        },
+        "commit_request_max_json_bytes": {
+          "const": 16777216
+        },
+        "commit_response_max_json_bytes": {
+          "const": 16777216
+        },
+        "rule_max_utf8_bytes": {
+          "const": 512
+        },
+        "file_max_bytes": {
+          "const": 500000000
+        },
+        "workspace_max_bytes": {
+          "const": 500000000000
+        },
+        "workspace_max_files": {
+          "const": 100000
+        },
+        "path_max_utf8_bytes": {
+          "const": 1024
+        },
+        "path_segment_max_utf8_bytes": {
+          "const": 255
+        },
+        "drive_changed_sse_max_json_bytes": {
+          "const": 65536
+        },
+        "upload_budget_default_bytes_per_minute": {
+          "const": 500000000
+        },
+        "upload_budget_min_count_bytes": {
+          "const": 65536
+        },
+        "retry_after_min_seconds": {
+          "const": 1
+        },
+        "retry_after_max_seconds": {
+          "const": 60
+        },
+        "connect_tls_timeout_ms": {
+          "const": 10000
+        },
+        "no_progress_timeout_ms": {
+          "const": 10000
+        },
+        "response_headers_timeout_ms": {
+          "const": 10000
+        },
+        "put_and_commit_total_timeout_ms_per_65536_request_bytes": {
+          "const": 10000
+        }
+      },
+      "required": [
+        "list_page_max_items",
+        "list_page_max_json_bytes",
+        "commit_min_changes",
+        "commit_max_changes",
+        "commit_request_max_json_bytes",
+        "commit_response_max_json_bytes",
+        "rule_max_utf8_bytes",
+        "file_max_bytes",
+        "workspace_max_bytes",
+        "workspace_max_files",
+        "path_max_utf8_bytes",
+        "path_segment_max_utf8_bytes",
+        "drive_changed_sse_max_json_bytes",
+        "upload_budget_default_bytes_per_minute",
+        "upload_budget_min_count_bytes",
+        "retry_after_min_seconds",
+        "retry_after_max_seconds",
+        "connect_tls_timeout_ms",
+        "no_progress_timeout_ms",
+        "response_headers_timeout_ms",
+        "put_and_commit_total_timeout_ms_per_65536_request_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "DriveTransferEndpoints": {
+      "$comment": "Each endpoint: method, path template, the schemas of its path parameters, query, request headers and body (\"raw\" for content bytes), its success responses, and its error status and code pairs, and its error body (Error, the client error body of connection-v1.schema.json). The hub checks shape (400 invalid_message), then connection, binding and drive access, then a commit's number of changes and a content upload's Content-Length and upload budget; a commit body over 16 MiB gets 413 request_too_large before the connection check. The CLI retries network errors, timeouts, 429, 500, 502, 503 and 504; every other status, and a 2xx answer that fails this schema or its relation to the request, is permanent.",
+      "type": "object",
+      "properties": {
+        "list_files": {
+          "const": {
+            "method": "GET",
+            "path": "/v1/client/drives/{drive_id}/files",
+            "path_params": "DrivePathParams",
+            "query": "ListFilesQuery",
+            "request_headers": null,
+            "request_body": null,
+            "responses": {
+              "200": {
+                "body": "ListFilesResponse",
+                "headers": null
+              }
+            },
+            "errors": [
+              "400 invalid_message",
+              "401 credential_expired",
+              "401 credential_invalid",
+              "401 credential_revoked",
+              "403 drive_access_denied",
+              "403 instance_unavailable",
+              "409 stale_binding",
+              "409 stale_connection"
+            ],
+            "error_body": "Error",
+            "error_headers": {}
+          }
+        },
+        "list_changes": {
+          "const": {
+            "method": "GET",
+            "path": "/v1/client/drives/{drive_id}/changes",
+            "path_params": "DrivePathParams",
+            "query": "ListChangesQuery",
+            "request_headers": null,
+            "request_body": null,
+            "responses": {
+              "200": {
+                "body": "ListChangesResponse",
+                "headers": null
+              }
+            },
+            "errors": [
+              "400 invalid_message",
+              "401 credential_expired",
+              "401 credential_invalid",
+              "401 credential_revoked",
+              "403 drive_access_denied",
+              "403 instance_unavailable",
+              "409 stale_binding",
+              "409 stale_connection",
+              "410 drive_cursor_expired"
+            ],
+            "error_body": "Error",
+            "error_headers": {}
+          }
+        },
+        "upload_content": {
+          "const": {
+            "method": "PUT",
+            "path": "/v1/client/drives/{drive_id}/content/{sha256}",
+            "path_params": "ContentPathParams",
+            "query": "CommonQuery",
+            "request_headers": "UploadContentRequestHeaders",
+            "request_body": "raw",
+            "responses": {
+              "200": {
+                "body": "UploadContentResponse",
+                "headers": null
+              }
+            },
+            "errors": [
+              "400 content_hash_mismatch",
+              "400 invalid_message",
+              "401 credential_expired",
+              "401 credential_invalid",
+              "401 credential_revoked",
+              "403 drive_access_denied",
+              "403 instance_unavailable",
+              "409 stale_binding",
+              "409 stale_connection",
+              "413 file_too_large",
+              "429 rate_limited"
+            ],
+            "error_body": "Error",
+            "error_headers": {
+              "429": "RateLimitedResponseHeaders"
+            }
+          }
+        },
+        "commit": {
+          "const": {
+            "method": "POST",
+            "path": "/v1/client/drives/{drive_id}/commits",
+            "path_params": "DrivePathParams",
+            "query": null,
+            "request_headers": null,
+            "request_body": "CommitRequest",
+            "responses": {
+              "200": {
+                "body": "CommitResponse",
+                "headers": null
+              }
+            },
+            "errors": [
+              "400 invalid_message",
+              "401 credential_expired",
+              "401 credential_invalid",
+              "401 credential_revoked",
+              "403 drive_access_denied",
+              "403 instance_unavailable",
+              "409 content_missing",
+              "409 stale_binding",
+              "409 stale_connection",
+              "413 request_too_large"
+            ],
+            "error_body": "Error",
+            "error_headers": {}
+          }
+        },
+        "download_content": {
+          "const": {
+            "method": "GET",
+            "path": "/v1/client/drives/{drive_id}/content/{sha256}",
+            "path_params": "ContentPathParams",
+            "query": "CommonQuery",
+            "request_headers": "DownloadContentRequestHeaders",
+            "request_body": null,
+            "responses": {
+              "200": {
+                "body": "raw",
+                "headers": null
+              },
+              "206": {
+                "body": "raw",
+                "headers": "PartialContentResponseHeaders"
+              }
+            },
+            "errors": [
+              "400 invalid_message",
+              "401 credential_expired",
+              "401 credential_invalid",
+              "401 credential_revoked",
+              "403 drive_access_denied",
+              "403 instance_unavailable",
+              "404 content_not_found",
+              "409 stale_binding",
+              "409 stale_connection",
+              "416 range_not_satisfiable"
+            ],
+            "error_body": "Error",
+            "error_headers": {}
+          }
+        }
+      },
+      "required": [
+        "list_files",
+        "list_changes",
+        "upload_content",
+        "commit",
+        "download_content"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "anyOf": [
+    {
+      "$ref": "#/$defs/CommitRequest"
+    },
+    {
+      "$ref": "#/$defs/ListFilesResponse"
+    },
+    {
+      "$ref": "#/$defs/ListChangesResponse"
+    },
+    {
+      "$ref": "#/$defs/UploadContentResponse"
+    },
+    {
+      "$ref": "#/$defs/CommitResponse"
+    },
+    {
+      "$ref": "#/$defs/Error"
+    },
+    {
+      "$ref": "#/$defs/DriveChanged"
+    }
+  ]
+}
