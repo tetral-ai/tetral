@@ -59,8 +59,12 @@ runs as child processes of itself.
   Server does not act on it.
 - `tetral server status --app <app>` and `tetral server stop --app <app>`:
   `GET /v1/status` and `POST /v1/shutdown` through the SDK, writing the status
-  or `{}`; `server_not_running` when no App Server answers. `server stop`
-  returns at the `202`, before the App Server has exited.
+  or `{}`; `server_not_running` when no App Server is listening. One five-second
+  deadline covers connecting through receipt of the complete HTTP response,
+  including its body; expiry returns `server_not_responding`. `server stop`
+  succeeds after receiving the complete `202` response. This confirms that
+  shutdown was accepted; `server run` can still be finishing cleanup and
+  holding the root lock when `stop` returns.
 
 ## Where things are
 

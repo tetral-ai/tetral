@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn blocked_reasons_remain_visible_without_clearing_cleanup_restrictions() {
-        for code in ["credential_expired", "credential_revoked"] {
+        for code in ["credential_expired", "credential_revoked", "protocol_error"] {
             let error = Some(ErrorObject {
                 code: code.into(),
                 message: "credential unavailable".into(),

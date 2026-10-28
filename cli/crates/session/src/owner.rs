@@ -502,6 +502,9 @@ impl<S: TaskStarter> SessionOwner<S> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    mod live_probes;
+
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 

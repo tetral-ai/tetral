@@ -157,6 +157,7 @@ pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
     let mut ownership = SocketOwnership::new(lock);
     let listener = UnixListener::bind(&socket).map_err(|error| IoFailure::new(&socket, error))?;
     ownership.socket = Some(socket.clone());
+    state::seams::barrier_blocking("startup.socket_bound");
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
         .map_err(|error| IoFailure::new(&socket, error))?;
     Ok(Started {

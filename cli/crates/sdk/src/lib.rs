@@ -114,8 +114,13 @@ impl Client {
         success: StatusCode,
     ) -> Result<T, Error> {
         let deadline = state::seams::now() + Duration::from_secs(5);
-        self.call_until(method, path, success, state::seams::sleep_until(deadline))
-            .await
+        self.call_until(
+            method,
+            path,
+            success,
+            state::seams::sleep_until_counted(deadline, "local.response_deadline_checked"),
+        )
+        .await
     }
 
     async fn call_until<T: DeserializeOwned>(

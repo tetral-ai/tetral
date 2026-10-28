@@ -114,8 +114,9 @@ fn socket_cleanup_finishes_before_a_successor_can_own_the_root() {
     let seams = Seams::serve(directory.path(), Duration::from_secs(1_000));
     seams.hold("shutdown.socket_removed");
     let predecessor = AppServer::start(server("run", &root).seams(&seams), &root);
-    let accepted = request(&predecessor.socket, "POST", "/v1/shutdown").unwrap();
-    assert_eq!(accepted.status, 202);
+    let accepted = server("stop", &root).run();
+    assert_eq!(accepted.status.code(), Some(0), "{}", accepted.exit());
+    assert_eq!(accepted.object(), json!({}));
     seams.wait_until_waiting("shutdown.socket_removed", 1);
     assert!(!predecessor.socket.exists());
     assert!(!lock_is_free(&root));
@@ -131,7 +132,47 @@ fn socket_cleanup_finishes_before_a_successor_can_own_the_root() {
     assert_eq!(accepted.status, 202);
     let (run, _) = successor.exited();
     assert_eq!(run.status.code(), Some(0), "{}", run.exit());
-    case.observe("the competing process was refused after unlink and before unlock; the successor then served its own socket");
+    case.observe("server stop returned successfully while server run still held the root lock; the competing process was refused after unlink and before unlock; the successor then served its own socket");
+    case.pass();
+}
+
+#[test]
+fn a_failure_after_bind_removes_the_socket_name_and_releases_the_root_lock() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case("startup unwinds socket ownership after a post-bind error");
+    let directory = tempfile::tempdir().unwrap();
+    let root = configured_root(&mut case, directory.path());
+    let seams = Seams::serve(directory.path(), Duration::from_secs(1_000));
+    seams.hold("startup.socket_bound");
+    let child = server("run", &root).seams(&seams).spawn();
+    seams.wait_until_waiting("startup.socket_bound", 1);
+    let socket = socket_path(&root);
+    assert!(
+        fs::symlink_metadata(&socket)
+            .unwrap()
+            .file_type()
+            .is_socket()
+    );
+    assert!(!lock_is_free(&root));
+    // chmod follows this test-owned dangling link and fails with ENOENT.
+    // The owned pathname still exists, so cleanup must actually unlink it.
+    fs::remove_file(&socket).unwrap();
+    std::os::unix::fs::symlink(directory.path().join("missing"), &socket).unwrap();
+    seams.release("startup.socket_bound");
+    let result = run::finish(child);
+    assert_eq!(result.error_code(), "io_failed");
+    assert_eq!(
+        fs::symlink_metadata(&socket).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert!(lock_is_free(&root));
+    let successor = AppServer::start(server("run", &root), &root);
+    let stop = server("stop", &root).run();
+    assert!(stop.status.success(), "{}", stop.exit());
+    let (result, _) = successor.exited();
+    assert!(result.status.success(), "{}", result.exit());
+    case.observe("a real chmod failure after bind removed the residual pathname, released the lock, and allowed a successor to start and stop");
     case.pass();
 }
 
