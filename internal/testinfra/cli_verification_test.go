@@ -172,8 +172,8 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 		t.Fatal("CLI verification has no evidence upload")
 	}
 	results := mappingValue(jobs, "results")
-	if scalar(mappingValue(results, "if")) != "always()" {
-		t.Fatal("CLI results must run even when a dependency fails or is skipped")
+	if !strings.HasPrefix(scalar(mappingValue(results, "if")), "always() && (") {
+		t.Fatal("CLI results must aggregate eligible events even when a dependency fails or is skipped")
 	}
 	needs := sequenceScalars(mappingValue(results, "needs"))
 	slices.Sort(needs)
@@ -213,6 +213,85 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 		}
 	}
 }
+
+// Evaluate the workflow's actual eligibility and group expressions against
+// event fixtures. The small Python adapter supports only the expression
+// operators and functions exercised here; it does not duplicate the policy.
+func TestCLIVerificationUnrelatedLabelsCannotRunOrCancelVerification(t *testing.T) {
+	workflow, err := parseYAMLFile(filepath.Join(testRepositoryRoot(t), ".github/workflows/cli-verification.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := workflow.Content[0]
+	jobs := mappingValue(root, "jobs")
+	expressions := map[string]string{
+		"select":    scalar(mappingValue(mappingValue(jobs, "changed"), "if")),
+		"aggregate": scalar(mappingValue(mappingValue(jobs, "results"), "if")),
+		"group":     scalar(mappingValue(mappingValue(root, "concurrency"), "group")),
+	}
+	prefix := "cli-verification-${{ "
+	if !strings.HasPrefix(expressions["group"], prefix) || !strings.HasSuffix(expressions["group"], " }}") {
+		t.Fatalf("unexpected concurrency expression: %s", expressions["group"])
+	}
+	expressions["group"] = strings.TrimSuffix(strings.TrimPrefix(expressions["group"], prefix), " }}")
+	events := []struct {
+		Name, Action, Label string
+		Labels              []string
+		RunID               int
+		PR                  any
+		Ref                 string
+		WantRun             bool
+		WantGroup           string
+	}{
+		{Name: "opened", Action: "opened", PR: 126, RunID: 1, WantRun: true, WantGroup: "126"},
+		{Name: "updated", Action: "synchronize", PR: 126, RunID: 2, WantRun: true, WantGroup: "126"},
+		{Name: "reopened", Action: "reopened", PR: 126, RunID: 3, WantRun: true, WantGroup: "126"},
+		{Name: "manual", PR: "", Ref: "refs/heads/main", RunID: 4, WantRun: true, WantGroup: "refs/heads/main"},
+		{Name: "benchmark added", Action: "labeled", Label: "cli-build-benchmark", Labels: []string{"cli-build-benchmark"}, PR: 126, RunID: 5, WantRun: true, WantGroup: "126"},
+		{Name: "ordinary label", Action: "labeled", Label: "documentation", Labels: []string{"documentation"}, PR: 126, RunID: 6, WantGroup: "ignored-label-6"},
+		{Name: "ordinary label with benchmark already present", Action: "labeled", Label: "reviewed", Labels: []string{"reviewed", "cli-build-benchmark"}, PR: 126, RunID: 7, WantGroup: "ignored-label-7"},
+		{Name: "another ignored run", Action: "labeled", Label: "reviewed", PR: 126, RunID: 8, WantGroup: "ignored-label-8"},
+	}
+	input, err := json.Marshal(map[string]any{"expressions": expressions, "events": events})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "python3", "-c", cliWorkflowEventFixture)
+	command.Stdin = strings.NewReader(string(input))
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("workflow event policy: %v\n%s", err, output)
+	}
+}
+
+const cliWorkflowEventFixture = `
+import json, re, sys
+fixture = json.load(sys.stdin)
+for event in fixture["events"]:
+    values = {
+        "github.event.action": event["Action"],
+        "github.event.label.name": event["Label"],
+        "github.event.pull_request.labels.*.name": event["Labels"] or [],
+        "github.event.pull_request.number": event["PR"],
+        "github.ref": event["Ref"],
+        "github.run_id": event["RunID"],
+    }
+    def evaluate(expression):
+        expression = re.sub(r"github\.[a-zA-Z_.*]+", lambda m: "values[" + repr(m[0]) + "]", expression)
+        expression = expression.replace("&&", " and ").replace("||", " or ")
+        return eval(expression, {"__builtins__": {}}, {
+            "values": values, "always": lambda: True,
+            "format": lambda pattern, *args: pattern.format(*args),
+            "contains": lambda items, value: value in items,
+        })
+    for name in ("select", "aggregate"):
+        actual = bool(evaluate(fixture["expressions"][name]))
+        assert actual == event["WantRun"], (event["Name"], name, actual, event["WantRun"])
+    group = str(evaluate(fixture["expressions"]["group"]))
+    assert group == event["WantGroup"], (event["Name"], group, event["WantGroup"])
+`
 
 type cliVerificationCommand struct {
 	Name     string

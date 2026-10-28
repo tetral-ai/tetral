@@ -18,11 +18,14 @@ permissions:
 cache-mode: read
 
 concurrency:
-  group: cli-verification-${{ github.event.pull_request.number || github.ref }}
+  # Ignored label events must also have their own group: a job-level skip
+  # alone cannot prevent workflow admission from cancelling pending work.
+  group: cli-verification-${{ github.event.action == 'labeled' && github.event.label.name != 'cli-build-benchmark' && format('ignored-label-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   changed:
+    if: github.event.action != 'labeled' || github.event.label.name == 'cli-build-benchmark'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -166,7 +169,7 @@ jobs:
   results:
     name: CLI results
     needs: [changed, linux]
-    if: always()
+    if: always() && (github.event.action != 'labeled' || github.event.label.name == 'cli-build-benchmark')
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

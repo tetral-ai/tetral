@@ -94,7 +94,7 @@ owners; they send messages and await replies.
 | Connection | One per App Server | `connection` | The connection to Engine: authentication, the event stream and its resume, ready, heartbeats, credential renewal, and the routing of Session instructions; the count of Session records, the directory probe slots and the task pressure point `tetral_tasks` |
 | Session binding | One per Session on this machine | `session` | The Session record, its bindings and their states, and the admission of new work |
 | Task supervisor | One per task | `execution` | One task's process tree |
-| Report outbox | One per App Server | `connection` | The frozen reports, their sending and their retries |
+| Report outbox | One per App Server | `connection` | Immutable encoded report bodies, their retained-memory charges, sending and retries |
 | Drive sync | One per Session on this machine | `drive` | The Session's drive sync state, the checks before a command, uploads and catch-up |
 | Content cache | One per machine | `drive` | The cached file contents and the slots that bound concurrent uploads and downloads |
 | MCP manager | One per App Server | `mcp` | The local MCP servers and each binding's MCP connections |
@@ -155,7 +155,8 @@ Every `cargo` command runs with `cli/` as its working directory, so that
 `--manifest-path cli/Cargo.toml` from the repository root.
 
 - `cargo build` and `cargo test` in `cli/` build and test the workspace.
-  `cargo test` needs Go, with which the harness builds the reference control
+  `cargo test` needs Python 3 for Linux live-probe fixtures and Go, with which
+  the harness builds the reference control
   server for the tests that run it and whose version each acceptance record
   names, and `TETRAL_ACCEPTANCE_DIR` naming the
   directory that the acceptance record of each test file of `tests/tests/`,
@@ -173,9 +174,17 @@ Every `cargo` command runs with `cli/` as its working directory, so that
 ## Continuous integration
 
 `.github/workflows/cli-verification.yml` (**CLI Verification**) runs on every
-pull request. Its job `changed` finds whether the pull request changes a path
-under `cli/` or `protocol/` or the workflow file; only then does the job
-`linux` build and test the workspace on `ubuntu-24.04`, with unprivileged user
-namespaces enabled. The job `CLI results` is the workflow's result: it passes
-when nothing of the CLI changed, and otherwise only when every job that ran
-passed.
+pull request. Its `changed` job selects changes to `cli/`, `protocol/`, the
+reference server's dependencies, the workflow, and paths with unknown ownership.
+Three independent Linux matrix jobs cover ordinary functionality, release seam
+exclusion, and the serial 5,000-task regression on `ubuntu-24.04`, with
+unprivileged user namespaces enabled. `CLI results` requires every selected job
+to pass, or accepts the matrix being skipped when verification was not selected.
+
+Adding `cli-build-benchmark` can trigger verification and compilation measurement.
+Other label additions skip all verification jobs and use a separate workflow
+concurrency group, so they cannot cancel running or pending verification. Normal
+code updates and benchmark-label additions share the pull request's usual group.
+The main-only cache producer and read-only pull request restore are described in
+[testing](../docs/testing.md); remote cache savings require measurement, and
+requiring `CLI results` depends on the workflow first landing on `main`.

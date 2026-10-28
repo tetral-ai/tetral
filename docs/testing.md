@@ -232,8 +232,12 @@ The readable CI topology is:
   measures the relevant compilation phases cold and warm on each job's same
   runner before executing its full test selection. These are compilation
   measurements, not cache-transfer or repeated runtime measurements.
-  The label also allows measurement before this workflow reaches the default
-  branch, which is required for GitHub's manual dispatch support.
+  Adding that label triggers verification; adding any other label skips all
+  verification jobs and uses a distinct workflow concurrency group, protecting
+  both running and pending verification from cancellation. This remains true
+  when the benchmark label was already present. The benchmark label also allows
+  measurement before this workflow reaches the default branch, which is required
+  for GitHub's manual dispatch support.
 - **Main Branch Verification**: the same evidence owners run independently on
   the exact merged commit. Go Race runs the same shards; repository, static,
   Runtime, Gateway, protocol, deployment, image, and security evidence run in
