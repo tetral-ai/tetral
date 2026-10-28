@@ -1178,6 +1178,7 @@ impl Owner {
                     Stream::Waiting { .. } | Stream::Resuming(_) => None,
                 };
                 held.ledger.final_acked(&instruction, current);
+                state::seams::count("connection.final_acked");
                 Phase::Held(held)
             }
             OutboxEvent::Refused { error, .. } => self.request_refused(held, &error, now),

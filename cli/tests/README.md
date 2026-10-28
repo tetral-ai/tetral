@@ -173,7 +173,10 @@ the isolated harness tests without starting the CLI.
   Session's preparation while the admission of a Session without an owner
   is held, the
   replay-ledger entries of tasks, kept until a resume
-  or freed by each ACK, also of an instruction that joined a task, a
+  or freed by each ACK, also of an instruction that joined a task. A final
+  ACK applied by the Connection owner after a resume retains the earlier
+  stream's entry: replay starts nothing twice, a full ledger refuses a new
+  task, and the next resume admits one. The tests also cover a
   running task's write and cancel with no entry free, which leave it
   unchanged, and, with only the ledger's reserve free, new tasks
   refused, as one `pressure.rejecting_started` of `tetral_tasks` in the App

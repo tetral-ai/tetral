@@ -121,7 +121,11 @@ Server:
   free after recording it; the rest may use the reserve; it never removes an
   entry to make room, and an entry goes only once its instruction's final
   report is acknowledged and no stream can deliver the instruction again
-  (`ledger`).
+  (`ledger`). The test seam `connection.final_acked` counts after the
+  Connection owner applies each instruction's final ACK to that ledger.
+  `outbox.answered` only establishes that the Report outbox applied an
+  answer and queued any final ACK events; the Connection owner may still
+  have to consume them.
 
 ## State
 
@@ -166,7 +170,7 @@ mailbox submission; the body owner releases the budget on its last reference.
 
 | File | Holds |
 |---|---|
-| `src/owner.rs` | The Connection owner: its phases, timers, the answers to the events request, ready and heartbeats, `disconnect`, the order of an event's handling and the ledger's admission (`admit`), staging and routing, the admission of a `session.prepare` and its `failed` report, the record `protocol.foreign_connection`, and the test seam counters `connection.attempt`, `connection.checked`, `connection.granted`, `connection.answered` and `route.session` |
+| `src/owner.rs` | The Connection owner: its phases, timers, the answers to the events request, ready and heartbeats, `disconnect`, the order of an event's handling and the ledger's admission (`admit`), staging and routing, the admission of a `session.prepare` and its `failed` report, the record `protocol.foreign_connection`, and the test seam counters `connection.attempt`, `connection.checked`, `connection.granted`, `connection.answered`, `connection.final_acked` and `route.session` |
 | `src/sessions.rs` | The Session binding owners as the Connection owner reaches them (`Owners`), `RECORDS_MAX`, and its side of `protocol::ports::ConnectionPort` |
 | `src/probe_slots.rs` | The probe slots, their waiting requests, `PROBES_MAX` and `PROBE_WAIT`, and the pressure point `tetral_probes`: its series and its rejection episodes |
 | `src/task_pressure.rs` | The pressure point `tetral_tasks`: the running tasks, the staged `tool.execute` instructions and their waits, the `resource_exhausted` rejections, its series and its rejection episodes |

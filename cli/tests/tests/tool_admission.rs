@@ -13,7 +13,8 @@
 //! only the ledger's reserve free, new tasks refused while a running task's
 //! controls, its binding's close and its report are recorded. The seam
 //! counters these tests read are those `tetral_tests::machine` and
-//! `tetral_tests::tasks` name.
+//! `tetral_tests::tasks` name, and `connection.final_acked`, counted after
+//! the Connection owner applies an instruction's final ACK to its ledger.
 
 use std::fs;
 use std::path::Path;
@@ -846,6 +847,9 @@ fn an_instruction_whose_final_ack_comes_after_a_resume_keeps_its_ledger_entry_un
         let tasks = TaskMachine::start(&mut case, directory.path());
         let seams = &tasks.machine().seams;
         let policy = project_policy(&tasks.project, "disabled");
+        // Startup issued only one preparation. Settle its ledger ACK before
+        // filling the ledger, so only the held task can supply ACK number 2.
+        seams.wait_for_count("connection.final_acked", 1);
         fill_ledger(&tasks, LEDGER_ROOM - 1);
         answer_fault(
             &tasks.engine,
@@ -854,9 +858,13 @@ fn an_instruction_whose_final_ack_comes_after_a_resume_keeps_its_ledger_entry_un
         let held = tasks.execute("task_held", json!({"cmd": "printf x >> f"}), policy.clone());
         tasks.terminal("task_held");
         resume(&tasks);
-        let answered = seams.count("outbox.answered");
         release_answers(&tasks);
-        seams.wait_for_count("outbox.answered", answered + 1);
+        // Closes of absent Sessions produce no reports. The held task is
+        // therefore the only remaining final ACK. Wait for the Connection
+        // owner to apply it, not just for the outbox to enqueue it: a resend
+        // handled first would change the entry's last-delivery stream and
+        // allow that ACK to remove it immediately.
+        seams.wait_for_count("connection.final_acked", 2);
 
         let spawns = seams.count(SPAWN);
         tasks
@@ -869,14 +877,16 @@ fn an_instruction_whose_final_ack_comes_after_a_resume_keeps_its_ledger_entry_un
             json!(["rejected", "resource_exhausted"])
         );
         assert_eq!(seams.count(SPAWN), spawns);
+        assert_eq!(fs::read_to_string(tasks.project.join("f")).unwrap(), "x");
 
         next_resume(&tasks);
         tasks.execute("task_admitted", json!({"cmd": "true"}), policy);
         let admitted = tasks.terminal("task_admitted");
         assert_eq!(admitted["result"]["status"], "success");
+        assert_eq!(seams.count(SPAWN), spawns + 1);
         assert_eq!(fs::read_to_string(tasks.project.join("f")).unwrap(), "x");
         case.observe(format!(
-            "the resent instruction launched nothing and f holds x once; the new task before the next resume was resource_exhausted; after the resume at {name} a new task ran"
+            "after the Connection owner applied the held final ACK, the ledger stayed full: the resent instruction launched nothing and f held x once, and the new task was resource_exhausted; after the resume at {name} a new task ran and f still held x once"
         ));
         case.pass();
     }
