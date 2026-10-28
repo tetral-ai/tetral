@@ -47,6 +47,7 @@ func TestCLIBuildCacheWorkflowPolicy(t *testing.T) {
 				if changed == string(body) {
 					t.Fatal("mutation did not match")
 				}
+				// #nosec G703 -- path is a literal table entry under this test's temporary fixture; only the file contents are mutated.
 				if err := os.WriteFile(path, []byte(changed), 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -104,6 +105,7 @@ func cliCacheScriptFixture(t *testing.T) (string, string) {
 		t.Fatal(err)
 	}
 	script := filepath.Join(root, "scripts/cli-build-cache.sh")
+	// #nosec G703 -- the destination is a fixed relative filename under t.TempDir; the repository script supplies contents, not a path.
 	if err := os.WriteFile(script, body, 0700); err != nil {
 		t.Fatal(err)
 	}
