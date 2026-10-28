@@ -147,7 +147,9 @@ mailbox submission; the body owner releases the budget on its last reference.
   Session binding owner; `status()` gives its `ConnectionStatus`,
   while `status_snapshot()` reads the last published owner status without waiting,
   `sessions()` the entries of `GET /v1/sessions`, and `stop()` stops it,
-  after which it stays `stopped`. It routes each Session instruction as an
+  after which it stays `stopped`. The owner publishes that snapshot before
+  answering stop, so final shutdown output cannot observe an earlier state
+  after stop has completed. It routes each Session instruction as an
   `Instruction`: the instruction as read, whether the ledger recorded it and
   as a new operation, and the span its work runs in; a `session.prepare`, a
   `session.close` and a tool instruction (`protocol::ports::ToolCall`) go to

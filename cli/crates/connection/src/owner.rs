@@ -322,6 +322,8 @@ async fn own(
         }
         owner.check();
         status.send_replace(owner.status());
+        // Stop waiters may read the snapshot as soon as their reply wakes them.
+        owner.answer_stop();
     }
 }
 
@@ -516,7 +518,6 @@ impl Owner {
             Message::Stop(reply) => {
                 self.stop();
                 self.stop_replies.push(reply);
-                self.answer_stop();
                 return;
             }
             Message::Port(message) => {
@@ -616,12 +617,10 @@ impl Owner {
                 if let Some(next) = self.slots.free(state::seams::now()) {
                     self.owners.answer(&next, ProbeSlot::Granted);
                 }
-                self.answer_stop();
             }
             PortMessage::RecordGone(session_id) => self.owners.record_gone(&session_id),
             PortMessage::TasksGone(session_id) => {
                 self.tasks_pending.remove(&session_id);
-                self.answer_stop();
             }
             PortMessage::TaskStaged(staged) => {
                 self.task_pressure.staged(staged, state::seams::now());
@@ -1804,6 +1803,52 @@ mod tests {
             },
             answer,
         )
+    }
+
+    #[tokio::test]
+    async fn stop_completion_publishes_its_snapshot_before_waking_the_waiter() {
+        struct ObserveWake {
+            status: tokio::sync::watch::Receiver<ConnectionStatus>,
+            observed: std::sync::Mutex<Vec<ConnectionState>>,
+        }
+        impl std::task::Wake for ObserveWake {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.observed
+                    .lock()
+                    .unwrap()
+                    .push(self.status.borrow().state);
+            }
+        }
+
+        let (mut owner, reports) = owner_with_budget(crate::report_memory::Budget::new(512, 512));
+        let (mailbox, inbox) = mpsc::unbounded_channel();
+        owner.mailbox = mailbox.clone();
+        let (status, snapshot) = tokio::sync::watch::channel(owner.status());
+        let observer = Arc::new(ObserveWake {
+            status: snapshot,
+            observed: std::sync::Mutex::new(Vec::new()),
+        });
+        let wake = std::task::Waker::from(observer.clone());
+        let mut context = std::task::Context::from_waker(&wake);
+        let (reply, mut answer) = oneshot::channel();
+        assert!(
+            std::future::Future::poll(std::pin::Pin::new(&mut answer), &mut context).is_pending()
+        );
+        mailbox.send(Message::Stop(reply)).unwrap();
+
+        // Poll the real owner loop. The waiter observes the snapshot inside
+        // send's wake, before the owner can execute a later publication.
+        let mut running = Box::pin(own(owner, inbox, reports, status));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(running.as_mut(), &mut context).is_pending());
+        assert_eq!(
+            *observer.observed.lock().unwrap(),
+            vec![ConnectionState::Stopped]
+        );
+        assert!(answer.try_recv().is_ok());
     }
 
     #[tokio::test]
