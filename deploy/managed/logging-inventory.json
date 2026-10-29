@@ -1592,6 +1592,23 @@
             "recovery.event": "string"
           }
         },
+        "drive_changes.listener_disconnected": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string"
+          },
+          "errors": {
+            "notification_listener_disconnected": {
+              "class": "dependency_unavailable",
+              "message_safe": "drive change listener disconnected"
+            }
+          }
+        },
         "http.auth": {
           "level": "WARN",
           "log_type": "app",

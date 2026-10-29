@@ -209,6 +209,7 @@ func newTetralAPITestEnv(t *testing.T, options ...tetralAPITestOption) tetralAPI
 	if err != nil {
 		t.Fatalf("BuildRouter: %v", err)
 	}
+	t.Cleanup(func() { _ = router.(io.Closer).Close() })
 	return tetralAPITestEnv{router: router, admin: adminDB}
 }
 

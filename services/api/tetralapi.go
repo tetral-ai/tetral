@@ -59,6 +59,9 @@ type RouterConfig struct {
 	BlobStore         blob.BlobStore
 	PrincipalVerifier *auth.InternalPrincipalVerifier
 	HTTPMetrics       *workload.HTTPMetrics
+	// Metrics holds the api's own families, such as the upload budget's
+	// pressure point; nil keeps them in a registry nothing exports.
+	Metrics *workload.Registry
 }
 
 // ProductionConfig carries startup inputs for the public API composition root.
@@ -70,6 +73,7 @@ type ProductionConfig struct {
 	Open                        StartupOpenFunc
 	EnvironmentNetworkPreflight func(context.Context, *dbconnect.Client) error
 	HTTPMetrics                 *workload.HTTPMetrics
+	Metrics                     *workload.Registry
 }
 
 // Application is a fully bootstrapped public API application.
@@ -150,6 +154,7 @@ func BuildProductionApplication(ctx context.Context, cfg ProductionConfig) (*App
 		Logger:        cfg.Logger,
 		Env:           cfg.Env,
 		HTTPMetrics:   cfg.HTTPMetrics,
+		Metrics:       cfg.Metrics,
 	})
 	if err != nil {
 		_ = database.OpenResult.Client.Close()
@@ -222,8 +227,12 @@ func BuildRouter(ctx context.Context, cfg RouterConfig) (handler http.Handler, r
 	if err != nil {
 		return nil, err
 	}
-	if _, err := loadDriveUploadBudgetFromEnv(cfg.Env); err != nil {
+	uploadBudgetBytesPerMinute, err := loadDriveUploadBudgetFromEnv(cfg.Env)
+	if err != nil {
 		return nil, err
+	}
+	if cfg.Metrics == nil {
+		cfg.Metrics = workload.NewRegistry("api")
 	}
 	encryptor, err := encryption.NewAES256GCMEncryptor(cfg.VaultKey)
 	if err != nil {
@@ -334,12 +343,49 @@ func BuildRouter(ctx context.Context, cfg RouterConfig) (handler http.Handler, r
 	if fileHandler != nil {
 		routerOpts = append(routerOpts, httpapi.WithFileHandler(fileHandler))
 	}
-	return &ownedRouter{Handler: httpapi.NewRouter(httpapi.NewSessionHandler(sessionService), "", routerOpts...), resources: ownedBlob}, nil
+	router := &ownedRouter{resources: ownedBlob}
+	if blobStore != nil {
+		driveHandler, stopChanges, err := buildDriveHandler(cfg, blobStore, uploadBudgetBytesPerMinute, eventPageTokenSecret)
+		if err != nil {
+			return nil, fmt.Errorf("drives: %w", err)
+		}
+		router.stop = stopChanges
+		routerOpts = append(routerOpts, httpapi.WithDriveHandler(driveHandler))
+	}
+	router.Handler = httpapi.NewRouter(httpapi.NewSessionHandler(sessionService), "", routerOpts...)
+	return router, nil
 }
 
-// ownedRouter keeps object-client cleanup at the composition that created it.
+// buildDriveHandler serves the drive API on blobStore and starts this pod's
+// LISTEN connection for drive change notices; stop ends it.
+func buildDriveHandler(cfg RouterConfig, blobStore blob.BlobStore, uploadBudgetBytesPerMinute int64, pageTokenSecret []byte) (*httpapi.DriveHandler, func(), error) {
+	drives, err := drive.NewService(cfg.RuntimeClient, blobStore, cfg.DataDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	budget, err := drive.NewUploadBudget(cfg.RuntimeClient, uploadBudgetBytesPerMinute, cfg.Metrics)
+	if err != nil {
+		return nil, nil, err
+	}
+	changes := httpapi.NewDriveChanges(cfg.RuntimeClient, drives, cfg.Logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = changes.Run(ctx)
+	}()
+	stop := func() {
+		cancel()
+		<-done
+	}
+	return httpapi.NewDriveHandler(drives, budget, changes, pageTokenSecret), stop, nil
+}
+
+// ownedRouter keeps object-client cleanup, and the end of the drive change
+// listener, at the composition that created them.
 type ownedRouter struct {
 	http.Handler
+	stop      func()
 	resources io.Closer
 	closeOnce sync.Once
 	closeErr  error
@@ -347,6 +393,9 @@ type ownedRouter struct {
 
 func (r *ownedRouter) Close() error {
 	r.closeOnce.Do(func() {
+		if r.stop != nil {
+			r.stop()
+		}
 		if r.resources != nil {
 			r.closeErr = r.resources.Close()
 		}

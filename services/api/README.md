@@ -113,9 +113,38 @@ unauthenticated.
 | Memory Stores | Live create/list/get/update/archive/delete, memory rows, and versions |
 | Files | All five `/v1/files` routes live when a BlobStore is configured; without one, every `/v1/files` route returns 501 — not only uploads |
 | Skills | All nine `/v1/skills` routes live when a BlobStore is configured; without one, every `/v1/skills` route returns 501 — not only uploads |
+| Drives | The `/v1/drives` routes of the developer drive API, except `drives.skills.*`, live when a BlobStore is configured; without one they are not registered |
 | Models | Live `GET /v1/models` and `GET /v1/models/{model_id}`, served from the in-code catalog |
 | API keys | Owned by the `auth` service |
 | Health (`GET /health`) | Live (200), unauthenticated |
+
+### Drives
+
+`internal/httpapi/drive_handler.go` serves the developer drive API on
+`internal/drive`; `beta` is accepted and never required. The writer of every
+version a route creates or redacts is the request's credential: `api_actor`
+for an API key, `user_actor` or `service_account_actor` for a direct token.
+
+- Lists take `limit` (default 20, above 100 treated as 100) and `page`, and
+  return `{data, next_page}`: drives by creation, files by UTF-8 byte order of
+  `path`, a path's versions oldest first. The page token is signed with the API
+  page-token secret and binds the Workspace, the list, the drive and its
+  filter. `drives.changes.list` takes `after` (whole commits), `session_id` and
+  `limit` 1 to 1,000, and returns `{data, has_more}`.
+- `drives.files.upload` refuses a declared `Content-Length` above 501,000,000
+  bytes with `413` before it takes from the upload budget, then takes the
+  budget (`429 rate_limit_error` with `Retry-After` when refused), then streams
+  the `file` part into the drive and writes it in one `all_or_nothing` commit.
+- `drives.changes.stream` is SSE: each pod holds one LISTEN connection on
+  `tetral_drive_changed`, opened when the router is built and closed with it;
+  it reconnects after a failure, which writes
+  `drive_changes.listener_disconnected`. Every event is `event: drive.changed`
+  with `{drive_id, seq}`: a stream first sends the drive's `last_seq` when it
+  is above 0, then one per commit notice; notices a slow client has not
+  received merge into the highest `seq`. After a LISTEN reconnect every stream
+  gets its drive's `last_seq` again.
+- The upload budget's pressure point exports
+  `drive_upload_budget_rejected_total{cause="budget"}` on the metrics listener.
 
 ### Files
 

@@ -78,6 +78,7 @@ var startupErrorInventory = map[string][]startupInventoryEntry{
 		{expression: `fmt.Errorf("runtime control configuration: %w", err)`, bucket: bucketConfig, count: 1},
 		{expression: `fmt.Errorf("event page token secret: %w", err)`, bucket: bucketPropagate, count: 1},
 		{expression: `fmt.Errorf("files: %w", err)`, bucket: bucketPropagate, count: 1},
+		{expression: `fmt.Errorf("drives: %w", err)`, bucket: bucketDependency, count: 1},
 	},
 	"buildOptionalBlobStore": {
 		{expression: "asStartupConfigError(err)", bucket: bucketConfig, count: 2},
