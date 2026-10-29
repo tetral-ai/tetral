@@ -659,3 +659,32 @@ func paddedReady(t *testing.T, ready protocol.Ready, size int) []byte {
 	}
 	return out
 }
+
+func TestHeartbeatRejectsMismatchedRequestIDWithoutRenewing(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	cli, stream := f.openOnline()
+	first := protocol.Heartbeat{ConnectionID: stream.connectionID, MessageID: "heartbeat_control", RequestMessageID: instance.HeartbeatMessageID(stream.connectionID, 1), HeartbeatSeq: 1}
+	response, err := cli.Heartbeat(f.ctx, first)
+	if err != nil || response.Status != http.StatusOK {
+		t.Fatalf("control heartbeat = %d %s, %v", response.Status, response.Body, err)
+	}
+	before := f.connectionRow(stream.connectionID)
+	mismatched := protocol.Heartbeat{ConnectionID: stream.connectionID, MessageID: "heartbeat_mismatch", RequestMessageID: instance.HeartbeatMessageID(stream.connectionID, 1), HeartbeatSeq: 2}
+	response, err = cli.Heartbeat(f.ctx, mismatched)
+	requireClientError(t, response, err, protocol.ErrorInvalidMessage)
+	if response.Status != http.StatusBadRequest {
+		t.Fatalf("mismatch status = %d; want 400", response.Status)
+	}
+	requireRowUnchanged(t, before, f.connectionRow(stream.connectionID))
+	if n := f.count(`SELECT count(*) FROM connection_upstream_messages WHERE connection_id=$1 AND message_id=$2`, stream.connectionID, mismatched.MessageID); n != 0 {
+		t.Fatal("refused heartbeat entered the acceptance ledger")
+	}
+	// The same sequence is acceptable with only the association corrected,
+	// proving readiness, authorization and ordering did not mask the check.
+	mismatched.MessageID = "heartbeat_corrected"
+	mismatched.RequestMessageID = instance.HeartbeatMessageID(stream.connectionID, 2)
+	response, err = cli.Heartbeat(f.ctx, mismatched)
+	if err != nil || response.Status != http.StatusOK {
+		t.Fatalf("corrected heartbeat = %d %s, %v", response.Status, response.Body, err)
+	}
+}
