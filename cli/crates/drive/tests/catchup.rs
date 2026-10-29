@@ -9,17 +9,20 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use drive::DriveSync;
+use drive::cache::{CacheConfig, ContentCache};
 use drive::state::{FileRow, PendingChange, SyncState, Tables, Write};
 use drive::transfer::{
     Binding, Commit, ContentSink, Download, DriveTransfer, Ended, ListChanges, ListFiles, Request,
     Transfer, Upload,
 };
+use drive::{DriveSync, SyncConfig};
 use protocol::drive_transfer::{
     CommitResponse, ListChangesResponse, ListFilesResponse, UploadContentResponse,
 };
-use protocol::id::Id;
+use protocol::id::{Id, SafeId};
+use protocol::ports::{TaskOwnerReply, TaskOwnership};
 use serde_json::{Value, json};
+use state::clock::Clock;
 use tokio::sync::{mpsc, oneshot};
 
 const DRIVE: &str = "drive_a";
@@ -38,6 +41,14 @@ enum Call {
 }
 
 struct Stub(mpsc::UnboundedSender<Call>);
+
+struct NoTasks;
+
+impl TaskOwnership for NoTasks {
+    fn task_of(&self, _: u32, reply: TaskOwnerReply) {
+        reply(None);
+    }
+}
 
 impl DriveTransfer for Stub {
     fn list_files(&self, request: Request<ListFiles>) -> Transfer<'_, ListFilesResponse> {
@@ -132,8 +143,27 @@ impl Harness {
             .await
             .unwrap();
         state.apply(seed).await.unwrap();
+        Harness::run(directory, state)
+    }
+
+    fn run(directory: &Path, state: SyncState) -> Harness {
         let (calls, received) = mpsc::unbounded_channel();
-        let sync = DriveSync::spawn(state, Arc::new(Stub(calls)));
+        let transfer: Arc<dyn DriveTransfer> = Arc::new(Stub(calls));
+        let cache = ContentCache::spawn(CacheConfig {
+            root: directory.to_path_buf(),
+            transfer: transfer.clone(),
+            clock: Clock::seams(),
+            free_space: Arc::new(|| Ok(u64::MAX)),
+        })
+        .unwrap();
+        let sync = DriveSync::spawn(SyncConfig {
+            session_id: SafeId::new("sess_a").unwrap(),
+            root: directory.to_path_buf(),
+            state,
+            transfer,
+            cache,
+            tasks: Arc::new(NoTasks),
+        });
         sync.binding_current(Binding {
             connection_id: Id::new("conn_a").unwrap(),
             binding_id: Id::new("bind_a").unwrap(),
@@ -425,16 +455,7 @@ async fn an_expired_cursor_lists_the_drive_again_and_keeps_pending_changes_and_f
         .await
         .unwrap();
     let before = state.tables().pending_changes.clone();
-    let (calls, received) = mpsc::unbounded_channel();
-    let sync = DriveSync::spawn(state, Arc::new(Stub(calls)));
-    sync.binding_current(Binding {
-        connection_id: Id::new("conn_a").unwrap(),
-        binding_id: Id::new("bind_a").unwrap(),
-    });
-    let mut harness = Harness {
-        sync,
-        calls: received,
-    };
+    let mut harness = Harness::run(directory.path(), state);
     harness.sync.mounted(Id::new(DRIVE).unwrap(), Vec::new());
     harness.changes((3, None), Err(Ended::CursorExpired)).await;
     let now = vec![file("a", "a2"), file("c", "c"), file("d", "d")];
@@ -497,16 +518,7 @@ async fn records_follow_the_rules_of_pending_changes_folders_and_excluded_paths(
         })
         .await
         .unwrap();
-    let (calls, received) = mpsc::unbounded_channel();
-    let sync = DriveSync::spawn(state, Arc::new(Stub(calls)));
-    sync.binding_current(Binding {
-        connection_id: Id::new("conn_a").unwrap(),
-        binding_id: Id::new("bind_a").unwrap(),
-    });
-    let mut harness = Harness {
-        sync,
-        calls: received,
-    };
+    let mut harness = Harness::run(directory.path(), state);
     harness
         .sync
         .mounted(Id::new(DRIVE).unwrap(), vec!["datasets".to_owned()]);

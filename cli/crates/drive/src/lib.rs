@@ -3,10 +3,12 @@
 
 pub mod cache;
 pub mod catchup;
+pub mod local;
+pub mod ops;
 pub mod paths;
 pub mod state;
 pub mod sync;
 pub mod transfer;
 
-pub use sync::DriveSync;
+pub use sync::{DriveSync, SyncConfig};
 pub use transfer::DriveTransfer;

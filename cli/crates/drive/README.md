@@ -19,6 +19,10 @@ Drives on this machine belong here, with two owners:
   `sync-state.db`; it changes its in-memory copy only after the write that
   records the change has committed. A database SQLite cannot read, or of
   another `user_version`, is left untouched.
+- A drive sync is the only writer of its Session's content files
+  (`sessions/<session_id>/content/`). An operation through a mount writes
+  its bytes there and commits its rows before it replies; a read that needs
+  a download waits outside the owner, so it blocks no other operation.
 - The Content cache owner is the only writer under `cache/`; a blob enters
   only when the whole content hashes to its name, and uncommitted content
   never enters it. Its waits and the times of its slots read the clock it
@@ -41,5 +45,14 @@ Drives on this machine belong here, with two owners:
   binding, the triggers of each mounted drive's catch-up, its pages and
   failed listings, and the check before a command.
 - `catchup.rs`: the writes of a finished listing and of a page of change
-  records (`finish_listing`, `apply_page`), the application of a record,
-  `page_applied_seq` and excluded paths.
+  records (`finish_listing`, `apply_page`), the application of a record and
+  `page_applied_seq`.
+- `ops.rs`: the operation table both mount adapters serve, as `DriveSync`
+  methods: attributes, folder listings, reads (`Source`) with their waits,
+  writes into content files, the downloads in progress (`Downloading`) and
+  the local-only notices (`Notice`).
+- `paths.rs`: NFC names, the path checks, excluded paths and the local-only
+  rules.
+- `local.rs`: the rows one operation changes (`Edit`), the pending changes it
+  records and their bases, and the base an accepted in-flight commit gives
+  (`accepted_in_flight`).

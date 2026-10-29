@@ -7,25 +7,49 @@
 //! the records through its highest notice and finished a catch-up that
 //! began after the latest `connected`. A list request answered permanently
 //! unmounts its drive with the failed listing's error.
+//!
+//! The owner also answers the mounts' operations ([`crate::ops`]). An
+//! operation on a drive whose first listing has not finished waits for it,
+//! and a read whose blob is missing waits for a running catch-up of its
+//! drive; a detached drive drops them, which fails them with `EIO`.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use protocol::drive_transfer::{ListChangesResponse, ListFilesResponse, Operation};
-use protocol::id::Id;
+use protocol::id::{Id, SafeId};
 use protocol::path::DrivePath;
+use protocol::ports::TaskOwnership;
+use rustix::io::Errno;
 use tokio::sync::{mpsc, oneshot, watch};
 
+use crate::cache::ContentCache;
 use crate::catchup::{self, Record, Version};
+use crate::ops::{Done, Notice, Op};
 use crate::paths;
 use crate::state::{ListingRow, SyncState, Tables, Write};
 use crate::transfer::{Binding, DriveTransfer, Ended, ListChanges, ListFiles, Request};
 
+/// What a Session's Drive sync owner is built with.
+pub struct SyncConfig {
+    pub session_id: SafeId,
+    /// The canonical state root.
+    pub root: PathBuf,
+    pub state: SyncState,
+    pub transfer: Arc<dyn DriveTransfer>,
+    pub cache: ContentCache,
+    pub tasks: Arc<dyn TaskOwnership>,
+}
+
 /// A handle on a Session's Drive sync owner.
 #[derive(Clone)]
 pub struct DriveSync {
-    mailbox: mpsc::UnboundedSender<Message>,
+    pub(crate) mailbox: mpsc::UnboundedSender<Message>,
+    pub(crate) session_id: SafeId,
+    pub(crate) cache: ContentCache,
+    pub(crate) tasks: Arc<dyn TaskOwnership>,
 }
 
 impl std::fmt::Debug for DriveSync {
@@ -34,7 +58,9 @@ impl std::fmt::Debug for DriveSync {
     }
 }
 
-enum Message {
+pub(crate) type Reply = oneshot::Sender<Result<Done, Errno>>;
+
+pub(crate) enum Message {
     Connected,
     DriveChanged {
         drive_id: Id,
@@ -57,9 +83,22 @@ enum Message {
         generation: u64,
         answer: Answer,
     },
+    Op {
+        drive_id: String,
+        op: Op,
+        reply: Reply,
+    },
+    /// A read of a [`Source::Cache`] ended.
+    ReadEnded(u64),
+    /// The reads waiting for blobs: machine path, hash and size.
+    Reads(oneshot::Sender<Vec<(PathBuf, String, u64)>>),
+    Notices {
+        task_id: String,
+        reply: oneshot::Sender<Vec<Notice>>,
+    },
 }
 
-enum Answer {
+pub(crate) enum Answer {
     Files {
         first: bool,
         result: Result<ListFilesResponse, Ended>,
@@ -68,12 +107,19 @@ enum Answer {
 }
 
 impl DriveSync {
-    /// Starts the owner of `state` with no current binding.
-    pub fn spawn(state: SyncState, transfer: Arc<dyn DriveTransfer>) -> DriveSync {
+    /// Starts the owner of `config.state` with no current binding.
+    pub fn spawn(config: SyncConfig) -> DriveSync {
         let (mailbox, inbox) = mpsc::unbounded_channel();
+        let inodes = config
+            .state
+            .tables()
+            .files
+            .values()
+            .map(|row| ((row.drive_id.clone(), row.file_id), row.path.clone()))
+            .collect();
         let owner = Owner {
-            state,
-            transfer,
+            state: config.state,
+            transfer: config.transfer,
             binding: watch::Sender::new(None),
             mailbox: mailbox.clone(),
             mounts: HashMap::new(),
@@ -82,9 +128,21 @@ impl DriveSync {
             connected: 0,
             generations: 0,
             checks: Vec::new(),
+            session_dir: state::paths::session_directory(&config.root, config.session_id.as_str()),
+            blobs: config.root.join("cache/blobs"),
+            session_id: config.session_id.clone(),
+            inodes,
+            reads: HashMap::new(),
+            read_tokens: 0,
+            notices: BTreeMap::new(),
         };
         tokio::spawn(owner.run(inbox));
-        DriveSync { mailbox }
+        DriveSync {
+            mailbox,
+            session_id: config.session_id,
+            cache: config.cache,
+            tasks: config.tasks,
+        }
     }
 
     /// The connection owner saw `connected`, resumed or not.
@@ -140,20 +198,30 @@ impl DriveSync {
         answer.await.unwrap_or_default()
     }
 
-    fn send(&self, message: Message) {
+    pub(crate) fn send(&self, message: Message) {
         let _ = self.mailbox.send(message);
     }
 }
 
 /// A mounted drive and its catch-up.
-struct Mount {
-    exclude: Vec<String>,
+pub(crate) struct Mount {
+    pub(crate) exclude: Vec<String>,
     /// Tells the answers of this mount from those of an earlier one.
     generation: u64,
     running: Option<Running>,
     again: bool,
     /// The `connected` count when the last finished catch-up began.
     finished_began: Option<u64>,
+    /// Operations that wait for the first listing to finish.
+    pub(crate) until_listed: Vec<(Op, Reply)>,
+    /// Reads of missing blobs that wait for the running catch-up to end.
+    pub(crate) until_caught_up: Vec<(Op, Reply)>,
+}
+
+impl Mount {
+    pub(crate) fn catching_up(&self) -> bool {
+        self.running.is_some()
+    }
 }
 
 struct Running {
@@ -162,21 +230,32 @@ struct Running {
     start_seq: Option<i64>,
 }
 
-struct Owner {
-    state: SyncState,
+pub(crate) struct Owner {
+    pub(crate) state: SyncState,
     transfer: Arc<dyn DriveTransfer>,
-    binding: watch::Sender<Option<Binding>>,
+    pub(crate) binding: watch::Sender<Option<Binding>>,
     mailbox: mpsc::UnboundedSender<Message>,
-    mounts: HashMap<String, Mount>,
+    pub(crate) mounts: HashMap<String, Mount>,
     /// The highest `drive.changed` seq received for each drive.
     notified: HashMap<String, i64>,
     unmounted: BTreeMap<String, String>,
     connected: u64,
     generations: u64,
     checks: Vec<oneshot::Sender<()>>,
+    /// `sessions/<session_id>` under the canonical state root.
+    pub(crate) session_dir: PathBuf,
+    pub(crate) blobs: PathBuf,
+    pub(crate) session_id: SafeId,
+    /// The path of each `file_id` of each drive, as last written.
+    pub(crate) inodes: HashMap<(String, i64), String>,
+    /// The reads of cache blobs in progress: drive, path, hash and size.
+    pub(crate) reads: HashMap<u64, (String, String, String, u64)>,
+    pub(crate) read_tokens: u64,
+    /// The local-only notices kept for each task.
+    pub(crate) notices: BTreeMap<String, Vec<Notice>>,
 }
 
-fn now_ns() -> i64 {
+pub(crate) fn now_ns() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |since| {
@@ -227,6 +306,8 @@ impl Owner {
                         running: None,
                         again: false,
                         finished_began: None,
+                        until_listed: Vec::new(),
+                        until_caught_up: Vec::new(),
                     },
                 );
                 self.trigger(&drive);
@@ -254,6 +335,20 @@ impl Owner {
                 if current {
                     self.answered(&drive, answer).await;
                 }
+            }
+            Message::Op {
+                drive_id,
+                op,
+                reply,
+            } => self.op(drive_id, op, reply).await,
+            Message::ReadEnded(token) => {
+                self.reads.remove(&token);
+            }
+            Message::Reads(reply) => {
+                let _ = reply.send(self.waiting_reads());
+            }
+            Message::Notices { task_id, reply } => {
+                let _ = reply.send(self.notices.remove(&task_id).unwrap_or_default());
             }
         }
     }
@@ -413,6 +508,14 @@ impl Owner {
         );
         self.write(write).await?;
         self.list_changes(drive, start_seq, None);
+        let waiting = self
+            .mounts
+            .get_mut(drive)
+            .map(|mount| std::mem::take(&mut mount.until_listed))
+            .unwrap_or_default();
+        for (op, reply) in waiting {
+            self.op(drive.to_owned(), op, reply).await;
+        }
         Ok(())
     }
 
@@ -455,7 +558,12 @@ impl Owner {
             .take()
             .expect("an answer of a running catch-up");
         mount.finished_began = Some(running.began);
-        if std::mem::take(&mut mount.again) {
+        let again = std::mem::take(&mut mount.again);
+        let waiting = std::mem::take(&mut mount.until_caught_up);
+        for (op, reply) in waiting {
+            self.op(drive.to_owned(), op, reply).await;
+        }
+        if again {
             self.trigger(drive);
         }
         Ok(())
@@ -468,11 +576,29 @@ impl Owner {
             .unwrap_or_default()
     }
 
-    async fn write(&mut self, write: Write) -> Result<(), String> {
+    /// Commits `write` and keeps the path of each `file_id` it names.
+    pub(crate) async fn write(&mut self, write: Write) -> Result<(), String> {
+        let tables = self.state.tables();
+        let gone: Vec<(String, i64)> = write
+            .files_removed
+            .iter()
+            .filter_map(|key| tables.files.get(key))
+            .map(|row| (row.drive_id.clone(), row.file_id))
+            .collect();
+        let named: Vec<((String, i64), String)> = write
+            .files
+            .iter()
+            .map(|row| ((row.drive_id.clone(), row.file_id), row.path.clone()))
+            .collect();
         self.state
             .apply(write)
             .await
-            .map_err(|error| format!("sync state: {error}"))
+            .map_err(|error| format!("sync state: {error}"))?;
+        for key in gone {
+            self.inodes.remove(&key);
+        }
+        self.inodes.extend(named);
+        Ok(())
     }
 
     fn ready(&self) -> bool {
