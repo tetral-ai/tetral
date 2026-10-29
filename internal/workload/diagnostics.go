@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"regexp"
@@ -80,9 +81,11 @@ func DiagnosticConfigFromEnv(getenv func(string) string) (DiagnosticConfig, erro
 		cfg.TraceSampleRatio = ratio
 	}
 	if raw := getenv("TETRAL_DB_SLOW_QUERY_MS"); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || strconv.Itoa(n) != raw || n < 1 || n > 60000 {
-			return cfg, NewConfigError("TETRAL_DB_SLOW_QUERY_MS must be 1 through 60000 milliseconds")
+		n, err := strconv.ParseInt(raw, 10, 64)
+		// This threshold is not a query deadline. Its only upper bound is
+		// representability when converting integer milliseconds to duration.
+		if err != nil || strconv.FormatInt(n, 10) != raw || n < 1 || n > math.MaxInt64/int64(time.Millisecond) {
+			return cfg, NewConfigError("TETRAL_DB_SLOW_QUERY_MS must be a positive integer representable as a millisecond duration")
 		}
 		cfg.SlowQuery = time.Duration(n) * time.Millisecond
 	}

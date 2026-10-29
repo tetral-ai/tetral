@@ -9,11 +9,12 @@ describe("shared process diagnostics", () => {
     expect(parseDiagnosticConfig({})).toEqual({ level: "info", maxRecordBytes: 16384, summaryIntervalMs: 30000, burst: 1, ...traceAndSlowQuery });
     expect(parseDiagnosticConfig({ TETRAL_LOG_LEVEL: "warn", TETRAL_LOG_MAX_RECORD_BYTES: "4096", TETRAL_LOG_SUMMARY_INTERVAL_MS: "500", TETRAL_LOG_BURST: "3" })).toEqual({ level: "warn", maxRecordBytes: 4096, summaryIntervalMs: 500, burst: 3, ...traceAndSlowQuery });
     for (const env of [{ TETRAL_LOG_LEVEL: "verbose" }, { TETRAL_LOG_MAX_RECORD_BYTES: "1023" }, { TETRAL_LOG_MAX_RECORD_BYTES: "65537" }, { TETRAL_LOG_SUMMARY_INTERVAL_MS: "99" }, { TETRAL_LOG_BURST: "0" }, { TETRAL_LOG_BURST: "9007199254740992" }]) expect(parseDiagnosticConfig(env)).toBeUndefined();
-    expect(parseDiagnosticConfig({ TETRAL_TRACE_SAMPLE_RATIO: "0", TETRAL_DB_SLOW_QUERY_MS: "60000", OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector:4317" })).toMatchObject({ traceSampleRatio: 0, dbSlowQueryMs: 60000, traceEndpoint: "http://collector:4317" });
+    expect(parseDiagnosticConfig({ TETRAL_TRACE_SAMPLE_RATIO: "0", TETRAL_DB_SLOW_QUERY_MS: "60001", OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector:4317" })).toMatchObject({ traceSampleRatio: 0, dbSlowQueryMs: 60001, traceEndpoint: "http://collector:4317" });
+    for (const value of ["0", "-1", "2.5", "01"]) expect(parseDiagnosticConfig({ TETRAL_DB_SLOW_QUERY_MS: value })).toBeUndefined();
     for (const [env, problem] of [
       [{ TETRAL_TRACE_SAMPLE_RATIO: "1.5" }, "TETRAL_TRACE_SAMPLE_RATIO must be a decimal from 0 through 1"],
       [{ TETRAL_TRACE_SAMPLE_RATIO: ".5" }, "TETRAL_TRACE_SAMPLE_RATIO must be a decimal from 0 through 1"],
-      [{ TETRAL_DB_SLOW_QUERY_MS: "60001" }, "TETRAL_DB_SLOW_QUERY_MS must be 1 through 60000 milliseconds"],
+      [{ TETRAL_DB_SLOW_QUERY_MS: "9007199254740992" }, "TETRAL_DB_SLOW_QUERY_MS must be a positive safe integer of milliseconds"],
       [{ OTEL_EXPORTER_OTLP_ENDPOINT: "collector:4317" }, "OTEL_EXPORTER_OTLP_ENDPOINT must be an http or https URL"],
       [{ OTEL_EXPORTER_OTLP_ENDPOINT: "ftp://collector" }, "OTEL_EXPORTER_OTLP_ENDPOINT must be an http or https URL"],
     ] as const) expect(parseDiagnosticConfigResult(env)).toEqual({ ok: false, problem });

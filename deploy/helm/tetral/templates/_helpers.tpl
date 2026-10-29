@@ -189,7 +189,7 @@ as 1m30s; the template functions have no duration parser. */}}
 {{- $ratio := printf "%v" .Values.observability.traceSampleRatio -}}
 {{- if or (not (regexMatch "^(0|1)(\\.[0-9]+)?$" $ratio)) (gt (float64 $ratio) 1.0) }}{{ fail "observability.traceSampleRatio must be a decimal from 0 to 1" }}{{ end -}}
 {{- $slowQuery := printf "%v" .Values.observability.slowQueryMs -}}
-{{- if or (not (regexMatch "^[1-9][0-9]*$" $slowQuery)) (gt (float64 $slowQuery) 60000.0) }}{{ fail "observability.slowQueryMs must be an integer from 1 to 60000" }}{{ end -}}
+{{- if or (not (regexMatch "^[1-9][0-9]*$" $slowQuery)) (gt (float64 $slowQuery) 9223372036854.0) }}{{ fail "observability.slowQueryMs must be a positive integer of milliseconds at most 9223372036854" }}{{ end -}}
 {{- $endpoint := .Values.observability.otlpEndpoint | default "" -}}
 {{- if not (kindIs "string" $endpoint) }}{{ fail "observability.otlpEndpoint must be a string" }}{{ end -}}
 {{- $env := dict "TETRAL_LOG_LEVEL" .Values.observability.logLevel "TETRAL_LOG_MAX_RECORD_BYTES" .Values.observability.logMaxRecordBytes "TETRAL_LOG_SUMMARY_INTERVAL_MS" .Values.observability.logSummaryIntervalMs "TETRAL_LOG_BURST" .Values.observability.logBurst "TETRAL_TRACE_SAMPLE_RATIO" $ratio "TETRAL_DB_SLOW_QUERY_MS" $slowQuery -}}

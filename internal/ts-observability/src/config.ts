@@ -49,8 +49,8 @@ export function parseDiagnosticConfigResult(env: Readonly<Record<string, string 
     traceSampleRatio = Number(ratio);
     if (!traceSampleRatioPattern.test(ratio) || traceSampleRatio > 1) return fail("TETRAL_TRACE_SAMPLE_RATIO must be a decimal from 0 through 1");
   }
-  const dbSlowQueryMs = integer("TETRAL_DB_SLOW_QUERY_MS", diagnosticDefaults.dbSlowQueryMs, 1, 60_000);
-  if (dbSlowQueryMs === undefined) return fail("TETRAL_DB_SLOW_QUERY_MS must be 1 through 60000 milliseconds");
+  const dbSlowQueryMs = integer("TETRAL_DB_SLOW_QUERY_MS", diagnosticDefaults.dbSlowQueryMs, 1, Number.MAX_SAFE_INTEGER);
+  if (dbSlowQueryMs === undefined) return fail("TETRAL_DB_SLOW_QUERY_MS must be a positive safe integer of milliseconds");
   const traceEndpoint = env.OTEL_EXPORTER_OTLP_ENDPOINT || undefined;
   if (traceEndpoint !== undefined && !httpURL(traceEndpoint)) return fail("OTEL_EXPORTER_OTLP_ENDPOINT must be an http or https URL");
   return { ok: true, config: Object.freeze({ level, maxRecordBytes, summaryIntervalMs, burst, traceSampleRatio, dbSlowQueryMs, ...(traceEndpoint === undefined ? {} : { traceEndpoint }) }) };

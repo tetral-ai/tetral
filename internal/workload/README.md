@@ -55,7 +55,7 @@ listed ranges fail startup without echoing their supplied value.
 | `TETRAL_LOG_SUMMARY_INTERVAL_MS` | `30000` | `100`–`3600000` milliseconds |
 | `TETRAL_LOG_BURST` | `1` | `1`–`1000` initial records per repeated event/reason window |
 | `TETRAL_TRACE_SAMPLE_RATIO` | `1.0` | a decimal from `0` to `1`: the share of root traces sampled |
-| `TETRAL_DB_SLOW_QUERY_MS` | `250` | `1`–`60000` milliseconds; a longer statement writes `db.query.slow` |
+| `TETRAL_DB_SLOW_QUERY_MS` | `250` | positive integer milliseconds, at most `9223372036854` (the `time.Duration` representation limit); a longer statement writes `db.query.slow` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | an OTLP/gRPC collector URL; empty exports no span |
 
 Severity describes operational significance; a semantic failure retains

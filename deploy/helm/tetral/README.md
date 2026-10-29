@@ -673,7 +673,7 @@ trace backend; the operator runs those and points Engine at them.
 | `otlpPeers` | `[]` | NetworkPolicy peers, each with a `namespaceSelector` or an `ipBlock`; required when `otlpEndpoint` is set | every workload NetworkPolicy allows egress to them on `otlpPort` |
 | `otlpPort` | `4317` | a TCP port, 1 to 65535 | the collector Pods' port as NetworkPolicy sees it after Service translation |
 | `traceSampleRatio` | `"1.0"` | a decimal from 0 to 1 | `TETRAL_TRACE_SAMPLE_RATIO`, the share of new traces sampled at their root; 0 samples none |
-| `slowQueryMs` | `250` | an integer from 1 to 60000 | `TETRAL_DB_SLOW_QUERY_MS`; a named database statement that takes longer records a `WARN` `db.query.slow` |
+| `slowQueryMs` | `250` | a positive integer of milliseconds, at most `9223372036854` (representable by both Go durations and TypeScript safe integers) | `TETRAL_DB_SLOW_QUERY_MS`; a named database statement that takes longer records a `WARN` `db.query.slow` |
 | `metricsScrapePeers` | `[]` | NetworkPolicy peers, each with a `namespaceSelector` or an `ipBlock` | every workload NetworkPolicy admits them on its metrics port; empty adds no rule |
 | `serviceMonitor.enabled` | `false` | a boolean | one `monitoring.coreos.com/v1` ServiceMonitor per workload metrics Service |
 

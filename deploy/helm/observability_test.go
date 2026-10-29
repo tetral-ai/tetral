@@ -128,7 +128,7 @@ func TestHelmObservabilitySettingsReachEveryWorkload(t *testing.T) {
 		{name: "defaults"},
 		{name: "lower bounds", ratio: "0", slowQuery: "1", values: []string{"observability.traceSampleRatio=0", "observability.slowQueryMs=1"}},
 		{name: "scrape peers only", scraped: true, values: scrapePeer},
-		{name: "exports", endpoint: endpoint, ratio: "0.25", slowQuery: "60000", scraped: true, values: []string{
+		{name: "exports", endpoint: endpoint, ratio: "0.25", slowQuery: "60001", scraped: true, values: []string{
 			"observability.otlpEndpoint=" + endpoint,
 			`observability.otlpPeers[0].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=observability`,
 			`observability.otlpPeers[0].podSelector.matchLabels.app\.kubernetes\.io/name=otel-collector`,
@@ -136,7 +136,7 @@ func TestHelmObservabilitySettingsReachEveryWorkload(t *testing.T) {
 			`observability.metricsScrapePeers[0].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=monitoring`,
 			`observability.metricsScrapePeers[0].podSelector.matchLabels.app\.kubernetes\.io/name=prometheus`,
 			"observability.traceSampleRatio=0.25",
-			"observability.slowQueryMs=60000",
+			"observability.slowQueryMs=60001",
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -302,9 +302,9 @@ func TestHelmObservabilityRejectsInvalidValues(t *testing.T) {
 	}{
 		{name: "trace ratio above one", values: []string{"observability.traceSampleRatio=1.5"}, wantInFail: "observability.traceSampleRatio must be a decimal from 0 to 1"},
 		{name: "negative trace ratio", values: []string{"observability.traceSampleRatio=-0.1"}, wantInFail: "observability.traceSampleRatio must be a decimal from 0 to 1"},
-		{name: "zero slow query", values: []string{"observability.slowQueryMs=0"}, wantInFail: "observability.slowQueryMs must be an integer from 1 to 60000"},
-		{name: "slow query above a minute", values: []string{"observability.slowQueryMs=60001"}, wantInFail: "observability.slowQueryMs must be an integer from 1 to 60000"},
-		{name: "fractional slow query", values: []string{"observability.slowQueryMs=2.5"}, wantInFail: "observability.slowQueryMs must be an integer from 1 to 60000"},
+		{name: "zero slow query", values: []string{"observability.slowQueryMs=0"}, wantInFail: "observability.slowQueryMs must be a positive integer of milliseconds at most 9223372036854"},
+		{name: "slow query over duration representation", values: []string{"observability.slowQueryMs=9223372036855"}, wantInFail: "observability.slowQueryMs must be a positive integer of milliseconds at most 9223372036854"},
+		{name: "fractional slow query", values: []string{"observability.slowQueryMs=2.5"}, wantInFail: "observability.slowQueryMs must be a positive integer of milliseconds at most 9223372036854"},
 		{name: "endpoint without collector peers", values: []string{endpoint}, wantInFail: "observability.otlpPeers must name the trace collector"},
 		{name: "empty collector peer", values: []string{endpoint, `observability.otlpPeers=[{}]`}, wantInFail: "observability.otlpPeers[0] must be a non-empty peer object"},
 		{name: "collector peer without namespace", values: []string{endpoint, `observability.otlpPeers=[{"podSelector":{"matchLabels":{"app.kubernetes.io/name":"otel-collector"}}}]`}, wantInFail: "observability.otlpPeers[0] must carry a namespaceSelector or an ipBlock"},

@@ -41,12 +41,15 @@ variable and its accepted values and never the supplied value; a service's
 | `TETRAL_LOG_SUMMARY_INTERVAL_MS` | `30000` | `100`–`3600000` milliseconds |
 | `TETRAL_LOG_BURST` | `1` | `1`–`1000` initial records per repeated event/reason window |
 | `TETRAL_TRACE_SAMPLE_RATIO` | `1` | a decimal matching `^(0\|1)(\.[0-9]+)?$` and at most `1`: the share of root traces sampled |
-| `TETRAL_DB_SLOW_QUERY_MS` | `250` | `1`–`60000` milliseconds |
+| `TETRAL_DB_SLOW_QUERY_MS` | `250` | positive safe integer milliseconds, at most `9007199254740991` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | an `http` or `https` URL with a host; empty exports no span |
 
 The sample ratio is honoured exactly: `0` samples no root trace. The
-slow-statement threshold is validated so that both languages accept the same
-environment.
+slow-statement threshold has the same meaning and default in Go and TypeScript;
+it is a warning threshold, not a query timeout. TypeScript accepts positive
+safe integers, while Go's millisecond-to-duration conversion supports at most
+`9223372036854`. Helm uses that narrower shared range. Values within the common
+range retain the same meaning; acceptance above it differs by runtime.
 
 ## Records
 
