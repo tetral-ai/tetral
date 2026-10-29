@@ -56,6 +56,7 @@ use protocol::ports::{
 };
 use protocol::time::Rfc3339Utc;
 use protocol::tool::ProtocolVersion;
+use state::clock::Clock;
 use state::paths::StateRoot;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
@@ -63,7 +64,6 @@ use tokio::task::AbortHandle;
 use crate::attempt::{self, ATTEMPT_TOTAL, AttemptKind};
 use crate::backoff::{BASE_MAX, BASE_START, Backoff, random_jitter};
 use crate::classify::{self, Read, SessionMessage};
-use crate::clock::Clock;
 use crate::credential::{self, CREDENTIAL_PATH, INVALID_RESPONSE, Renewal};
 use crate::git_ticket::{self, GIT_TICKET_PATH, TicketFetch};
 use crate::heartbeat::Heartbeats;

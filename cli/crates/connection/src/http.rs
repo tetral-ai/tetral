@@ -35,11 +35,10 @@ use protocol::errors::{ErrorBody, decode_client_error};
 use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, PROXY_AUTHORIZATION};
 use reqwest::{Response, StatusCode, Url};
 use rustls::pki_types::ServerName;
+use state::clock::Clock;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tower_service::Service;
-
-use crate::clock::Clock;
 
 /// The total time of one attempt of an ordinary request.
 pub const REQUEST_TOTAL: Duration = Duration::from_secs(10);

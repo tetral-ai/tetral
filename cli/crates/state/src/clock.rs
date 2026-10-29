@@ -1,4 +1,5 @@
-//! The clock the Report outbox reads: the CLI's clock, or one a test moves.
+//! The clock that the owners with deadlines of their own read and wait on,
+//! given at their construction: the CLI's clock, or one a test moves.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,9 +11,9 @@ pub struct Clock {
 }
 
 impl Clock {
-    /// `state::seams::now`, read again at least every recheck interval.
+    /// `seams::now`, read again at least every recheck interval.
     pub fn seams() -> Clock {
-        Clock::new(state::seams::now, state::seams::recheck_interval())
+        Clock::new(crate::seams::now, crate::seams::recheck_interval())
     }
 
     /// A clock that reads `now`, waits for which read it again at least

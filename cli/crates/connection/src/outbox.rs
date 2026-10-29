@@ -24,11 +24,11 @@ use protocol::ports::{
     Submission,
 };
 use protocol::tool::Acknowledgement;
+use state::clock::Clock;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
 use crate::backoff::{BASE_MAX, BASE_START, Backoff, random_jitter};
-use crate::clock::Clock;
 use crate::http::{Answer, ReportRequest, Transport};
 use crate::report_deadline::{self, REPORT_TOTAL, STALL_LIMIT};
 use crate::report_memory::{Budget, NORMAL_BYTES, RESERVED_BYTES};

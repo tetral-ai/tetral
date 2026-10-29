@@ -183,7 +183,7 @@ mailbox submission; the body owner releases the budget on its last reference.
   `protocol::ports::ReportSink`; the Connection owner tells it each
   connection's start and end, and it answers with `OutboxEvent`s.
   `OutboxTimes` holds its durations, each a constant but for tests, and its
-  `Clock` is the CLI's clock but for tests.
+  `state::clock::Clock` is the CLI's clock but for tests.
 
 ## Where things are
 
@@ -207,6 +207,5 @@ mailbox submission; the body owner releases the budget on its last reference.
 | `src/outbox.rs` | The Report outbox: identities `r<n>`, admission, sending, retries, ACKs and refusals, connection ends, a credential switch and its key, the record `report.dropped`, and the test seam counters `outbox.answered` and `outbox.key_awaited` |
 | `src/report_memory.rs` | Shared report body ownership and ordinary/reserved byte accounting |
 | `src/report_deadline.rs` | A report attempt's total and `STALL_LIMIT` |
-| `src/clock.rs` | The clock the outbox reads |
 | `src/stream.rs` | The bounded reading of an event stream (`Events`), its shared limit (`EventLimit`), `EVENT_MAX_BYTES` and `TOOL_EVENT_MAX_BYTES` |
 | `src/status.rs` | `ConnectionStatus`, the record `connection.state_changed` and the metrics `tetral_connection_state` and `tetral_reconnects_total` |
