@@ -96,6 +96,8 @@ the isolated harness tests without starting the CLI.
   `bwrap`'s digest, and of the reference control server.
 - `src/reference.rs`: `ReferenceServer`, the server as a process, its startup
   input, its controls and its request log.
+- `src/sessions.rs`: issuing `session.prepare`, the reports that answer it,
+  the App Server's Sessions and a new connection between preparations.
 - `src/run.rs`: `Tetral`, a command line of the `tetral` under test or of a
   link to it, under another `argv[0]` when it selects an entry point, and
   `Run`, its exit status, output and result object.

@@ -8,6 +8,7 @@ pub mod record;
 pub mod reference;
 pub mod run;
 pub mod seams;
+pub mod sessions;
 pub mod snapshot;
 pub mod socket_directory;
 pub mod tasks;
