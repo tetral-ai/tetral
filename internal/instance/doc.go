@@ -1,7 +1,10 @@
 // Package instance owns CLI registrations (instances), their connection
 // credentials, the idempotency records of the issuing routes, and the CLI
 // connections with their replay ledger, protocol-error reports and Session
-// instructions.
+// instructions. Computer-hub is the only current service writer; Auth resolves
+// connection keys through the security-definer lookup. Each state transition
+// has one writer here, running in its caller's Workspace-scoped transaction
+// (dbconnect.Client.WithWorkspaceTx).
 //
 // OWNS:
 //   - Table instances: one row per registration of a CLI with a Workspace.
@@ -160,6 +163,22 @@
 //     connection's sequences have no gaps and follow commit order. An
 //     instruction is never stored on an ended connection, and its envelope
 //     never changes after it is stored.
+//
+// # Files
+//
+//   - store.go: Instance and Credential rows and their plain reads.
+//   - instance.go: database clock, instance locks, creation, deregistration,
+//     lists and the instance object.
+//   - credential.go: issuance, stream renewals, fetch, activation, reuse
+//     records, revocation and the credential limit.
+//   - key.go: connection key format and generation.
+//   - idempotency.go: idempotency records and request fingerprints.
+//   - connection.go: connections, leases, grants, ready and heartbeat
+//     records, ends, resumes and connection notices.
+//   - ledger.go: upstream message replay ledger.
+//   - protocol_error.go: protocol-error reports.
+//   - instruction.go: Session instructions, writes, reports and pressure reads.
+//   - audit.go: credential operation audit records.
 //
 // UPDATE-WITH:
 //

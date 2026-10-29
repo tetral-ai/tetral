@@ -1,13 +1,14 @@
 // Package hubflow holds the computer-hub steps that span packages. Each step
 // runs in its caller's transaction, so its writes commit or roll back with
-// the request that runs it.
+// the request that runs it. It owns no table; the rows belong to
+// internal/instance.
 //
 // STEPS:
 //
-//	AcceptReady    accepts a connection's ready (instance.AcceptReady) and
+//	AcceptReady (ready.go) accepts a connection's ready (instance.AcceptReady) and
 //	               notices the pod holding the connection's stream, which then
 //	               starts its heartbeats. Caller: the ready route.
-//	EndConnection  the single end step of a connection, for every cause:
+//	EndConnection (end.go) the single end step of a connection, for every cause:
 //	               lease_expired (a new connection replaces one whose lease
 //	               passed), revoked (the live connection's credential is
 //	               revoked) and deregistered (its instance is deregistered).
