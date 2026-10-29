@@ -125,6 +125,15 @@ const createPostgreSQLDriveBlobCleanupTable = `CREATE TABLE drive_blob_cleanup (
  PRIMARY KEY(workspace_id,blob_key)
 )`
 
+// One row per Workspace that has taken from its upload budget; a Workspace
+// without one has a full budget.
+const createPostgreSQLDriveUploadBudgetsTable = `CREATE TABLE drive_upload_budgets (
+ workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+ tokens NUMERIC NOT NULL CHECK(tokens>=0),
+ refilled_at TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY(workspace_id)
+)`
+
 func postgresqlDriveTableSteps() []postgresqlSchemaStep {
 	return []postgresqlSchemaStep{
 		{"create_drives", createPostgreSQLDrivesTable},
@@ -134,6 +143,7 @@ func postgresqlDriveTableSteps() []postgresqlSchemaStep {
 		{"create_drive_changes", createPostgreSQLDriveChangesTable},
 		{"create_drive_contents", createPostgreSQLDriveContentsTable},
 		{"create_drive_blob_cleanup", createPostgreSQLDriveBlobCleanupTable},
+		{"create_drive_upload_budgets", createPostgreSQLDriveUploadBudgetsTable},
 		{"index_drives_workspace_created", `CREATE INDEX idx_drives_workspace_created ON drives(workspace_id,created_at,drive_id)`},
 		{"index_drive_files_fold_key", `CREATE UNIQUE INDEX idx_drive_files_fold_key ON drive_files(workspace_id,drive_id,fold_key text_pattern_ops)`},
 		{"index_drive_versions_path_created", `CREATE INDEX idx_drive_versions_path_created ON drive_versions(workspace_id,drive_id,path,created_at)`},

@@ -2478,6 +2478,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"drive_changes",
 		"drive_contents",
 		"drive_files",
+		"drive_upload_budgets",
 		"drive_versions",
 		"drive_workspace_usage",
 		"drives",

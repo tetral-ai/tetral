@@ -65,7 +65,8 @@
     "drive_versions",
     "drive_changes",
     "drive_contents",
-    "drive_blob_cleanup"
+    "drive_blob_cleanup",
+    "drive_upload_budgets"
   ],
   "append_only_workspace_tables": [
     "session_file_attachment_consumptions",
