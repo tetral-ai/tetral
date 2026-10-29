@@ -12,6 +12,12 @@
 //     process's slow-query threshold, and starts a span only when the trace
 //     is sampled. Listen, a transaction's whole scope and the time a lock is
 //     held are not observed.
+//   - Query outcome, elapsed time and span finish together when Rows exhausts,
+//     fails or closes, or when Row.Scan completes. Immediate query failures
+//     finish immediately. Elapsed time includes caller read intervals, not
+//     just server execution. Callers must consume/close Rows and Scan Row.
+//     A Rows.Scan conversion error leaves the stream open; Row.Scan's final
+//     error is the client-operation outcome. sql.ErrNoRows remains successful.
 //   - Connection failures become a DiagnosticError (diagnostic.go) that names
 //     provider, phase and kind without the DSN.
 //

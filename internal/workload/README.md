@@ -212,6 +212,10 @@ Boundaries record without per-call code: the public HTTP middleware observes
 `grpc_server_request_duration_seconds{service,method,code}`; named database
 statements and lock acquisitions
 `db_client_operation_duration_seconds{service,operation,outcome}`.
+For Go queries, the outcome, elapsed time and sampled span finish at result
+exhaustion, terminal error or explicit close (at Scan completion for QueryRow).
+This includes caller read intervals. The slow-operation warning therefore
+describes client database access time, not isolated server execution time.
 
 ### Pressure points
 

@@ -64,7 +64,7 @@ func NewTelemetry(options TelemetryOptions) *Telemetry {
 	t.long = t.metrics.Histogram("tetral_long_operation_duration_seconds", "Duration of a completed long operation.", "service", "operation", "outcome")
 	t.phases = t.metrics.Histogram("cold_start_phase_seconds", "Duration of one completed cold start phase.", "service", "kind", "phase")
 	t.coldStarts = t.metrics.Histogram("cold_start_seconds", "Duration of a completed cold start, in total and Engine's part.", "service", "kind", "scope")
-	t.statements = t.metrics.Histogram("db_client_operation_duration_seconds", "Duration of one named database statement or lock acquisition.", "service", "operation", "outcome")
+	t.statements = t.metrics.Histogram("db_client_operation_duration_seconds", "Elapsed client time of one named database operation or lock acquisition.", "service", "operation", "outcome")
 	if options.SyncExporter != nil {
 		t.tracing.provider.RegisterSpanProcessor(sdktrace.NewSimpleSpanProcessor(options.SyncExporter))
 	}
@@ -107,7 +107,7 @@ func (t *Telemetry) Registry() *Registry { return t.metrics }
 // Tracer starts the spans of this process.
 func (t *Telemetry) Tracer() trace.Tracer { return t.tracing.tracer }
 
-// SlowQueryThreshold is the database statement duration above which the
+// SlowQueryThreshold is the client database operation duration above which the
 // statement writes db.query.slow.
 func (t *Telemetry) SlowQueryThreshold() time.Duration { return t.slowQuery }
 
@@ -133,6 +133,8 @@ func (t *Telemetry) Shutdown(ctx context.Context) {
 // acquire a lock, that started at started: one duration sample and, above
 // the slow-query threshold, one WARN db.query.slow that never carries the
 // statement's text or arguments.
+// Query elapsed time includes result consumption and caller read intervals;
+// it does not measure database-server execution time in isolation.
 func (t *Telemetry) ObserveStatement(ctx context.Context, operation string, started time.Time, err error) {
 	elapsed := time.Since(started)
 	outcome := "ok"
