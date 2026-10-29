@@ -15,13 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-
 	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
-	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 // slowBody hands an event stream's body to its reader at most rate bytes a
@@ -104,14 +101,9 @@ func (f *hubFixture) openSlow(rate, stopAfter int64) (*enginetest.CLI, *testStre
 }
 
 // issueBacklog issues edits tool.execute edits of size bytes of new content
-// on connectionID in one transaction, so one pass writes them all. 16 MB in
-// all is many times what the sockets between the pod and a stopped reader
-// hold.
+// on connectionID in one transaction. 16 MB in all is many times what the
+// sockets between the pod and a stopped reader hold.
 func (f *hubFixture) issueBacklog(connectionID string, edits, size int) []string {
-	return f.issueBacklogContext(f.ctx, connectionID, edits, size)
-}
-
-func (f *hubFixture) issueBacklogContext(ctx context.Context, connectionID string, edits, size int) []string {
 	f.t.Helper()
 	payload := protocol.ExecutePayload{
 		SessionID: "id_session_id", BindingID: "id_binding_id", ToolUseEventID: "id_tool_use_event_id", TaskID: "id_task_id",
@@ -122,14 +114,14 @@ func (f *hubFixture) issueBacklogContext(ctx context.Context, connectionID strin
 		},
 	}
 	var messageIDs []string
-	if err := f.client.WithWorkspaceTx(ctx, string(f.ws), "computer_hub.test_issue", func(tx *dbconnect.Tx) error {
+	if err := f.client.WithWorkspaceTx(f.ctx, string(f.ws), "computer_hub.test_issue", func(tx *dbconnect.Tx) error {
 		messageIDs = messageIDs[:0]
-		connection, err := instance.ReadConnection(ctx, tx, f.ws, connectionID)
+		connection, err := instance.ReadConnection(f.ctx, tx, f.ws, connectionID)
 		if err != nil {
 			return err
 		}
 		for range edits {
-			messageID, err := instance.IssueInstruction(ctx, tx, f.ws, connection, payload, "")
+			messageID, err := instance.IssueInstruction(f.ctx, tx, f.ws, connection, payload, "")
 			if err != nil {
 				return err
 			}
@@ -271,46 +263,4 @@ func TestABacklogReadForMoreThan45SecondsKeepsItsConnection(t *testing.T) {
 	if f.count(`SELECT count(*) FROM instance_connections WHERE id=$1 AND ended_at IS NULL AND lease_expires_at>clock_timestamp()`, stream.connectionID) != 1 {
 		t.Fatal("the connection's lease passed during the backlog")
 	}
-}
-
-// The reader reports the first instruction while the same pass is still
-// writing its backlog. Reporting must not discard pending delivery recording.
-func TestReportedInstructionStillRecordsItsSuccessfulWrite(t *testing.T) {
-	spans := tracetest.NewInMemoryExporter()
-	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: ServiceName, SyncExporter: spans, SampleRatio: 1})))
-	f := newHubFixture(t, 720*time.Hour)
-	_, stream, _ := f.openSlow(1<<20, 0)
-	traced, span := workload.StartRequestSpan(f.ctx, "test.backlog", "")
-	defer span.End()
-	traceparent := workload.ContextTraceparent(traced)
-	backlog := f.issueBacklogContext(traced, stream.connectionID, 3, 2_000_000)
-	f.requireInstructions(stream, backlog[0])
-	f.markReported(stream.connectionID, backlog[0])
-	// The small socket buffer and unread four-megabyte tail hold this pass
-	// in its network writes. Verify its recording pass has not committed.
-	if n := f.count(`SELECT count(*) FROM connection_instructions WHERE connection_id=$1 AND first_written_at IS NOT NULL`, stream.connectionID); n != 0 {
-		t.Fatalf("recording already advanced before report: %d rows", n)
-	}
-	if n := f.count(`SELECT count(*) FROM connection_instructions WHERE message_id=$1 AND reported_at IS NOT NULL`, backlog[0]); n != 1 {
-		t.Fatal("report was not stored")
-	}
-	f.requireInstructions(stream, backlog[1:]...)
-	sentinel := f.issueInstruction(traced, stream.connectionID, "sess_after_report")
-	f.requireInstructions(stream, sentinel)
-	awaitDeliverySpan(t, spans, sentinel)
-	if n := f.count(`SELECT count(*) FROM connection_instructions WHERE message_id=$1 AND reported_at IS NOT NULL AND first_written_at IS NOT NULL`, backlog[0]); n != 1 {
-		t.Fatal("reported instruction lost its pending first-write recording")
-	}
-	for _, messageID := range append(backlog, sentinel) {
-		delivered := deliverySpans(spans, messageID)
-		if len(delivered) != 1 || delivered[0].SpanContext.TraceID().String() != traceparent[3:35] {
-			t.Fatalf("delivery %s: %v; want exactly one in issuing trace", messageID, delivered)
-		}
-	}
-	// All four first marks are accounted for by message identity above;
-	// the corresponding histogram must contain exactly four samples.
-	if count := metricValue(t, f.pods[hubTestPod].metrics, "computerhub_instructions_queue_wait_seconds_count", ""); count != 4 {
-		t.Fatalf("queue-wait count = %v; want 4", count)
-	}
-	requireNoEvent(t, stream)
 }

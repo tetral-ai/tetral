@@ -78,7 +78,14 @@ gets the short review path. Coding agents reach the same procedure as a
 `pr-selfcheck` skill (`.agents/skills/` for Codex, `.claude/skills/` for
 Claude Code); both point at the same text.
 
-- Commits: `[engine] <description>`, body lines `Scope:` / `Goal:` / `Test:`.
+- Commits: [Conventional Commits](https://www.conventionalcommits.org/),
+  `<type>(<scope>): <description>`, with the types `feat`, `fix`, `test`,
+  `docs`, `refactor`, `perf`, `build`, `ci` and `chore`. The scope is the
+  changed component's directory name: `computer-hub` for
+  `services/computer-hub/`, `instance` for `internal/instance/`, and `cli` for
+  anything under `cli/`; a change across several components has no scope. A
+  body only when the reason is not evident from the change. PR titles take
+  the same form.
 - PRs: the answer sheet filled; validation green; tests accompany behavior
   changes; docs move in the same PR as the behavior they describe; no secrets
   in code, logs, or responses.
