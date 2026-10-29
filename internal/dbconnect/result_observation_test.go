@@ -103,7 +103,7 @@ func TestQueryObservationUsesFinalResult(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer raw.Rollback()
+				defer func() { _ = raw.Rollback() }()
 				tx = NewTxForTesting(raw, client, operation)
 			}
 			var finalErr error
@@ -126,7 +126,7 @@ func TestQueryObservationUsesFinalResult(t *testing.T) {
 					t.Fatalf("expected prefix rows before deferred error: %v", finalErr)
 				}
 				if finalErr == nil {
-					defer rows.Close()
+					defer func() { _ = rows.Close() }()
 					prefix := 0
 					for rows.Next() {
 						if err := rows.Scan(new(int)); err != nil {
@@ -167,7 +167,7 @@ func TestRowsObservationWaitsForCloseAfterNonterminalScanError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if !rows.Next() {
 		t.Fatalf("missing row: %v", rows.Err())
 	}
