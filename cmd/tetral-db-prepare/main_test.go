@@ -218,8 +218,8 @@ func assertPreparationFailure(t *testing.T, logs, step, message string) {
 			t.Fatal(err)
 		}
 		if record["msg"] == "database.prepare.failed" {
-			safe, _ := record["error.message_safe"].(string)
-			if record["step"] != step || !strings.Contains(safe, message) {
+			problem, _ := record["prepare.problem"].(string)
+			if record["step"] != step || record["error.code"] != "prepare_failed" || record["error.message_safe"] != "PostgreSQL database preparation failed" || !strings.Contains(problem, message) {
 				t.Fatalf("unexpected failure diagnostic: %#v", record)
 			}
 			return

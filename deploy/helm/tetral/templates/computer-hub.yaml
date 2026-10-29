@@ -1,0 +1,265 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: computer-hub
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: computer-hub
+    app.kubernetes.io/component: computer-hub
+    app.kubernetes.io/part-of: tetral
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: computer-hub
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: computer-hub
+    app.kubernetes.io/component: computer-hub
+    app.kubernetes.io/part-of: tetral
+spec:
+  {{- /* No replicas: the HorizontalPodAutoscaler below owns them, so an upgrade keeps the Pods it scaled to. */}}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: {{ .Values.rollout.maxSurge }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: computer-hub
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: computer-hub
+        app.kubernetes.io/component: computer-hub
+        app.kubernetes.io/part-of: tetral
+    spec:
+      serviceAccountName: computer-hub
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: computer-hub
+          image: {{ include "tetral.image" (dict "root" . "name" "tetral") }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/tetral-computer-hub
+          env:
+{{ include "tetral.diagnosticEnv" . | trim | indent 12 }}
+{{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" true "bun" false) | trim | indent 12 }}
+{{ include "tetral.edgeHTTPEnv" (dict "root" .) | trim | indent 12 }}
+            - name: TETRAL_COMPUTER_HUB_HTTP_ADDR
+              value: ":8080"
+            - name: TETRAL_COMPUTER_HUB_METRICS_ADDR
+              value: ":8081"
+            - name: TETRAL_COMPUTER_HUB_MAX_CREDENTIAL_LIFETIME
+              value: {{ .Values.computerHub.maxCredentialLifetime | quote }}
+            - name: TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.computerHubPageToken | quote }}
+                  key: page-token-key
+            - name: TETRAL_COMPUTER_HUB_MIN_CLI_VERSION
+              value: {{ .Values.computerHub.minCLIVersion | quote }}
+            - name: TETRAL_COMPUTER_HUB_RECOMMENDED_CLI_VERSION
+              value: {{ .Values.computerHub.recommendedCLIVersion | quote }}
+            - name: TETRAL_COMPUTER_HUB_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: TETRAL_COMPUTER_HUB_STREAM_MAX_AGE
+              value: {{ .Values.computerHub.streamMaxAge | quote }}
+            - name: TETRAL_COMPUTER_HUB_STREAM_DRAIN_WINDOW
+              value: {{ .Values.computerHub.streamDrainWindow | quote }}
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              value: {{ .Values.observability.deploymentEnvironment | quote }}
+            - name: TETRAL_SERVICE_VERSION
+              value: {{ .Values.observability.serviceVersion | quote }}
+            - name: TETRAL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralDatabase | quote }}
+                  key: computer-hub-url
+            - name: TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.authInternalPrincipal | quote }}
+                  key: public_key_b64
+            - name: TETRAL_BLOB_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: endpoint
+            - name: TETRAL_BLOB_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: region
+            - name: TETRAL_BLOB_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: bucket
+            - name: TETRAL_BLOB_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: access-key
+            - name: TETRAL_BLOB_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: secret-key
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+          resources:
+{{ toYaml .Values.resources.computerHub | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+{{ include "tetral.edgeHTTPMounts" . | trim | indent 12 }}
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
+      volumes:
+{{ include "tetral.edgeHTTPVolumes" (dict "root" . "name" "computer-hub") | trim | indent 8 }}
+        - name: store-trust
+          configMap:
+            name: {{ .Values.transport.storeTrustConfigMap | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: computer-hub
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: computer-hub
+    app.kubernetes.io/component: computer-hub
+    app.kubernetes.io/part-of: tetral
+    tetral.ai/exposure: public
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: computer-hub
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: computer-hub-metrics
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: computer-hub
+    app.kubernetes.io/component: computer-hub
+    app.kubernetes.io/part-of: tetral
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: computer-hub
+  ports:
+    - name: metrics
+      port: 8081
+      targetPort: metrics
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: computer-hub
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: computer-hub
+    app.kubernetes.io/component: computer-hub
+    app.kubernetes.io/part-of: tetral
+  annotations:
+    tetral.ai/egress-intent: {{ (urlParse .Values.blob.endpoint).host | quote }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: computer-hub
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+{{- toYaml .Values.network.publicIngressPeers | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: tetral
+      ports:
+        - protocol: TCP
+          port: 8081
+{{- include "tetral.metricsScrapeIngress" (dict "root" . "port" 8081) }}
+  egress:
+    - to:
+{{- toYaml .Values.network.databasePeers | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.network.databasePort }}
+    - to:
+{{- toYaml .Values.network.externalEgressPeers | nindent 8 }}
+      ports:
+{{- range .Values.network.externalEgressPorts }}
+        - protocol: TCP
+          port: {{ . }}
+{{- end }}
+    - to:
+{{- toYaml .Values.network.dnsPeers | nindent 8 }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- include "tetral.otlpEgress" . }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: computer-hub
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: computer-hub
+    app.kubernetes.io/component: computer-hub
+    app.kubernetes.io/part-of: tetral
+  annotations:
+    tetral.ai/hpa-metric-source: "prometheus-adapter: computerhub_open_streams"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: computer-hub
+  minReplicas: {{ .Values.computerHub.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.computerHub.autoscaling.maxReplicas }}
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: computerhub_open_streams
+        target:
+          type: AverageValue
+          averageValue: {{ .Values.computerHub.autoscaling.targetOpenStreamsPerPod | quote }}

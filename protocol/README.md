@@ -459,7 +459,10 @@ is acknowledged ([registration failure](#registration-failure)).
      that moves the lease it makes the new credential the connection's
      credential, caps later grants at its expiry and revokes the old credential.
      A later use of the old credential gets `401 credential_revoked` and is
-     recorded as a reuse, which means the credential file was copied.
+     recorded as a reuse. A request already in flight during legitimate renewal
+     can produce this observation. The record alone does not establish that a
+     credential was copied or compromised; a Controller interprets it with
+     surrounding connection and operational evidence.
 - If the CLI cannot persist the new credential, it keeps the current one and the
   pending credential expires unused. Bindings and tasks stay on the connection
   throughout.
@@ -1664,17 +1667,33 @@ replacing large content with an empty value of the same type (`input` and an
 `{}`); identities, permissions, errors and unknown optional fields together take
 at most 64 KiB (`metadata_json_bytes`).
 
-Engine measures `tool.execute` input using `runtimecontrol.MarshalDataJSON`
-and embeds that same measured `json.RawMessage` in the instruction. It encodes
-the complete instruction once and preserves those exact bytes through storage,
-first delivery and replay. Stored text or bytes must not be reconstructed from
-`jsonb`, since re-encoding can change whitespace and escaping. The designated
-encoder disables HTML escaping and adds no newline; all remaining escapes,
-including U+2028 and U+2029, count toward the limits. Boundary tests must cover
-input, metadata and complete-envelope limits with dense `<`, `>`, `&` and
-U+2028 content, and compare the measured, stored and transmitted bytes.
-These are sender requirements; receiver validation alone does not establish
-that persistence and replay preserve the measured representation.
+Engine validates and measures compact instruction input and metadata before
+admission using an encoding compatible with the final protocol envelope.
+Representation changes after measurement are allowed only when they preserve
+the accepted value's meaning and cannot increase the corresponding encoded
+input or metadata byte count above its measured representation. String content,
+whitespace within strings, exact integer values, absent versus null semantics,
+and every validated policy restriction and value remain unchanged. No data is
+truncated or silently altered to fit a budget. All input, metadata and complete
+message limits below continue to apply.
+
+Engine preserves sufficient validated input and policy state across admission
+and release to meet those guarantees. Persisting or releasing an admitted
+instruction introduces no second size rejection or new failure state. The
+complete final envelope is stored as text or bytes; first delivery and every
+resend write those saved bytes unchanged. The helper and in-memory
+representation are implementation choices. Arbitrary `jsonb` recoding or
+encoder substitutions require evidence of semantic and size preservation.
+
+Boundary checks cover input, metadata and complete-envelope limits with legal
+near-limit strings dense in `<`, `>`, `&`, U+2028 and control escapes. For the
+same admitted call they compare measured input/metadata, persisted state,
+release encoding, saved full envelope, first SSE delivery and resumed delivery:
+meaning is unchanged, encoded input and metadata do not grow beyond measurement,
+and saved envelope = first delivery = resend byte for byte. Legal equivalent
+JSON spelling may pass; semantic change, growth beyond measurement, budget
+overflow and resend recoding must fail. These are production sender and
+persistence requirements; receiver validation alone does not establish them.
 
 | Object | Limit in bytes | `TransportLimits` field |
 |---|---|---|

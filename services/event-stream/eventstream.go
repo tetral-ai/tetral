@@ -94,8 +94,9 @@ func NewRouter(reader Reader, verifier *auth.InternalPrincipalVerifier, opts ...
 	handler := &handler{reader: reader, options: options}
 	router := chi.NewRouter()
 	router.Use(httpapi.RequestIDMiddleware)
+	router.Use(httpapi.RequestLogMiddleware(options.logger, httpapi.WithRequestLogMetrics(options.requestMetrics),
+		httpapi.WithLongRoutes("GET /v1/sessions/{session_id}/events/stream", "GET /v1/sessions/{session_id}/threads/{thread_id}/stream")))
 	router.Use(httpapi.PublicRecoveryMiddleware(options.logger))
-	router.Use(httpapi.RequestLogMiddleware(options.logger, httpapi.DefaultSlowRequestThreshold, httpapi.WithRequestLogMetrics(options.requestMetrics)))
 	router.Route("/v1", func(r chi.Router) {
 		r.Use(internalPrincipalMiddleware(verifier))
 		r.Method(http.MethodGet, "/sessions/{session_id}/events/stream", httpapi.DeclarePublicOperation(http.MethodGet, "/v1/sessions/{session_id}/events/stream", handler.streamSessionEvents))

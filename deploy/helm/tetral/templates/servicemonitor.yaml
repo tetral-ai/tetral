@@ -1,0 +1,39 @@
+{{- /*
+One ServiceMonitor per workload metrics Service. Cleanup is a CronJob without
+one and keeps its push exporter. honorLabels keeps the `service` label that
+Engine metrics carry instead of renaming it under the Operator's own label.
+*/ -}}
+{{- if .Values.observability.serviceMonitor.enabled }}
+{{- range $target := list
+  (dict "name" "agent-runtime" "namespace" "tetral-agent-runtime" "port" "http")
+  (dict "name" "api" "namespace" "tetral-system" "port" "metrics")
+  (dict "name" "auth" "namespace" "tetral-system" "port" "metrics")
+  (dict "name" "bridge" "namespace" "tetral-system" "port" "http")
+  (dict "name" "computer-hub" "namespace" "tetral-system" "port" "metrics")
+  (dict "name" "event-stream" "namespace" "tetral-system" "port" "metrics")
+  (dict "name" "git-proxy" "namespace" "tetral-system" "port" "metrics")
+  (dict "name" "job-runner" "namespace" "tetral-system" "port" "metrics-job")
+  (dict "name" "mcp-connector" "namespace" "tetral-system" "port" "mcp-http")
+  (dict "name" "provider-gateway" "namespace" "tetral-system" "port" "http")
+  (dict "name" "queue" "namespace" "tetral-system" "port" "http")
+  (dict "name" "sandbox" "namespace" "tetral-system" "port" "http")
+  (dict "name" "web-connector" "namespace" "tetral-system" "port" "web-metrics") }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $target.name }}
+  namespace: {{ $target.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $target.name }}
+    app.kubernetes.io/part-of: tetral
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $target.name }}
+  endpoints:
+    - port: {{ $target.port }}
+      path: /metrics
+      honorLabels: true
+{{- end }}
+{{- end }}

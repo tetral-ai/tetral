@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -997,6 +999,141 @@ func TestPostgreSQLStoreLeaseAndHeartbeatUseDatabaseClock(t *testing.T) {
 	}
 	if status := queueJobStatus(t, admin, ws, job.ID); status != StatusPending {
 		t.Fatalf("status after heartbeat-versus-reclaim = %q; want pending", status)
+	}
+}
+
+// Both lease paths return the traceparent the producer enqueued under (none
+// for untraced work) and observe one queue_jobs_queue_wait_seconds sample per
+// lease, measured from ready_at rather than from admission.
+func TestPostgreSQLStoreLeaseReturnsProducerTraceAndObservesOneQueueWait(t *testing.T) {
+	ws := workspace.ID("ws_queue_trace")
+	for _, row := range []struct {
+		name   string
+		traced bool
+		kind   string
+		lease  func(t *testing.T, store *PostgreSQLQueueStore) *Job
+	}{
+		{name: "workspace lease of traced work", traced: true, kind: KindSandboxToolExecute, lease: func(t *testing.T, store *PostgreSQLQueueStore) *Job {
+			return mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindSandboxToolExecute}, LeaseOwner: "sandbox", MaxJobs: 1, LeaseDuration: time.Minute})
+		}},
+		{name: "direct Job Runner lease of traced work", traced: true, kind: KindRuntimeRecovery, lease: func(t *testing.T, store *PostgreSQLQueueStore) *Job {
+			result := leaseJobRunner(t, store, 1)
+			if len(result.Jobs) != 1 {
+				t.Fatalf("direct lease returned %d jobs; want 1", len(result.Jobs))
+			}
+			return result.Jobs[0]
+		}},
+		{name: "workspace lease of untraced work", kind: KindSandboxToolExecute, lease: func(t *testing.T, store *PostgreSQLQueueStore) *Job {
+			return mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindSandboxToolExecute}, LeaseOwner: "sandbox", MaxJobs: 1, LeaseDuration: time.Minute})
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			store, admin, _ := newJobRunnerTestStore(t, nil)
+			// The family is the queue service's, declared in its table.
+			table, err := os.ReadFile("../../services/queue/observability.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			workload.RegisterDeclarations("queue", table)
+			telemetry := workload.NewTelemetry(workload.TelemetryOptions{Service: "queue", SampleRatio: 1})
+			t.Cleanup(workload.InstallTelemetry(telemetry))
+			store.ObserveQueueWaitIn(telemetry.Registry())
+			ctx, want := context.Background(), ""
+			if row.traced {
+				var producer *workload.Span
+				ctx, producer = workload.StartSpan(ctx, "producer")
+				defer producer.End()
+				want = workload.ContextTraceparent(ctx)
+			}
+			// The producer's clock runs two hours behind the database's, and its
+			// job became ready a minute before it was enqueued.
+			admitted := time.Now().UTC().Add(-2 * time.Hour)
+			request := sandboxToolExecuteRequest(t, ws, "sesn_trace", "thrd_trace", "evt_trace", "qjob_trace", 5, admitted)
+			if row.kind == KindRuntimeRecovery {
+				var err error
+				if request, err = NewRuntimeRecoveryEnqueueRequest(ws, "sesn_trace", "thrd_trace", "evt_trace", admitted); err != nil {
+					t.Fatal(err)
+				}
+			}
+			request.AvailableAt = admitted.Add(-time.Minute)
+			enqueued, err := store.Enqueue(ctx, request)
+			if err != nil {
+				t.Fatalf("Enqueue: %v", err)
+			}
+			var stored sql.NullString
+			if err := admin.QueryRow(`SELECT trace_context FROM queue_jobs WHERE workspace_id = $1 AND id = $2`, string(ws), enqueued.ID).Scan(&stored); err != nil {
+				t.Fatalf("read trace_context: %v", err)
+			}
+			if stored.Valid != row.traced || stored.String != want || enqueued.TraceContext != want {
+				t.Fatalf("stored trace_context = %+v, enqueued %q; want %q", stored, enqueued.TraceContext, want)
+			}
+			if leased := row.lease(t, store); leased.ID != enqueued.ID || leased.TraceContext != want {
+				t.Fatalf("leased job %s trace %q; want %s with %q", leased.ID, leased.TraceContext, enqueued.ID, want)
+			}
+			var count, sum float64
+			samples, _ := telemetry.Registry().Collector()(context.Background())
+			for _, sample := range samples {
+				if len(sample.Labels) == 1 && sample.Labels[0].Value == row.kind {
+					switch sample.Name {
+					case "queue_jobs_queue_wait_seconds_count":
+						count += sample.Value
+					case "queue_jobs_queue_wait_seconds_sum":
+						sum += sample.Value
+					}
+				}
+			}
+			if count != 1 || sum < 55 || sum > 90 {
+				t.Fatalf("queue wait samples = %v totalling %vs; want one of about 60s", count, sum)
+			}
+		})
+	}
+}
+
+func TestPostgreSQLStoreReadmissionDelaysReadyAtOnTheDatabaseClock(t *testing.T) {
+	ws := workspace.ID("ws_queue_ready_at")
+	for _, row := range []struct {
+		name    string
+		request func(t *testing.T, now time.Time) EnqueueRequest
+		readmit func(store *PostgreSQLQueueStore, job *Job, now time.Time) (bool, error)
+	}{
+		{name: "retry", request: func(t *testing.T, now time.Time) EnqueueRequest {
+			return sandboxToolExecuteRequest(t, ws, "sesn_ready", "thrd_ready", "evt_ready", "qjob_ready_retry", 5, now)
+		}, readmit: func(store *PostgreSQLQueueStore, job *Job, now time.Time) (bool, error) {
+			return store.Retry(context.Background(), RetryRequest{WorkspaceID: ws, JobID: job.ID, LeaseToken: job.LeaseToken, ErrorKind: "unavailable", Now: now})
+		}},
+		{name: "defer", request: func(t *testing.T, now time.Time) EnqueueRequest {
+			return EnqueueRequest{
+				ID: "qjob_ready_defer", WorkspaceID: ws, Kind: KindEnvironmentBuild, MaxAttempts: 3,
+				PartitionKey: FormatEnvironmentPartitionKey(ws, "env_ready"),
+				DedupeKey:    FormatEnvironmentBuildDedupeKey(ws, "env_ready", "1"),
+				PayloadJSON:  []byte(`{"workspace_id":"ws_queue_ready_at","environment_id":"env_ready","generation":"1"}`), Now: now,
+			}
+		}, readmit: func(store *PostgreSQLQueueStore, job *Job, now time.Time) (bool, error) {
+			return store.Defer(context.Background(), DeferRequest{WorkspaceID: ws, JobID: job.ID, LeaseToken: job.LeaseToken, Now: now})
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			store, admin := newPostgreSQLQueueStore(t)
+			store.retryPolicy.BaseDelay, store.retryPolicy.MaxDelay = 20*time.Second, 20*time.Second
+			store.retryPolicy.RandomInt64 = func(bound int64) int64 { return bound - 1 }
+			// The caller's clock runs an hour behind the database's.
+			now := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+			request := row.request(t, now)
+			mustEnqueue(t, store, request)
+			leased := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{request.Kind}, LeaseOwner: "owner", MaxJobs: 1, LeaseDuration: time.Minute, Now: now})
+			if ok, err := row.readmit(store, leased, now); err != nil || !ok {
+				t.Fatalf("readmit = %t, %v", ok, err)
+			}
+			var availableAt time.Time
+			var readyIn float64
+			if err := admin.QueryRow(`SELECT available_at, EXTRACT(EPOCH FROM (ready_at - clock_timestamp())) FROM queue_jobs WHERE id = $1`, request.ID).Scan(&availableAt, &readyIn); err != nil {
+				t.Fatal(err)
+			}
+			delay := availableAt.Sub(now).Seconds()
+			if readyIn > delay || readyIn < delay-1 {
+				t.Fatalf("ready_at is %.3fs from the database clock; want the %.3fs delay of available_at", readyIn, delay)
+			}
+		})
 	}
 }
 
@@ -2465,8 +2602,9 @@ func TestPostgreSQLStoreMetricsSummarizesQueueState(t *testing.T) {
 		PartitionKey: FormatSessionPartitionKey(ws, "sesn_metrics_old"),
 		DedupeKey:    FormatRuntimeInputDedupeKey(ws, "sesn_metrics_old", "input_old"),
 		PayloadJSON:  runtimeInputPayload(t, ws, "sesn_metrics_old", "thrd_metrics_old", "input_old", "messages", 1, 1),
-		AvailableAt:  now.Add(-30 * time.Second),
-		Now:          now.Add(-30 * time.Second),
+		// Ready 30 s before its enqueue on a producer clock an hour behind.
+		AvailableAt: now.Add(-time.Hour - 30*time.Second),
+		Now:         now.Add(-time.Hour),
 	})
 	retryJob := mustEnqueue(t, store, EnqueueRequest{
 		ID:           "qjob_metrics_retry",
@@ -2535,8 +2673,8 @@ func TestPostgreSQLStoreMetricsSummarizesQueueState(t *testing.T) {
 	if runtimeInput.PendingJobs != 4 || runtimeInput.ReadyJobs != 3 || runtimeInput.RetryPendingJobs != 1 || runtimeInput.LeasedJobs != 0 || runtimeInput.DeadLetteredJobs != 0 {
 		t.Fatalf("runtime_input metrics = %+v", runtimeInput)
 	}
-	if runtimeInput.ReadyLagSeconds < 29.9 || runtimeInput.ReadyLagSeconds > 30.1 {
-		t.Fatalf("runtime_input ready lag = %f; want about 30s", runtimeInput.ReadyLagSeconds)
+	if runtimeInput.ReadyLagSeconds < 30 || runtimeInput.ReadyLagSeconds > 35 {
+		t.Fatalf("runtime_input ready lag = %f; want about 30s on the database clock", runtimeInput.ReadyLagSeconds)
 	}
 	cleanup := byKind[KindCleanupSession]
 	if cleanup.LeasedJobs != 1 || cleanup.PendingJobs != 0 {

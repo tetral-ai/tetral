@@ -68,7 +68,7 @@ Istiod, Envoy Gateway and optional cert-manager namespaces belong to their
 separate prerequisite installation guides. Verify existing namespace ownership
 rather than silently adopting it.
 
-Create the following 15 Secrets in `tetral-system` before installation. Secret
+Create the following 16 Secrets in `tetral-system` before installation. Secret
 names may be changed through Helm values, but their keys are fixed by the
 workloads.
 
@@ -79,6 +79,7 @@ workloads.
 | `auth-bootstrap` | `engine-api-key` |
 | `auth-database` | `url` |
 | `auth-internal-principal` | `private_key_b64`, `public_key_b64` |
+| `computer-hub-page-token` | `page-token-key` |
 | `gateway-web-blob` | `TETRAL_BLOB_ENDPOINT`, `TETRAL_BLOB_REGION`, `TETRAL_BLOB_BUCKET`, `TETRAL_BLOB_ACCESS_KEY`, `TETRAL_BLOB_SECRET_KEY` |
 | `gateway-web-keypool` | `TETRAL_WEB_API_KEYS` |
 | `queue-database` | `url` |
@@ -87,7 +88,7 @@ workloads.
 | `sandbox-daytona` | `DAYTONA_API_KEY` |
 | `sandbox-r2-parent` | `TETRAL_R2_PARENT_API_TOKEN`, `TETRAL_R2_PARENT_ACCESS_KEY` |
 | `tetral-blob` | `endpoint`, `region`, `bucket`, `access-key`, `secret-key` |
-| `tetral-database` | `bridge-url`, `cleanup-url`, `git-proxy-url`, `job-runner-url`, `mcp-connector-url`, `provider-gateway-url`, `TETRAL_POSTGRES_DSN` |
+| `tetral-database` | `bridge-url`, `cleanup-url`, `computer-hub-url`, `git-proxy-url`, `job-runner-url`, `mcp-connector-url`, `provider-gateway-url`, `TETRAL_POSTGRES_DSN` |
 | `tetral-event-stream-database` | `url` |
 
 When `edge.enabled=true`, supply separate public API and Git TLS Secrets selected
@@ -133,10 +134,13 @@ curl -s -H "Authorization: Bearer $TOKEN" \
   https://api.cloudflare.com/client/v4/user/tokens/verify
 ```
 
-Five Secrets have no checked-in example template:
-`gateway-web-blob`, `gateway-web-keypool`, `runtime-binding-token`,
-`tetral-blob`, and `tetral-event-stream-database`. Create them directly with
-`kubectl create secret generic` or through the cluster's Secret controller.
+Six Secrets have no checked-in example template:
+`computer-hub-page-token`, `gateway-web-blob`, `gateway-web-keypool`,
+`runtime-binding-token`, `tetral-blob`, and `tetral-event-stream-database`.
+Create them directly with `kubectl create secret generic` or through the
+cluster's Secret controller. `computer-hub-page-token/page-token-key` is 32
+random bytes as 64 hexadecimal characters (`openssl rand -hex 32`); every
+computer-hub Pod reads the same value to sign and verify list page tokens.
 The event-stream database is covered by
 `tetral-event-stream-database/url` and the public half of
 `auth-internal-principal`; it has no separate template.

@@ -1,13 +1,23 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { Writable } from "node:stream";
-import { createDiagnosticStreamSink, createTetralJsonLogger, diagnosticDefaults, parseDiagnosticConfig, parseWorkloadResourceConfig, semanticErrorFields } from "@tetral/ts-observability";
+import { createDiagnosticStreamSink, createTetralJsonLogger, diagnosticDefaults, parseDiagnosticConfig, parseDiagnosticConfigResult, parseWorkloadResourceConfig, semanticErrorFields } from "@tetral/ts-observability";
 import { startupFailureLogRecord } from "../../src/logger.js";
 
 describe("shared process diagnostics", () => {
   test("boot controls have literal defaults and reject malformed or excessive bounds", () => {
-    expect(parseDiagnosticConfig({})).toEqual({ level: "info", maxRecordBytes: 16384, summaryIntervalMs: 30000, burst: 1 });
-    expect(parseDiagnosticConfig({ TETRAL_LOG_LEVEL: "warn", TETRAL_LOG_MAX_RECORD_BYTES: "4096", TETRAL_LOG_SUMMARY_INTERVAL_MS: "500", TETRAL_LOG_BURST: "3" })).toEqual({ level: "warn", maxRecordBytes: 4096, summaryIntervalMs: 500, burst: 3 });
+    const traceAndSlowQuery = { traceSampleRatio: expect.any(Number), dbSlowQueryMs: expect.any(Number) };
+    expect(parseDiagnosticConfig({})).toEqual({ level: "info", maxRecordBytes: 16384, summaryIntervalMs: 30000, burst: 1, ...traceAndSlowQuery });
+    expect(parseDiagnosticConfig({ TETRAL_LOG_LEVEL: "warn", TETRAL_LOG_MAX_RECORD_BYTES: "4096", TETRAL_LOG_SUMMARY_INTERVAL_MS: "500", TETRAL_LOG_BURST: "3" })).toEqual({ level: "warn", maxRecordBytes: 4096, summaryIntervalMs: 500, burst: 3, ...traceAndSlowQuery });
     for (const env of [{ TETRAL_LOG_LEVEL: "verbose" }, { TETRAL_LOG_MAX_RECORD_BYTES: "1023" }, { TETRAL_LOG_MAX_RECORD_BYTES: "65537" }, { TETRAL_LOG_SUMMARY_INTERVAL_MS: "99" }, { TETRAL_LOG_BURST: "0" }, { TETRAL_LOG_BURST: "9007199254740992" }]) expect(parseDiagnosticConfig(env)).toBeUndefined();
+    expect(parseDiagnosticConfig({ TETRAL_TRACE_SAMPLE_RATIO: "0", TETRAL_DB_SLOW_QUERY_MS: "60001", OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector:4317" })).toMatchObject({ traceSampleRatio: 0, dbSlowQueryMs: 60001, traceEndpoint: "http://collector:4317" });
+    for (const value of ["0", "-1", "2.5", "01"]) expect(parseDiagnosticConfig({ TETRAL_DB_SLOW_QUERY_MS: value })).toBeUndefined();
+    for (const [env, problem] of [
+      [{ TETRAL_TRACE_SAMPLE_RATIO: "1.5" }, "TETRAL_TRACE_SAMPLE_RATIO must be a decimal from 0 through 1"],
+      [{ TETRAL_TRACE_SAMPLE_RATIO: ".5" }, "TETRAL_TRACE_SAMPLE_RATIO must be a decimal from 0 through 1"],
+      [{ TETRAL_DB_SLOW_QUERY_MS: "9007199254740992" }, "TETRAL_DB_SLOW_QUERY_MS must be a positive safe integer of milliseconds"],
+      [{ OTEL_EXPORTER_OTLP_ENDPOINT: "collector:4317" }, "OTEL_EXPORTER_OTLP_ENDPOINT must be an http or https URL"],
+      [{ OTEL_EXPORTER_OTLP_ENDPOINT: "ftp://collector" }, "OTEL_EXPORTER_OTLP_ENDPOINT must be an http or https URL"],
+    ] as const) expect(parseDiagnosticConfigResult(env)).toEqual({ ok: false, problem });
   });
   test("metadata parsing preserves each service bound and explicit required-value semantics", () => {
     expect(parseWorkloadResourceConfig({TETRAL_DEPLOYMENT_ENVIRONMENT: "prod-west", TETRAL_SERVICE_VERSION: "revision-42"},253)).toEqual({deploymentEnvironment: "prod-west",serviceVersion: "revision-42"});
@@ -23,7 +33,7 @@ describe("shared process diagnostics", () => {
     for (let n = 0; n < 1000; n++) logger.debug({ event: "queue.empty", operation: "queue.poll" });
     expect(lines).toHaveLength(0);
     logger.warn({ event: "transport.degraded", operation: "transport.recover", ...semanticErrorFields({ errorClass: "transport", errorCode: "unavailable", messageSafe: "transport temporarily unavailable" }) });
-    expect(JSON.parse(lines[0]!)).toMatchObject({ level: "warn", "error.class": "transport", "error.code": "unavailable", "service.instance.id": "process-one" });
+    expect(JSON.parse(lines[0]!)).toMatchObject({ level: "WARN", "error.class": "transport", "error.code": "unavailable", "service.instance.id": "process-one" });
     expect(logger.stats().filtered).toBe(1000);
   });
   test("repetition emits initial plus bounded summary, does not key by scope, and recovers", () => {
@@ -75,10 +85,10 @@ describe("shared process diagnostics", () => {
           }
           const summaries = lines.map((line) => JSON.parse(line)).filter((record) => record.event === "diagnostic.suppressed");
           expect(summaries).toEqual([expect.objectContaining({
-            level: severity, "event.original": "dependency.failed", reason: "connection_lost",
+            level: severity.toUpperCase(), "event.original": "dependency.failed", reason: "connection_lost",
             "error.class": "transport_error", "error.code": "connection_lost", "error.message_safe": "MCP connection lost",
             component: "mcp-connector", phase: "connection  wait ", "session.id": "[TRUNCATED]",
-            "suppressed.count": 1, first_seen: "2026-10-02T00:00:00.000Z", last_seen: "2026-10-02T00:00:00.025Z",
+            "suppressed.count": 1, first_seen: "2026-10-02T00:00:00.000000Z", last_seen: "2026-10-02T00:00:00.025000Z",
           })]);
           expect(logger.stats().limiterEntries).toBe(0);
           for (const line of lines) {
@@ -105,7 +115,7 @@ describe("shared process diagnostics", () => {
       logger.flush();
       const summaries = lines.map((line) => JSON.parse(line)).filter((record) => record.event === "diagnostic.suppressed");
       expect(summaries[0]).toMatchObject({ "error.class": "[TRUNCATED]", "error.code": "safe_code", "error.message_safe": "[REDACTED]", phase: "[TRUNCATED]", component: "[REDACTED]" });
-      expect(summaries[1]).toMatchObject({ level: "warn", phase: "retry", component: "connector" });
+      expect(summaries[1]).toMatchObject({ level: "WARN", phase: "retry", component: "connector" });
       for (const field of ["error.class", "error.code", "error.message_safe"]) expect(summaries[1]).not.toHaveProperty(field);
       expect(lines.join("")).not.toMatch(/PRIVATE_(CLASS|PHASE)_SENTINEL|sk-private/);
     } finally { logger.close(); }
@@ -155,8 +165,20 @@ describe("shared process diagnostics", () => {
     logger.warn({ event: "dependency.failed", reason: "unavailable" });
     logger.warn({ event: "dependency.failed", reason: "unavailable" });
     logger.error({ event: "dependency.failed", reason: "unavailable" });
-    expect(lines).toHaveLength(2); expect(JSON.parse(lines[1]!)).toMatchObject({ level: "error", event: "dependency.failed" });
+    expect(lines).toHaveLength(2); expect(JSON.parse(lines[1]!)).toMatchObject({ level: "ERROR", event: "dependency.failed" });
     logger.flush();
+  });
+  test("record time follows the wall clock, the monotonic clock supplying only the sub-millisecond digits", () => {
+    const lines: string[] = [];
+    const wall = spyOn(Date, "now").mockReturnValue(Date.UTC(2026, 9, 2));
+    const monotonic = spyOn(performance, "now").mockReturnValue(5.25);
+    const logger = createTetralJsonLogger({ write: (line) => lines.push(line), serviceName: "test" });
+    try {
+      logger.info({ event: "safe" });
+      wall.mockReturnValue(Date.UTC(2026, 9, 2, 1));
+      logger.info({ event: "safe" });
+      expect(lines.map((line) => JSON.parse(line).time)).toEqual(["2026-10-02T00:00:00.000250Z", "2026-10-02T01:00:00.000250Z"]);
+    } finally { wall.mockRestore(); monotonic.mockRestore(); logger.close(); }
   });
   test("getter and clock failures are contained separately from sink errors", () => {
     const lines: string[] = []; const logger = createTetralJsonLogger({ write: (line) => lines.push(line), serviceName: "test" });

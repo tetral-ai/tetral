@@ -14,6 +14,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -23,6 +24,9 @@ type PostgreSQLQueueStore struct {
 	// jobRunner is the process's direct Job Runner scheduler; a Queue process
 	// constructs exactly one store.
 	jobRunner *jobRunnerScheduler
+	// queueWait is the Queue service's queue_jobs_queue_wait_seconds; the
+	// store of any other process observes no wait.
+	queueWait *workload.Histogram
 }
 
 func NewPostgreSQLStore(client *dbconnect.Client) *PostgreSQLQueueStore {
@@ -40,6 +44,13 @@ func NewPostgreSQLStoreWithRetryPolicy(client *dbconnect.Client, policy RetryPol
 	store := &PostgreSQLQueueStore{client: client, retryPolicy: normalizeRetryPolicy(policy)}
 	store.jobRunner = newJobRunnerScheduler(store)
 	return store
+}
+
+// ObserveQueueWaitIn makes each committed lease observe its wait in
+// registry's queue_jobs_queue_wait_seconds, which the Queue service's table
+// declares; the Queue service calls it on its one store.
+func (s *PostgreSQLQueueStore) ObserveQueueWaitIn(registry *workload.Registry) {
+	s.queueWait = registry.Histogram("queue_jobs_queue_wait_seconds", "Time a queue job waited from its ready_at to its lease.", "kind")
 }
 
 func normalizeRetryPolicy(policy RetryPolicy) RetryPolicy {
@@ -92,7 +103,7 @@ func (s *PostgreSQLQueueStore) Metrics(ctx context.Context, now time.Time) ([]Me
 			        COALESCE(MAX(
 			            CASE
 			                WHEN status = 'pending' AND available_at <= $1
-			                    THEN EXTRACT(EPOCH FROM ($1 - available_at))
+			                    THEN EXTRACT(EPOCH FROM (clock_timestamp() - ready_at))
 			                ELSE 0
 			            END
 			        ), 0) AS ready_lag_seconds
@@ -371,6 +382,7 @@ func EnqueueBatchTx(ctx context.Context, tx enqueueTransaction, requests []Enque
 		}
 		return leftRequest.DedupeKey < rightRequest.DedupeKey
 	})
+	traceContext := workload.ContextTraceparent(ctx)
 	jobs := make([]*Job, len(normalized))
 	notifyClasses := make(map[string]struct{}, 2)
 	for _, item := range ordered {
@@ -397,7 +409,7 @@ func EnqueueBatchTx(ctx context.Context, tx enqueueTransaction, requests []Enque
 		).Scan(&partitionSequence); err != nil {
 			return nil, err
 		}
-		job, inserted, err := insertQueueJobTx(ctx, tx, request, partitionSequence)
+		job, inserted, err := insertQueueJobTx(ctx, tx, request, partitionSequence, traceContext)
 		if err != nil {
 			return nil, err
 		}
@@ -427,19 +439,18 @@ func EnqueueBatchTx(ctx context.Context, tx enqueueTransaction, requests []Enque
 	return jobs, nil
 }
 
-func insertQueueJobTx(ctx context.Context, tx enqueueTransaction, request EnqueueRequest, partitionSequence int64) (*Job, bool, error) {
+func insertQueueJobTx(ctx context.Context, tx enqueueTransaction, request EnqueueRequest, partitionSequence int64, traceContext string) (*Job, bool, error) {
 	payload := append(json.RawMessage(nil), request.PayloadJSON...)
 	row := tx.QueryRowScanner(ctx,
 		`INSERT INTO queue_jobs (
 			id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key,
 			causal_session_id, delivery_scope, delivery_thread_id, control_class,
 			payload_version, status, payload_json, priority, attempt_count, max_attempts,
-			available_at, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', $12, $13, 0, $14, $15, $16, $16)
+			available_at, ready_at, created_at, updated_at, trace_context
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', $12, $13, 0, $14, $15,
+		          clock_timestamp() + $18::bigint * interval '1 microsecond', $16, $16, $17)
 		ON CONFLICT (workspace_id, dedupe_key) WHERE status IN ('pending', 'leased') DO NOTHING
-		RETURNING id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key, payload_version,
-		          status, payload_json, priority, available_at, leased_by, lease_token,
-		          leased_at, leased_until, attempt_count, max_attempts, created_at, updated_at`,
+		RETURNING `+queueJobColumns,
 		request.ID,
 		string(request.WorkspaceID),
 		request.Kind,
@@ -456,6 +467,8 @@ func insertQueueJobTx(ctx context.Context, tx enqueueTransaction, request Enqueu
 		request.MaxAttempts,
 		request.AvailableAt,
 		request.Now,
+		nullableString(traceContext),
+		request.AvailableAt.Sub(request.Now).Microseconds(),
 	)
 	job, err := scanJob(row)
 	if err == nil {
@@ -473,9 +486,7 @@ func existingActiveDedupeJob(ctx context.Context, tx enqueueTransaction, workspa
 		return nil, &ValidationError{Message: "queue transaction is required"}
 	}
 	return scanJob(tx.QueryRowScanner(ctx,
-		`SELECT id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key, payload_version,
-		        status, payload_json, priority, available_at, leased_by, lease_token,
-		        leased_at, leased_until, attempt_count, max_attempts, created_at, updated_at
+		`SELECT `+queueJobColumns+`
 		   FROM queue_jobs
 		  WHERE workspace_id = $1
 		    AND dedupe_key = $2
@@ -577,6 +588,7 @@ func (s *PostgreSQLQueueStore) Lease(ctx context.Context, request LeaseRequest) 
 	if err != nil {
 		return nil, err
 	}
+	s.observeQueueWait(leased...)
 	return leased, nil
 }
 
@@ -852,6 +864,7 @@ func (s *PostgreSQLQueueStore) ReclaimExpiredLeases(ctx context.Context, request
 				`UPDATE queue_jobs
 				    SET status = 'pending',
 				        available_at = clock_timestamp(),
+				        ready_at = clock_timestamp(),
 				        lease_token = NULL,
 				        leased_by = NULL,
 				        leased_at = NULL,
@@ -1503,7 +1516,7 @@ func DeferLeasedRuntimeInputCustodyTx(ctx context.Context, tx *dbconnect.Tx, req
 		  RETURNING runtime_input_id
 		), deferred_queue AS (
 		   UPDATE queue_jobs
-		      SET status='pending', available_at=$4, attempt_count=attempt_count-1,
+		      SET status='pending', available_at=$4, ready_at=clock_timestamp(), attempt_count=attempt_count-1,
 		          lease_token=NULL, leased_by=NULL, leased_at=NULL, leased_until=NULL,
 		          lease_previous_attempt_count=NULL,
 		          last_error_kind=NULL, last_error_message=NULL, updated_at=$4
@@ -1624,6 +1637,7 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 					`UPDATE queue_jobs
 						    SET status = 'pending',
 						        available_at = $4,
+						        ready_at = clock_timestamp(),
 						        lease_token = NULL,
 						        leased_by = NULL,
 						        leased_at = NULL,
@@ -1681,6 +1695,7 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 			`UPDATE queue_jobs
 			    SET status = 'pending',
 			        available_at = $4,
+			        ready_at = clock_timestamp() + $8::bigint * interval '1 microsecond',
 			        lease_token = NULL,
 			        leased_by = NULL,
 			        leased_at = NULL,
@@ -1701,6 +1716,7 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 			nullableString(request.ErrorKind),
 			nullableString(request.ErrorMessage),
 			now,
+			retryDelay.Microseconds(),
 		)
 		if err != nil {
 			return err
@@ -1790,6 +1806,7 @@ func (s *PostgreSQLQueueStore) Defer(ctx context.Context, request DeferRequest) 
 			`UPDATE queue_jobs
 			    SET status = 'pending',
 			        available_at = $4,
+			        ready_at = clock_timestamp() + $6::bigint * interval '1 microsecond',
 			        attempt_count = attempt_count - 1,
 			        defer_count = defer_count + 1,
 			        lease_token = NULL,
@@ -1808,6 +1825,7 @@ func (s *PostgreSQLQueueStore) Defer(ctx context.Context, request DeferRequest) 
 			request.LeaseToken,
 			now.Add(deferDelay),
 			now,
+			deferDelay.Microseconds(),
 		)
 		if err != nil {
 			return err
@@ -1889,6 +1907,7 @@ func (s *PostgreSQLQueueStore) ReleaseUnstartedJob(ctx context.Context, request 
 			`UPDATE queue_jobs
 			    SET status = 'pending',
 			        available_at = $4,
+			        ready_at = clock_timestamp(),
 			        attempt_count = lease_previous_attempt_count,
 			        lease_previous_attempt_count = NULL,
 			        lease_token = NULL,
@@ -2236,7 +2255,7 @@ func (s *PostgreSQLQueueStore) Cancel(ctx context.Context, request CancelRequest
 // queueJobColumns is the RETURNING/SELECT projection read by scanJob.
 const queueJobColumns = `id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key, payload_version,
 		            status, payload_json, priority, available_at, leased_by, lease_token,
-		            leased_at, leased_until, attempt_count, max_attempts, created_at, updated_at`
+		            leased_at, leased_until, attempt_count, max_attempts, created_at, updated_at, trace_context, ready_at`
 
 func scanJob(row interface{ Scan(dest ...any) error }) (*Job, error) {
 	var job Job
@@ -2250,6 +2269,8 @@ func scanJob(row interface{ Scan(dest ...any) error }) (*Job, error) {
 	var leasedUntil sql.NullTime
 	var createdAt time.Time
 	var updatedAt time.Time
+	var traceContext sql.NullString
+	var readyAt time.Time
 	if err := row.Scan(
 		&job.ID,
 		&workspaceID,
@@ -2270,6 +2291,8 @@ func scanJob(row interface{ Scan(dest ...any) error }) (*Job, error) {
 		&job.MaxAttempts,
 		&createdAt,
 		&updatedAt,
+		&traceContext,
+		&readyAt,
 	); err != nil {
 		return nil, err
 	}
@@ -2289,7 +2312,20 @@ func scanJob(row interface{ Scan(dest ...any) error }) (*Job, error) {
 	}
 	job.CreatedAt = createdAt.UTC()
 	job.UpdatedAt = updatedAt.UTC()
+	job.TraceContext = traceContext.String
+	job.ReadyAt = readyAt.UTC()
 	return &job, nil
+}
+
+// observeQueueWait records, once per committed lease, how long the job waited
+// from its ready_at to its leased_at, the lease statement's clock_timestamp().
+func (s *PostgreSQLQueueStore) observeQueueWait(jobs ...*Job) {
+	for _, job := range jobs {
+		if job == nil || job.LeasedAt == nil {
+			continue
+		}
+		s.queueWait.Observe(job.LeasedAt.Sub(job.ReadyAt).Seconds(), job.Kind)
+	}
 }
 
 func rowsAffected(result sql.Result) bool {

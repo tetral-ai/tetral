@@ -17,6 +17,7 @@ import type { RuntimeProcessPort } from "./runtime-process.js";
 import { bridgeMethodDeadline } from "./bridge-policy.js";
 import { retryRuntimeProcessOperation } from "./runtime-process.js";
 import { status } from "@grpc/grpc-js";
+import { completeServiceColdStart, endServiceColdStartPhase, failServiceColdStart } from "@tetral/ts-observability";
 import type { RuntimePodConfigResult } from "./config.js";
 import type { RuntimePodLogger, RuntimePodLogRecord } from "./logger.js";
 import {
@@ -167,6 +168,7 @@ export class RuntimePodLifecycle {
       await this.options.bootstrap.grpc();
       causeCategory = "dependency_readiness";
       await this.options.bootstrap.authClient();
+      endServiceColdStartPhase("dependencies");
       const config = this.options.config.config;
       const registrationDeadline = bridgeMethodDeadline(
         config.bridgeMethodPolicies,
@@ -201,6 +203,7 @@ export class RuntimePodLifecycle {
       this.startupComplete = true;
       this.readyFlag = true;
       this.accepting = true;
+      completeServiceColdStart();
     } catch (error) {
       if (
         typeof error === "object" &&
@@ -209,6 +212,7 @@ export class RuntimePodLifecycle {
         error.code === status.FAILED_PRECONDITION
       )
         this.rejectProcess();
+      failServiceColdStart("startup_error");
       try {
         this.options.logger.error(
           startupFailureLogRecord({

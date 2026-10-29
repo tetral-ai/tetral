@@ -1,0 +1,234 @@
+{
+  "service": "cleanup",
+  "events": {
+    "cleanup.claim_due.completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "candidate.count": "integer",
+        "cleanup.claim.limit": "integer",
+        "cleanup.jobs.claimed": "integer",
+        "component": "string",
+        "duration.ms": "integer",
+        "event.kind": "string",
+        "failed.count": "integer",
+        "operation": "string",
+        "outcome": "string"
+      }
+    },
+    "cleanup.metrics_export.failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "duration.ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "retryable": "boolean",
+        "terminal": "boolean"
+      },
+      "errors": {
+        "cleanup_metrics_export_failed": {
+          "class": "metrics_export_error",
+          "message_safe": "cleanup metrics export failed"
+        }
+      }
+    },
+    "cleanup.retention.completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "candidate.count": "integer",
+        "component": "string",
+        "deleted.count": "integer",
+        "duration.ms": "integer",
+        "event.kind": "string",
+        "operation": "string",
+        "outcome": "string",
+        "page.count": "integer",
+        "phase": "string"
+      }
+    },
+    "queue.notification_listener.disconnected": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "consumer.class": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "retryable": "boolean",
+        "terminal": "boolean"
+      },
+      "errors": {
+        "notification_listener_authentication": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_endpoint_transport": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_permission": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_timeout": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_unknown": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        }
+      }
+    },
+    "queue.notification_listener.recovered": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "consumer.class": "string",
+        "operation": "string",
+        "outcome": "string",
+        "recovery.event": "string"
+      }
+    },
+    "schema.migration.completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      }
+    },
+    "schema.migration.failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "db.sqlstate": "string",
+        "duration_ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      },
+      "errors": {
+        "schema_ahead": {
+          "class": "schema_ahead",
+          "message_safe": "postgresql schema is ahead of this binary"
+        },
+        "schema_apply_failed": {
+          "class": "schema_apply_failed",
+          "message_safe": "postgresql schema migration failed"
+        },
+        "schema_behind": {
+          "class": "schema_behind",
+          "message_safe": "postgresql schema is behind this binary"
+        },
+        "schema_checksum_drift": {
+          "class": "schema_checksum_drift",
+          "message_safe": "postgresql schema checksum does not match this binary"
+        },
+        "schema_history_duplicate": {
+          "class": "schema_history_duplicate",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_history_gap": {
+          "class": "schema_history_gap",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_history_malformed": {
+          "class": "schema_history_malformed",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_lock_failed": {
+          "class": "schema_lock_failed",
+          "message_safe": "postgresql schema migration lock failed"
+        },
+        "schema_missing": {
+          "class": "schema_missing",
+          "message_safe": "postgresql schema registry is missing"
+        },
+        "schema_operation_canceled": {
+          "class": "schema_operation_canceled",
+          "message_safe": "postgresql schema operation was canceled"
+        },
+        "schema_rls_drift": {
+          "class": "schema_rls_drift",
+          "message_safe": "postgresql workspace isolation contract does not match this binary"
+        },
+        "schema_unexpected_state": {
+          "class": "schema_unexpected_state",
+          "message_safe": "postgresql schema is not empty and has no current identity"
+        }
+      }
+    },
+    "schema.migration.started": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      }
+    }
+  },
+  "operations": {
+    "claim_due": {
+      "long": false,
+      "errors": [
+        "cancelled",
+        "timeout"
+      ]
+    }
+  },
+  "metrics": {
+    "tetral_cleanup_claim_due_duration_ms_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "tetral_cleanup_claim_due_runs_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "tetral_cleanup_jobs_claimed_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "tetral_cleanup_retention_budget_exhausted_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "phase": [
+          "idempotency",
+          "stream_changes"
+        ]
+      }
+    }
+  },
+  "spans": {}
+}

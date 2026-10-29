@@ -2,7 +2,10 @@ package httpapi
 
 import (
 	"errors"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 func TestRejectUnstorableJSONText(t *testing.T) {
@@ -32,5 +35,19 @@ func TestRejectUnstorableJSONText(t *testing.T) {
 				t.Fatalf("rejectUnstorableJSONText(%s) = %v; want U+0000 ValidationError", test.body, err)
 			}
 		})
+	}
+}
+
+func TestReadJSONBodyAnswersAnUnreadableBodyAsInvalid(t *testing.T) {
+	request := httptest.NewRequest("POST", "/v1/instances", iotest.ErrReader(errors.New("unexpected EOF in chunked body")))
+	_, err := ReadJSONBody(httptest.NewRecorder(), request)
+	var validation *ValidationError
+	if !errors.As(err, &validation) || validation.Message != "request body could not be read" {
+		t.Fatalf("ReadJSONBody of an unreadable body = %v; want a ValidationError", err)
+	}
+	request = httptest.NewRequest("POST", "/v1/instances", strings.NewReader(strings.Repeat(" ", JSONBodyLimit+1)))
+	var tooLarge *RequestTooLargeError
+	if _, err := ReadJSONBody(httptest.NewRecorder(), request); !errors.As(err, &tooLarge) {
+		t.Fatalf("ReadJSONBody of a body over the limit = %v; want a RequestTooLargeError", err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/workload"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
@@ -57,16 +58,23 @@ type jobRunnerSlots struct {
 	closed      bool
 	closedCh    chan struct{}
 	completed   chan error
+	// inProgress is jobrunner_slots_in_progress, the ACTIVE slots.
+	inProgress *workload.Gauge
 }
 
 var jobRunnerSlotsInit sync.Mutex
 
 func newJobRunnerSlots(capacity int) *jobRunnerSlots {
+	registry := workload.CurrentTelemetry().Registry()
+	registry.Gauge("jobrunner_slots_limit", "Job Runner execution slots.").Set(float64(capacity))
+	inProgress := registry.Gauge("jobrunner_slots_in_progress", "Job Runner slots running a leased job.")
+	inProgress.Set(0)
 	return &jobRunnerSlots{
-		capacity:  capacity,
-		free:      capacity,
-		closedCh:  make(chan struct{}),
-		completed: make(chan error, capacity),
+		capacity:   capacity,
+		free:       capacity,
+		closedCh:   make(chan struct{}),
+		completed:  make(chan error, capacity),
+		inProgress: inProgress,
 	}
 }
 
@@ -141,6 +149,7 @@ func (s *jobRunnerSlots) dispatch(reserved int, count int) bool {
 	}
 	s.active += count
 	s.free += reserved - count
+	s.inProgress.Set(float64(s.active))
 	return true
 }
 
@@ -156,6 +165,7 @@ func (s *jobRunnerSlots) finish(err error) {
 	s.mu.Lock()
 	s.active--
 	s.joining++
+	s.inProgress.Set(float64(s.active))
 	s.mu.Unlock()
 	s.completed <- err
 }
@@ -249,11 +259,19 @@ func (r *JobRunner) AcquireAndDispatch(ctx context.Context) (JobRunnerAcquisitio
 	return acquisition, nil
 }
 
+// runSlot runs one leased job under the trace its producer enqueued it with,
+// so its records and outgoing calls carry that trace.
 func (r *JobRunner) runSlot(ctx context.Context, job *queuev1.QueueJob, cfg JobRunnerConfig, slots *jobRunnerSlots) {
+	ctx, span := workload.StartServerSpan(ctx, "job_runner.run_job", job.GetTraceContext())
+	span.SetString("queue.job.id", job.GetId())
+	span.SetString("queue.job.kind", job.GetKind())
+	span.SetString("workspace.id", job.GetWorkspaceId())
 	err := r.processRuntimeJob(ctx, job, cfg)
 	if err != nil && ctx.Err() == nil {
-		r.logRuntimeJobFailure(job)
+		span.SetFailure("job_runner_error", "runtime_job_failed")
+		r.logRuntimeJobFailure(ctx, job)
 	}
+	span.End()
 	slots.finish(err)
 }
 
@@ -355,12 +373,12 @@ func (r *JobRunner) waitForAcquisition(ctx context.Context, slots *jobRunnerSlot
 	return true
 }
 
-func (r *JobRunner) logRuntimeJobFailure(job *queuev1.QueueJob) {
+func (r *JobRunner) logRuntimeJobFailure(ctx context.Context, job *queuev1.QueueJob) {
 	if r == nil || r.Logger == nil {
 		return
 	}
 	defer func() { _ = recover() }()
-	r.Logger.Warn("job_runner.runtime_job.failed",
+	r.Logger.WarnContext(ctx, "job_runner.runtime_job.failed",
 		slog.String("operation", "job_runner.runtime_job"),
 		slog.String("event.kind", "runtime_job_failed"),
 		slog.String("component", ServiceNameJobRunner),

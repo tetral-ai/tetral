@@ -30,7 +30,7 @@ resolver.resolve=async(input)=>{
  finally{const startNS=Math.round(startedAt*1e6),endNS=Math.round(performance.now()*1e6);completionSamples.push({cohort:"attachment_preparation",method:"resolve",receiver:`bridge-metadata:${addressA};bridge-bytes:${addressB}`,outcome,start_boundary:"resolve_started",end_boundary:"resolve_completed",clock_id:`bun:${process.pid}`,start_ns:startNS,end_ns:endNS,duration_ns:endNS-startNS});}
 };
 const config:ProviderGatewayConfig={
- deploymentEnvironment:"test",diagnostics:{level:"info",maxRecordBytes:16384,summaryIntervalMs:30000,burst:1},serviceVersion:"replica-test",
+ deploymentEnvironment:"test",diagnostics:{level:"info",maxRecordBytes:16384,summaryIntervalMs:30000,burst:1,traceSampleRatio:1,dbSlowQueryMs:250},serviceVersion:"replica-test",
  grpcBindAddress:"127.0.0.1:0",httpBindAddress:"127.0.0.1:0",allowedRuntimePod:{namespace:"tetral-agent-runtime",serviceAccount:"agent-runtime"},
  runtimeBindingTokenHMACKey:signingKey,databaseUrl:"postgres://not-opened-by-this-app/fixture",databasePool:{max:2,idleTimeout:30,maxLifetime:1800,connectionTimeout:30,statementTimeoutMs:30000},drainTimeoutMs:100,cancelJoinTimeoutMs:1000,
  vaultKeyHex:"00".repeat(32),kubernetesApiServerUrl:"https://kubernetes.default.svc",kubernetesApiCaCertPath:"unused",tokenReviewReviewerTokenPath:"unused",
@@ -78,5 +78,5 @@ try{
  client.close();await app.shutdown(new Date(Date.now()+500));await resolver.close();await resolver.close();
 }
 assert.equal(clientCloses,1);
-assert(app.service.metricsText().includes("providergateway_provider_streams_active 0"));
+assert(app.service.metricsText().includes("providergateway_turns_in_progress 0"));
 console.log(JSON.stringify({ok:true,providerCalls,clientCloses,hash,completionSamples}));

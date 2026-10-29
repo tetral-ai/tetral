@@ -784,7 +784,7 @@ func TestPostgreSQLRuntimePodLossSweepIsolatesEarlyPageFailureWithListenerConnec
 		switch record["event"] {
 		case "runtime_pod_loss_repair_failed":
 			failure = record
-		case "runtime_pod_loss_repair_run_completed":
+		case "runtime_pod_loss_repair_run_failed":
 			if summary == nil {
 				summary = record
 			}
@@ -905,7 +905,7 @@ type repairRunRecorder struct{ repaired chan<- int64 }
 
 func (repairRunRecorder) Enabled(context.Context, slog.Level) bool { return true }
 func (h repairRunRecorder) Handle(_ context.Context, record slog.Record) error {
-	if record.Message != "runtime_pod_loss_repair_run_completed" {
+	if record.Message != "runtime_pod_loss_repair_run_completed" && record.Message != "runtime_pod_loss_repair_run_failed" {
 		return nil
 	}
 	record.Attrs(func(attr slog.Attr) bool {

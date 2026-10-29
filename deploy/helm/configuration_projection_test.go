@@ -156,13 +156,16 @@ func TestConfigurationOperationalProjectionUsesOwningParsers(t *testing.T) {
 				rwant := map[string]int64{"lease_ms": 30000, "heartbeat_ms": 10000, "jobs": 8}
 				dwant := workload.DefaultDiagnosticConfig()
 				if configured {
-					values = append(values, "queue.leaseReclaimIntervalSeconds=17", "queue.leaseReclaimLimit=23", "queue.retryBaseMs=700", "queue.retryCapMs=9000", "queue.retryMaxAttempts=4", "jobRunner.leaseDurationMs=24000", "jobRunner.heartbeatIntervalMs=6000", "jobRunner.maxJobs=3", "observability.logLevel=warn", "observability.logMaxRecordBytes=8192", "observability.logSummaryIntervalMs=7000", "observability.logBurst=3", "observability.deploymentEnvironment=projection-test", "observability.serviceVersion=projection-version", "lifecycle.providerDrainMs=200", "lifecycle.providerJoinMs=1000", "lifecycle.mcpDrainMs=250", "lifecycle.mcpJoinMs=1200")
+					values = append(values, "queue.leaseReclaimIntervalSeconds=17", "queue.leaseReclaimLimit=23", "queue.retryBaseMs=700", "queue.retryCapMs=9000", "queue.retryMaxAttempts=4", "jobRunner.leaseDurationMs=24000", "jobRunner.heartbeatIntervalMs=6000", "jobRunner.maxJobs=3", "observability.logLevel=warn", "observability.logMaxRecordBytes=8192", "observability.logSummaryIntervalMs=7000", "observability.logBurst=3", "observability.traceSampleRatio=0.25", "observability.slowQueryMs=900", "observability.otlpEndpoint=http://otel-collector.observability:4317", `observability.otlpPeers[0].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=observability`, "observability.deploymentEnvironment=projection-test", "observability.serviceVersion=projection-version", "lifecycle.providerDrainMs=200", "lifecycle.providerJoinMs=1000", "lifecycle.mcpDrainMs=250", "lifecycle.mcpJoinMs=1200")
 					qwant = map[string]int64{"reclaim_seconds": 17, "reclaim_limit": 23, "base_ms": 700, "cap_ms": 9000, "attempts": 4}
 					rwant = map[string]int64{"lease_ms": 24000, "heartbeat_ms": 6000, "jobs": 3}
 					dwant.Level = 4
 					dwant.MaxRecordBytes = 8192
 					dwant.SummaryInterval = 7 * time.Second
 					dwant.Burst = 3
+					dwant.TraceSampleRatio = 0.25
+					dwant.SlowQuery = 900 * time.Millisecond
+					dwant.TraceEndpoint = "http://otel-collector.observability:4317"
 				}
 				envs := configurationEnvironments(t, uniqueObjects(t, renderChart(t, helm, chart, values...)))
 				q, err := queueservice.ConfigFromEnv(envs["queue"])
@@ -183,6 +186,11 @@ func TestConfigurationOperationalProjectionUsesOwningParsers(t *testing.T) {
 					d, err := workload.DiagnosticConfigFromEnv(env.Getenv)
 					if err != nil {
 						t.Fatalf("%s: %v", role, err)
+					}
+					if !configured {
+						// The unconfigured trace ratio and slow-query threshold
+						// are defaults; no test pins them.
+						d.TraceSampleRatio, d.SlowQuery = dwant.TraceSampleRatio, dwant.SlowQuery
 					}
 					if err := requireProjection(d, dwant); err != nil {
 						t.Fatalf("%s: %v", role, err)
@@ -254,13 +262,16 @@ func checkTypeScriptProjection(t *testing.T, envs map[string]projectionEnv, conf
 	if err != nil {
 		t.Fatalf("actual TypeScript parsers: %v\n%s", err, output)
 	}
+	type diagnostics struct {
+		Level                                    string
+		MaxRecordBytes, SummaryIntervalMs, Burst int
+		TraceSampleRatio                         float64
+		TraceEndpoint                            string
+	}
 	var results []struct {
-		Role        string
-		OK          bool
-		Diagnostics struct {
-			Level                                    string
-			MaxRecordBytes, SummaryIntervalMs, Burst int
-		}
+		Role                                  string
+		OK                                    bool
+		Diagnostics                           diagnostics
 		DeploymentEnvironment, ServiceVersion string
 		DatabasePool                          map[string]int
 		Lifecycle                             map[string]int
@@ -277,19 +288,16 @@ func checkTypeScriptProjection(t *testing.T, envs map[string]projectionEnv, conf
 		if !result.OK {
 			t.Fatalf("%s actual startup parser rejected rendered config", result.Role)
 		}
-		want := struct {
-			Level                                    string
-			MaxRecordBytes, SummaryIntervalMs, Burst int
-		}{"info", 16384, 30000, 1}
+		got, want := result.Diagnostics, diagnostics{Level: "info", MaxRecordBytes: 16384, SummaryIntervalMs: 30000, Burst: 1}
 		environment, version := "local", "dev"
 		if configured {
-			want = struct {
-				Level                                    string
-				MaxRecordBytes, SummaryIntervalMs, Burst int
-			}{"warn", 8192, 7000, 3}
+			want = diagnostics{"warn", 8192, 7000, 3, 0.25, "http://otel-collector.observability:4317"}
 			environment, version = "projection-test", "projection-version"
+		} else {
+			// The unconfigured trace settings are defaults; no test pins them.
+			got.TraceSampleRatio, got.TraceEndpoint = 0, ""
 		}
-		if err := requireProjection(result.Diagnostics, want); err != nil {
+		if err := requireProjection(got, want); err != nil {
 			t.Fatalf("%s: %v", result.Role, err)
 		}
 		if result.DeploymentEnvironment != environment || result.ServiceVersion != version {
@@ -537,7 +545,7 @@ func TestConfigurationInventoryHasCurrentOwnerSources(t *testing.T) {
 		_ = json.Unmarshal(family["sources"], &sourcePaths)
 		_ = json.Unmarshal(family["environment_keys"], &declaredKeys)
 		actualKeys := map[string]bool{}
-		pattern := regexp.MustCompile(`\b(?:TETRAL_[A-Z0-9_]+|ENGINE_[A-Z0-9_]+|DAYTONA_[A-Z0-9_]+)\b`)
+		pattern := regexp.MustCompile(`\b(?:TETRAL_[A-Z0-9_]+|ENGINE_[A-Z0-9_]+|DAYTONA_[A-Z0-9_]+|OTEL_[A-Z0-9_]+)\b`)
 		for _, path := range sourcePaths {
 			source, err := os.ReadFile(filepath.Join(root, path))
 			if err != nil {
@@ -572,7 +580,7 @@ func TestConfigurationInventoryHasCurrentOwnerSources(t *testing.T) {
 			}
 		}
 	}
-	expected := strings.Fields("go-database-pool bun-database-pool resource-metadata diagnostics auth-listeners-and-exchange internal-authentication runtime-process-custody job-runner bridge queue cleanup sandbox blob-transport provider-gateway mcp-connector runtime-pod runtime-bridge-rpc-deadlines event-stream git-proxy web-connector api-and-bootstrap kubernetes-visibility runtime-installed-configuration domain-protocol-storage deployment-policy build-release-verification documentation-workflow preview-broker transport-security")
+	expected := strings.Fields("go-database-pool bun-database-pool resource-metadata diagnostics auth-listeners-and-exchange internal-authentication runtime-process-custody job-runner bridge queue cleanup sandbox computer-hub blob-transport provider-gateway mcp-connector runtime-pod runtime-bridge-rpc-deadlines event-stream git-proxy web-connector api-and-bootstrap kubernetes-visibility runtime-installed-configuration domain-protocol-storage deployment-policy build-release-verification documentation-workflow preview-broker transport-security")
 	if catalog.SchemaVersion != 1 || len(seen) != len(expected) {
 		t.Fatal("configuration semantic coverage differs")
 	}
@@ -606,7 +614,7 @@ func checkedConfigurationDefaults(t *testing.T, families []map[string]json.RawMe
 	}
 	expected := map[string]map[string]any{
 		"go-database-pool":        {"max_open": pool.MaxOpenConns, "max_idle": pool.MaxIdleConns, "max_lifetime": pool.ConnMaxLifetime.String(), "max_idle_time": pool.ConnMaxIdleTime.String(), "statement_timeout": pool.StatementTimeout.String()},
-		"diagnostics":             {"level": strings.ToLower(diagnostic.Level.String()), "max_record_bytes": diagnostic.MaxRecordBytes, "summary_interval_ms": diagnostic.SummaryInterval.Milliseconds(), "burst": diagnostic.Burst},
+		"diagnostics":             {"level": strings.ToLower(diagnostic.Level.String()), "max_record_bytes": diagnostic.MaxRecordBytes, "summary_interval_ms": diagnostic.SummaryInterval.Milliseconds(), "burst": diagnostic.Burst, "trace_sample_ratio": diagnostic.TraceSampleRatio, "slow_query_ms": diagnostic.SlowQuery.Milliseconds(), "otlp_endpoint": diagnostic.TraceEndpoint},
 		"runtime-process-custody": {"registration_ms": process.RegistrationTimeout.Milliseconds(), "report_timeout_ms": process.ReportTimeout.Milliseconds(), "report_interval_ms": process.ReportInterval.Milliseconds(), "freshness_ms": process.Freshness.Milliseconds()},
 		"queue":                   {"reclaim_interval_seconds": int64(q.LeaseReclaimInterval / time.Second), "reclaim_limit": q.LeaseReclaimBatchLimit, "retry_base_ms": q.RetryBaseDelay.Milliseconds(), "retry_cap_ms": q.RetryMaxDelay.Milliseconds(), "retry_max_attempts": q.RetryMaxAttempts, "drain_ms": q.DrainTimeout.Milliseconds(), "cancel_join_ms": q.CancelJoinTimeout.Milliseconds()},
 		"cleanup":                 {"claim_limit": c.ClaimLimit, "metrics_export_timeout": c.MetricsExportTimeout.String()},

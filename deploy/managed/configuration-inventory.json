@@ -108,24 +108,31 @@
         "internal/ts-observability/src/config.ts"
       ],
       "environment_keys": [
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "TETRAL_DB_SLOW_QUERY_MS",
         "TETRAL_LOG_BURST",
         "TETRAL_LOG_LEVEL",
         "TETRAL_LOG_MAX_RECORD_BYTES",
-        "TETRAL_LOG_SUMMARY_INTERVAL_MS"
+        "TETRAL_LOG_SUMMARY_INTERVAL_MS",
+        "TETRAL_TRACE_SAMPLE_RATIO"
       ],
       "defaults": {
         "level": "info",
         "max_record_bytes": 16384,
         "summary_interval_ms": 30000,
-        "burst": 1
+        "burst": 1,
+        "trace_sample_ratio": 1.0,
+        "slow_query_ms": 250,
+        "otlp_endpoint": ""
       },
-      "units": "severity, bytes, milliseconds, records per event/reason/window",
-      "unset_zero": "Empty/unset defaults; zero invalid.",
-      "constraints": "Canonical integers; bytes 1024..65536, interval 100..3600000, burst 1..1000. Fixed 64 Go queue/256 limiter states, TS 65536 buffer remain implementation bounds.",
-      "projection": "observability.logLevel/logMaxRecordBytes/logSummaryIntervalMs/logBurst; common helper projects every application container.",
+      "units": "severity, bytes, milliseconds, records per event/reason/window, root sampling ratio, OTLP/gRPC endpoint URL",
+      "unset_zero": "Empty/unset defaults; zero invalid except a 0 sampling ratio, which samples no new trace; an empty endpoint exports no trace.",
+      "constraints": "Canonical integers; bytes 1024..65536, interval 100..3600000, burst 1..1000, slow query positive integer milliseconds: Go/Helm at most 9223372036854 (duration representation), TypeScript at most 9007199254740991 (safe integer); warning threshold only, not a query deadline. Sampling ratio a plain decimal 0..1. Fixed 64 Go queue/256 limiter states, TS 65536 buffer remain implementation bounds.",
+      "projection": "observability.logLevel/logMaxRecordBytes/logSummaryIntervalMs/logBurst/traceSampleRatio/slowQueryMs/otlpEndpoint; common helper projects every application container. otlpPeers/otlpPort and metricsScrapePeers open the workload NetworkPolicy paths; serviceMonitor.enabled renders one ServiceMonitor per metrics Service.",
       "proofs": [
         "internal/workload/diagnostics_test.go",
-        "deploy/helm/configuration_projection_test.go"
+        "deploy/helm/configuration_projection_test.go",
+        "deploy/helm/observability_test.go"
       ]
     },
     {
@@ -501,6 +508,48 @@
       ]
     },
     {
+      "id": "computer-hub",
+      "owner": "services/computer-hub",
+      "sources": [
+        "services/computer-hub/config.go",
+        "services/computer-hub/cmd/tetral-computer-hub/main.go"
+      ],
+      "environment_keys": [
+        "TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64",
+        "TETRAL_COMPUTER_HUB_HTTP_ADDR",
+        "TETRAL_COMPUTER_HUB_MAX_CREDENTIAL_LIFETIME",
+        "TETRAL_COMPUTER_HUB_METRICS_ADDR",
+        "TETRAL_COMPUTER_HUB_MIN_CLI_VERSION",
+        "TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY",
+        "TETRAL_COMPUTER_HUB_POD_NAME",
+        "TETRAL_COMPUTER_HUB_RECOMMENDED_CLI_VERSION",
+        "TETRAL_COMPUTER_HUB_STREAM_DRAIN_WINDOW",
+        "TETRAL_COMPUTER_HUB_STREAM_MAX_AGE",
+        "TETRAL_DATABASE_TLS_CA_PATH",
+        "TETRAL_DATABASE_TLS_SERVER_NAME",
+        "TETRAL_DATABASE_URL"
+      ],
+      "defaults": {
+        "http_addr": ":8080",
+        "metrics_addr": ":8081",
+        "shutdown_timeout": "10s",
+        "max_credential_lifetime": "720h",
+        "min_cli_version": "0.0.0",
+        "recommended_cli_version": "0.0.0",
+        "stream_max_age": "30m",
+        "stream_drain_window": "10s"
+      },
+      "units": "listen addresses, Go durations, semantic versions",
+      "unset_zero": "Whitespace empty addresses, an empty maximum credential lifetime, empty CLI versions and an empty stream age or drain window default; database DSN, principal key, page token key and pod name required.",
+      "constraints": "Metrics address differs from the public address; the principal key is a base64 Ed25519 public key; the maximum credential lifetime is a positive Go duration; the page token key is 32 bytes as 64 hexadecimal characters; both CLI versions are full semantic versions without a v prefix and the recommended one is not lower than the minimum; the pod name has 1 to 253 characters; the stream age is a positive Go duration and the drain window one of at most 15s; blob settings pass blob production readiness.",
+      "projection": "Fixed ports 8080/8081, computer-hub-url DSN key of the database Secret, blob Secret keys, the page-token-key of the Secret secrets.computerHubPageToken names, computerHub.autoscaling.minReplicas, maxReplicas and targetOpenStreamsPerPod (default 2, 10 and 1000) of its HorizontalPodAutoscaler, computerHub.maxCredentialLifetime (default 720h), computerHub.minCLIVersion and computerHub.recommendedCLIVersion (default 0.0.0 each), computerHub.streamMaxAge (default 30m) and computerHub.streamDrainWindow (default 10s), and the pod name from the downward API; no other hub setting is chart-owned.",
+      "proofs": [
+        "services/computer-hub/config_test.go",
+        "deploy/helm/configuration_projection_test.go",
+        "deploy/kubernetes/manifest_test.go"
+      ]
+    },
+    {
       "id": "blob-transport",
       "owner": "internal/blob",
       "sources": [
@@ -535,6 +584,7 @@
       ],
       "environment_keys": [
         "ENGINE_VAULT_KEY",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
         "TETRAL_BRIDGE_API_GRPC_ADDR",
         "TETRAL_DATABASE_POOL_CONNECTION_TIMEOUT_SECONDS",
         "TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS",
@@ -544,6 +594,7 @@
         "TETRAL_DATABASE_TLS_CA_PATH",
         "TETRAL_DATABASE_TLS_SERVER_NAME",
         "TETRAL_DATABASE_URL",
+        "TETRAL_DB_SLOW_QUERY_MS",
         "TETRAL_DEPLOYMENT_ENVIRONMENT",
         "TETRAL_DRAIN_TIMEOUT_MS",
         "TETRAL_GATEWAY_MAX_CONCURRENT_TURNS",
@@ -558,7 +609,8 @@
         "TETRAL_PROVIDER_GATEWAY_HTTP_ADDR",
         "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY",
         "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS",
-        "TETRAL_SERVICE_VERSION"
+        "TETRAL_SERVICE_VERSION",
+        "TETRAL_TRACE_SAMPLE_RATIO"
       ],
       "defaults": {
         "drain_ms": 30000,
@@ -644,7 +696,9 @@
         "services/agent-runtime/packages/runtime-pod/src/config.ts"
       ],
       "environment_keys": [
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
         "TETRAL_BRIDGE_API_GRPC_ADDR",
+        "TETRAL_DB_SLOW_QUERY_MS",
         "TETRAL_DEPLOYMENT_ENVIRONMENT",
         "TETRAL_GATEWAY_GRPC_ADDR",
         "TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS",
@@ -676,6 +730,7 @@
         "TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS",
         "TETRAL_RUNTIME_SKILL_GUIDANCE_DESCRIPTION_BUDGET_BYTES",
         "TETRAL_SERVICE_VERSION",
+        "TETRAL_TRACE_SAMPLE_RATIO",
         "TETRAL_TRANSPORT_PROFILE",
         "TETRAL_WEB_CONNECTOR_GRPC_ADDR"
       ],

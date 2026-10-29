@@ -1,4 +1,4 @@
-import { diagnosticMetricsText } from "@tetral/ts-observability";
+import { completeServiceColdStart, diagnosticMetricsText, endServiceColdStartPhase } from "@tetral/ts-observability";
 /**
  * @packageDocumentation
  *
@@ -115,11 +115,13 @@ export function createProviderGatewayApp(options: ProviderGatewayAppOptions): Pr
       try {
         await options.bootstrap?.();
         await options.previewPublisher?.start();
+        endServiceColdStartPhase("dependencies");
         causeCategory = "listener";
         grpcServer = createGatewayGrpcServer(service);
         boundGrpcPort = await grpcServer.bind(options.config.grpcBindAddress);
         httpServer = createGatewayHttpServer(options.config.httpBindAddress, state);
         readyFlag = true;
+        completeServiceColdStart();
         logWorkloadStarted(options.logger);
       } catch {
         readyFlag = false;

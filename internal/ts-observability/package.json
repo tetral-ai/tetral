@@ -6,6 +6,29 @@
   "packageManager": "bun@1.3.14",
   "exports": {
     ".": "./src/index.ts",
-    "./test-support/executable-shutdown": "./test-support/executable-shutdown.ts"
+    "./effect": "./src/effect.ts",
+    "./test-support/executable-shutdown": "./test-support/executable-shutdown.ts",
+    "./test-support/handled-failure-record.json": "./test-support/handled-failure-record.json",
+    "./test-support/recording-telemetry": "./test-support/recording-telemetry.ts"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/context-async-hooks": "2.12.0",
+    "@opentelemetry/exporter-trace-otlp-grpc": "0.223.0",
+    "@opentelemetry/resources": "2.12.0",
+    "@opentelemetry/sdk-trace-base": "2.12.0"
+  },
+  "peerDependencies": {
+    "@effect/opentelemetry": "4.0.0-beta.66",
+    "@grpc/grpc-js": "1.14.5",
+    "effect": "4.0.0-beta.66"
+  },
+  "peerDependenciesMeta": {
+    "@effect/opentelemetry": {
+      "optional": true
+    },
+    "effect": {
+      "optional": true
+    }
   }
 }

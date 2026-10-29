@@ -1,6 +1,7 @@
 package static
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -644,36 +646,185 @@ func TestFinalArchitectureTypeScriptProtocolGenerationIsServiceLocal(t *testing.
 	}
 }
 
+// Every service records through the shared library: internal/workload in
+// Go, @tetral/ts-observability in TypeScript. A record written around it
+// misses the declared tables, the field allowlist, redaction and the limiter.
 func TestProductionCodeDoesNotUseStandardLibraryPrintLogging(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
+	violations, err := printLoggingViolations(finalArchitectureEngineRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, violation := range violations {
+		t.Error(violation)
+	}
+}
+
+func TestPrintLoggingGuardNamesTheFileAndLineOfEachViolation(t *testing.T) {
+	slogCalls := []string{"Debug", "Info", "Warn", "Error", "DebugContext", "InfoContext", "WarnContext", "ErrorContext", "Log", "LogAttrs", "New", "NewTextHandler", "SetDefault"}
+	records := "package api\n\nimport \"log/slog\"\n\nfunc record() {\n"
+	var want []string
+	for i, name := range slogCalls {
+		records += "\tslog." + name + "(nil)\n"
+		want = append(want, fmt.Sprintf("services/api/record.go:%d calls slog.%s; record through internal/workload", 6+i, name))
+	}
+	records += "}\n"
+	root := t.TempDir()
+	for rel, body := range map[string]string{
+		"services/api/record.go":                     records,
+		"services/api/handler.go":                    "package api\n\nimport logging \"log/slog\"\n\nvar handler = logging.NewJSONHandler(nil, nil)\n",
+		"internal/workload/owner.go":                 "package workload\n\nimport (\n\t\"fmt\"\n\t\"log/slog\"\n)\n\nfunc install() {\n\tslog.SetDefault(nil)\n\tfmt.Println(\"installed\")\n}\n",
+		"integration/harness.go":                     "package integration\n\nimport (\n\t\"fmt\"\n\t\"log/slog\"\n)\n\nfunc trace() {\n\tslog.Info(\"harness\")\n\tfmt.Println(\"harness\")\n}\n",
+		"services/queue/print.go":                    "package queue\n\nimport \"fmt\"\n\nfunc report() {\n\tfmt.Print(\"a\")\n\tfmt.Printf(\"%s\", \"b\")\n\tfmt.Println(\"done\")\n}\n",
+		"internal/testinfra/cmd/tool/main.go":        "package main\n\nimport (\n\t\"fmt\"\n\t\"log/slog\"\n)\n\nfunc main() {\n\tfmt.Println(\"plan\")\n\tslog.Info(\"plan\")\n}\n",
+		"services/gateway/packages/x/src/service.ts": "export function run(): void {\n  console.error(\"failed\");\n}\n",
+		"services/gateway/packages/x/test/a.test.ts": "console.log(\"test output\");\n",
+		"internal/ts-observability/src/sink.ts":      "console.warn(\"library\");\n",
+	} {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	violations, err := printLoggingViolations(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = append(want,
+		"services/api/handler.go:5 calls slog.NewJSONHandler; record through internal/workload",
+		"integration/harness.go:10 calls fmt.Println; record through internal/workload",
+		"internal/workload/owner.go:10 calls fmt.Println; record through internal/workload",
+		"internal/testinfra/cmd/tool/main.go:10 calls slog.Info; record through internal/workload",
+		"services/gateway/packages/x/src/service.ts:2 calls console; record through @tetral/ts-observability",
+		"services/queue/print.go:6 calls fmt.Print; record through internal/workload",
+		"services/queue/print.go:7 calls fmt.Printf; record through internal/workload",
+		"services/queue/print.go:8 calls fmt.Println; record through internal/workload",
+	)
+	slices.Sort(violations)
+	slices.Sort(want)
+	if !slices.Equal(violations, want) {
+		t.Fatalf("violations = %q; want %q", violations, want)
+	}
+}
+
+func printLoggingViolations(engineRoot string) ([]string, error) {
 	forbidden := []string{"log.Print(", "log.Printf(", "log.Println(", "log.Fatalf("}
-	if err := filepath.WalkDir(engineRoot, func(path string, entry os.DirEntry, err error) error {
+	packageLevelSlog := regexp.MustCompile(`^(Debug|Info|Warn|Error|DebugContext|InfoContext|WarnContext|ErrorContext|Log|LogAttrs|New|New[A-Za-z]*Handler|SetDefault)$`)
+	printCall := regexp.MustCompile(`^Print(f|ln)?$`)
+	consoleCall := regexp.MustCompile(`\bconsole\.[A-Za-z]+\(`)
+	var violations []string
+	err := filepath.WalkDir(engineRoot, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
+		rel, err := filepath.Rel(engineRoot, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
 		if entry.IsDir() {
-			if entry.Name() == "vendor" || entry.Name() == "node_modules" {
+			switch {
+			case entry.Name() == "vendor" || entry.Name() == "node_modules" || entry.Name() == ".git", rel == "cli", rel == "internal/ts-observability":
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		body, err := os.ReadFile(path) //nolint:gosec // G304: path comes from repository-local WalkDir in a static test.
-		if err != nil {
-			return err
-		}
-		source := string(body)
-		for _, token := range forbidden {
-			if strings.Contains(source, token) {
-				t.Fatalf("%s contains forbidden production logging token %q", path, token)
+		switch {
+		case strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go"):
+			body, err := os.ReadFile(path) //nolint:gosec // G304: path comes from repository-local WalkDir in a static test.
+			if err != nil {
+				return err
+			}
+			for _, call := range forbidden {
+				if strings.Contains(string(body), call) {
+					violations = append(violations, rel+" contains forbidden production logging token "+strconv.Quote(call))
+				}
+			}
+			// internal/workload owns slog and integration/ is test support; the
+			// commands under internal/testinfra are developer tools whose stdout
+			// is their interface, not service records.
+			checked := map[string]bool{
+				"log/slog": !strings.HasPrefix(rel, "internal/workload/") && !strings.HasPrefix(rel, "integration/"),
+				"fmt":      !strings.HasPrefix(rel, "internal/testinfra/"),
+			}
+			fileSet := token.NewFileSet()
+			file, err := parser.ParseFile(fileSet, path, body, 0)
+			if err != nil {
+				return err
+			}
+			importNames := map[string]string{}
+			for _, imported := range file.Imports {
+				importPath := strings.Trim(imported.Path.Value, `"`)
+				if !checked[importPath] {
+					continue
+				}
+				name := filepath.Base(importPath)
+				if imported.Name != nil {
+					name = imported.Name.Name
+				}
+				importNames[name] = importPath
+			}
+			if len(importNames) == 0 {
+				return nil
+			}
+			ast.Inspect(file, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				receiver, ok := selector.X.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				switch importNames[receiver.Name] {
+				case "log/slog":
+					if packageLevelSlog.MatchString(selector.Sel.Name) {
+						violations = append(violations, fmt.Sprintf("%s:%d calls slog.%s; record through internal/workload", rel, fileSet.Position(call.Pos()).Line, selector.Sel.Name))
+					}
+				case "fmt":
+					if printCall.MatchString(selector.Sel.Name) {
+						violations = append(violations, fmt.Sprintf("%s:%d calls fmt.%s; record through internal/workload", rel, fileSet.Position(call.Pos()).Line, selector.Sel.Name))
+					}
+				}
+				return true
+			})
+		case strings.HasSuffix(path, ".ts") && typeScriptServiceSource(rel):
+			body, err := os.ReadFile(path) //nolint:gosec // G304: path comes from repository-local WalkDir in a static test.
+			if err != nil {
+				return err
+			}
+			for index, line := range strings.Split(string(body), "\n") {
+				if consoleCall.MatchString(line) {
+					violations = append(violations, fmt.Sprintf("%s:%d calls console; record through @tetral/ts-observability", rel, index+1))
+				}
 			}
 		}
 		return nil
-	}); err != nil {
-		t.Fatal(err)
+	})
+	return violations, err
+}
+
+// typeScriptServiceSource reports production TypeScript of a service or of a
+// shared TypeScript package, never a test or test support.
+func typeScriptServiceSource(rel string) bool {
+	if !strings.HasPrefix(rel, "services/") && !strings.HasPrefix(rel, "internal/ts-") {
+		return false
 	}
+	if strings.HasSuffix(rel, ".test.ts") || strings.HasSuffix(rel, ".d.ts") {
+		return false
+	}
+	for _, part := range strings.Split(rel, "/") {
+		if part == "test" || part == "tests" || part == "test-support" || part == "gen" {
+			return false
+		}
+	}
+	return true
 }
 
 func TestProductionCommandsDoNotEmitPlainStartupStderr(t *testing.T) {

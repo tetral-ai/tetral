@@ -348,6 +348,69 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  name: computer-hub
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: computer-hub
+    app.kubernetes.io/component: computer-hub
+    app.kubernetes.io/part-of: tetral
+  annotations:
+    tetral.ai/egress-intent: "blob.example.internal"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: computer-hub
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              tetral.ai/network-role: public-ingress
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: tetral
+      ports:
+        - protocol: TCP
+          port: 8081
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tetral-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
   name: event-stream
   namespace: tetral-system
   labels:
@@ -1171,6 +1234,17 @@ automountServiceAccountToken: false
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  name: computer-hub
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: computer-hub
+    app.kubernetes.io/component: computer-hub
+    app.kubernetes.io/part-of: tetral
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
   name: event-stream
   namespace: tetral-system
   labels:
@@ -1305,7 +1379,7 @@ metadata:
   namespace: tetral-system
 data:
   status: "unresolved"
-  maximumOwnedPoolSlots: "780"
+  maximumOwnedPoolSlots: "1000"
   operatorReserveSlots: "8"
   availableServerConnections: "unknown"
   externalConsumerSlots: "unknown"
@@ -1738,6 +1812,43 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  name: computer-hub
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: computer-hub
+    app.kubernetes.io/component: computer-hub
+    app.kubernetes.io/part-of: tetral
+    tetral.ai/exposure: public
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: computer-hub
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: computer-hub-metrics
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: computer-hub
+    app.kubernetes.io/component: computer-hub
+    app.kubernetes.io/part-of: tetral
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: computer-hub
+  ports:
+    - name: metrics
+      port: 8081
+      targetPort: metrics
+---
+apiVersion: v1
+kind: Service
+metadata:
   name: event-stream
   namespace: tetral-system
   labels:
@@ -1954,6 +2065,8 @@ spec:
             - bun
             - /app/dist/command.js
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -1962,6 +2075,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_RUNTIME_DRAIN_TIMEOUT_MS
               value: "60000"
             - name: TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS
@@ -2122,6 +2237,8 @@ spec:
           command:
             - /usr/local/bin/tetral-api
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -2130,6 +2247,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -2312,6 +2431,8 @@ spec:
           command:
             - /usr/local/bin/tetral-auth
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -2320,6 +2441,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -2486,6 +2609,8 @@ spec:
           command:
             - /usr/local/bin/bridge-api
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -2494,6 +2619,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -2643,6 +2770,186 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  name: computer-hub
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: computer-hub
+    app.kubernetes.io/component: computer-hub
+    app.kubernetes.io/part-of: tetral
+spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: computer-hub
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: computer-hub
+        app.kubernetes.io/component: computer-hub
+        app.kubernetes.io/part-of: tetral
+    spec:
+      serviceAccountName: computer-hub
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: computer-hub
+          image: ghcr.io/tetral-ai/tetral:0.0.0-dev
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/tetral-computer-hub
+          env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
+            - name: TETRAL_DATABASE_TLS_CA_PATH
+              value: /var/run/tetral/store-trust/database-ca.crt
+            - name: TETRAL_DATABASE_TLS_SERVER_NAME
+              value: "tetral-postgres.tetral-system.svc.cluster.local"
+            - name: TETRAL_DB_MAX_OPEN_CONNS
+              value: "20"
+            - name: TETRAL_BLOB_TLS_CA_PATH
+              value: /var/run/tetral/store-trust/object-store-ca.crt
+            - name: TETRAL_BLOB_TLS_SERVER_NAME
+              value: "tetral-object-store.tetral-system.svc.cluster.local"
+            - name: TETRAL_HTTP_TRANSPORT
+              value: "native-mtls"
+            - name: TETRAL_HTTP_TLS_CA_PATH
+              value: /var/run/tetral/edge-trust/ca.crt
+            - name: TETRAL_HTTP_TLS_CERT_PATH
+              value: /var/run/tetral/edge-leaf/tls.crt
+            - name: TETRAL_HTTP_TLS_KEY_PATH
+              value: /var/run/tetral/edge-leaf/tls.key
+            - name: TETRAL_HTTP_TLS_EDGE_CLIENT_URI
+              value: "spiffe://cluster.local/ns/envoy-gateway-system/sa/tetral-public-edge"
+            - name: TETRAL_COMPUTER_HUB_HTTP_ADDR
+              value: ":8080"
+            - name: TETRAL_COMPUTER_HUB_METRICS_ADDR
+              value: ":8081"
+            - name: TETRAL_COMPUTER_HUB_MAX_CREDENTIAL_LIFETIME
+              value: "720h"
+            - name: TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: "computer-hub-page-token"
+                  key: page-token-key
+            - name: TETRAL_COMPUTER_HUB_MIN_CLI_VERSION
+              value: "0.0.0"
+            - name: TETRAL_COMPUTER_HUB_RECOMMENDED_CLI_VERSION
+              value: "0.0.0"
+            - name: TETRAL_COMPUTER_HUB_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: TETRAL_COMPUTER_HUB_STREAM_MAX_AGE
+              value: "30m"
+            - name: TETRAL_COMPUTER_HUB_STREAM_DRAIN_WINDOW
+              value: "10s"
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              value: "local"
+            - name: TETRAL_SERVICE_VERSION
+              value: "dev"
+            - name: TETRAL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "tetral-database"
+                  key: computer-hub-url
+            - name: TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64
+              valueFrom:
+                secretKeyRef:
+                  name: "auth-internal-principal"
+                  key: public_key_b64
+            - name: TETRAL_BLOB_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: "tetral-blob"
+                  key: endpoint
+            - name: TETRAL_BLOB_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: "tetral-blob"
+                  key: region
+            - name: TETRAL_BLOB_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: "tetral-blob"
+                  key: bucket
+            - name: TETRAL_BLOB_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: "tetral-blob"
+                  key: access-key
+            - name: TETRAL_BLOB_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: "tetral-blob"
+                  key: secret-key
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+          resources:
+
+            limits:
+              cpu: 500m
+              ephemeral-storage: 512Mi
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              ephemeral-storage: 64Mi
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: edge-trust
+              mountPath: /var/run/tetral/edge-trust
+              readOnly: true
+            - name: edge-leaf
+              mountPath: /var/run/tetral/edge-leaf
+              readOnly: true
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
+      volumes:
+        - name: edge-trust
+          configMap:
+            name: "tetral-edge-native-trust"
+        - name: edge-leaf
+          secret:
+            secretName: "tetral-computer-hub-edge-tls"
+        - name: store-trust
+          configMap:
+            name: "tetral-store-trust"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
   name: event-stream
   namespace: tetral-system
   labels:
@@ -2680,6 +2987,8 @@ spec:
           command:
             - /usr/local/bin/event-stream
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -2688,6 +2997,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT
               value: "local"
             - name: TETRAL_SERVICE_VERSION
@@ -2879,6 +3190,8 @@ spec:
           command:
             - /usr/local/bin/git-proxy
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -2887,6 +3200,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -3017,6 +3332,8 @@ spec:
           command:
             - /usr/local/bin/job-runner
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -3025,6 +3342,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -3235,6 +3554,8 @@ spec:
             - bun
             - /app/dist/mcp-connector/src-command.js
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -3243,6 +3564,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -3403,6 +3726,8 @@ spec:
             - bun
             - /app/dist/provider-gateway/src-command.js
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -3411,6 +3736,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -3625,6 +3952,8 @@ spec:
           command:
             - /usr/local/bin/tetral-queue
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -3633,6 +3962,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -3774,6 +4105,8 @@ spec:
           command:
             - /usr/local/bin/tetral-sandbox
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -3782,6 +4115,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -4052,6 +4387,8 @@ spec:
           command:
             - /usr/local/bin/web-connector
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -4060,6 +4397,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_BLOB_TLS_CA_PATH
               value: /var/run/tetral/store-trust/object-store-ca.crt
             - name: TETRAL_BLOB_TLS_SERVER_NAME
@@ -4189,6 +4528,33 @@ spec:
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
+  name: computer-hub
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: computer-hub
+    app.kubernetes.io/component: computer-hub
+    app.kubernetes.io/part-of: tetral
+  annotations:
+    tetral.ai/hpa-metric-source: "prometheus-adapter: computerhub_open_streams"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: computer-hub
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: computerhub_open_streams
+        target:
+          type: AverageValue
+          averageValue: "1000"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
   name: git-proxy
   namespace: tetral-system
   labels:
@@ -4286,6 +4652,8 @@ spec:
               command:
                 - /usr/local/bin/tetral-cleanup
               env:
+                - name: TETRAL_DB_SLOW_QUERY_MS
+                  value: "250"
                 - name: TETRAL_LOG_BURST
                   value: "1"
                 - name: TETRAL_LOG_LEVEL
@@ -4294,6 +4662,8 @@ spec:
                   value: "16384"
                 - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
                   value: "30000"
+                - name: TETRAL_TRACE_SAMPLE_RATIO
+                  value: "1.0"
                 - name: TETRAL_DEPLOYMENT_ENVIRONMENT
                   value: "local"
                 - name: TETRAL_SERVICE_VERSION

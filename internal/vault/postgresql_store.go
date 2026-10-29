@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/storage"
+	"github.com/tetral-ai/tetral/internal/workload"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -1306,8 +1306,7 @@ func normalizeProviderOAuthAuth(auth CredentialAuth) (CredentialAuth, error) {
 }
 
 func providerOAuthValidationError(providerID string, member string, message string) error {
-	slog.Debug("provider credential rejected",
-		"event", "provider_credential_rejected",
+	workload.CurrentTelemetry().Logger().Debug("provider_credential_rejected",
 		"event.kind", "provider_credential_rejected",
 		"component", "vault",
 		"provider.id", providerID,

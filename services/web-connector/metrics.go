@@ -43,7 +43,7 @@ func (m *Metrics) Handler() http.Handler {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		var b strings.Builder
-		b.WriteString(m.GRPC.Operations.Text())
+		b.WriteString(m.GRPC.Text())
 		b.WriteString("# HELP web_requests_total Web requests.\n# TYPE web_requests_total counter\n")
 		for _, key := range sortedMetricKeys(m.requests) {
 			fmt.Fprintf(&b, "web_requests_total{operation=%q,status=%q} %d\n", key.first, key.second, m.requests[key])

@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"math"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -14,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // DiagnosticConfig is validated once at startup; changing it requires restart.
@@ -22,10 +26,14 @@ type DiagnosticConfig struct {
 	MaxRecordBytes  int
 	SummaryInterval time.Duration
 	Burst           int
+	// TraceEndpoint is the OTLP/gRPC collector; empty exports no span.
+	TraceEndpoint    string
+	TraceSampleRatio float64
+	SlowQuery        time.Duration
 }
 
 func DefaultDiagnosticConfig() DiagnosticConfig {
-	return DiagnosticConfig{slog.LevelInfo, 16384, 30 * time.Second, 1}
+	return DiagnosticConfig{Level: slog.LevelInfo, MaxRecordBytes: 16384, SummaryInterval: 30 * time.Second, Burst: 1, TraceSampleRatio: 1, SlowQuery: defaultSlowQuery}
 }
 func DiagnosticConfigFromEnv(getenv func(string) string) (DiagnosticConfig, error) {
 	cfg := DefaultDiagnosticConfig()
@@ -65,8 +73,36 @@ func DiagnosticConfigFromEnv(getenv func(string) string) (DiagnosticConfig, erro
 		}
 		cfg.SummaryInterval = time.Duration(n) * time.Millisecond
 	}
+	if raw := getenv("TETRAL_TRACE_SAMPLE_RATIO"); raw != "" {
+		ratio, err := strconv.ParseFloat(raw, 64)
+		if err != nil || !traceSampleRatioPattern.MatchString(raw) || ratio < 0 || ratio > 1 {
+			return cfg, NewConfigError("TETRAL_TRACE_SAMPLE_RATIO must be a decimal from 0 through 1")
+		}
+		cfg.TraceSampleRatio = ratio
+	}
+	if raw := getenv("TETRAL_DB_SLOW_QUERY_MS"); raw != "" {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		// This threshold is not a query deadline. Its only upper bound is
+		// representability when converting integer milliseconds to duration.
+		if err != nil || strconv.FormatInt(n, 10) != raw || n < 1 || n > math.MaxInt64/int64(time.Millisecond) {
+			return cfg, NewConfigError("TETRAL_DB_SLOW_QUERY_MS must be a positive integer representable as a millisecond duration")
+		}
+		cfg.SlowQuery = time.Duration(n) * time.Millisecond
+	}
+	if raw := getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); raw != "" {
+		endpoint, err := url.Parse(raw)
+		if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" {
+			return cfg, NewConfigError("OTEL_EXPORTER_OTLP_ENDPOINT must be an http or https URL")
+		}
+		cfg.TraceEndpoint = raw
+	}
 	return cfg, nil
 }
+
+var traceSampleRatioPattern = regexp.MustCompile(`^(0|1)(\.[0-9]+)?$`)
+
+// recordTimeLayout writes UTC with exactly six fractional digits.
+const recordTimeLayout = "2006-01-02T15:04:05.000000Z"
 
 const diagnosticQueueCapacity = 64
 const diagnosticLimiterCapacity = 256
@@ -94,11 +130,12 @@ type diagnosticWindow struct {
 	sample              map[string]any
 }
 type diagnosticState struct {
-	mu      sync.Mutex
-	cfg     DiagnosticConfig
-	windows map[string]*diagnosticWindow
-	counts  diagnosticCounters
-	clock   func() time.Time
+	mu        sync.Mutex
+	cfg       DiagnosticConfig
+	windows   map[string]*diagnosticWindow
+	counts    diagnosticCounters
+	clock     func() time.Time
+	telemetry *Telemetry
 }
 type diagnosticWriter interface{ Write([]byte) (int, error) }
 
@@ -107,13 +144,15 @@ type diagnosticWriter interface{ Write([]byte) (int, error) }
 // canceled. If a write never returns, only that single worker remains blocked;
 // it cannot retain further per-record workers or unbounded queued data.
 type ProcessLogger struct {
-	Logger  *slog.Logger
-	state   *diagnosticState
-	queue   chan []byte
-	done    chan struct{}
-	mu      sync.Mutex
-	closed  bool
-	discard atomic.Bool
+	Logger *slog.Logger
+	// Telemetry is the process's recording owner, installed with Logger.
+	Telemetry *Telemetry
+	state     *diagnosticState
+	queue     chan []byte
+	done      chan struct{}
+	mu        sync.Mutex
+	closed    bool
+	discard   atomic.Bool
 }
 
 func NewProcessLogger(writer io.Writer, service, environment, version string, cfg DiagnosticConfig) *ProcessLogger {
@@ -122,6 +161,16 @@ func NewProcessLogger(writer io.Writer, service, environment, version string, cf
 	}
 	owner := &ProcessLogger{state: newDiagnosticState(cfg), queue: make(chan []byte, diagnosticQueueCapacity), done: make(chan struct{})}
 	owner.Logger = newDiagnosticLogger(owner, service, environment, version, owner.state)
+	options := TelemetryOptions{Service: service, Environment: environment, Version: version, Logger: owner.Logger, SampleRatio: cfg.TraceSampleRatio, SlowQuery: cfg.SlowQuery}
+	if cfg.TraceEndpoint != "" {
+		// The exporter fails only on options the configuration parse already
+		// refused, so a failure here keeps spans local instead of failing start.
+		if exporter, err := newOTLPExporter(cfg.TraceEndpoint); err == nil {
+			options.Exporter = exporter
+		}
+	}
+	owner.Telemetry = NewTelemetry(options)
+	owner.state.telemetry = owner.Telemetry
 	go func() {
 		defer close(owner.done)
 		ticker := time.NewTicker(cfg.SummaryInterval)
@@ -171,6 +220,7 @@ func (p *ProcessLogger) Close(ctx context.Context) {
 		ctx, cancel = context.WithTimeout(context.Background(), diagnosticCloseTimeout)
 		defer cancel()
 	}
+	p.Telemetry.Shutdown(ctx)
 	p.state.flush(p)
 	p.mu.Lock()
 	if !p.closed {
@@ -236,7 +286,7 @@ func (s *diagnosticState) summary(writer diagnosticWriter, w *diagnosticWindow) 
 	fields["suppressed.count"] = w.suppressed
 	fields["first_seen"] = w.first
 	fields["last_seen"] = w.last
-	fields["time"] = s.clock().UTC().Format(time.RFC3339Nano)
+	fields["time"] = s.clock().UTC().Format(recordTimeLayout)
 	s.encode(writer, fields)
 }
 func (s *diagnosticState) flush(writer diagnosticWriter) {
@@ -272,6 +322,11 @@ func (s *diagnosticState) emit(writer diagnosticWriter, level slog.Level, fields
 	resource, _ := fields["kubernetes.resource"].(string)
 	if resource != "pods" && resource != "endpointslices" {
 		resource = ""
+	}
+	if event == "pressure.rejecting_started" || event == "pressure.rejecting_ended" {
+		point, _ := fields["pressure.point"].(string)
+		cause, _ := fields["pressure.cause"].(string)
+		reason, resource = point, cause
 	}
 	key := event + "\x00" + reason + "\x00" + resource
 	w := s.windows[key]
@@ -395,9 +450,17 @@ func (h *diagnosticHandler) WithGroup(name string) slog.Handler {
 	}
 	return &next
 }
-func (h *diagnosticHandler) Handle(_ context.Context, r slog.Record) (err error) {
+
+// undeclaredEventPanic escapes the handler's recovery so that a test which
+// writes an undeclared event fails.
+type undeclaredEventPanic struct{ message any }
+
+func (h *diagnosticHandler) Handle(ctx context.Context, r slog.Record) (err error) {
 	defer func() {
-		if recover() != nil {
+		if recovered := recover(); recovered != nil {
+			if escaped, ok := recovered.(undeclaredEventPanic); ok {
+				panic(escaped.message)
+			}
 			h.state.counts.dropped.Add(1)
 		}
 	}()
@@ -432,10 +495,17 @@ func (h *diagnosticHandler) Handle(_ context.Context, r slog.Record) (err error)
 			fields[key] = value
 		}
 	}
+	for _, a := range ContextFields(ctx) {
+		add(a, "")
+	}
 	for _, a := range h.attrs {
 		add(a, "")
 	}
 	r.Attrs(func(a slog.Attr) bool { add(a, h.group); return visited < 64 })
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		fields["trace_id"] = sc.TraceID().String()
+		fields["span_id"] = sc.SpanID().String()
+	}
 	for key, value := range h.base {
 		fields[key] = value
 	}
@@ -448,9 +518,27 @@ func (h *diagnosticHandler) Handle(_ context.Context, r slog.Record) (err error)
 			}
 		}
 	}
+	service, _ := h.base["service.name"].(string)
+	if event != "diagnostic.invalid_event" && !eventDeclared(service, event) {
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					panic(undeclaredEventPanic{recovered})
+				}
+			}()
+			undeclared("event", event)
+		}()
+		fields["event.original"] = event
+		event = "diagnostic.invalid_event"
+	}
+	logType := "app"
+	if declared, ok := lookupEvent(service, event); ok && declared.LogType != "" {
+		logType = declared.LogType
+	}
+	fields["log.type"] = logType
 	fields["msg"] = event
 	fields["event"] = event
-	fields["time"] = r.Time.UTC().Format(time.RFC3339Nano)
+	fields["time"] = r.Time.UTC().Format(recordTimeLayout)
 	fields["level"] = r.Level.String()
 	if _, ok := fields["operation"]; !ok {
 		fields["operation"] = strings.Split(event, ".")[0]
@@ -473,7 +561,7 @@ func (h *diagnosticHandler) Handle(_ context.Context, r slog.Record) (err error)
 	return nil
 }
 
-var diagnosticSensitiveKey = regexp.MustCompile(`(?i)(^|[._-])(authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|body|content|prompt|reasoning|arguments|payload|stack|headers|sql|exception|tool_result|provider_response)([._-]|$)`)
+var diagnosticSensitiveKey = regexp.MustCompile(`(?i)(^|[._-])(authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|secret|password|engine[_-]?vault[_-]?key|body|content|prompt|reasoning|arguments|payload|stack|headers|sql|exception|tool_result|provider_response)([._-]|$)|^(authorizationToken|apiKey|accessToken|refreshToken|sessionToken|clientSecret|secretAccessKey|engineVaultKey)$`)
 var diagnosticSensitiveValue = regexp.MustCompile(`(?i)Bearer\s+\S+|(?:sk|ant|ghp|github)[-_][A-Za-z0-9._-]{8,}|(?:access_token|refresh_token|client_secret|token)=|https?://`)
 
 func boundedDiagnosticString(value string) string {
@@ -585,10 +673,18 @@ func safeDiagnosticEvent(event string) string {
 
 // InstallDefaultLogger gives legacy package-level diagnostics the process's owned sink.
 // Process composition installs it before constructing dependencies and restores after cleanup.
+// A logger that a ProcessLogger owns also installs that owner's Telemetry.
 func InstallDefaultLogger(logger *slog.Logger) func() {
 	previous := slog.Default()
 	slog.SetDefault(logger)
-	return func() { slog.SetDefault(previous) }
+	restoreTelemetry := func() {}
+	if h, ok := logger.Handler().(*diagnosticHandler); ok && h.state.telemetry != nil {
+		restoreTelemetry = InstallTelemetry(h.state.telemetry)
+	}
+	return func() {
+		slog.SetDefault(previous)
+		restoreTelemetry()
+	}
 }
 
 func (s *diagnosticState) flushExpired(writer diagnosticWriter) {

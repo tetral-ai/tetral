@@ -32,6 +32,7 @@ func run(ctx context.Context, env tetralqueue.Env) error {
 	defer diagnosticOwner.CloseWithBudget()
 	logger := diagnosticOwner.Logger
 	defer workload.InstallDefaultLogger(logger)()
+	coldStart := workload.BeginServiceColdStart(ctx)
 	if diagnosticErr != nil {
 		return workload.LogStartupFailure(logger, "queue", diagnosticErr)
 	}
@@ -40,6 +41,7 @@ func run(ctx context.Context, env tetralqueue.Env) error {
 		return workload.LogStartupFailure(logger, "queue", workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	workload.ConfigureProcessShutdown(ctx, cfg.DrainTimeout+cfg.CancelJoinTimeout, diagnosticOwner)
+	coldStart.Advance(ctx)
 	openResult, err := openDatabase(ctx)
 	if err != nil {
 		return workload.LogStartupFailure(logger, "queue", workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
@@ -56,8 +58,10 @@ func run(ctx context.Context, env tetralqueue.Env) error {
 		MaxDelay:    cfg.RetryMaxDelay,
 		MaxAttempts: cfg.RetryMaxAttempts,
 	})
+	store.ObserveQueueWaitIn(workload.CurrentTelemetry().Registry())
 	if err := store.VerifyReady(ctx); err != nil {
 		return workload.LogStartupFailure(logger, "queue", workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
+	coldStart.Advance(ctx)
 	return runQueueService(ctx, cfg, store, tetralqueue.RuntimeConfig{Listen: listenTCP, Logger: logger, DBStatsProvider: openResult.Client, MaintenanceStore: store})
 }

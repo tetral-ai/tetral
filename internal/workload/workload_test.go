@@ -54,8 +54,9 @@ func TestWorkloadHealthRouterServesRuntimeMetrics(t *testing.T) {
 
 func TestWorkloadHealthRouterServesServiceCollectors(t *testing.T) {
 	httpMetrics := workload.NewHTTPMetrics("bridge")
-	httpMetrics.ObserveHTTPRequest(http.MethodPost, http.StatusCreated, 1500*time.Millisecond)
+	httpMetrics.ObserveHTTPRoute("POST /v1/sessions", http.MethodPost, http.StatusCreated, 1500*time.Millisecond, false)
 	grpcMetrics := workload.NewGRPCMetrics("bridge")
+	grpcMetrics.SetMethods([]string{"/tetral.test.v1.Service/Call"})
 	grpcMetrics.ObserveGRPCRequest("/tetral.test.v1.Service/Call", "OK", 2*time.Second)
 	handler := workload.HealthRouter(workload.NewReadiness(),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
@@ -88,10 +89,10 @@ func TestWorkloadHealthRouterServesServiceCollectors(t *testing.T) {
 		`db_pool_in_use_connections{pool="runtime"} 2`,
 		`db_pool_wait_count_total{pool="runtime"} 7`,
 		`db_pool_wait_duration_seconds_total{pool="runtime"} 3`,
-		`http_request_duration_seconds_count{method="POST",status_code="201"} 1`,
-		`http_request_duration_seconds_sum{method="POST",status_code="201"} 1.5`,
-		`grpc_request_duration_seconds_count{grpc_code="OK",grpc_method="/tetral.test.v1.Service/Call"} 1`,
-		`grpc_request_duration_seconds_sum{grpc_code="OK",grpc_method="/tetral.test.v1.Service/Call"} 2`,
+		`http_server_request_duration_seconds_count{method="POST",route="POST /v1/sessions",service="bridge",status_class="2xx"} 1`,
+		`http_server_request_duration_seconds_sum{method="POST",route="POST /v1/sessions",service="bridge",status_class="2xx"} 1.5`,
+		`grpc_server_request_duration_seconds_count{code="OK",method="/tetral.test.v1.Service/Call",service="bridge"} 1`,
+		`grpc_server_request_duration_seconds_sum{code="OK",method="/tetral.test.v1.Service/Call",service="bridge"} 2`,
 		`queue_pending_jobs{kind="runtime_input"} 5`,
 		`tetral_metrics_collector_errors_total{collector="broken"} 1`,
 	} {
@@ -110,18 +111,14 @@ type fakeDBStatsProvider struct {
 
 func (p fakeDBStatsProvider) Stats() sql.DBStats { return p.stats }
 
-func TestWorkloadHealthRouterRecordsHTTPMetrics(t *testing.T) {
+func TestWorkloadHealthRouterObservesNoHealthOrMetricsRequest(t *testing.T) {
 	metrics := workload.NewHTTPMetrics("api")
-	handler := workload.HealthRouter(workload.NewReadiness(),
-		workload.WithHTTPMetrics(metrics),
-		workload.WithMetricsCollector("http", metrics.Collector()),
-	)
+	handler := workload.HealthRouter(workload.NewReadiness(), workload.WithMetricsCollector("http", metrics.Collector()))
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/health", nil))
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	body := recorder.Body.String()
-	if !strings.Contains(body, `http_request_duration_seconds_count{method="GET",status_code="200"} 1`) {
-		t.Fatalf("/metrics body missing health request count:\n%s", body)
+	if body := recorder.Body.String(); strings.Contains(body, "http_server_request_duration_seconds_count") {
+		t.Fatalf("/metrics observed a health or metrics request:\n%s", body)
 	}
 }
 

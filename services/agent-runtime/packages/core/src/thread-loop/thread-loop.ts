@@ -131,6 +131,7 @@ import type {
 	RuntimeMetricOutcome,
 	RuntimeMetricsSink,
 	RuntimeProviderStreamKind,
+	RuntimeToolPermitState,
 } from "../runtime/metrics.js";
 import { beginApprovalWaitObservation, NoopRuntimeMetricsSink, safeRuntimeMetricsSink } from "../runtime/metrics.js";
 import {
@@ -2844,14 +2845,21 @@ function withObservedToolPermit<A, E, R>(
 ): Effect.Effect<A, E, R> {
 	return Effect.suspend(() => {
 		const startedAt = options.runtime.monotonicMs();
+		const metrics = runtimeMetrics(options);
+		const toolCall = Symbol("tool-permit");
+		const recordPermit = (state: RuntimeToolPermitState) => metrics.recordToolPermit?.(toolCall, state) ?? Effect.void;
 		let admitted = false;
-		return session.toolCoordinator.withPermit(policy, Effect.sync(() => {
-			admitted = true;
-			recordOperationStage(options, session, "permit_wait", startedAt, "success");
-		}).pipe(Effect.andThen(effect))).pipe(Effect.onExit(exit => Effect.sync(() => {
-			if (!admitted)
-				recordOperationStage(options, session, "permit_wait", startedAt, Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause) ? "cancelled" : "error");
-		})));
+		// Queued inside the onExit scope, so every queued call also ends.
+		return recordPermit("queued").pipe(
+			Effect.andThen(session.toolCoordinator.withPermit(policy, recordPermit("started").pipe(Effect.andThen(Effect.sync(() => {
+				admitted = true;
+				recordOperationStage(options, session, "permit_wait", startedAt, "success");
+			})), Effect.andThen(effect)))),
+			Effect.onExit(exit => recordPermit("ended").pipe(Effect.andThen(Effect.sync(() => {
+				if (!admitted)
+					recordOperationStage(options, session, "permit_wait", startedAt, Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause) ? "cancelled" : "error");
+			})))),
+		);
 	});
 }
 

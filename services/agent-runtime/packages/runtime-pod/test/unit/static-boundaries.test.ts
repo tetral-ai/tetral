@@ -126,7 +126,7 @@ describe("Runtime Pod static boundaries", () => {
         violations.push(`${path}: zod import must use zod/v4`);
       }
       for (const specifier of importSpecifiers(text)) {
-        if (specifier.startsWith(".") && extname(specifier) !== ".js") {
+        if (specifier.startsWith(".") && extname(specifier) !== ".js" && extname(specifier) !== ".json") {
           violations.push(`${path}: relative import without .js suffix (${specifier})`);
         }
         if (specifier === "@grpc/grpc-js" && !text.includes("Server")) {

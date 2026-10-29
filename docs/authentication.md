@@ -118,6 +118,14 @@ Memory history records the actor that made each direct write or redaction:
 | Direct service bearer | `{"type":"service_account_actor","service_account_id":"<stable Engine identity ID>"}` |
 | Session runtime write | Existing `session_actor` attribution |
 
+Connection keys, which a CLI uses for its instance, are a separate credential
+class. A `/v1/client/*` route accepts only a connection key sent as
+`Authorization: Bearer tetral_ck_...`; an API key, an access token or no
+credential there returns `401` with the client error body
+`{"code":"credential_invalid","message":...}`. A connection key on any other
+route returns `401 authentication_error`, and no role, API key or access token
+carries a client route's permission.
+
 A service identity retains its service actor. Its Engine identity ID, external
 provider subject, and optional service-account selector serve different purposes.
 

@@ -110,6 +110,11 @@ var publicContractErrorTypes = map[string]struct{}{
 	"request_too_large":     {},
 	"not_implemented":       {},
 	"api_error":             {},
+
+	"idempotency_conflict_error": {},
+	"credential_limit_error":     {},
+	"instance_offline_error":     {},
+	"instance_unavailable_error": {},
 }
 
 func TestEmittedErrorTypesMatchPublicContractSet(t *testing.T) {

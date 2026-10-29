@@ -1,7 +1,8 @@
 import type { ExecutableProcessBoundary } from "@tetral/ts-observability";
 import { ServiceLifecycleDefaults } from "@tetral/gateway-protocol/src/service-lifecycle.js";
 import { openPostgresSQLOwner } from "@tetral/ts-dbconnect";
-import { createDiagnosticStreamSink, processFailureLogRecord, processShutdownFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
+import { beginServiceColdStart, createDiagnosticStreamSink, createTelemetry, endServiceColdStartPhase, failServiceColdStart, failServiceColdStartAtConfig, installTelemetry, processFailureLogRecord, processShutdownFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
+import type { Telemetry } from "@tetral/ts-observability";
 /**
  * @packageDocumentation
  *
@@ -21,7 +22,7 @@ import { createProviderGatewayApp } from "./app.js";
 import { semanticErrorFields } from "@tetral/ts-observability";
 import { loadProviderGatewayConfigFromProcessEnv } from "./config.js";
 import { BridgeAPIAttachmentResolver } from "./attachments.js";
-import { createJsonLogger, startupFailureLogRecord } from "./logger.js";
+import { createJsonLogger, providerGatewayDeclarations, startupFailureLogRecord } from "./logger.js";
 import {
   CachedPlatformCredentialPool,
   ProviderCredentialResolver,
@@ -87,6 +88,8 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
     try { if ("flush" in owner && typeof owner.flush === "function") diagnosticReleases.push(owner.flush.bind(owner)); } catch { /* best effort */ }
   };
   let logger: GatewayLogger | undefined;
+  let telemetry: Telemetry | undefined;
+  let restoreTelemetry: (() => void) | undefined;
   const report = (record: GatewayLogRecord): void => {
     try {
       logger?.error(record);
@@ -127,6 +130,8 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
         }
       } finally {
         disarmExit?.();
+        await telemetry?.shutdown();
+        restoreTelemetry?.();
         for (const release of diagnosticReleases) { try { release(); } catch { /* best effort */ } }
         diagnosticSink?.close();
       }
@@ -142,6 +147,7 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
     const config = loadProviderGatewayConfigFromProcessEnv();
     if (!config.ok) {
       failureReported = true; report(startupFailureLogRecord(config.error));
+      failServiceColdStartAtConfig("provider-gateway", logger);
       throw new Error("gateway service config error");
     }
     logger = options.logger ?? createJsonLogger({
@@ -149,6 +155,10 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
       deploymentEnvironment: config.config.deploymentEnvironment, diagnostics: config.config.diagnostics, serviceVersion: config.config.serviceVersion,
     });
     registerDiagnosticCleanup(logger);
+    telemetry = createTelemetry({ serviceName: "provider-gateway", serviceVersion: config.config.serviceVersion, deploymentEnvironment: config.config.deploymentEnvironment, logger, declarations: providerGatewayDeclarations, diagnostics: config.config.diagnostics });
+    restoreTelemetry = installTelemetry(telemetry);
+    beginServiceColdStart(telemetry);
+    endServiceColdStartPhase("config");
     drainTimeoutMs = config.config.drainTimeoutMs;
     cancelJoinTimeoutMs = config.config.cancelJoinTimeoutMs;
     phase = "dependency";
@@ -177,6 +187,7 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
     await (options.waitForever ?? waitForever)();
   } catch (error) {
     failed = true;
+    failServiceColdStart("startup_error");
     if (!failureReported) report(processFailureLogRecord(phase));
     throw error;
   } finally {

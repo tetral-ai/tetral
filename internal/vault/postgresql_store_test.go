@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/workload"
 
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/vault"
@@ -1412,9 +1413,7 @@ func TestPostgreSQLCredentialStoreNormalizesAndRejectsProviderOAuthBeforePersist
 
 func captureVaultStoreLogs(level slog.Level, run func() error) (string, error) {
 	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: level})))
-	defer slog.SetDefault(previous)
+	defer workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: "api", Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: level}))}))()
 	err := run()
 	return logs.String(), err
 }

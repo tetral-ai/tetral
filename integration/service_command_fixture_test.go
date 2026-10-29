@@ -81,7 +81,7 @@ func declareReplacementScope(t *testing.T, registrar, client *dbconnect.Client, 
 func fixtureRuntimeLoadClient(t *testing.T) *http.Client {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/metrics" {
+		if r.URL.Path != "/metrics/placement" {
 			http.NotFound(w, r)
 			return
 		}

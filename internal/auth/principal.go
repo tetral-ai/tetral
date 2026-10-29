@@ -52,12 +52,14 @@ type ResourceReference struct {
 }
 
 const (
-	CredentialAPIKey        = "api_key"
-	CredentialAccessToken   = "access_token"
-	IdentityHuman           = "human"
-	IdentityService         = "service"
-	AuthorityIndependentKey = "independent_key"
-	AuthorityIdentityGrant  = "identity_grant"
+	CredentialAPIKey            = "api_key"
+	CredentialAccessToken       = "access_token"
+	CredentialConnectionKey     = "connection_key"
+	IdentityHuman               = "human"
+	IdentityService             = "service"
+	AuthorityIndependentKey     = "independent_key"
+	AuthorityIdentityGrant      = "identity_grant"
+	AuthorityInstanceConnection = "instance_connection"
 )
 
 // IndependentKeyPrincipal is the single definition of independent
@@ -70,6 +72,14 @@ func IndependentKeyPrincipal(ws workspace.Workspace, keyID string) Principal {
 	}}
 }
 
+// ConnectionKeyPrincipal is the only principal a connection key yields: the
+// credential of one instance, with the single operation client.connect.
+func ConnectionKeyPrincipal(ws workspace.Workspace, instanceID, credentialID string) Principal {
+	return Principal{Workspace: ws, Credential: Credential{ID: credentialID, Kind: CredentialConnectionKey}, Authority: Authority{
+		Kind: AuthorityInstanceConnection, PolicyVersion: PolicyVersion, Operations: []Operation{OperationClientConnect}, Scope: ResourceReference{WorkspaceID: ws.ID, Type: "instance", ID: instanceID},
+	}}
+}
+
 func boundedIdentity(value string) bool {
 	return value != "" && len(value) <= 128 && !strings.ContainsAny(value, "\x00\r\n")
 }
@@ -78,7 +88,16 @@ func boundedIdentity(value string) bool {
 // independent authority. It also bounds signed data before it reaches handlers.
 func (p Principal) Validate() error {
 	invalid := func() error { return &AuthenticationError{Message: "invalid internal principal"} }
-	if !boundedIdentity(string(p.Workspace.ID)) || !boundedIdentity(p.Credential.ID) || p.Authority.Scope.WorkspaceID != p.Workspace.ID || p.Authority.Scope.Type != "workspace" || p.Authority.Scope.ID != "" || p.Authority.PolicyVersion != PolicyVersion {
+	if !boundedIdentity(string(p.Workspace.ID)) || !boundedIdentity(p.Credential.ID) || p.Authority.Scope.WorkspaceID != p.Workspace.ID || p.Authority.PolicyVersion != PolicyVersion {
+		return invalid()
+	}
+	if p.Credential.Kind == CredentialConnectionKey {
+		if p.APIKeyID != "" || p.Identity != nil || p.Authority.Kind != AuthorityInstanceConnection || p.Authority.Scope.Type != "instance" || !boundedIdentity(p.Authority.Scope.ID) || p.Authority.RuleID != "" || p.Authority.IdentityID != "" || p.Authority.GrantID != "" || p.Authority.RuleRevision != 0 || p.Authority.IdentityRevision != 0 || p.Authority.GrantRevision != 0 || len(p.Authority.Operations) != 1 || p.Authority.Operations[0] != OperationClientConnect {
+			return invalid()
+		}
+		return nil
+	}
+	if p.Authority.Scope.Type != "workspace" || p.Authority.Scope.ID != "" {
 		return invalid()
 	}
 	switch p.Credential.Kind {
@@ -124,10 +143,15 @@ type PermissionError struct{}
 func (*PermissionError) Error() string { return "permission denied" }
 
 // Authorize is the shared public-operation gate. Resource ownership remains the
-// responsibility of the owning repository; a foreign workspace fails closed.
+// responsibility of the owning repository; a foreign workspace fails closed. A
+// connection key authenticates no public operation, so it fails as a
+// credential, not as a permission.
 func Authorize(p Principal, operation Operation, resource ResourceReference) error {
 	if err := p.Validate(); err != nil {
 		return err
+	}
+	if p.Credential.Kind == CredentialConnectionKey {
+		return &AuthenticationError{Message: "connection keys authenticate only client connection routes"}
 	}
 	if !IsRegisteredOperation(operation) || !slices.Contains(p.Authority.Operations, operation) || resource.WorkspaceID != p.Authority.Scope.WorkspaceID || !validResourceReference(resource) {
 		return &PermissionError{}

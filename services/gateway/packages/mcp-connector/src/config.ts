@@ -16,7 +16,7 @@ import {
  */
 
 import { parseDatabasePoolConfig } from "@tetral/ts-dbconnect";
-import { diagnosticEnvKeys, parseDiagnosticConfig, parseWorkloadResourceConfig, workloadResourceEnvKeys } from "@tetral/ts-observability";
+import { diagnosticEnvKeys, parseDiagnosticConfigResult, parseWorkloadResourceConfig, workloadResourceEnvKeys } from "@tetral/ts-observability";
 import type { DiagnosticConfig } from "@tetral/ts-observability";
 
 import type { DatabasePoolConfig } from "@tetral/ts-dbconnect";
@@ -186,7 +186,9 @@ export function loadMcpConnectorConfigFromEnv(env: Record<string, string | undef
 function loadMcpConnectorConfig(env: Record<string, string | undefined>): McpConnectorConfigResult {
   const allowedRuntimePod = parseSingleServiceAccount(env.TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS ?? "");
   const allowedDiscoveryCallers = parseDiscoveryServiceAccounts(env.TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS ?? "");
-  const diagnostics = parseDiagnosticConfig(env);
+  const diagnosticResult = parseDiagnosticConfigResult(env);
+  if (!diagnosticResult.ok) return { ok: false, error: { kind: "config_error", message: diagnosticResult.problem } };
+  const diagnostics = diagnosticResult.config;
   const resource = parseWorkloadResourceConfig(env, 4096);
   const caPath = env.TETRAL_DATABASE_TLS_CA_PATH,
     serverName = env.TETRAL_DATABASE_TLS_SERVER_NAME;
@@ -226,7 +228,6 @@ function loadMcpConnectorConfig(env: Record<string, string | undefined>): McpCon
     allowedDiscoveryCallers === undefined ||
     databasePool === undefined ||
     policies === undefined ||
-    diagnostics === undefined ||
     resource === undefined ||
     !nonEmpty(env.TETRAL_BRIDGE_API_GRPC_ADDR) ||
     !nonEmpty(env.TETRAL_MCP_CONNECTOR_BRIDGE_TOKEN_PATH) ||

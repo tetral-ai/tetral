@@ -348,6 +348,11 @@ func isAllowedExistingRuntimeBoundaryImport(relativePath string, importPath stri
 	if strings.HasPrefix(relativePath, "internal/blob/") && strings.HasPrefix(importPath, awsSDKRoot) {
 		return true
 	}
+	// The shared observability library is the one owner of the tracing SDK;
+	// every other package records through it.
+	if strings.HasPrefix(relativePath, "internal/workload/") && strings.HasPrefix(importPath, "go.opentelemetry.io/") {
+		return true
+	}
 	if importPath == "log" {
 		return allowedExistingLogImportFilesForDBConnectTest()[relativePath]
 	}

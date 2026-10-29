@@ -1,0 +1,578 @@
+{
+  "service": "event-stream",
+  "events": {
+    "auth.api_key_usage.failed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "failed.count": "integer",
+        "phase": "string"
+      },
+      "errors": {
+        "auth_api_key_usage_unavailable": {
+          "class": "dependency_unavailable",
+          "message_safe": "api key usage update unavailable"
+        }
+      }
+    },
+    "auth.operation.denied": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_operation_denied": {
+          "class": "permission_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.operation.invalid": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_operation_invalid": {
+          "class": "authentication_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.operation.unavailable": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_operation_unavailable": {
+          "class": "dependency_unavailable",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.signed_principal.denied": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_signed_principal_denied": {
+          "class": "permission_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.signed_principal.invalid": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_signed_principal_invalid": {
+          "class": "authentication_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.signed_principal.unavailable": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_signed_principal_unavailable": {
+          "class": "dependency_unavailable",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.token_prune.failed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "phase": "string"
+      },
+      "errors": {
+        "auth_token_prune_unavailable": {
+          "class": "dependency_unavailable",
+          "message_safe": "expired token cleanup unavailable"
+        }
+      }
+    },
+    "auth.token_prune.recovered": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "phase": "string",
+        "recovery.event": "string"
+      }
+    },
+    "event_stream.feed_closed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "operation": "string",
+        "outcome": "string",
+        "reason": "string",
+        "session.id": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      }
+    },
+    "event_stream.idle_check_failed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "failed.count": "integer",
+        "operation": "string",
+        "outcome": "string",
+        "reason": "string",
+        "workspace.id": "string"
+      }
+    },
+    "http.auth": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.result": "string",
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "http.request.method": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "authentication_backend_error": {
+          "class": "auth_error",
+          "message_safe": "authentication backend error"
+        },
+        "authentication_error": {
+          "class": "authentication_error",
+          "message_safe": "authentication failed"
+        }
+      }
+    },
+    "preview_stopped": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "model_request.id": "string",
+        "operation": "string",
+        "outcome": "string",
+        "reason": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      }
+    },
+    "preview_subscriber_disconnected": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "operation": "string",
+        "outcome": "string",
+        "reason": "string"
+      }
+    },
+    "preview_subscriber_recovered": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "operation": "string",
+        "outcome": "string"
+      }
+    },
+    "preview_subscriber_unavailable": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "operation": "string",
+        "outcome": "string",
+        "reason": "string"
+      }
+    },
+    "provider_credential_rejected": {
+      "level": "DEBUG",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "provider.id": "string",
+        "validation.member": "string"
+      },
+      "errors": {
+        "invalid_provider_oauth": {
+          "class": "validation",
+          "message_safe": "provider credential rejected"
+        }
+      }
+    },
+    "queue.notification_listener.disconnected": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "consumer.class": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "retryable": "boolean",
+        "terminal": "boolean"
+      },
+      "errors": {
+        "notification_listener_authentication": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_endpoint_transport": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_permission": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_timeout": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_unknown": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        }
+      }
+    },
+    "queue.notification_listener.recovered": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "consumer.class": "string",
+        "operation": "string",
+        "outcome": "string",
+        "recovery.event": "string"
+      }
+    },
+    "schema.migration.completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      }
+    },
+    "schema.migration.failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "db.sqlstate": "string",
+        "duration_ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      },
+      "errors": {
+        "schema_ahead": {
+          "class": "schema_ahead",
+          "message_safe": "postgresql schema is ahead of this binary"
+        },
+        "schema_apply_failed": {
+          "class": "schema_apply_failed",
+          "message_safe": "postgresql schema migration failed"
+        },
+        "schema_behind": {
+          "class": "schema_behind",
+          "message_safe": "postgresql schema is behind this binary"
+        },
+        "schema_checksum_drift": {
+          "class": "schema_checksum_drift",
+          "message_safe": "postgresql schema checksum does not match this binary"
+        },
+        "schema_history_duplicate": {
+          "class": "schema_history_duplicate",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_history_gap": {
+          "class": "schema_history_gap",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_history_malformed": {
+          "class": "schema_history_malformed",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_lock_failed": {
+          "class": "schema_lock_failed",
+          "message_safe": "postgresql schema migration lock failed"
+        },
+        "schema_missing": {
+          "class": "schema_missing",
+          "message_safe": "postgresql schema registry is missing"
+        },
+        "schema_operation_canceled": {
+          "class": "schema_operation_canceled",
+          "message_safe": "postgresql schema operation was canceled"
+        },
+        "schema_rls_drift": {
+          "class": "schema_rls_drift",
+          "message_safe": "postgresql workspace isolation contract does not match this binary"
+        },
+        "schema_unexpected_state": {
+          "class": "schema_unexpected_state",
+          "message_safe": "postgresql schema is not empty and has no current identity"
+        }
+      }
+    },
+    "schema.migration.started": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      }
+    }
+  },
+  "operations": {},
+  "metrics": {
+    "event_stream_active_sse_viewers": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_formal_delivery_latency_seconds": {
+      "type": "histogram",
+      "audience": "operators",
+      "labels": {},
+      "buckets": "request"
+    },
+    "event_stream_formal_events_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_nats_disconnects_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_nats_dispatching_bytes": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_nats_pending_frames": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_nats_reconnects_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_nats_reserved_bytes": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_nats_reserved_frames": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_preview_active_requests": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_preview_delivery_latency_seconds": {
+      "type": "histogram",
+      "audience": "operators",
+      "labels": {},
+      "buckets": "request"
+    },
+    "event_stream_preview_events_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_preview_hub_drops_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_preview_invalid_frames_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_preview_pending_bytes": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_preview_sequence_stops_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_preview_stopped_requests_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_preview_subscriptions": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_preview_viewer_drops_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_preview_viewers": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_sent_bytes_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "event_stream_slow_writers_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    }
+  },
+  "spans": {}
+}

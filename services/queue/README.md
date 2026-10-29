@@ -38,12 +38,16 @@ a `payload_version` (positive integer; the payload-schema-version guard, rejecte
 at admission when negative, while an unset or zero value defaults to 1), lease bookkeeping (`leased_by`, `lease_token`,
 `leased_at`, `leased_until`, and the private `lease_previous_attempt_count`
 described under [Direct Job Runner leasing](#direct-job-runner-leasing)), `attempt_count` / `max_attempts`, the config/build observation
-`defer_count`, a `priority`, an `available_at`, and a `status`. Runtime-facing
+`defer_count`, a `priority`, an `available_at` with its `ready_at`, and a `status`. Runtime-facing
 rows also carry structured scheduling authority: `causal_session_id` preserves
 Session causal order, `delivery_scope` is `thread` or `session`,
 `delivery_thread_id` identifies a Thread lane, and `control_class` distinguishes
 ordinary, agent-mail, and interrupt delivery. Non-Runtime rows use the
 independent `partition` delivery scope.
+`trace_context` holds the W3C `traceparent` of the producer's context when the
+row was admitted, or `NULL` when the producer had no trace; every enqueue path
+writes it, both lease methods return it as `QueueJob.trace_context`, and the
+consumer continues that trace while it works the job.
 Payloads are references only — the admission whitelist (below) rejects any job
 that would persist user content, resource bytes, model config, or credentials.
 
@@ -319,26 +323,37 @@ The retry policy is Queue-Service-owned; consumers carry no delay authority.
 ### Operational surface
 
 gRPC on `:9090` serves `QueueService` and a gRPC health service; HTTP on `:8080`
-serves `/health` (liveness), `/ready` (readiness), and `/metrics`. Metrics are
-per kind: `queue_pending_jobs`, `queue_leased_jobs`, `queue_retry_pending_jobs`,
-`queue_dead_lettered_jobs`, `queue_ready_jobs`, and `queue_ready_lag_seconds`.
-`queue_ready_jobs` counts pending rows with `available_at` at or before the
-observation time; `queue_pending_jobs` includes future Retry/Defer availability.
-`queue_ready_lag_seconds` is the oldest available pending age.
+serves `/health` (liveness), `/ready` (readiness), and `/metrics`. The job
+queue is the pressure point `queue_jobs`; its gauges are per kind:
+`queue_jobs_queued` counts pending rows with `available_at` at or before the
+observation time, `queue_jobs_oldest_queued_seconds` is the oldest such row's
+age past `ready_at`, and `queue_jobs_in_progress` counts leased rows.
+`queue_jobs_queue_wait_seconds{kind}` (long-operation buckets) observes one
+sample per committed lease, either method: the lease statement's
+`clock_timestamp()` (the row's `leased_at`) minus the row's `ready_at`, so
+retry backoff is excluded. `available_at` comes from the caller's clock and
+decides when a row is due; every write of it also sets `ready_at` to
+`clock_timestamp()` plus the same delay, so both durations, which span the
+producer's and the consumer's processes, come from the one database clock.
+The queue refuses nothing, so it has no rejection counter; a
+dead-lettered job is a failure. `queue_pending_jobs` includes future
+Retry/Defer availability, and `queue_retry_pending_jobs` and
+`queue_dead_lettered_jobs` complete the per-kind gauges.
 `queue_retention_budget_exhausted_total{phase="job_runner_terminal"}` counts
 Job Runner terminal-retention passes that stopped on their batch budget while
 eligible rows remained. These are
 availability gauges, not a claim that every available job is presently leaseable
 under Session/Thread ordering. Per-kind groups absent from the database have no
 series; a failed collector emits its error counter rather than invented zeros.
-The shared [operation histogram](../../internal/workload/README.md#operation-durations)
-records registered RPC outcomes and actual Queue drain/join boundaries. The service account
+The shared [gRPC request histogram](../../internal/workload/README.md#metrics)
+records every registered RPC, and the [shutdown phases](../../internal/workload/README.md#shutdown-phases)
+record the actual Queue drain/join boundaries. The service account
 mounts no Kubernetes API token; the network policy restricts egress to PostgreSQL
 and DNS, and ingress on both ports to `api`, `job-runner`, and
 `sandbox`.
 
 Each successful lease logs `duration.ms` for the database Lease call and
-`queue.ready_wait.ms` for time elapsed since that job's `available_at`; retry
+`queue.ready_wait.ms`, the job's `leased_at` minus its `ready_at`; retry
 backoff before `available_at` is deliberately excluded. A direct Job Runner
 call additionally warns, with fixed fields only, when candidates were skipped
 on a local lock or statement timeout (`timeout.kind`, `failed.count`), when a
@@ -470,7 +485,7 @@ replaced without losing or double-committing work.
 
 **Interface contract.** `Lease(workspace_id, kinds, lease_owner, max_jobs,
 lease_duration_ms)` returns up to `max_jobs` leased rows, each with a fresh
-`lease_token`. `LeaseJobRunnerJobs(max_jobs, lease_owner, lease_duration_ms)`
+`lease_token` and its producer's `trace_context`. `LeaseJobRunnerJobs(max_jobs, lease_owner, lease_duration_ms)`
 returns up to `max_jobs` Runner jobs across workspaces and a `retry_after_ms`
 hint; `max_jobs` is bounded by `MaxJobRunnerLeaseJobs()`, which keeps a maximal
 response inside the 4 MiB Queue Lease transport fuse, and invalid values are
@@ -524,13 +539,13 @@ the next holder re-leases under a new token.
 | Suite (file) | Proves |
 |---|---|
 | `internal/queue/queue_test.go` | admission validation: per-kind canonical shape, references-only payload bounds, event-reference limits, lease batch-capacity arithmetic |
-| `internal/queue/postgresql_store_test.go` | the store's durable behavior against PostgreSQL: Thread/Session lease compatibility, same-Thread interrupt precedence, partition exclusion, ack/retry/defer/dead-letter fencing, both cancellation boundaries, over-budget conditional dead-lettering, Sandbox terminal retention and empty-counter cleanup, backoff full-jitter, unset-`max_attempts` projection, cross-workspace maintenance, metrics summary |
+| `internal/queue/postgresql_store_test.go` | the store's durable behavior against PostgreSQL: the producer's trace context written at enqueue and returned by both lease methods with one wait sample per lease, Thread/Session lease compatibility, same-Thread interrupt precedence, partition exclusion, ack/retry/defer/dead-letter fencing, both cancellation boundaries, over-budget conditional dead-lettering, Sandbox terminal retention and empty-counter cleanup, backoff full-jitter, unset-`max_attempts` projection, cross-workspace maintenance, metrics summary |
 | `internal/queue/job_runner_lease_test.go` | direct Job Runner leasing under the real Queue role: future-tenant yield and window resumption, examined-prefix advancement under the transaction budget, per-call visited tenants with interleaved calls, per-process alternation and replica custody, committed tokens after a later lease or discovery failure, a local timeout never failing the call (a candidate over its statement or lock limit skipped unchanged and counted; a tenant-seek or pass-start statement over its limit ending the call with its committed jobs, the timed-out statement reported and the 100 ms hint even in an idle process), the eligibility matrix against `Lease`, discovery query plans on the Runner indexes, idle-aware retry hints, busy-tenant skipping, bounded pass cleanup, quiesce, exact release refunds, post-lock expiry, and provenance cleared by every transition; the scheduling traces run with widened time limits, so database speed cannot change them |
 | `services/queue/server_test.go` | the gRPC surface over the generated client: lease + fenced transitions, maximum legal batch within the message fuse for both lease methods, the field census matching lease arithmetic, validation → `InvalidArgument`, release `FailedPrecondition` and draining-scheduler `Unavailable` mapping, the discovery-timeout warning's fixed fields |
 | `services/queue/config_test.go` | `ConfigFromEnv` pins the retry policy and rejects invalid values |
 | `services/queue/maintenance_test.go` | each maintenance tick runs reclaim, bounded Sandbox terminal retention, bounded empty-counter cleanup, then Job Runner terminal retention under its own 2 s deadline at the tick time; the budget counter grows by one per pass with any exhausted state; integrity counts and failures are logged with fixed fields |
 | `internal/queue/job_runner_retention_test.go` | with the installed Queue role: each Runner kind and terminal state expires exactly at its age and survives a microsecond younger, Sandbox and Environment kinds, nonterminal rows and partition counters are untouched, `NULL` terminal timestamps are retained and counted, 256 rows per state per pass with exactly 256 eligible rows not exhausted and 257 exhausted once, the cutoff capped at the database clock minus each state's age, a state error leaves later states running, argument validation, other-workload execution, spoofed flags, search-path shadowing and a non-owner definer are denied, and each state's partial index serves its locked page and its `LIMIT 1` probe |
-| `services/queue/run_test.go` | admitted RPC, maintenance, and HTTP users join under graceful completion and forced cancellation; no later maintenance cycle starts after drain admission closes; the Job Runner scheduler starts once and quiesces before `Run` returns |
+| `services/queue/run_test.go` | the per-kind job queue gauges; admitted RPC, maintenance, and HTTP users join under graceful completion and forced cancellation; no later maintenance cycle starts after drain admission closes; the Job Runner scheduler starts once and quiesces before `Run` returns |
 | `integration/replica_queue_test.go` | three independent Queue receivers share lease authority; lost committed Lease/Ack responses, real expiry/reclaim, stale-token rejection on every transition, and Workspace/Session barriers |
 | `integration/replica_queue_maintenance_test.go` | a real reclaim UPDATE is held before commit; normal completion commits the whole batch, forced cancellation rolls it all back, the pool stays alive until join, and a replacement maintenance owner reclaims remaining work |
 | `services/queue/cmd/tetral-queue/main_test.go` | schema-behind startup stops before the store and listener; startup-failure logs use shared fields |

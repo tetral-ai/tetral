@@ -482,11 +482,12 @@ it preserves the stated invariants and passes the named suites.
   exhaustion produces a fatal, nonretryable request error, never a truncated
   successful block. No raw-record, completed-content history or
   attachment-envelope limit is introduced here.
-- **Observations.** The service emits content-free `provider.stage_completed`
-  samples for dispatch → first private content fragment, first fragment → first
-  complete semantic frame, and complete frame → local write callback. Each sample
-  carries a closed outcome/content kind, duration, canonical bytes, and encoded
-  frame bytes. Missing-content failure/cancellation samples retain the denominator.
+- **Observations.** Three stage durations, dispatch → first private content
+  fragment, first fragment → first complete semantic frame, and complete frame →
+  local write callback, go to the operation histograms with a closed outcome;
+  no stage or fragment writes a record. Missing-content failure/cancellation
+  samples retain the denominator. Each provider stream also observes its model
+  speed once when it ends ([operation measurement](#operation-measurement)).
   Live assembly gauges and pending complete-frame bytes distinguish ownership
   release from allocator RSS. Frame ownership lasts through callback and any
   required drain. Logging and metric sink failures cannot affect delivery.
@@ -564,7 +565,8 @@ it preserves the stated invariants and passes the named suites.
 | `credentials*.test.ts`, `openai-oauth-refresh.test.ts` | Fail-closed enumeration, positive resolution to the provider-native credential header, Go↔TS decryption round-trip, OAuth single-flight refresh and rotation CAS |
 | `platform-pool.test.ts`, `platform-key-cli.test.ts` | Body-level classification, cool/quarantine transitions, pre-first-byte failover and switch cap, cooldown clamp, weighted selection, cache-scope startup refusal, operator-CLI round-trip |
 | `leak-guards.test.ts` | No key/token sentinel appears in any captured log, event, or error payload |
-| `service.test.ts`, `grpc-server.test.ts` | End-to-end streaming turn, drain backpressure, cancellation, header/inter-chunk and semantic-progress timeouts, admission cap, and the Bun/grpc-js tripwire (many private records → complete frames + trailers + clean status) |
+| `service.test.ts`, `grpc-server.test.ts` | End-to-end streaming turn, drain backpressure, cancellation, header/inter-chunk and semantic-progress timeouts, admission cap and its refusal episode, and the Bun/grpc-js tripwire (many private records → complete frames + trailers + clean status) |
+| `provider-stream-observations.test.ts` | Stage durations on independent clocks, model speed and tokens once per stream, no record per fragment, provider `429`/`503`/`529` refusal counts |
 | `http-server.test.ts` | Ops-route responses and readiness-first graceful shutdown |
 | `attachments.test.ts` | Transient and file-backed resolution, per-ref rejection reporting, and the integrity-mismatch fatal path |
 | `schema-startup.test.ts`, `static-boundaries.test.ts` | Migration-registry verification and cross-package boundary guards |
@@ -1234,8 +1236,23 @@ transport-profile setting.
 Provider Gateway and MCP Connector use the shared
 [TypeScript diagnostic contract](../../internal/ts-observability/README.md).
 `TETRAL_LOG_LEVEL`, `TETRAL_LOG_MAX_RECORD_BYTES`,
-`TETRAL_LOG_SUMMARY_INTERVAL_MS`, and `TETRAL_LOG_BURST` are restart-only controls.
-The default level is Info. Safe builders retain fixed classifications and bounded
+`TETRAL_LOG_SUMMARY_INTERVAL_MS`, `TETRAL_LOG_BURST`,
+`TETRAL_TRACE_SAMPLE_RATIO`, `TETRAL_DB_SLOW_QUERY_MS` and
+`OTEL_EXPORTER_OTLP_ENDPOINT` are restart-only controls.
+The default level is Info. Each package declares the events, operations and
+metric families it records in its `observability.json`
+(`packages/provider-gateway/observability.json`,
+`packages/mcp-connector/observability.json`); its logger refuses any other
+event.
+
+Each process records one `service_pod` cold start. Provider Gateway ends
+`dependencies` once its dependency graph is built (SQL owner, schema
+verification, credential and provider clients) and its preview publisher has
+started, and `ready` when both listeners are bound and readiness opens. MCP Connector ends `dependencies` after its SQL
+owner, schema verification and TokenReview reviewer material are ready, and
+`ready` when both listeners are bound. Both gRPC servers continue the caller's
+trace from `traceparent` metadata, and both write it on their Bridge calls;
+calls to model providers and remote MCP servers carry no trace context. Safe builders retain fixed classifications and bounded
 identities; repeated degradation emits bounded summaries. Existing metrics expose
 drops and asynchronous stderr failures. Startup and shutdown finally blocks
 release diagnostic timers/listeners without waiting for stream flush.
@@ -1278,29 +1295,57 @@ Go's independently owned pool policy remains distinct.
 
 ## Operation measurement
 
-Both metrics listeners export the additive seconds histogram
-`tetral_operation_duration_seconds{service,operation,outcome}` with the
-[shared fixed bounds](../../internal/workload/README.md#operation-durations).
-Provider Gateway operations are `StreamProviderRequest`,
+Both metrics listeners export the additive seconds histograms
+`tetral_operation_duration_seconds{service,operation,outcome}` and, for the
+operations a table marks long, `tetral_long_operation_duration_seconds`, with the
+[shared bucket sets](../../internal/workload/README.md#metrics); a success
+records as `ok`, and `cancelled` and `timeout` are codes the operations that
+produce them declare. Provider Gateway operations are `StreamProviderRequest`,
 `provider_first_fragment`, `provider_first_complete`, `complete_frame_write`,
-`shutdown_drain` and `shutdown_cancel_join`. Request duration covers the actual
+`shutdown_drain` and `shutdown_cancel_join`; all but `complete_frame_write`
+are long. Request duration covers the actual
 service entry through owned cleanup, including authentication, validation and
 capacity rejection. Stage durations retain their existing dispatch/fragment/
 complete/write-callback boundaries and success/error/cancelled populations;
 no-content failure observations remain included. A successful local write is
 not evidence of client delivery or a valid Agent turn.
 
-`providergateway_provider_streams_active` and
-`providergateway_provider_stream_capacity` expose current admitted work and its
-configured admission bound. `providergateway_admission_rejections_total` counts
-only concurrent-turn admission refusal. Provider stream counters, assembly
+Turn admission is the pressure point `providergateway_turns`:
+`providergateway_turns_in_progress` and `providergateway_turns_limit` expose
+admitted turns and the configured concurrent-turn limit, and
+`providergateway_turns_rejected_total{cause="capacity"}` counts each turn
+refused at the limit; a refused turn is never queued. Refusals are recorded by
+episode, one `WARN` `pressure.rejecting_started` at the first refusal after 60
+quiet seconds and one `pressure.rejecting_ended` with the episode's
+`pressure.rejected` count at the first admission or refusal 60 seconds or more
+after the last one. The turn's `provider_request_streamed` summary stays `INFO`
+for a capacity refusal, a request validation or caller denial and a
+cancellation; every other failed turn writes `ERROR`
+`provider_request_streamed_failed` instead. Provider stream counters, assembly
 gauges and pending-frame bytes keep their meaning. Stage durations are exported
-only through `tetral_operation_duration_seconds` and the raw
-`provider.stage_completed` samples.
+only through the operation histograms.
+
+Each provider stream, one credential attempt from its dispatch to its end,
+observes its model speed once when it ends, labelled by the catalogue's
+`provider` and `model` ids, on the shell's observation clock:
+`providergateway_time_to_first_token_seconds{provider,model,first_kind}` (dispatch
+to the first content fragment, `first_kind` `text`, `reasoning` or `tool_call`;
+none without a fragment), `providergateway_output_tokens_per_second{provider,model}`
+(the provider-reported output tokens over the first to the last content
+fragment, buckets `1, 5, 10, 20, 40, 80, 160, 320`; none when the provider
+reported no output tokens or the interval is zero) and
+`providergateway_stream_duration_seconds{provider,model,outcome}` (`ok`, `error`
+or `cancelled`), both durations with the long-operation buckets.
+`providergateway_tokens_total{provider,model,type}` adds the provider-reported
+usage: `input` all input tokens, `cached` the part of them read from the
+provider's cache, and `output`. `providergateway_provider_rejected_total{provider,cause}`
+counts each attempt the provider refused over HTTP, `rate_limited` for a `429`
+and `overloaded` for a `503` or `529`; a Gateway-local failure counts nothing.
+A value that cannot be measured drops only its own sample.
 
 MCP operations are `RunMcpTool`, `ListMcpTools`, `shutdown_drain` and
-`shutdown_cancel_join`. Execution records one owning duration across claim,
-credential/SDK work and settlement, with success/error/rejected/timeout/cancelled
+`shutdown_cancel_join`, all long. Execution records one owning duration across claim,
+credential/SDK work and settlement, with ok/error/rejected/timeout/cancelled
 outcomes. Tool names remain only in the existing legacy MCP series; the new
 histogram aggregates them under the fixed RPC operation. Discovery records its
 actual complete-list duration, including non-success. Shutdown records actual

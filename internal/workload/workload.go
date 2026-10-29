@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	stdmetrics "runtime/metrics"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -68,9 +69,10 @@ func (r *Readiness) WithReadinessDependency(dependency func() bool) *Readiness {
 }
 
 // MarkReady marks dependencies ready.
+// The process's first readiness to pass completes its service_pod cold start.
 func (r *Readiness) MarkReady() {
-	if r != nil {
-		r.state.CompareAndSwap(readinessNotReady, readinessReady)
+	if r != nil && r.state.CompareAndSwap(readinessNotReady, readinessReady) && r.dependency == nil {
+		completeProcessColdStart()
 	}
 }
 
@@ -86,7 +88,11 @@ func (r *Readiness) Ready() bool {
 	if r == nil || r.state.Load() != readinessReady {
 		return false
 	}
-	return r.dependency == nil || r.dependency()
+	if r.dependency == nil || r.dependency() {
+		completeProcessColdStart()
+		return true
+	}
+	return false
 }
 
 func (r *Readiness) message() string {
@@ -128,7 +134,6 @@ type MetricsCollector func(context.Context) ([]Metric, error)
 
 type healthRouterConfig struct {
 	metricsCollectors []namedMetricsCollector
-	httpMetrics       *HTTPMetrics
 }
 
 type namedMetricsCollector struct {
@@ -156,156 +161,145 @@ type DBStatsProvider interface {
 	Stats() sql.DBStats
 }
 
+// HTTPMetrics observes one service's HTTP requests by route pattern:
+// http_server_request_duration_seconds, or, for a route its owner marks long
+// (a stream, a content transfer), http_server_stream_duration_seconds.
+// Health checks and /metrics are never observed.
 type HTTPMetrics struct {
+	// Operations records the shutdown phases of the service's listeners.
 	Operations *OperationMetrics
-	mu         sync.Mutex
-	records    map[httpMetricsKey]durationMetricsRecord
-}
-
-type httpMetricsKey struct {
-	method     string
-	statusCode string
-}
-
-type GRPCMetrics struct {
-	Operations *OperationMetrics
-	mu         sync.Mutex
-	records    map[grpcMetricsKey]durationMetricsRecord
-}
-
-type grpcMetricsKey struct {
-	method string
-	code   string
-}
-
-type durationMetricsRecord struct {
-	count      int64
-	sumSeconds float64
+	service    string
+	registry   *Registry
+	requests   *Histogram
+	streams    *Histogram
 }
 
 // NewHTTPMetrics requires the owning service name from the closed workload
 // domain; see NewOperationMetrics.
 func NewHTTPMetrics(service string) *HTTPMetrics {
-	return &HTTPMetrics{records: map[httpMetricsKey]durationMetricsRecord{}, Operations: NewOperationMetrics(service, "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE", "http_unknown_method")}
+	registry := NewRegistry(service)
+	return &HTTPMetrics{
+		Operations: NewOperationMetrics(service),
+		service:    service,
+		registry:   registry,
+		requests:   registry.Histogram("http_server_request_duration_seconds", "Duration of one HTTP request.", "service", "route", "method", "status_class"),
+		streams:    registry.Histogram("http_server_stream_duration_seconds", "Duration of one long HTTP request, a stream or a content transfer.", "service", "route", "method", "status_class"),
+	}
 }
 
-func (m *HTTPMetrics) ObserveHTTPRequest(method string, statusCode int, duration time.Duration) {
+// ObserveHTTPRoute records one request to route, its registered pattern or
+// "unmatched", never its path.
+func (m *HTTPMetrics) ObserveHTTPRoute(route, method string, statusCode int, duration time.Duration, long bool) {
 	if m == nil {
 		return
 	}
-	outcome := "success"
-	if statusCode >= 500 {
-		outcome = "error"
-	} else if statusCode >= 400 {
-		outcome = "rejected"
+	histogram := m.requests
+	if long {
+		histogram = m.streams
 	}
-	operation := method
+	histogram.Observe(duration.Seconds(), m.service, defaultString(route, "unmatched"), HTTPMethodLabel(method), httpStatusClass(statusCode))
+}
+
+// HTTPMethodLabel keeps the nine standard methods and maps every other one
+// to _OTHER.
+func HTTPMethodLabel(method string) string {
 	switch method {
 	case "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE":
+		return method
 	default:
-		operation = "http_unknown_method"
+		return "_OTHER"
 	}
-	m.Operations.Observe(operation, outcome, duration)
-	key := httpMetricsKey{
-		method:     defaultString(method, "UNKNOWN"),
-		statusCode: fmt.Sprintf("%d", statusCode),
+}
+
+func httpStatusClass(statusCode int) string {
+	if statusCode < 100 || statusCode > 599 {
+		return "5xx"
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	record := m.records[key]
-	record.count++
-	record.sumSeconds += duration.Seconds()
-	m.records[key] = record
+	return strconv.Itoa(statusCode/100) + "xx"
 }
 
 func (m *HTTPMetrics) Collector() MetricsCollector {
-	return func(context.Context) ([]Metric, error) {
+	return func(ctx context.Context) ([]Metric, error) {
 		if m == nil {
 			return nil, nil
 		}
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		keys := make([]httpMetricsKey, 0, len(m.records))
-		for key := range m.records {
-			keys = append(keys, key)
-		}
-		sort.Slice(keys, func(i int, j int) bool {
-			if keys[i].method == keys[j].method {
-				return keys[i].statusCode < keys[j].statusCode
-			}
-			return keys[i].method < keys[j].method
-		})
-		metrics := make([]Metric, 0, len(keys)*2)
-		for _, key := range keys {
-			record := m.records[key]
-			labels := []MetricLabel{{Name: "method", Value: key.method}, {Name: "status_code", Value: key.statusCode}}
-			metrics = append(metrics,
-				Metric{Name: "http_request_duration_seconds_count", Help: "Observed HTTP request count.", Type: "counter", Labels: labels, Value: float64(record.count)},
-				Metric{Name: "http_request_duration_seconds_sum", Help: "Observed HTTP request duration seconds.", Type: "counter", Labels: labels, Value: record.sumSeconds},
-			)
-		}
-		observations, _ := m.Operations.Collector()(context.Background())
+		metrics, _ := m.registry.Collector()(ctx)
+		observations, _ := m.Operations.Collector()(ctx)
 		return append(metrics, observations...), nil
 	}
+}
+
+// GRPCMetrics observes grpc_server_request_duration_seconds for the methods
+// of the registered service descriptors; any other method is unknown_method.
+type GRPCMetrics struct {
+	// Operations records the shutdown phases of the service's gRPC servers.
+	Operations *OperationMetrics
+	service    string
+	registry   *Registry
+	requests   *Histogram
+	mu         sync.Mutex
+	methods    map[string]bool
 }
 
 // NewGRPCMetrics requires the owning service name from the closed workload
 // domain; see NewOperationMetrics.
 func NewGRPCMetrics(service string) *GRPCMetrics {
-	return &GRPCMetrics{records: map[grpcMetricsKey]durationMetricsRecord{}, Operations: NewOperationMetrics(service)}
+	registry := NewRegistry(service)
+	return &GRPCMetrics{
+		Operations: NewOperationMetrics(service),
+		service:    service,
+		registry:   registry,
+		requests:   registry.Histogram("grpc_server_request_duration_seconds", "Duration of one internal gRPC call.", "service", "method", "code"),
+		methods:    map[string]bool{},
+	}
+}
+
+// Text renders the gRPC histogram and shutdown phases alone, for owners with
+// custom metrics ports.
+func (m *GRPCMetrics) Text() string {
+	samples, _ := m.Collector()(context.Background())
+	var builder strings.Builder
+	headers := map[string]bool{}
+	for _, sample := range groupMetricFamilies(samples) {
+		writeMetric(&builder, headers, sample)
+	}
+	return builder.String()
+}
+
+// SetMethods installs the registered descriptors' full method names before
+// the listener admits calls.
+func (m *GRPCMetrics) SetMethods(methods []string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, method := range methods {
+		m.methods[method] = true
+	}
 }
 
 func (m *GRPCMetrics) ObserveGRPCRequest(method string, code string, duration time.Duration) {
 	if m == nil {
 		return
 	}
-	m.Operations.Observe(method, grpcMetricOutcome(code), duration)
-	key := grpcMetricsKey{
-		method: defaultString(method, "unknown"),
-		code:   defaultString(code, "Unknown"),
-	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	record := m.records[key]
-	record.count++
-	record.sumSeconds += duration.Seconds()
-	m.records[key] = record
+	known := m.methods[method]
+	m.mu.Unlock()
+	if !known {
+		method = "unknown_method"
+	}
+	m.requests.Observe(duration.Seconds(), m.service, method, defaultString(code, "Unknown"))
 }
 
 func (m *GRPCMetrics) Collector() MetricsCollector {
-	return func(context.Context) ([]Metric, error) {
+	return func(ctx context.Context) ([]Metric, error) {
 		if m == nil {
 			return nil, nil
 		}
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		keys := make([]grpcMetricsKey, 0, len(m.records))
-		for key := range m.records {
-			keys = append(keys, key)
-		}
-		sort.Slice(keys, func(i int, j int) bool {
-			if keys[i].method == keys[j].method {
-				return keys[i].code < keys[j].code
-			}
-			return keys[i].method < keys[j].method
-		})
-		metrics := make([]Metric, 0, len(keys)*2)
-		for _, key := range keys {
-			record := m.records[key]
-			labels := []MetricLabel{{Name: "grpc_code", Value: key.code}, {Name: "grpc_method", Value: key.method}}
-			metrics = append(metrics,
-				Metric{Name: "grpc_request_duration_seconds_count", Help: "Observed gRPC request count.", Type: "counter", Labels: labels, Value: float64(record.count)},
-				Metric{Name: "grpc_request_duration_seconds_sum", Help: "Observed gRPC request duration seconds.", Type: "counter", Labels: labels, Value: record.sumSeconds},
-			)
-		}
-		observations, _ := m.Operations.Collector()(context.Background())
+		metrics, _ := m.registry.Collector()(ctx)
+		observations, _ := m.Operations.Collector()(ctx)
 		return append(metrics, observations...), nil
-	}
-}
-
-func WithHTTPMetrics(metrics *HTTPMetrics) HealthRouterOption {
-	return func(cfg *healthRouterConfig) {
-		cfg.httpMetrics = metrics
 	}
 }
 
@@ -352,36 +346,7 @@ func HealthRouter(readiness *Readiness, options ...HealthRouterOption) http.Hand
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		_, _ = w.Write([]byte(metricsText(r.Context(), cfg.metricsCollectors)))
 	})
-	if cfg.httpMetrics == nil {
-		return mux
-	}
-	return observeHTTPMetrics(mux, cfg.httpMetrics)
-}
-
-func observeHTTPMetrics(next http.Handler, metrics *HTTPMetrics) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tracker := &statusTrackingWriter{ResponseWriter: w, status: http.StatusOK}
-		start := time.Now()
-		next.ServeHTTP(tracker, r)
-		metrics.ObserveHTTPRequest(r.Method, tracker.status, time.Since(start))
-	})
-}
-
-type statusTrackingWriter struct {
-	http.ResponseWriter
-	status int
-}
-
-func (w *statusTrackingWriter) WriteHeader(status int) {
-	w.status = status
-	w.ResponseWriter.WriteHeader(status)
-}
-
-func (w *statusTrackingWriter) Write(data []byte) (int, error) {
-	if w.status == 0 {
-		w.status = http.StatusOK
-	}
-	return w.ResponseWriter.Write(data)
+	return mux
 }
 
 // RuntimeMetricsTextWith renders Go runtime metrics plus already-collected
@@ -408,7 +373,8 @@ func runtimeMetricsText(extra []Metric) string {
 	writeMetric(&builder, emittedHeaders, Metric{Name: "go_heap_free_bytes", Help: "Free bytes reserved for the Go heap.", Type: "gauge", Value: metricSampleValue(samples[3])})
 	writeMetric(&builder, emittedHeaders, Metric{Name: "go_gc_cycles_total", Help: "Completed Go GC cycles.", Type: "counter", Value: metricSampleValue(samples[4])})
 	writeMetric(&builder, emittedHeaders, Metric{Name: "go_gc_pause_seconds_total", Help: "Cumulative Go GC pause CPU seconds.", Type: "counter", Value: metricSampleValue(samples[5])})
-	for _, metric := range groupMetricFamilies(extra) {
+	library, _ := CurrentTelemetry().Collector()(context.Background())
+	for _, metric := range groupMetricFamilies(append(extra, library...)) {
 		writeMetric(&builder, emittedHeaders, metric)
 	}
 	return builder.String()

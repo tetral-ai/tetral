@@ -94,7 +94,8 @@ func TestDaytonaAdapterExposesCreateCapacityAsProvedNotStarted(t *testing.T) {
 	}
 	for _, want := range []string{
 		`"provider.name":"daytona"`, `"provider.status_code":400`, `"error.code":"quota_exceeded"`,
-		`"error.message_safe":"sandbox provider capacity is unavailable"`,
+		`"error.message_safe":"sandbox provider operation failed"`,
+		`"provider.failure_detail":"sandbox provider capacity is unavailable"`,
 	} {
 		if !strings.Contains(logs.String(), want) {
 			t.Fatalf("provider completion log missing %s: %s", want, logs.String())
@@ -132,7 +133,8 @@ func TestDaytonaCreateCapacityUsesExistingActivationCustody(t *testing.T) {
 			providerRecord := findDaytonaCapacityLogRecord(t, harness.logs.Bytes(), "operation", "sandbox.provider.create")
 			assertDaytonaCapacityLogFields(t, providerRecord, map[string]any{
 				"provider.name": "daytona", "provider.status_code": float64(400),
-				"error.code": "quota_exceeded", "error.message_safe": "sandbox provider capacity is unavailable",
+				"error.code": "quota_exceeded", "error.message_safe": "sandbox provider operation failed",
+				"provider.failure_detail": "sandbox provider capacity is unavailable",
 			})
 			attemptRecord := findDaytonaCapacityLogRecord(t, harness.logs.Bytes(), "event", "sandbox_activation_attempt_completed")
 			assertDaytonaCapacityLogFields(t, attemptRecord, map[string]any{

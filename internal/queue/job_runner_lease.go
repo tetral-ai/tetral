@@ -893,5 +893,6 @@ func (s *PostgreSQLQueueStore) leaseJobRunnerCandidate(ctx context.Context, tena
 		}
 		return nil, jobRunnerLeaseIneligible, err
 	}
+	s.observeQueueWait(job)
 	return job, outcome, nil
 }

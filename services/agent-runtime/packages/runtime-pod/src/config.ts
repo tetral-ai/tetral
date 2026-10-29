@@ -8,7 +8,7 @@
  */
 import { isIP } from "node:net";
 import { z } from "zod/v4";
-import { diagnosticEnvKeys, parseDiagnosticConfig, parseWorkloadResourceConfig, workloadResourceEnvKeys } from "@tetral/ts-observability";
+import { diagnosticEnvKeys, parseDiagnosticConfigResult, parseWorkloadResourceConfig, workloadResourceEnvKeys } from "@tetral/ts-observability";
 import type { DiagnosticConfig } from "@tetral/ts-observability";
 import {
 	bridgeMethodEnvKeys,
@@ -123,6 +123,9 @@ const ConfigSchema = z.strictObject({
 	TETRAL_LOG_MAX_RECORD_BYTES: z.string().optional(),
 	TETRAL_LOG_SUMMARY_INTERVAL_MS: z.string().optional(),
 	TETRAL_LOG_BURST: z.string().optional(),
+	TETRAL_TRACE_SAMPLE_RATIO: z.string().optional(),
+	TETRAL_DB_SLOW_QUERY_MS: z.string().optional(),
+	OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
 	TETRAL_RUNTIME_POD_NAMESPACE: IdentityFieldSchema,
 	TETRAL_RUNTIME_POD_NAME: IdentityFieldSchema,
 	TETRAL_RUNTIME_POD_UID: IdentityFieldSchema,
@@ -212,13 +215,16 @@ const RuntimePodEnvKeys = [
 export function loadRuntimePodConfig(
 	env: Record<string, string | undefined>,
 ): RuntimePodConfigResult {
-	const diagnostics = parseDiagnosticConfig(env);
+	const diagnosticResult = parseDiagnosticConfigResult(env);
+	if (!diagnosticResult.ok) {
+		return { ok: false, error: { kind: "config_error", message: diagnosticResult.problem } };
+	}
+	const diagnostics = diagnosticResult.config;
 	const resource = parseWorkloadResourceConfig(env, 253);
 	const bridgeMethodPolicies = parseBridgeMethodPolicies(env);
 	const parsed = ConfigSchema.safeParse(env);
 	if (
 		!parsed.success ||
-		diagnostics === undefined ||
 		resource === undefined ||
 		bridgeMethodPolicies === undefined
 	) {

@@ -1,0 +1,455 @@
+{
+  "events": {
+    "cold_start.completed": {
+      "audience": "benchmarks",
+      "fields": {
+        "cold_start.kind": "string",
+        "cold_start.start_kind": "string",
+        "config_ms": "integer",
+        "dependencies_ms": "integer",
+        "outcome": "string",
+        "ready_ms": "integer"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "cold_start.phase_completed": {
+      "audience": "benchmarks",
+      "fields": {
+        "cold_start.kind": "string",
+        "cold_start.phase": "string",
+        "config_ms": "integer",
+        "dependencies_ms": "integer",
+        "ready_ms": "integer"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "cold_start.phase_started": {
+      "audience": "benchmarks",
+      "fields": {
+        "cold_start.kind": "string",
+        "cold_start.phase": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "diagnostic.invalid_event": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.original": "string",
+        "reason": "string"
+      },
+      "level": "WARN",
+      "log_type": "app"
+    },
+    "diagnostic.suppressed": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.original": "string",
+        "first_seen": "string",
+        "last_seen": "string",
+        "operation": "string",
+        "operation.id": "string",
+        "phase": "string",
+        "reason": "string",
+        "request.id": "string",
+        "session.id": "string",
+        "suppressed.count": "integer",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "WARN",
+      "log_type": "app"
+    },
+    "internal.grpc.request": {
+      "level": "DEBUG",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "duration.ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "grpc.code": "string",
+        "grpc.method": "string",
+        "operation": "string",
+        "retryable": "boolean",
+        "terminal": "boolean"
+      },
+      "errors": {
+        "aborted": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "alreadyexists": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "canceled": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "dataloss": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "deadlineexceeded": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "failedprecondition": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "internal": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "invalidargument": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "notfound": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "outofrange": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "permissiondenied": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "resourceexhausted": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "unauthenticated": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "unavailable": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "unimplemented": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        },
+        "unknown": {
+          "class": "grpc_error",
+          "message_safe": "internal gRPC request failed"
+        }
+      }
+    },
+    "pressure.rejecting_ended": {
+      "audience": "operators",
+      "fields": {
+        "pressure.cause": "string",
+        "pressure.point": "string",
+        "pressure.rejected": "integer"
+      },
+      "level": "WARN",
+      "log_type": "app"
+    },
+    "pressure.rejecting_started": {
+      "audience": "operators",
+      "fields": {
+        "pressure.cause": "string",
+        "pressure.point": "string"
+      },
+      "level": "WARN",
+      "log_type": "app"
+    },
+    "workload.cleanup_failed": {
+      "audience": "operators",
+      "errors": {
+        "app": {
+          "class": "cleanup_error",
+          "message_safe": "workload resource cleanup failed"
+        },
+        "configuration": {
+          "class": "cleanup_error",
+          "message_safe": "workload resource cleanup failed"
+        },
+        "database": {
+          "class": "cleanup_error",
+          "message_safe": "workload resource cleanup failed"
+        },
+        "dependency": {
+          "class": "cleanup_error",
+          "message_safe": "workload resource cleanup failed"
+        },
+        "grpc": {
+          "class": "cleanup_error",
+          "message_safe": "workload resource cleanup failed"
+        },
+        "http": {
+          "class": "cleanup_error",
+          "message_safe": "workload resource cleanup failed"
+        },
+        "listener": {
+          "class": "cleanup_error",
+          "message_safe": "workload resource cleanup failed"
+        },
+        "mcp_clients": {
+          "class": "cleanup_error",
+          "message_safe": "workload resource cleanup failed"
+        },
+        "runtime_core": {
+          "class": "cleanup_error",
+          "message_safe": "workload resource cleanup failed"
+        },
+        "wait": {
+          "class": "cleanup_error",
+          "message_safe": "workload resource cleanup failed"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "phase": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "workload.command_failed": {
+      "audience": "operators",
+      "errors": {
+        "app": {
+          "class": "process_error",
+          "message_safe": "workload command failed"
+        },
+        "configuration": {
+          "class": "process_error",
+          "message_safe": "workload command failed"
+        },
+        "database": {
+          "class": "process_error",
+          "message_safe": "workload command failed"
+        },
+        "dependency": {
+          "class": "process_error",
+          "message_safe": "workload command failed"
+        },
+        "grpc": {
+          "class": "process_error",
+          "message_safe": "workload command failed"
+        },
+        "http": {
+          "class": "process_error",
+          "message_safe": "workload command failed"
+        },
+        "listener": {
+          "class": "process_error",
+          "message_safe": "workload command failed"
+        },
+        "mcp_clients": {
+          "class": "process_error",
+          "message_safe": "workload command failed"
+        },
+        "runtime_core": {
+          "class": "process_error",
+          "message_safe": "workload command failed"
+        },
+        "wait": {
+          "class": "process_error",
+          "message_safe": "workload command failed"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "phase": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "workload.shutdown.phase_completed": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "duration.seconds": "number",
+        "metric.observation.count": "integer",
+        "operation": "string",
+        "outcome": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "workload.shutdown_deadline_exceeded": {
+      "audience": "operators",
+      "errors": {
+        "shutdown_deadline_exceeded": {
+          "class": "shutdown_error",
+          "message_safe": "workload application shutdown deadline exceeded"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "phase": "string",
+        "timeout.kind": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    }
+  },
+  "metrics": {
+    "cold_start_phase_seconds": {
+      "audience": "benchmarks",
+      "buckets": "long",
+      "labels": {
+        "kind": [
+          "service_pod"
+        ],
+        "phase": [
+          "config",
+          "dependencies",
+          "ready"
+        ],
+        "service": "service names"
+      },
+      "type": "histogram"
+    },
+    "cold_start_seconds": {
+      "audience": "benchmarks",
+      "buckets": "long",
+      "labels": {
+        "kind": [
+          "service_pod"
+        ],
+        "scope": [
+          "engine",
+          "total"
+        ],
+        "service": "service names"
+      },
+      "type": "histogram"
+    },
+    "grpc_server_request_duration_seconds": {
+      "type": "histogram",
+      "audience": "operators",
+      "labels": {
+        "code": [
+          "OK",
+          "Canceled",
+          "Unknown",
+          "InvalidArgument",
+          "DeadlineExceeded",
+          "NotFound",
+          "AlreadyExists",
+          "PermissionDenied",
+          "ResourceExhausted",
+          "FailedPrecondition",
+          "Aborted",
+          "OutOfRange",
+          "Unimplemented",
+          "Internal",
+          "Unavailable",
+          "DataLoss",
+          "Unauthenticated"
+        ],
+        "method": "full gRPC method names the service registers",
+        "service": "service names"
+      },
+      "buckets": "request"
+    },
+    "tetral_diagnostic_dropped_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "tetral_diagnostic_emitted_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "tetral_diagnostic_filtered_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "tetral_diagnostic_limiter_entries": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "tetral_diagnostic_sink_failures_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "tetral_diagnostic_spans_dropped_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "tetral_diagnostic_suppressed_total": {
+      "audience": "operators",
+      "labels": {},
+      "type": "counter"
+    },
+    "tetral_long_operation_duration_seconds": {
+      "audience": "operators",
+      "buckets": "long",
+      "labels": {
+        "operation": "long operations declared in the service's table, or unknown_method",
+        "outcome": "ok, error, cancelled, rejected, timeout, the content commit outcomes committed, duplicate, stale and failed, or a code the operation declares",
+        "service": [
+          "agent-runtime",
+          "mcp-connector",
+          "provider-gateway"
+        ]
+      },
+      "type": "histogram"
+    },
+    "tetral_operation_duration_seconds": {
+      "audience": "operators",
+      "buckets": "request",
+      "labels": {
+        "operation": "operations declared in the service's table, or unknown_method",
+        "outcome": "ok, error, cancelled, rejected, timeout, the content commit outcomes committed, duplicate, stale and failed, or a code the operation declares",
+        "service": [
+          "agent-runtime",
+          "mcp-connector",
+          "provider-gateway"
+        ]
+      },
+      "type": "histogram"
+    }
+  },
+  "operations": {},
+  "service": "ts-observability",
+  "spans": {
+    "{grpc.method}": {
+      "attributes": [
+        "rpc.grpc.status_name"
+      ]
+    },
+    "{operation}": {
+      "attributes": []
+    }
+  }
+}

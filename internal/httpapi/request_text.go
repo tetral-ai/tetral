@@ -3,6 +3,8 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"maps"
 	"net/http"
 	"net/url"
@@ -15,6 +17,28 @@ import (
 // hold U+0000. PublicOperationHandler checks the path and query, and each JSON
 // body reader its body, so a request carrying U+0000 (or, in the path and
 // query, invalid UTF-8) gets 400 before any lookup or write.
+
+// JSONBodyLimit is the largest JSON request body ReadJSONBody accepts.
+const JSONBodyLimit = 1 << 20
+
+// ReadJSONBody reads a request body of at most JSONBodyLimit bytes, answering
+// a RequestTooLargeError that names the limit for a larger one and a
+// ValidationError for a body that cannot be read (a truncated or malformed
+// chunked body), and refuses U+0000 in it. Decoding is left to the route.
+func ReadJSONBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, JSONBodyLimit))
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return nil, &RequestTooLargeError{Message: "request body exceeds the 1 MiB limit"}
+		}
+		return nil, &ValidationError{Message: "request body could not be read"}
+	}
+	if err := rejectUnstorableJSONText(body); err != nil {
+		return nil, err
+	}
+	return body, nil
+}
 
 // rejectUnstorableJSONText reports U+0000 in any string or object key of a
 // JSON body. Malformed JSON is left to the route's strict decoder.

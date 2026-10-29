@@ -1,0 +1,1556 @@
+{
+  "schema_version": 1,
+  "purpose": "Every metric family each Engine component exposes: its type, label names with their allowed values or the closed domain that fixes them in code, bucket set and audience. The source observability.json of each component is the declaration; this catalogue must match it exactly.",
+  "bucket_sets": {
+    "request": [
+      0.005,
+      0.01,
+      0.025,
+      0.05,
+      0.1,
+      0.25,
+      0.5,
+      1,
+      2.5,
+      5,
+      10
+    ],
+    "long": [
+      0.1,
+      0.5,
+      1,
+      2.5,
+      5,
+      10,
+      30,
+      60,
+      120,
+      300,
+      600,
+      1800
+    ]
+  },
+  "services": {
+    "agent-runtime": {
+      "process_heap_used_bytes": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "process_rss_bytes": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "runtimepod_accepting_commands": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "runtimepod_active_fibers": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "runtimepod_active_sessions": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "runtimepod_active_threads": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "runtimepod_active_tool_fibers": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "runtimepod_approval_wait_outstanding": {
+        "audience": "operators",
+        "labels": {
+          "approval_source": [
+            "auto_reviewer",
+            "user"
+          ],
+          "request_kind": [
+            "agent_provider_request",
+            "approval_reviewer",
+            "compaction_summary"
+          ]
+        },
+        "type": "gauge"
+      },
+      "runtimepod_approval_wait_started_total": {
+        "audience": "operators",
+        "labels": {
+          "approval_source": [
+            "auto_reviewer",
+            "user"
+          ],
+          "request_kind": [
+            "agent_provider_request",
+            "approval_reviewer",
+            "compaction_summary"
+          ]
+        },
+        "type": "counter"
+      },
+      "runtimepod_approval_wait_unavailable_total": {
+        "audience": "operators",
+        "labels": {
+          "approval_source": [
+            "auto_reviewer",
+            "user"
+          ],
+          "request_kind": [
+            "agent_provider_request",
+            "approval_reviewer",
+            "compaction_summary"
+          ]
+        },
+        "type": "counter"
+      },
+      "runtimepod_cleanup_command_outcomes_total": {
+        "audience": "operators",
+        "labels": {
+          "outcome": [
+            "accepted",
+            "completed",
+            "failed",
+            "rejected"
+          ]
+        },
+        "type": "counter"
+      },
+      "runtimepod_closeout_events_total": {
+        "audience": "operators",
+        "labels": {
+          "event": [
+            "runtime_closeout_recovered",
+            "runtime_closeout_stalled",
+            "runtime_closeout_unrepairable"
+          ]
+        },
+        "type": "counter"
+      },
+      "runtimepod_commands_in_flight": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "runtimepod_container_memory_limit_bytes": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "runtimepod_container_memory_usage_bytes": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "runtimepod_content_commit_latency_ms": {
+        "audience": "operators",
+        "labels": {
+          "kind": [
+            "internal_tool_repair",
+            "reasoning",
+            "request_end",
+            "text",
+            "thinking",
+            "tool",
+            "tool_result"
+          ],
+          "outcome": [
+            "committed",
+            "duplicate",
+            "failed",
+            "stale"
+          ],
+          "phase": [
+            "content_apply",
+            "content_commit",
+            "request_end_apply",
+            "request_end_commit"
+          ],
+          "request_kind": [
+            "agent_provider_request",
+            "approval_reviewer",
+            "compaction_summary"
+          ]
+        },
+        "type": "summary"
+      },
+      "runtimepod_context_load_latency_ms": {
+        "audience": "operators",
+        "labels": {
+          "operation": [
+            "build_context",
+            "build_thread_context",
+            "commit_accepted_input",
+            "load_pending_input"
+          ],
+          "outcome": [
+            "cancelled",
+            "error",
+            "rejected",
+            "success"
+          ]
+        },
+        "type": "summary"
+      },
+      "runtimepod_continuation_latency_ms": {
+        "audience": "operators",
+        "labels": {
+          "approval_source": [
+            "auto_reviewer",
+            "user"
+          ],
+          "operation": [
+            "approval_wait",
+            "binding_refresh",
+            "cleanup_join",
+            "context_reconstruct",
+            "member_barrier_wait",
+            "permit_wait",
+            "tool_accept",
+            "tool_settle"
+          ],
+          "outcome": [
+            "cancelled",
+            "error",
+            "rejected",
+            "success"
+          ],
+          "request_kind": [
+            "agent_provider_request",
+            "approval_reviewer",
+            "compaction_summary"
+          ]
+        },
+        "type": "summary"
+      },
+      "runtimepod_event_write_latency_ms": {
+        "audience": "operators",
+        "labels": {
+          "operation": [
+            "append",
+            "commit_runtime_termination",
+            "finish_idle",
+            "write_request_end"
+          ],
+          "outcome": [
+            "cancelled",
+            "error",
+            "rejected",
+            "success"
+          ]
+        },
+        "type": "summary"
+      },
+      "runtimepod_pending_approvals": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "runtimepod_pending_content_bytes": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "runtimepod_pending_content_entries": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "runtimepod_provider_stream_duration_ms": {
+        "audience": "operators",
+        "labels": {
+          "kind": [
+            "agent_provider_request",
+            "approval_reviewer",
+            "compaction_summary"
+          ],
+          "outcome": [
+            "cancelled",
+            "error",
+            "rejected",
+            "success"
+          ]
+        },
+        "type": "summary"
+      },
+      "runtimepod_ready": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "runtimepod_session_capacity": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "runtimepod_tools_in_progress": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "runtimepod_tools_oldest_queued_seconds": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "runtimepod_tools_queue_wait_seconds": {
+        "audience": "operators",
+        "buckets": "long",
+        "labels": {},
+        "type": "histogram"
+      },
+      "runtimepod_tools_queued": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      }
+    },
+    "api": {},
+    "auth": {
+      "tetral_auth_api_key_usage_rows_updated_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_auth_api_key_usage_samples_dropped_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "reason": [
+            "deadline",
+            "database",
+            "unconfirmed"
+          ]
+        }
+      },
+      "tetral_auth_api_key_usage_submissions_dropped_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "reason": [
+            "capacity",
+            "contended",
+            "closed"
+          ]
+        }
+      },
+      "tetral_auth_token_prune_deleted_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_auth_token_prune_expired_backlog": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_auth_token_prune_healthy": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_auth_token_prune_last_success_timestamp_seconds": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_auth_token_prune_oldest_expiry_age_seconds": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_auth_token_prune_passes_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "status": [
+            "success",
+            "failed",
+            "cancelled"
+          ]
+        }
+      }
+    },
+    "bridge": {},
+    "cleanup": {
+      "tetral_cleanup_claim_due_duration_ms_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_cleanup_claim_due_runs_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_cleanup_jobs_claimed_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_cleanup_retention_budget_exhausted_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "phase": [
+            "idempotency",
+            "stream_changes"
+          ]
+        }
+      }
+    },
+    "computer-hub": {
+      "computerhub_connections_started_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "kind": [
+            "new",
+            "resumed"
+          ]
+        }
+      },
+      "computerhub_instructions_in_progress": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "computerhub_instructions_oldest_queued_seconds": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "computerhub_instructions_queue_wait_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {},
+        "buckets": "long"
+      },
+      "computerhub_instructions_queued": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "computerhub_open_streams": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "computerhub_streams_ended_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "cause": [
+            "age_limit",
+            "client_closed",
+            "connection_ended",
+            "drain",
+            "moved",
+            "stalled"
+          ]
+        }
+      }
+    },
+    "db-prepare": {},
+    "event-stream": {
+      "event_stream_active_sse_viewers": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_formal_delivery_latency_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {},
+        "buckets": "request"
+      },
+      "event_stream_formal_events_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_nats_disconnects_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_nats_dispatching_bytes": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_nats_pending_frames": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_nats_reconnects_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_nats_reserved_bytes": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_nats_reserved_frames": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_preview_active_requests": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_preview_delivery_latency_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {},
+        "buckets": "request"
+      },
+      "event_stream_preview_events_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_preview_hub_drops_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_preview_invalid_frames_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_preview_pending_bytes": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_preview_sequence_stops_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_preview_stopped_requests_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_preview_subscriptions": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_preview_viewer_drops_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_preview_viewers": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_sent_bytes_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "event_stream_slow_writers_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      }
+    },
+    "git-proxy": {
+      "gitproxy_active_connections": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "gitproxy_bytes_relayed_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "direction": [
+            "in",
+            "out"
+          ]
+        }
+      },
+      "gitproxy_requests_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "decision": [
+            "",
+            "rejected:invalid_route",
+            "rejected:malformed",
+            "rejected:unauthorized",
+            "rejected:request_body_too_large",
+            "rejected:max_conns",
+            "rejected:authorizer_unavailable",
+            "rejected:credential_required",
+            "rejected:credential_error",
+            "injected",
+            "anonymous"
+          ],
+          "endpoint": [
+            "",
+            "refs-upload",
+            "refs-receive",
+            "upload-pack",
+            "receive-pack"
+          ],
+          "upstream_status": "HTTP status code written to the client (integer as text; \"0\" only in the empty placeholder sample)"
+        }
+      },
+      "gitproxy_ticket_rejections_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "reason": [
+            "malformed",
+            "unauthorized"
+          ]
+        }
+      },
+      "gitproxy_upstream_latency_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {},
+        "buckets": "request"
+      }
+    },
+    "job-runner": {
+      "jobrunner_placement_rejected_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "cause": [
+            "no_candidates",
+            "exhausted"
+          ]
+        }
+      },
+      "jobrunner_slots_in_progress": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "jobrunner_slots_limit": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "runtime_placement_probe_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "outcome": [
+            "eligible",
+            "registry_unavailable",
+            "timeout",
+            "cancelled",
+            "transport_error",
+            "http_error",
+            "invalid_metrics",
+            "not_accepting",
+            "capacity_excluded",
+            "response_too_large"
+          ]
+        }
+      },
+      "runtime_placement_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "outcome": [
+            "selected",
+            "exhausted",
+            "no_candidates",
+            "visibility_not_ready",
+            "timeout",
+            "cancelled",
+            "invalid_policy",
+            "random_unavailable"
+          ]
+        }
+      }
+    },
+    "mcp-connector": {
+      "mcpconnector_call_latency_seconds": {
+        "audience": "operators",
+        "labels": {
+          "error_kind": [
+            "",
+            "mcp_authentication_failed",
+            "mcp_claim_conflict",
+            "mcp_commit_failed",
+            "mcp_connection_failed",
+            "mcp_credential_required",
+            "mcp_custody_lost",
+            "mcp_in_flight",
+            "mcp_internal_error",
+            "mcp_invalid_input",
+            "mcp_not_ready",
+            "mcp_timeout",
+            "mcp_tool_error",
+            "mcp_transport_failed",
+            "mcp_unauthenticated",
+            "runtime_binding_token_rejected"
+          ],
+          "status": [
+            "completed",
+            "runtime_error",
+            "tool_error",
+            "unspecified"
+          ],
+          "tool": "MCP tool name from the Bridge-returned executor payload (any name an installed MCP server exposes, up to the shared ID byte bound); empty string when the call settled before an executor was resolved"
+        },
+        "type": "summary"
+      },
+      "mcpconnector_calls_total": {
+        "audience": "operators",
+        "labels": {
+          "error_kind": [
+            "",
+            "mcp_authentication_failed",
+            "mcp_claim_conflict",
+            "mcp_commit_failed",
+            "mcp_connection_failed",
+            "mcp_credential_required",
+            "mcp_custody_lost",
+            "mcp_in_flight",
+            "mcp_internal_error",
+            "mcp_invalid_input",
+            "mcp_not_ready",
+            "mcp_timeout",
+            "mcp_tool_error",
+            "mcp_transport_failed",
+            "mcp_unauthenticated",
+            "runtime_binding_token_rejected"
+          ],
+          "status": [
+            "completed",
+            "runtime_error",
+            "tool_error",
+            "unspecified"
+          ],
+          "tool": "MCP tool name from the Bridge-returned executor payload (any name an installed MCP server exposes, up to the shared ID byte bound); empty string when the call settled before an executor was resolved"
+        },
+        "type": "counter"
+      },
+      "mcpconnector_manifest_refreshes_total": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "mcpconnector_refresh_attempts_total": {
+        "audience": "operators",
+        "labels": {
+          "outcome": [
+            "failed",
+            "success"
+          ]
+        },
+        "type": "counter"
+      },
+      "mcpconnector_sessions_active": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      }
+    },
+    "provider-gateway": {
+      "process_heap_used_bytes": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "process_rss_bytes": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "providergateway_complete_frame_pending_bytes": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "providergateway_content_cumulative_content_bytes": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "providergateway_content_identities": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "providergateway_content_open_blocks": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "providergateway_content_retained_bytes": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "providergateway_content_segments": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "providergateway_output_tokens_per_second": {
+        "audience": "operators",
+        "buckets": [
+          1,
+          5,
+          10,
+          20,
+          40,
+          80,
+          160,
+          320
+        ],
+        "labels": {
+          "model": "the Gateway catalogue's model ids",
+          "provider": "the Gateway catalogue's provider ids"
+        },
+        "type": "histogram"
+      },
+      "providergateway_preview_accepted_total": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "providergateway_preview_attempted_total": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "providergateway_preview_client_pending_bytes": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "providergateway_preview_connected": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "providergateway_preview_disabled_events_total": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "providergateway_preview_disabled_requests_total": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "providergateway_preview_dropped_total": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "providergateway_preview_encoded_bytes_total": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "providergateway_preview_encoded_frames_total": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "providergateway_preview_failures_total": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "providergateway_preview_flushed_total": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "providergateway_preview_pending_bytes": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "providergateway_preview_pending_frames": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "providergateway_preview_stops_total": {
+        "audience": "operators",
+        "labels": {
+          "reason": [
+            "connection_lost",
+            "credential_reload",
+            "encoding",
+            "event_identities",
+            "flush_failed",
+            "frame_bytes",
+            "queue_bytes",
+            "queue_frames",
+            "shutdown",
+            "unavailable"
+          ]
+        },
+        "type": "counter"
+      },
+      "providergateway_provider_rejected_total": {
+        "audience": "operators",
+        "labels": {
+          "cause": [
+            "overloaded",
+            "rate_limited"
+          ],
+          "provider": "the Gateway catalogue's provider ids"
+        },
+        "type": "counter"
+      },
+      "providergateway_provider_stream_duration_ms_sum": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "providergateway_provider_stream_failures_total": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "providergateway_provider_streams_total": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "providergateway_ready": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "providergateway_stream_duration_seconds": {
+        "audience": "operators",
+        "buckets": "long",
+        "labels": {
+          "model": "the Gateway catalogue's model ids",
+          "outcome": [
+            "cancelled",
+            "error",
+            "ok"
+          ],
+          "provider": "the Gateway catalogue's provider ids"
+        },
+        "type": "histogram"
+      },
+      "providergateway_time_to_first_token_seconds": {
+        "audience": "operators",
+        "buckets": "long",
+        "labels": {
+          "first_kind": [
+            "reasoning",
+            "text",
+            "tool_call"
+          ],
+          "model": "the Gateway catalogue's model ids",
+          "provider": "the Gateway catalogue's provider ids"
+        },
+        "type": "histogram"
+      },
+      "providergateway_tokens_total": {
+        "audience": "operators",
+        "labels": {
+          "model": "the Gateway catalogue's model ids",
+          "provider": "the Gateway catalogue's provider ids",
+          "type": [
+            "cached",
+            "input",
+            "output"
+          ]
+        },
+        "type": "counter"
+      },
+      "providergateway_turns_in_progress": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "providergateway_turns_limit": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "providergateway_turns_rejected_total": {
+        "audience": "operators",
+        "labels": {
+          "cause": [
+            "capacity"
+          ]
+        },
+        "type": "counter"
+      }
+    },
+    "queue": {
+      "queue_dead_lettered_jobs": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {
+          "kind": "queue job kinds present in queue_jobs (one series per kind from PostgreSQLQueueStore.Metrics)"
+        }
+      },
+      "queue_jobs_in_progress": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {
+          "kind": "queue job kinds present in queue_jobs (one series per kind from PostgreSQLQueueStore.Metrics)"
+        }
+      },
+      "queue_jobs_oldest_queued_seconds": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {
+          "kind": "queue job kinds present in queue_jobs (one series per kind from PostgreSQLQueueStore.Metrics)"
+        }
+      },
+      "queue_jobs_queue_wait_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {
+          "kind": "queue job kind of the leased job"
+        },
+        "buckets": "long"
+      },
+      "queue_jobs_queued": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {
+          "kind": "queue job kinds present in queue_jobs (one series per kind from PostgreSQLQueueStore.Metrics)"
+        }
+      },
+      "queue_pending_jobs": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {
+          "kind": "queue job kinds present in queue_jobs (one series per kind from PostgreSQLQueueStore.Metrics)"
+        }
+      },
+      "queue_retention_budget_exhausted_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "phase": [
+            "job_runner_terminal"
+          ]
+        }
+      },
+      "queue_retry_pending_jobs": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {
+          "kind": "queue job kinds present in queue_jobs (one series per kind from PostgreSQLQueueStore.Metrics)"
+        }
+      }
+    },
+    "sandbox": {},
+    "ts-observability": {
+      "cold_start_phase_seconds": {
+        "audience": "benchmarks",
+        "buckets": "long",
+        "labels": {
+          "kind": [
+            "service_pod"
+          ],
+          "phase": [
+            "config",
+            "dependencies",
+            "ready"
+          ],
+          "service": "service names"
+        },
+        "type": "histogram"
+      },
+      "cold_start_seconds": {
+        "audience": "benchmarks",
+        "buckets": "long",
+        "labels": {
+          "kind": [
+            "service_pod"
+          ],
+          "scope": [
+            "engine",
+            "total"
+          ],
+          "service": "service names"
+        },
+        "type": "histogram"
+      },
+      "grpc_server_request_duration_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {
+          "code": [
+            "OK",
+            "Canceled",
+            "Unknown",
+            "InvalidArgument",
+            "DeadlineExceeded",
+            "NotFound",
+            "AlreadyExists",
+            "PermissionDenied",
+            "ResourceExhausted",
+            "FailedPrecondition",
+            "Aborted",
+            "OutOfRange",
+            "Unimplemented",
+            "Internal",
+            "Unavailable",
+            "DataLoss",
+            "Unauthenticated"
+          ],
+          "method": "full gRPC method names the service registers",
+          "service": "service names"
+        },
+        "buckets": "request"
+      },
+      "tetral_diagnostic_dropped_total": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "tetral_diagnostic_emitted_total": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "tetral_diagnostic_filtered_total": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "tetral_diagnostic_limiter_entries": {
+        "audience": "operators",
+        "labels": {},
+        "type": "gauge"
+      },
+      "tetral_diagnostic_sink_failures_total": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "tetral_diagnostic_spans_dropped_total": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "tetral_diagnostic_suppressed_total": {
+        "audience": "operators",
+        "labels": {},
+        "type": "counter"
+      },
+      "tetral_long_operation_duration_seconds": {
+        "audience": "operators",
+        "buckets": "long",
+        "labels": {
+          "operation": "long operations declared in the service's table, or unknown_method",
+          "outcome": "ok, error, cancelled, rejected, timeout, the content commit outcomes committed, duplicate, stale and failed, or a code the operation declares",
+          "service": [
+            "agent-runtime",
+            "mcp-connector",
+            "provider-gateway"
+          ]
+        },
+        "type": "histogram"
+      },
+      "tetral_operation_duration_seconds": {
+        "audience": "operators",
+        "buckets": "request",
+        "labels": {
+          "operation": "operations declared in the service's table, or unknown_method",
+          "outcome": "ok, error, cancelled, rejected, timeout, the content commit outcomes committed, duplicate, stale and failed, or a code the operation declares",
+          "service": [
+            "agent-runtime",
+            "mcp-connector",
+            "provider-gateway"
+          ]
+        },
+        "type": "histogram"
+      }
+    },
+    "web-connector": {
+      "web_backend_calls_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "api": [
+            "search",
+            "reader"
+          ],
+          "outcome": [
+            "success",
+            "error",
+            "request_error",
+            "timeout",
+            "transport_error",
+            "response_error",
+            "401",
+            "402",
+            "429",
+            "tool_error",
+            "runtime_error",
+            "invalid_response"
+          ]
+        }
+      },
+      "web_backend_tokens_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "api": [
+            "search",
+            "reader"
+          ]
+        }
+      },
+      "web_cache_bytes_written_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "web_draining": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "web_key_rotations_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "reason": [
+            "401",
+            "402",
+            "429"
+          ]
+        }
+      },
+      "web_request_duration_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {
+          "operation": [
+            "search",
+            "open",
+            "find",
+            "mixed"
+          ]
+        },
+        "buckets": "request"
+      },
+      "web_requests_active": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "web_requests_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "operation": [
+            "search",
+            "open",
+            "find",
+            "mixed"
+          ],
+          "status": [
+            "completed",
+            "tool_error",
+            "runtime_error"
+          ]
+        }
+      }
+    },
+    "workload": {
+      "cold_start_phase_seconds": {
+        "type": "histogram",
+        "audience": "benchmarks",
+        "labels": {
+          "kind": [
+            "cli",
+            "service_pod"
+          ],
+          "phase": [
+            "config",
+            "connect",
+            "dependencies",
+            "ready",
+            "register"
+          ],
+          "service": "service names"
+        },
+        "buckets": "long"
+      },
+      "cold_start_seconds": {
+        "type": "histogram",
+        "audience": "benchmarks",
+        "labels": {
+          "kind": [
+            "cli",
+            "service_pod"
+          ],
+          "scope": [
+            "engine",
+            "total"
+          ],
+          "service": "service names"
+        },
+        "buckets": "long"
+      },
+      "db_client_operation_duration_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {
+          "operation": "statement and lock names fixed in code",
+          "outcome": [
+            "ok",
+            "error"
+          ],
+          "service": "service names"
+        },
+        "buckets": "request"
+      },
+      "db_pool_idle_connections": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {
+          "pool": "pool names fixed by each service"
+        }
+      },
+      "db_pool_in_use_connections": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {
+          "pool": "pool names fixed by each service"
+        }
+      },
+      "db_pool_open_connections": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {
+          "pool": "pool names fixed by each service"
+        }
+      },
+      "db_pool_wait_count_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "pool": "pool names fixed by each service"
+        }
+      },
+      "db_pool_wait_duration_seconds_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "pool": "pool names fixed by each service"
+        }
+      },
+      "go_gc_cycles_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "go_gc_pause_seconds_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "go_goroutines": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "go_heap_alloc_bytes": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "go_heap_free_bytes": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "go_sched_gomaxprocs_threads": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "grpc_server_request_duration_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {
+          "code": [
+            "OK",
+            "Canceled",
+            "Unknown",
+            "InvalidArgument",
+            "DeadlineExceeded",
+            "NotFound",
+            "AlreadyExists",
+            "PermissionDenied",
+            "ResourceExhausted",
+            "FailedPrecondition",
+            "Aborted",
+            "OutOfRange",
+            "Unimplemented",
+            "Internal",
+            "Unavailable",
+            "DataLoss",
+            "Unauthenticated"
+          ],
+          "method": "full gRPC method names the service registers",
+          "service": "service names"
+        },
+        "buckets": "request"
+      },
+      "http_server_request_duration_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {
+          "method": [
+            "CONNECT",
+            "DELETE",
+            "GET",
+            "HEAD",
+            "OPTIONS",
+            "PATCH",
+            "POST",
+            "PUT",
+            "TRACE",
+            "_OTHER"
+          ],
+          "route": "route patterns the service registers, or unmatched",
+          "service": "service names",
+          "status_class": [
+            "1xx",
+            "2xx",
+            "3xx",
+            "4xx",
+            "5xx"
+          ]
+        },
+        "buckets": "request"
+      },
+      "http_server_stream_duration_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {
+          "method": [
+            "CONNECT",
+            "DELETE",
+            "GET",
+            "HEAD",
+            "OPTIONS",
+            "PATCH",
+            "POST",
+            "PUT",
+            "TRACE",
+            "_OTHER"
+          ],
+          "route": "long route patterns the service registers",
+          "service": "service names",
+          "status_class": [
+            "1xx",
+            "2xx",
+            "3xx",
+            "4xx",
+            "5xx"
+          ]
+        },
+        "buckets": "long"
+      },
+      "tetral_diagnostic_dropped_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_diagnostic_emitted_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_diagnostic_filtered_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_diagnostic_limiter_entries": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_diagnostic_queue_records": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_diagnostic_sink_failures_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_diagnostic_spans_dropped_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_diagnostic_suppressed_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {}
+      },
+      "tetral_long_operation_duration_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {
+          "operation": "long operations declared in the service's table",
+          "outcome": "ok, rejected, error or a declared error code",
+          "service": "service names"
+        },
+        "buckets": "long"
+      },
+      "tetral_metrics_collector_errors_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "collector": "collector names fixed by each service"
+        }
+      },
+      "tetral_operation_duration_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {
+          "operation": "operations declared in the service's table",
+          "outcome": "ok, rejected, error or a declared error code",
+          "service": "service names"
+        },
+        "buckets": "request"
+      }
+    }
+  }
+}

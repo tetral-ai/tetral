@@ -23,7 +23,8 @@ import { ProviderRequestLoweringError } from "@tetral/gateway-lowering/src/error
 import { ProviderGatewayServiceShell } from "../../src/service.js";
 import { writeProviderStreamEvents } from "../../src/grpc-server.js";
 import { unusedProviderFetch, validFileBackedProviderAttachment, validProviderAttachment, validProviderRequest, validRunWebRequest } from "./fixtures.js";
-import { createJsonLogger } from "../../src/logger.js";
+import { createJsonLogger, providerGatewayDeclarations } from "../../src/logger.js";
+import { recordingTelemetry } from "@tetral/ts-observability/test-support/recording-telemetry";
 import type { GatewayLogger } from "../../src/logger.js";
 import type { GatewayAuthenticator, ProviderAttachmentResolver, ProviderRequestStreamer } from "../../src/service.js";
 import type { RuntimeBindingRequestIdentity, RuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
@@ -93,7 +94,7 @@ describe("ProviderGatewayServiceShell", () => {
       expect(record["service.instance.id"]).toBeString();
       expect(record["metric.observation.count"]).toBe(1);
       expect(record["duration.seconds"]).toBeGreaterThan(0);
-      expect(service.metricsText()).toContain(`tetral_operation_duration_seconds_sum{service="provider-gateway",operation="${record.operation}",outcome="timeout"} ${record["duration.seconds"]}`);
+      expect(service.metricsText()).toContain(`tetral_long_operation_duration_seconds_sum{service="provider-gateway",operation="${record.operation}",outcome="timeout"} ${record["duration.seconds"]}`);
     }
     logger.close();
     expect(await outcome).toMatchObject({code:status.UNAVAILABLE});
@@ -130,7 +131,7 @@ describe("ProviderGatewayServiceShell", () => {
     expect(Date.now() - started).toBeLessThan(150 + 1000);
     await written;
     expect(stream.writes).toHaveLength(1);
-    expect(service.metricsText()).toContain("providergateway_provider_streams_active 0");
+    expect(service.metricsText()).toContain("providergateway_turns_in_progress 0");
   });
 
   test("a cooperative worker aborted at the drain cutoff writes its terminal error without forced stream closure", async () => {
@@ -156,13 +157,13 @@ describe("ProviderGatewayServiceShell", () => {
 
     expect(closes).toBe(0);
     expect(stream.writes.at(-1)?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR);
-    expect(service.metricsText()).toContain("providergateway_provider_streams_active 0");
+    expect(service.metricsText()).toContain("providergateway_turns_in_progress 0");
   });
 
   test("a throwing shutdown diagnostic sink does not change the joined phase result", async () => {
     const service = createService(new RecordingAuthenticator(),true,undefined,{logger:{ info: () => { throw new Error("sink"); }, error: () => undefined }});
     await service.shutdown(new Date(Date.now()+1000));
-    expect(service.metricsText()).toContain('operation="shutdown_drain",outcome="success"} 1');
+    expect(service.metricsText()).toContain('operation="shutdown_drain",outcome="ok"} 1');
   });
   test("authorizes before request validation or provider-unavailable response construction", async () => {
     const authenticator = new RecordingAuthenticator({ ok: false, code: "Unauthenticated", message: "unauthenticated" });
@@ -178,7 +179,7 @@ describe("ProviderGatewayServiceShell", () => {
     const service = createService(new RecordingAuthenticator(),true,{verify: () => true},{logger});
     try {
       await expectGrpcCode(collectEvents(service.streamProviderRequest({...validProviderRequest(),requestId: ""},metadata())),status.INVALID_ARGUMENT);
-      expect(JSON.parse(lines[0]!)).toMatchObject({level: "info",event: "provider_request_streamed","request.outcome": "failed","error.class": "request_validation"});
+      expect(JSON.parse(lines[0]!)).toMatchObject({level: "INFO",event: "provider_request_streamed","request.outcome": "failed","error.class": "request_validation"});
     } finally { logger.close(); }
   });
   test("rejects invalid request-kind output-schema combinations before credential resolution", async () => {
@@ -306,9 +307,9 @@ describe("ProviderGatewayServiceShell", () => {
     await collectEvents(service.streamProviderRequest(request, metadata()));
 
     expect(JSON.stringify(logs)).not.toContain(hostileCode);
-    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
+    expect(logs).toEqual([
       expect.objectContaining({
-        event: "provider_request_streamed",
+        event: "provider_request_streamed_failed",
         "request.outcome": "failed",
         "error.class": "provider_error",
         "error.code": "provider_error",
@@ -350,9 +351,9 @@ describe("ProviderGatewayServiceShell", () => {
         }),
       }),
     ]);
-    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
+    expect(logs).toEqual([
       expect.objectContaining({
-        event: "provider_request_streamed",
+        event: "provider_request_streamed_failed",
         "request.outcome": "failed",
         "error.class": "provider_configuration",
         "error.code": "provider_configuration_invalid",
@@ -395,10 +396,10 @@ describe("ProviderGatewayServiceShell", () => {
     await collectEvents(service.streamProviderRequest(request, metadata()));
     await service.runWeb(webRequest, metadata()).catch(() => undefined);
 
-    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
+    expect(logs).toEqual([
       expect.objectContaining({
-        event: "provider_request_streamed",
-        "event.kind": "provider_request_streamed",
+        event: "provider_request_streamed_failed",
+        "event.kind": "provider_request_streamed_failed",
         operation: "StreamProviderRequest",
         component: "gateway",
         "request.outcome": "failed",
@@ -499,58 +500,65 @@ describe("ProviderGatewayServiceShell", () => {
     ]);
   });
 
-  test("admission cap fails fast with retryable provider-error without queueing", async () => {
-    const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
-    const request = validProviderRequest({
-      ...base,
-      runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid),
-    });
-    let started!: () => void;
-    const firstStarted = new Promise<void>((resolve) => {
-      started = resolve;
-    });
+  test("a ninth concurrent turn is refused without queueing and its refusals form one episode", async () => {
+    let now = 0;
+    const recording = recordingTelemetry({ serviceName: "provider-gateway", declarations: providerGatewayDeclarations, monotonicClock: () => now });
     const logs: unknown[] = [];
-    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
-      maxConcurrentTurns: 1,
-      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
-      providerStreamer: {
-        stream: async function* () {
-          started();
-          await new Promise((resolve) => setTimeout(resolve, 50));
-          yield providerError("provider_unavailable", false);
+    let held = 0;
+    let allHeld!: () => void;
+    const heldAll = new Promise<void>((resolve) => { allHeld = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    try {
+      const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+        maxConcurrentTurns: 8,
+        logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+        providerStreamer: {
+          stream: async function* () {
+            if (++held === 8) allHeld();
+            await gate;
+            yield providerError("provider_unavailable", false);
+          },
         },
-      },
-    });
+      });
+      const request = signedProviderRequest();
+      const turn = (n: number) => collectEvents(service.streamProviderRequest({ ...request, requestId: `req_${n}`, modelRequestId: `mreq_${n}` }, metadata()));
+      const pressure = () => recording.records().filter((record) => String(record.event).startsWith("pressure."));
+      const admitted = Array.from({ length: 8 }, (_, n) => turn(n));
+      await heldAll;
 
-    const first = collectEvents(service.streamProviderRequest(request, metadata()));
-    await firstStarted;
-    const second = await collectEvents(service.streamProviderRequest({
-      ...request,
-      requestId: "req_2",
-      modelRequestId: "mreq_2",
-    }, metadata()));
+      const refused = await turn(8);
+      expect(refused).toHaveLength(1);
+      expect(refused[0]?.providerError?.error).toMatchObject({ code: "provider_unavailable", retryable: true, fatal: false });
+      expect(service.metricsText()).toContain("providergateway_turns_limit 8\n");
+      expect(service.metricsText()).toContain("providergateway_turns_in_progress 8\n");
+      expect(service.metricsText()).toContain('providergateway_turns_rejected_total{cause="capacity"} 1\n');
+      expect(service.metricsText()).toContain('tetral_long_operation_duration_seconds_count{service="provider-gateway",operation="StreamProviderRequest",outcome="rejected"} 1');
+      expect(pressure()).toEqual([
+        expect.objectContaining({ level: "WARN", event: "pressure.rejecting_started", "pressure.point": "providergateway_turns", "pressure.cause": "capacity" }),
+      ]);
+      expect(logs.filter((record) => (record as { readonly "model_request.id"?: unknown })["model_request.id"] === "mreq_8")).toEqual([
+        expect.objectContaining({ event: "provider_request_streamed", "request.outcome": "failed", "error.class": "provider_error", "error.code": "provider_unavailable" }),
+      ]);
 
-    expect(second).toHaveLength(1);
-    expect(second[0]?.providerError?.error).toMatchObject({
-      code: "provider_unavailable",
-      retryable: true,
-      fatal: false,
-    });
-    expect(service.metricsText()).toContain("providergateway_provider_stream_capacity 1");
-    expect(service.metricsText()).toContain("providergateway_admission_rejections_total 1");
-    expect(service.metricsText()).toContain('tetral_operation_duration_seconds_count{service="provider-gateway",operation="StreamProviderRequest",outcome="rejected"} 1');
-    await first;
-    expect(service.metricsText()).toContain('tetral_operation_duration_seconds_count{service="provider-gateway",operation="StreamProviderRequest",outcome="error"} 1');
-    expect(logs.filter((record) =>
-      (record as { readonly event?: unknown }).event === "provider_request_streamed"
-      && (record as { readonly "model_request.id"?: unknown })["model_request.id"] === "mreq_2"
-    )).toEqual([
-      expect.objectContaining({
-        "request.outcome": "failed",
-        "error.class": "provider_error",
-        "error.code": "provider_unavailable",
-      }),
-    ]);
+      release();
+      await Promise.all(admitted);
+      expect(service.metricsText()).toContain("providergateway_turns_in_progress 0\n");
+      // An admitted turn that fails is an error, never a rejection.
+      expect(service.metricsText()).toContain('tetral_long_operation_duration_seconds_count{service="provider-gateway",operation="StreamProviderRequest",outcome="error"} 8');
+      now = 59_000;
+      await turn(9);
+      expect(pressure()).toEqual([expect.objectContaining({ event: "pressure.rejecting_started" })]);
+      now = 60_000;
+      await turn(10);
+      expect(pressure()).toEqual([
+        expect.objectContaining({ event: "pressure.rejecting_started" }),
+        expect.objectContaining({ level: "WARN", event: "pressure.rejecting_ended", "pressure.point": "providergateway_turns", "pressure.cause": "capacity", "pressure.rejected": 1 }),
+      ]);
+    } finally {
+      release();
+      recording.restore();
+    }
   });
 
   test("first normalized event timeout produces a retryable terminal provider-error", async () => {
@@ -644,7 +652,7 @@ describe("ProviderGatewayServiceShell", () => {
       statusCode: 504,
     });
     expect(aborted).toBe(true);
-    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
+    expect(logs).toEqual([
       expect.objectContaining({
         event: "gateway_provider_timeout",
         "timeout.kind": "inter_event",
@@ -652,7 +660,7 @@ describe("ProviderGatewayServiceShell", () => {
         "timeout.inter_event_gap_ms": expect.any(Number),
         "stream.last_event.kind": "text_start",
       }),
-      expect.objectContaining({ event: "provider_request_streamed" }),
+      expect.objectContaining({ event: "provider_request_streamed_failed" }),
     ]);
     expect(JSON.stringify(logs)).not.toContain("Provider stream stalled before the next chunk.");
   });
@@ -849,9 +857,9 @@ describe("ProviderGatewayServiceShell", () => {
     await iterator.return?.();
 
     expect(providerClosed).toBe(true);
-    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
+    expect(logs).toEqual([
       expect.objectContaining({
-        event: "provider_request_streamed",
+        event: "provider_request_streamed_failed",
         "request.outcome": "failed",
         "error.class": "runtime_error",
         "error.code": "stream_incomplete",
@@ -951,9 +959,9 @@ describe("ProviderGatewayServiceShell", () => {
       retryable: true,
       fatal: false,
     });
-    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
+    expect(logs).toEqual([
       expect.objectContaining({
-        event: "provider_request_streamed",
+        event: "provider_request_streamed_failed",
         "error.class": "provider_transport_failure",
         "error.code": "provider_stream_error",
         "provider.id": "anthropic",
@@ -999,8 +1007,8 @@ describe("ProviderGatewayServiceShell", () => {
       retryable: true,
       fatal: false,
     });
-    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([expect.objectContaining({
-      event: "provider_request_streamed",
+    expect(logs).toEqual([expect.objectContaining({
+      event: "provider_request_streamed_failed",
       "error.class": "provider_transport_failure",
       "error.code": "provider_stream_error",
     })]);
@@ -1467,9 +1475,9 @@ describe("ProviderGatewayServiceShell", () => {
       fatal: true,
       statusCode: 422,
     });
-    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
+    expect(logs).toEqual([
       expect.objectContaining({
-        event: "provider_request_streamed",
+        event: "provider_request_streamed_failed",
         "error.class": "provider_http_rejection",
         "error.code": "provider_request_invalid",
         "provider.status_code": 422,
@@ -1555,8 +1563,8 @@ describe("ProviderGatewayServiceShell", () => {
       statusCode: 400,
     }));
     expect(JSON.stringify(failed)).not.toMatch(/anthropic|platform|key|balance|billing|credit|private-billing-canary/i);
-    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([expect.objectContaining({
-      event: "provider_request_streamed",
+    expect(logs).toEqual([expect.objectContaining({
+      event: "provider_request_streamed_failed",
       "error.class": "provider_http_rejection",
       "error.code": "provider_unavailable",
       "provider.status_code": 400,
@@ -2048,9 +2056,9 @@ describe("ProviderGatewayServiceShell", () => {
     });
 
     await expectGrpcCode(collectEvents(service.streamProviderRequest(validProviderRequest(), metadata())), status.UNAVAILABLE);
-    expect(logs.filter(record => (record as {event?: string}).event !== "provider.stage_completed")).toEqual([
+    expect(logs).toEqual([
       expect.objectContaining({
-        event: "provider_request_streamed",
+        event: "provider_request_streamed_failed",
         "request.outcome": "failed",
         "error.class": "grpc_status",
         "error.code": "14",

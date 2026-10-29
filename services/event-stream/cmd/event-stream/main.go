@@ -121,6 +121,7 @@ func run(ctx context.Context, env envReader, open openStartupFunc) error {
 	defer diagnosticOwner.CloseWithBudget()
 	logger := diagnosticOwner.Logger
 	defer workload.InstallDefaultLogger(logger)()
+	coldStart := workload.BeginServiceColdStart(ctx)
 	if diagnosticErr != nil {
 		return workload.LogStartupFailure(logger, "event-stream", diagnosticErr)
 	}
@@ -129,6 +130,7 @@ func run(ctx context.Context, env envReader, open openStartupFunc) error {
 		return workload.LogStartupFailure(logger, "event-stream", err)
 	}
 	workload.ConfigureProcessShutdown(ctx, defaultShutdownTimeout+5*time.Second, diagnosticOwner)
+	coldStart.Advance(ctx)
 	if open == nil {
 		open = openStartupDatabaseFromEnv
 	}
@@ -158,11 +160,11 @@ func run(ctx context.Context, env envReader, open openStartupFunc) error {
 		}
 		defer workload.ProcessCleanup(ctx, previewHub.Close)
 	}
+	coldStart.Advance(ctx)
 	handler := buildHTTPHandler(readiness, eventstream.NewRouter(reader, cfg.PrincipalVerifier, eventstream.WithLogger(logger), eventstream.WithRequestMetrics(httpMetrics), eventstream.WithStreamConfig(cfg.StreamConfig), eventstream.WithStreamShutdownContext(ctx), eventstream.WithIdleCoalescer(idleChecks), eventstream.WithPreviewHub(previewHub), eventstream.WithPreviewMetrics(previewMetrics)))
 	metricsHandler := workload.HealthRouter(readiness,
 		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
 		workload.WithMetricsCollector("previews", previewMetrics.Collector()),
-		workload.WithHTTPMetrics(httpMetrics),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
 		workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", database.runtimeClient)),
 	)

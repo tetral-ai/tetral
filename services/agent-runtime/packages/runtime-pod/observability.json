@@ -1,0 +1,1369 @@
+{
+  "events": {
+    "approval_review_failure": {
+      "audience": "operators",
+      "errors": {
+        "runtime_failure": {
+          "class": "approval_review_failure",
+          "message_safe": "approval reviewer failed"
+        }
+      },
+      "fields": {
+        "approval.failure_kind": "string",
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "message": "string",
+        "operation": "string",
+        "request.id": "string",
+        "review.id": "string",
+        "session.id": "string",
+        "target.tool.name": "string",
+        "target.tool_call.id": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "approval_review_lifecycle_failure": {
+      "audience": "operators",
+      "errors": {
+        "durable_close_failed": {
+          "class": "reviewer_lifecycle_failure",
+          "message_safe": "approval reviewer lifecycle did not reach its expected durable boundary"
+        },
+        "durable_close_rejected": {
+          "class": "reviewer_lifecycle_failure",
+          "message_safe": "approval reviewer lifecycle did not reach its expected durable boundary"
+        },
+        "hot_close_failed": {
+          "class": "reviewer_lifecycle_failure",
+          "message_safe": "approval reviewer lifecycle did not reach its expected durable boundary"
+        },
+        "hot_eviction_failed": {
+          "class": "reviewer_lifecycle_failure",
+          "message_safe": "approval reviewer lifecycle did not reach its expected durable boundary"
+        },
+        "hot_release_failed": {
+          "class": "reviewer_lifecycle_failure",
+          "message_safe": "approval reviewer lifecycle did not reach its expected durable boundary"
+        },
+        "quiescence_unconfirmed": {
+          "class": "reviewer_lifecycle_failure",
+          "message_safe": "approval reviewer lifecycle did not reach its expected durable boundary"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "lifecycle.reason": "string",
+        "operation": "string",
+        "request.id": "string",
+        "review.id": "string",
+        "reviewer.kind": "string",
+        "session.id": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "approval_review_settlement_failure": {
+      "audience": "operators",
+      "errors": {
+        "ack_mismatch": {
+          "class": "durable_settlement_failure",
+          "message_safe": "approval reviewer outcome was not durably acknowledged"
+        },
+        "schema_mismatch": {
+          "class": "durable_settlement_failure",
+          "message_safe": "approval reviewer outcome was not durably acknowledged"
+        },
+        "superseded": {
+          "class": "durable_settlement_failure",
+          "message_safe": "approval reviewer outcome was not durably acknowledged"
+        },
+        "timeout": {
+          "class": "durable_settlement_failure",
+          "message_safe": "approval reviewer outcome was not durably acknowledged"
+        },
+        "unavailable": {
+          "class": "durable_settlement_failure",
+          "message_safe": "approval reviewer outcome was not durably acknowledged"
+        },
+        "unknown": {
+          "class": "durable_settlement_failure",
+          "message_safe": "approval reviewer outcome was not durably acknowledged"
+        },
+        "unrepairable": {
+          "class": "durable_settlement_failure",
+          "message_safe": "approval reviewer outcome was not durably acknowledged"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "request.id": "string",
+        "review.id": "string",
+        "session.id": "string",
+        "settlement.outcome": "string",
+        "target.tool.name": "string",
+        "target.tool_call.id": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "provider_reschedule_selected": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "delay.ms": "integer",
+        "delay.source": "string",
+        "event.kind": "string",
+        "message": "string",
+        "model_request.id": "string",
+        "operation": "string",
+        "provider.failure.code": "string",
+        "request.id": "string",
+        "retry.attempt": "integer",
+        "retryable": "boolean",
+        "session.id": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "provider_tool_declaration_rejected": {
+      "audience": "operators",
+      "errors": {
+        "invalid_tool_definition": {
+          "class": "provider_tool_declaration",
+          "message_safe": "provider tool declaration rejected"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "message": "string",
+        "model_request.id": "string",
+        "operation": "string",
+        "request.id": "string",
+        "session.id": "string",
+        "thread.id": "string",
+        "tool.declaration.kind": "string",
+        "tool.family": "string",
+        "validation.member": "string",
+        "workspace.id": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "runtime_accepted_input_commit": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "duration.ms": "number",
+        "event.kind": "string",
+        "failure.class": "string",
+        "message": "string",
+        "operation": "string",
+        "outcome": "string",
+        "retry.attempt": "integer",
+        "runtime_input.id": "string",
+        "runtime_input.kind": "string",
+        "session.id": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "runtime_binding_handoff_committed": {
+      "audience": "operators",
+      "fields": {
+        "binding.generation": "integer",
+        "binding.id": "string",
+        "component": "string",
+        "handoff.disposition": "string",
+        "handoff.id": "string",
+        "operation.id": "string",
+        "runtime.process.id": "string",
+        "session.id": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "runtime_binding_handoff_incomplete": {
+      "audience": "operators",
+      "errors": {
+        "runtime_binding_handoff_incomplete": {
+          "class": "shutdown_error",
+          "message_safe": "Runtime binding release did not commit"
+        }
+      },
+      "fields": {
+        "binding.generation": "integer",
+        "binding.id": "string",
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "grpc.code": "string",
+        "kind": "string",
+        "message": "string",
+        "operation": "string",
+        "operation.id": "string",
+        "runtime.process.id": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "runtime_checkpoint_expired": {
+      "audience": "operators",
+      "errors": {
+        "runtime_checkpoint_expired": {
+          "class": "shutdown_error",
+          "message_safe": "Runtime current step deadline exceeded"
+        }
+      },
+      "fields": {
+        "binding.generation": "integer",
+        "binding.id": "string",
+        "checkpoint.deadline_at": "integer",
+        "checkpoint.expired": "boolean",
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "kind": "string",
+        "message": "string",
+        "operation": "string",
+        "parent.thread.id": "string",
+        "reviewer.thread.id": "string",
+        "runtime.process.id": "string",
+        "session.id": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "runtime_checkpoint_failed_joined": {
+      "audience": "operators",
+      "fields": {
+        "binding.generation": "integer",
+        "binding.id": "string",
+        "checkpoint.deadline_at": "integer",
+        "checkpoint.expired": "boolean",
+        "component": "string",
+        "parent.thread.id": "string",
+        "reviewer.thread.id": "string",
+        "runtime.process.id": "string",
+        "session.id": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "runtime_checkpoint_ready": {
+      "audience": "operators",
+      "fields": {
+        "binding.generation": "integer",
+        "binding.id": "string",
+        "checkpoint.deadline_at": "integer",
+        "component": "string",
+        "runtime.process.id": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "runtime_checkpoint_reconstruction_failed": {
+      "audience": "operators",
+      "errors": {
+        "operation_failed": {
+          "class": "operation_failed",
+          "message_safe": "operation failed"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "failure.kind": "string",
+        "message": "string",
+        "reconstruction.phase": "string",
+        "session.id": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "runtime_closeout_recovered": {
+      "audience": "operators",
+      "errors": {
+        "runtime_closeout_recovered": {
+          "class": "runtime_closeout",
+          "message_safe": "runtime_closeout_recovered"
+        }
+      },
+      "fields": {
+        "closeout.active_count": "integer",
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "message": "string",
+        "operation": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "runtime_closeout_stalled": {
+      "audience": "operators",
+      "errors": {
+        "runtime_closeout_stalled": {
+          "class": "runtime_closeout",
+          "message_safe": "runtime_closeout_stalled"
+        }
+      },
+      "fields": {
+        "closeout.active_count": "integer",
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "message": "string",
+        "operation": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "runtime_closeout_unrepairable": {
+      "audience": "operators",
+      "errors": {
+        "ack_mismatch": {
+          "class": "runtime_closeout",
+          "message_safe": "runtime_closeout_unrepairable"
+        },
+        "schema_mismatch": {
+          "class": "runtime_closeout",
+          "message_safe": "runtime_closeout_unrepairable"
+        },
+        "unrepairable": {
+          "class": "runtime_closeout",
+          "message_safe": "runtime_closeout_unrepairable"
+        }
+      },
+      "fields": {
+        "closeout.active_count": "integer",
+        "closeout.error_code": "string",
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "message": "string",
+        "operation": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "runtime_command_accepted": {
+      "audience": "operators",
+      "fields": {
+        "binding.generation": "integer",
+        "binding.id": "string",
+        "caller.service_account": "string",
+        "component": "string",
+        "duration.ms": "number",
+        "event.kind": "string",
+        "grpc.code": "string",
+        "grpc.method": "string",
+        "handoff.id": "string",
+        "operation": "string",
+        "operation.id": "string",
+        "runtime.process.id": "string",
+        "session.id": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "runtime_command_rejected": {
+      "audience": "operators",
+      "errors": {
+        "authentication_rejected": {
+          "class": "runtime_command_rejected",
+          "message_safe": "runtime command rejected"
+        },
+        "binding_mismatch": {
+          "class": "runtime_command_rejected",
+          "message_safe": "runtime command rejected"
+        },
+        "identity_conflict": {
+          "class": "runtime_command_rejected",
+          "message_safe": "runtime command rejected"
+        },
+        "internal_failure": {
+          "class": "runtime_command_rejected",
+          "message_safe": "runtime command rejected"
+        },
+        "invalid_content": {
+          "class": "runtime_command_rejected",
+          "message_safe": "runtime command rejected"
+        },
+        "invalid_request": {
+          "class": "runtime_command_rejected",
+          "message_safe": "runtime command rejected"
+        },
+        "operation_rejected": {
+          "class": "runtime_command_rejected",
+          "message_safe": "runtime command rejected"
+        },
+        "operation_unavailable": {
+          "class": "runtime_command_rejected",
+          "message_safe": "runtime command rejected"
+        },
+        "resource_exhausted": {
+          "class": "runtime_command_rejected",
+          "message_safe": "runtime command rejected"
+        },
+        "runtime_not_accepting": {
+          "class": "runtime_command_rejected",
+          "message_safe": "runtime command rejected"
+        },
+        "runtime_process_mismatch": {
+          "class": "runtime_command_rejected",
+          "message_safe": "runtime command rejected"
+        },
+        "selected_pod_mismatch": {
+          "class": "runtime_command_rejected",
+          "message_safe": "runtime command rejected"
+        }
+      },
+      "fields": {
+        "binding.generation": "integer",
+        "binding.id": "string",
+        "caller.service_account": "string",
+        "component": "string",
+        "duration.ms": "number",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "grpc.code": "string",
+        "grpc.method": "string",
+        "handoff.id": "string",
+        "operation": "string",
+        "operation.id": "string",
+        "phase": "string",
+        "reason": "string",
+        "runtime.process.id": "string",
+        "session.id": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "runtime_content_commit": {
+      "audience": "benchmarks",
+      "fields": {
+        "component": "string",
+        "duration.ms": "number",
+        "event.kind": "string",
+        "kind": "string",
+        "message": "string",
+        "model_request.id": "string",
+        "operation": "string",
+        "output.size_bytes": "integer",
+        "request.kind": "string",
+        "session.id": "string",
+        "settlement.outcome": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "DEBUG",
+      "log_type": "app"
+    },
+    "runtime_context_load_parse_failed": {
+      "audience": "operators",
+      "errors": {
+        "operation_failed": {
+          "class": "operation_failed",
+          "message_safe": "operation failed"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "message": "string",
+        "operation": "string",
+        "phase": "string",
+        "reason": "string",
+        "session.id": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "runtime_mcp_manifest_update": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "mcp.manifest.current_generation": "integer",
+        "mcp.manifest.disposition": "string",
+        "mcp.manifest.received_generation": "integer",
+        "mcp.manifest.source": "string",
+        "mcp.server.name": "string",
+        "mcp.tool_catalog.eligible": "boolean",
+        "message": "string",
+        "operation": "string",
+        "session.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "runtime_operation_completed": {
+      "audience": "benchmarks",
+      "fields": {
+        "approval.source": "string",
+        "component": "string",
+        "duration.ms": "number",
+        "event.kind": "string",
+        "message": "string",
+        "model_request.id": "string",
+        "operation": "string",
+        "outcome": "string",
+        "request.kind": "string",
+        "session.id": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "DEBUG",
+      "log_type": "app"
+    },
+    "runtime_operation_timing_unavailable": {
+      "audience": "benchmarks",
+      "fields": {
+        "approval.source": "string",
+        "component": "string",
+        "event.kind": "string",
+        "message": "string",
+        "model_request.id": "string",
+        "operation": "string",
+        "outcome": "string",
+        "request.kind": "string",
+        "session.id": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "DEBUG",
+      "log_type": "app"
+    },
+    "runtime_process_accepting": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "runtime.process.id": "string",
+        "runtime.process.phase": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "runtime_process_draining": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "runtime.process.id": "string",
+        "runtime.process.phase": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "runtime_process_freshness_expired": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "runtime.process.freshness_ms": "integer",
+        "runtime.process.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "runtime_process_report_failed": {
+      "audience": "operators",
+      "errors": {
+        "runtime_process_report_failed": {
+          "class": "dependency_error",
+          "message_safe": "runtime process report failed"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "failed.count": "integer",
+        "message": "string",
+        "operation": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "runtime_process_report_recovered": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "failed.count": "integer",
+        "runtime.process.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "runtime_provider_stream_closed": {
+      "audience": "operators",
+      "errors": {
+        "gateway_cancelled": {
+          "class": "gateway_client",
+          "message_safe": "Gateway provider stream failed"
+        },
+        "gateway_protocol_error": {
+          "class": "gateway_client",
+          "message_safe": "Gateway provider stream failed"
+        },
+        "gateway_stream_error": {
+          "class": "gateway_client",
+          "message_safe": "Gateway provider stream failed"
+        },
+        "gateway_unavailable": {
+          "class": "gateway_client",
+          "message_safe": "Gateway provider stream failed"
+        }
+      },
+      "fields": {
+        "cancel.kind": "string",
+        "component": "string",
+        "duration.ms": "number",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "message": "string",
+        "model.id": "string",
+        "model_request.id": "string",
+        "operation": "string",
+        "provider.id": "string",
+        "request.id": "string",
+        "retryable": "boolean",
+        "rpc.grpc.status_code": "integer",
+        "rpc.grpc.status_name": "string",
+        "session.id": "string",
+        "terminal": "boolean",
+        "terminal.candidate_observed": "boolean",
+        "thread.id": "string",
+        "transport.outcome": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "runtime_provider_stream_failed": {
+      "audience": "operators",
+      "errors": {
+        "gateway_cancelled": {
+          "class": "gateway_client",
+          "message_safe": "Gateway provider stream failed before opening"
+        },
+        "gateway_protocol_error": {
+          "class": "gateway_client",
+          "message_safe": "Gateway provider stream failed before opening"
+        },
+        "gateway_stream_error": {
+          "class": "gateway_client",
+          "message_safe": "Gateway provider stream failed before opening"
+        },
+        "gateway_unavailable": {
+          "class": "gateway_client",
+          "message_safe": "Gateway provider stream failed before opening"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "message": "string",
+        "model.id": "string",
+        "model_request.id": "string",
+        "operation": "string",
+        "provider.id": "string",
+        "request.id": "string",
+        "retryable": "boolean",
+        "rpc.grpc.status_code": "integer",
+        "rpc.grpc.status_name": "string",
+        "session.id": "string",
+        "terminal": "boolean",
+        "thread.id": "string",
+        "transport.stage": "string",
+        "workspace.id": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "runtime_provider_stream_opened": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "message": "string",
+        "model.id": "string",
+        "model_request.id": "string",
+        "operation": "string",
+        "provider.id": "string",
+        "request.id": "string",
+        "session.id": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "runtime_provider_terminal_observed": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "message": "string",
+        "model.id": "string",
+        "model_request.id": "string",
+        "operation": "string",
+        "provider.id": "string",
+        "request.id": "string",
+        "session.id": "string",
+        "terminal.kind": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    },
+    "runtime_terminal_settlement": {
+      "audience": "operators",
+      "errors": {
+        "runtime_semantic_error": {
+          "class": "runtime_contract_validation",
+          "message_safe": "runtime contract validation failed"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "message": "string",
+        "model_request.id": "string",
+        "operation": "string",
+        "retry.status": "string",
+        "session.id": "string",
+        "settlement.outcome": "string",
+        "terminal": "boolean",
+        "terminal.disposition": "string",
+        "thread.id": "string",
+        "workspace.id": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "shutdown_active_run_settlement_failed": {
+      "audience": "operators",
+      "errors": {
+        "shutdown_active_run_settlement_failed": {
+          "class": "shutdown_error",
+          "message_safe": "runtime pod shutdown active-run settlement failed"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "kind": "string",
+        "message": "string",
+        "operation": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "shutdown_drain_timeout": {
+      "audience": "operators",
+      "errors": {
+        "shutdown_drain_timeout": {
+          "class": "shutdown_error",
+          "message_safe": "runtime pod shutdown drain timed out"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "kind": "string",
+        "message": "string",
+        "operation": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "startup_failed": {
+      "audience": "operators",
+      "errors": {
+        "config_error": {
+          "class": "config_error",
+          "message_safe": "configuration invalid"
+        },
+        "startup_error": {
+          "class": "startup_error",
+          "message_safe": "runtime pod startup failed"
+        }
+      },
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "kind": "string",
+        "message": "string",
+        "operation": "string",
+        "startup.cause_category": "string",
+        "startup.cause_class": "string",
+        "startup.config_problem": "string"
+      },
+      "level": "ERROR",
+      "log_type": "app"
+    },
+    "workload.started": {
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "listener.transport": "string",
+        "operation": "string",
+        "readiness.state": "string"
+      },
+      "level": "INFO",
+      "log_type": "app"
+    }
+  },
+  "metrics": {
+    "process_heap_used_bytes": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "process_rss_bytes": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "runtimepod_accepting_commands": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "runtimepod_active_fibers": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "runtimepod_active_sessions": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "runtimepod_active_threads": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "runtimepod_active_tool_fibers": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "runtimepod_approval_wait_outstanding": {
+      "audience": "operators",
+      "labels": {
+        "approval_source": [
+          "auto_reviewer",
+          "user"
+        ],
+        "request_kind": [
+          "agent_provider_request",
+          "approval_reviewer",
+          "compaction_summary"
+        ]
+      },
+      "type": "gauge"
+    },
+    "runtimepod_approval_wait_started_total": {
+      "audience": "operators",
+      "labels": {
+        "approval_source": [
+          "auto_reviewer",
+          "user"
+        ],
+        "request_kind": [
+          "agent_provider_request",
+          "approval_reviewer",
+          "compaction_summary"
+        ]
+      },
+      "type": "counter"
+    },
+    "runtimepod_approval_wait_unavailable_total": {
+      "audience": "operators",
+      "labels": {
+        "approval_source": [
+          "auto_reviewer",
+          "user"
+        ],
+        "request_kind": [
+          "agent_provider_request",
+          "approval_reviewer",
+          "compaction_summary"
+        ]
+      },
+      "type": "counter"
+    },
+    "runtimepod_cleanup_command_outcomes_total": {
+      "audience": "operators",
+      "labels": {
+        "outcome": [
+          "accepted",
+          "completed",
+          "failed",
+          "rejected"
+        ]
+      },
+      "type": "counter"
+    },
+    "runtimepod_closeout_events_total": {
+      "audience": "operators",
+      "labels": {
+        "event": [
+          "runtime_closeout_recovered",
+          "runtime_closeout_stalled",
+          "runtime_closeout_unrepairable"
+        ]
+      },
+      "type": "counter"
+    },
+    "runtimepod_commands_in_flight": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "runtimepod_container_memory_limit_bytes": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "runtimepod_container_memory_usage_bytes": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "runtimepod_content_commit_latency_ms": {
+      "audience": "operators",
+      "labels": {
+        "kind": [
+          "internal_tool_repair",
+          "reasoning",
+          "request_end",
+          "text",
+          "thinking",
+          "tool",
+          "tool_result"
+        ],
+        "outcome": [
+          "committed",
+          "duplicate",
+          "failed",
+          "stale"
+        ],
+        "phase": [
+          "content_apply",
+          "content_commit",
+          "request_end_apply",
+          "request_end_commit"
+        ],
+        "request_kind": [
+          "agent_provider_request",
+          "approval_reviewer",
+          "compaction_summary"
+        ]
+      },
+      "type": "summary"
+    },
+    "runtimepod_context_load_latency_ms": {
+      "audience": "operators",
+      "labels": {
+        "operation": [
+          "build_context",
+          "build_thread_context",
+          "commit_accepted_input",
+          "load_pending_input"
+        ],
+        "outcome": [
+          "cancelled",
+          "error",
+          "rejected",
+          "success"
+        ]
+      },
+      "type": "summary"
+    },
+    "runtimepod_continuation_latency_ms": {
+      "audience": "operators",
+      "labels": {
+        "approval_source": [
+          "auto_reviewer",
+          "user"
+        ],
+        "operation": [
+          "approval_wait",
+          "binding_refresh",
+          "cleanup_join",
+          "context_reconstruct",
+          "member_barrier_wait",
+          "permit_wait",
+          "tool_accept",
+          "tool_settle"
+        ],
+        "outcome": [
+          "cancelled",
+          "error",
+          "rejected",
+          "success"
+        ],
+        "request_kind": [
+          "agent_provider_request",
+          "approval_reviewer",
+          "compaction_summary"
+        ]
+      },
+      "type": "summary"
+    },
+    "runtimepod_event_write_latency_ms": {
+      "audience": "operators",
+      "labels": {
+        "operation": [
+          "append",
+          "commit_runtime_termination",
+          "finish_idle",
+          "write_request_end"
+        ],
+        "outcome": [
+          "cancelled",
+          "error",
+          "rejected",
+          "success"
+        ]
+      },
+      "type": "summary"
+    },
+    "runtimepod_pending_approvals": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "runtimepod_pending_content_bytes": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "runtimepod_pending_content_entries": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "runtimepod_provider_stream_duration_ms": {
+      "audience": "operators",
+      "labels": {
+        "kind": [
+          "agent_provider_request",
+          "approval_reviewer",
+          "compaction_summary"
+        ],
+        "outcome": [
+          "cancelled",
+          "error",
+          "rejected",
+          "success"
+        ]
+      },
+      "type": "summary"
+    },
+    "runtimepod_ready": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "runtimepod_session_capacity": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "runtimepod_tools_in_progress": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "runtimepod_tools_oldest_queued_seconds": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    },
+    "runtimepod_tools_queue_wait_seconds": {
+      "audience": "operators",
+      "buckets": "long",
+      "labels": {},
+      "type": "histogram"
+    },
+    "runtimepod_tools_queued": {
+      "audience": "operators",
+      "labels": {},
+      "type": "gauge"
+    }
+  },
+  "operations": {
+    "agent_provider_request": {
+      "long": true,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "append": {
+      "long": false,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "approval_reviewer": {
+      "long": true,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "approval_reviewer_compaction": {
+      "long": true
+    },
+    "approval_wait": {
+      "long": true,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "binding_refresh": {
+      "long": false,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "build_context": {
+      "long": false,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "build_thread_context": {
+      "long": false,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "cleanup_join": {
+      "long": true,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "commit_accepted_input": {
+      "long": false,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "commit_runtime_termination": {
+      "long": false,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "compaction_summary": {
+      "long": true,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "content_apply": {
+      "long": false,
+      "errors": [
+        "duplicate",
+        "stale"
+      ]
+    },
+    "content_commit": {
+      "long": false,
+      "errors": [
+        "duplicate",
+        "stale"
+      ]
+    },
+    "context_reconstruct": {
+      "long": false,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "finish_idle": {
+      "long": false,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "load_pending_input": {
+      "long": false,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "member_barrier_wait": {
+      "long": true,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "permit_wait": {
+      "long": true,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "request_end_apply": {
+      "long": false,
+      "errors": [
+        "duplicate",
+        "stale"
+      ]
+    },
+    "request_end_commit": {
+      "long": false,
+      "errors": [
+        "duplicate",
+        "stale"
+      ]
+    },
+    "shutdown_clients": {
+      "long": true,
+      "errors": [
+        "timeout"
+      ]
+    },
+    "shutdown_listeners": {
+      "long": true,
+      "errors": [
+        "timeout"
+      ]
+    },
+    "shutdown_local_join": {
+      "long": true,
+      "errors": [
+        "timeout"
+      ]
+    },
+    "shutdown_quiesce": {
+      "long": true,
+      "errors": [
+        "timeout"
+      ]
+    },
+    "shutdown_release": {
+      "long": true,
+      "errors": [
+        "timeout"
+      ]
+    },
+    "shutdown_report": {
+      "long": true,
+      "errors": [
+        "timeout"
+      ]
+    },
+    "tool_accept": {
+      "long": false,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "tool_settle": {
+      "long": false,
+      "errors": [
+        "cancelled"
+      ]
+    },
+    "write_request_end": {
+      "long": false,
+      "errors": [
+        "cancelled"
+      ]
+    }
+  },
+  "service": "agent-runtime",
+  "spans": {}
+}

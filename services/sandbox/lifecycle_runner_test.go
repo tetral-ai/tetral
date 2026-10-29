@@ -113,8 +113,12 @@ func TestSandboxActivationRunnerLogsRetryAndTerminalAttemptOutcomes(t *testing.T
 				t.Fatalf("Queue transitions = %v; want %q", queueClient.transitions, test.wantTransition)
 			}
 			got := logs.String()
+			wantEvent := "sandbox_activation_attempt_completed"
+			if test.wantOutcome == "terminal_failure" {
+				wantEvent = "sandbox_activation_attempt_failed"
+			}
 			for _, want := range []string{
-				`"level":"` + test.wantLevel + `"`, `"event":"sandbox_activation_attempt_completed"`,
+				`"level":"` + test.wantLevel + `"`, `"event":"` + wantEvent + `"`,
 				`"outcome":"` + test.wantOutcome + `"`, `"queue.attempt.count":1`, `"queue.attempt.max":5`,
 				`"error.class":"sandbox_activation_error"`, `"error.code":"` + test.wantErrorCode + `"`,
 			} {

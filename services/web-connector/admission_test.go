@@ -6,7 +6,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -286,19 +285,10 @@ func TestWebRPCOwnsOrdinaryDenialSummaryWithoutServiceDuplicate(t *testing.T) {
 		t.Fatalf("invalid code=%s", status.Code(err))
 	}
 	server.GracefulStop() // All handler logging must complete before inspection.
-	output := logs.snapshot()
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	if len(lines) != 2 || strings.Contains(output, "PRIVATE_INVALID_BINDING_SENTINEL") {
+	// The caller handles a refused call, so neither the boundary, which
+	// records calls at DEBUG, nor the service writes a record for it.
+	if output := logs.snapshot(); output != "" {
 		t.Fatalf("RPC diagnostics = %s", output)
-	}
-	for index, code := range []string{"permissiondenied", "invalidargument"} {
-		var record map[string]any
-		if err := json.Unmarshal([]byte(lines[index]), &record); err != nil {
-			t.Fatal(err)
-		}
-		if record["level"] != "INFO" || record["msg"] != "internal.grpc.request" || record["error.class"] != "grpc_error" || record["error.code"] != code || record["error.message_safe"] != "internal gRPC request failed" {
-			t.Fatalf("ordinary boundary summary = %#v", record)
-		}
 	}
 	if backend.calls != 1 || objects.Len() != 1 {
 		t.Fatalf("denial side effects: backend=%d objects=%d", backend.calls, objects.Len())

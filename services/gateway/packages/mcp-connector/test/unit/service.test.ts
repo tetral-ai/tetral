@@ -47,14 +47,14 @@ expect(await observed).toBeInstanceOf(Error);
       expect(record["service.instance.id"]).toBeString();
       expect(record["metric.observation.count"]).toBe(1);
       expect(record["duration.seconds"]).toBeGreaterThan(0);
-      expect(service.metricsText()).toContain(`tetral_operation_duration_seconds_sum{service="mcp-connector",operation="${record.operation}",outcome="timeout"} ${record["duration.seconds"]}`);
+      expect(service.metricsText()).toContain(`tetral_long_operation_duration_seconds_sum{service="mcp-connector",operation="${record.operation}",outcome="timeout"} ${record["duration.seconds"]}`);
     }
     logger.close();
     await service.shutdown(new Date(Date.now()+30));
     // Post-drain admission records exactly one rejected sample per RPC and no
     // other change, so relabeling as error or double counting is visible.
     const operationCounts=(text:string)=>Object.fromEntries(text.split("\n")
-      .filter(line=>line.startsWith("tetral_operation_duration_seconds_count{")&&/operation="(ListMcpTools|RunMcpTool)"/.test(line))
+      .filter(line=>line.startsWith("tetral_long_operation_duration_seconds_count{")&&/operation="(ListMcpTools|RunMcpTool)"/.test(line))
       .map(line=>[line.slice(0,line.lastIndexOf(" ")),Number(line.slice(line.lastIndexOf(" ")+1))]));
     const countsBefore=operationCounts(service.metricsText());
     expect(Object.keys(countsBefore).filter(series=>series.includes('outcome="rejected"'))).toEqual([]);
@@ -64,8 +64,8 @@ expect(await observed).toBeInstanceOf(Error);
     expect(client.calls).toHaveLength(callsBefore);
     expect(operationCounts(service.metricsText())).toEqual({
       ...countsBefore,
-      'tetral_operation_duration_seconds_count{service="mcp-connector",operation="ListMcpTools",outcome="rejected"}':1,
-      'tetral_operation_duration_seconds_count{service="mcp-connector",operation="RunMcpTool",outcome="rejected"}':1,
+      'tetral_long_operation_duration_seconds_count{service="mcp-connector",operation="ListMcpTools",outcome="rejected"}':1,
+      'tetral_long_operation_duration_seconds_count{service="mcp-connector",operation="RunMcpTool",outcome="rejected"}':1,
     });
   });
   test("surfaces configured-server resolution rejection from the client owner", async () => {
@@ -631,7 +631,7 @@ expect(await observed).toBeInstanceOf(Error);
     expect(logger.terminalRecords).toHaveLength(1);
     expect(logger.terminalRecords[0]).toMatchObject({ status: "runtime_error", "error.code": "mcp_commit_failed" });
     expect(metrics.render()).toContain('mcpconnector_calls_total{tool="create_issue",status="runtime_error",error_kind="mcp_commit_failed"} 1');
-    expect(metrics.render()).toContain('tetral_operation_duration_seconds_count{service="mcp-connector",operation="RunMcpTool",outcome="error"} 1');
+    expect(metrics.render()).toContain('tetral_long_operation_duration_seconds_count{service="mcp-connector",operation="RunMcpTool",outcome="error"} 1');
   });
 
   test("records exactly one terminal RunMcpTool outcome for every early exit", async () => {
@@ -776,7 +776,7 @@ expect(await observed).toBeInstanceOf(Error);
     expect(records).toHaveLength(2);
     for (const [index, record] of records.entries()) {
       expect(record).toMatchObject({
-        level: "info",
+        level: "INFO",
         "service.name": "mcp-connector",
         "request.id": expect.stringMatching(/^mcpclaim_/),
         "workspace.id": "wksp_1",

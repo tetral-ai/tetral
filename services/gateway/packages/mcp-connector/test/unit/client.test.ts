@@ -117,14 +117,14 @@ describe("McpSDKClient", () => {
       };
       const record = mcpToolsListChangedFailureLogRecord(validIdentity(), failure);
       expect(record).toMatchObject(expected);
-      expect(serializedThroughSharedLogger(record)).toMatchObject({ ...expected, level: "error" });
+      expect(serializedThroughSharedLogger(record)).toMatchObject({ ...expected, level: "ERROR" });
     }
   });
 
   test("discovery pagination failure logs keep their fields through the shared logger", () => {
     const serialized = serializedThroughSharedLogger(mcpDiscoveryPaginationFailureLogRecord(validIdentity(), "repeated_cursor", 3, 42));
     expect(serialized).toMatchObject({
-      level: "error",
+      level: "ERROR",
       event: "mcp_discovery_pagination_failed",
       "workspace.id": "wksp_1",
       "session.id": "sesn_1",
@@ -133,6 +133,7 @@ describe("McpSDKClient", () => {
       "mcp.discovery.pages": 3,
       "mcp.discovery.tool_count": 42,
       "error.code": "mcp_connection_failed",
+      "error.message_safe": "mcp discovery pagination failed",
     });
     expect(serialized).not.toHaveProperty("mcp_server_name");
   });

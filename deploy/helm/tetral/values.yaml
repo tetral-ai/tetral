@@ -53,7 +53,7 @@ network:
         k8s:io.kubernetes.pod.namespace: kube-system
         k8s:k8s-app: kube-dns
   # Outbound HTTPS for the workloads that call operator-selected endpoints:
-  # API, Bridge, Job Runner and Web Connector blob storage; the Sandbox
+  # API, Bridge, Job Runner, computer-hub and Web Connector blob storage; the Sandbox
   # provider and blob storage; Provider Gateway model providers; MCP
   # Connector remote MCP servers; Web Connector search and reader; and the
   # git-proxy upstream. The default is unrestricted because those endpoints are
@@ -97,6 +97,7 @@ edge:
     api: tetral-api-edge-tls
     event-stream: tetral-event-stream-edge-tls
     git-proxy: tetral-git-proxy-edge-tls
+    computer-hub: tetral-computer-hub-edge-tls
 
 image:
   registry: ghcr.io/tetral-ai
@@ -115,6 +116,9 @@ secrets:
   authBootstrap: auth-bootstrap
   authDatabase: auth-database
   authInternalPrincipal: auth-internal-principal
+  # Key page-token-key: 32 bytes as 64 hexadecimal characters that sign
+  # computer-hub list page tokens; every hub Pod reads the same Secret.
+  computerHubPageToken: computer-hub-page-token
   gatewayWebBlob: gateway-web-blob
   gatewayWebKeypool: gateway-web-keypool
   queueDatabase: queue-database
@@ -155,6 +159,19 @@ observability:
   logMaxRecordBytes: 16384
   logSummaryIntervalMs: 30000
   logBurst: 1
+  # Quoted so the default renders as written: Helm renders an unquoted 1.0 as 1.
+  traceSampleRatio: "1.0"
+  slowQueryMs: 250
+  # An OTLP/gRPC endpoint such as http://collector.observability:4317; empty
+  # exports no trace. When set, otlpPeers must name the collector Pods and
+  # otlpPort their port, which every workload NetworkPolicy then allows.
+  otlpEndpoint: ""
+  otlpPeers: []
+  otlpPort: 4317
+  # Peers admitted to every workload's metrics port; empty adds no rule.
+  metricsScrapePeers: []
+  serviceMonitor:
+    enabled: false
 
 queue:
   leaseReclaimIntervalSeconds: 30
@@ -167,6 +184,30 @@ jobRunner:
   leaseDurationMs: 30000
   heartbeatIntervalMs: 10000
   maxJobs: 8
+
+computerHub:
+  # The HorizontalPodAutoscaler keeps between minReplicas and maxReplicas hub
+  # Pods at an average of targetOpenStreamsPerPod open client streams
+  # (computerhub_open_streams through prometheus-adapter); two Pods keep a
+  # serving hub while one restarts.
+  autoscaling:
+    minReplicas: 2
+    maxReplicas: 10
+    targetOpenStreamsPerPod: 1000
+  # Latest expiry an issued connection credential may have, as a Go duration
+  # after issuance; also the lifetime of a credential issued without one.
+  maxCredentialLifetime: 720h
+  # Semantic versions: a ready from a CLI older than minCLIVersion is refused
+  # with cli_upgrade_required; an instance whose CLI is older than
+  # recommendedCLIVersion reads cli_update_available. The recommended version
+  # is never lower than the minimum.
+  minCLIVersion: "0.0.0"
+  recommendedCLIVersion: "0.0.0"
+  # Go durations: a stream lasts streamMaxAge plus up to a tenth of it before
+  # a stream-only disconnect; a stopping Pod spreads its streams' disconnects
+  # over streamDrainWindow, at most 15s.
+  streamMaxAge: 30m
+  streamDrainWindow: 10s
 
 resources:
   agentRuntime:
@@ -224,6 +265,15 @@ resources:
       memory: 256Mi
       ephemeral-storage: 512Mi
   eventStream:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+      ephemeral-storage: 64Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+      ephemeral-storage: 512Mi
+  computerHub:
     requests:
       cpu: 50m
       memory: 128Mi

@@ -36,6 +36,14 @@ const (
 	OperationFilesDelete                 Operation = "files.delete"
 	OperationFilesList                   Operation = "files.list"
 	OperationFilesRead                   Operation = "files.read"
+	OperationInstanceCredentialsCreate   Operation = "instance_credentials.create"
+	OperationInstanceCredentialsDelete   Operation = "instance_credentials.delete"
+	OperationInstanceCredentialsList     Operation = "instance_credentials.list"
+	OperationInstancesCreate             Operation = "instances.create"
+	OperationInstancesDelete             Operation = "instances.delete"
+	OperationInstancesList               Operation = "instances.list"
+	OperationInstancesRead               Operation = "instances.read"
+	OperationInstancesStream             Operation = "instances.stream"
 	OperationMemoriesCreate              Operation = "memories.create"
 	OperationMemoriesDelete              Operation = "memories.delete"
 	OperationMemoriesList                Operation = "memories.list"
@@ -88,6 +96,10 @@ const (
 	OperationVaultsUpdate                Operation = "vaults.update"
 )
 
+// OperationClientConnect is the one operation of a connection key principal.
+// It is not registered, so no role, API key or access token carries it.
+const OperationClientConnect Operation = "client.connect"
+
 var registeredOperations = []Operation{
 	OperationAgentVersionsList,
 	OperationAgentsArchive,
@@ -116,6 +128,14 @@ var registeredOperations = []Operation{
 	OperationFilesDelete,
 	OperationFilesList,
 	OperationFilesRead,
+	OperationInstanceCredentialsCreate,
+	OperationInstanceCredentialsDelete,
+	OperationInstanceCredentialsList,
+	OperationInstancesCreate,
+	OperationInstancesDelete,
+	OperationInstancesList,
+	OperationInstancesRead,
+	OperationInstancesStream,
 	OperationMemoriesCreate,
 	OperationMemoriesDelete,
 	OperationMemoriesList,
@@ -180,6 +200,8 @@ var operationRoutes = []OperationRoute{
 	{"DELETE", "/v1/api_keys/{api_key_id}", OperationAPIKeysDelete},
 	{"DELETE", "/v1/environments/{environment_id}", OperationEnvironmentsDelete},
 	{"DELETE", "/v1/files/{file_id}", OperationFilesDelete},
+	{"DELETE", "/v1/instances/{instance_id}", OperationInstancesDelete},
+	{"DELETE", "/v1/instances/{instance_id}/credentials/{credential_id}", OperationInstanceCredentialsDelete},
 	{"DELETE", "/v1/memory_stores/{memory_store_id}", OperationMemoryStoresDelete},
 	{"DELETE", "/v1/memory_stores/{memory_store_id}/memories/{memory_id}", OperationMemoriesDelete},
 	{"DELETE", "/v1/sessions/{session_id}", OperationSessionsDelete},
@@ -197,6 +219,10 @@ var operationRoutes = []OperationRoute{
 	{"GET", "/v1/files", OperationFilesList},
 	{"GET", "/v1/files/{file_id}", OperationFilesRead},
 	{"GET", "/v1/files/{file_id}/content", OperationFilesContentRead},
+	{"GET", "/v1/instances", OperationInstancesList},
+	{"GET", "/v1/instances/stream", OperationInstancesStream},
+	{"GET", "/v1/instances/{instance_id}", OperationInstancesRead},
+	{"GET", "/v1/instances/{instance_id}/credentials", OperationInstanceCredentialsList},
 	{"GET", "/v1/memory_stores", OperationMemoryStoresList},
 	{"GET", "/v1/memory_stores/{memory_store_id}", OperationMemoryStoresRead},
 	{"GET", "/v1/memory_stores/{memory_store_id}/memories", OperationMemoriesList},
@@ -232,6 +258,8 @@ var operationRoutes = []OperationRoute{
 	{"POST", "/v1/environments/{environment_id}", OperationEnvironmentsUpdate},
 	{"POST", "/v1/environments/{environment_id}/archive", OperationEnvironmentsArchive},
 	{"POST", "/v1/files", OperationFilesCreate},
+	{"POST", "/v1/instances", OperationInstancesCreate},
+	{"POST", "/v1/instances/{instance_id}/credentials", OperationInstanceCredentialsCreate},
 	{"POST", "/v1/memory_stores", OperationMemoryStoresCreate},
 	{"POST", "/v1/memory_stores/{memory_store_id}", OperationMemoryStoresUpdate},
 	{"POST", "/v1/memory_stores/{memory_store_id}/archive", OperationMemoryStoresArchive},

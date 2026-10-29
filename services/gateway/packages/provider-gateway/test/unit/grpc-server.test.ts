@@ -8,7 +8,10 @@ import {
   ProviderGatewayServiceClient,
   ProviderStreamEventType,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { parseDeclarations, traceparentClientInterceptor } from "@tetral/ts-observability";
+import { recordingTelemetry } from "@tetral/ts-observability/test-support/recording-telemetry";
 import { createGatewayGrpcServer, writeProviderStreamEvents } from "../../src/grpc-server.js";
+import observabilityTable from "../../observability.json";
 import { ProviderGatewayServiceShell } from "../../src/service.js";
 import { validProviderRequest } from "./fixtures.js";
 import type { ProviderStreamEvent } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -65,6 +68,28 @@ describe("Gateway gRPC streaming transport", () => {
     } finally {
       client.close();
       await server.shutdown();
+    }
+  });
+
+  test("a provider stream served by the Gateway server continues the caller's trace", async () => {
+    // The Gateway's table plus the caller's operation.
+    const declarations = parseDeclarations({ ...observabilityTable, operations: { ...observabilityTable.operations, caller: { long: false } } });
+    const recording = recordingTelemetry({ serviceName: "provider-gateway", declarations });
+    const server = createGatewayGrpcServer(createService({ stream: async function* () { yield textEvent(FragmentType.TextStart, ""); } }));
+    const port = await server.bind("127.0.0.1:0");
+    const client = new ProviderGatewayServiceClient(`127.0.0.1:${port}`, credentials.createInsecure(), { interceptors: [traceparentClientInterceptor] });
+    try {
+      const observation = recording.telemetry.observe("caller");
+      await observation.run(() => readStream(client.streamProviderRequest(validAnthropicProviderRequest(), metadata())));
+      observation.end();
+      const caller = recording.spans().find((span) => span.name === "caller")!;
+      const served = recording.spans().find((span) => span.name === "/tetral.provider_gateway.v1.ProviderGatewayService/StreamProviderRequest");
+      expect(served?.spanContext().traceId).toBe(caller.spanContext().traceId);
+      expect(served?.parentSpanContext?.spanId).toBe(caller.spanContext().spanId);
+    } finally {
+      client.close();
+      await server.shutdown();
+      recording.restore();
     }
   });
 

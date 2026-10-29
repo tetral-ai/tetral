@@ -5,8 +5,9 @@
  * normalized to finite non-negative numbers, snapshots copy mutable maps, and metrics remain a
  * read-only observability side channel that does not affect command or lifecycle decisions.
  */
-import { OperationMetricsRegistry } from "@tetral/ts-observability";
+import { MetricRegistry, OperationMetricsRegistry, operationMetricsText, renderMetrics } from "@tetral/ts-observability";
 import type { ShutdownPhaseLogger } from "@tetral/ts-observability";
+import { Effect, Ref } from "effect";
 import { readFileSync } from "node:fs";
 import type {
 	RuntimeApprovalSource,
@@ -21,9 +22,11 @@ import type {
 	RuntimeMetricOutcome,
 	RuntimeMetricsSink,
 	RuntimeProviderStreamKind,
+	RuntimeToolPermitState,
 } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
 import type { RuntimeCloseoutEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { RuntimePodLifecycle } from "./lifecycle.js";
+import { runtimePodDeclarations } from "./logger.js";
 
 /** Container values share one cgroup scope; an unlimited/unknown limit cannot advertise headroom. */
 export interface ContainerMemoryObservation {
@@ -70,6 +73,8 @@ interface Observation {
 export interface RuntimePodDomainMetricsSnapshot
 	extends RuntimeHotStateMetrics {
 	readonly activeToolFibers: number;
+	/** The point runtimepod_tools: tool calls holding, and waiting for, one of their Session's permits. */
+	readonly toolsText?: string;
  readonly operationDurationText?: string;
  readonly pendingContentEntries?:number;
  readonly pendingContentBytes?:number;
@@ -95,6 +100,8 @@ export interface RuntimePodMetricsSource extends RuntimeMetricsSink {
  readonly observeShutdownPhase?: (phase: RuntimeShutdownPhase, durationMs: number, outcome: "success" | "error" | "timeout", logger?: ShutdownPhaseLogger) => void;
 	readonly recordCloseoutEvent: (event: RuntimeCloseoutEvent) => void;
 	readonly snapshot: () => RuntimePodDomainMetricsSnapshot;
+	/** The resident Session count alone, for the placement read. */
+	readonly activeSessions: () => number;
 }
 
 /**
@@ -109,8 +116,21 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
   "content_commit", "content_apply", "request_end_commit", "request_end_apply",
   "member_barrier_wait", "permit_wait", "binding_refresh", "approval_wait", "tool_accept", "tool_settle", "context_reconstruct", "cleanup_join",
   "shutdown_quiesce", "shutdown_report", "shutdown_release", "shutdown_local_join", "shutdown_clients", "shutdown_listeners",
- ]);
+ ], runtimePodDeclarations);
  observeShutdownPhase(phase: RuntimeShutdownPhase, durationMs: number, outcome: "success" | "error" | "timeout", logger?: ShutdownPhaseLogger): void { this.operations.observeShutdown(phase,outcome,durationMs/1000,logger); }
+	readonly #monotonicMs: () => number;
+	readonly #tools = new MetricRegistry(runtimePodDeclarations);
+	readonly #toolsInProgress = this.#tools.gauge("runtimepod_tools_in_progress", "Tool calls holding one of their Session's permits.");
+	readonly #toolsQueued = this.#tools.gauge("runtimepod_tools_queued", "Tool calls waiting for one of their Session's permits.");
+	readonly #toolsOldestQueued = this.#tools.gauge("runtimepod_tools_oldest_queued_seconds", "Age of the longest waiting tool call, 0 when none waits.");
+	readonly #toolsQueueWait = this.#tools.histogram("runtimepod_tools_queue_wait_seconds", "Tool call wait from queued to holding a permit.");
+	/** Each tool call between queued and ended: its queue time while it waits, then "running". */
+	readonly #toolPermits = Ref.makeUnsafe<ReadonlyMap<symbol, number | "running">>(new Map());
+
+	/** monotonicMs times the tool permit waits; it defaults to the process clock. */
+	constructor(options: { readonly monotonicMs?: () => number } = {}) {
+		this.#monotonicMs = options.monotonicMs ?? (() => performance.now());
+	}
 	private hotState: RuntimeHotStateMetrics = {
 		activeSessions: 0,
 		activeThreads: 0,
@@ -142,7 +162,7 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
   this.pendingContentBytes=nonNegative(this.pendingContentBytes+bytes);
  }
  observeContentCommitLatency(kind:RuntimeContentKind,phase:RuntimeContentCommitPhase,durationMs:number,outcome:RuntimeContentCommitOutcome,requestKind:RuntimeProviderStreamKind="agent_provider_request"):void {
-  this.operations.observe(phase,outcome,durationMs/1000);
+  this.operations.observe(phase,outcome === "committed" ? "ok" : outcome,durationMs/1000);
   addObservation(this.contentCommitLatencyMs,labelledKey({kind,phase,outcome,request_kind:requestKind}),durationMs);
  }
 
@@ -171,6 +191,40 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
 			activeFibers: nonNegative(snapshot.activeFibers),
 			pendingApprovals: nonNegative(snapshot.pendingApprovals),
 		};
+	}
+
+	/** Moves one tool call through its permit wait; a start observes the call's queue wait. */
+	recordToolPermit(toolCall: symbol, state: RuntimeToolPermitState): Effect.Effect<void> {
+		return Effect.suspend(() => {
+			const now = this.#monotonicMs();
+			return Ref.modify(this.#toolPermits, (permits): [number | undefined, ReadonlyMap<symbol, number | "running">] => {
+				const next = new Map(permits);
+				const queuedAt = permits.get(toolCall);
+				if (state === "queued") next.set(toolCall, now);
+				else if (state === "ended") next.delete(toolCall);
+				else if (typeof queuedAt === "number") next.set(toolCall, "running");
+				else return [undefined, permits];
+				return [state === "started" && typeof queuedAt === "number" ? now - queuedAt : undefined, next];
+			});
+		}).pipe(Effect.map((waitedMs) => {
+			if (waitedMs !== undefined) this.#toolsQueueWait.observe(waitedMs / 1000);
+		}));
+	}
+
+	#toolsText(): string {
+		const now = this.#monotonicMs();
+		let oldest = now, queued = 0, running = 0;
+		for (const permit of Effect.runSync(Ref.get(this.#toolPermits)).values()) {
+			if (permit === "running") running += 1;
+			else {
+				queued += 1;
+				oldest = Math.min(oldest, permit);
+			}
+		}
+		this.#toolsInProgress.set(running);
+		this.#toolsQueued.set(queued);
+		this.#toolsOldestQueued.set(Math.max(0, now - oldest) / 1000);
+		return renderMetrics(this.#tools.collect());
 	}
 
 	/** Applies a delta to the active tool-fiber gauge and floors the resulting value at zero. */
@@ -246,12 +300,17 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
 		);
 	}
 
+	activeSessions(): number {
+		return this.hotState.activeSessions;
+	}
+
 	/** Returns current gauges and defensive copies of all mutable observation maps. */
 	snapshot(): RuntimePodDomainMetricsSnapshot {
 		return {
 			...this.hotState,
 			activeToolFibers: this.activeToolFibers,
-   operationDurationText:this.operations.render(),
+			toolsText: this.#toolsText(),
+   operationDurationText:operationMetricsText(this.operations),
    pendingContentEntries:this.pendingContentEntries,
    pendingContentBytes:this.pendingContentBytes,
    contentCommitLatencyMs:new Map(this.contentCommitLatencyMs),
@@ -277,6 +336,7 @@ const EmptyRuntimePodMetrics: RuntimePodMetricsSource = {
 	observeContextLoadLatency: () => undefined,
 	recordCleanupCommandOutcome: () => undefined,
 	recordCloseoutEvent: () => undefined,
+	activeSessions: () => 0,
 	snapshot: () => ({
 		activeSessions: 0,
 		activeThreads: 0,
@@ -306,71 +366,20 @@ export function runtimePodMetricsText(
 	const snapshot = lifecycle.metricsSnapshot();
 	const runtimeSnapshot = runtimeMetrics.snapshot();
 	const memory = process.memoryUsage();
-	let container: ContainerMemoryObservation | undefined;
-	try {
-		container = readContainerMemory();
-	} catch {
-		/* unknown remains ineligible */
-	}
-	const validContainer =
-		container !== undefined &&
-		Number.isSafeInteger(container.usageBytes) &&
-		container.usageBytes >= 0 &&
-		Number.isSafeInteger(container.limitBytes) &&
-		container.limitBytes > 0;
-	const capacity = lifecycle.sessionCapacity();
+	const placement = placementSeries(lifecycle, runtimeSnapshot.activeSessions, readContainerMemory);
 	return [
     runtimeSnapshot.operationDurationText ?? "",
-		...(capacity === undefined
-			? []
-			: [
-					metric(
-						"runtimepod_session_capacity",
-						"Configured local Session capacity.",
-						"gauge",
-						capacity,
-					),
-				]),
-		...(validContainer
-			? [
-					metric(
-						"runtimepod_container_memory_usage_bytes",
-						"Current container cgroup memory usage.",
-						"gauge",
-						container!.usageBytes,
-					),
-					metric(
-						"runtimepod_container_memory_limit_bytes",
-						"Finite container cgroup memory limit.",
-						"gauge",
-						container!.limitBytes,
-					),
-				]
-			: ["# runtimepod_container_memory_state unknown_or_unlimited\n"]),
-		metric(
-			"runtimepod_ready",
-			"Runtime Pod readiness state.",
-			"gauge",
-			snapshot.ready ? 1 : 0,
-		),
-		metric(
-			"runtimepod_accepting_commands",
-			"Runtime Pod command admission state.",
-			"gauge",
-			snapshot.accepting ? 1 : 0,
-		),
+		placement.capacity,
+		placement.memory,
+		placement.ready,
+		placement.accepting,
 		metric(
 			"runtimepod_commands_in_flight",
 			"Runtime Pod commands currently draining or executing.",
 			"gauge",
 			snapshot.inFlightCommands,
 		),
-		metric(
-			"runtimepod_active_sessions",
-			"Runtime Pod hot-state sessions currently resident.",
-			"gauge",
-			runtimeSnapshot.activeSessions,
-		),
+		placement.activeSessions,
 		metric(
 			"runtimepod_active_threads",
 			"Runtime Pod hot-state threads currently resident.",
@@ -389,6 +398,7 @@ export function runtimePodMetricsText(
 			"gauge",
 			runtimeSnapshot.activeToolFibers,
 		),
+		runtimeSnapshot.toolsText ?? "",
   metric("runtimepod_pending_content_entries","Runtime semantic member submissions awaiting ACK/application.","gauge",runtimeSnapshot.pendingContentEntries??0),
   metric("runtimepod_pending_content_bytes","Encoded Runtime semantic member submissions awaiting ACK/application.","gauge",runtimeSnapshot.pendingContentBytes??0),
   observationMetric("runtimepod_continuation_latency_ms","Runtime owning continuation stages in milliseconds.",runtimeSnapshot.continuationLatencyMs??new Map()),
@@ -432,6 +442,86 @@ export function runtimePodMetricsText(
 			memory.rss,
 		),
 	].join("");
+}
+
+/**
+ * The six series Job Runner reads to place a Session, served alone on
+ * `/metrics/placement` so the page stays small however large `/metrics`
+ * grows. A capacity or container memory that is unknown is left out, which
+ * keeps the pod out of placement.
+ */
+export function runtimePodPlacementMetricsText(
+	lifecycle: RuntimePodLifecycle,
+	runtimeMetrics: RuntimePodMetricsSource = EmptyRuntimePodMetrics,
+	readContainerMemory: () =>
+		| ContainerMemoryObservation
+		| undefined = containerMemoryObservation,
+): string {
+	const placement = placementSeries(lifecycle, runtimeMetrics.activeSessions(), readContainerMemory);
+	return [placement.activeSessions, placement.capacity, placement.memory, placement.ready, placement.accepting].join("");
+}
+
+function placementSeries(
+	lifecycle: RuntimePodLifecycle,
+	activeSessions: number,
+	readContainerMemory: () => ContainerMemoryObservation | undefined,
+): { readonly activeSessions: string; readonly capacity: string; readonly memory: string; readonly ready: string; readonly accepting: string } {
+	const snapshot = lifecycle.metricsSnapshot();
+	let container: ContainerMemoryObservation | undefined;
+	try {
+		container = readContainerMemory();
+	} catch {
+		/* unknown remains ineligible */
+	}
+	const validContainer =
+		container !== undefined &&
+		Number.isSafeInteger(container.usageBytes) &&
+		container.usageBytes >= 0 &&
+		Number.isSafeInteger(container.limitBytes) &&
+		container.limitBytes > 0;
+	const capacity = lifecycle.sessionCapacity();
+	return {
+		activeSessions: metric(
+			"runtimepod_active_sessions",
+			"Runtime Pod hot-state sessions currently resident.",
+			"gauge",
+			activeSessions,
+		),
+		capacity: capacity === undefined
+			? ""
+			: metric(
+					"runtimepod_session_capacity",
+					"Configured local Session capacity.",
+					"gauge",
+					capacity,
+				),
+		memory: validContainer
+			? metric(
+					"runtimepod_container_memory_usage_bytes",
+					"Current container cgroup memory usage.",
+					"gauge",
+					container!.usageBytes,
+				) +
+				metric(
+					"runtimepod_container_memory_limit_bytes",
+					"Finite container cgroup memory limit.",
+					"gauge",
+					container!.limitBytes,
+				)
+			: "# runtimepod_container_memory_state unknown_or_unlimited\n",
+		ready: metric(
+			"runtimepod_ready",
+			"Runtime Pod readiness state.",
+			"gauge",
+			snapshot.ready ? 1 : 0,
+		),
+		accepting: metric(
+			"runtimepod_accepting_commands",
+			"Runtime Pod command admission state.",
+			"gauge",
+			snapshot.accepting ? 1 : 0,
+		),
+	};
 }
 
 function metric(

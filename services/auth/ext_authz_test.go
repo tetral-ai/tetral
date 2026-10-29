@@ -13,17 +13,23 @@ import (
 	"encoding/pem"
 	"errors"
 	"log/slog"
+	"net/http"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
+	"github.com/jackc/pgx/v5"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/auth/authtest"
+	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -147,7 +153,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 	client := authv3.NewAuthorizationClient(connection)
 	check := func(t *testing.T, req *authv3.CheckRequest, want int) *authv3.CheckResponse {
 		t.Helper()
-		outcome := "success"
+		outcome := "ok"
 		if want >= 400 {
 			outcome = "rejected"
 		}
@@ -511,7 +517,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 		if err != nil || externalTestStatus(response) != 500 || externalTestPrincipal(response) != "" {
 			t.Fatalf("closed owning DB Check=%v/%v", response, err)
 		}
-		if authOperationSample(t, failedMetrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, "error") != 1 || authOperationSample(t, failedMetrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, "success") != 0 {
+		if authOperationSample(t, failedMetrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, "error") != 1 || authOperationSample(t, failedMetrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, "ok") != 0 {
 			t.Fatal("typed 500 was counted as successful gRPC admission")
 		}
 		flushAPIKeyUsage(ctx, t, admin, runtime, resolver)
@@ -528,7 +534,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 		t.Fatal(err)
 	}
 	runJoined = true
-	if authOperationSample(t, metrics, "tetral_operation_duration_seconds_count", "shutdown_grpc_drain", "success") != 1 {
+	if authOperationSample(t, metrics, "tetral_long_operation_duration_seconds_count", "shutdown_grpc_drain", "ok") != 1 {
 		t.Fatal("Auth graceful owner did not populate its actual drain")
 	}
 	diagnosticOwner.CloseWithBudget()
@@ -618,6 +624,153 @@ func externalAwaitBlock(ctx context.Context, t *testing.T, admin *sql.DB, holder
 		case <-ticker.C:
 		}
 	}
+}
+
+// lookupCounter counts the statements that call an Auth lookup function.
+type lookupCounter struct {
+	calls             atomic.Int64
+	failConnectionKey atomic.Bool
+}
+
+func (c *lookupCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(data.SQL, "tetral_auth_lookup") {
+		c.calls.Add(1)
+	}
+	if strings.Contains(data.SQL, "public.tetral_auth_lookup_connection_key") && c.failConnectionKey.CompareAndSwap(true, false) {
+		failed, cancel := context.WithCancel(ctx)
+		cancel()
+		return failed
+	}
+	return ctx
+}
+func (*lookupCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// TestPostgreSQLAuthCheckSeparatesConnectionKeysFromOtherCredentials drives
+// Check with each credential class on the client routes and on management
+// routes, counting the lookup statements Auth's pool sends.
+func TestPostgreSQLAuthCheckSeparatesConnectionKeysFromOtherCredentials(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	_, admin, privateKey := newTestAuthRouter(t)
+	workloadDB := storagetest.OpenWorkloadDB(t, admin, "auth")
+	lookups := &lookupCounter{}
+	lookupDB := workloadDB.OpenWorkload(t, "auth", lookups)
+	resolver := auth.NewAuthorityResolver(lookupDB, "ws_auth_test", nil)
+	signer, err := auth.NewInternalPrincipalSignerFromBase64(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: resolver}, Signer: signer, PrincipalTTL: DefaultInternalPrincipalTTL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bearer, _ := externalTestBearer(ctx, t, admin, workloadDB.DB)
+	unknown := instance.GenerateKey()
+	var (
+		registered instance.Instance
+		credential instance.Credential
+		known      instance.ConnectionKey
+	)
+	if err := dbconnect.NewClientForTesting(admin).WithWorkspaceTx(ctx, "ws_auth_test", "auth.test_connection_key", func(tx *dbconnect.Tx) error {
+		var err error
+		if registered, err = instance.CreateUserInstance(ctx, tx, "ws_auth_test", "laptop"); err != nil {
+			return err
+		}
+		now, err := instance.Now(ctx, tx)
+		if err != nil {
+			return err
+		}
+		credential, known, err = instance.IssueCredential(ctx, tx, "ws_auth_test", registered.ID, instance.CredentialActive, now, now.Add(time.Hour))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, method, path, apiKey string
+		authorization              []string
+		status                     int
+		clientCode, apiErrorType   string
+		lookups                    int64
+	}{
+		{"api key on the client event stream", "GET", "/v1/client/events", testBootstrapAPIKey(), nil, 401, "credential_invalid", "", 0},
+		{"access token on a client heartbeat", "POST", "/v1/client/heartbeat", "", []string{"Bearer " + bearer}, 401, "credential_invalid", "", 0},
+		{"unknown connection key on ready", "POST", "/v1/client/ready", "", []string{"Bearer " + unknown.Reveal()}, 401, "credential_invalid", "", 1},
+		{"no credential on ready", "POST", "/v1/client/ready", "", nil, 401, "credential_invalid", "", 0},
+		{"known connection key on ready", "POST", "/v1/client/ready", "", []string{"Bearer " + known.Reveal()}, 200, "", "", 1},
+		{"connection key on sessions", "POST", "/v1/sessions", "", []string{"Bearer " + known.Reveal()}, 401, "", "authentication_error", 0},
+		{"connection key on instances", "GET", "/v1/instances", "", []string{"Bearer " + known.Reveal()}, 401, "", "authentication_error", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := lookups.calls.Load()
+			response, err := adapter.Check(ctx, externalTestRequest(tc.method, tc.path, tc.apiKey, tc.authorization))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status, calls := externalTestStatus(response), lookups.calls.Load()-before; status != tc.status || calls != tc.lookups {
+				t.Fatalf("status=%d lookups=%d; want %d and %d", status, calls, tc.status, tc.lookups)
+			}
+			if tc.status == 200 {
+				p, _, err := signer.Verify(externalTestPrincipal(response), tc.method, tc.path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := auth.ConnectionKeyPrincipal(p.Workspace, registered.ID, credential.ID)
+				if p.Workspace.ID != "ws_auth_test" || p.APIKeyID != "" || p.Identity != nil || p.Credential != want.Credential || p.Authority.Kind != auth.AuthorityInstanceConnection || p.Authority.Scope != want.Authority.Scope || !slices.Equal(p.Authority.Operations, want.Authority.Operations) {
+					t.Fatalf("connection principal = %+v", p)
+				}
+				return
+			}
+			body := response.GetDeniedResponse().GetBody()
+			if strings.Contains(body, known.Reveal()) || strings.Contains(body, unknown.Reveal()) || strings.Contains(body, bearer) || strings.Contains(body, testBootstrapAPIKey()) {
+				t.Fatal("denial body holds a credential")
+			}
+			if tc.clientCode != "" {
+				var denial map[string]string
+				if err := json.Unmarshal([]byte(body), &denial); err != nil || len(denial) != 2 || denial["code"] != tc.clientCode || denial["message"] == "" {
+					t.Fatalf("client denial body = %s", body)
+				}
+				return
+			}
+			var envelope errorResponse
+			if err := json.Unmarshal([]byte(body), &envelope); err != nil || envelope.Type != "error" || envelope.Error.Type != tc.apiErrorType {
+				t.Fatalf("API denial body = %s", body)
+			}
+		})
+	}
+	assertUnavailable := func(t *testing.T) {
+		t.Helper()
+		response, err := adapter.Check(ctx, externalTestRequest("POST", "/v1/client/ready", "", []string{"Bearer " + known.Reveal()}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if externalTestStatus(response) != http.StatusInternalServerError || externalTestPrincipal(response) != "" {
+			t.Fatalf("dependency failure: status=%d principal present=%v", externalTestStatus(response), externalTestPrincipal(response) != "")
+		}
+		var envelope errorResponse
+		body := response.GetDeniedResponse().GetBody()
+		if err := json.Unmarshal([]byte(body), &envelope); err != nil || envelope.Type != "error" || envelope.Error.Type != "api_error" || envelope.Error.Message != "authentication unavailable" {
+			t.Fatalf("dependency denial = %s", body)
+		}
+	}
+	t.Run("connection key lookup failure after acquisition", func(t *testing.T) {
+		before := lookups.calls.Load()
+		lookups.failConnectionKey.Store(true)
+		assertUnavailable(t)
+		if lookups.failConnectionKey.Load() || lookups.calls.Load()-before != 1 {
+			t.Fatal("failure did not reach the connection-key lookup")
+		}
+	})
+	t.Run("connection key acquisition failure", func(t *testing.T) {
+		if err := lookupDB.Close(); err != nil {
+			t.Fatal(err)
+		}
+		before := lookups.calls.Load()
+		assertUnavailable(t)
+		if lookups.calls.Load() != before {
+			t.Fatal("closed pool unexpectedly reached lookup")
+		}
+	})
+
 }
 
 func externalTestBearer(ctx context.Context, t *testing.T, admin, runtime *sql.DB) (string, func() int64) {

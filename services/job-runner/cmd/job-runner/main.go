@@ -29,6 +29,15 @@ var openDatabase = func(ctx context.Context, _ string, dsn string) (dbconnect.Op
 	return dbconnect.OpenProtectedDSN(ctx, dsn, os.Getenv("TETRAL_DATABASE_TLS_CA_PATH"), os.Getenv("TETRAL_DATABASE_TLS_SERVER_NAME"))
 }
 var verifySchema = func(ctx context.Context, client *dbconnect.Client) error { return client.VerifySchema(ctx) }
+var newKubernetesClient = func() (kubernetesClient, error) { return enginekubernetes.NewInClusterVisibilityClient() }
+var openBlobStore = blob.NewProtectedS3BlobStore
+
+// kubernetesClient is what Job Runner reads from its cluster: the watched
+// Runtime pods and endpoints, and a fresh read of one pod.
+type kubernetesClient interface {
+	enginekubernetes.VisibilityClient
+	GetPod(ctx context.Context, namespace, name string) (*enginekubernetes.PodObservation, error)
+}
 
 type osEnv struct{}
 
@@ -50,6 +59,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 	defer owner.CloseWithBudget()
 	logger := owner.Logger
 	defer workload.InstallDefaultLogger(logger)()
+	coldStart := workload.BeginServiceColdStart(ctx)
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
@@ -58,6 +68,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	workload.ConfigureProcessShutdown(ctx, cfg.DrainTimeout+cfg.CancelJoinTimeout, owner)
+	coldStart.Advance(ctx)
 	database, err := openDatabase(ctx, jobrunner.EnvDatabaseURL, cfg.DatabaseURL)
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
@@ -130,7 +141,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 		enginekubernetes.WithLogger(logger),
 		enginekubernetes.WithPodDeleted(repairSignal.Mark),
 	)
-	kubernetesClient, err := enginekubernetes.NewInClusterVisibilityClient()
+	kubernetesClient, err := newKubernetesClient()
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
@@ -152,7 +163,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 	if err := blobConfig.AssertProductionReady(); err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
-	blobStore, err := blob.NewProtectedS3BlobStore(ctx, blobConfig)
+	blobStore, err := openBlobStore(ctx, blobConfig)
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
@@ -162,6 +173,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 			logger.Error("shutdown.resource_close_failed", "operation", "close_blob_store", "error.class", "resource_shutdown", "error.code", "blob_store_close_failed")
 		}
 	}()
+	coldStart.Advance(ctx)
 	deliveryStore := jobrunner.NewJobRunnerRuntimeDeliveryStore(
 		database.Client,
 		logger,
@@ -218,7 +230,6 @@ func run(ctx context.Context, env jobrunner.Env) error {
 		Listener:              listener,
 		Metrics:               httpMetrics.Operations,
 		Handler: workload.HealthRouter(readiness,
-			workload.WithHTTPMetrics(httpMetrics),
 			workload.WithMetricsCollector("http", httpMetrics.Collector()),
 			workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
 			workload.WithMetricsCollector("placement", deliveryStore.PlacementMetrics.Collector()),

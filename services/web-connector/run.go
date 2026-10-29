@@ -106,6 +106,7 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 		admission.Lock()
 		if !draining.Load() {
 			ready.Store(true)
+			workload.MarkProcessReady()
 		}
 		admission.Unlock()
 		grpcErr <- server.Serve(grpcListener)
@@ -116,6 +117,7 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 		metrics.Handler().ServeHTTP(w, r)
 		_, _ = fmt.Fprintf(w, "# TYPE web_requests_active gauge\nweb_requests_active %d\n# TYPE web_draining gauge\nweb_draining %d\n", active.Load(), boolInt(draining.Load()))
 		_, _ = w.Write([]byte(workload.DiagnosticMetricsText(runtime.Logger)))
+		_, _ = w.Write([]byte(workload.LibraryMetricsText()))
 	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

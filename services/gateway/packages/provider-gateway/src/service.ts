@@ -24,6 +24,7 @@ import type {
   ProviderAttachmentRejection,
   ProviderRequest,
   ProviderStreamEvent,
+  RequestUsage,
   RunWebRequest,
   RunWebResponse,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -39,6 +40,7 @@ import { GrpcStatusError } from "./errors.js";
 import type { RuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
 import type { GatewayLogger } from "./logger.js";
 import { lookupGatewayModel } from "./providers/catalog.js";
+import type { GatewayModelCatalogEntry } from "./providers/catalog.js";
 import { controlProviderStream } from "./providers/stream-control.js";
 import type { ProviderStreamWatchdogKind } from "./providers/stream-control.js";
 import { classifyProviderFailure, PlatformKeyPoolConstants, ProviderKeyFailureError } from "./providers/pool.js";
@@ -47,7 +49,7 @@ import type { ProviderCredentialResolver, ResolvedProviderCredential } from "./p
 import type { ProviderErrorInput } from "@tetral/gateway-lowering/src/errors.js";
 import type { ResolvedProviderRequestAttachment } from "@tetral/gateway-lowering/src/request.js";
 import { ProviderGatewayMetricsRegistry } from "./metrics.js";
-import type { ProviderStageSample, ProviderStageOutcome, ProviderContentKind } from "./metrics.js";
+import type { ProviderStageSample, ProviderStageOutcome, ProviderContentKind, ProviderStreamSample } from "./metrics.js";
 import { ProviderStreamEvent as ProviderStreamFrame } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { PreviewRequestProducer } from "./providers/preview-publisher.js";
 
@@ -106,7 +108,7 @@ export class ProviderGatewayServiceShell {
   recordProviderWriteTimeout(event:ProviderStreamEvent):void {
     const frame=this.frameDeadlines.get(event);if(frame!==undefined)logGatewayProviderTimeout(this.options.logger,frame.request,{kind:"overall_timeout",elapsedMs:performance.now()-frame.startedAt});
   }
-  private readonly completeFrameTimes = new WeakMap<ProviderStreamEvent, { completedAt: number; requestId: string; kind: ProviderContentKind; canonicalBytes: number; encodedBytes: number; release?: () => void; callbackAt?: number }>();
+  private readonly completeFrameTimes = new WeakMap<ProviderStreamEvent, { completedAt: number; encodedBytes: number; release?: () => void; callbackAt?: number }>();
   recordCompleteFrameWriteStarted(event: ProviderStreamEvent): void {
     const frame = this.completeFrameTimes.get(event);
     if (frame === undefined || frame.release !== undefined) return;
@@ -122,20 +124,18 @@ export class ProviderGatewayServiceShell {
     if (frame === undefined) return;
     this.completeFrameTimes.delete(event);
     try { frame.release?.(); } catch { /* Observability is fail-open. */ }
-    this.observeStage({stage:"complete_frame_write", outcome, kind:frame.kind, durationMs:(frame.callbackAt ?? this.clock()) - frame.completedAt, canonicalBytes:frame.canonicalBytes, encodedBytes:frame.encodedBytes},frame.requestId);
+    this.observeStage({stage:"complete_frame_write", outcome, durationMs:(frame.callbackAt ?? this.clock()) - frame.completedAt});
   }
-  private observeStage(sample: ProviderStageSample, requestId: string): void {
+  private observeStage(sample: ProviderStageSample): void {
     try { this.metrics.observeProviderStage(sample); } catch { /* Observability is fail-open. */ }
-    try { this.options.logger.info({event:"provider.stage_completed", "event.kind":"stage_completed", component:"gateway", operation:"provider.stream", "request.id":requestId, stage:sample.stage, outcome:sample.outcome, kind:sample.kind, duration_ms:Math.max(0,sample.durationMs), bytes_in:sample.canonicalBytes, bytes_out:sample.encodedBytes}); } catch { /* The raw sample sink cannot affect delivery. */ }
   }
   private clock():number { return this.options.observationClock?.() ?? performance.now(); }
   private readonly workers = new Map<AbortController, Promise<void>>();
 
   constructor(private readonly options: ProviderGatewayServiceOptions) {
     this.providerStreamer = options.providerStreamer ?? new CatalogGatedProviderStreamer();
-    this.admission = new TurnAdmissionGate(options.maxConcurrentTurns ?? 8);
     this.metrics = options.metrics ?? new ProviderGatewayMetricsRegistry();
-    try { this.metrics.setCapacity(options.maxConcurrentTurns ?? 8); } catch { /* Metrics are best effort. */ }
+    this.admission = new TurnAdmissionGate(options.maxConcurrentTurns ?? 8, this.metrics);
   }
 
   /**
@@ -228,7 +228,6 @@ export class ProviderGatewayServiceShell {
       const release = this.admission.tryAcquire();
       if (release === undefined) {
         capacityRejected = true;
-        try { this.metrics.recordAdmissionRejection(); } catch { /* Metrics cannot reject work. */ }
         errorClass = "provider_error";
         errorCode = "provider_unavailable";
         yield* assembler.accept(providerErrorEvent({
@@ -345,18 +344,21 @@ export class ProviderGatewayServiceShell {
         if (requestOutcome === "ok") {
           this.options.logger.info(record);
         } else {
-          // Ordinary denial/cancellation is expected control flow; failure meaning is retained.
-          const emit = errorClass === "request_validation" || (errorClass === "grpc_status" && ["1", "3", "7", "16"].includes(errorCode))
-            ? this.options.logger.info : this.options.logger.error;
-          emit.call(this.options.logger, {
-              ...record,
-              ...semanticErrorFields({
-                errorClass,
-                errorCode,
-                messageSafe: "provider request failed",
-              }),
-              ...(providerStatusCode === undefined ? {} : { "provider.status_code": providerStatusCode }),
-            });
+          const failure = {
+            ...semanticErrorFields({
+              errorClass,
+              errorCode,
+              messageSafe: "provider request failed",
+            }),
+            ...(providerStatusCode === undefined ? {} : { "provider.status_code": providerStatusCode }),
+          };
+          // Ordinary denial, cancellation and a capacity refusal are expected control flow and keep the
+          // summary's level, the failure meaning retained; every other failure has an event of its own.
+          if (capacityRejected || errorClass === "request_validation" || (errorClass === "grpc_status" && ["1", "3", "7", "16"].includes(errorCode))) {
+            this.options.logger.info({ ...record, ...failure });
+          } else {
+            this.options.logger.error({ ...record, event: "provider_request_streamed_failed", "event.kind": "provider_request_streamed_failed", ...failure });
+          }
         }
       } catch {
         // Observability must not replace the request's outcome.
@@ -494,9 +496,10 @@ export class ProviderGatewayServiceShell {
     abortOnTimeout: (timeout: ProviderTimeoutObservation) => void,
     recordFailureOrigin: (origin: "http_rejection" | "transport_failure") => void,
   ): AsyncGenerator<ProviderStreamEvent> {
-    const catalogError = this.catalogGate(request);
-    if (catalogError !== undefined) {
-      yield* assembler.accept(providerErrorEvent(catalogError));
+    const model = request.model;
+    const catalogEntry = model === undefined ? undefined : lookupGatewayModel(model.providerId, model.modelId);
+    if (catalogEntry === undefined) {
+      yield* assembler.accept(providerErrorEvent(catalogUnavailableError()));
       return;
     }
     const attachmentResolution = await withinProviderDeadline(
@@ -571,7 +574,9 @@ export class ProviderGatewayServiceShell {
       const dispatchedAt = this.clock();
       let firstFragmentAt: number | undefined;
       let firstFragmentKind: ProviderContentKind = "none";
-      let firstComplete: { at: number; kind: ProviderContentKind; canonicalBytes: number; encodedBytes: number } | undefined;
+      let lastFragmentAt: number | undefined;
+      let firstCompleteAt: number | undefined;
+      let reportedUsage: RequestUsage | undefined;
       let attemptOutcome: ProviderStageOutcome = "cancelled";
       try {
         const providerEvents = controlProviderStream(this.providerStreamer.stream({
@@ -604,20 +609,25 @@ export class ProviderGatewayServiceShell {
           }
           emitted = true;
           const fragmentKind = normalizedContentKind(event);
-          if (firstFragmentAt === undefined && fragmentKind !== "none") {
-            firstFragmentAt = this.clock();
-            firstFragmentKind = fragmentKind;
+          if (fragmentKind !== "none") {
+            lastFragmentAt = this.clock();
+            if (firstFragmentAt === undefined) {
+              firstFragmentAt = lastFragmentAt;
+              firstFragmentKind = fragmentKind;
+            }
           }
           if (event.providerError !== undefined) attemptOutcome = "error";
-          else if (event.finish !== undefined) attemptOutcome = "success";
+          else if (event.finish !== undefined) {
+            attemptOutcome = "success";
+            reportedUsage = event.finish.usage;
+          }
           lastEventAt = performance.now();
           lastEventKind = boundedProviderEventKind(event.type);
           for(const frame of assembler.accept(event)) {
             if(frame.textComplete!==undefined || frame.reasoningComplete!==undefined || frame.toolCallComplete!==undefined){
               const completedAt = this.clock();
-              const description = completeFrameDescription(frame);
-              this.completeFrameTimes.set(frame,{completedAt,requestId:request.requestId,...description});
-              firstComplete ??= {at:completedAt,...description};
+              this.completeFrameTimes.set(frame,{completedAt,encodedBytes:ProviderStreamFrame.encode(frame).finish().byteLength});
+              firstCompleteAt ??= completedAt;
             }
             yield frame;
           }
@@ -626,6 +636,7 @@ export class ProviderGatewayServiceShell {
         return;
       } catch (error) {
         attemptOutcome = abortSignal.aborted ? "cancelled" : "error";
+        this.recordProviderRejection(catalogEntry, error);
         if (assembler.isTerminal) throw new GrpcStatusError(status.INTERNAL, "gateway provider stream failed after terminal");
         if (error instanceof GrpcStatusError) {
           throw error;
@@ -721,8 +732,18 @@ export class ProviderGatewayServiceShell {
       } finally {
         if (abortSignal.aborted) attemptOutcome = "cancelled";
         const finishedAt = this.clock();
-        this.observeStage({stage:"provider_first_fragment",outcome:attemptOutcome,kind:firstFragmentKind,durationMs:(firstFragmentAt ?? finishedAt)-dispatchedAt,canonicalBytes:firstComplete?.canonicalBytes ?? 0,encodedBytes:firstComplete?.encodedBytes ?? 0},request.requestId);
-        this.observeStage({stage:"provider_first_complete",outcome:attemptOutcome,kind:firstComplete?.kind ?? "none",durationMs:(firstComplete?.at ?? finishedAt)-(firstFragmentAt ?? dispatchedAt),canonicalBytes:firstComplete?.canonicalBytes ?? 0,encodedBytes:firstComplete?.encodedBytes ?? 0},request.requestId);
+        this.observeStage({stage:"provider_first_fragment",outcome:attemptOutcome,durationMs:(firstFragmentAt ?? finishedAt)-dispatchedAt});
+        this.observeStage({stage:"provider_first_complete",outcome:attemptOutcome,durationMs:(firstCompleteAt ?? finishedAt)-(firstFragmentAt ?? dispatchedAt)});
+        this.observeProviderStream({
+          provider: catalogEntry.providerId,
+          model: catalogEntry.modelId,
+          outcome: attemptOutcome === "success" ? "ok" : attemptOutcome,
+          dispatchedAt,
+          endedAt: finishedAt,
+          firstFragment: firstFragmentAt === undefined || firstFragmentKind === "none" ? undefined : { at: firstFragmentAt, kind: firstFragmentKind === "tool" ? "tool_call" : firstFragmentKind },
+          lastFragmentAt,
+          usage: reportedUsage === undefined ? undefined : { inputTokens: reportedUsage.inputTotalTokens, outputTokens: reportedUsage.outputTotalTokens, cachedTokens: reportedUsage.inputCacheReadTokens },
+        });
       }
     }
   }
@@ -781,20 +802,30 @@ export class ProviderGatewayServiceShell {
     }
   }
 
-  private catalogGate(request: ProviderRequest): ProviderErrorInput | undefined {
-    const model = request.model;
-    const entry = model === undefined ? undefined : lookupGatewayModel(model.providerId, model.modelId);
-    if (entry === undefined) {
-      return {
-        code: "provider_unavailable",
-        message: "Provider model is not approved by the Gateway catalog.",
-        retryable: false,
-        fatal: true,
-        statusCode: 503,
-      };
-    }
-    return undefined;
+  /** Observes one ended provider stream; the speed and token families are best effort. */
+  private observeProviderStream(sample: ProviderStreamSample): void {
+    try { this.metrics.observeProviderStream(sample); } catch { /* Observability is fail-open. */ }
   }
+
+  /** A provider's own HTTP refusal of one attempt, before or during its stream. */
+  private recordProviderRejection(entry: GatewayModelCatalogEntry, error: unknown): void {
+    try {
+      const statusCode = error instanceof ProviderKeyFailureError
+        ? error.origin === "http_rejection" ? error.classification.providerError.statusCode : undefined
+        : providerAttemptFailureInput(error).statusCode;
+      if (statusCode !== undefined) this.metrics.recordProviderRejection(entry.providerId, statusCode);
+    } catch { /* Observability is fail-open. */ }
+  }
+}
+
+function catalogUnavailableError(): ProviderErrorInput {
+  return {
+    code: "provider_unavailable",
+    message: "Provider model is not approved by the Gateway catalog.",
+    retryable: false,
+    fatal: true,
+    statusCode: 503,
+  };
 }
 
 function platformCredentialPoolUnavailableError(statusCode: number | undefined): ProviderErrorInput {
@@ -1062,24 +1093,34 @@ class CatalogGatedProviderStreamer implements ProviderRequestStreamer {
   }
 }
 
+/** The point providergateway_turns: it refuses a turn beyond the limit and never queues one. */
 class TurnAdmissionGate {
   private inFlight = 0;
 
-  constructor(private readonly maxConcurrentTurns: number) {}
+  constructor(private readonly maxConcurrentTurns: number, private readonly metrics: ProviderGatewayMetricsRegistry) {
+    observeAdmission(() => metrics.setTurnLimit(maxConcurrentTurns));
+  }
 
   tryAcquire(): (() => void) | undefined {
     if (this.maxConcurrentTurns <= 0 || this.inFlight >= this.maxConcurrentTurns) {
+      observeAdmission(() => this.metrics.turnRejected());
       return undefined;
     }
     this.inFlight += 1;
+    observeAdmission(() => this.metrics.turnAdmitted(this.inFlight));
     let released = false;
     return () => {
       if (!released) {
         released = true;
         this.inFlight -= 1;
+        observeAdmission(() => this.metrics.turnReleased(this.inFlight));
       }
     };
   }
+}
+
+function observeAdmission(observe: () => void): void {
+  try { observe(); } catch { /* Metrics cannot change an admission decision. */ }
 }
 
 // The normalized provider-event watchdog default, applied as both the first-event
@@ -1173,12 +1214,4 @@ function normalizedContentKind(event: NormalizedProviderEvent): ProviderContentK
   if (event.reasoning !== undefined) return "reasoning";
   if (event.toolInput !== undefined || event.toolCall !== undefined) return "tool";
   return "none";
-}
-function completeFrameDescription(frame: ProviderStreamEvent): {kind: ProviderContentKind; canonicalBytes: number; encodedBytes: number} {
-  const encoder = new TextEncoder();
-  const canonical = frame.textComplete !== undefined ? JSON.stringify(frame.textComplete.text)
-    : frame.reasoningComplete !== undefined ? JSON.stringify(frame.reasoningComplete.text)
-    : frame.toolCallComplete?.inputJson ?? "";
-  const metadata = frame.reasoningComplete?.providerMetadataJson ?? frame.toolCallComplete?.providerMetadataJson ?? "";
-  return {kind: frame.textComplete !== undefined ? "text" : frame.reasoningComplete !== undefined ? "reasoning" : "tool", canonicalBytes:encoder.encode(canonical).byteLength + encoder.encode(metadata).byteLength, encodedBytes:ProviderStreamFrame.encode(frame).finish().byteLength};
 }

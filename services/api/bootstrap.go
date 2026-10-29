@@ -22,6 +22,7 @@ func Run(ctx context.Context, env Env, stderr io.Writer, buildApplication BuildA
 	defer diagnosticOwner.CloseWithBudget()
 	logger := diagnosticOwner.Logger
 	defer workload.InstallDefaultLogger(logger)()
+	coldStart := workload.BeginServiceColdStart(ctx)
 	if diagnosticErr != nil {
 		return workload.LogStartupFailure(logger, "api", diagnosticErr)
 	}
@@ -30,6 +31,7 @@ func Run(ctx context.Context, env Env, stderr io.Writer, buildApplication BuildA
 		return workload.LogStartupFailure(logger, "api", err)
 	}
 	workload.ConfigureProcessShutdown(ctx, defaultShutdownTimeout+5*time.Second, diagnosticOwner)
+	coldStart.Advance(ctx)
 	if buildApplication == nil {
 		buildApplication = BuildProductionApplication
 	}
@@ -39,11 +41,11 @@ func Run(ctx context.Context, env Env, stderr io.Writer, buildApplication BuildA
 		return workload.LogStartupFailure(logger, "api", err)
 	}
 	defer workload.ProcessCleanup(ctx, func() { _ = application.Close() })
+	coldStart.Advance(ctx)
 	readiness := workload.NewReadiness()
 	handler := BuildHTTPHandler(readiness, application.Handler)
 	metricsHandler := workload.HealthRouter(readiness,
 		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
-		workload.WithHTTPMetrics(httpMetrics),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
 		workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", application.Client)),
 	)

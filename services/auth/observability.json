@@ -1,0 +1,1074 @@
+{
+  "service": "auth",
+  "events": {
+    "auth.admission.denied": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_admission_denied": {
+          "class": "permission_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.admission.invalid": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_admission_invalid": {
+          "class": "authentication_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.admission.success": {
+      "level": "DEBUG",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "operation": "string",
+        "request.id": "string"
+      }
+    },
+    "auth.admission.unavailable": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_store_unavailable": {
+          "class": "dependency_unavailable",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.api_key_usage.failed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "failed.count": "integer",
+        "phase": "string"
+      },
+      "errors": {
+        "auth_api_key_usage_unavailable": {
+          "class": "dependency_unavailable",
+          "message_safe": "api key usage update unavailable"
+        }
+      }
+    },
+    "auth.assertion.denied": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_assertion_denied": {
+          "class": "permission_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.assertion.invalid": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_assertion_invalid": {
+          "class": "authentication_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.assertion.unavailable": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_jwks_unavailable": {
+          "class": "dependency_unavailable",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.exchange.success": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "operation": "string",
+        "request.id": "string"
+      }
+    },
+    "auth.external_authorization.panic": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string"
+      },
+      "errors": {
+        "internal_error": {
+          "class": "panic",
+          "message_safe": "internal error"
+        }
+      }
+    },
+    "auth.grant.denied": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_grant_denied": {
+          "class": "permission_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.grant.unavailable": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_store_unavailable": {
+          "class": "dependency_unavailable",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.grpc.failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "listener.transport": "string",
+        "operation": "string",
+        "startup.cause": "string",
+        "startup.config_problem": "string"
+      },
+      "errors": {
+        "config_error": {
+          "class": "config_error",
+          "message_safe": "configuration invalid"
+        },
+        "startup_error": {
+          "class": "startup_error",
+          "message_safe": "startup failed"
+        }
+      }
+    },
+    "auth.grpc.shutdown.complete": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "listener.transport": "string",
+        "operation": "string"
+      }
+    },
+    "auth.grpc.started": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "listener.transport": "string",
+        "operation": "string"
+      }
+    },
+    "auth.input.denied": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_input_denied": {
+          "class": "permission_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.input.invalid": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_input_invalid": {
+          "class": "authentication_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.input.unavailable": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_input_unavailable": {
+          "class": "dependency_unavailable",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.issuance.denied": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_issuance_denied": {
+          "class": "permission_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.issuance.invalid": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_issuance_invalid": {
+          "class": "authentication_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.issuance.success": {
+      "level": "DEBUG",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "operation": "string",
+        "request.id": "string"
+      }
+    },
+    "auth.issuance.unavailable": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_store_unavailable": {
+          "class": "dependency_unavailable",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.limiter.limited": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_limiter_limited": {
+          "class": "rate_limit_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.operation.denied": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_operation_denied": {
+          "class": "permission_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.operation.invalid": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_operation_invalid": {
+          "class": "authentication_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.operation.unavailable": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_operation_unavailable": {
+          "class": "dependency_unavailable",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.rule.denied": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_rule_denied": {
+          "class": "permission_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.rule.invalid": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_rule_invalid": {
+          "class": "authentication_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.rule.unavailable": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_store_unavailable": {
+          "class": "dependency_unavailable",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.signed_principal.denied": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_signed_principal_denied": {
+          "class": "permission_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.signed_principal.invalid": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_signed_principal_invalid": {
+          "class": "authentication_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.signed_principal.unavailable": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_signed_principal_unavailable": {
+          "class": "dependency_unavailable",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.token_prune.failed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "phase": "string"
+      },
+      "errors": {
+        "auth_token_prune_unavailable": {
+          "class": "dependency_unavailable",
+          "message_safe": "expired token cleanup unavailable"
+        }
+      }
+    },
+    "auth.token_prune.recovered": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "phase": "string",
+        "recovery.event": "string"
+      }
+    },
+    "http.auth": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.result": "string",
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "http.request.method": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "authentication_backend_error": {
+          "class": "auth_error",
+          "message_safe": "authentication backend error"
+        },
+        "authentication_error": {
+          "class": "authentication_error",
+          "message_safe": "authentication failed"
+        }
+      }
+    },
+    "provider_credential_rejected": {
+      "level": "DEBUG",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "provider.id": "string",
+        "validation.member": "string"
+      },
+      "errors": {
+        "invalid_provider_oauth": {
+          "class": "validation",
+          "message_safe": "provider credential rejected"
+        }
+      }
+    },
+    "queue.notification_listener.disconnected": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "consumer.class": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "retryable": "boolean",
+        "terminal": "boolean"
+      },
+      "errors": {
+        "notification_listener_authentication": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_endpoint_transport": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_permission": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_timeout": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_unknown": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        }
+      }
+    },
+    "queue.notification_listener.recovered": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "consumer.class": "string",
+        "operation": "string",
+        "outcome": "string",
+        "recovery.event": "string"
+      }
+    },
+    "schema.migration.completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      }
+    },
+    "schema.migration.failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "db.sqlstate": "string",
+        "duration_ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      },
+      "errors": {
+        "schema_ahead": {
+          "class": "schema_ahead",
+          "message_safe": "postgresql schema is ahead of this binary"
+        },
+        "schema_apply_failed": {
+          "class": "schema_apply_failed",
+          "message_safe": "postgresql schema migration failed"
+        },
+        "schema_behind": {
+          "class": "schema_behind",
+          "message_safe": "postgresql schema is behind this binary"
+        },
+        "schema_checksum_drift": {
+          "class": "schema_checksum_drift",
+          "message_safe": "postgresql schema checksum does not match this binary"
+        },
+        "schema_history_duplicate": {
+          "class": "schema_history_duplicate",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_history_gap": {
+          "class": "schema_history_gap",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_history_malformed": {
+          "class": "schema_history_malformed",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_lock_failed": {
+          "class": "schema_lock_failed",
+          "message_safe": "postgresql schema migration lock failed"
+        },
+        "schema_missing": {
+          "class": "schema_missing",
+          "message_safe": "postgresql schema registry is missing"
+        },
+        "schema_operation_canceled": {
+          "class": "schema_operation_canceled",
+          "message_safe": "postgresql schema operation was canceled"
+        },
+        "schema_rls_drift": {
+          "class": "schema_rls_drift",
+          "message_safe": "postgresql workspace isolation contract does not match this binary"
+        },
+        "schema_unexpected_state": {
+          "class": "schema_unexpected_state",
+          "message_safe": "postgresql schema is not empty and has no current identity"
+        }
+      }
+    },
+    "schema.migration.started": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      }
+    }
+  },
+  "operations": {
+    "/envoy.service.auth.v3.Authorization/Check": {
+      "long": false,
+      "errors": [
+        "cancelled",
+        "timeout"
+      ]
+    }
+  },
+  "metrics": {
+    "tetral_auth_api_key_usage_rows_updated_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "tetral_auth_api_key_usage_samples_dropped_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "reason": [
+          "deadline",
+          "database",
+          "unconfirmed"
+        ]
+      }
+    },
+    "tetral_auth_api_key_usage_submissions_dropped_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "reason": [
+          "capacity",
+          "contended",
+          "closed"
+        ]
+      }
+    },
+    "tetral_auth_token_prune_deleted_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "tetral_auth_token_prune_expired_backlog": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "tetral_auth_token_prune_healthy": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "tetral_auth_token_prune_last_success_timestamp_seconds": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "tetral_auth_token_prune_oldest_expiry_age_seconds": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "tetral_auth_token_prune_passes_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "status": [
+          "success",
+          "failed",
+          "cancelled"
+        ]
+      }
+    }
+  },
+  "spans": {}
+}

@@ -94,7 +94,7 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 			metricMethods = append(metricMethods, "/"+service+"/"+method.Name)
 		}
 	}
-	grpcMetrics.Operations.SetOperations(metricMethods)
+	grpcMetrics.SetMethods(metricMethods)
 
 	drainTimeout := cfg.DrainTimeout
 	if drainTimeout <= 0 {
@@ -131,7 +131,6 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 			metricsOptions = append(metricsOptions, workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", runtime.DBStatsProvider)))
 		}
 		metricsOptions = append(metricsOptions,
-			workload.WithHTTPMetrics(httpMetrics),
 			workload.WithMetricsCollector("http", httpMetrics.Collector()),
 			workload.WithMetricsCollector("grpc", grpcMetrics.Collector()),
 			workload.WithMetricsCollector("queue_retention", retentionMetrics.Collector()),
@@ -195,7 +194,7 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 	defer timer.Stop()
 	select {
 	case <-joined:
-		grpcMetrics.Operations.ObserveShutdown(logger, "shutdown_queue_drain", "success", time.Since(drainStarted))
+		grpcMetrics.Operations.ObserveShutdown(logger, "shutdown_queue_drain", "ok", time.Since(drainStarted))
 	case <-timer.C:
 		grpcMetrics.Operations.ObserveShutdown(logger, "shutdown_queue_drain", "timeout", time.Since(drainStarted))
 		joinStarted := time.Now()
@@ -205,7 +204,7 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 		cancelWork()
 		grpcServer.Stop()
 		<-joined
-		grpcMetrics.Operations.ObserveShutdown(logger, "shutdown_queue_cancel_join", "success", time.Since(joinStarted))
+		grpcMetrics.Operations.ObserveShutdown(logger, "shutdown_queue_cancel_join", "ok", time.Since(joinStarted))
 		errOut = errors.Join(errOut, context.DeadlineExceeded)
 	}
 	return errors.Join(errOut, httpRunErr)
@@ -234,11 +233,11 @@ func queueMetricsCollector(store queueMetricsStore, now func() time.Time) worklo
 			labels := []workload.MetricLabel{{Name: "kind", Value: snapshot.Kind}}
 			metrics = append(metrics,
 				workload.Metric{Name: "queue_pending_jobs", Help: "Pending queue jobs.", Type: "gauge", Labels: labels, Value: float64(snapshot.PendingJobs)},
-				workload.Metric{Name: "queue_ready_jobs", Help: "Pending queue jobs whose available_at is at or before the observation time.", Type: "gauge", Labels: labels, Value: float64(snapshot.ReadyJobs)},
-				workload.Metric{Name: "queue_leased_jobs", Help: "Leased queue jobs.", Type: "gauge", Labels: labels, Value: float64(snapshot.LeasedJobs)},
+				workload.Metric{Name: "queue_jobs_queued", Help: "Pending queue jobs whose available_at is at or before the observation time.", Type: "gauge", Labels: labels, Value: float64(snapshot.ReadyJobs)},
+				workload.Metric{Name: "queue_jobs_in_progress", Help: "Leased queue jobs.", Type: "gauge", Labels: labels, Value: float64(snapshot.LeasedJobs)},
 				workload.Metric{Name: "queue_retry_pending_jobs", Help: "Pending queue jobs that have retried at least once.", Type: "gauge", Labels: labels, Value: float64(snapshot.RetryPendingJobs)},
 				workload.Metric{Name: "queue_dead_lettered_jobs", Help: "Dead-lettered queue jobs.", Type: "gauge", Labels: labels, Value: float64(snapshot.DeadLetteredJobs)},
-				workload.Metric{Name: "queue_ready_lag_seconds", Help: "Maximum ready pending queue lag in seconds.", Type: "gauge", Labels: labels, Value: snapshot.ReadyLagSeconds},
+				workload.Metric{Name: "queue_jobs_oldest_queued_seconds", Help: "Age of the oldest pending queue job past its available_at.", Type: "gauge", Labels: labels, Value: snapshot.ReadyLagSeconds},
 			)
 		}
 		return metrics, nil

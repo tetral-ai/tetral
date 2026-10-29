@@ -59,7 +59,7 @@ func NewRouter(cfg RouterConfig) http.Handler {
 	}
 	cfg.Logger = logger
 	r.Use(httpapi.RequestIDMiddleware)
-	r.Use(httpapi.RequestLogMiddleware(logger, httpapi.DefaultSlowRequestThreshold, httpapi.WithRequestLogMetrics(cfg.RequestMetrics)))
+	r.Use(httpapi.RequestLogMiddleware(logger, httpapi.WithRequestLogMetrics(cfg.RequestMetrics)))
 	r.Use(httpapi.PublicRecoveryMiddleware(logger))
 	r.Method(http.MethodPost, "/v1/oauth/token", &exchangeHandler{cfg: cfg})
 	r.Route("/v1", func(r chi.Router) {

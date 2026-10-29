@@ -1,0 +1,173 @@
+{
+  "service": "web-connector",
+  "events": {
+    "web.backend.unmatched_client_error": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "backend.api": "string",
+        "backend.error.name": "string",
+        "backend.error.status": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string"
+      },
+      "errors": {
+        "unmatched_client_error": {
+          "class": "backend_error",
+          "message_safe": "web backend rejected the request"
+        }
+      }
+    },
+    "web.drain.joined": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "closeout.active_count": "integer",
+        "operation": "string",
+        "shutdown.phase": "string"
+      }
+    },
+    "web.drain.started": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "closeout.active_count": "integer",
+        "operation": "string",
+        "shutdown.phase": "string"
+      }
+    },
+    "web.idempotency.conflict": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string"
+      },
+      "errors": {
+        "idempotency_conflict": {
+          "class": "idempotency_error",
+          "message_safe": "web tool delivery conflict"
+        }
+      }
+    },
+    "web.idempotency.lookup_failed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string"
+      },
+      "errors": {
+        "cache_unavailable": {
+          "class": "storage_error",
+          "message_safe": "web idempotency lookup unavailable"
+        }
+      }
+    }
+  },
+  "operations": {},
+  "metrics": {
+    "web_backend_calls_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "api": [
+          "search",
+          "reader"
+        ],
+        "outcome": [
+          "success",
+          "error",
+          "request_error",
+          "timeout",
+          "transport_error",
+          "response_error",
+          "401",
+          "402",
+          "429",
+          "tool_error",
+          "runtime_error",
+          "invalid_response"
+        ]
+      }
+    },
+    "web_backend_tokens_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "api": [
+          "search",
+          "reader"
+        ]
+      }
+    },
+    "web_cache_bytes_written_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {}
+    },
+    "web_draining": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "web_key_rotations_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "reason": [
+          "401",
+          "402",
+          "429"
+        ]
+      }
+    },
+    "web_request_duration_seconds": {
+      "type": "histogram",
+      "audience": "operators",
+      "labels": {
+        "operation": [
+          "search",
+          "open",
+          "find",
+          "mixed"
+        ]
+      },
+      "buckets": "request"
+    },
+    "web_requests_active": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "web_requests_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "operation": [
+          "search",
+          "open",
+          "find",
+          "mixed"
+        ],
+        "status": [
+          "completed",
+          "tool_error",
+          "runtime_error"
+        ]
+      }
+    }
+  },
+  "spans": {}
+}

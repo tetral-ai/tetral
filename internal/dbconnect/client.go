@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/tetral-ai/tetral/internal/storage"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 type Client struct {
@@ -42,6 +43,7 @@ type Row struct {
 	client *Client
 	op     string
 	err    error
+	done   func(error)
 }
 
 func (r *Row) Scan(dest ...any) error {
@@ -49,6 +51,9 @@ func (r *Row) Scan(dest ...any) error {
 		return r.err
 	}
 	err := r.row.Scan(dest...)
+	if r.done != nil {
+		r.done(err)
+	}
 	if err == nil || errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -62,10 +67,15 @@ type Rows struct {
 	rows   *sql.Rows
 	client *Client
 	op     string
+	done   func(error)
 }
 
 func (r *Rows) Next() bool {
-	return r.rows.Next()
+	next := r.rows.Next()
+	if !next && r.done != nil {
+		r.done(r.rows.Err())
+	}
+	return next
 }
 
 func (r *Rows) Scan(dest ...any) error {
@@ -74,6 +84,9 @@ func (r *Rows) Scan(dest ...any) error {
 
 func (r *Rows) Err() error {
 	err := r.rows.Err()
+	if err != nil && r.done != nil {
+		r.done(err)
+	}
 	if err == nil {
 		return nil
 	}
@@ -84,7 +97,11 @@ func (r *Rows) Err() error {
 }
 
 func (r *Rows) Close() error {
-	return r.rows.Close()
+	err := r.rows.Close()
+	if r.done != nil {
+		r.done(errors.Join(err, r.rows.Err()))
+	}
+	return err
 }
 
 type Tx struct {
@@ -101,7 +118,9 @@ func NewTxForTesting(sqlTx *sql.Tx, client *Client, operation string) *Tx {
 }
 
 func (tx *Tx) Exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	ctx, done := observeStatement(ctx, tx.operation)
 	result, err := tx.tx.ExecContext(ctx, query, args...)
+	done(err)
 	if err != nil {
 		return nil, tx.client.classifyRuntimeError(tx.operation, err)
 	}
@@ -113,11 +132,13 @@ func (tx *Tx) ExecContext(ctx context.Context, query string, args ...any) (sql.R
 }
 
 func (tx *Tx) Query(ctx context.Context, query string, args ...any) (*Rows, error) {
+	ctx, done := observeStatement(ctx, tx.operation)
 	rows, err := tx.tx.QueryContext(ctx, query, args...)
 	if err != nil {
+		done(err)
 		return nil, tx.client.classifyRuntimeError(tx.operation, err)
 	}
-	return &Rows{rows: rows, client: tx.client, op: tx.operation}, nil
+	return &Rows{rows: rows, client: tx.client, op: tx.operation, done: done}, nil
 }
 
 func (tx *Tx) QueryRows(ctx context.Context, query string, args ...any) (interface {
@@ -130,7 +151,9 @@ func (tx *Tx) QueryRows(ctx context.Context, query string, args ...any) (interfa
 }
 
 func (tx *Tx) QueryRow(ctx context.Context, query string, args ...any) *Row {
-	return &Row{row: tx.tx.QueryRowContext(ctx, query, args...), client: tx.client, op: tx.operation}
+	ctx, done := observeStatement(ctx, tx.operation)
+	row := tx.tx.QueryRowContext(ctx, query, args...)
+	return observedRow(row, tx.client, tx.operation, done)
 }
 
 func (tx *Tx) QueryRowScanner(ctx context.Context, query string, args ...any) interface {
@@ -161,7 +184,9 @@ func (c *Client) Exec(ctx context.Context, operation string, query string, args 
 	if err := c.validateOperation(operation); err != nil {
 		return nil, err
 	}
+	ctx, done := observeStatement(ctx, operation)
 	result, err := c.db.ExecContext(ctx, query, args...)
+	done(err)
 	if err != nil {
 		return nil, c.classifyRuntimeError(operation, err)
 	}
@@ -172,18 +197,22 @@ func (c *Client) Query(ctx context.Context, operation string, query string, args
 	if err := c.validateOperation(operation); err != nil {
 		return nil, err
 	}
+	ctx, done := observeStatement(ctx, operation)
 	rows, err := c.db.QueryContext(ctx, query, args...)
 	if err != nil {
+		done(err)
 		return nil, c.classifyRuntimeError(operation, err)
 	}
-	return &Rows{rows: rows, client: c, op: operation}, nil
+	return &Rows{rows: rows, client: c, op: operation, done: done}, nil
 }
 
 func (c *Client) QueryRow(ctx context.Context, operation string, query string, args ...any) *Row {
 	if err := c.validateOperation(operation); err != nil {
 		return &Row{err: err}
 	}
-	return &Row{row: c.db.QueryRowContext(ctx, query, args...), client: c, op: operation}
+	ctx, done := observeStatement(ctx, operation)
+	row := c.db.QueryRowContext(ctx, query, args...)
+	return observedRow(row, c, operation, done)
 }
 
 // Listen holds one dedicated PostgreSQL connection until ctx is cancelled or
@@ -292,7 +321,10 @@ func (c *Client) WithAdvisoryLock(ctx context.Context, operation string, categor
 		return c.classifyRuntimeError(operation, err)
 	}
 	defer func() { _ = conn.Close() }()
-	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1, $2)", category, resource); err != nil {
+	lockCtx, acquired := observeStatement(ctx, operation)
+	_, err = conn.ExecContext(lockCtx, "SELECT pg_advisory_lock($1, $2)", category, resource)
+	acquired(err)
+	if err != nil {
 		return c.classifyRuntimeError(operation, err)
 	}
 	unlocked := false
@@ -324,7 +356,10 @@ func (c *Client) TryWithAdvisoryLock(ctx context.Context, operation string, cate
 	}
 	defer func() { _ = conn.Close() }()
 	var locked bool
-	if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1, $2)", category, resource).Scan(&locked); err != nil {
+	lockCtx, acquired := observeStatement(ctx, operation)
+	err = conn.QueryRowContext(lockCtx, "SELECT pg_try_advisory_lock($1, $2)", category, resource).Scan(&locked)
+	acquired(err)
+	if err != nil {
 		return false, c.classifyRuntimeError(operation, err)
 	}
 	if !locked {
@@ -356,7 +391,9 @@ type SessionLockConn struct {
 
 // QueryRow runs one statement on the lock-holding connection.
 func (c *SessionLockConn) QueryRow(ctx context.Context, query string, args ...any) *Row {
-	return &Row{row: c.conn.QueryRowContext(ctx, query, args...), client: c.client, op: c.operation}
+	ctx, done := observeStatement(ctx, c.operation)
+	row := c.conn.QueryRowContext(ctx, query, args...)
+	return observedRow(row, c.client, c.operation, done)
 }
 
 // sessionLockReleaseTimeout bounds the explicit unlock, which still runs after
@@ -378,7 +415,10 @@ func (c *Client) TryWithSessionLock(ctx context.Context, operation string, name 
 		return false, c.classifyRuntimeError(operation, err)
 	}
 	var locked bool
-	if err := conn.QueryRowContext(ctx, "SELECT pg_catalog.pg_try_advisory_lock(pg_catalog.hashtextextended($1, 0))", name).Scan(&locked); err != nil {
+	lockCtx, acquired := observeStatement(ctx, operation)
+	err = conn.QueryRowContext(lockCtx, "SELECT pg_catalog.pg_try_advisory_lock(pg_catalog.hashtextextended($1, 0))", name).Scan(&locked)
+	acquired(err)
+	if err != nil {
 		// A failed try-lock has an unknown outcome; never pool that session.
 		discardConn(conn)
 		return false, c.classifyRuntimeError(operation, err)
@@ -448,7 +488,10 @@ func (c *Client) withWorkspaceTx(ctx context.Context, workspaceID string, operat
 			_ = tx.Rollback()
 		}
 	}()
-	if _, err := tx.ExecContext(ctx, "SELECT set_config('tetral.workspace_id', $1, true)", workspaceID); err != nil {
+	scopeCtx, scoped := observeStatement(ctx, operation)
+	_, err = tx.ExecContext(scopeCtx, "SELECT set_config('tetral.workspace_id', $1, true)", workspaceID)
+	scoped(err)
+	if err != nil {
 		return c.classifyRuntimeError(operation, err)
 	}
 	wrapped := &Tx{tx: tx, client: c, operation: operation}
@@ -487,6 +530,40 @@ func (c *Client) Close() error {
 		}
 	})
 	return c.closeErr
+}
+
+// observeStatement times a named client database operation through its final
+// result, including caller read intervals, or one lock acquisition. Transaction
+// scope and lock-held time are excluded. The result owner settles once; a span
+// is made only when the caller's trace is sampled.
+func observeStatement(ctx context.Context, operation string) (context.Context, func(error)) {
+	started := time.Now()
+	var span *workload.Span
+	if workload.ContextTraceSampled(ctx) {
+		ctx, span = workload.StartSpan(ctx, operation)
+		span.SetString("db.operation.name", operation)
+	}
+	var once sync.Once
+	return ctx, func(err error) {
+		once.Do(func() {
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				span.SetFailure("database_error", "statement_failed")
+			} else {
+				err = nil
+			}
+			span.End()
+			workload.CurrentTelemetry().ObserveStatement(ctx, operation, started, err)
+		})
+	}
+}
+
+// A Row exposes immediate query errors before Scan, but successful acquisition
+// says nothing about errors that Scan discovers while reading or draining it.
+func observedRow(row *sql.Row, client *Client, operation string, done func(error)) *Row {
+	if err := row.Err(); err != nil {
+		done(err)
+	}
+	return &Row{row: row, client: client, op: operation, done: done}
 }
 
 func (c *Client) validateOperation(operation string) error {

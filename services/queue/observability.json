@@ -1,0 +1,440 @@
+{
+  "service": "queue",
+  "events": {
+    "queue.job.leased": {
+      "level": "DEBUG",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration.ms": "integer",
+        "event.kind": "string",
+        "operation": "string",
+        "queue.job.id": "string",
+        "queue.job.kind": "string",
+        "queue.partition.key": "string",
+        "queue.ready_wait.ms": "integer",
+        "workspace.id": "string"
+      }
+    },
+    "queue.job_runner_lease.candidate_timeout": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "failed.count": "integer",
+        "operation": "string",
+        "retryable": "boolean",
+        "terminal": "boolean",
+        "timeout.kind": "string"
+      }
+    },
+    "queue.job_runner_lease.discovery_timeout": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "phase": "string",
+        "retryable": "boolean",
+        "terminal": "boolean",
+        "timeout.kind": "string"
+      }
+    },
+    "queue.job_runner_lease.partial_failure": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "candidate.count": "integer",
+        "component": "string",
+        "db.sqlstate": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "retryable": "boolean",
+        "terminal": "boolean"
+      },
+      "errors": {
+        "job_runner_lease_stopped": {
+          "class": "queue_lease_error",
+          "message_safe": "queue job runner lease stopped after committed leases"
+        }
+      }
+    },
+    "queue.job_runner_retention.completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "budget.exhausted": "boolean",
+        "component": "string",
+        "deleted.count": "integer",
+        "duration.ms": "integer",
+        "event.kind": "string",
+        "malformed.count": "integer",
+        "operation": "string",
+        "target.count": "integer"
+      }
+    },
+    "queue.job_runner_retention.failed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "budget.exhausted": "boolean",
+        "component": "string",
+        "deleted.count": "integer",
+        "duration.ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "malformed.count": "integer",
+        "operation": "string",
+        "retryable": "boolean",
+        "target.count": "integer",
+        "terminal": "boolean"
+      },
+      "errors": {
+        "queue_retention_failed": {
+          "class": "queue_maintenance_error",
+          "message_safe": "queue retention failed"
+        }
+      }
+    },
+    "queue.job_runner_retention.found_malformed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "budget.exhausted": "boolean",
+        "component": "string",
+        "deleted.count": "integer",
+        "duration.ms": "integer",
+        "event.kind": "string",
+        "malformed.count": "integer",
+        "operation": "string",
+        "target.count": "integer"
+      }
+    },
+    "queue.lease_reclaim.completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "duration.ms": "integer",
+        "event.kind": "string",
+        "operation": "string",
+        "queue.jobs.reclaimed": "integer"
+      }
+    },
+    "queue.lease_reclaim.failed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "duration.ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "retryable": "boolean",
+        "terminal": "boolean"
+      },
+      "errors": {
+        "lease_reclaim_failed": {
+          "class": "queue_maintenance_error",
+          "message_safe": "queue lease reclaim failed"
+        }
+      }
+    },
+    "queue.notification_listener.disconnected": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "consumer.class": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "retryable": "boolean",
+        "terminal": "boolean"
+      },
+      "errors": {
+        "notification_listener_authentication": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_endpoint_transport": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_permission": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_timeout": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        },
+        "notification_listener_unknown": {
+          "class": "queue_notification_listener_error",
+          "message_safe": "queue notification listener disconnected"
+        }
+      }
+    },
+    "queue.notification_listener.recovered": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "consumer.class": "string",
+        "operation": "string",
+        "outcome": "string",
+        "recovery.event": "string"
+      }
+    },
+    "queue.partition_counter_retention.completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "duration.ms": "integer",
+        "event.kind": "string",
+        "operation": "string",
+        "queue.partition_counters.deleted": "integer"
+      }
+    },
+    "queue.partition_counter_retention.failed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "duration.ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "retryable": "boolean",
+        "terminal": "boolean"
+      },
+      "errors": {
+        "queue_retention_failed": {
+          "class": "queue_maintenance_error",
+          "message_safe": "queue retention failed"
+        }
+      }
+    },
+    "queue.sandbox_job_retention.completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "duration.ms": "integer",
+        "event.kind": "string",
+        "operation": "string",
+        "queue.jobs.deleted": "integer"
+      }
+    },
+    "queue.sandbox_job_retention.failed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "component": "string",
+        "duration.ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "operation": "string",
+        "retryable": "boolean",
+        "terminal": "boolean"
+      },
+      "errors": {
+        "queue_retention_failed": {
+          "class": "queue_maintenance_error",
+          "message_safe": "queue retention failed"
+        }
+      }
+    },
+    "schema.migration.completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      }
+    },
+    "schema.migration.failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "db.sqlstate": "string",
+        "duration_ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      },
+      "errors": {
+        "schema_ahead": {
+          "class": "schema_ahead",
+          "message_safe": "postgresql schema is ahead of this binary"
+        },
+        "schema_apply_failed": {
+          "class": "schema_apply_failed",
+          "message_safe": "postgresql schema migration failed"
+        },
+        "schema_behind": {
+          "class": "schema_behind",
+          "message_safe": "postgresql schema is behind this binary"
+        },
+        "schema_checksum_drift": {
+          "class": "schema_checksum_drift",
+          "message_safe": "postgresql schema checksum does not match this binary"
+        },
+        "schema_history_duplicate": {
+          "class": "schema_history_duplicate",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_history_gap": {
+          "class": "schema_history_gap",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_history_malformed": {
+          "class": "schema_history_malformed",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_lock_failed": {
+          "class": "schema_lock_failed",
+          "message_safe": "postgresql schema migration lock failed"
+        },
+        "schema_missing": {
+          "class": "schema_missing",
+          "message_safe": "postgresql schema registry is missing"
+        },
+        "schema_operation_canceled": {
+          "class": "schema_operation_canceled",
+          "message_safe": "postgresql schema operation was canceled"
+        },
+        "schema_rls_drift": {
+          "class": "schema_rls_drift",
+          "message_safe": "postgresql workspace isolation contract does not match this binary"
+        },
+        "schema_unexpected_state": {
+          "class": "schema_unexpected_state",
+          "message_safe": "postgresql schema is not empty and has no current identity"
+        }
+      }
+    },
+    "schema.migration.started": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      }
+    }
+  },
+  "operations": {
+    "shutdown_queue_cancel_join": {
+      "long": true
+    },
+    "shutdown_queue_drain": {
+      "long": true,
+      "errors": [
+        "timeout"
+      ]
+    }
+  },
+  "metrics": {
+    "queue_dead_lettered_jobs": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {
+        "kind": "queue job kinds present in queue_jobs (one series per kind from PostgreSQLQueueStore.Metrics)"
+      }
+    },
+    "queue_jobs_in_progress": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {
+        "kind": "queue job kinds present in queue_jobs (one series per kind from PostgreSQLQueueStore.Metrics)"
+      }
+    },
+    "queue_jobs_oldest_queued_seconds": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {
+        "kind": "queue job kinds present in queue_jobs (one series per kind from PostgreSQLQueueStore.Metrics)"
+      }
+    },
+    "queue_jobs_queue_wait_seconds": {
+      "type": "histogram",
+      "audience": "operators",
+      "labels": {
+        "kind": "queue job kind of the leased job"
+      },
+      "buckets": "long"
+    },
+    "queue_jobs_queued": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {
+        "kind": "queue job kinds present in queue_jobs (one series per kind from PostgreSQLQueueStore.Metrics)"
+      }
+    },
+    "queue_pending_jobs": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {
+        "kind": "queue job kinds present in queue_jobs (one series per kind from PostgreSQLQueueStore.Metrics)"
+      }
+    },
+    "queue_retention_budget_exhausted_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "phase": [
+          "job_runner_terminal"
+        ]
+      }
+    },
+    "queue_retry_pending_jobs": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {
+        "kind": "queue job kinds present in queue_jobs (one series per kind from PostgreSQLQueueStore.Metrics)"
+      }
+    }
+  },
+  "spans": {}
+}

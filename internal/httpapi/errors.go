@@ -1,4 +1,3 @@
-// Package httpapi provides HTTP handlers, middleware, and error handling for the Engine API.
 package httpapi
 
 import (
@@ -10,6 +9,7 @@ import (
 	authErrors "github.com/tetral-ai/tetral/internal/auth"
 	environmentErrors "github.com/tetral-ai/tetral/internal/environment"
 	fileErrors "github.com/tetral-ai/tetral/internal/files"
+	instanceErrors "github.com/tetral-ai/tetral/internal/instance"
 	memoryErrors "github.com/tetral-ai/tetral/internal/memory"
 	sandboxErrors "github.com/tetral-ai/tetral/internal/sandbox"
 	sessionErrors "github.com/tetral-ai/tetral/internal/session"
@@ -71,6 +71,14 @@ type SessionEventRequestTooLargeError struct {
 }
 
 func (e *SessionEventRequestTooLargeError) Error() string { return e.Message }
+
+// UnavailableError indicates that a dependency the route needs, such as its
+// database, failed, so the request changed nothing.
+type UnavailableError struct {
+	Message string
+}
+
+func (e *UnavailableError) Error() string { return e.Message }
 
 // errorResponse is the standard error JSON envelope, matching the Anthropic error format.
 type errorResponse struct {
@@ -189,6 +197,15 @@ func classifyError(err error) errorClassification {
 	var memoryConflict *memoryErrors.PathConflictError
 	var memoryTooLarge *memoryErrors.RequestTooLargeError
 	var memoryQuota *memoryErrors.QuotaError
+
+	// Instance-layer error types carry the reasons the computer management
+	// routes name.
+	var instanceIdempotencyConflict *instanceErrors.IdempotencyConflictError
+	var instanceCredentialLimit *instanceErrors.CredentialLimitError
+	var instanceOffline *instanceErrors.OfflineError
+	var instanceUnavailable *instanceErrors.UnavailableError
+
+	var unavailable *UnavailableError
 
 	// Sandbox-layer error types are internal classifications only; HTTP
 	// responses must use existing public Engine error types and fixed safe
@@ -309,6 +326,16 @@ func classifyError(err error) errorClassification {
 		return classified(http.StatusBadRequest, "invalid_request_error", memoryQuota.Message)
 	case errors.As(err, &memoryValidation):
 		return classified(http.StatusBadRequest, "invalid_request_error", memoryValidation.Message)
+	case errors.As(err, &instanceIdempotencyConflict):
+		return classified(http.StatusConflict, "idempotency_conflict_error", instanceIdempotencyConflict.Error())
+	case errors.As(err, &instanceCredentialLimit):
+		return classified(http.StatusConflict, "credential_limit_error", instanceCredentialLimit.Error())
+	case errors.As(err, &instanceOffline):
+		return classified(http.StatusConflict, "instance_offline_error", instanceOffline.Error())
+	case errors.As(err, &instanceUnavailable):
+		return classified(http.StatusForbidden, "instance_unavailable_error", instanceUnavailable.Error())
+	case errors.As(err, &unavailable):
+		return classified(http.StatusServiceUnavailable, "api_error", unavailable.Message)
 	case errors.As(err, &sandboxError):
 		return classifySandboxError(sandboxError)
 	default:

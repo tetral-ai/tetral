@@ -58,7 +58,8 @@
         "tetral_auth_lookup_token(bytea)",
         "tetral_auth_lookup_grants(text, text)",
         "tetral_auth_lock_authority(text, text, text, text)",
-        "tetral_auth_prune_tokens(integer)"
+        "tetral_auth_prune_tokens(integer)",
+        "tetral_auth_lookup_connection_key(bytea)"
       ]
     },
     "queue": {
@@ -246,6 +247,19 @@
         "session_runtime_handoff_threads": ["SELECT"],
         "tetral_schema_migrations": ["SELECT"]
       }
+    },
+    "computer_hub": {
+      "tables": {
+        "instances": ["SELECT", "INSERT", "UPDATE"],
+        "instance_credentials": ["SELECT", "INSERT", "UPDATE"],
+        "instance_idempotency_records": ["SELECT", "INSERT", "DELETE"],
+        "instance_connections": ["SELECT", "INSERT", "UPDATE"],
+        "connection_upstream_messages": ["SELECT", "INSERT", "DELETE"],
+        "connection_protocol_errors": ["INSERT"],
+        "connection_instructions": ["SELECT", "INSERT", "UPDATE"],
+        "tetral_schema_migrations": ["SELECT"]
+      },
+      "functions": ["tetral_computer_hub_instruction_pressure()"]
     }
   }
 }

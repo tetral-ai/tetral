@@ -181,7 +181,6 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 		return serverCtx.Err()
 	}
 	metricsOptions := []workload.HealthRouterOption{
-		workload.WithHTTPMetrics(httpMetrics),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
 		workload.WithMetricsCollector("grpc", grpcMetrics.Collector()),
 		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),

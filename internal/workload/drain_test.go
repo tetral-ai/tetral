@@ -106,7 +106,7 @@ func TestWorkloadRunDrainsInFlightRequestBeforeReturning(t *testing.T) {
 	}
 	response := httptest.NewRecorder()
 	workload.HealthRouter(workload.NewReadiness(), workload.WithMetricsCollector("operations", metrics.Collector())).ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
-	if !strings.Contains(response.Body.String(), `tetral_operation_duration_seconds_count{operation="shutdown_http_drain",outcome="success",service="api"} 1`) {
+	if !strings.Contains(response.Body.String(), `tetral_long_operation_duration_seconds_count{operation="shutdown_http_drain",outcome="ok",service="api"} 1`) {
 		t.Fatalf("missing actual drain outcome: %s", response.Body.String())
 	}
 }
@@ -184,7 +184,7 @@ func TestWorkloadRunSurfacesDrainTimeoutError(t *testing.T) {
 	}
 	response := httptest.NewRecorder()
 	workload.HealthRouter(workload.NewReadiness(), workload.WithMetricsCollector("operations", metrics.Collector())).ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
-	if !strings.Contains(response.Body.String(), `tetral_operation_duration_seconds_count{operation="shutdown_http_drain",outcome="timeout",service="api"} 1`) {
+	if !strings.Contains(response.Body.String(), `tetral_long_operation_duration_seconds_count{operation="shutdown_http_drain",outcome="timeout",service="api"} 1`) {
 		t.Fatalf("missing actual drain outcome: %s", response.Body.String())
 	}
 }

@@ -16,7 +16,7 @@ describe("provider-gateway schema verification", () => {
 				{
 					version: 1,
 					checksum:
-						"5620aec71eb3fce8c8024a4f3c13ee462c145fee8e1d380cc843dbde77beaeef",
+						"ccb2c611d81c594cd1fed7fb2d123127e16999c47a25ab4d9320dc4ea3ae5cdc",
 				},
 			],
 		]);
@@ -55,12 +55,12 @@ describe("provider-gateway schema verification", () => {
 					{
 						version: 1,
 						checksum:
-							"5620aec71eb3fce8c8024a4f3c13ee462c145fee8e1d380cc843dbde77beaeef",
+							"ccb2c611d81c594cd1fed7fb2d123127e16999c47a25ab4d9320dc4ea3ae5cdc",
 					},
 					{
 						version: 1,
 						checksum:
-							"5620aec71eb3fce8c8024a4f3c13ee462c145fee8e1d380cc843dbde77beaeef",
+							"ccb2c611d81c594cd1fed7fb2d123127e16999c47a25ab4d9320dc4ea3ae5cdc",
 					},
 				],
 			],
@@ -82,7 +82,7 @@ describe("provider-gateway schema verification", () => {
 					{
 						version: 1,
 						checksum:
-							"5620aec71eb3fce8c8024a4f3c13ee462c145fee8e1d380cc843dbde77beaeef",
+							"ccb2c611d81c594cd1fed7fb2d123127e16999c47a25ab4d9320dc4ea3ae5cdc",
 					},
 					{
 						version: 2,
@@ -250,7 +250,7 @@ function schemaSQL(
 function providerConfig(): ProviderGatewayConfig {
 	return {
 		deploymentEnvironment: "test",
-    diagnostics: { level: "info", maxRecordBytes: 16384, summaryIntervalMs: 30000, burst: 1 },
+    diagnostics: { level: "info", maxRecordBytes: 16384, summaryIntervalMs: 30000, burst: 1, traceSampleRatio: 1, dbSlowQueryMs: 250 },
 		serviceVersion: "unit",
 		grpcBindAddress: "127.0.0.1:9090",
 		httpBindAddress: "127.0.0.1:8080",

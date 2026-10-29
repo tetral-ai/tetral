@@ -12,6 +12,7 @@ import {
   status,
 } from "@grpc/grpc-js";
 import type { sendUnaryData, ServerUnaryCall, ServiceError } from "@grpc/grpc-js";
+import { continueGrpcTraces } from "@tetral/ts-observability";
 import {
   AgentRuntimePodServiceService,
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
@@ -35,7 +36,7 @@ export function createRuntimeGrpcServer(
 	service: RuntimeControlService,
 ): RuntimeGrpcServer {
 	const server = new Server(grpcServerOptions());
-	server.addService(AgentRuntimePodServiceService, {
+	server.addService(AgentRuntimePodServiceService, continueGrpcTraces(AgentRuntimePodServiceService, {
 		recoverThread: commandHandler((request, metadata) =>
 			service.recoverThread(request, metadata),
 		),
@@ -60,7 +61,7 @@ export function createRuntimeGrpcServer(
 		cleanupSession: commandHandler((request, metadata) =>
 			service.cleanupSession(request, metadata),
 		),
-	});
+	}));
 	let closing: Promise<void> | undefined;
 	return {
 		server,

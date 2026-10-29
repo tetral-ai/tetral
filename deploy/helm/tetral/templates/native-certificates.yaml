@@ -1,7 +1,7 @@
 {{- if .Values.nativeCertificates.enabled }}
 {{- $root := . }}
 {{- $roles := list }}
-{{- range $role := list "auth" "api" "event-stream" "git-proxy" }}
+{{- range $role := list "auth" "api" "event-stream" "git-proxy" "computer-hub" }}
 {{- $roles = append $roles (dict "role" $role "namespace" "tetral-system" "secret" (index $root.Values.edge.serverLeafSecrets $role) "usage" "server auth") }}
 {{- end }}
 {{- $roles = append $roles (dict "role" "tetral-public-edge" "namespace" "tetral-system" "uriNamespace" "envoy-gateway-system" "secret" .Values.edge.clientLeafSecret "usage" "client auth") }}

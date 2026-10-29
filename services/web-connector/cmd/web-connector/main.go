@@ -28,6 +28,7 @@ func run(ctx context.Context, env webconnector.Env) error {
 	defer diagnosticOwner.CloseWithBudget()
 	logger := diagnosticOwner.Logger
 	defer workload.InstallDefaultLogger(logger)()
+	coldStart := workload.BeginServiceColdStart(ctx)
 	if diagnosticErr != nil {
 		return workload.LogStartupFailure(logger, webconnector.ServiceName, diagnosticErr)
 	}
@@ -36,6 +37,7 @@ func run(ctx context.Context, env webconnector.Env) error {
 		return workload.LogStartupFailure(logger, webconnector.ServiceName, err)
 	}
 	workload.ConfigureProcessShutdown(ctx, cfg.DrainTimeout+cfg.CancelJoinTimeout, diagnosticOwner)
+	coldStart.Advance(ctx)
 	blobCfg, err := blob.LoadConfig()
 	if err != nil {
 		return workload.LogStartupFailure(logger, webconnector.ServiceName, err)
@@ -57,6 +59,7 @@ func run(ctx context.Context, env webconnector.Env) error {
 		return workload.LogStartupFailure(logger, webconnector.ServiceName, err)
 	}
 	authenticator := grpcauth.NewTokenReviewAuthenticator(reviewer, authCfg)
+	coldStart.Advance(ctx)
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DisableCompression = true
 	client := &http.Client{Transport: transport, Timeout: webconnector.BackendRequestTimeout}

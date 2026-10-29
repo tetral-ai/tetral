@@ -5,6 +5,11 @@ import (
 	"errors"
 	"os"
 	"strings"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
+
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 const DefaultServiceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token" //nolint:gosec // path to mounted token file, not a credential value.
@@ -58,4 +63,27 @@ func (ServiceAccountTokenCredentials) RequireTransportSecurity() bool {
 
 func safeTokenError() error {
 	return errors.New("service account token unavailable")
+}
+
+// TraceparentUnaryClientInterceptor and TraceparentStreamClientInterceptor
+// write the caller's traceparent into every internal call's metadata, so the
+// server continues the caller's trace. Every internal dial option set
+// installs them (internalgrpc's boundedInternalDialOptions).
+func TraceparentUnaryClientInterceptor() grpc.UnaryClientInterceptor {
+	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		return invoker(withOutgoingTraceparent(ctx), method, req, reply, cc, opts...)
+	}
+}
+
+func TraceparentStreamClientInterceptor() grpc.StreamClientInterceptor {
+	return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return streamer(withOutgoingTraceparent(ctx), desc, cc, method, opts...)
+	}
+}
+
+func withOutgoingTraceparent(ctx context.Context) context.Context {
+	if traceparent := workload.ContextTraceparent(ctx); traceparent != "" {
+		return metadata.AppendToOutgoingContext(ctx, "traceparent", traceparent)
+	}
+	return ctx
 }

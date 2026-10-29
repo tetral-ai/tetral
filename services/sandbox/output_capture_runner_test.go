@@ -340,7 +340,7 @@ func TestSandboxOutputCaptureScanFailureRetainsSharedDiagnosticTuple(t *testing.
 	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &record); err != nil {
 		t.Fatal(err)
 	}
-	if record["error.class"] != "output_capture_scan_error" || record["error.code"] != "output_capture_scan_changed" || record["error.message_safe"] != "sandbox output changed during capture" || record["error.capture_detail"] != "sandbox output changed during capture" {
+	if record["error.class"] != "output_capture_scan_error" || record["error.code"] != "output_capture_scan_changed" || record["error.message_safe"] != "sandbox output capture scan failed" || record["error.capture_detail"] != "sandbox output changed during capture" {
 		t.Fatalf("scan failure classification = %#v", record)
 	}
 }

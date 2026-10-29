@@ -16,7 +16,8 @@ import (
 type edgeRequestIDContextKey struct{}
 
 type edgeRequestIDHolder struct {
-	value atomic.Pointer[string]
+	value     atomic.Pointer[string]
+	workspace atomic.Pointer[string]
 }
 
 // WithEdgeRequestIDRecorder lets a request boundary that wraps principal
@@ -41,7 +42,24 @@ func WithVerifiedEdgeRequestID(ctx context.Context, claims InternalPrincipalClai
 	}
 	requestID := claims.RequestID
 	holder.value.Store(&requestID)
+	if claims.WorkspaceID != "" {
+		workspaceID := claims.WorkspaceID
+		holder.workspace.Store(&workspaceID)
+	}
 	return ctx
+}
+
+// VerifiedWorkspaceIDFromContext returns the workspace of the principal that
+// was verified for this request, or "" when none was.
+func VerifiedWorkspaceIDFromContext(ctx context.Context) string {
+	holder, ok := ctx.Value(edgeRequestIDContextKey{}).(*edgeRequestIDHolder)
+	if !ok {
+		return ""
+	}
+	if value := holder.workspace.Load(); value != nil {
+		return *value
+	}
+	return ""
 }
 
 // EdgeRequestIDFromContext returns the verified edge request ID, or "" when no

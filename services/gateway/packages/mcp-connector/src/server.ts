@@ -31,6 +31,7 @@ import type {
   McpConnectorServiceServer,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { MCP_BLOB_MAX_BYTES } from "./formatter.js";
+import { continueGrpcTraces } from "@tetral/ts-observability";
 import { mcpGrpcServerKeepaliveOptions } from "./transport.js";
 import { GrpcStatusError, type McpConnectorServiceShell } from "./service.js";
 
@@ -89,7 +90,7 @@ export function createMcpConnectorGrpcServer(service: McpConnectorServiceShell):
       }), callback).finally(() => call.removeListener("cancelled", cancel));
     },
   };
-  server.addService(McpConnectorServiceService, implementation);
+  server.addService(McpConnectorServiceService, continueGrpcTraces(McpConnectorServiceService, implementation));
   return {
     server,
     bind: async (address) =>

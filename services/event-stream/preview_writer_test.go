@@ -266,7 +266,7 @@ func TestPostgreSQLRequestEndProjectionResidency(t *testing.T) {
 				if cancelAtWrite {
 					wantLatencySamples = 1
 				}
-				if latency := handler.options.previewMetrics.formalLatency.snapshot(); latency.count != wantLatencySamples || latency.buckets[5] != wantLatencySamples {
+				if latency := handler.options.previewMetrics.formalLatency.snapshot(); latency.count != wantLatencySamples || latency.buckets[len(deliveryLatencyBounds)] != wantLatencySamples {
 					t.Fatal("actual successful formal writes missing monotonic latency samples")
 				}
 				if handler.options.previewMetrics.activeStreams.Load() != 0 || handler.options.previewMetrics.activeRequests.Load() != 0 {

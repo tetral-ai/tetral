@@ -47,15 +47,15 @@ func TestInternalGRPCOperationDurationsFollowRegisteredRequestsAndShutdown(t *te
 	workload.HealthRouter(workload.NewReadiness(), workload.WithMetricsCollector("grpc", metrics.Collector())).ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
 	body := response.Body.String()
 	for _, expected := range []string{
-		`tetral_operation_duration_seconds_count{operation="` + testMethod + `",outcome="success",service="queue"} 1`,
-		`tetral_operation_duration_seconds_count{operation="` + testMethod + `",outcome="rejected",service="queue"} 1`,
-		`tetral_operation_duration_seconds_count{operation="shutdown_grpc_drain",outcome="success",service="queue"} 1`,
+		`grpc_server_request_duration_seconds_count{code="OK",method="` + testMethod + `",service="queue"} 1`,
+		`grpc_server_request_duration_seconds_count{code="Unauthenticated",method="` + testMethod + `",service="queue"} 1`,
+		`tetral_long_operation_duration_seconds_count{operation="shutdown_grpc_drain",outcome="ok",service="queue"} 1`,
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("missing %s\n%s", expected, body)
 		}
 	}
-	if strings.Contains(body, `operation="unknown_method"`) {
+	if strings.Contains(body, `method="unknown_method"`) {
 		t.Fatalf("registered method lost its descriptor domain: %s", body)
 	}
 }
@@ -202,7 +202,7 @@ func TestInternalGRPCShutdownRecordsAfterMetricsListenerClosesAndSinkFailures(t 
 			}
 			owner.CloseWithBudget()
 			text := metrics.Operations.Text()
-			if !strings.Contains(text, `tetral_operation_duration_seconds_count{operation="shutdown_grpc_drain",outcome="success",service="queue"} 1`) {
+			if !strings.Contains(text, `tetral_long_operation_duration_seconds_count{operation="shutdown_grpc_drain",outcome="ok",service="queue"} 1`) {
 				t.Fatalf("actual drain histogram missing:%s", text)
 			}
 			if kind == "throwing_sink" && owner.Stats().SinkFailures == 0 {
@@ -221,7 +221,7 @@ func TestInternalGRPCShutdownRecordsAfterMetricsListenerClosesAndSinkFailures(t 
 					drain = record
 				}
 			}
-			if drain == nil || drain["metric.observation.count"] != float64(1) || drain["outcome"] != "success" || drain["service.instance.id"] == "" || drain["service.instance.id"] == nil {
+			if drain == nil || drain["metric.observation.count"] != float64(1) || drain["outcome"] != "ok" || drain["service.instance.id"] == "" || drain["service.instance.id"] == nil {
 				t.Fatalf("missing attributable final phase record:%v", drain)
 			}
 			samples, err := metrics.Operations.Collector()(context.Background())

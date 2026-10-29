@@ -15,6 +15,10 @@ const startupErrorClassConfig = "config_error"
 const startupErrorClassConstant = "startup_error"
 const startupErrorMessageSafe = "startup failed"
 
+// configErrorMessageSafe is config_error's fixed text; the ConfigError's own
+// message, which names the variable, goes to startup.config_problem.
+const configErrorMessageSafe = "configuration invalid"
+
 // StartupFailureCause identifies the startup boundary that failed without
 // exposing dependency error text.
 type StartupFailureCause string
@@ -98,8 +102,8 @@ func StartupFailureFields(err error) (class string, message string, hasMessage b
 
 // StartupFailureAttrs appends the contract error fields to a startup-failure log
 // line: error.class/error.code are config_error for a ConfigError and
-// startup_error otherwise; error.message_safe is always populated with either the
-// config-safe message or a constant dependency-safe message. Callers pass the
+// startup_error otherwise, each with its fixed error.message_safe; a
+// ConfigError's own message goes to startup.config_problem. Callers pass the
 // line's other attributes as base and spread the result into Logger.Error, so
 // every workload startup-failure line classifies identically instead of carrying
 // a divergent copy.
@@ -115,6 +119,9 @@ func StartupFailureAttrs(err error, base ...any) []any {
 		slog.String("error.class", class),
 		slog.String("error.code", class),
 	)
+	if class == startupErrorClassConfig {
+		return append(attrs, slog.String("error.message_safe", configErrorMessageSafe), slog.String("startup.config_problem", message))
+	}
 	if hasMessage {
 		attrs = append(attrs, slog.String("error.message_safe", message))
 	}
@@ -145,5 +152,7 @@ func LogStartupFailure(logger *slog.Logger, component string, err error, base ..
 	}
 	attrs = append(attrs, base...)
 	logger.Error("startup.failed", StartupFailureAttrs(err, attrs...)...)
+	class, _, _ := StartupFailureFields(err)
+	failProcessColdStart(class)
 	return err
 }

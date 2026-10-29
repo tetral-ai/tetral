@@ -1,0 +1,417 @@
+{
+  "service": "computer-hub",
+  "events": {
+    "auth.operation.denied": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_operation_denied": {
+          "class": "permission_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.operation.invalid": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_operation_invalid": {
+          "class": "authentication_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.operation.unavailable": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_operation_unavailable": {
+          "class": "dependency_unavailable",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.signed_principal.denied": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_signed_principal_denied": {
+          "class": "permission_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.signed_principal.invalid": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_signed_principal_invalid": {
+          "class": "authentication_error",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "auth.signed_principal.unavailable": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.grant.revision": "string",
+        "auth.identity.kind": "string",
+        "auth.identity.revision": "string",
+        "auth.operation": "string",
+        "auth.result": "string",
+        "auth.rule.revision": "string",
+        "auth.stage": "string",
+        "component": "string",
+        "edge.request.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "auth_signed_principal_unavailable": {
+          "class": "dependency_unavailable",
+          "message_safe": "authentication decision failed"
+        }
+      }
+    },
+    "client.protocol_error": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "connection.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "message.id": "string",
+        "request.message.id": "string"
+      },
+      "errors": {
+        "invalid_message": {
+          "class": "protocol_error",
+          "message_safe": "the CLI could not accept a downstream message"
+        },
+        "message_conflict": {
+          "class": "protocol_error",
+          "message_safe": "the CLI received a reused message_id with different content"
+        }
+      }
+    },
+    "connection_notices.listener_disconnected": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string"
+      },
+      "errors": {
+        "notification_listener_disconnected": {
+          "class": "dependency_unavailable",
+          "message_safe": "connection notice listener disconnected"
+        }
+      }
+    },
+    "http.auth": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "auth.result": "string",
+        "component": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "event.kind": "string",
+        "http.request.method": "string",
+        "operation": "string",
+        "request.id": "string"
+      },
+      "errors": {
+        "authentication_backend_error": {
+          "class": "auth_error",
+          "message_safe": "authentication backend error"
+        },
+        "authentication_error": {
+          "class": "authentication_error",
+          "message_safe": "authentication failed"
+        }
+      }
+    },
+    "instance_credential_audit": {
+      "level": "INFO",
+      "log_type": "audit",
+      "audience": "operators",
+      "fields": {
+        "actor.credential.id": "string",
+        "actor.credential.kind": "string",
+        "credential.id": "string",
+        "edge.request.id": "string",
+        "instance.id": "string",
+        "operation": "string",
+        "request.id": "string",
+        "workspace.id": "string"
+      }
+    },
+    "instance_events.listener_disconnected": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string"
+      },
+      "errors": {
+        "notification_listener_disconnected": {
+          "class": "dependency_unavailable",
+          "message_safe": "instance event listener disconnected"
+        }
+      }
+    },
+    "schema.migration.completed": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      }
+    },
+    "schema.migration.failed": {
+      "level": "ERROR",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "db.sqlstate": "string",
+        "duration_ms": "integer",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      },
+      "errors": {
+        "schema_ahead": {
+          "class": "schema_ahead",
+          "message_safe": "postgresql schema is ahead of this binary"
+        },
+        "schema_apply_failed": {
+          "class": "schema_apply_failed",
+          "message_safe": "postgresql schema migration failed"
+        },
+        "schema_behind": {
+          "class": "schema_behind",
+          "message_safe": "postgresql schema is behind this binary"
+        },
+        "schema_checksum_drift": {
+          "class": "schema_checksum_drift",
+          "message_safe": "postgresql schema checksum does not match this binary"
+        },
+        "schema_history_duplicate": {
+          "class": "schema_history_duplicate",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_history_gap": {
+          "class": "schema_history_gap",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_history_malformed": {
+          "class": "schema_history_malformed",
+          "message_safe": "postgresql schema history is malformed"
+        },
+        "schema_lock_failed": {
+          "class": "schema_lock_failed",
+          "message_safe": "postgresql schema migration lock failed"
+        },
+        "schema_missing": {
+          "class": "schema_missing",
+          "message_safe": "postgresql schema registry is missing"
+        },
+        "schema_operation_canceled": {
+          "class": "schema_operation_canceled",
+          "message_safe": "postgresql schema operation was canceled"
+        },
+        "schema_rls_drift": {
+          "class": "schema_rls_drift",
+          "message_safe": "postgresql workspace isolation contract does not match this binary"
+        },
+        "schema_unexpected_state": {
+          "class": "schema_unexpected_state",
+          "message_safe": "postgresql schema is not empty and has no current identity"
+        }
+      }
+    },
+    "schema.migration.started": {
+      "level": "INFO",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "duration_ms": "integer",
+        "operation": "string",
+        "schema.step": "string",
+        "schema.version": "integer",
+        "transaction.outcome": "string"
+      }
+    }
+  },
+  "operations": {},
+  "metrics": {
+    "computerhub_connections_started_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "kind": [
+          "new",
+          "resumed"
+        ]
+      }
+    },
+    "computerhub_instructions_in_progress": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "computerhub_instructions_oldest_queued_seconds": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "computerhub_instructions_queue_wait_seconds": {
+      "type": "histogram",
+      "audience": "operators",
+      "labels": {},
+      "buckets": "long"
+    },
+    "computerhub_instructions_queued": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "computerhub_open_streams": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "computerhub_streams_ended_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "cause": [
+          "age_limit",
+          "client_closed",
+          "connection_ended",
+          "drain",
+          "moved",
+          "stalled"
+        ]
+      }
+    }
+  },
+  "spans": {
+    "instruction.deliver": {
+      "attributes": [
+        "connection.id",
+        "message.id",
+        "message.type"
+      ]
+    }
+  }
+}

@@ -1,13 +1,14 @@
 /**
  * Hosts the Runtime Pod's process-operational HTTP surface. Application composition calls this
  * module after gRPC bind; the Bun server reads health, readiness, and drain state from lifecycle and
- * delegates Prometheus rendering to the metrics module. It exposes no runtime command or public API,
+ * delegates Prometheus rendering to the metrics module: `/metrics` holds every series and
+ * `/metrics/placement` the six that Job Runner reads to place a Session. It exposes no runtime command or public API,
  * returns readiness failure as HTTP 503, and returns 404 for every unrecognized path.
  */
 import { diagnosticMetricsText } from "@tetral/ts-observability";
 import type { RuntimePodLogger } from "./logger.js";
 import type { RuntimePodLifecycle } from "./lifecycle.js";
-import { runtimePodMetricsText } from "./metrics.js";
+import { runtimePodMetricsText, runtimePodPlacementMetricsText } from "./metrics.js";
 import type { ContainerMemoryObservation } from "./metrics.js";
 import type { RuntimePodMetricsSource } from "./metrics.js";
 
@@ -40,6 +41,12 @@ export function createRuntimeHttpServer(
       }
       if (path === "/metrics") {
         return new Response(runtimePodMetricsText(lifecycle, runtimeMetrics, readContainerMemory) + (logger ? diagnosticMetricsText(logger) : ""), {
+          status: 200,
+          headers: { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" },
+        });
+      }
+      if (path === "/metrics/placement") {
+        return new Response(runtimePodPlacementMetricsText(lifecycle, runtimeMetrics, readContainerMemory), {
           status: 200,
           headers: { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" },
         });

@@ -89,7 +89,8 @@ func TestStartupFailureAttrsUsesSharedLogFieldNames(t *testing.T) {
 	if fields["error.class"] != "config_error" ||
 		fields["error.code"] != "config_error" ||
 		fields["startup.cause"] != "configuration" ||
-		fields["error.message_safe"] != "ENGINE_API_KEY is required" ||
+		fields["error.message_safe"] != "configuration invalid" ||
+		fields["startup.config_problem"] != "ENGINE_API_KEY is required" ||
 		fields["operation"] != "workload.startup" ||
 		fields["event.kind"] != "startup_failed" {
 		t.Fatalf("config startup attrs = %#v", fields)

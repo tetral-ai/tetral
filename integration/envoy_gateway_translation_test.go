@@ -61,7 +61,7 @@ func translateProductionEnvoyGatewayHosts(t *testing.T, profile string, ports en
 	}
 	authority := transporttest.Must(transporttest.NewAuthority("local-production-edge"))
 	leaves := map[string]transporttest.Leaf{}
-	for _, role := range []string{"public-api", "public-git", "edge", "auth", "api", "event-stream", "git-proxy"} {
+	for _, role := range []string{"public-api", "public-git", "edge", "auth", "api", "event-stream", "git-proxy", "computer-hub"} {
 		dns, uri := role+".tetral-system.svc.cluster.local", "spiffe://cluster.local/ns/tetral-system/sa/"+role
 		switch role {
 		case "public-api":
@@ -121,12 +121,12 @@ func translateProductionEnvoyGatewayHosts(t *testing.T, profile string, ports en
 	}
 	wanted := map[string]int{"Gateway": 1, "EnvoyProxy": 1, "HTTPRoute": 4, "ClientTrafficPolicy": 3, "BackendTrafficPolicy": 1, "SecurityPolicy": 1, "EnvoyPatchPolicy": 1}
 	if profile == "hardened" {
-		wanted["BackendTLSPolicy"] = 4
+		wanted["BackendTLSPolicy"] = 5
 	}
 	if !reflect.DeepEqual(counts, wanted) {
 		t.Fatal("actual production render omitted or added an owning edge policy object")
 	}
-	for index, name := range []string{"auth", "api", "event-stream", "git-proxy"} {
+	for index, name := range []string{"auth", "api", "event-stream", "git-proxy", "computer-hub"} {
 		service := services[name]
 		if service == nil {
 			t.Fatal("actual render omitted edge Service")
@@ -163,7 +163,7 @@ func translateProductionEnvoyGatewayHosts(t *testing.T, profile string, ports en
 	completeEnvoyGatewaySecrets(ctx, t, confined)
 	wantedSecrets := 2
 	if profile == "hardened" {
-		wantedSecrets = 7
+		wantedSecrets = 8
 	}
 	if len(confined.Resources[resourcev3.SecretType]) != wantedSecrets {
 		t.Fatal("actual policy SDS set/count differs from selected profile")

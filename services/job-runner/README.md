@@ -73,6 +73,13 @@ synchronous Heartbeat before any Runtime delivery. A slot frees only after the
 job, its heartbeat and its final Queue transition finish, and that completion
 wakes acquisition even while other jobs still run. No request is made while
 every slot is busy, and leased work never waits in a local backlog.
+`jobrunner_slots_limit` is the slot count and `jobrunner_slots_in_progress` the
+slots running a job.
+
+Each job runs in a `job_runner.run_job` span that continues the job's
+`trace_context`, the trace its producer enqueued it under (a new trace when it
+has none), so the job's records, its Runtime and Queue calls and their
+`traceparent` metadata carry the producer's trace ID.
 
 A response with jobs is followed immediately by a request for the remaining
 free slots. An empty response waits for Queue's `retry_after_ms`, a committed
@@ -142,7 +149,9 @@ process's current admission phase. Registering or abandoning a candidate does
 not advance that watermark and cannot displace the current owner.
 
 New placement samples two distinct eligible Pods uniformly, probes their native
-PodIP:8080 `/metrics` concurrently and chooses the lower resident Session count.
+PodIP:8080 `/metrics/placement` concurrently and chooses the lower resident
+Session count. That page carries only the six placement series, so a Pod whose
+full `/metrics` page outgrows the 256 KiB load bound stays placeable.
 One valid report suffices; ties use a uniform draw. If both fail, one further
 round uses unprobed Pods. The bounded policy defaults are one second per probe,
 two seconds total and at most two rounds/four distinct Pods; shorter caller
@@ -170,14 +179,28 @@ differ when another Runner commits first. `runtime.placement.rounds` and
 `runtime.load.active_sessions`, `runtime.load.session_capacity` and
 `runtime.load.memory_ratio` retain the validated choice's finite load values.
 `runtime_placement_probe_total`, `runtime_placement_total` and their duration
-counters use only finite outcome labels. The attempt also emits at most four
-`runtime.placement.candidate.1` through `.4` groups, including losing candidates.
-Each group retains the exact Pod UID, observed process ID, bounded reason and,
-when valid, finite active-session/capacity/memory measurements. Reasons distinguish
-registry unavailability, timeout/cancellation, transport or HTTP failure, invalid
-metrics, response size, admission and capacity exclusions. The overall reason
-distinguishes no candidates, exhausted probes and selection; it stays separate
-from the actual binding outcome when another Runner commits first.
+counters use only finite outcome labels. The attempt also records each probed
+candidate, at most four (two per round, two rounds), as the scalar fields
+`runtime.placement.candidate.<n>.*`, `n` from 1 in probe order: the exact Pod UID
+(`kubernetes.uid`), observed `runtime.process.id`, the `reason` it was or was not
+chosen and, when its report was valid, `runtime.load.active_sessions`,
+`runtime.load.session_capacity`, `runtime.load.memory_usage_bytes`,
+`runtime.load.memory_limit_bytes` and `runtime.load.memory_ratio`. A probe that
+excluded the candidate gives its reason: registry unavailability,
+timeout/cancellation, transport or HTTP failure, invalid metrics, response size,
+admission or capacity exclusion. An eligible candidate is `selected`,
+`more_active_sessions` when the other eligible one had fewer, or `tie_lost` when
+the uniform tie draw chose the other. The overall reason distinguishes no
+candidates, exhausted probes and selection; it stays separate from the actual
+binding outcome when another Runner commits first.
+
+Placement is the pressure point `jobrunner_placement`. An attempt with no
+candidates or with every probe exhausted is a refusal counted in
+`jobrunner_placement_rejected_total{cause}` (`no_candidates`, `exhausted`) and
+recorded by episode (`pressure.rejecting_started`, then
+`pressure.rejecting_ended` with the episode's count); a selection is an
+admission. Other failures, such as a deadline or unready visibility, are not
+refusals.
 
 For `runtime_input` the runner reconciles referenced events first — all
 already processed → stale with no command; superseded by a processed
@@ -500,7 +523,7 @@ Placement's existing probe and attempt timers also populate fixed-bucket
 A probe covers the process registry proof and actual HTTP load query. An
 attempt covers bounded sampling through all started probes joining; it ends
 before transactional binding arbitration and command delivery. Eligible probes
-and selected attempts are `success`; timeout/cancellation retain those outcomes;
+and selected attempts are `ok`; timeout/cancellation retain those outcomes;
 capacity, not-accepting, no-candidate and exhausted sampling are `rejected`.
 Registry, transport, invalid-response, visibility, policy and randomness
 failures are `error`. An exhausted attempt means no eligible candidate was
@@ -508,14 +531,19 @@ found; the original probe reason counters retain the exclusion/dependency cause.
 
 `runtime_placement_probe_total{outcome}` and `runtime_placement_total{outcome}`
 count the fine-grained probe and attempt reasons that the histogram's
-success/rejected/error outcome folds together; placement durations are exported
+ok/rejected/error outcome folds together; placement durations are exported
 only through the histogram. Both use the same owning hooks and exported
 collector, with race-safe zero-value initialization. No pod, process, Session
 or request labels enter these families.
 `TestPostgreSQLRuntimePlacementDiagnosticReasons` exercises actual registry and
 HTTP probe boundaries and compares completed histogram populations with the
 distinguishing reason counters; the concurrent collector test separately checks
-initialization and retention.
+initialization and retention. `TestPostgreSQLRuntimePlacementReadsOnlyThePlacementPage`
+places a Pod whose `/metrics` page exceeds 256 KiB, and
+`TestPostgreSQLRuntimePlacementRefusalCountsAtItsPressurePoint` counts each
+refusal cause and its episode record. `TestPostgreSQLJobRunnerRunsLeasedJobUnderItsProducerTrace`
+enqueues under a trace, leases through the Queue service and checks that the
+Runtime delivery and the attempt record carry the producer's trace ID.
 
 Owner-local unit and PostgreSQL suites are in this directory; real Bridge and
 Runner compositions are in `integration/`. Runtime/Bun and Blob fixtures retain
@@ -526,7 +554,7 @@ owner closure and managed dependencies; direct database tests require an
 administrative test DSN and create restricted private clones.
 
 Acquisition and repair controls are `job_runner_slots_test.go` (slot refill,
-release after closure, retry hint and capped backoff),
+release after closure, retry hint and capped backoff, slot gauges),
 `runtime_pod_loss_repair_test.go` (startup, signal and deadline runs; bounded
 pages and mutations), `runtime_binding_discovery_test.go` (the discovery
 functions under the installed role) and the composed

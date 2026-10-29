@@ -27,7 +27,18 @@ import (
 
 // newTestLogger captures JSON log lines into buffer through the production handler.
 func newTestLogger(buffer *bytes.Buffer) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(buffer, nil)).With(slog.String("service.name", "test-service"))
+	return slog.New(slog.NewJSONHandler(buffer, &slog.HandlerOptions{Level: slog.LevelDebug})).With(slog.String("service.name", "test-service"))
+}
+
+// assertNothingAboveDebug checks that the boundary left a failed call's
+// record to the component that handles it.
+func assertNothingAboveDebug(t *testing.T, output string) {
+	t.Helper()
+	for _, level := range []string{`"level":"INFO"`, `"level":"WARN"`, `"level":"ERROR"`} {
+		if strings.Contains(output, level) {
+			t.Fatalf("gRPC boundary wrote a record above DEBUG: %s", output)
+		}
+	}
 }
 
 const testMethod = "/tetral.test.v1.TestService/Call"
@@ -92,6 +103,34 @@ func TestInternalGRPCConstructorsNeverBind(t *testing.T) {
 	}
 }
 
+// A handler's own failure is recorded by the component that handles it, so
+// the boundary keeps even Internal and ResourceExhausted at DEBUG.
+func TestInternalGRPCRecordsHandlerFailuresOnlyAtDebug(t *testing.T) {
+	for _, code := range []codes.Code{codes.Internal, codes.ResourceExhausted} {
+		var buffer bytes.Buffer
+		client, cleanup := newInternalGRPCClient(t, Config{
+			ServiceName:   "test-service",
+			Authenticator: &allowingAuthenticator{},
+			Logger:        newTestLogger(&buffer),
+			Metrics:       workload.NewGRPCMetrics("queue"),
+			Register: func(server *grpc.Server) {
+				registerTestService(server, func(context.Context) error { return status.Error(code, "handler failed") })
+			},
+		})
+		ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer token"))
+		err := client.Invoke(ctx, testMethod, &emptypb.Empty{}, &emptypb.Empty{})
+		output := buffer.String()
+		cleanup()
+		if status.Code(err) != code {
+			t.Fatalf("call error = %v; want %s", err, code)
+		}
+		if !strings.Contains(output, `"grpc.code":"`+code.String()+`"`) {
+			t.Fatalf("no DEBUG call record for %s: %s", code, output)
+		}
+		assertNothingAboveDebug(t, output)
+	}
+}
+
 func TestInternalGRPCAuthenticatesBeforeDispatchAndLogsSafely(t *testing.T) {
 	var buffer bytes.Buffer
 	metrics := workload.NewGRPCMetrics("queue")
@@ -153,6 +192,7 @@ func TestInternalGRPCAuthenticatesBeforeDispatchAndLogsSafely(t *testing.T) {
 			t.Fatalf("gRPC boundary log missing %s: %s", want, logOutput)
 		}
 	}
+	assertNothingAboveDebug(t, logOutput)
 	assertGRPCMetricCount(t, metrics, testMethod, codes.Unauthenticated.String(), 1)
 	assertGRPCMetricCount(t, metrics, testMethod, codes.Unimplemented.String(), 1)
 }
@@ -250,6 +290,7 @@ func TestInternalGRPCAuthorizesMethodBeforeDispatchAndLogsSafely(t *testing.T) {
 			t.Fatalf("gRPC boundary log missing %s: %s", want, logOutput)
 		}
 	}
+	assertNothingAboveDebug(t, logOutput)
 }
 
 func TestInternalGRPCAuthenticatesStreamingHealthWatch(t *testing.T) {
@@ -495,14 +536,14 @@ func assertGRPCMetricCount(t *testing.T, metrics *workload.GRPCMetrics, method s
 		t.Fatalf("collect gRPC metrics: %v", err)
 	}
 	for _, metric := range collected {
-		if metric.Name != "grpc_request_duration_seconds_count" || metric.Value != want {
+		if metric.Name != "grpc_server_request_duration_seconds_count" || metric.Value != want {
 			continue
 		}
-		if hasMetricLabel(metric.Labels, "grpc_method", method) && hasMetricLabel(metric.Labels, "grpc_code", code) {
+		if hasMetricLabel(metric.Labels, "method", method) && hasMetricLabel(metric.Labels, "code", code) {
 			return
 		}
 	}
-	t.Fatalf("missing grpc_request_duration_seconds_count for method=%s code=%s value=%g in %+v", method, code, want, collected)
+	t.Fatalf("missing grpc_server_request_duration_seconds_count for method=%s code=%s value=%g in %+v", method, code, want, collected)
 }
 
 func hasMetricLabel(labels []workload.MetricLabel, name string, value string) bool {

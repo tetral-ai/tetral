@@ -432,9 +432,14 @@ func (r *RuntimePodLossRepair) logRun(summary RuntimePodLossRepairRun, started t
 	if r.logger == nil {
 		return
 	}
+	failed := summary.Outcome == "failed" || summary.Failed > 0
+	event := "runtime_pod_loss_repair_run_completed"
+	if failed {
+		event = "runtime_pod_loss_repair_run_failed"
+	}
 	attrs := []any{
-		slog.String("event", "runtime_pod_loss_repair_run_completed"),
-		slog.String("event.kind", "runtime_pod_loss_repair_run_completed"),
+		slog.String("event", event),
+		slog.String("event.kind", event),
 		slog.String("component", ServiceNameJobRunner),
 		slog.Int("page.count", summary.Pages),
 		slog.Int("candidate.count", summary.Candidates),
@@ -444,13 +449,13 @@ func (r *RuntimePodLossRepair) logRun(summary RuntimePodLossRepairRun, started t
 		slog.Int64("duration.ms", max(time.Since(started).Milliseconds(), 0)),
 		slog.String("outcome", summary.Outcome),
 	}
-	if summary.Outcome == "failed" || summary.Failed > 0 {
+	if failed {
 		attrs = append(attrs,
 			slog.String("error.class", "runtime_pod_loss_repair"),
 			slog.String("error.code", "repair_run_failed"),
 			slog.String("error.message_safe", "runtime pod-loss repair run completed with failures"),
 		)
-		r.logger.Error("runtime_pod_loss_repair_run_completed", attrs...)
+		r.logger.Error(event, attrs...)
 		return
 	}
 	if summary.Outcome != "completed" || summary.Pages > 0 {

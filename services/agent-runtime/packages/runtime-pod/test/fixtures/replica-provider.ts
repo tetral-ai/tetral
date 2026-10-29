@@ -11,7 +11,7 @@ import type {ProviderStreamEvent} from "@tetral/gateway-protocol/src/gen/tetral/
 const completionSamples: Array<{cohort:string;method:string;receiver:string;outcome:string;start_boundary:string;end_boundary:string;clock_id:string;start_ns:number;end_ns:number;duration_ns:number}>=[];
 const [backend,variant]=process.argv.slice(2);assert(backend&&variant);
 const signingKey="replica-provider-binding-key-at-least-32-bytes",podUID="pod_replica_provider",runtimeProcessId="process_replica_provider";
-const config:ProviderGatewayConfig={deploymentEnvironment:"test",diagnostics:{level:"info",maxRecordBytes:16384,summaryIntervalMs:30000,burst:1},serviceVersion:"replica-test",grpcBindAddress:"127.0.0.1:0",httpBindAddress:"127.0.0.1:0",allowedRuntimePod:{namespace:"tetral-agent-runtime",serviceAccount:"agent-runtime"},runtimeBindingTokenHMACKey:signingKey,databaseUrl:"postgres://not-opened/fixture",databasePool:{max:2,idleTimeout:30,maxLifetime:1800,connectionTimeout:30,statementTimeoutMs:30000},drainTimeoutMs:500,cancelJoinTimeoutMs:1000,vaultKeyHex:"00".repeat(32),kubernetesApiServerUrl:"https://kubernetes.default.svc",kubernetesApiCaCertPath:"unused",tokenReviewReviewerTokenPath:"unused",bridgeApiGrpcAddress:"unused:9090",bridgeTokenPath:"unused",maxConcurrentTurns:2};
+const config:ProviderGatewayConfig={deploymentEnvironment:"test",diagnostics:{level:"info",maxRecordBytes:16384,summaryIntervalMs:30000,burst:1,traceSampleRatio:1,dbSlowQueryMs:250},serviceVersion:"replica-test",grpcBindAddress:"127.0.0.1:0",httpBindAddress:"127.0.0.1:0",allowedRuntimePod:{namespace:"tetral-agent-runtime",serviceAccount:"agent-runtime"},runtimeBindingTokenHMACKey:signingKey,databaseUrl:"postgres://not-opened/fixture",databasePool:{max:2,idleTimeout:30,maxLifetime:1800,connectionTimeout:30,statementTimeoutMs:30000},drainTimeoutMs:500,cancelJoinTimeoutMs:1000,vaultKeyHex:"00".repeat(32),kubernetesApiServerUrl:"https://kubernetes.default.svc",kubernetesApiCaCertPath:"unused",tokenReviewReviewerTokenPath:"unused",bridgeApiGrpcAddress:"unused:9090",bridgeTokenPath:"unused",maxConcurrentTurns:2};
 const fetchProvider=Object.assign(async(input:RequestInfo|URL,init?:RequestInit)=>{const original=new Request(input,init);return await fetch(new Request(`${backend}/provider`,original));},{preconnect:()=>{}});
 const registry=new ProviderClientRegistry({fetch:fetchProvider});
 const logs:unknown[]=[];
@@ -54,6 +54,6 @@ try{
   const final=await state();assert.equal(final.starts,1);assert.equal(variant==="drain_complete"?final.completed:final.cancelled,1);
  }
  await until(async()=>(await state()).active===0);
- assert(app.service.metricsText().includes("providergateway_provider_streams_active 0"));
+ assert(app.service.metricsText().includes("providergateway_turns_in_progress 0"));
 }finally{await client.close();await app.shutdown(new Date(Date.now()+500));}
 console.log(JSON.stringify({ok:true,completionSamples,...await state()}));

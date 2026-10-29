@@ -76,7 +76,7 @@ func (s *Server) Lease(ctx context.Context, request *queuev1.LeaseRequest) (*que
 	leaseCompleted := s.nowUTC()
 	response := &queuev1.LeaseResponse{Jobs: make([]*queuev1.QueueJob, 0, len(jobs))}
 	for _, job := range jobs {
-		s.logLease("queue.lease", job, leaseNow, leaseStarted, leaseCompleted)
+		s.logLease("queue.lease", job, leaseStarted, leaseCompleted)
 		response.Jobs = append(response.Jobs, queueJobToProto(job))
 	}
 	return response, nil
@@ -113,7 +113,7 @@ func (s *Server) LeaseJobRunnerJobs(ctx context.Context, request *queuev1.LeaseJ
 		RetryAfterMs: int32(result.RetryAfter.Milliseconds()),
 	}
 	for _, job := range result.Jobs {
-		s.logLease("queue.lease_job_runner_jobs", job, leaseStarted, leaseStarted, leaseCompleted)
+		s.logLease("queue.lease_job_runner_jobs", job, leaseStarted, leaseCompleted)
 		response.Jobs = append(response.Jobs, queueJobToProto(job))
 	}
 	return response, nil
@@ -191,7 +191,7 @@ func (s *Server) ReleaseUnstartedJob(ctx context.Context, request *queuev1.Relea
 	return &queuev1.ReleaseUnstartedJobResponse{Updated: updated}, nil
 }
 
-func (s *Server) logLease(operation string, job *queue.Job, leaseNow, leaseStarted, leaseCompleted time.Time) {
+func (s *Server) logLease(operation string, job *queue.Job, leaseStarted, leaseCompleted time.Time) {
 	if s == nil || s.logger == nil || job == nil {
 		return
 	}
@@ -199,9 +199,10 @@ func (s *Server) logLease(operation string, job *queue.Job, leaseNow, leaseStart
 	if duration < 0 {
 		duration = 0
 	}
-	readyWait := leaseNow.Sub(job.AvailableAt)
-	if readyWait < 0 {
-		readyWait = 0
+	// Both ends come from the database clock; see queue.Job.ReadyAt.
+	var readyWait time.Duration
+	if job.LeasedAt != nil {
+		readyWait = job.LeasedAt.Sub(job.ReadyAt)
 	}
 	s.logger.Debug("queue.job.leased",
 		slog.String("operation", operation),
@@ -377,6 +378,7 @@ func queueJobToProto(job *queue.Job) *queuev1.QueueJob {
 		LeasedUntil:    formatOptionalTime(job.LeasedUntil),
 		AttemptCount:   int32(job.AttemptCount),
 		MaxAttempts:    int32(job.MaxAttempts),
+		TraceContext:   job.TraceContext,
 	}
 }
 

@@ -1,4 +1,4 @@
-.PHONY: build build-sandbox-helper install-sandbox-helper test test-affected test-full lint vulncheck integration-test run run-api run-bridge-api run-job-runner run-sandbox run-git-proxy run-cleanup run-event-stream
+.PHONY: build build-sandbox-helper install-sandbox-helper test test-affected test-full lint vulncheck integration-test run run-api run-bridge-api run-job-runner run-sandbox run-git-proxy run-cleanup run-event-stream run-computer-hub
 
 SANDBOX_HELPER_OUT ?= bin/sandbox
 SANDBOX_HELPER_INSTALL_PATH ?= /usr/local/bin/sandbox
@@ -59,6 +59,9 @@ run-cleanup:
 
 run-event-stream:
 	go run ./services/event-stream/cmd/event-stream
+
+run-computer-hub:
+	go run ./services/computer-hub/cmd/tetral-computer-hub
 
 run-auth:
 	go run ./services/auth/cmd/tetral-auth

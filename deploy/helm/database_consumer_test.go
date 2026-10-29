@@ -95,7 +95,7 @@ func TestProtectedDatabaseConsumerCensus(t *testing.T) {
 	helm := requireHelm(t)
 	chart := filepath.Join(engineRoot(t), "deploy/helm/tetral")
 	goOwners := protectedGoServiceOwners(t)
-	wantGo := []string{"api", "auth", "bridge", "cleanup", "event-stream", "git-proxy", "job-runner", "queue", "sandbox"}
+	wantGo := []string{"api", "auth", "bridge", "cleanup", "computer-hub", "event-stream", "git-proxy", "job-runner", "queue", "sandbox"}
 	gotGo := []string{}
 	for role := range goOwners {
 		gotGo = append(gotGo, role)
@@ -181,8 +181,8 @@ func TestProtectedDatabaseConsumerCensus(t *testing.T) {
 			}
 			total += jobSlots
 			ledger := transportMap(t, transportAt(t, objects["v1|ConfigMap|tetral-system|tetral-database-connection-budget"], "data"))
-			if fmt.Sprint(ledger["maximumOwnedPoolSlots"]) != strconv.Itoa(total) || total != 260 {
-				t.Fatalf("independent eleven-consumer total=%d differs from ledger %v", total, ledger)
+			if fmt.Sprint(ledger["maximumOwnedPoolSlots"]) != strconv.Itoa(total) || total != 337 {
+				t.Fatalf("independent twelve-consumer total=%d differs from ledger %v", total, ledger)
 			}
 		})
 	}

@@ -17,6 +17,27 @@ that silently permits more than the default did.
 {{- end }}
 {{- end }}
 {{- end }}
+{{/* An empty observability peer list renders no rule at all, so unlike the
+network lists above it is the narrowest setting and stays allowed. */}}
+{{- range $key := list "otlpPeers" "metricsScrapePeers" }}
+{{- $peers := get $.Values.observability $key }}
+{{- if not (kindIs "slice" $peers) }}
+{{- fail (printf "observability.%s must be a list of NetworkPolicy peers." $key) }}
+{{- end }}
+{{- range $index, $peer := $peers }}
+{{- if or (not (kindIs "map" $peer)) (not $peer) }}
+{{- fail (printf "observability.%s[%d] must be a non-empty peer object: null and empty peers render as an allow-all match." $key $index) }}
+{{- end }}
+{{- if not (or (hasKey $peer "namespaceSelector") (hasKey $peer "ipBlock")) }}
+{{- fail (printf "observability.%s[%d] must carry a namespaceSelector or an ipBlock: workload policies live in two namespaces, and a podSelector alone matches Pods in the policy's own namespace only." $key $index) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if and .Values.observability.otlpEndpoint (not .Values.observability.otlpPeers) }}
+{{- fail "observability.otlpPeers must name the trace collector when observability.otlpEndpoint is set: workload NetworkPolicies allow trace egress only to these peers." }}
+{{- end }}
+{{- if or (not (regexMatch "^[1-9][0-9]*$" (toString .Values.observability.otlpPort))) (gt (int .Values.observability.otlpPort) 65535) }}{{ fail "observability.otlpPort must be a TCP port from 1 to 65535" }}{{ end }}
+{{- if not (kindIs "bool" .Values.observability.serviceMonitor.enabled) }}{{ fail "observability.serviceMonitor.enabled must be a boolean" }}{{ end }}
 {{- $numericKinds := list "int" "int8" "int16" "int32" "int64" "uint" "uint8" "uint16" "uint32" "uint64" "float32" "float64" }}
 {{- if or (not .Values.network.databasePort) (not (has (kindOf .Values.network.databasePort) $numericKinds)) }}
 {{- fail "network.databasePort must be set: it has to match the port in the database DSN carried by the Secrets." }}
@@ -83,6 +104,12 @@ that silently permits more than the default did.
 {{- if gt (int .Values.lifecycle.queueDrainMs) 25000 }}{{ fail "Queue drain must remain within its typed 25s limit" }}{{ end }}
 {{- if gt (add (int .Values.lifecycle.queueDrainMs) (int .Values.lifecycle.cancelJoinMs)) 25000 }}{{ fail "Queue drain and cancellation join must fit 25s application allocation, reserving 5s signal/proxy margin in 30s Pod grace" }}{{ end }}
 {{- if not (regexMatch "^[1-9][0-9]*$" (toString .Values.replicas.eventStream)) }}{{ fail "replicas.eventStream must be a positive integer" }}{{ end }}
+{{- range $key := list "minReplicas" "maxReplicas" "targetOpenStreamsPerPod" }}{{- if not (regexMatch "^[1-9][0-9]*$" (toString (get $.Values.computerHub.autoscaling $key))) }}{{ fail (printf "computerHub.autoscaling.%s must be a positive integer" $key) }}{{ end }}{{ end }}
+{{- if lt (int .Values.computerHub.autoscaling.maxReplicas) (int .Values.computerHub.autoscaling.minReplicas) }}{{ fail "computerHub.autoscaling.maxReplicas must not be below minReplicas" }}{{ end }}
+{{- if not (regexMatch "^([0-9]+(\\.[0-9]+)?(h|m|s|ms|us|ns))+$" (toString .Values.computerHub.maxCredentialLifetime)) }}{{ fail "computerHub.maxCredentialLifetime must be a Go duration such as 720h" }}{{ end }}
+{{- range $key := list "streamMaxAge" "streamDrainWindow" }}{{- if not (regexMatch "^([0-9]+(\\.[0-9]+)?(h|m|s|ms|us|ns))+$" (toString (get $.Values.computerHub $key))) }}{{ fail (printf "computerHub.%s must be a Go duration such as 10s" $key) }}{{ end }}{{ end }}
+{{- $drainWindow := float64 (include "tetral.durationSeconds" .Values.computerHub.streamDrainWindow) -}}
+{{- if or (le $drainWindow 0.0) (gt $drainWindow 15.0) }}{{ fail "computerHub.streamDrainWindow must be a positive Go duration of at most 15s, so the drain fits the hub's 30s Pod grace" }}{{ end }}
 {{- if .Values.preview.enabled }}
 {{- if not (regexMatch "^[A-Za-z0-9.-]+:4222$" .Values.preview.brokerAddress) }}{{ fail "preview.brokerAddress must be a broker DNS name on port 4222 without credentials" }}{{ end }}
 {{- range $key := list "publisherSecret" "subscriberSecret" }}{{- if not (get $.Values.preview $key) }}{{ fail (printf "preview.%s is required" $key) }}{{ end }}{{ end }}
@@ -121,7 +148,7 @@ that silently permits more than the default did.
 {{- range $key := list "trustConfigMap" "clientLeafSecret" }}
 {{- if not (get $.Values.edge $key) }}{{ fail (printf "edge.%s is required for native edge TLS" $key) }}{{ end }}
 {{- end }}
-{{- range $role := list "auth" "api" "event-stream" "git-proxy" }}
+{{- range $role := list "auth" "api" "event-stream" "git-proxy" "computer-hub" }}
 {{- if not (get $.Values.edge.serverLeafSecrets $role) }}{{ fail (printf "edge.serverLeafSecrets.%s is required for native edge TLS" $role) }}{{ end }}
 {{- end }}
 {{- end }}

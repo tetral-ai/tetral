@@ -22,11 +22,17 @@ import type {
 	TetralDiagnosticLogger,
 	TetralJsonLogger,
 	TetralLogRecord,
+	UndeclaredNamePolicy,
 } from "@tetral/ts-observability";
 import {
 	createTetralJsonLogger,
 	semanticErrorFields,
+	serviceDeclarations,
 } from "@tetral/ts-observability";
+import observabilityTable from "../observability.json";
+
+/** Every event, operation, metric family and span this process writes; the Runtime Core's events included. */
+export const runtimePodDeclarations = serviceDeclarations(observabilityTable);
 
 /** Structured JSON logger accepted by Runtime Pod composition and runtime services. */
 export type RuntimePodLogger = TetralJsonLogger<RuntimePodLogRecord> &
@@ -192,9 +198,10 @@ export interface JsonLoggerOptions {
 	readonly deploymentEnvironment?: string;
 	readonly serviceVersion?: string;
 	readonly clock?: (() => Date) | undefined;
+	readonly undeclared?: UndeclaredNamePolicy;
 }
 
-/** Creates a Runtime Pod JSON logger backed by the shared observability serializer. */
+/** Creates a Runtime Pod JSON logger backed by the shared observability serializer; it refuses events its table does not declare. */
 export function createJsonLogger(options: JsonLoggerOptions): TetralDiagnosticLogger<RuntimePodLogRecord> {
 	return createTetralJsonLogger<RuntimePodLogRecord>({
 		write: options.write,
@@ -204,12 +211,15 @@ export function createJsonLogger(options: JsonLoggerOptions): TetralDiagnosticLo
 		deploymentEnvironment: options.deploymentEnvironment,
 		serviceVersion: options.serviceVersion,
 		clock: options.clock,
+		declarations: runtimePodDeclarations,
+		undeclared: options.undeclared,
 	});
 }
 
 /**
- * Builds a startup failure record by retaining the supplied configuration message and collapsing
- * adapter startup failures to a fixed message.
+ * Builds a startup failure record. A configuration failure carries the fixed safe message and names
+ * the problem, which never holds a supplied value, in `startup.config_problem`; adapter startup
+ * failures collapse to a fixed message.
  */
 export function startupFailureLogRecord(input: {
 	readonly kind: "config_error" | "startup_error";
@@ -235,11 +245,11 @@ export function startupFailureLogRecord(input: {
 		"startup.cause_category": causeCategory,
 		...(input.kind === "startup_error"
 			? { "startup.cause_class": startupCauseClass(input.cause) }
-			: {}),
+			: { "startup.config_problem": input.message }),
 		...semanticErrorFields({
 			errorClass: input.kind,
 			errorCode: input.kind,
-			messageSafe: safeMessage,
+			messageSafe: input.kind === "config_error" ? "configuration invalid" : safeMessage,
 		}),
 	};
 }

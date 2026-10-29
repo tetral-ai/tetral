@@ -64,7 +64,7 @@ describe("ProviderGatewayApp lifecycle", () => {
       const metrics = await textProbe(started.httpUrl, "/metrics");
       expect(metrics.status).toBe(200);
       expect(metrics.body).toContain("providergateway_ready 1");
-      expect(metrics.body).toContain("providergateway_provider_streams_active");
+      expect(metrics.body).toContain("providergateway_turns_in_progress");
 
       const call = client.streamProviderRequest(request, metadata());
       const eventsPromise = collectEvents(call);
@@ -111,9 +111,7 @@ describe("ProviderGatewayApp lifecycle", () => {
         typeof record === "object"
         && record !== null
         && "event" in record
-        && record.event === "provider_request_streamed"
-        && "request.outcome" in record
-        && record["request.outcome"] === "failed"
+        && record.event === "provider_request_streamed_failed"
       )).toEqual([
         expect.objectContaining({
           "request.outcome": "failed",
@@ -156,7 +154,7 @@ describe("ProviderGatewayApp lifecycle", () => {
 function validConfig(): ProviderGatewayConfig {
   return {
     deploymentEnvironment: "test",
-    diagnostics: { level: "info", maxRecordBytes: 16384, summaryIntervalMs: 30000, burst: 1 },
+    diagnostics: { level: "info", maxRecordBytes: 16384, summaryIntervalMs: 30000, burst: 1, traceSampleRatio: 1, dbSlowQueryMs: 250 },
     serviceVersion: "test",
     grpcBindAddress: "127.0.0.1:0",
     httpBindAddress: "127.0.0.1:0",

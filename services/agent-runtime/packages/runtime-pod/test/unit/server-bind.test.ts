@@ -1,6 +1,8 @@
 import { DefaultBridgeMethodPolicies } from "../../src/bridge-policy.js";
 import { describe, expect, test } from "bun:test";
 import { Writable } from "node:stream";
+import type { RuntimeToolPermitState } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
+import { Effect } from "effect";
 import { createDiagnosticStreamSink, createTetralJsonLogger } from "@tetral/ts-observability";
 import { createRuntimeGrpcServer } from "../../src/grpc-server.js";
 import { createRuntimeHttpServer } from "../../src/http-server.js";
@@ -45,7 +47,8 @@ describe("Runtime Pod server bind addresses", () => {
 		} finally { httpServer.stop(); logger.close(); sink.close(); stream.destroy(); }
 	});
 	test("HTTP server accepts explicit production host addresses, serves metrics, and rejects hostless addresses", async () => {
-		const metricsRegistry = new RuntimePodMetricsRegistry();
+		let now = 0;
+		const metricsRegistry = new RuntimePodMetricsRegistry({ monotonicMs: () => now });
 		metricsRegistry.recordHotState({
 			activeSessions: 2,
 			activeThreads: 3,
@@ -53,6 +56,18 @@ describe("Runtime Pod server bind addresses", () => {
 			pendingApprovals: 1,
 		});
 		metricsRegistry.addActiveToolFibers(2);
+		// One tool call waited 2 s for a permit and runs; another has waited 5 s.
+		const running = Symbol("running"), waiting = Symbol("waiting"), finished = Symbol("finished");
+		const permit = (toolCall: symbol, state: RuntimeToolPermitState) => Effect.runSync(metricsRegistry.recordToolPermit(toolCall, state));
+		permit(finished, "queued");
+		permit(finished, "started");
+		permit(finished, "ended");
+		permit(running, "queued");
+		now = 2_000;
+		permit(running, "started");
+		now = 3_000;
+		permit(waiting, "queued");
+		now = 8_000;
 		metricsRegistry.observeProviderStreamDuration(
 			"agent_provider_request",
 			42,
@@ -98,6 +113,11 @@ describe("Runtime Pod server bind addresses", () => {
 			expect(body).toContain("runtimepod_active_threads 3");
 			expect(body).toContain("runtimepod_active_fibers 1");
 			expect(body).toContain("runtimepod_active_tool_fibers 2");
+			expect(body).toContain("runtimepod_tools_in_progress 1\n");
+			expect(body).toContain("runtimepod_tools_queued 1\n");
+			expect(body).toContain("runtimepod_tools_oldest_queued_seconds 5\n");
+			expect(body).toContain("runtimepod_tools_queue_wait_seconds_count 2\n");
+			expect(body).toContain("runtimepod_tools_queue_wait_seconds_sum 2\n");
 			expect(body).toContain("runtimepod_pending_approvals 1");
 			expect(body).toContain('runtimepod_content_commit_latency_ms_count{kind="text",outcome="duplicate",phase="content_commit",request_kind="approval_reviewer"} 1');
 			expect(body).toContain('runtimepod_content_commit_latency_ms_sum{kind="request_end",outcome="failed",phase="request_end_apply",request_kind="agent_provider_request"} 7');
@@ -137,6 +157,30 @@ describe("Runtime Pod server bind addresses", () => {
 		);
 	});
 
+	test("the placement page serves exactly the six series Job Runner reads", async () => {
+		const metricsRegistry = new RuntimePodMetricsRegistry();
+		metricsRegistry.recordHotState({ activeSessions: 2, activeThreads: 3, activeFibers: 1, pendingApprovals: 1 });
+		metricsRegistry.observeProviderStreamDuration("agent_provider_request", 42, "success");
+		Effect.runSync(metricsRegistry.recordToolPermit(Symbol("tool"), "queued"));
+		const httpServer = createRuntimeHttpServer("127.0.0.1:0", fakeLifecycle(), metricsRegistry, undefined, () => ({ usageBytes: 80, limitBytes: 100 }));
+		try {
+			const response = await fetch(new URL("/metrics/placement", httpServer.url));
+			expect(response.status).toBe(200);
+			expect(response.headers.get("content-type")).toBe("text/plain; version=0.0.4; charset=utf-8");
+			const samples = (await response.text()).split("\n").filter((line) => line !== "" && !line.startsWith("#"));
+			expect(samples.sort()).toEqual([
+				"runtimepod_accepting_commands 0",
+				"runtimepod_active_sessions 2",
+				"runtimepod_container_memory_limit_bytes 100",
+				"runtimepod_container_memory_usage_bytes 80",
+				"runtimepod_ready 0",
+				"runtimepod_session_capacity 256",
+			]);
+		} finally {
+			httpServer.stop();
+		}
+	});
+
 	test("gRPC server binds explicit host addresses for ephemeral ports", async () => {
 		const grpcServer = createRuntimeGrpcServer(fakeRuntimeControlService());
 		try {
@@ -160,7 +204,7 @@ function fakeLifecycle() {
 					ip: "10.0.0.1",
 				},
 				deploymentEnvironment: "test",
- diagnostics: {level:"info",maxRecordBytes:16384,summaryIntervalMs:30000,burst:1},
+ diagnostics: {level:"info",maxRecordBytes:16384,summaryIntervalMs:30000,burst:1,traceSampleRatio:1,dbSlowQueryMs:250},
 				serviceVersion: "test",
 				jobRunner: { namespace: "engine", serviceAccount: "job-runner" },
 				grpcBindAddress: "127.0.0.1:0",

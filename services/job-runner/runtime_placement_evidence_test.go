@@ -338,13 +338,14 @@ func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 				prefix := fmt.Sprintf("runtime.placement.candidate.%d.", index+1)
 				reason := scenario
 				if scenario == "selected" {
-					reason = "eligible"
+					// Both report no active Session; the tie draw picks the second.
+					reason = []string{"tie_lost", "selected"}[index]
 				}
 				if record[prefix+"reason"] != reason || record[prefix+"kubernetes.uid"] != observation.Candidate.PodUID || record[prefix+"runtime.process.id"] != observation.ProcessID || observation.ProcessID != "process_"+observation.Candidate.PodUID {
 					t.Fatalf("safe rejected/winning observation lost:%v", record)
 				}
 				if scenario == "selected" || scenario == "capacity_excluded" {
-					for key, value := range map[string]float64{"runtime.load.active_sessions": observation.Report.ActiveSessions, "runtime.load.session_capacity": 16, "runtime.load.memory_ratio": .1} {
+					for key, value := range map[string]float64{"runtime.load.active_sessions": observation.Report.ActiveSessions, "runtime.load.session_capacity": 16, "runtime.load.memory_ratio": .1, "runtime.load.memory_usage_bytes": 100, "runtime.load.memory_limit_bytes": 1000} {
 						if record[prefix+key] != value {
 							t.Fatalf("valid excluded/ranked load lost%s=%v", prefix+key, record[prefix+key])
 						}
@@ -547,11 +548,106 @@ func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 					if probes.Load() != 1 || plan.placement == nil {
 						t.Fatalf("fresh input must sample actual candidate once: probes=%d plan=%+v", probes.Load(), plan)
 					}
-					if plan.placement.ProcessID != persisted.RuntimeProcessID || plan.placement.Candidate.PodUID != persisted.PodUID || record["outcome"] != "committed" || record["runtime.placement.sampled_pod_uid"] != persisted.PodUID || record["runtime.placement.candidate.1.runtime.process.id"] != persisted.RuntimeProcessID || record["runtime.placement.candidate.1.reason"] != "eligible" {
+					if plan.placement.ProcessID != persisted.RuntimeProcessID || plan.placement.Candidate.PodUID != persisted.PodUID || record["outcome"] != "committed" || record["runtime.placement.sampled_pod_uid"] != persisted.PodUID || record["runtime.placement.candidate.1.runtime.process.id"] != persisted.RuntimeProcessID || record["runtime.placement.candidate.1.reason"] != "selected" {
 						t.Errorf("fresh input must report sampled=committed winner: choice=%+v record=%v", plan.placement, record)
 					}
 				}
 			})
 		}
+	}
+}
+
+// A Runtime pod's full /metrics page may outgrow the 256 KiB load bound; the
+// pod stays placeable because Job Runner reads only /metrics/placement.
+func TestPostgreSQLRuntimePlacementReadsOnlyThePlacementPage(t *testing.T) {
+	runtime, _ := storagetest.NewPostgreSQLDBWithAdmin(t)
+	client := dbconnect.NewClientForTesting(runtime)
+	candidates := placementEvidenceCandidates(t, client)
+	fullPage := placementVectorBody(0, 100) + strings.Repeat("# unrelated series\n", 300*1024/19)
+	if len(fullPage) <= 256*1024 {
+		t.Fatalf("full metrics page = %d bytes; want over 256 KiB", len(fullPage))
+	}
+	var mu sync.Mutex
+	var paths []string
+	httpClient := runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/metrics":
+			_, _ = io.WriteString(w, fullPage)
+		case "/metrics/placement":
+			_, _ = io.WriteString(w, placementVectorBody(0, 100))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	resolver := KubernetesRuntimeTargetResolver{LoadClient: httpClient, PlacementPolicy: DefaultRuntimePlacementPolicy(), Snapshot: func() kubernetes.BindingVisibilitySnapshot {
+		return kubernetes.NewBindingVisibilitySnapshotForTest(true, candidates[:1])
+	}}
+	choice, err := resolver.sampleRuntimePlacement(context.Background(), client, RuntimeJob{WorkspaceID: "default", SessionID: "placement_page"})
+	if err != nil || choice.Reason != "selected" || choice.Candidate.PodUID != candidates[0].PodUID {
+		t.Fatalf("placement = %+v/%v; want the pod selected", choice, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(paths) != 1 || paths[0] != "/metrics/placement" {
+		t.Fatalf("requested paths = %v; want only /metrics/placement", paths)
+	}
+}
+
+// A placement that finds no candidate or exhausts its probes is a refusal at
+// the jobrunner_placement pressure point: one count for its cause and the
+// episode's pressure.rejecting_started record.
+func TestPostgreSQLRuntimePlacementRefusalCountsAtItsPressurePoint(t *testing.T) {
+	runtime, _ := storagetest.NewPostgreSQLDBWithAdmin(t)
+	client := dbconnect.NewClientForTesting(runtime)
+	candidates := placementEvidenceCandidates(t, client)
+	httpClient := runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	for _, row := range []struct {
+		name      string
+		inventory []kubernetes.BindingCandidate
+		cause     string
+	}{
+		{name: "no candidates", cause: "no_candidates"},
+		{name: "every probe fails", inventory: candidates, cause: "exhausted"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			var records bytes.Buffer
+			telemetry := workload.NewTelemetry(workload.TelemetryOptions{Service: ServiceNameJobRunner, Logger: workload.NewLogger(&records, ServiceNameJobRunner, "test", "unit"), SampleRatio: 1})
+			t.Cleanup(workload.InstallTelemetry(telemetry))
+			resolver := KubernetesRuntimeTargetResolver{PlacementMetrics: &RuntimePlacementMetrics{}, LoadClient: httpClient, PlacementPolicy: DefaultRuntimePlacementPolicy(), RandomIndex: func(n int) int { return n - 1 }, Snapshot: func() kubernetes.BindingVisibilitySnapshot {
+				return kubernetes.NewBindingVisibilitySnapshotForTest(true, row.inventory)
+			}}
+			if _, err := resolver.sampleRuntimePlacement(context.Background(), client, RuntimeJob{WorkspaceID: "default", SessionID: "refused"}); err == nil {
+				t.Fatal("placement succeeded; want a refusal")
+			}
+			counted := map[string]float64{}
+			samples, _ := telemetry.Registry().Collector()(context.Background())
+			for _, sample := range samples {
+				if sample.Name == "jobrunner_placement_rejected_total" {
+					counted[sample.Labels[0].Value] += sample.Value
+				}
+			}
+			if len(counted) != 1 || counted[row.cause] != 1 {
+				t.Fatalf("jobrunner_placement_rejected_total = %v; want one %s", counted, row.cause)
+			}
+			var started []map[string]any
+			decoder := json.NewDecoder(&records)
+			for decoder.More() {
+				var record map[string]any
+				if err := decoder.Decode(&record); err != nil {
+					t.Fatal(err)
+				}
+				if record["event"] == "pressure.rejecting_started" {
+					started = append(started, record)
+				}
+			}
+			if len(started) != 1 || started[0]["pressure.point"] != "jobrunner_placement" || started[0]["pressure.cause"] != row.cause || started[0]["level"] != "WARN" {
+				t.Fatalf("pressure records = %v; want one rejecting_started for %s", started, row.cause)
+			}
+		})
 	}
 }

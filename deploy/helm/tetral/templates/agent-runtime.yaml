@@ -218,6 +218,7 @@ spec:
       ports:
         - protocol: TCP
           port: {{ if eq .Values.transport.profile "hardened" }}19443{{ else }}19090{{ end }}
+{{- include "tetral.metricsScrapeIngress" (dict "root" . "port" 8080) }}
   egress:
     - to:
         - namespaceSelector:
@@ -271,6 +272,7 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+{{- include "tetral.otlpEgress" . }}
 {{- if .Values.cilium.enabled }}
 ---
 apiVersion: cilium.io/v2

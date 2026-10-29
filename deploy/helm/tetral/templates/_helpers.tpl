@@ -89,6 +89,9 @@ alternative DSN environment names; neither can be inferred from DATABASE_URL. */
 {{- $replicas := int (get $.Values.replicas $key) -}}
 {{- $goProcesses = add $goProcesses $replicas (int (include "tetral.surge" (dict "root" $ "replicas" $replicas))) -}}
 {{- end -}}
+{{/* The hub autoscaler's limit bounds its Pods. */}}
+{{- $computerHub := int .Values.computerHub.autoscaling.maxReplicas -}}
+{{- $goProcesses = add $goProcesses $computerHub (int (include "tetral.surge" (dict "root" . "replicas" $computerHub))) -}}
 {{- $eventStream := int .Values.replicas.eventStream -}}
 {{- $goProcesses = add $goProcesses $eventStream (int (include "tetral.surge" (dict "root" . "replicas" $eventStream))) -}}
 {{/* Queue remains fixed at one replica. */}}
@@ -110,6 +113,18 @@ alternative DSN environment names; neither can be inferred from DATABASE_URL. */
 
 {{/* Existing Provider HPA floor, shared by its resource and validation. */}}
 {{- define "tetral.providerGatewayMinReplicas" -}}2{{- end -}}
+
+{{/* Seconds of a Go duration that already matched the duration syntax, such
+as 1m30s; the template functions have no duration parser. */}}
+{{- define "tetral.durationSeconds" -}}
+{{- $units := dict "h" 3600.0 "m" 60.0 "s" 1.0 "ms" 0.001 "us" 0.000001 "ns" 0.000000001 -}}
+{{- $seconds := 0.0 -}}
+{{- range $part := regexFindAll "[0-9]+(\\.[0-9]+)?(h|ms|m|s|us|ns)" (toString .) -1 -}}
+{{- $number := regexFind "^[0-9]+(\\.[0-9]+)?" $part -}}
+{{- $seconds = addf $seconds (mulf (float64 $number) (get $units (trimPrefix $number $part))) -}}
+{{- end -}}
+{{- $seconds -}}
+{{- end -}}
 
 {{/* Fixed finite complement of the exact Git ticket header. */}}
 {{- define "tetral.gitPrivateHeadersPattern" -}}
@@ -168,12 +183,51 @@ alternative DSN environment names; neither can be inferred from DATABASE_URL. */
 {{- define "tetral.diagnosticEnv" -}}
 {{- if not (has .Values.observability.logLevel (list "debug" "info" "warn" "error")) }}{{ fail "observability.logLevel must be debug, info, warn, or error" }}{{ end -}}
 {{- range $setting := list (dict "name" "logMaxRecordBytes" "min" 1024 "max" 65536) (dict "name" "logSummaryIntervalMs" "min" 100 "max" 3600000) (dict "name" "logBurst" "min" 1 "max" 1000) -}}
-{{- $raw := printf "%v" (index $.Values.observability $setting.name) -}}
+{{- $value := index $.Values.observability $setting.name -}}
+{{- $raw := toJson $value -}}
+{{- if kindIs "string" $value }}{{ $raw = $value }}{{ end -}}
 {{- if or (not (regexMatch "^[1-9][0-9]*$" $raw)) (lt (float64 $raw) (float64 $setting.min)) (gt (float64 $raw) (float64 $setting.max)) }}{{ fail (printf "observability.%s is outside its supported integer range" $setting.name) }}{{ end -}}
 {{- end -}}
-{{- range $name, $value := dict "TETRAL_LOG_LEVEL" .Values.observability.logLevel "TETRAL_LOG_MAX_RECORD_BYTES" .Values.observability.logMaxRecordBytes "TETRAL_LOG_SUMMARY_INTERVAL_MS" .Values.observability.logSummaryIntervalMs "TETRAL_LOG_BURST" .Values.observability.logBurst }}
+{{- $ratio := printf "%v" .Values.observability.traceSampleRatio -}}
+{{- if or (not (regexMatch "^(0|1)(\\.[0-9]+)?$" $ratio)) (gt (float64 $ratio) 1.0) }}{{ fail "observability.traceSampleRatio must be a decimal from 0 to 1" }}{{ end -}}
+{{/* JSON keeps integral YAML numbers in this range decimal; printf may use an exponent. */}}
+{{- $slowQuery := toJson .Values.observability.slowQueryMs -}}
+{{- if kindIs "string" .Values.observability.slowQueryMs }}{{ $slowQuery = .Values.observability.slowQueryMs }}{{ end -}}
+{{- if or (not (regexMatch "^[1-9][0-9]*$" $slowQuery)) (gt (float64 $slowQuery) 9223372036854.0) }}{{ fail "observability.slowQueryMs must be a positive integer of milliseconds at most 9223372036854" }}{{ end -}}
+{{- $endpoint := .Values.observability.otlpEndpoint -}}
+{{- if not (kindIs "string" $endpoint) }}{{ fail "observability.otlpEndpoint must be a string" }}{{ end -}}
+{{- if $endpoint -}}
+{{/* Check address structure without parser errors that echo the configured value.
+     Each workload still owns complete URL validation. */}}
+{{- if not (regexMatch `(?i)^https?://([^/?#@[:space:]]*@)?(\[[^\[\]/?#@[:space:]]+\]|[^\[\]/?#:@[:space:]]+)(:[0-9]*)?([/?#][^[:space:]]*)?$` $endpoint) }}{{ fail "observability.otlpEndpoint must be an http or https URL with a host" }}{{ end -}}
+{{- end -}}
+{{- $env := dict "TETRAL_LOG_LEVEL" .Values.observability.logLevel "TETRAL_LOG_MAX_RECORD_BYTES" .Values.observability.logMaxRecordBytes "TETRAL_LOG_SUMMARY_INTERVAL_MS" .Values.observability.logSummaryIntervalMs "TETRAL_LOG_BURST" .Values.observability.logBurst "TETRAL_TRACE_SAMPLE_RATIO" $ratio "TETRAL_DB_SLOW_QUERY_MS" $slowQuery -}}
+{{- if $endpoint }}{{ $_ := set $env "OTEL_EXPORTER_OTLP_ENDPOINT" $endpoint }}{{ end -}}
+{{- range $name, $value := $env }}
+{{- if not (kindIs "string" $value) }}{{ $value = toJson $value }}{{ end }}
 - name: {{ $name }}
   value: {{ $value | quote }}
+{{- end }}
+{{- end -}}
+
+{{/* Egress to the trace collector. */}}
+{{- define "tetral.otlpEgress" -}}
+{{- if .Values.observability.otlpEndpoint }}
+    - to:
+{{- toYaml .Values.observability.otlpPeers | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.observability.otlpPort }}
+{{- end }}
+{{- end -}}
+
+{{- define "tetral.metricsScrapeIngress" -}}
+{{- if .root.Values.observability.metricsScrapePeers }}
+    - from:
+{{- toYaml .root.Values.observability.metricsScrapePeers | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ .port }}
 {{- end }}
 {{- end -}}
 

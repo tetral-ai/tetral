@@ -44,7 +44,7 @@ format, see [authentication](../../docs/authentication.md).
 | Route | Identity and input | Success | Failure |
 |-------|--------------------|---------|---------|
 | `POST /v1/oauth/token` | JSON JWT bearer exchange; registered rule, organization, upstream assertion, optional Engine workspace/service selector | opaque `access_token`, `token_type: Bearer`, integer `expires_in` | malformed/ambiguous input `400`; oversized body `413`; invalid assertion or missing/currently invalid authority `401`; issuer/database unavailable `503`; bounded admission exhausted `429` |
-| `envoy.service.auth.v3.Authorization/Check` | raw public headers, actual method/request URI, one trusted request ID and forwarded-for | OK Check response overwrites one `X-Tetral-Internal-Principal` and enumerates credential/untrusted header removals | JSON denied response: invalid credential `401`, invalid metadata `400`, internal/dependency failure `500`; edge Check transport unavailability maps to `503` |
+| `envoy.service.auth.v3.Authorization/Check` | raw public headers, actual method/request URI, one trusted request ID and forwarded-for | OK Check response overwrites one `X-Tetral-Internal-Principal` and enumerates credential/untrusted header removals | JSON denied response: invalid credential `401` (on `/v1/client/` paths the client error body `{code: "credential_invalid", message}`, elsewhere the API envelope), invalid metadata `400`, internal/dependency failure `500`; edge Check transport unavailability maps to `503` |
 | `POST /v1/api_keys` | verified internal principal; `{ "name": ... }`, at most one MiB of strict JSON | metadata and one-time raw `api_key` at `200` | invalid name/body `400`; oversized body `413`; denied action `403`; stale authority/issuer credential `401` |
 | `GET /v1/api_keys` | verified internal principal; `limit` defaults to 20, cap 100; opaque `page` | metadata page at `200` | foreign/mismatched cursor `400`; denied action `403` |
 | `DELETE /v1/api_keys/{api_key_id}` | verified internal principal and tenant-resolved durable key facts | empty `204` | absent/revoked/foreign row `404`; malformed ID `400`; denied action `403` |
@@ -82,6 +82,24 @@ and exact bytes. Its invalidity never falls back to Bearer. A selected key does
 not borrow a simultaneously supplied Bearer's identity. With no selected key,
 Auth accepts one unambiguous `Authorization: Bearer <token>` value; repeated or
 combined Bearer values are rejected. Query-string credentials are ignored.
+
+Connection keys are a credential class of their own. On a path under
+`/v1/client/`, Check admits only one `Authorization: Bearer` value holding a
+connection key (prefix `tetral_ck_`) in a request without `X-Api-Key`; it
+resolves the key's SHA-256 digest through
+`public.tetral_auth_lookup_connection_key` and mints a principal of credential
+kind `connection_key`, authority kind `instance_connection`, scope
+`{workspace_id, type: "instance", id}` and the single unregistered operation
+`client.connect`. An unknown key, no credential, an API key or any other bearer
+token there is denied `401` with the client error body
+`{code: "credential_invalid", message}`. On every other path a bearer token
+with the connection key prefix is denied `401 authentication_error` before any
+lookup, and other credentials follow the rules above. Check decides only the
+class and identity: the lookup returns the key's holder whatever the
+credential's state, and computer-hub checks the credential, registration and
+connection on every request. The shared operation gate (`auth.Authorize`)
+answers a `connection_key` principal `401 authentication_error` on every public
+operation.
 
 Check requires Envoy `encode_raw_headers: true`; its raw repeated entries preserve
 header order and mixed-case duplicate semantics. The first API-key value remains
@@ -317,7 +335,7 @@ usage.
 The same metrics listener exports fixed-bucket
 `tetral_operation_duration_seconds{service="auth",operation="/envoy.service.auth.v3.Authorization/Check",outcome=...}`
 from the actual Check unary boundary, including current-peer validation. A typed
-allow is `success`; a typed 4xx denial is `rejected`; a typed 5xx or transport
+allow is `ok`; a typed 4xx denial is `rejected`; a typed 5xx or transport
 failure is `error`. Actual caller/transport cancellation or deadline expiry is
 `cancelled`/`timeout`. A nil gRPC error on a denied response never means success.
 An internal dependency expiry returned as HTTP 500 remains `error` unless the
@@ -328,7 +346,7 @@ labels are added, and HTTP token/key metrics retain their names and units.
 `timeout`. Forced `shutdown_grpc_cancel_join` records only after Stop and the
 handler owner join, without a new join budget. The existing process logger
 records the same phase duration even if the metrics listener is already closed,
-subject to [shared collection limits](../../internal/workload/README.md#operation-durations).
+subject to [shared collection limits](../../internal/workload/README.md#shutdown-phases).
 The owning PostgreSQL Check test verifies typed denial populations, a real
 closed Auth-role database failure with no principal or credential usage, and
 the existing held native Check transaction completing during graceful drain.
@@ -409,7 +427,12 @@ administrative `TETRAL_TEST_DATABASE_URL` and create isolated clones/roles.
 - `services/auth/ext_authz_test.go`: actual gRPC Check, real Auth-role private
   PostgreSQL, signature/typed actor/sampled usage/path binding, foreign and revoked keys,
   frozen Bearer selection/duplicates, malformed metadata, actual lock-graph
-  revoke/admission orders and interrupted database waits.
+  revoke/admission orders and interrupted database waits; the credential class
+  rows drive each class on client and management paths and count the lookup
+  statements Auth's pool sends. Connection-key lookup failures after acquisition
+  and pool acquisition failures both return HTTP 500 with `api_error` and
+  `authentication unavailable`, without a signed principal; an unknown key
+  remains a 401 credential refusal.
 - `services/auth/grpc_test.go`: listener configuration and, within the owning
   PostgreSQL root, real native TLS peer rejection without credential admission,
   held Check across leaf renewal and trust overlap, retired-channel rejection,

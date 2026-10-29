@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/id"
+	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -45,6 +46,42 @@ func (a *RequestAuthenticator) AuthenticateRequest(ctx context.Context, r Creden
 		return Principal{}, err
 	}
 	p, err := a.Resolver.AuthenticateBearer(ctx, token)
+	return p, authenticationDependencyError(err)
+}
+
+// HasConnectionKey reports whether any Authorization value of r is a bearer
+// token with the connection key prefix.
+func HasConnectionKey(r CredentialRequest) bool {
+	values := r.AuthorizationValues
+	if len(values) == 0 && r.Authorization != "" {
+		values = []string{r.Authorization}
+	}
+	for _, value := range values {
+		if scheme, token, ok := strings.Cut(value, " "); ok && strings.EqualFold(scheme, "Bearer") && strings.HasPrefix(token, instance.KeyPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// AuthenticateConnection admits only a connection key sent as the single
+// Authorization bearer token of a request without X-Api-Key. Any other
+// credential, or none, is rejected without a lookup.
+func (a *RequestAuthenticator) AuthenticateConnection(ctx context.Context, r CredentialRequest) (Principal, error) {
+	if a == nil || a.Resolver == nil {
+		err := &UnavailableError{}
+		RecordDecision(ctx, "admission", err, AuditEvent{})
+		return Principal{}, err
+	}
+	if len(r.AuthorizationValues) == 1 {
+		r.Authorization = r.AuthorizationValues[0]
+	}
+	scheme, token, ok := strings.Cut(r.Authorization, " ")
+	if r.APIKey != "" || len(r.AuthorizationValues) > 1 || !ok || !strings.EqualFold(scheme, "Bearer") || !strings.HasPrefix(token, instance.KeyPrefix) || strings.ContainsAny(token, " \t\r\n") {
+		RecordDecision(ctx, "admission", authRejected(), AuditEvent{})
+		return Principal{}, authRejected()
+	}
+	p, err := a.Resolver.AuthenticateConnectionKey(ctx, token)
 	return p, authenticationDependencyError(err)
 }
 
@@ -240,6 +277,49 @@ func (s *AuthorityResolver) authenticate(ctx context.Context, raw string, bearer
 	// and a dropped sample cannot change this admission.
 	if !bearer {
 		s.usage.submit(usage)
+	}
+	return p, nil
+}
+
+// AuthenticateConnectionKey resolves a connection key to the principal of its
+// instance and credential. It decides only the credential class and identity:
+// the lookup returns the digest's holder whatever the credential's state, and
+// computer-hub checks the state on every request. Admission writes nothing.
+func (s *AuthorityResolver) AuthenticateConnectionKey(ctx context.Context, raw string) (principal Principal, resultErr error) {
+	defer func() { RecordDecision(ctx, "admission", resultErr, AuditEvent{}) }()
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if len(raw) != instance.KeyLength || !strings.HasPrefix(raw, instance.KeyPrefix) {
+		return Principal{}, authRejected()
+	}
+	digest := sha256.Sum256([]byte(raw))
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return Principal{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var workspaceID workspace.ID
+	var instanceID, credentialID string
+	err = tx.QueryRowContext(ctx, `SELECT workspace_id,instance_id,credential_id FROM public.tetral_auth_lookup_connection_key($1)`, digest[:]).Scan(&workspaceID, &instanceID, &credentialID)
+	if err == sql.ErrNoRows {
+		return Principal{}, authRejected()
+	}
+	if err != nil {
+		return Principal{}, err
+	}
+	if err = setAuthWorkspace(ctx, tx, workspaceID); err != nil {
+		return Principal{}, err
+	}
+	var ws workspace.Workspace
+	if err = tx.QueryRowContext(ctx, `SELECT id,type,name,created_at FROM workspaces WHERE id=$1`, string(workspaceID)).Scan(&ws.ID, &ws.Type, &ws.Name, &ws.CreatedAt); err != nil {
+		return Principal{}, err
+	}
+	p := ConnectionKeyPrincipal(ws, instanceID, credentialID)
+	if err = p.Validate(); err != nil {
+		return Principal{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return Principal{}, err
 	}
 	return p, nil
 }

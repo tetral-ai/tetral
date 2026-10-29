@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/workload"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
@@ -236,5 +237,56 @@ func TestRunJobRunnerLoopUsesCappedBackoffAndQueueRetryHint(t *testing.T) {
 	requests := queueClient.requested()
 	if requests[7] != 2 || requests[8] != 1 {
 		t.Fatalf("requested capacities = %v; want a partial response followed at once by the remaining slot", requests)
+	}
+}
+
+// The slot gauges render the configured slot count and the slots that are
+// running a leased job, which return to zero once the job settles.
+func TestJobRunnerSlotGaugesRenderRunningJobsAndLimit(t *testing.T) {
+	telemetry := workload.NewTelemetry(workload.TelemetryOptions{Service: ServiceNameJobRunner})
+	t.Cleanup(workload.InstallTelemetry(telemetry))
+	gauges := func() map[string]float64 {
+		values := map[string]float64{}
+		samples, _ := telemetry.Registry().Collector()(context.Background())
+		for _, sample := range samples {
+			if sample.Name == "jobrunner_slots_in_progress" || sample.Name == "jobrunner_slots_limit" {
+				values[sample.Name] = sample.Value
+			}
+		}
+		return values
+	}
+	queueClient := &scriptedAcquisitionQueue{
+		recordingQueueClient: &recordingQueueClient{},
+		responses:            []scriptedLease{{jobs: []*queuev1.QueueJob{slotQueueJob("qjob_a", "thr_a")}}},
+	}
+	deliverer := &slotDeliverer{held: "thr_a", release: make(chan struct{}), delivered: make(chan string, 1)}
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer, Config: JobRunnerConfig{MaxJobs: 3, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour}}
+	if _, err := runner.AcquireAndDispatch(context.Background()); err != nil {
+		t.Fatalf("AcquireAndDispatch: %v", err)
+	}
+	select {
+	case <-deliverer.delivered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("leased job did not start")
+	}
+	for _, phase := range []struct {
+		name string
+		want map[string]float64
+		step func()
+	}{
+		{name: "running", want: map[string]float64{"jobrunner_slots_in_progress": 1, "jobrunner_slots_limit": 3}},
+		{name: "settled", want: map[string]float64{"jobrunner_slots_in_progress": 0, "jobrunner_slots_limit": 3}, step: func() {
+			close(deliverer.release)
+			if err := runner.JoinDispatched(context.Background()); err != nil {
+				t.Fatalf("JoinDispatched: %v", err)
+			}
+		}},
+	} {
+		if phase.step != nil {
+			phase.step()
+		}
+		if got := gauges(); !reflect.DeepEqual(got, phase.want) {
+			t.Fatalf("%s: slot gauges = %v; want %v", phase.name, got, phase.want)
+		}
 	}
 }

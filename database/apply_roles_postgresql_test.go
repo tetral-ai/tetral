@@ -126,6 +126,7 @@ func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
 		seedRLSRows(t, admin)
 		assertAPIAndBridgeDurableOperations(t, databaseName, admin, declarations)
 		assertAuthLookupBoundary(t, databaseName, admin, declarations)
+		assertInstructionPressureBoundary(t, databaseName, admin, declarations)
 		auth := openManagedRole(t, databaseName, declarations.Roles["auth"])
 		defer func() { _ = auth.Close(context.Background()) }()
 		tx, err := auth.Begin(context.Background())
@@ -731,10 +732,10 @@ func assertProcessRegistryPrivileges(t *testing.T, databaseName string, admin *s
 			assertWorkloadDenied(t, databaseName, declarations.Roles["job_runner"], statement)
 		}
 	}
-	for _, workload := range []string{"api", "auth", "queue", "sandbox", "provider_gateway", "mcp_connector", "git_proxy", "cleanup", "event_stream"} {
+	for _, workload := range []string{"api", "auth", "queue", "sandbox", "provider_gateway", "mcp_connector", "git_proxy", "cleanup", "event_stream", "computer_hub"} {
 		assertWorkloadDenied(t, databaseName, declarations.Roles[workload], `SELECT 1 FROM public.tetral_lock_runtime_process('tetral-agent-runtime','role-boundary-pod','role-boundary-process')`)
 	}
-	for _, workload := range []string{"api", "auth", "queue", "sandbox", "provider_gateway", "mcp_connector", "git_proxy", "cleanup", "event_stream", "bridge"} {
+	for _, workload := range []string{"api", "auth", "queue", "sandbox", "provider_gateway", "mcp_connector", "git_proxy", "cleanup", "event_stream", "computer_hub", "bridge"} {
 		assertWorkloadDenied(t, databaseName, declarations.Roles[workload], `SELECT 1 FROM public.tetral_lock_runtime_process_liveness('tetral-agent-runtime','role-boundary-pod','role-boundary-process')`)
 	}
 	assertWorkloadDenied(t, databaseName, declarations.Roles["job_runner"], `CREATE OR REPLACE FUNCTION public.tetral_lock_runtime_process(text,text,text) RETURNS SETOF public.runtime_processes LANGUAGE sql AS 'SELECT * FROM public.runtime_processes'`)
@@ -758,6 +759,10 @@ func assertProcessRegistryPrivileges(t *testing.T, databaseName string, admin *s
 func assertAuthLookupBoundary(t *testing.T, databaseName string, admin *sql.DB, declarations database.RoleDeclarations) {
 	t.Helper()
 	ctx := context.Background()
+	if _, err := admin.Exec(`INSERT INTO instances (workspace_id,id,kind,name,registration_state) VALUES ('ws_contract_b','inst_contract_b','user','contract','active');
+ INSERT INTO instance_credentials (workspace_id,instance_id,id,state,key_digest,expires_at,delivery) VALUES ('ws_contract_b','inst_contract_b','ccred_contract_b','active',decode(repeat('03',32),'hex'),clock_timestamp()+interval '1 day','response')`); err != nil {
+		t.Fatal(err)
+	}
 	authConnection := openManagedRole(t, databaseName, declarations.Roles["auth"])
 	defer func() { _ = authConnection.Close(ctx) }()
 	tx, err := authConnection.Begin(ctx)
@@ -782,6 +787,13 @@ func assertAuthLookupBoundary(t *testing.T, databaseName string, admin *sql.DB, 
 	if resolved != "ws_contract_b" {
 		t.Fatal("exact digest lookup did not resolve its workspace")
 	}
+	var instanceID, credentialID string
+	if err := tx.QueryRow(ctx, `SELECT workspace_id,instance_id,credential_id FROM public.tetral_auth_lookup_connection_key(decode(repeat('03',32),'hex'))`).Scan(&resolved, &instanceID, &credentialID); err != nil {
+		t.Fatal(err)
+	}
+	if resolved != "ws_contract_b" || instanceID != "inst_contract_b" || credentialID != "ccred_contract_b" {
+		t.Fatal("connection key lookup did not resolve its holder")
+	}
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM api_keys WHERE id IN ('ak_contract_a','ak_contract_b')`).Scan(&visible); err != nil {
 		t.Fatal(err)
 	}
@@ -804,14 +816,71 @@ func assertAuthLookupBoundary(t *testing.T, databaseName string, admin *sql.DB, 
 		`SELECT * FROM public.tetral_auth_lock_authority('rule','identity','grant','workspace')`,
 		`SELECT * FROM public.tetral_auth_prune_tokens(1000)`,
 		`SELECT * FROM api_keys`,
+		`SELECT * FROM public.tetral_auth_lookup_connection_key(decode(repeat('03',32),'hex'))`,
+		`SELECT * FROM instance_credentials`,
 	} {
 		assertWorkloadDenied(t, databaseName, declarations.Roles["api"], statement)
 	}
+	assertWorkloadPrivilegeDenied(t, databaseName, declarations.Roles["computer_hub"], `SELECT * FROM public.tetral_auth_lookup_connection_key(decode(repeat('03',32),'hex'))`)
 	var unsafe int
-	if err := admin.QueryRow(`SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('tetral_auth_lookup_key','tetral_auth_lookup_token','tetral_auth_lookup_grants','tetral_auth_lock_authority','tetral_auth_prune_tokens') AND (NOT p.prosecdef OR NOT ('search_path=pg_catalog'=ANY(p.proconfig)) OR EXISTS(SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE'))`).Scan(&unsafe); err != nil {
+	if err := admin.QueryRow(`SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('tetral_auth_lookup_key','tetral_auth_lookup_token','tetral_auth_lookup_grants','tetral_auth_lock_authority','tetral_auth_prune_tokens','tetral_auth_lookup_connection_key') AND (NOT p.prosecdef OR NOT ('search_path=pg_catalog'=ANY(p.proconfig)) OR EXISTS(SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE'))`).Scan(&unsafe); err != nil {
 		t.Fatal(err)
 	}
 	if unsafe != 0 {
 		t.Fatalf("unsafe Auth function catalog=%d", unsafe)
+	}
+}
+
+// The pressure function counts the instructions of every Workspace for
+// Computer Hub alone; the flag set by the serving role itself admits nothing
+// outside its Workspace.
+func assertInstructionPressureBoundary(t *testing.T, databaseName string, admin *sql.DB, declarations database.RoleDeclarations) {
+	t.Helper()
+	ctx := context.Background()
+	for _, suffix := range []string{"a", "b"} {
+		connection := "conn_" + strings.Repeat(suffix, 32)
+		ws, instanceID, credentialID, messageID := "ws_contract_"+suffix, "inst_pressure_"+suffix, "ccred_pressure_"+suffix, "msg_pressure_"+suffix
+		for _, row := range []struct {
+			statement string
+			args      []any
+		}{
+			{`INSERT INTO instances (workspace_id,id,kind,name,registration_state) VALUES ($1,$2,'user','pressure','active')`, []any{ws, instanceID}},
+			{`INSERT INTO instance_credentials (workspace_id,instance_id,id,state,key_digest,expires_at,delivery) VALUES ($1,$2,$3,'active',sha256(convert_to($3,'UTF8')),clock_timestamp()+interval '1 day','response')`, []any{ws, instanceID, credentialID}},
+			{`INSERT INTO instance_connections (workspace_id,instance_id,id,credential_id,hub_pod,connected_at,lease_expires_at,stream_count) VALUES ($1,$2,$3,$4,'pod',clock_timestamp(),clock_timestamp()+interval '45 seconds',1)`, []any{ws, instanceID, connection, credentialID}},
+			{`INSERT INTO connection_instructions (workspace_id,connection_id,message_id,issue_seq,type,envelope) VALUES ($1,$2,$3,1,'session.close','{}')`, []any{ws, connection, messageID}},
+		} {
+			if _, err := admin.Exec(row.statement, row.args...); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	hub := openManagedRole(t, databaseName, declarations.Roles["computer_hub"])
+	defer func() { _ = hub.Close(ctx) }()
+	tx, err := hub.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT set_config('tetral.workspace_id','ws_contract_a',true),set_config('tetral.instruction_pressure','true',true)`); err != nil {
+		t.Fatal(err)
+	}
+	var visible, queued int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM connection_instructions WHERE message_id LIKE 'msg_pressure_%'`).Scan(&visible); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.QueryRow(ctx, `SELECT queued FROM public.tetral_computer_hub_instruction_pressure()`).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if visible != 1 || queued != 2 {
+		t.Fatalf("visible instructions=%d queued=%d; want 1 in the Workspace and 2 counted", visible, queued)
+	}
+	_ = tx.Rollback(ctx)
+	assertWorkloadPrivilegeDenied(t, databaseName, declarations.Roles["api"], `SELECT * FROM public.tetral_computer_hub_instruction_pressure()`)
+	var unsafe int
+	if err := admin.QueryRow(`SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname='tetral_computer_hub_instruction_pressure' AND (NOT p.prosecdef OR NOT ('search_path=pg_catalog'=ANY(p.proconfig)) OR EXISTS(SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE'))`).Scan(&unsafe); err != nil {
+		t.Fatal(err)
+	}
+	if unsafe != 0 {
+		t.Fatalf("unsafe pressure function catalog=%d", unsafe)
 	}
 }

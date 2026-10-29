@@ -11,6 +11,7 @@
 import { mcpPhaseCompletedLogRecord } from "./logger.js";
 import type { McpConnectorLogger } from "./service.js";
 import { credentials, status } from "@grpc/grpc-js";
+import { traceparentClientInterceptor } from "@tetral/ts-observability";
 import type {
   ClientUnaryCall,
   CallOptions,
@@ -166,7 +167,7 @@ export class BridgeAPIManifestChangeNotifier {
   private readonly now: () => number;
 
   constructor(private readonly options: BridgeAPIManifestChangeNotifierOptions) {
-    this.client = options.client ?? new AgentRuntimeBridgeServiceClient(options.address, credentials.createInsecure(), mcpGrpcClientKeepaliveOptions());
+    this.client = options.client ?? new AgentRuntimeBridgeServiceClient(options.address, credentials.createInsecure(), { ...mcpGrpcClientKeepaliveOptions(), interceptors: [traceparentClientInterceptor] });
     this.metadataFactory = options.metadataFactory ?? buildOutboundBearerMetadata;
     this.timeoutMs = options.timeoutMs ?? MCP_MANIFEST_CHANGE_RPC_TIMEOUT_MS;
     this.now = options.now ?? Date.now;
@@ -257,7 +258,7 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
   private readonly sleep: (delayMs: number) => Promise<void>;
 
   constructor(private readonly options: BridgeAPIMcpToolResultIdempotencyStoreOptions) {
-    this.client = options.client ?? new AgentRuntimeBridgeServiceClient(options.address, credentials.createInsecure(), bridgeMcpCommitGrpcChannelOptions());
+    this.client = options.client ?? new AgentRuntimeBridgeServiceClient(options.address, credentials.createInsecure(), { ...bridgeMcpCommitGrpcChannelOptions(), interceptors: [traceparentClientInterceptor] });
     this.metadataFactory = options.metadataFactory ?? buildOutboundBearerMetadata;
     this.claimTimeoutMs = options.claimTimeoutMs ?? MCP_CLAIM_RPC_TIMEOUT_MS;
     this.commitTimeoutMs = options.commitTimeoutMs ?? MCP_COMMIT_RPC_TIMEOUT_MS;

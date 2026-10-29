@@ -78,16 +78,19 @@ func logProviderOutcomeCompletion[T any](ctx context.Context, logger *slog.Logge
 		level = slog.LevelError
 		result = "error"
 	}
+	buildFailed := false
 	if build, ok := any(outcome.Value).(sandbox.BuildArtifactResult); ok && !outcome.Failed() {
 		result = string(build.State)
 		if build.State == sandbox.ArtifactBuildFailed {
 			level = slog.LevelError
+			buildFailed = true
 		}
 	}
+	event := providerOperationEvent(level)
 	attrs := []slog.Attr{
 		slog.String("operation", operation),
-		slog.String("event", "sandbox_provider_operation_completed"),
-		slog.String("event.kind", "sandbox_provider_operation_completed"),
+		slog.String("event", strings.ReplaceAll(event, ".", "_")),
+		slog.String("event.kind", strings.ReplaceAll(event, ".", "_")),
 		slog.String("provider.name", "daytona"),
 		slog.String("outcome", result),
 		slog.Int64("duration.ms", duration.Milliseconds()),
@@ -105,11 +108,31 @@ func logProviderOutcomeCompletion[T any](ctx context.Context, logger *slog.Logge
 			slog.String("error.class", "sandbox_provider_error"),
 			slog.String("error.code", outcome.ErrorKind),
 			slog.Int("provider.status_code", outcome.ProviderStatusCode),
-			slog.String("error.message_safe", boundedProviderLogMessage(message)),
+			slog.String("error.message_safe", providerOperationFailedMessage),
+			slog.String("provider.failure_detail", boundedProviderLogMessage(message)),
 		)
 		attrs = appendProviderDiagnosticAttrs(attrs, outcome.Diagnostic)
+	} else if buildFailed {
+		attrs = append(attrs,
+			slog.String("error.class", "sandbox_provider_error"),
+			slog.String("error.code", "artifact_build_failed"),
+			slog.String("error.message_safe", "sandbox environment artifact build failed"),
+		)
 	}
-	logger.LogAttrs(ctx, level, "sandbox.provider.operation_completed", attrs...)
+	logger.LogAttrs(ctx, level, event, attrs...)
+}
+
+// providerOperationFailedMessage is the fixed safe text of every provider
+// failure; the provider's own safe detail goes to provider.failure_detail.
+const providerOperationFailedMessage = "sandbox provider operation failed"
+
+// providerOperationEvent names a provider operation's record: a failure has an
+// event of its own, so each event keeps one level.
+func providerOperationEvent(level slog.Level) string {
+	if level >= slog.LevelError {
+		return "sandbox.provider.operation_failed"
+	}
+	return "sandbox.provider.operation_completed"
 }
 
 func logProviderCompletion(ctx context.Context, logger *slog.Logger, operation string, identity providerOperationIdentity, duration time.Duration, err error) {
@@ -149,10 +172,11 @@ func logProviderCompletion(ctx context.Context, logger *slog.Logger, operation s
 			}
 		}
 	}
+	event := providerOperationEvent(level)
 	attrs := []slog.Attr{
 		slog.String("operation", operation),
-		slog.String("event", "sandbox_provider_operation_completed"),
-		slog.String("event.kind", "sandbox_provider_operation_completed"),
+		slog.String("event", strings.ReplaceAll(event, ".", "_")),
+		slog.String("event.kind", strings.ReplaceAll(event, ".", "_")),
 		slog.String("provider.name", "daytona"),
 		slog.String("outcome", outcome),
 		slog.Int64("duration.ms", duration.Milliseconds()),
@@ -163,11 +187,12 @@ func logProviderCompletion(ctx context.Context, logger *slog.Logger, operation s
 			slog.String("error.class", "sandbox_provider_error"),
 			slog.String("error.code", errorKind),
 			slog.Int("provider.status_code", statusCode),
-			slog.String("error.message_safe", boundedProviderLogMessage(safeMessage)),
+			slog.String("error.message_safe", providerOperationFailedMessage),
+			slog.String("provider.failure_detail", boundedProviderLogMessage(safeMessage)),
 		)
 		attrs = appendProviderDiagnosticAttrs(attrs, diagnostic)
 	}
-	logger.LogAttrs(ctx, level, "sandbox.provider.operation_completed", attrs...)
+	logger.LogAttrs(ctx, level, event, attrs...)
 }
 
 func appendProviderDiagnosticAttrs(attrs []slog.Attr, diagnostic sandbox.ProviderDiagnostic) []slog.Attr {
@@ -195,7 +220,7 @@ func appendProviderIdentityAttrs(attrs []slog.Attr, identity providerOperationId
 		{key: "environment.id", value: identity.environmentID},
 		{key: "operation.id", value: identity.lifecycleOperationID},
 		{key: "provider.resource.id", value: identity.providerResourceID},
-		{key: "tool_use.event.id", value: identity.toolUseEventID},
+		{key: "tool.use.event.id", value: identity.toolUseEventID},
 	} {
 		if item.value != "" {
 			attrs = append(attrs, slog.String(item.key, item.value))

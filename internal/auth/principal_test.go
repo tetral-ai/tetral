@@ -4,6 +4,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -84,6 +86,68 @@ func TestPrincipalAuthorityUnionAndOperationGate(t *testing.T) {
 	operations[0] = "mutated"
 	if IsRegisteredOperation("mutated") {
 		t.Fatal("registry mutable by caller")
+	}
+}
+
+func TestConnectionKeyPrincipalCarriesOnlyClientConnect(t *testing.T) {
+	ws := workspace.Workspace{ID: "workspace-a"}
+	connection := ConnectionKeyPrincipal(ws, "inst_a", "ccred_a")
+	if err := connection.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := NewInternalPrincipalSigner(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := signer.Mint(connection, "POST", "/v1/client/ready", "req-connection", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, _, err := signer.Verify(token, "POST", "/v1/client/ready")
+	if err != nil || verified.Credential != connection.Credential || verified.Authority.Scope != connection.Authority.Scope || len(verified.Authority.Operations) != 1 || verified.Authority.Operations[0] != OperationClientConnect {
+		t.Fatalf("signed connection principal = %+v, %v", verified, err)
+	}
+	var credentialError *AuthenticationError
+	if err := Authorize(connection, OperationSessionsList, ResourceReference{WorkspaceID: ws.ID, Type: "workspace"}); !errors.As(err, &credentialError) {
+		t.Fatalf("connection key on a public operation = %v; want an authentication error", err)
+	}
+	if IsRegisteredOperation(OperationClientConnect) {
+		t.Fatal("client.connect is registered")
+	}
+	if operations, err := RoleOperations(WorkspaceFullAccess); err != nil || slices.Contains(operations, OperationClientConnect) {
+		t.Fatal("workspace_full_access includes client.connect")
+	}
+	federated := Principal{Workspace: ws, Identity: &Identity{ID: "identity-a", Kind: IdentityService}, Credential: Credential{ID: "at_a", Kind: CredentialAccessToken}, Authority: Authority{Kind: AuthorityIdentityGrant, RuleID: "rule-a", IdentityID: "identity-a", GrantID: "grant-a", RuleRevision: 1, IdentityRevision: 1, GrantRevision: 1, PolicyVersion: PolicyVersion, Operations: []Operation{OperationClientConnect}, Scope: ResourceReference{WorkspaceID: ws.ID, Type: "workspace"}}}
+	independent := IndependentKeyPrincipal(ws, "ak_a")
+	independent.Authority.Operations = []Operation{OperationClientConnect}
+	for name, mutate := range map[string]func(*Principal){
+		"workspace scope":        func(p *Principal) { p.Authority.Scope = ResourceReference{WorkspaceID: ws.ID, Type: "workspace"} },
+		"scope without instance": func(p *Principal) { p.Authority.Scope.ID = "" },
+		"scope in another space": func(p *Principal) { p.Authority.Scope.WorkspaceID = "workspace-b" },
+		"a registered operation": func(p *Principal) {
+			p.Authority.Operations = []Operation{OperationClientConnect, OperationSessionsList}
+		},
+		"no operation":                func(p *Principal) { p.Authority.Operations = nil },
+		"api key attribution":         func(p *Principal) { p.APIKeyID = "ak_a" },
+		"an identity":                 func(p *Principal) { p.Identity = &Identity{ID: "identity-a", Kind: IdentityService} },
+		"independent key kind":        func(p *Principal) { p.Authority.Kind = AuthorityIndependentKey },
+		"grant lineage":               func(p *Principal) { p.Authority.GrantID = "grant-a" },
+		"api key with client.connect": func(p *Principal) { *p = independent },
+		"token with client.connect":   func(p *Principal) { *p = federated },
+		"instance scope on an api key": func(p *Principal) {
+			*p = IndependentKeyPrincipal(ws, "ak_a")
+			p.Authority.Scope = connection.Authority.Scope
+		},
+	} {
+		invalid := ConnectionKeyPrincipal(ws, "inst_a", "ccred_a")
+		mutate(&invalid)
+		if invalid.Validate() == nil {
+			t.Fatalf("%s: principal validated", name)
+		}
 	}
 }
 

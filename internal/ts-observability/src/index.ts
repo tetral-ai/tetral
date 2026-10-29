@@ -1,25 +1,33 @@
-import approvedFieldNames from "./fields.json";
-export { OperationMetricsRegistry, operationDurationBuckets } from "./operation-metrics.js";
-export type { OperationService, OperationOutcome, ShutdownPhaseLogRecord, ShutdownPhaseLogger } from "./operation-metrics.js";
-const approvedDiagnosticFields = new Set<string>(approvedFieldNames);
+import { context } from "@opentelemetry/api";
+import { diagnosticDefaults } from "./config.js";
+import type { DiagnosticConfig, LogLevel } from "./config.js";
+import { activeSpanContext, contextFields } from "./context.js";
+import { defaultUndeclaredNamePolicy, lookupEvent, UndeclaredNameError } from "./declarations.js";
+import type { Declarations, UndeclaredNamePolicy } from "./declarations.js";
+import { processInstanceId } from "./instance.js";
+import { invalidEvent, redactLogRecord, safeDiagnosticEvent, safeResourceValue } from "./fields.js";
+import type { TetralLogFieldValue } from "./fields.js";
 /**
  * @packageDocumentation
  *
  * Provides the shared structured JSON logger used by the Runtime Pod, Provider
- * Gateway, and MCP Connector service logger modules. Those callers specialize
- * the record type and supply a prompt-return sink. The logger bounds, filters,
- * redacts and limits records before serialization; sink failures are contained. Production callers currently select standard error, while tests may
- * inject an in-memory sink. This package provides in-memory metrics primitives and does not open a
- * listener.
+ * Gateway, and MCP Connector service logger modules, and the process
+ * telemetry (tracing, operation observations, pressure points, cold starts)
+ * those services record through. Callers specialize the record type and
+ * supply a prompt-return sink. The logger bounds, filters, redacts and limits
+ * records before serialization; sink failures are contained. Production
+ * callers select standard error, while tests may inject an in-memory sink.
+ * This package provides in-memory metrics primitives and opens no listener.
  *
  * Accepted records emit one JSON object followed by a newline. Debug is off by
- * default; repeated event/reason pairs emit an initial record and bounded summaries. The
- * logger-supplied `level`, UTC `time`, and the configured or defaulted
- * `service.name`, `service.version`, `deployment.environment`,
- * `service.instance.id`, and `process.pid` fields overwrite fields with the
- * same names in the caller's record. A missing `instanceId` option defaults to
- * one random UUID per process, and missing version and environment options use
- * `"unknown"`; record fields whose value is `undefined` are omitted.
+ * default; repeated event/reason pairs emit an initial record and bounded
+ * summaries. The logger-supplied `time`, `level`, `event`, `msg`, `log.type`,
+ * `trace_id`, `span_id` and the configured or defaulted `service.name`,
+ * `service.version`, `deployment.environment`, `service.instance.id`, and
+ * `process.pid` fields overwrite fields with the same names in the caller's
+ * record. A missing `instanceId` option defaults to one random identifier per
+ * process, and missing version and environment options use `"unknown"`;
+ * record fields whose value is `undefined` are omitted.
  *
  * Redaction is a syntactic, field-level safeguard: matching sensitive key names
  * or token-shaped string values replace the complete scalar value with
@@ -30,8 +38,8 @@ const approvedDiagnosticFields = new Set<string>(approvedFieldNames);
  * traces.
  */
 
-/** Scalar field values accepted by the shared structured log record. */
-export type TetralLogFieldValue = string | number | boolean | undefined;
+export type { TetralLogFieldValue } from "./fields.js";
+export { redactLogRecord } from "./fields.js";
 
 /**
  * Defines the common structured fields and permits service-specific scalar
@@ -60,8 +68,6 @@ type TetralLogRecordFields = {
   readonly "sandbox.id"?: string;
   readonly "cleanup.id"?: string;
   readonly "provider.request.id"?: string;
-  readonly "trace.id"?: string;
-  readonly "span.id"?: string;
   readonly "service.name"?: string;
   readonly "service.version"?: string;
   readonly "deployment.environment"?: string;
@@ -139,16 +145,17 @@ export interface TetralJsonLoggerOptions {
   /** Monotonic duration clock, independent of UTC timestamps. */
   readonly monotonicClock?: (() => number) | undefined;
   readonly diagnostics?: DiagnosticConfig | undefined;
+  /** The service's table; with one, an event that neither it nor the library table declares is refused. */
+  readonly declarations?: Declarations | undefined;
+  readonly undeclared?: UndeclaredNamePolicy | undefined;
 }
-import { diagnosticDefaults } from "./config.js";
-import type { DiagnosticConfig, LogLevel } from "./config.js";
-export { diagnosticDefaults, diagnosticEnvKeys, parseDiagnosticConfig } from "./config.js";
-export type { DiagnosticConfig, LogLevel } from "./config.js";
+export { diagnosticDefaults, diagnosticEnvKeys, parseDiagnosticConfig, parseDiagnosticConfigResult } from "./config.js";
+export type { DiagnosticConfig, DiagnosticConfigResult, LogLevel } from "./config.js";
 export { createDiagnosticStreamSink } from "./sink.js";
 export type { DiagnosticStream } from "./sink.js";
 
-const processInstanceId = crypto.randomUUID();
 const levels: Readonly<Record<LogLevel, number>> = { debug: 10, info: 20, warn: 30, error: 40 };
+const recordLevels: Readonly<Record<LogLevel, string>> = { debug: "DEBUG", info: "INFO", warn: "WARN", error: "ERROR" };
 const maxLimiterEntries = 256;
 interface Window {
   started: number; first: string; last: string; emitted: number; suppressed: number;
@@ -160,6 +167,7 @@ export function createTetralJsonLogger<TRecord extends TetralLogRecord = TetralL
   options: TetralJsonLoggerOptions,
 ): TetralDiagnosticLogger<TRecord> {
   const cfg = options.diagnostics ?? diagnosticDefaults;
+  const policy = options.undeclared ?? defaultUndeclaredNamePolicy();
   const base = {
     "service.name": safeResourceValue(options.serviceName),
     "deployment.environment": safeResourceValue(options.deploymentEnvironment ?? "unknown"),
@@ -167,6 +175,7 @@ export function createTetralJsonLogger<TRecord extends TetralLogRecord = TetralL
     "service.instance.id": safeResourceValue(options.instanceId ?? processInstanceId),
     "process.pid": process.pid,
   };
+  const now = (): string => recordTime(options.clock);
   const windows = new Map<string, Window>();
   const counts = { emitted: 0, filtered: 0, suppressed: 0, dropped: 0, sinkFailures: 0 };
   const summarySample = (record: Record<string, TetralLogFieldValue>, semanticFailure: boolean): Record<string, TetralLogFieldValue> => {
@@ -181,20 +190,20 @@ export function createTetralJsonLogger<TRecord extends TetralLogRecord = TetralL
     }
     return sample;
   };
-  const write = (level: LogLevel, record: Record<string, TetralLogFieldValue>, time: string): void => {
+  const write = (level: LogLevel, event: string, fields: Record<string, TetralLogFieldValue>, time: string): void => {
     try {
-      const bounded = redactLogRecord(record as TRecord);
-      if (typeof bounded.event === "string") bounded.event = safeDiagnosticEvent(bounded.event);
-      const line = `${JSON.stringify({ ...bounded, time, level, ...base })}\n`;
-      if (new TextEncoder().encode(line).byteLength > cfg.maxRecordBytes) { counts.dropped++; return; }
+      const line = `${JSON.stringify({
+        time, level: recordLevels[level], event, msg: event, ...fields, "log.type": lookupEvent(options.declarations, event)?.log_type ?? "app", ...base,
+      })}\n`;
+      if (Buffer.byteLength(line, "utf8") > cfg.maxRecordBytes) { counts.dropped++; return; }
       if (options.write(line) === false) { counts.dropped++; return; }
       counts.emitted++;
     } catch { counts.sinkFailures++; counts.dropped++; }
   };
   const summarize = (window: Window, time: string): void => {
     if (window.suppressed === 0) return;
-    write(window.level, {
-      event: "diagnostic.suppressed", operation: "diagnostic.limiter",
+    write(window.level, "diagnostic.suppressed", {
+      operation: "diagnostic.limiter",
       "event.original": window.event, reason: window.reason, ...window.sample,
       "suppressed.count": window.suppressed, "first_seen": window.first, "last_seen": window.last,
     }, time);
@@ -202,42 +211,68 @@ export function createTetralJsonLogger<TRecord extends TetralLogRecord = TetralL
   const emit = (level: LogLevel, record: TRecord): void => {
     if (levels[level] < levels[cfg.level]) { counts.filtered++; return; }
     try {
-      const time = (options.clock?.() ?? new Date()).toISOString();
-      const boundedRecord = redactLogRecord(record);
-      const now = options.monotonicClock?.() ?? performance.now();
-      if (typeof boundedRecord["recovery.event"] === "string") {
-        for (const [key, window] of windows) { if (window.event === boundedRecord["recovery.event"]) { summarize(window, time); windows.delete(key); } }
+      const time = now();
+      const active = context.active();
+      const fields = redactLogRecord({ ...contextFields(active), ...record });
+      const spanContext = activeSpanContext(active);
+      if (spanContext !== undefined) { fields.trace_id = spanContext.traceId; fields.span_id = spanContext.spanId; }
+      let event = recordEvent(fields);
+      if (event !== invalidEvent && options.declarations !== undefined && lookupEvent(options.declarations, event) === undefined) {
+        if (policy === "throw") {
+          const error = new UndeclaredNameError("event", event);
+          // A caller that contains logging failures cannot hide the missing declaration from the test run.
+          queueMicrotask(() => { throw error; });
+          throw error;
+        }
+        fields["event.original"] = event;
+        event = invalidEvent;
       }
-      const event = safeDiagnosticEvent(boundedRecord.event ?? boundedRecord["event.kind"] ?? "diagnostic.unknown");
-      const reason = String(boundedRecord["error.code"] ?? boundedRecord.reason ?? boundedRecord.outcome ?? "none").slice(0, 128);
-      if (level === "info" && record[semanticErrorOutcome] !== true && record["diagnostic.repeat"] !== true) { write(level, record, time); return; }
-      if (level === "debug") { write(level, record, time); return; }
+      delete fields.event;
+      fields.operation ??= event.split(".")[0];
+      if (level === "error" || fields["error.class"] !== undefined || fields["error.code"] !== undefined || fields["error.message_safe"] !== undefined) {
+        fields["error.class"] ??= "operation_failed";
+        fields["error.code"] ??= "operation_failed";
+        fields["error.message_safe"] ??= "operation failed";
+      }
+      const semanticFailure = record[semanticErrorOutcome] === true || fields["error.class"] !== undefined;
+      const monotonicNow = options.monotonicClock?.() ?? performance.now();
+      if (typeof fields["recovery.event"] === "string") {
+        for (const [key, window] of windows) { if (window.event === fields["recovery.event"]) { summarize(window, time); windows.delete(key); } }
+      }
+      const reason = event === "pressure.rejecting_started" || event === "pressure.rejecting_ended"
+        ? `${String(fields["pressure.point"])}\0${String(fields["pressure.cause"])}`
+        : String(fields["error.code"] ?? fields.reason ?? fields.outcome ?? "none").slice(0, 128);
+      if (level === "info" && !semanticFailure && record["diagnostic.repeat"] !== true) { write(level, event, fields, time); return; }
+      if (level === "debug") { write(level, event, fields, time); return; }
       const key = `${event}\0${reason}`;
       let window = windows.get(key);
-      if (window !== undefined && now - window.started >= cfg.summaryIntervalMs) {
+      if (window !== undefined && monotonicNow - window.started >= cfg.summaryIntervalMs) {
         summarize(window, time); windows.delete(key); window = undefined;
       }
       if (window === undefined) {
         for (const [oldKey, old] of windows) {
-          if (now - old.started >= cfg.summaryIntervalMs) { summarize(old, time); windows.delete(oldKey); }
+          if (monotonicNow - old.started >= cfg.summaryIntervalMs) { summarize(old, time); windows.delete(oldKey); }
         }
         if (windows.size >= maxLimiterEntries) { counts.dropped++; return; }
-        const sample = summarySample(boundedRecord, record[semanticErrorOutcome] === true);
-        window = { started: now, first: time, last: time, emitted: 0, suppressed: 0, level, event, reason, sample };
+        const sample = summarySample(fields, semanticFailure);
+        window = { started: monotonicNow, first: time, last: time, emitted: 0, suppressed: 0, level, event, reason, sample };
         windows.set(key, window);
       }
-      if (window.sample["error.class"] === undefined && record[semanticErrorOutcome] === true) {
-        window.sample = summarySample(boundedRecord, true);
+      if (window.sample["error.class"] === undefined && semanticFailure) {
+        window.sample = summarySample(fields, true);
       }
       window.last = time;
       if (levels[level] > levels[window.level]) { window.level = level; window.emitted = 0; }
       if (window.emitted >= cfg.burst) { window.suppressed++; counts.suppressed++; return; }
-      window.emitted++; write(level, record, time);
-    } catch { counts.dropped++; }
+      window.emitted++; write(level, event, fields, time);
+    } catch (error) {
+      if (error instanceof UndeclaredNameError) throw error;
+      counts.dropped++;
+    }
   };
   const timer = setInterval(() => {
-    try { const now = options.monotonicClock?.() ?? performance.now(); const time = (options.clock?.() ?? new Date()).toISOString();
-      for (const [key, window] of windows) { if (now - window.started >= cfg.summaryIntervalMs) { summarize(window, time); windows.delete(key); } }
+    try { const monotonicNow = options.monotonicClock?.() ?? performance.now(); const time = now();
+      for (const [key, window] of windows) { if (monotonicNow - window.started >= cfg.summaryIntervalMs) { summarize(window, time); windows.delete(key); } }
     } catch { counts.dropped++; }
   }, cfg.summaryIntervalMs);
   timer.unref();
@@ -247,7 +282,7 @@ export function createTetralJsonLogger<TRecord extends TetralLogRecord = TetralL
     warn: (record) => emit("warn", record), error: (record) => emit("error", record),
     flush: () => {
       clearInterval(timer);
-      try { const time = (options.clock?.() ?? new Date()).toISOString(); for (const window of windows.values()) summarize(window, time); }
+      try { const time = now(); for (const window of windows.values()) summarize(window, time); }
       catch { counts.dropped++; }
       windows.clear();
     },
@@ -259,41 +294,22 @@ export function createTetralJsonLogger<TRecord extends TetralLogRecord = TetralL
   };
 }
 
-const redacted = "[REDACTED]";
-const sensitiveKeyPattern = /(?:^|[._-])(?:authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|secret|password|engine[_-]?vault[_-]?key)(?:[._-]|$)|^(?:authorizationToken|apiKey|accessToken|refreshToken|sessionToken|clientSecret|secretAccessKey|engineVaultKey)$/i;
-const contentKeyPattern = /(?:^|[._-])(?:body|content|prompt|reasoning|arguments|payload|stack|headers|sql|exception|provider_response|tool_result)(?:[._-]|$)/i;
-const sensitiveValuePattern = /\bBearer\s+\S+|(?:sk|ant|ghp|github)[-_][A-Za-z0-9._-]{8,}|(?:access_token|refresh_token|client_secret|accessToken|refreshToken|clientSecret|token)=/i;
-
-function redactLogRecord<TRecord extends TetralLogRecord>(record: TRecord): Record<string, TetralLogFieldValue> {
-  const next: Record<string, TetralLogFieldValue> = {};
-  let fields = 0;
-  for (const key in record) {
-    if (!Object.hasOwn(record, key)) continue;
-    const value = record[key];
-    if (++fields > 64) break;
-    if (key.length > 128) continue;
-    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") continue;
-    if (typeof value === "number" && !Number.isFinite(value)) continue;
-    if (value === undefined) {
-      continue;
-    }
-    if (sensitiveKeyPattern.test(key) || (contentKeyPattern.test(key) && !(approvedDiagnosticFields.has(key) && typeof value === "number" && key.endsWith("_count")))) {
-      next[key] = redacted;
-      continue;
-    }
-    if (typeof value === "string" && value.length > 1024) { if (approvedDiagnosticFields.has(key)) next[key] = "[TRUNCATED]"; continue; }
-    if (typeof value === "string" && (sensitiveValuePattern.test(value) || /https?:\/\//i.test(value))) {
-      next[key] = redacted;
-      continue;
-    }
-    if (!approvedDiagnosticFields.has(key)) continue;
-    next[key] = typeof value === "string" ? value.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 1024) : value;
-  }
-  return next;
+/**
+ * RFC 3339 UTC with exactly six fractional digits, from the wall clock unless one is injected.
+ * `Date.now()` stops at milliseconds, so `performance.now()` supplies only the digits below them.
+ */
+function recordTime(clock: (() => Date) | undefined): string {
+  const micros = clock === undefined ? Date.now() * 1000 + Math.floor((performance.now() % 1) * 1000) : clock().getTime() * 1000;
+  const iso = new Date(Math.floor(micros / 1000)).toISOString();
+  return `${iso.slice(0, -1)}${String(micros % 1000).padStart(3, "0")}Z`;
 }
 
-function safeDiagnosticEvent(event: unknown): string {
-  return typeof event === "string" && /^[a-z][a-z0-9_.-]{0,127}$/.test(event) && !sensitiveValuePattern.test(event) ? event : "diagnostic.invalid_event";
+function recordEvent(fields: Readonly<Record<string, TetralLogFieldValue>>): string {
+  for (const candidate of [fields.event, fields["event.kind"]]) {
+    const event = safeDiagnosticEvent(candidate);
+    if (event !== invalidEvent) return event;
+  }
+  return invalidEvent;
 }
 
 /** Fixed series, no request/workspace/credential labels; independent of the log sink. */
@@ -308,17 +324,26 @@ export function diagnosticMetricsText<TRecord extends TetralLogRecord>(logger: T
       `# TYPE tetral_diagnostic_limiter_entries gauge\ntetral_diagnostic_limiter_entries ${stats.limiterEntries}\n`;
   } catch { return ""; }
 }
+
 export { workloadResourceEnvKeys, parseWorkloadResourceConfig } from "./resource-config.js";
 export type { WorkloadResourceConfig } from "./resource-config.js";
-
-function safeResourceValue(value: string): string {
-  if (value.length > 253) return "[TRUNCATED]";
-  if (sensitiveValuePattern.test(value) || /https?:\/\//i.test(value)) return redacted;
-  return value.replace(/[\x00-\x1f\x7f]/g, " ");
-}
-
 export { processFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "./process-boundary.js";
 export type { ProcessFailurePhase } from "./process-boundary.js";
-
 export { processShutdownFailureLogRecord } from "./process-boundary.js";
 export type { ExecutableProcessBoundary } from "./process-boundary.js";
+export { OperationMetricsRegistry } from "./operation-metrics.js";
+export type { OperationService, OperationOutcome, ShutdownPhaseLogRecord, ShutdownPhaseLogger } from "./operation-metrics.js";
+export { libraryDeclarations, parseDeclarations, serviceDeclarations, UndeclaredNameError } from "./declarations.js";
+export type { Declarations, EventDeclaration, MetricDeclaration, OperationDeclaration, SpanDeclaration, UndeclaredNamePolicy } from "./declarations.js";
+export { longOperationDurationBuckets, MetricRegistry, renderMetrics, requestDurationBuckets } from "./metric-registry.js";
+export type { Counter, Gauge, Histogram, MetricSample } from "./metric-registry.js";
+export { contextFields, withFields } from "./context.js";
+export type { Fields } from "./context.js";
+export { activeTraceparent, formatTraceparent, parseTraceparent, BoundedSpanProcessor } from "./tracing.js";
+export { createTelemetry, currentTelemetry, installTelemetry, operationMetricsText, Telemetry } from "./telemetry.js";
+export type { TelemetryOptions } from "./telemetry.js";
+export { observe, Observation } from "./observe.js";
+export type { CodedError } from "./observe.js";
+export { PressurePoint, Rejection } from "./pressure.js";
+export { beginColdStart, beginServiceColdStart, ColdStart, completeServiceColdStart, endServiceColdStartPhase, failServiceColdStart, failServiceColdStartAtConfig } from "./cold-start.js";
+export { continueGrpcTraces, injectTraceparent, traceparentClientInterceptor } from "./grpc.js";

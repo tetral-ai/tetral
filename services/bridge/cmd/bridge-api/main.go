@@ -58,6 +58,7 @@ func run(ctx context.Context, env envReader) error {
 	defer owner.CloseWithBudget()
 	logger := owner.Logger
 	defer workload.InstallDefaultLogger(logger)()
+	coldStart := workload.BeginServiceColdStart(ctx)
 	if err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
@@ -66,6 +67,7 @@ func run(ctx context.Context, env envReader) error {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	workload.ConfigureProcessShutdown(ctx, bridgeConfig.LifecyclePolicy.DrainTimeout+bridgeConfig.LifecyclePolicy.CancelJoinTimeout, owner)
+	coldStart.Advance(ctx)
 	database, err := openDatabase(resourceCtx, agentruntimebridge.EnvDatabaseURL, env.Getenv(agentruntimebridge.EnvDatabaseURL))
 	if err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
@@ -123,6 +125,7 @@ func run(ctx context.Context, env envReader) error {
 			logger.Error("shutdown.resource_close_failed", "operation", "close_mcp_manifest_channel", "error.class", "resource_shutdown", "error.code", "mcp_manifest_channel_close_failed")
 		}
 	}()
+	coldStart.Advance(ctx)
 	// One process-local LISTEN connection feeds AwaitSandboxExecution waiters
 	// their wake hints; initial readiness and reconnect trigger catch-up reads.
 	executionResultListenerCtx, cancelExecutionResultListener := context.WithCancel(resourceCtx)

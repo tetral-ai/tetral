@@ -19,10 +19,12 @@ contracts.
   `tetral_job_runner_binding_page(text, text, text, text, integer)` for Job
   Runner only; for Auth only, `tetral_auth_lookup_key`,
   `tetral_auth_lookup_token`, `tetral_auth_lookup_grants`,
-  `tetral_auth_lock_authority` and `tetral_auth_prune_tokens`; for Cleanup
+  `tetral_auth_lock_authority`, `tetral_auth_prune_tokens` and
+  `tetral_auth_lookup_connection_key`; for Cleanup
   only, `tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer)`,
-  `tetral_prune_event_idempotency` and `tetral_prune_event_changes`; and, for
-  Queue only, `tetral_prune_job_runner_jobs`.
+  `tetral_prune_event_idempotency` and `tetral_prune_event_changes`; for
+  Queue only, `tetral_prune_job_runner_jobs`; and, for Computer Hub only,
+  `tetral_computer_hub_instruction_pressure()`.
   Operator-selected role names and credentials are inputs to the installer and
   never belong in this repository.
 - `ApplyRoleContract` owns role attributes, public-privilege revocation, schema
@@ -113,6 +115,53 @@ change rows they summarize. Event Stream may only SELECT it; only the change
 retention function writes it. Its `(workspace_id, session_id, pruned_through
 DESC)` index serves Event Stream's shared idle check, which reads a Session's
 highest watermark across its feeds.
+
+`instances` and `instance_credentials` are Workspace-RLS tables of CLI
+registrations and their connection credentials, which only the `computer_hub`
+role writes. A credential row holds the SHA-256 digest of its key, never the
+key; a revoked one names its cause, `delete`, `deregistration` or
+`pending_activation`. A credential delivered on the stream renews a live
+connection: it names that connection and the credential it replaces, has no
+digest until the CLI fetches its key, and records the fetch and its first
+authenticated use. An instance row keeps the latest use of a credential that
+such an activation revoked. `instance_idempotency_records`, also
+Workspace-RLS and the hub's alone, holds one row per issuing request's
+`Idempotency-Key`, scoped to the principal's credential and the route, with
+the request body's fingerprint, the instance and credential the request
+created and the status it answered.
+`instance_connections` holds one row per CLI connection of an instance, kept
+after it ends: its credential, the hub pod holding its stream, its lease, the
+accepted or refused ready, the latest accepted heartbeat and the end. A
+partial unique index allows one connection per instance that has not ended.
+`connection_upstream_messages` is the connection's replay ledger of accepted
+upstream messages other than ready and heartbeat, keyed by the SHA-256 of the
+`message_id`, with the request fingerprint and the exact answer; ending the
+connection deletes its rows. `connection_protocol_errors` keeps each accepted
+protocol-error report, its message as UTF-8 bytes, since a JSON string may hold
+U+0000. `connection_instructions` holds one row per Session
+instruction issued on a connection: its `message_id`, unique over all
+connections, its issue sequence on the connection, the exact envelope every
+write sends with the issuing work's trace context, and the times of its first
+write and of its final report; the connection row keeps its latest issue
+sequence and the time of its first Session report. Only the `computer_hub`
+role writes these four tables, and it may only insert protocol errors.
+The hub's instruction pressure gauges read across Workspaces through the
+migration-owned security-definer
+`public.tetral_computer_hub_instruction_pressure()`, which only
+Computer Hub executes. It sets `tetral.instruction_pressure`, and the
+SELECT-only `instruction_pressure` policies on `instance_connections` and
+`connection_instructions` admit a row only when that flag is set and
+`current_user` is the table owner; it returns the two counts and the age of
+the oldest queued instruction by the database clock, and nothing else.
+Auth resolves a connection key before it knows the Workspace through the
+migration-owned security-definer
+`public.tetral_auth_lookup_connection_key(bytea)`, which only Auth executes,
+with a fixed search path, a qualified table and revoked public execution. It
+sets `tetral.auth_lookup`, and the SELECT-only `auth_lookup` policy on
+`instance_credentials` admits a row only when that flag is set and
+`current_user` is the table owner. The function returns the Workspace, instance
+and credential IDs that hold the exact digest, whatever the credential's state,
+and nothing else.
 
 `session_runtime_handoffs` and `session_runtime_handoff_threads` are internal
 Workspace-RLS receipts retained through Session lifetime. They preserve exact

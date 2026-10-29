@@ -32,6 +32,8 @@ spec:
           command:
             - /usr/local/bin/git-proxy
           env:
+            - name: TETRAL_DB_SLOW_QUERY_MS
+              value: "250"
             - name: TETRAL_LOG_BURST
               value: "1"
             - name: TETRAL_LOG_LEVEL
@@ -40,6 +42,8 @@ spec:
               value: "16384"
             - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
               value: "30000"
+            - name: TETRAL_TRACE_SAMPLE_RATIO
+              value: "1.0"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME

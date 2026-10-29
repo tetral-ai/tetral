@@ -8,6 +8,7 @@ import (
 	"net"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/internalgrpc/auth"
@@ -17,7 +18,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 type Authenticator interface {
@@ -138,6 +142,7 @@ func forceStopAndJoin(server *grpc.Server, cfg Config) error {
 		cfg.Logger.Error("internal.grpc.cancellation_join_timeout",
 			"operation", "internal.grpc.shutdown", "event.kind", "shutdown", "component", "internal-grpc",
 			"error.class", "shutdown_error", "error.code", "cancellation_join_timeout",
+			"error.message_safe", "gRPC handlers outlived the cancellation budget",
 			"duration.ms", time.Since(started).Milliseconds())
 		<-stopped
 		if cfg.Metrics != nil {
@@ -192,7 +197,7 @@ func buildServer(cfg Config) (*grpc.Server, *health.Server, error) {
 				methods = append(methods, "/"+service+"/"+method.Name)
 			}
 		}
-		cfg.Metrics.Operations.SetOperations(methods)
+		cfg.Metrics.SetMethods(methods)
 	}
 	return server, healthServer, nil
 }
@@ -213,25 +218,33 @@ func listenerFor(cfg Config) (net.Listener, error) {
 	return listen("tcp", address)
 }
 
+// authUnaryInterceptor and authStreamInterceptor own each call's recording:
+// a server span that continues the caller's traceparent, the request's
+// workspace, Session and thread as correlation fields (a stream's from its
+// first message), one duration sample and one DEBUG record, a failed call
+// included. The component that handles a failure records it; a
+// ResourceExhausted refusal is counted at its pressure point.
 func authUnaryInterceptor(cfg Config) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		started := time.Now()
+		ctx, span := workload.StartServerSpan(withRequestFields(ctx, req), info.FullMethod, incomingTraceparent(ctx))
+		defer span.End()
 		token, err := auth.TokenFromIncomingContext(ctx)
 		if err != nil {
-			logBoundary(cfg.Logger, cfg.Metrics, info.FullMethod, "", codes.Unauthenticated, time.Since(started))
+			logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, "", codes.Unauthenticated, time.Since(started))
 			return nil, err
 		}
 		identity, err := cfg.Authenticator.Authenticate(ctx, token)
 		if err != nil {
-			logBoundary(cfg.Logger, cfg.Metrics, info.FullMethod, "", status.Code(err), time.Since(started))
+			logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, "", status.Code(err), time.Since(started))
 			return nil, err
 		}
 		if err := authorizeMethod(cfg, identity, info.FullMethod); err != nil {
-			logBoundary(cfg.Logger, cfg.Metrics, info.FullMethod, identity.ServiceAccount.String(), status.Code(err), time.Since(started))
+			logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, identity.ServiceAccount.String(), status.Code(err), time.Since(started))
 			return nil, err
 		}
 		response, err := handler(auth.ContextWithIdentity(ctx, identity), req)
-		logBoundary(cfg.Logger, cfg.Metrics, info.FullMethod, identity.ServiceAccount.String(), status.Code(err), time.Since(started))
+		logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, identity.ServiceAccount.String(), status.Code(err), time.Since(started))
 		return response, err
 	}
 }
@@ -239,27 +252,76 @@ func authUnaryInterceptor(cfg Config) grpc.UnaryServerInterceptor {
 func authStreamInterceptor(cfg Config) grpc.StreamServerInterceptor {
 	return func(srv any, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		started := time.Now()
-		token, err := auth.TokenFromIncomingContext(stream.Context())
+		ctx, span := workload.StartServerSpan(stream.Context(), info.FullMethod, incomingTraceparent(stream.Context()))
+		defer span.End()
+		token, err := auth.TokenFromIncomingContext(ctx)
 		if err != nil {
-			logBoundary(cfg.Logger, cfg.Metrics, info.FullMethod, "", codes.Unauthenticated, time.Since(started))
+			logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, "", codes.Unauthenticated, time.Since(started))
 			return err
 		}
-		identity, err := cfg.Authenticator.Authenticate(stream.Context(), token)
+		identity, err := cfg.Authenticator.Authenticate(ctx, token)
 		if err != nil {
-			logBoundary(cfg.Logger, cfg.Metrics, info.FullMethod, "", status.Code(err), time.Since(started))
+			logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, "", status.Code(err), time.Since(started))
 			return err
 		}
 		if err := authorizeMethod(cfg, identity, info.FullMethod); err != nil {
-			logBoundary(cfg.Logger, cfg.Metrics, info.FullMethod, identity.ServiceAccount.String(), status.Code(err), time.Since(started))
+			logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, identity.ServiceAccount.String(), status.Code(err), time.Since(started))
 			return err
 		}
-		err = handler(srv, &identityServerStream{
+		wrapped := &identityServerStream{
 			ServerStream: stream,
-			ctx:          auth.ContextWithIdentity(stream.Context(), identity),
-		})
-		logBoundary(cfg.Logger, cfg.Metrics, info.FullMethod, identity.ServiceAccount.String(), status.Code(err), time.Since(started))
+			span:         span,
+			ctx:          auth.ContextWithIdentity(ctx, identity),
+		}
+		err = handler(srv, wrapped)
+		logBoundary(withFields(ctx, wrapped.requestFields()), span, cfg.Logger, cfg.Metrics, info.FullMethod, identity.ServiceAccount.String(), status.Code(err), time.Since(started))
 		return err
 	}
+}
+
+func incomingTraceparent(ctx context.Context) string {
+	if values := metadata.ValueFromIncomingContext(ctx, "traceparent"); len(values) == 1 {
+		return values[0]
+	}
+	return ""
+}
+
+// requestCorrelationFields maps the request fields that name a workspace,
+// Session or thread to their correlation field names.
+var requestCorrelationFields = map[protoreflect.Name]string{"workspace_id": "workspace.id", "session_id": "session.id", "thread_id": "thread.id"}
+
+func withRequestFields(ctx context.Context, req any) context.Context {
+	return withFields(ctx, requestFields(req))
+}
+
+func requestFields(req any) []slog.Attr {
+	message, ok := req.(proto.Message)
+	if !ok {
+		return nil
+	}
+	reflected := message.ProtoReflect()
+	var fields []slog.Attr
+	for name, field := range requestCorrelationFields {
+		descriptor := reflected.Descriptor().Fields().ByName(name)
+		if descriptor == nil || descriptor.Kind() != protoreflect.StringKind || descriptor.IsList() {
+			continue
+		}
+		if value := reflected.Get(descriptor).String(); value != "" {
+			fields = append(fields, slog.String(field, value))
+		}
+	}
+	return fields
+}
+
+func withFields(ctx context.Context, fields []slog.Attr) context.Context {
+	if len(fields) == 0 {
+		return ctx
+	}
+	values := make([]any, len(fields))
+	for i, field := range fields {
+		values[i] = field
+	}
+	return workload.WithFields(ctx, values...)
 }
 
 func authorizeMethod(cfg Config, identity auth.Identity, method string) error {
@@ -356,18 +418,55 @@ func recoveryStreamInterceptor(logger *slog.Logger, metrics *workload.GRPCMetric
 	}
 }
 
+// identityServerStream gives the handler the caller's identity and, once the
+// first message arrives, that message's correlation fields; the mutex orders
+// RecvMsg's update against a Context call from another goroutine.
 type identityServerStream struct {
 	grpc.ServerStream
-	ctx context.Context
+	span     *workload.Span
+	mu       sync.Mutex
+	ctx      context.Context
+	fields   []slog.Attr
+	received bool
 }
 
 func (s *identityServerStream) Context() context.Context {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.ctx
 }
 
-func logBoundary(logger *slog.Logger, metrics *workload.GRPCMetrics, method string, caller string, code codes.Code, elapsed time.Duration) {
+func (s *identityServerStream) RecvMsg(m any) error {
+	if err := s.ServerStream.RecvMsg(m); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.received {
+		return nil
+	}
+	s.received = true
+	s.fields = requestFields(m)
+	for _, field := range s.fields {
+		s.span.SetString(field.Key, field.Value.String())
+	}
+	s.ctx = withFields(s.ctx, s.fields)
+	return nil
+}
+
+func (s *identityServerStream) requestFields() []slog.Attr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fields
+}
+
+func logBoundary(ctx context.Context, span *workload.Span, logger *slog.Logger, metrics *workload.GRPCMetrics, method string, caller string, code codes.Code, elapsed time.Duration) {
 	if metrics != nil {
 		metrics.ObserveGRPCRequest(method, code.String(), elapsed)
+	}
+	span.SetString("rpc.grpc.status_name", code.String())
+	if code != codes.OK {
+		span.SetFailure("grpc_error", strings.ToLower(code.String()))
 	}
 	if logger != nil {
 		attrs := []slog.Attr{
@@ -389,16 +488,7 @@ func logBoundary(logger *slog.Logger, metrics *workload.GRPCMetrics, method stri
 				slog.String("error.message_safe", "internal gRPC request failed"),
 			)
 		}
-		level := slog.LevelInfo
-		switch code {
-		case codes.OK, codes.Canceled:
-			level = slog.LevelDebug
-		case codes.Internal, codes.DataLoss:
-			level = slog.LevelError
-		case codes.Unavailable, codes.ResourceExhausted, codes.DeadlineExceeded:
-			level = slog.LevelWarn
-		}
-		logger.LogAttrs(context.Background(), level, "internal.grpc.request", attrs...)
+		logger.LogAttrs(ctx, slog.LevelDebug, "internal.grpc.request", attrs...)
 	}
 }
 

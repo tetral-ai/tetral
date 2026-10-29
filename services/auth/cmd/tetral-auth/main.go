@@ -32,6 +32,7 @@ func run(ctx context.Context, env tetralauth.Env) error {
 	defer diagnosticOwner.CloseWithBudget()
 	logger := diagnosticOwner.Logger
 	defer workload.InstallDefaultLogger(logger)()
+	coldStart := workload.BeginServiceColdStart(ctx)
 	if diagnosticErr != nil {
 		return workload.LogStartupFailure(logger, "auth", diagnosticErr)
 	}
@@ -40,17 +41,18 @@ func run(ctx context.Context, env tetralauth.Env) error {
 		return workload.LogStartupFailure(logger, "auth", err)
 	}
 	workload.ConfigureProcessShutdown(ctx, tetralauth.DefaultShutdownTimeout+5*time.Second, diagnosticOwner)
+	coldStart.Advance(ctx)
 	httpMetrics := workload.NewHTTPMetrics("auth")
 	app, err := tetralauth.BuildApplication(ctx, cfg, nil, tetralauth.WithLogger(logger), tetralauth.WithRequestMetrics(httpMetrics))
 	if err != nil {
 		return workload.LogStartupFailure(logger, "auth", err)
 	}
 	defer workload.ProcessCleanup(ctx, func() { _ = app.Close() })
+	coldStart.Advance(ctx)
 	readiness := workload.NewReadiness()
 	handler := buildHTTPHandler(readiness, app.Handler)
 	metricsHandler := workload.HealthRouter(readiness,
 		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
-		workload.WithHTTPMetrics(httpMetrics),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
 		workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", app.Client)),
 		workload.WithMetricsCollector("auth_token_pruning", app.PruningMetrics),
