@@ -976,6 +976,8 @@ func TestSlowWorkspaceDoesNotStallOtherIdleChecks(t *testing.T) {
 	}
 	f.trace.hold(slow)
 	f.start()
+	// Fast publications do not prove that the slow worker has reached its hold.
+	waitCondition(t, func() bool { return f.trace.startedIn(slow) == 1 })
 	for round := 1; round <= 3; round++ {
 		if round > 1 {
 			f.advance()

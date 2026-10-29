@@ -541,6 +541,10 @@ func VerifyGoBuildCacheWorkflows(root string) error {
 			}
 		}
 	}
+	if err := VerifyCLIBuildCacheWorkflows(root); err != nil {
+		return err
+	}
+	writers = append(writers, goBuildCacheWriter{file: "cli-build-cache.yml", job: "build"})
 	return verifyActionsCacheWriters(root, writers)
 }
 

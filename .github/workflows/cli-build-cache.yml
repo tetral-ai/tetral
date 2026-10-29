@@ -1,0 +1,144 @@
+name: CLI Build Cache
+
+# Only merged code may create these reusable compiled outputs.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cli-build-cache-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    cache-mode: write
+    steps:
+      - name: Check out the exact revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Set up Go without its own cache
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.26.10'
+          cache: false
+      - name: Install bubblewrap for the digest fixture
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+      - name: Install the pinned Rust toolchain
+        working-directory: cli
+        run: rustup toolchain install
+      - name: Prepare compatible keys and check free disk
+        id: prepare
+        run: ./scripts/cli-build-cache.sh prepare all "$RUNNER_TEMP/cli-cache-evidence"
+      - name: Look up common for this revision
+        id: lookup-common
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ steps.prepare.outputs.common-paths }}
+          key: ${{ steps.prepare.outputs.common-key }}
+          lookup-only: true
+      - name: Look up digest for this revision
+        id: lookup-digest
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ steps.prepare.outputs.digest-paths }}
+          key: ${{ steps.prepare.outputs.digest-key }}
+          lookup-only: true
+      - name: Look up release for this revision
+        id: lookup-release
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ steps.prepare.outputs.release-paths }}
+          key: ${{ steps.prepare.outputs.release-key }}
+          lookup-only: true
+      - name: Record exact-key lookups
+        env:
+          COMMON_HIT: ${{ steps.lookup-common.outputs.cache-hit }}
+          DIGEST_HIT: ${{ steps.lookup-digest.outputs.cache-hit }}
+          RELEASE_HIT: ${{ steps.lookup-release.outputs.cache-hit }}
+          COMMON_KEY: ${{ steps.prepare.outputs.common-key }}
+          DIGEST_KEY: ${{ steps.prepare.outputs.digest-key }}
+          RELEASE_KEY: ${{ steps.prepare.outputs.release-key }}
+        run: ./scripts/cli-build-cache.sh lookups "$RUNNER_TEMP/cli-cache-evidence"
+      - name: Restore compatible common and digest outputs
+        if: steps.prepare.outputs.restore-allowed == 'true' && (steps.lookup-common.outputs.cache-hit != 'true' || steps.lookup-digest.outputs.cache-hit != 'true' || steps.lookup-release.outputs.cache-hit != 'true')
+        uses: ./.github/actions/cli-build-cache
+        with:
+          profile: functional
+          evidence-dir: ${{ runner.temp }}/cli-cache-evidence/restores
+      - name: Restore compatible release outputs
+        id: release
+        if: steps.prepare.outputs.restore-allowed == 'true' && steps.lookup-release.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ steps.prepare.outputs.release-paths }}
+          key: ${{ steps.prepare.outputs.release-key }}
+          restore-keys: ${{ steps.prepare.outputs.release-prefix }}
+      - name: Compile common
+        id: build-common
+        if: steps.lookup-common.outputs.cache-hit != 'true'
+        timeout-minutes: 25
+        run: ./scripts/cli-build-cache.sh build common producer "$RUNNER_TEMP/cli-cache-evidence"
+      - name: Measure common before saving
+        if: steps.lookup-common.outputs.cache-hit != 'true'
+        env:
+          REQUESTED_KEY: ${{ steps.prepare.outputs.common-key }}
+          RESTORE_OUTCOME: success
+        run: ./scripts/cli-build-cache.sh record common "$RUNNER_TEMP/cli-cache-evidence/saved"
+      - name: Save common
+        if: steps.lookup-common.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ steps.prepare.outputs.common-paths }}
+          key: ${{ steps.prepare.outputs.common-key }}
+      - name: Compile digest
+        id: build-digest
+        if: steps.lookup-digest.outputs.cache-hit != 'true'
+        timeout-minutes: 25
+        run: ./scripts/cli-build-cache.sh build digest producer "$RUNNER_TEMP/cli-cache-evidence"
+      - name: Measure digest before saving
+        if: steps.lookup-digest.outputs.cache-hit != 'true'
+        env:
+          REQUESTED_KEY: ${{ steps.prepare.outputs.digest-key }}
+          RESTORE_OUTCOME: success
+        run: ./scripts/cli-build-cache.sh record digest "$RUNNER_TEMP/cli-cache-evidence/saved"
+      - name: Save digest
+        if: steps.lookup-digest.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ steps.prepare.outputs.digest-paths }}
+          key: ${{ steps.prepare.outputs.digest-key }}
+      - name: Compile release
+        id: build-release
+        if: steps.lookup-release.outputs.cache-hit != 'true'
+        timeout-minutes: 25
+        run: ./scripts/cli-build-cache.sh build release-only producer "$RUNNER_TEMP/cli-cache-evidence"
+      - name: Measure release before saving
+        if: steps.lookup-release.outputs.cache-hit != 'true'
+        env:
+          REQUESTED_KEY: ${{ steps.prepare.outputs.release-key }}
+          RESTORE_OUTCOME: success
+        run: ./scripts/cli-build-cache.sh record release "$RUNNER_TEMP/cli-cache-evidence/saved"
+      - name: Save release
+        if: steps.lookup-release.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ steps.prepare.outputs.release-paths }}
+          key: ${{ steps.prepare.outputs.release-key }}
+      - name: Upload cache and compilation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cli-build-cache-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cli-cache-evidence
+          if-no-files-found: warn
+          retention-days: 14

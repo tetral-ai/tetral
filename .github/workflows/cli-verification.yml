@@ -1,0 +1,195 @@
+name: CLI Verification
+
+# No path filter: CLI results reports on every pull request, so it can be a
+# required check; the changed job decides whether the build jobs run.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      measure-builds:
+        description: Measure cold and warm builds on the same runner before testing
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+cache-mode: read
+
+concurrency:
+  # Ignored label events must also have their own group: a job-level skip
+  # alone cannot prevent workflow admission from cancelling pending work.
+  group: cli-verification-${{ github.event.action == 'labeled' && github.event.label.name != 'cli-build-benchmark' && format('ignored-label-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changed:
+    if: github.event.action != 'labeled' || github.event.label.name == 'cli-build-benchmark'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      cli: ${{ steps.paths.outputs.cli }}
+    steps:
+      - name: Check out the pull request with its history
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Find changes to the CLI
+        id: paths
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "cli=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The three-dot range lists what the pull request changes since its
+          # merge base, not what the base branch gained since. -z prints each
+          # path verbatim, ended by NUL; without it git quotes a path holding a
+          # non-ASCII byte, a quote or a control character, and the quoted form
+          # would miss the pattern.
+          changed="$RUNNER_TEMP/changed-paths"
+          git diff --name-only --no-renames -z "$BASE_SHA...$HEAD_SHA" > "$changed"
+          cli=false
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              cli/*|protocol/*|go.mod|go.sum|internal/pathvalidation/*|.github/workflows/cli-verification.yml)
+                cli=true
+                break
+                ;;
+              # These owners do not enter the CLI build or its reference
+              # server. Keep this list aligned with their dependencies.
+              services/*|deploy/*|docs/*|README.md)
+                ;;
+              # Unknown ownership runs verification, including new build
+              # configuration and dependencies outside the CLI workspace.
+              *)
+                cli=true
+                break
+                ;;
+            esac
+          done < "$changed"
+          echo "cli=$cli" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Linux CLI (${{ matrix.profile }})
+    needs: changed
+    if: needs.changed.outputs.cli == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [functional, release, task-capacity]
+    env:
+      CLI_PROFILE: ${{ matrix.profile }}
+    steps:
+      - name: Initialize the evidence directory
+        id: evidence
+        run: |
+          mkdir -p "$RUNNER_TEMP/cli-$CLI_PROFILE"
+          printf 'CLI_EVIDENCE_DIR=%s/cli-%s\n' "$RUNNER_TEMP" "$CLI_PROFILE" >> "$GITHUB_ENV"
+      - name: Check out the revision under test
+        id: checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Set up Go for the reference control server
+        id: go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.26.10'
+          cache: false
+      - name: Allow unprivileged user namespaces
+        id: namespaces
+        run: |
+          set -euo pipefail
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Install bubblewrap for the sandboxed tool processes
+        id: bubblewrap
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+      - name: Install the pinned Rust toolchain
+        id: rust
+        working-directory: cli
+        run: rustup toolchain install
+      - name: Restore the compiled CLI dependencies and selected artifacts
+        id: cache
+        if: inputs.measure-builds != true && !contains(github.event.pull_request.labels.*.name, 'cli-build-benchmark')
+        uses: ./.github/actions/cli-build-cache
+        with:
+          profile: ${{ matrix.profile }}
+          evidence-dir: ${{ env.CLI_EVIDENCE_DIR }}/cache
+      - name: Measure cold and warm builds without a restored cache
+        id: measure
+        if: inputs.measure-builds == true || contains(github.event.pull_request.labels.*.name, 'cli-build-benchmark')
+        timeout-minutes: 40
+        env:
+          CLI_PROFILE: ${{ matrix.profile }}
+        run: |
+          ./scripts/cli-build-cache.sh build "$CLI_PROFILE" cold "$CLI_EVIDENCE_DIR/builds"
+          ./scripts/cli-build-cache.sh build "$CLI_PROFILE" warm "$CLI_EVIDENCE_DIR/builds"
+      - name: Verify the selected CLI behavior
+        id: verify
+        timeout-minutes: 40
+        env:
+          CLI_PROFILE: ${{ matrix.profile }}
+        run: python3 scripts/verify-cli.py "$CLI_PROFILE" --evidence-dir "$CLI_EVIDENCE_DIR/verification"
+      - name: Record setup and verification outcomes
+        if: always()
+        env:
+          STEP_RESULTS: ${{ toJSON(steps) }}
+        run: |
+          mkdir -p "$CLI_EVIDENCE_DIR"
+          printf '%s\n' "$STEP_RESULTS" > "$CLI_EVIDENCE_DIR/steps.json"
+          {
+            printf 'revision=%s\nrunner=%s/%s\n' "$GITHUB_SHA" "$RUNNER_OS" "$RUNNER_ARCH"
+            (cd cli && rustc -vV && cargo -V) || true
+            go version || true
+            df -h .
+          } > "$CLI_EVIDENCE_DIR/environment.txt"
+      - name: Retain CLI logs, timings and acceptance records
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cli-${{ matrix.profile }}-${{ github.run_attempt }}
+          path: ${{ env.CLI_EVIDENCE_DIR }}
+          if-no-files-found: warn
+
+  results:
+    name: CLI results
+    needs: [changed, linux]
+    if: always() && (github.event.action != 'labeled' || github.event.label.name == 'cli-build-benchmark')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every job that ran to pass
+        env:
+          CHANGED_RESULT: ${{ needs.changed.result }}
+          CLI_CHANGED: ${{ needs.changed.outputs.cli }}
+          BUILD_RESULT: ${{ needs.linux.result }}
+        run: |
+          set -euo pipefail
+          if [ "$CHANGED_RESULT" != "success" ]; then
+            echo "the changed job ended with $CHANGED_RESULT"
+            exit 1
+          fi
+          case "$CLI_CHANGED:$BUILD_RESULT" in
+            true:success|false:skipped|false:success)
+              exit 0
+              ;;
+            *)
+              echo "CLI selection was '$CLI_CHANGED' and its build ended with '$BUILD_RESULT'"
+              exit 1
+              ;;
+          esac

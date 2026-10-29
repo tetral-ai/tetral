@@ -1,0 +1,26 @@
+[package]
+name = "tetral"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+test-seams = ["appserver/test-seams", "execution/test-seams", "state/test-seams"]
+
+[dependencies]
+appserver.workspace = true
+clap = { workspace = true, features = ["derive"] }
+codex-linux-sandbox.workspace = true
+codex-sandboxing.workspace = true
+execution.workspace = true
+observe.workspace = true
+protocol.workspace = true
+sdk.workspace = true
+serde_json.workspace = true
+session.workspace = true
+state.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+tempfile.workspace = true

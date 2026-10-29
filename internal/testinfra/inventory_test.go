@@ -30,6 +30,7 @@ func TestBroadOwnersRequireFull(t *testing.T) {
 		"proto/tetral/bridge/v1/bridge.proto",
 		"internal/storage/postgresql_schema.go",
 		"services/gateway/bun.lock",
+		"protocol/connection-v1.schema.json",
 	} {
 		if !inventory.RequiresFull(path) {
 			t.Errorf("broad owner %q did not require Full", path)
@@ -49,6 +50,11 @@ func TestInventoryMapsRepresentativeOwnersAndCrossBoundaryRelations(t *testing.T
 		"proto/tetral/bridge/v1/bridge.proto":             {"gateway", "protocol", "runtime"},
 		"deploy/helm/tetral/Chart.yaml":                   {"deployment"},
 		"Dockerfile.sandbox":                              {"sandbox-image"},
+		"cli/Cargo.lock":                                  {"cli"},
+		"cli/crates/protocol/src/lib.rs":                  {"cli"},
+		"cli/README.md":                                   {"cli", "repository"},
+		"cli/reference/server.go":                         {"cli", "go", "go-static", "repository"},
+		"internal/pathvalidation/norm.go":                 {"cli", "go", "go-static", "repository"},
 	}
 	for path, expected := range want {
 		matches := inventory.MatchPath(path)

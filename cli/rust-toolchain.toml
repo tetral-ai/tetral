@@ -1,0 +1,4 @@
+# The exact release that the pinned Codex tag in UPSTREAM.md builds with;
+# the two change together.
+[toolchain]
+channel = "1.99.1"

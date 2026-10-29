@@ -1184,11 +1184,11 @@
     "value": {
       "records": [
         {
-          "seq": 41,
+          "seq": 40,
           "index": 0,
           "path": "old.md",
           "operation": "created",
-          "version_id": "id_version_41_0",
+          "version_id": "id_version_40_0",
           "content_sha256": "01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee",
           "size_bytes": 4,
           "executable": false

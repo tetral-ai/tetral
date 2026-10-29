@@ -1,0 +1,79 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "tests"]
+
+[workspace.package]
+version = "0.1.0-alpha.1"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+appserver = { path = "crates/appserver" }
+connection = { path = "crates/connection" }
+drive = { path = "crates/drive" }
+execution = { path = "crates/execution" }
+mcp = { path = "crates/mcp" }
+observe = { path = "crates/observe" }
+protocol = { path = "crates/protocol" }
+sdk = { path = "crates/sdk" }
+session = { path = "crates/session" }
+state = { path = "crates/state" }
+
+axum = "0.8.9"
+base64 = "0.23.1"
+bytes = "1.12.1"
+caseless = "0.2.2"
+clap = "4.6.7"
+eventsource-stream = "0.2.3"
+flate2 = "1.1.10"
+futures-core = "0.3.34"
+fuser = "0.18.0"
+http = "1.5.0"
+http-body = "1.1.0"
+http-body-util = "0.1.5"
+hyper = "1.12.0"
+hyper-rustls = { version = "0.27.10", default-features = false, features = ["http1", "tls12"] }
+hyper-util = "0.1.21"
+idna = "1.1.0"
+jsonschema = { version = "0.60.1", default-features = false }
+libc = "0.2.191"
+nfsserve = "0.11.0"
+rand = "0.10.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+rmcp = "=3.5.1"
+rustix = "1.1.5"
+rustls = { version = "0.23.46", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+rustls-platform-verifier = "0.7.1"
+serde = "1.0.229"
+# Every build reads a decimal as its nearest double; test builds would
+# otherwise differ, since jsonschema turns this feature on for them.
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+sha2 = "0.11.1"
+sqlx = { version = "0.9.0", default-features = false, features = ["sqlite-bundled"] }
+tar = "0.4.46"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+tokio = "1.54.1"
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["tls12"] }
+toml = "1.1.8"
+tower-service = "0.3.3"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry", "std"] }
+trybuild = "1.0.122"
+unicode-normalization = "0.1.26"
+unicode-properties = { version = "0.1.4", default-features = false, features = ["general-category"] }
+which = "8.0.6"
+
+codex-linux-sandbox = { git = "https://github.com/openai/codex", tag = "rust-v0.164.0" }
+codex-protocol = { git = "https://github.com/openai/codex", tag = "rust-v0.164.0" }
+codex-sandboxing = { git = "https://github.com/openai/codex", tag = "rust-v0.164.0" }
+codex-utils-absolute-path = { git = "https://github.com/openai/codex", tag = "rust-v0.164.0" }
+codex-utils-path-uri = { git = "https://github.com/openai/codex", tag = "rust-v0.164.0" }
+codex-utils-pty = { git = "https://github.com/openai/codex", tag = "rust-v0.164.0" }
+
+# The Codex crates build against these forks, which Codex's own workspace
+# patches in at the pinned tag.
+[patch.crates-io]
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
