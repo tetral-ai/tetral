@@ -96,6 +96,12 @@ the isolated harness tests without starting the CLI.
   `bwrap`'s digest, and of the reference control server.
 - `src/reference.rs`: `ReferenceServer`, the server as a process, its startup
   input, its controls and its request log.
+- `src/git_server.rs`: `GitServer`, a loopback Git smart-HTTP server over
+  HTTPS with a test certificate that stands in for git-proxy: it serves only
+  `/github.com/<owner>/<repo>`, accepts only the current tickets the
+  reference control server issued (`ReferenceServer::current_tickets`),
+  records each request, answers a clone with a fault and holds a pack
+  response until released.
 - `src/sessions.rs`: issuing `session.prepare`, the reports that answer it,
   the App Server's Sessions and a new connection between preparations.
 - `src/run.rs`: `Tetral`, a command line of the `tetral` under test or of a
@@ -121,7 +127,8 @@ the isolated harness tests without starting the CLI.
   Server the protocol's `tool_execution` fixture to advertise, through the
   test seam `TETRAL_TEST_TOOL_EXECUTION`, and the system `PATH` for its
   tasks, and `Machine::start_with_tools_from` another `tetral` build and
-  `PATH`; `Machine::start_under` runs the App Server under another program,
+  `PATH`; `Machine::start_with` adds variables to the App Server's
+  environment; `Machine::start_under` runs the App Server under another program,
   such as `bwrap` with mounts that change what it finds; `task_parent`
   locates a root's `T` apart from the code under test.
 - `src/tasks.rs`: `TaskMachine`, such a machine with one prepared Session,

@@ -192,7 +192,7 @@ impl Machine {
     }
 
     /// [`Machine::start_in`] with `environment` added to the App Server's.
-    fn start_with(
+    pub fn start_with(
         case: &mut Case,
         directory: &Path,
         bootstrap: &Value,

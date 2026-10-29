@@ -6,8 +6,11 @@ license.workspace = true
 publish = false
 
 [dependencies]
+base64.workspace = true
 protocol.workspace = true
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "aws_lc_rs"] }
 reqwest = { workspace = true, features = ["blocking", "json"] }
+rustls.workspace = true
 rustix = { workspace = true, features = ["fs", "process"] }
 sdk = { workspace = true, features = ["test-seams"] }
 serde_json.workspace = true
@@ -17,5 +20,4 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]
-base64.workspace = true
 fuser.workspace = true
