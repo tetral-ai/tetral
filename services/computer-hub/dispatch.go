@@ -34,7 +34,8 @@ import (
 //     at most the stream's bound and not yet written on this stream; until
 //     the first Session report is stored only the first
 //     instance.SessionInstructionCap of them. It records the first write of
-//     each instruction an earlier pass wrote (instance.MarkWritten).
+//     each instruction an earlier pass wrote (instance.MarkWritten),
+//     including instructions whose reports have already been stored.
 //
 // The pass writes what it chose only after its transaction commits, so no
 // row lock is held while bytes go to the stream, and a pass that wrote
@@ -58,7 +59,7 @@ type streamState struct {
 	stream   *clientStream
 	writer   sseWriter
 	written  map[string]bool
-	unmarked map[string]bool
+	unmarked map[string]deliveryMetadata
 	accepted bool
 	// retryBase is the wait before the stream's next pass after a failed
 	// one, before its jitter; 0 once a pass commits.
@@ -107,10 +108,18 @@ func (state *streamState) retryAfter(r float64) time.Duration {
 	return time.Duration(float64(state.retryBase) * (1 + r))
 }
 
+// deliveryMetadata retains the observation identity of a successful write
+// until its recording commits, without retaining the instruction payload.
+type deliveryMetadata struct {
+	MessageID    string
+	Type         string
+	TraceContext string
+}
+
 // firstWrite is an instruction whose first write to any stream a pass
 // recorded.
 type firstWrite struct {
-	instruction instance.Instruction
+	instruction deliveryMetadata
 	queued      time.Duration
 }
 
@@ -184,18 +193,18 @@ func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
 		for _, instruction := range instructions {
 			if !state.written[instruction.MessageID] {
 				chosen.instructions = append(chosen.instructions, instruction)
-				continue
 			}
-			if !state.unmarked[instruction.MessageID] {
-				continue
-			}
-			first, queued, err := instance.MarkWritten(txCtx, tx, stream.workspace, stream.connection, instruction.MessageID)
+		}
+		// Reporting ends resend eligibility, but not recording already owed
+		// for this stream's successful writes. Retain these until commit.
+		for messageID, metadata := range state.unmarked {
+			first, queued, err := instance.MarkWritten(txCtx, tx, stream.workspace, stream.connection, messageID)
 			if err != nil {
 				return err
 			}
-			chosen.marked = append(chosen.marked, instruction.MessageID)
+			chosen.marked = append(chosen.marked, messageID)
 			if first {
-				chosen.firsts = append(chosen.firsts, firstWrite{instruction: instruction, queued: queued})
+				chosen.firsts = append(chosen.firsts, firstWrite{instruction: metadata, queued: queued})
 			}
 		}
 		return nil
@@ -248,7 +257,7 @@ func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
 			return passBroken
 		}
 		state.written[instruction.MessageID] = true
-		state.unmarked[instruction.MessageID] = true
+		state.unmarked[instruction.MessageID] = deliveryMetadata{MessageID: instruction.MessageID, Type: instruction.Type, TraceContext: instruction.TraceContext}
 	}
 	if len(chosen.instructions) > 0 {
 		return passWrote

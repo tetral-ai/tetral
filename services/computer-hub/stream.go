@@ -263,7 +263,7 @@ func (s *Streams) ageLimit() time.Duration {
 // stream's end under its first cause.
 func (s *Streams) serve(ctx context.Context, w http.ResponseWriter, stream *clientStream, started instance.Connection, resumed bool) {
 	writer := sseWriter{w: w, controller: http.NewResponseController(w), connectionID: started.ID, cutOff: new(atomic.Pointer[string])}
-	state := &streamState{stream: stream, writer: writer, written: map[string]bool{}, unmarked: map[string]bool{}, accepted: started.ReadyAcceptedAt != nil, end: endClientClosed}
+	state := &streamState{stream: stream, writer: writer, written: map[string]bool{}, unmarked: map[string]deliveryMetadata{}, accepted: started.ReadyAcceptedAt != nil, end: endClientClosed}
 	defer func() { s.metrics.streamEndedBy(state.end) }()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")

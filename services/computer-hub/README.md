@@ -281,7 +281,11 @@ first write to any stream: it sets `first_written_at`, observes
 `trace_context`, is one span `instruction.deliver` in that trace with
 `connection.id`, `message.id` and `message.type`, each once that transaction
 commits; when it fails, the stream's next pass records the write without
-writing the instruction again.
+writing the instruction again. Pending recording retains only message/type/trace
+metadata, independently of the unreported delivery selection: a report stored
+during the writing pass does not discard its successful write. Entries are
+removed only after recording commits, and an already recorded write emits no
+second observation.
 
 Connection notices (`notice.go`): each pod listens on `tetral_hub_` and the
 first 16 hexadecimal characters of the SHA-256 of

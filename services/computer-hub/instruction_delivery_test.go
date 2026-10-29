@@ -669,6 +669,34 @@ func TestFirstWriteIsRecordedWithoutAResendWhenItsRecordingPassFails(t *testing.
 	}
 }
 
+// deliverySpans selects only the original message, excluding progress sentinels.
+func deliverySpans(spans *tracetest.InMemoryExporter, messageID string) []tracetest.SpanStub {
+	var found []tracetest.SpanStub
+	for _, stub := range spans.GetSpans() {
+		if stub.Name != "instruction.deliver" {
+			continue
+		}
+		for _, attr := range stub.Attributes {
+			if string(attr.Key) == "message.id" && attr.Value.AsString() == messageID {
+				found = append(found, stub)
+				break
+			}
+		}
+	}
+	return found
+}
+
+func awaitDeliverySpan(t *testing.T, spans *tracetest.InMemoryExporter, messageID string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for len(deliverySpans(spans, messageID)) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("no delivery span for %s within 10 seconds", messageID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestResentInstructionKeepsItsTraceAndMakesOneDeliverSpan(t *testing.T) {
 	spans := tracetest.NewInMemoryExporter()
 	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: ServiceName, SyncExporter: spans, SampleRatio: 1})))
@@ -683,17 +711,19 @@ func TestResentInstructionKeepsItsTraceAndMakesOneDeliverSpan(t *testing.T) {
 	if event := stream.next(); event.Envelope.Traceparent != protocol.Some(traceparent) {
 		t.Fatalf("first write %s; want traceparent %s", event.Data, traceparent)
 	}
+	awaitDeliverySpan(t, spans, instruction)
 	resumed := f.resume(b.url, cli, stream.connectionID)
 	resumed.next()
 	if event := resumed.next(); event.Envelope.Traceparent != protocol.Some(traceparent) || !bytes.Equal(event.Data, f.envelopeOf(instruction)) {
 		t.Fatalf("resend %s; want the stored envelope with traceparent %s", event.Data, traceparent)
 	}
-	var delivers []tracetest.SpanStub
-	for _, stub := range spans.GetSpans() {
-		if stub.Name == "instruction.deliver" {
-			delivers = append(delivers, stub)
-		}
-	}
+	// Complete the resumed original's recording pass before counting its
+	// observations. The later sentinel is sampled and processed serially.
+	sentinel := f.issueInstruction(traced, resumed.connectionID, "sess_trace_barrier")
+	f.requireInstructions(resumed, sentinel)
+	awaitDeliverySpan(t, spans, sentinel)
+	stream.ended()
+	delivers := deliverySpans(spans, instruction)
 	if len(delivers) != 1 || delivers[0].SpanContext.TraceID().String() != traceparent[3:35] {
 		t.Fatalf("instruction.deliver spans = %d; want one in the issuing trace", len(delivers))
 	}
