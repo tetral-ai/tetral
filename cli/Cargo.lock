@@ -1876,6 +1876,7 @@ dependencies = [
  "state",
  "tempfile",
  "tokio",
+ "unicode-normalization",
 ]
 
 [[package]]

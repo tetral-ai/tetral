@@ -3,6 +3,7 @@
 
 pub mod cache;
 pub mod catchup;
+pub mod paths;
 pub mod state;
 pub mod sync;
 pub mod transfer;

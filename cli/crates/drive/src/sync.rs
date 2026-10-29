@@ -18,6 +18,7 @@ use protocol::path::DrivePath;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::catchup::{self, Record, Version};
+use crate::paths;
 use crate::state::{ListingRow, SyncState, Tables, Write};
 use crate::transfer::{Binding, DriveTransfer, Ended, ListChanges, ListFiles, Request};
 
@@ -381,7 +382,7 @@ impl Owner {
         write.listing = page
             .files
             .iter()
-            .filter(|file| !catchup::excluded(file.path.as_str(), &exclude))
+            .filter(|file| !paths::excluded(file.path.as_str(), &exclude))
             .map(|file| ListingRow {
                 drive_id: drive.to_owned(),
                 path: file.path.as_str().to_owned(),
@@ -422,7 +423,7 @@ impl Owner {
         let records: Vec<Record> = page
             .records
             .iter()
-            .filter(|record| !catchup::excluded(record.path.as_str(), &exclude))
+            .filter(|record| !paths::excluded(record.path.as_str(), &exclude))
             .map(|record| Record {
                 path: record.path.as_str().to_owned(),
                 state: match (record.operation, &record.content_sha256.0) {

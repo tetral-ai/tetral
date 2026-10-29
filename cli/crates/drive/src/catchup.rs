@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::paths::{self, ancestors, parent};
 use crate::state::{Cursor, FileRow, ListingRow, Tables, Write};
 
 /// The file id of a drive's top folder, the row of path `""`.
@@ -28,18 +29,6 @@ pub struct Record {
     pub state: Option<Version>,
 }
 
-/// Whether `path` equals an entry of `exclude`, written without its
-/// trailing `/`, or lies below it.
-pub fn excluded(path: &str, exclude: &[String]) -> bool {
-    exclude.iter().any(|entry| {
-        let entry = entry.trim_end_matches('/');
-        path == entry
-            || path
-                .strip_prefix(entry)
-                .is_some_and(|rest| rest.starts_with('/'))
-    })
-}
-
 /// The `applied_seq` after a page of records: the last record's seq when it
 /// is the last page, otherwise the highest seq below the last record's,
 /// since that commit may go on in the next page; unchanged when there is
@@ -57,26 +46,6 @@ pub fn page_applied_seq(current: i64, seqs: &[i64], has_more: bool) -> i64 {
         .max()
         .unwrap_or(current)
         .max(current)
-}
-
-/// The parent folder of `path`; the top folder's parent is none.
-fn parent(path: &str) -> Option<&str> {
-    if path.is_empty() {
-        return None;
-    }
-    Some(path.rsplit_once('/').map_or("", |(parent, _)| parent))
-}
-
-/// The folders above `path`, from the top folder down.
-fn ancestors(path: &str) -> Vec<&str> {
-    let mut each = Vec::new();
-    let mut at = parent(path);
-    while let Some(folder) = at {
-        each.push(folder);
-        at = parent(folder);
-    }
-    each.reverse();
-    each
 }
 
 /// One drive's `files` rows while records are applied to them.
@@ -97,6 +66,12 @@ impl Work<'_> {
 
     fn row(&self, path: &str) -> Option<&FileRow> {
         self.rows.get(path)
+    }
+
+    fn local_only(&self, path: &str, kind: &str) -> Option<&'static str> {
+        paths::local_only(path, kind, |each| {
+            self.row(each).is_some_and(|row| row.present)
+        })
     }
 
     /// Whether any present entry lies below `folder`.
@@ -140,7 +115,7 @@ impl Work<'_> {
             ctime_ns: Some(self.now_ns),
             origin: Some("drive".to_owned()),
             link_target: None,
-            local_only: None,
+            local_only: self.local_only(path, "folder").map(str::to_owned),
         }
     }
 
@@ -155,18 +130,17 @@ impl Work<'_> {
             && self
                 .row(path)
                 .is_some_and(|row| row.present && row.kind == "folder");
-        let in_local_only = ancestors(path).into_iter().chain([path]).any(|folder| {
-            self.row(folder).is_some_and(|row| {
-                row.kind == "folder"
-                    && matches!(
-                        row.local_only.as_deref(),
-                        Some("ignored" | "git_repository")
-                    )
-            })
-        }) && !self
-            .row(path)
-            .is_some_and(|row| row.kind == "file" && row.content.as_deref() == Some("cache"));
-        let local_only = relisting && self.row(path).is_some_and(|row| row.local_only.is_some());
+        // A local-only path takes the drive's version only where this
+        // machine has not changed the entry since the version it applied.
+        let replaceable = self.row(path).is_none_or(|row| {
+            row.present && row.kind == "file" && row.content.as_deref() == Some("cache")
+        });
+        let in_local_only = self.local_only(path, "file").is_some() && !replaceable;
+        let local_only = relisting
+            && self
+                .row(path)
+                .is_some_and(|row| self.local_only(path, &row.kind).is_some())
+            && !replaceable;
         self.pending.contains(path) || below_file || over_folder || in_local_only || local_only
     }
 
@@ -184,6 +158,7 @@ impl Work<'_> {
                 row.kind = "file".to_owned();
                 row.present = false;
                 row.origin = None;
+                row.local_only = None;
                 row.mtime_ns = None;
                 row.ctime_ns = None;
                 set_version(&mut row, Some(version));
@@ -233,7 +208,7 @@ impl Work<'_> {
         row.executable = Some(version.executable);
         row.origin = None;
         row.link_target = None;
-        row.local_only = None;
+        row.local_only = self.local_only(path, "file").map(str::to_owned);
         set_version(&mut row, Some(version));
         if !same {
             row.mtime_ns = Some(now);
