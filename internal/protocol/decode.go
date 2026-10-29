@@ -65,7 +65,7 @@ const maxNesting = 10000
 func parse(data []byte) (*value, error) {
 	p := parser{data: data}
 	p.space()
-	v, err := p.value("", 0)
+	v, err := p.value(0)
 	if err != nil {
 		return nil, err
 	}
@@ -79,6 +79,9 @@ func parse(data []byte) (*value, error) {
 type parser struct {
 	data []byte
 	pos  int
+	// path holds unescaped reference tokens. Only a failure renders the
+	// full pointer; retaining every ancestor's full path costs quadratic space.
+	path []string
 }
 
 func (p *parser) space() {
@@ -92,24 +95,24 @@ func (p *parser) space() {
 	}
 }
 
-func (p *parser) value(ptr string, depth int) (*value, error) {
+func (p *parser) value(depth int) (*value, error) {
 	if p.pos >= len(p.data) {
-		return nil, invalid(ptr, "unexpected end of JSON")
+		return nil, p.invalid("unexpected end of JSON")
 	}
 	switch c := p.data[p.pos]; {
 	case c == '{':
-		return p.object(ptr, depth+1)
+		return p.object(depth + 1)
 	case c == '[':
-		return p.array(ptr, depth+1)
+		return p.array(depth + 1)
 	case c == '"':
 		start := p.pos
-		text, err := p.string(ptr)
+		text, err := p.string()
 		if err != nil {
 			return nil, err
 		}
 		return &value{kind: kindString, text: text, size: p.pos - start}, nil
 	case c == '-' || ('0' <= c && c <= '9'):
-		return p.number(ptr)
+		return p.number()
 	case p.literal("true"):
 		return &value{kind: kindBool, boolean: true}, nil
 	case p.literal("false"):
@@ -117,7 +120,7 @@ func (p *parser) value(ptr string, depth int) (*value, error) {
 	case p.literal("null"):
 		return &value{kind: kindNull}, nil
 	default:
-		return nil, invalid(ptr, "invalid JSON token")
+		return nil, p.invalid("invalid JSON token")
 	}
 }
 
@@ -129,9 +132,9 @@ func (p *parser) literal(word string) bool {
 	return true
 }
 
-func (p *parser) object(ptr string, depth int) (*value, error) {
+func (p *parser) object(depth int) (*value, error) {
 	if depth > maxNesting {
-		return nil, invalid(ptr, "JSON nested too deeply")
+		return nil, p.invalid("JSON nested too deeply")
 	}
 	p.pos++
 	v := &value{kind: kindObject}
@@ -144,29 +147,30 @@ func (p *parser) object(ptr string, depth int) (*value, error) {
 	for {
 		p.space()
 		if p.pos >= len(p.data) || p.data[p.pos] != '"' {
-			return nil, invalid(ptr, "expected an object key")
+			return nil, p.invalid("expected an object key")
 		}
 		keyStart := p.pos
-		key, err := p.string(ptr)
+		key, err := p.string()
 		if err != nil {
 			return nil, err
 		}
 		keySize := p.pos - keyStart
-		child := pointer(ptr, key)
+		p.path = append(p.path, key)
 		if keys == nil {
 			keys = make(map[string]struct{})
 		}
 		if _, ok := keys[key]; ok {
-			return nil, invalid(child, "duplicate object key")
+			return nil, p.invalid("duplicate object key")
 		}
 		keys[key] = struct{}{}
 		p.space()
 		if p.pos >= len(p.data) || p.data[p.pos] != ':' {
-			return nil, invalid(child, "expected ':' after an object key")
+			return nil, p.invalid("expected ':' after an object key")
 		}
 		p.pos++
 		p.space()
-		item, err := p.value(child, depth)
+		item, err := p.value(depth)
+		p.path = p.path[:len(p.path)-1]
 		if err != nil {
 			return nil, err
 		}
@@ -180,13 +184,13 @@ func (p *parser) object(ptr string, depth int) (*value, error) {
 			p.pos++
 			return v, nil
 		}
-		return nil, invalid(ptr, "expected ',' or '}' in an object")
+		return nil, p.invalid("expected ',' or '}' in an object")
 	}
 }
 
-func (p *parser) array(ptr string, depth int) (*value, error) {
+func (p *parser) array(depth int) (*value, error) {
 	if depth > maxNesting {
-		return nil, invalid(ptr, "JSON nested too deeply")
+		return nil, p.invalid("JSON nested too deeply")
 	}
 	p.pos++
 	v := &value{kind: kindArray}
@@ -197,7 +201,9 @@ func (p *parser) array(ptr string, depth int) (*value, error) {
 	}
 	for {
 		p.space()
-		item, err := p.value(pointer(ptr, strconv.Itoa(len(v.items))), depth)
+		p.path = append(p.path, strconv.Itoa(len(v.items)))
+		item, err := p.value(depth)
+		p.path = p.path[:len(p.path)-1]
 		if err != nil {
 			return nil, err
 		}
@@ -211,18 +217,18 @@ func (p *parser) array(ptr string, depth int) (*value, error) {
 			p.pos++
 			return v, nil
 		}
-		return nil, invalid(ptr, "expected ',' or ']' in an array")
+		return nil, p.invalid("expected ',' or ']' in an array")
 	}
 }
 
 // string reads a JSON string at p.pos and returns its unescaped text.
-func (p *parser) string(ptr string) (string, error) {
+func (p *parser) string() (string, error) {
 	p.pos++
 	var out []byte
 	start := p.pos
 	for {
 		if p.pos >= len(p.data) {
-			return "", invalid(ptr, "unterminated string")
+			return "", p.invalid("unterminated string")
 		}
 		c := p.data[p.pos]
 		switch {
@@ -232,20 +238,20 @@ func (p *parser) string(ptr string) (string, error) {
 			return string(out), nil
 		case c == '\\':
 			out = append(out, p.data[start:p.pos]...)
-			r, err := p.escape(ptr)
+			r, err := p.escape()
 			if err != nil {
 				return "", err
 			}
 			out = utf8.AppendRune(out, r)
 			start = p.pos
 		case c < 0x20:
-			return "", invalid(ptr, "unescaped control character in a string")
+			return "", p.invalid("unescaped control character in a string")
 		case c < utf8.RuneSelf:
 			p.pos++
 		default:
 			r, size := utf8.DecodeRune(p.data[p.pos:])
 			if r == utf8.RuneError && size == 1 {
-				return "", invalid(ptr, "invalid UTF-8")
+				return "", p.invalid("invalid UTF-8")
 			}
 			p.pos += size
 		}
@@ -254,9 +260,9 @@ func (p *parser) string(ptr string) (string, error) {
 
 // escape reads one escape sequence; a \u escape of a surrogate must be the
 // high half of a pair whose low half follows at once.
-func (p *parser) escape(ptr string) (rune, error) {
+func (p *parser) escape() (rune, error) {
 	if p.pos+1 >= len(p.data) {
-		return 0, invalid(ptr, "unterminated string")
+		return 0, p.invalid("unterminated string")
 	}
 	c := p.data[p.pos+1]
 	p.pos += 2
@@ -275,11 +281,11 @@ func (p *parser) escape(ptr string) (rune, error) {
 		return '\t', nil
 	case 'u':
 	default:
-		return 0, invalid(ptr, "invalid escape in a string")
+		return 0, p.invalid("invalid escape in a string")
 	}
 	r, ok := p.hex4()
 	if !ok {
-		return 0, invalid(ptr, "invalid \\u escape in a string")
+		return 0, p.invalid("invalid \\u escape in a string")
 	}
 	if !utf16.IsSurrogate(r) {
 		return r, nil
@@ -293,7 +299,7 @@ func (p *parser) escape(ptr string) (rune, error) {
 			}
 		}
 	}
-	return 0, invalid(ptr, "lone surrogate escape in a string")
+	return 0, p.invalid("lone surrogate escape in a string")
 }
 
 func (p *parser) hex4() (rune, bool) {
@@ -308,7 +314,7 @@ func (p *parser) hex4() (rune, bool) {
 	return rune(n), true
 }
 
-func (p *parser) number(ptr string) (*value, error) {
+func (p *parser) number() (*value, error) {
 	start := p.pos
 	if p.data[p.pos] == '-' {
 		p.pos++
@@ -317,12 +323,12 @@ func (p *parser) number(ptr string) (*value, error) {
 	case p.pos < len(p.data) && p.data[p.pos] == '0':
 		p.pos++
 	case p.digits() == 0:
-		return nil, invalid(ptr, "invalid number")
+		return nil, p.invalid("invalid number")
 	}
 	if p.pos < len(p.data) && p.data[p.pos] == '.' {
 		p.pos++
 		if p.digits() == 0 {
-			return nil, invalid(ptr, "invalid number")
+			return nil, p.invalid("invalid number")
 		}
 	}
 	if p.pos < len(p.data) && (p.data[p.pos] == 'e' || p.data[p.pos] == 'E') {
@@ -331,7 +337,7 @@ func (p *parser) number(ptr string) (*value, error) {
 			p.pos++
 		}
 		if p.digits() == 0 {
-			return nil, invalid(ptr, "invalid number")
+			return nil, p.invalid("invalid number")
 		}
 	}
 	text := string(p.data[start:p.pos])
@@ -340,7 +346,7 @@ func (p *parser) number(ptr string) (*value, error) {
 	// integer keeps its exact text whatever its length.
 	if strings.ContainsAny(text, ".eE") {
 		if f, _ := strconv.ParseFloat(text, 64); math.IsInf(f, 0) {
-			return nil, invalid(ptr, "number beyond the float64 range")
+			return nil, p.invalid("number beyond the float64 range")
 		}
 	}
 	return &value{kind: kindNumber, text: text}, nil
@@ -352,6 +358,17 @@ func (p *parser) digits() int {
 		p.pos++
 	}
 	return p.pos - start
+}
+
+// invalid renders the current JSON pointer once, at the failure boundary.
+func (p *parser) invalid(reason string) *DecodeError {
+	var ptr strings.Builder
+	for _, token := range p.path {
+		ptr.WriteByte('/')
+		token = strings.ReplaceAll(token, "~", "~0")
+		ptr.WriteString(strings.ReplaceAll(token, "/", "~1"))
+	}
+	return invalid(ptr.String(), reason)
 }
 
 // pointer appends one reference token to a JSON pointer (RFC 6901).

@@ -48,6 +48,11 @@ first failure:
    headers take the request they answer as a context and also check the
    relations to it. A request body's complete limit is its first relation.
 
+The token parser keeps one incremental path of unescaped segments, rendering a
+complete JSON pointer only for an error. Path bookkeeping therefore does not
+retain a full ancestor pointer at every nesting level. The existing maximum
+of 10,000 nested arrays/objects remains unchanged.
+
 Sizes are measured on the compact JSON with every string and number token
 counted as written, escapes included. A failure is a `*DecodeError` holding
 the JSON pointer of the first failing value and the status and code the
