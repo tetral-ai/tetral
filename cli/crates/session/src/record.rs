@@ -4,7 +4,10 @@
 //! binding replaces only once it has `failed`, and the binding the Session
 //! had on an ended connection, `unavailable` until a new binding replaces it.
 
-use protocol::connection::{PreparationError, Repository, RepositoryFailure};
+use drive::mount::Failure;
+use protocol::connection::{
+    DriveBinding, DriveExclude, PreparationError, Repository, RepositoryFailure,
+};
 use protocol::field::{AbsolutePath, Nullable};
 use protocol::id::{Id, SafeId};
 use protocol::local::{SessionEntry, SessionState};
@@ -40,6 +43,11 @@ pub struct Binding {
     /// The repositories the preparation clones, and those that failed.
     pub repositories: Vec<Repository>,
     pub repository_failures: Vec<RepositoryFailure>,
+    /// The bound drives, this computer's excluded paths of each, and the
+    /// new mount failures the preparation reports.
+    pub drives: Vec<DriveBinding>,
+    pub drive_exclude: Vec<DriveExclude>,
+    pub drive_mount_failures: Vec<Failure>,
     pub tasks: Tasks,
 }
 

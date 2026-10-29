@@ -111,6 +111,9 @@ impl<S: TaskStarter> SessionOwner<S> {
             reports: Vec::new(),
             repositories: prepare.payload.repositories.clone(),
             repository_failures: Vec::new(),
+            drives: prepare.payload.drives.clone(),
+            drive_exclude: prepare.payload.drive_exclude.clone(),
+            drive_mount_failures: Vec::new(),
             tasks: Default::default(),
         };
         let record = self.record.get_or_insert_with(Record::default);
@@ -300,6 +303,21 @@ impl<S: TaskStarter> SessionOwner<S> {
         if let Some(error) = failure {
             return self.fail(operation, error);
         }
+        self.mount_drives(operation, cwd);
+    }
+
+    /// After the mounts of `operation`: its repositories are cloned once a
+    /// git ticket comes.
+    pub(crate) fn clone_repositories(&mut self, operation: u64, cwd: AbsolutePath) {
+        let (Some(preparation), Some(binding)) = (
+            &self.preparation,
+            self.record
+                .as_ref()
+                .and_then(|record| record.current.as_ref())
+                .filter(|binding| binding.operation == operation),
+        ) else {
+            return;
+        };
         if binding.repositories.is_empty() {
             return self.prepared(operation, cwd, Vec::new());
         }
@@ -390,6 +408,8 @@ impl<S: TaskStarter> SessionOwner<S> {
         binding.cwd = Some(cwd);
         binding.repository_failures = failures;
         binding.state = SessionState::PreparedPendingAck;
+        let mount_failures = binding.drive_mount_failures.clone();
+        self.mount_failures_reported(&mount_failures);
         self.report_waiting();
     }
 
@@ -428,6 +448,7 @@ impl<S: TaskStarter> SessionOwner<S> {
         binding.reports.remove(index);
         if outcome == ReportOutcome::Acked && binding.state == SessionState::PreparedPendingAck {
             binding.state = SessionState::Prepared;
+            self.drive_binding_current();
             self.start_staged();
         }
     }
@@ -500,11 +521,11 @@ impl<S: TaskStarter> SessionOwner<S> {
         submission
     }
 
-    fn current_binding(&mut self) -> Option<&mut Binding> {
+    pub(crate) fn current_binding(&mut self) -> Option<&mut Binding> {
         self.record.as_mut()?.current.as_mut()
     }
 
-    fn is_preparing(&self, operation: u64) -> bool {
+    pub(crate) fn is_preparing(&self, operation: u64) -> bool {
         self.record
             .as_ref()
             .and_then(|record| record.current.as_ref())
@@ -556,7 +577,11 @@ fn saved_outcome(binding: &Binding) -> Option<SessionOutcome> {
         (SessionState::PreparedPendingAck | SessionState::Prepared, Some(cwd), _) => {
             Some(SessionOutcome::Prepared {
                 cwd: cwd.clone(),
-                drive_mount_failures: None,
+                drive_mount_failures: (!binding.drive_mount_failures.is_empty()).then(|| {
+                    List(crate::drives::failures(
+                        binding.drive_mount_failures.clone(),
+                    ))
+                }),
                 repository_failures: (!binding.repository_failures.is_empty())
                     .then(|| List(binding.repository_failures.clone())),
             })

@@ -12,6 +12,7 @@ use connection::{Connection, Credential, ReadyFields};
 use drive::cache::{CacheConfig, ContentCache, volume_free_space};
 use protocol::connection::SemVer;
 use protocol::local::{ServerState, Status};
+use session::drives::DriveContext;
 use session::{Factory, RootPaths, Shared, ToolContext};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, oneshot};
@@ -187,7 +188,7 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
         root,
         canonical_root,
         leftovers: (check, leftovers),
-        ..
+        mounting,
     } = started;
     let socket_directory = socket.parent().unwrap_or(&socket).canonicalize()?;
     let tools = ToolContext {
@@ -203,6 +204,9 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
     let state_root =
         state::paths::StateRoot::new(root.as_os_str()).expect("startup took this root's path");
     let cache_root = canonical_root.clone();
+    // The drive syncs' context comes once the Connection owner provides
+    // their transfer client.
+    let (drive_context, drives) = tokio::sync::watch::channel(None);
     let sessions = Factory::new(
         Shared {
             paths: Arc::new(RootPaths {
@@ -217,6 +221,7 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
             times: times.session,
             tools: Arc::new(tools),
             leftovers: leftovers.clone(),
+            drives,
         },
         Supervisors {
             tetral,
@@ -248,12 +253,18 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
         times: times.connection,
     });
     // The drive syncs read from it; it holds the App Server's transfer slots.
-    let _content_cache = ContentCache::spawn(CacheConfig {
+    let content_cache = ContentCache::spawn(CacheConfig {
         free_space: volume_free_space(cache_root.clone()),
         root: cache_root,
         transfer: connection.drive_transfer(),
         clock: state::clock::Clock::seams(),
     })?;
+    drive_context.send_replace(Some(Arc::new(DriveContext {
+        transfer: connection.drive_transfer(),
+        cache: content_cache,
+        mounting,
+        registry: Arc::new(connection.clone()),
+    })));
     let (lifecycle, finished) = spawn(ShutdownParts {
         ownership,
         connection: connection.clone(),

@@ -20,4 +20,5 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]
+drive.workspace = true
 fuser.workspace = true

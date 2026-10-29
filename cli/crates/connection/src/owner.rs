@@ -2237,6 +2237,24 @@ fn code_text(code: ErrorCode) -> String {
     }
 }
 
+impl drive::mount::Registry for Connection {
+    fn add(&self, session_id: SafeId, sync: DriveSync) {
+        self.add_drive_sync(session_id, sync);
+    }
+
+    fn remove(&self, session_id: SafeId) {
+        self.remove_drive_sync(session_id);
+    }
+
+    fn mounted(&self, drive_id: Id, session_id: SafeId) {
+        self.drive_mounted(drive_id, session_id);
+    }
+
+    fn detached(&self, drive_id: Id, session_id: SafeId) {
+        self.drive_detached(drive_id, session_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};

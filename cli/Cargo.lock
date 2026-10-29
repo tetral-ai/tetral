@@ -6032,6 +6032,7 @@ dependencies = [
 name = "session"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "drive",
  "execution",
  "observe",
  "protocol",
@@ -6663,6 +6664,7 @@ name = "tetral-tests"
 version = "0.1.0-alpha.1"
 dependencies = [
  "base64 0.23.1",
+ "drive",
  "fuser",
  "protocol",
  "rcgen",

@@ -76,6 +76,13 @@ pub enum SessionMessage {
         pid: u32,
         reply: TaskOwnerReply,
     },
+    /// The Session's drive sync opened, or the error of its sync state.
+    DriveSyncOpened(Result<drive::DriveSync, String>),
+    /// The mounts of a preparation ended with these new failures.
+    MountsDone {
+        operation: u64,
+        failures: Vec<drive::mount::Failure>,
+    },
 }
 
 pub type SessionMailbox = mpsc::UnboundedSender<SessionMessage>;
@@ -151,6 +158,7 @@ pub struct Shared {
     /// Which Sessions a record an earlier App Server left keeps
     /// `cleanup_pending`.
     pub leftovers: Leftovers,
+    pub drives: crate::drives::DriveContexts,
 }
 
 /// Creates the Session binding owners of an App Server.
@@ -197,6 +205,11 @@ impl<S: TaskStarter + Clone + Sync> SessionFactory for Factory<S> {
             tools::unbound(&shared, call, reports.as_ref());
         });
     }
+}
+
+/// The owner's answers to its drive sync's task ownership questions.
+pub(crate) fn task_ownership(mailbox: SessionMailbox) -> Arc<dyn TaskOwnership> {
+    Arc::new(Handle { mailbox })
 }
 
 /// The Connection owner's handle on one owner: each call is a message.
@@ -307,6 +320,10 @@ pub(crate) struct SessionOwner<S> {
     pub shutting_down: bool,
     /// The Connection owner was told that every task is confirmed gone.
     pub shutdown_answered: bool,
+    pub drive_sync: crate::drives::DriveSyncSlot,
+    /// The text last reported for each drive while the sync state could not
+    /// be opened.
+    pub open_failures: HashMap<String, String>,
 }
 
 async fn own<S: TaskStarter>(
@@ -355,6 +372,8 @@ impl<S: TaskStarter> SessionOwner<S> {
             running: HashSet::new(),
             shutting_down: false,
             shutdown_answered: false,
+            drive_sync: crate::drives::DriveSyncSlot::default(),
+            open_failures: HashMap::new(),
         }
     }
 
@@ -375,6 +394,11 @@ impl<S: TaskStarter> SessionOwner<S> {
             } => self.repositories_done(operation, failures),
             SessionMessage::Report { report, outcome } => self.report_outcome(report, outcome),
             SessionMessage::ConnectionEnded(connection) => self.connection_ended(&connection),
+            SessionMessage::DriveSyncOpened(opened) => self.drive_sync_opened(opened),
+            SessionMessage::MountsDone {
+                operation,
+                failures,
+            } => self.mounts_done(operation, failures),
             SessionMessage::Shutdown => self.shutdown(),
             SessionMessage::Entries(reply) => {
                 let entries = match (&self.record, &self.preparation) {
@@ -456,6 +480,14 @@ impl<S: TaskStarter> SessionOwner<S> {
     /// preparation of one ends, its staged tasks are discarded and its
     /// running ones end.
     fn connection_ended(&mut self, connection: &Id) {
+        let current = self
+            .record
+            .as_ref()
+            .and_then(|record| record.current.as_ref())
+            .is_some_and(|binding| binding.connection_id == *connection);
+        if current {
+            self.drive_binding_gone();
+        }
         let Some(record) = self.record.as_mut() else {
             return;
         };
@@ -484,6 +516,9 @@ impl<S: TaskStarter> SessionOwner<S> {
 
     fn shutdown(&mut self) {
         self.shutting_down = true;
+        if let crate::drives::DriveSyncSlot::Open(sync) = &self.drive_sync {
+            sync.detach_all();
+        }
         if let Some(record) = &self.record {
             for binding in [&record.current, &record.unavailable].into_iter().flatten() {
                 binding.tasks.shutdown();
@@ -577,6 +612,9 @@ mod tests {
                 reports: Vec::new(),
                 repositories: Vec::new(),
                 repository_failures: Vec::new(),
+                drives: Vec::new(),
+                drive_exclude: Vec::new(),
+                drive_mount_failures: Vec::new(),
                 tasks: Default::default(),
             }),
             unavailable: None,
@@ -623,6 +661,7 @@ mod tests {
                 cua_driver: None,
             }),
             leftovers: Leftovers::none(),
+            drives: crate::drives::no_drives(),
         }
     }
 

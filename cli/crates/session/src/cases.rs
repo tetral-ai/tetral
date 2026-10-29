@@ -59,6 +59,9 @@ mod tests {
             reports: Vec::new(),
             repositories: Vec::new(),
             repository_failures: Vec::new(),
+            drives: Vec::new(),
+            drive_exclude: Vec::new(),
+            drive_mount_failures: Vec::new(),
             tasks: Default::default(),
         }
     }

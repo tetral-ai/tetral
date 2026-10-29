@@ -115,6 +115,16 @@ that is no longer the binding's is discarded.
   `repositories.json` even when its preparation is no longer current, so
   that the next preparation reuses it; a preparation with no repositories
   runs no `git`.
+- A preparation that binds drives mounts them before its clones, through the
+  Session's drive sync, which the owner opens from
+  `sessions/<session_id>/sync-state.db` at the first such preparation once
+  the App Server's drive context exists (`drives::DriveContext`). The
+  report lists the new mount failures in `drive_mount_failures`, and the
+  drive sync keeps their texts when the report is built. A sync state that
+  cannot be opened fails every bound drive with its error, once per drive
+  and text in the App Server process, and is opened again at the next
+  preparation. The drive sync's requests carry the binding once it is
+  `prepared`, and none after its connection ends (`drives`).
 
 ## Entry points
 
