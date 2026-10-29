@@ -104,18 +104,62 @@ func Fingerprint(body []byte) (fingerprint [sha256.Size]byte, ok bool) {
 		return fingerprint, false
 	}
 	c := canonicalizer{src: body}
-	var out bytes.Buffer
-	if !c.value(&out) {
+	value, ok := c.value()
+	if !ok {
 		return fingerprint, false
 	}
+	var out bytes.Buffer
+	out.Grow(len(body))
+	value.writeTo(&out)
 	return sha256.Sum256(out.Bytes()), true
 }
 
-// canonicalizer re-encodes JSON that json.Valid accepted, so it only tracks
-// structure and copies every string and scalar token unchanged.
+// canonicalizer orders JSON that json.Valid accepted. Scalar tokens refer to
+// the input; nested values are not repeatedly copied into ancestor buffers.
+// A single final traversal emits the same canonical bytes for hashing.
 type canonicalizer struct {
 	src []byte
 	pos int
+}
+
+type canonicalValue struct {
+	kind     byte
+	raw      []byte
+	members  []canonicalMember
+	elements []canonicalValue
+}
+
+type canonicalMember struct {
+	key   string
+	raw   []byte
+	value canonicalValue
+}
+
+func (v canonicalValue) writeTo(out *bytes.Buffer) {
+	switch v.kind {
+	case '{':
+		out.WriteByte('{')
+		for i, m := range v.members {
+			if i > 0 {
+				out.WriteByte(',')
+			}
+			out.Write(m.raw)
+			out.WriteByte(':')
+			m.value.writeTo(out)
+		}
+		out.WriteByte('}')
+	case '[':
+		out.WriteByte('[')
+		for i, item := range v.elements {
+			if i > 0 {
+				out.WriteByte(',')
+			}
+			item.writeTo(out)
+		}
+		out.WriteByte(']')
+	default:
+		out.Write(v.raw)
+	}
 }
 
 func (c *canonicalizer) skipSpace() {
@@ -124,23 +168,22 @@ func (c *canonicalizer) skipSpace() {
 	}
 }
 
-func (c *canonicalizer) value(out *bytes.Buffer) bool {
+func (c *canonicalizer) value() (canonicalValue, bool) {
 	c.skipSpace()
 	switch c.src[c.pos] {
 	case '{':
-		return c.object(out)
+		return c.object()
 	case '[':
-		return c.array(out)
+		return c.array()
 	case '"':
-		out.Write(c.str())
+		return canonicalValue{raw: c.str()}, true
 	default:
 		start := c.pos
 		for c.pos < len(c.src) && strings.IndexByte(" \t\r\n,:]}", c.src[c.pos]) < 0 {
 			c.pos++
 		}
-		out.Write(c.src[start:c.pos])
+		return canonicalValue{raw: c.src[start:c.pos]}, true
 	}
-	return true
 }
 
 func (c *canonicalizer) str() []byte {
@@ -154,13 +197,8 @@ func (c *canonicalizer) str() []byte {
 	return c.src[start:c.pos]
 }
 
-func (c *canonicalizer) object(out *bytes.Buffer) bool {
-	type member struct {
-		key   string
-		raw   []byte
-		value []byte
-	}
-	var members []member
+func (c *canonicalizer) object() (canonicalValue, bool) {
+	value := canonicalValue{kind: '{'}
 	keys := map[string]bool{}
 	c.pos++
 	c.skipSpace()
@@ -169,47 +207,36 @@ func (c *canonicalizer) object(out *bytes.Buffer) bool {
 		raw := c.str()
 		var key string
 		if json.Unmarshal(raw, &key) != nil || keys[key] {
-			return false
+			return canonicalValue{}, false
 		}
 		keys[key] = true
 		c.skipSpace()
 		c.pos++ // ':'
-		var value bytes.Buffer
-		if !c.value(&value) {
-			return false
+		child, ok := c.value()
+		if !ok {
+			return canonicalValue{}, false
 		}
-		members = append(members, member{key: key, raw: raw, value: value.Bytes()})
+		value.members = append(value.members, canonicalMember{key: key, raw: raw, value: child})
 		c.skipSpace()
 		if c.src[c.pos] == ',' {
 			c.pos++
 		}
 	}
 	c.pos++
-	slices.SortFunc(members, func(a, b member) int { return strings.Compare(a.key, b.key) })
-	out.WriteByte('{')
-	for i, m := range members {
-		if i > 0 {
-			out.WriteByte(',')
-		}
-		out.Write(m.raw)
-		out.WriteByte(':')
-		out.Write(m.value)
-	}
-	out.WriteByte('}')
-	return true
+	slices.SortFunc(value.members, func(a, b canonicalMember) int { return strings.Compare(a.key, b.key) })
+	return value, true
 }
 
-func (c *canonicalizer) array(out *bytes.Buffer) bool {
+func (c *canonicalizer) array() (canonicalValue, bool) {
+	value := canonicalValue{kind: '['}
 	c.pos++
 	c.skipSpace()
-	out.WriteByte('[')
-	for first := true; c.src[c.pos] != ']'; first = false {
-		if !first {
-			out.WriteByte(',')
+	for c.src[c.pos] != ']' {
+		child, ok := c.value()
+		if !ok {
+			return canonicalValue{}, false
 		}
-		if !c.value(out) {
-			return false
-		}
+		value.elements = append(value.elements, child)
 		c.skipSpace()
 		if c.src[c.pos] == ',' {
 			c.pos++
@@ -217,6 +244,5 @@ func (c *canonicalizer) array(out *bytes.Buffer) bool {
 		c.skipSpace()
 	}
 	c.pos++
-	out.WriteByte(']')
-	return true
+	return value, true
 }

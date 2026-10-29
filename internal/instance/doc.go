@@ -172,7 +172,9 @@
 //   - credential.go: issuance, stream renewals, fetch, activation, reuse
 //     records, revocation and the credential limit.
 //   - key.go: connection key format and generation.
-//   - idempotency.go: idempotency records and request fingerprints.
+//   - idempotency.go: idempotency records and request fingerprints. Canonical
+//     ordering keeps scalar tokens in the input and emits once, avoiding
+//     repeated ancestor-value copies for deeply nested accepted JSON.
 //   - connection.go: connections, leases, grants, ready and heartbeat
 //     records, ends, resumes and connection notices.
 //   - ledger.go: upstream message replay ledger.
