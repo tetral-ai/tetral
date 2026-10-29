@@ -677,8 +677,10 @@ trace backend; the operator runs those and points Engine at them.
 | `metricsScrapePeers` | `[]` | NetworkPolicy peers, each with a `namespaceSelector` or an `ipBlock` | every workload NetworkPolicy admits them on its metrics port; empty adds no rule |
 | `serviceMonitor.enabled` | `false` | a boolean | one `monitoring.coreos.com/v1` ServiceMonitor per workload metrics Service |
 
-All values are under `observability`, and a value outside its accepted range
-fails the render. Integral YAML diagnostic values are emitted as decimal strings,
+All values are under `observability`. Numeric ranges and endpoint structure
+(`http`/`https`, a nonempty hostname and an optional numeric port) are checked
+at render time without echoing the supplied endpoint. Workloads perform complete
+URL validation at startup. Integral YAML diagnostic values are emitted as decimal strings,
 including values above one million; fractions and overflow are refused. The
 default ratio is quoted because Helm renders an unquoted
 `1.0` as `1`, which is equally valid. The workload NetworkPolicies live in

@@ -384,3 +384,38 @@ func TestHelmDiagnosticIntegersFromYAML(t *testing.T) {
 		})
 	}
 }
+
+// The chart checks address structure without invoking a parser whose errors
+// could echo the supplied value. Workloads retain complete URL validation.
+func TestHelmCollectorAddressStructure(t *testing.T) {
+	helm := requireHelm(t)
+	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
+	for _, tc := range []struct {
+		name, endpoint string
+		valid          bool
+	}{
+		{"hostname", "https://collector.example:4317/traces?transport=grpc", true},
+		{"ipv6", "http://[::1]:4317", true},
+		{"userinfo", "http://test-user:nonsecret-sentinel@collector:4317", true},
+		{"port without hostname", "http://:4317", false},
+		{"malformed port", "http://collector:bad/path?token=nonsecret-sentinel", false},
+		{"empty IPv6 host", "http://[]:4317", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			command := exec.Command(helm, "template", "tetral", chart, "--set-string", "observability.otlpEndpoint="+tc.endpoint, "--set-json", `observability.otlpPeers=[{"namespaceSelector":{}}]`) //nolint:gosec // Test-owned executable, chart and synthetic values.
+			output, err := command.CombinedOutput()
+			if tc.valid {
+				if err != nil {
+					t.Fatalf("valid address refused: %v\n%s", err, output)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(string(output), "observability.otlpEndpoint must be an http or https URL with a host") {
+				t.Fatalf("invalid address not refused by safe diagnostic: %v\n%s", err, output)
+			}
+			if strings.Contains(string(output), tc.endpoint) || strings.Contains(string(output), "nonsecret-sentinel") {
+				t.Fatalf("diagnostic echoed configured address: %s", output)
+			}
+		})
+	}
+}

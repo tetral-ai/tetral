@@ -197,8 +197,9 @@ as 1m30s; the template functions have no duration parser. */}}
 {{- $endpoint := .Values.observability.otlpEndpoint -}}
 {{- if not (kindIs "string" $endpoint) }}{{ fail "observability.otlpEndpoint must be a string" }}{{ end -}}
 {{- if $endpoint -}}
-{{- $url := urlParse $endpoint -}}
-{{- if or (not (has $url.scheme (list "http" "https"))) (empty $url.host) }}{{ fail "observability.otlpEndpoint must be an http or https URL with a host" }}{{ end -}}
+{{/* Check address structure without parser errors that echo the configured value.
+     Each workload still owns complete URL validation. */}}
+{{- if not (regexMatch `(?i)^https?://([^/?#@[:space:]]*@)?(\[[^\[\]/?#@[:space:]]+\]|[^\[\]/?#:@[:space:]]+)(:[0-9]*)?([/?#][^[:space:]]*)?$` $endpoint) }}{{ fail "observability.otlpEndpoint must be an http or https URL with a host" }}{{ end -}}
 {{- end -}}
 {{- $env := dict "TETRAL_LOG_LEVEL" .Values.observability.logLevel "TETRAL_LOG_MAX_RECORD_BYTES" .Values.observability.logMaxRecordBytes "TETRAL_LOG_SUMMARY_INTERVAL_MS" .Values.observability.logSummaryIntervalMs "TETRAL_LOG_BURST" .Values.observability.logBurst "TETRAL_TRACE_SAMPLE_RATIO" $ratio "TETRAL_DB_SLOW_QUERY_MS" $slowQuery -}}
 {{- if $endpoint }}{{ $_ := set $env "OTEL_EXPORTER_OTLP_ENDPOINT" $endpoint }}{{ end -}}
