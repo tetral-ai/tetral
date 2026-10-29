@@ -23,6 +23,10 @@ Drives on this machine belong here, with two owners:
   (`sessions/<session_id>/content/`). An operation through a mount writes
   its bytes there and commits its rows before it replies; a read that needs
   a download waits outside the owner, so it blocks no other operation.
+- A drive sync mounts its Session's drives itself: `fusermount3` mounts each
+  one and hands back the FUSE device, so no `fuser` session owns a mount and
+  none can unmount a later mount at the same point. The mount check reads
+  `/proc/self/mountinfo` before it touches a mount point.
 - The Content cache owner is the only writer under `cache/`; a blob enters
   only when the whole content hashes to its name, and uncommitted content
   never enters it. Its waits and the times of its slots read the clock it
@@ -51,6 +55,13 @@ Drives on this machine belong here, with two owners:
   methods: attributes, folder listings, reads (`Source`) with their waits,
   writes into content files, the downloads in progress (`Downloading`) and
   the local-only notices (`Notice`).
+- `mount.rs`: the capability probe (`probe`, `Mounting`), the mount check of
+  each bound drive (`Bound`), its failure texts and the new-failure rule
+  against `mount_errors` (`Failure`), `TETRAL_DRIVES`, lazy detach, and the
+  Connection owner's registry of drive syncs (`Registry`).
+- `fuse.rs` (Linux): the `fuser` adapter of one drive of one Session.
+- `mountinfo.rs` (Linux): the device number of a mount point in
+  `/proc/self/mountinfo`.
 - `paths.rs`: NFC names, the path checks, excluded paths and the local-only
   rules.
 - `local.rs`: the rows one operation changes (`Edit`), the pending changes it

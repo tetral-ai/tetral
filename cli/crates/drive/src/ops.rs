@@ -659,7 +659,7 @@ struct After {
 }
 
 impl Owner {
-    fn machine_path(&self, drive: &str, path: &str) -> PathBuf {
+    pub(crate) fn machine_path(&self, drive: &str, path: &str) -> PathBuf {
         let top = self.session_dir.join("drives").join(drive);
         if path.is_empty() { top } else { top.join(path) }
     }

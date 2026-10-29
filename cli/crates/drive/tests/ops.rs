@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use drive::cache::{CacheConfig, ContentCache};
 use drive::local::accepted_in_flight;
+use drive::mount::{Mounting, Registry};
 use drive::ops::{Notice, SetAttr, Special, TOP_INODE};
 use drive::state::{FileRow, InflightChange, SyncState, Tables, Write};
 use drive::transfer::{
@@ -132,6 +133,15 @@ impl DriveTransfer for Stub {
 }
 
 /// `TASK_PID` belongs to `task_a`; every other process to no task.
+struct NoRegistry;
+
+impl Registry for NoRegistry {
+    fn add(&self, _: SafeId, _: DriveSync) {}
+    fn remove(&self, _: SafeId) {}
+    fn mounted(&self, _: Id, _: SafeId) {}
+    fn detached(&self, _: Id, _: SafeId) {}
+}
+
 struct Tasks;
 
 impl TaskOwnership for Tasks {
@@ -320,6 +330,8 @@ fn spawn(root: &Path, stub: &Arc<Stub>, cache: &ContentCache, state: SyncState) 
         transfer: stub.clone(),
         cache: cache.clone(),
         tasks: Arc::new(Tasks),
+        mounting: Mounting::Unavailable("no FUSE: test".to_owned()),
+        registry: Arc::new(NoRegistry),
     });
     sync.binding_current(Binding {
         connection_id: Id::new("conn_a").unwrap(),

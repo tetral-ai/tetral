@@ -27,6 +27,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::cache::ContentCache;
 use crate::catchup::{self, Record, Version};
+use crate::mount::{Bound, Failure, Mounted, Mounting, Registry};
 use crate::ops::{Done, Notice, Op};
 use crate::paths;
 use crate::state::{ListingRow, SyncState, Tables, Write};
@@ -41,6 +42,8 @@ pub struct SyncConfig {
     pub transfer: Arc<dyn DriveTransfer>,
     pub cache: ContentCache,
     pub tasks: Arc<dyn TaskOwnership>,
+    pub mounting: Mounting,
+    pub registry: Arc<dyn Registry>,
 }
 
 /// A handle on a Session's Drive sync owner.
@@ -96,6 +99,29 @@ pub(crate) enum Message {
         task_id: String,
         reply: oneshot::Sender<Vec<Notice>>,
     },
+    /// Mounts each bound drive that is not mounted; the failures.
+    CheckMounts {
+        bound: Vec<Bound>,
+        reply: oneshot::Sender<Vec<Failure>>,
+    },
+    /// A check before a command begins: the held failures, and the failed
+    /// listings until its end go to it.
+    BeginCheck(oneshot::Sender<(u64, Vec<Failure>)>),
+    /// The check ends: `earlier` and its failed listings, those that are new.
+    EndCheck {
+        check: u64,
+        earlier: Vec<Failure>,
+        reply: oneshot::Sender<Vec<Failure>>,
+    },
+    /// The new failures among `failures`, judged against the rows.
+    Judge {
+        failures: Vec<Failure>,
+        reply: oneshot::Sender<Vec<Failure>>,
+    },
+    /// These failures were reported: their rows hold their texts.
+    Reported(Vec<Failure>),
+    Detach(String),
+    DetachAll,
 }
 
 pub(crate) enum Answer {
@@ -117,6 +143,11 @@ impl DriveSync {
             .values()
             .map(|row| ((row.drive_id.clone(), row.file_id), row.path.clone()))
             .collect();
+        // The mount points are named as `/proc/self/mountinfo` lists them.
+        let root = config
+            .root
+            .canonicalize()
+            .unwrap_or_else(|_| config.root.clone());
         let owner = Owner {
             state: config.state,
             transfer: config.transfer,
@@ -128,21 +159,32 @@ impl DriveSync {
             connected: 0,
             generations: 0,
             checks: Vec::new(),
-            session_dir: state::paths::session_directory(&config.root, config.session_id.as_str()),
-            blobs: config.root.join("cache/blobs"),
+            session_dir: state::paths::session_directory(&root, config.session_id.as_str()),
+            blobs: root.join("cache/blobs"),
             session_id: config.session_id.clone(),
             inodes,
             reads: HashMap::new(),
             read_tokens: 0,
             notices: BTreeMap::new(),
+            mounting: config.mounting,
+            registry: config.registry,
+            mounted: HashMap::new(),
+            held: Vec::new(),
+            checking: HashMap::new(),
+            check_ids: 0,
+            clean: std::collections::HashSet::new(),
+            handle: None,
         };
-        tokio::spawn(owner.run(inbox));
-        DriveSync {
+        let sync = DriveSync {
             mailbox,
             session_id: config.session_id,
             cache: config.cache,
             tasks: config.tasks,
-        }
+        };
+        let mut owner = owner;
+        owner.handle = Some(sync.clone());
+        tokio::spawn(owner.run(inbox));
+        sync
     }
 
     /// The connection owner saw `connected`, resumed or not.
@@ -191,6 +233,57 @@ impl DriveSync {
         answer.await.unwrap_or_default()
     }
 
+    /// Mounts each drive of `bound` that is not mounted, as a preparation
+    /// or a `session.drives` does; the failures that are new.
+    pub async fn mount_drives(&self, bound: Vec<Bound>) -> Vec<Failure> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Message::CheckMounts { bound, reply });
+        let failures = answer.await.unwrap_or_default();
+        let (reply, answer) = oneshot::channel();
+        self.send(Message::Judge { failures, reply });
+        answer.await.unwrap_or_default()
+    }
+
+    /// The check before an `exec_command` starts or a `view_image` reads:
+    /// the held failed listings, then each drive's mount, then the wait for
+    /// catch-up and its failed listings; the failures that are new, in that
+    /// order. Their rows change only when [`DriveSync::reported`] is told.
+    pub async fn check_drives(&self, bound: Vec<Bound>) -> Vec<Failure> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Message::BeginCheck(reply));
+        let Ok((check, mut earlier)) = answer.await else {
+            return Vec::new();
+        };
+        let (reply, answer) = oneshot::channel();
+        self.send(Message::CheckMounts { bound, reply });
+        earlier.extend(answer.await.unwrap_or_default());
+        self.check().await;
+        let (reply, answer) = oneshot::channel();
+        self.send(Message::EndCheck {
+            check,
+            earlier,
+            reply,
+        });
+        answer.await.unwrap_or_default()
+    }
+
+    /// These failures were reported; a drive whose first catch-up since its
+    /// mount finished keeps no row.
+    pub fn reported(&self, failures: Vec<Failure>) {
+        self.send(Message::Reported(failures));
+    }
+
+    /// Detaches `drive_id`'s mount: it gets no more notices, and every later
+    /// request of its FUSE session answers `EIO`.
+    pub fn detach(&self, drive_id: &Id) {
+        self.send(Message::Detach(drive_id.as_str().to_owned()));
+    }
+
+    /// Detaches every mount, as the App Server's shutdown does.
+    pub fn detach_all(&self) {
+        self.send(Message::DetachAll);
+    }
+
     /// The drives a failed listing unmounted, with its error.
     pub async fn unmounted(&self) -> BTreeMap<String, String> {
         let (reply, answer) = oneshot::channel();
@@ -212,6 +305,8 @@ pub(crate) struct Mount {
     again: bool,
     /// The `connected` count when the last finished catch-up began.
     finished_began: Option<u64>,
+    /// Whether no catch-up of this mount has finished yet.
+    first: bool,
     /// Operations that wait for the first listing to finish.
     pub(crate) until_listed: Vec<(Op, Reply)>,
     /// Reads of missing blobs that wait for the running catch-up to end.
@@ -253,6 +348,19 @@ pub(crate) struct Owner {
     pub(crate) read_tokens: u64,
     /// The local-only notices kept for each task.
     pub(crate) notices: BTreeMap<String, Vec<Notice>>,
+    pub(crate) mounting: Mounting,
+    pub(crate) registry: Arc<dyn Registry>,
+    /// The FUSE mount of each drive this App Server mounted.
+    pub(crate) mounted: HashMap<String, Mounted>,
+    /// Failed listings that ended outside every check, new when they ended.
+    pub(crate) held: Vec<Failure>,
+    /// The failed listings of each check in progress.
+    pub(crate) checking: HashMap<u64, Vec<Failure>>,
+    pub(crate) check_ids: u64,
+    /// The drives whose first catch-up since their mount finished.
+    pub(crate) clean: std::collections::HashSet<String>,
+    /// A handle on this owner, for the mounts' adapters.
+    pub(crate) handle: Option<DriveSync>,
 }
 
 pub(crate) fn now_ns() -> i64 {
@@ -294,24 +402,7 @@ impl Owner {
             Message::BindingGone => {
                 self.binding.send_replace(None);
             }
-            Message::Mounted { drive_id, exclude } => {
-                let drive = drive_id.as_str().to_owned();
-                self.generations += 1;
-                self.unmounted.remove(&drive);
-                self.mounts.insert(
-                    drive.clone(),
-                    Mount {
-                        exclude,
-                        generation: self.generations,
-                        running: None,
-                        again: false,
-                        finished_began: None,
-                        until_listed: Vec::new(),
-                        until_caught_up: Vec::new(),
-                    },
-                );
-                self.trigger(&drive);
-            }
+            Message::Mounted { drive_id, exclude } => self.mount_catch_up(drive_id, exclude),
             Message::Detached { drive_id } => {
                 self.mounts.remove(drive_id.as_str());
             }
@@ -350,6 +441,34 @@ impl Owner {
             Message::Notices { task_id, reply } => {
                 let _ = reply.send(self.notices.remove(&task_id).unwrap_or_default());
             }
+            Message::CheckMounts { bound, reply } => {
+                let failures = self.check_mounts(bound);
+                let _ = reply.send(failures);
+            }
+            Message::BeginCheck(reply) => {
+                self.check_ids += 1;
+                self.checking.insert(self.check_ids, Vec::new());
+                let _ = reply.send((self.check_ids, std::mem::take(&mut self.held)));
+            }
+            Message::EndCheck {
+                check,
+                mut earlier,
+                reply,
+            } => {
+                earlier.extend(self.checking.remove(&check).unwrap_or_default());
+                let _ = reply.send(self.judge(earlier));
+            }
+            Message::Judge { failures, reply } => {
+                let _ = reply.send(self.judge(failures));
+            }
+            Message::Reported(failures) => self.reported(failures).await,
+            Message::Detach(drive) => self.detach(&drive),
+            Message::DetachAll => {
+                let drives: Vec<String> = self.mounted.keys().cloned().collect();
+                for drive in drives {
+                    self.detach(&drive);
+                }
+            }
         }
     }
 
@@ -359,6 +478,29 @@ impl Owner {
             .drive_cursor
             .get(drive)
             .map_or(0, |cursor| cursor.applied_seq)
+    }
+
+    /// `drive_id` is mounted with `exclude`: a new mount, whose catch-up
+    /// starts.
+    pub(crate) fn mount_catch_up(&mut self, drive_id: Id, exclude: Vec<String>) {
+        let drive = drive_id.as_str().to_owned();
+        self.generations += 1;
+        self.unmounted.remove(&drive);
+        self.clean.remove(&drive);
+        self.mounts.insert(
+            drive.clone(),
+            Mount {
+                exclude,
+                generation: self.generations,
+                running: None,
+                again: false,
+                finished_began: None,
+                first: true,
+                until_listed: Vec::new(),
+                until_caught_up: Vec::new(),
+            },
+        );
+        self.trigger(&drive);
     }
 
     /// Starts a catch-up of `drive`, or one more after the running one.
@@ -450,7 +592,8 @@ impl Owner {
         };
         if let Err(error) = outcome {
             // The mount is detached and the drive is unmounted.
-            self.mounts.remove(drive);
+            self.detach(drive);
+            self.listing_failed(drive, &error);
             self.unmounted.insert(drive.to_owned(), error);
         }
     }
@@ -506,7 +649,7 @@ impl Owner {
             rand::random::<i64>(),
             now_ns(),
         );
-        self.write(write).await?;
+        self.write_replacing(drive, write).await?;
         self.list_changes(drive, start_seq, None);
         let waiting = self
             .mounts
@@ -541,7 +684,7 @@ impl Owner {
             })
             .collect();
         let write = catchup::apply_page(self.state.tables(), drive, &records, applied, now_ns());
-        self.write(write).await?;
+        self.write_replacing(drive, write).await?;
         if page.has_more {
             let last = page
                 .records
@@ -558,10 +701,14 @@ impl Owner {
             .take()
             .expect("an answer of a running catch-up");
         mount.finished_began = Some(running.began);
+        let first = std::mem::take(&mut mount.first);
         let again = std::mem::take(&mut mount.again);
         let waiting = std::mem::take(&mut mount.until_caught_up);
         for (op, reply) in waiting {
             self.op(drive.to_owned(), op, reply).await;
+        }
+        if first {
+            self.caught_up_first(drive).await?;
         }
         if again {
             self.trigger(drive);
@@ -574,6 +721,19 @@ impl Owner {
             .get(drive)
             .map(|mount| mount.exclude.clone())
             .unwrap_or_default()
+    }
+
+    /// Commits a catch-up's `write`, then invalidates the kernel's cached
+    /// pages of each file whose content it replaced.
+    async fn write_replacing(&mut self, drive: &str, write: Write) -> Result<(), String> {
+        let replaced = catchup::replaced(self.state.tables(), &write);
+        self.write(write).await?;
+        if let Some(mounted) = self.mounted.get(drive) {
+            for file_id in replaced {
+                mounted.invalidate(file_id as u64);
+            }
+        }
+        Ok(())
     }
 
     /// Commits `write` and keeps the path of each `file_id` it names.

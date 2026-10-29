@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use drive::cache::{CacheConfig, ContentCache};
+use drive::mount::{Mounting, Registry};
 use drive::state::{FileRow, PendingChange, SyncState, Tables, Write};
 use drive::transfer::{
     Binding, Commit, ContentSink, Download, DriveTransfer, Ended, ListChanges, ListFiles, Request,
@@ -41,6 +42,15 @@ enum Call {
 }
 
 struct Stub(mpsc::UnboundedSender<Call>);
+
+struct NoRegistry;
+
+impl Registry for NoRegistry {
+    fn add(&self, _: SafeId, _: DriveSync) {}
+    fn remove(&self, _: SafeId) {}
+    fn mounted(&self, _: Id, _: SafeId) {}
+    fn detached(&self, _: Id, _: SafeId) {}
+}
 
 struct NoTasks;
 
@@ -163,6 +173,8 @@ impl Harness {
             transfer,
             cache,
             tasks: Arc::new(NoTasks),
+            mounting: Mounting::Unavailable("no FUSE: test".to_owned()),
+            registry: Arc::new(NoRegistry),
         });
         sync.binding_current(Binding {
             connection_id: Id::new("conn_a").unwrap(),

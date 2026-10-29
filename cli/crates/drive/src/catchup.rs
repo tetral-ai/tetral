@@ -396,3 +396,25 @@ pub fn apply_page(
     });
     write
 }
+
+/// The `file_id`s of the present files whose content `write` replaces.
+pub fn replaced(tables: &Tables, write: &Write) -> Vec<i64> {
+    write
+        .files
+        .iter()
+        .filter(|row| row.present && row.kind == "file")
+        .filter(|row| {
+            tables
+                .files
+                .get(&(row.drive_id.clone(), row.path.clone()))
+                .is_some_and(|before| {
+                    before.present
+                        && before.kind == "file"
+                        && before.file_id == row.file_id
+                        && (&before.content, &before.local_sha256)
+                            != (&row.content, &row.local_sha256)
+                })
+        })
+        .map(|row| row.file_id)
+        .collect()
+}

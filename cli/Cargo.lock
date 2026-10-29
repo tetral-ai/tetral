@@ -1866,6 +1866,7 @@ name = "drive"
 version = "0.1.0-alpha.1"
 dependencies = [
  "bytes",
+ "fuser",
  "observe",
  "protocol",
  "rand 0.10.3",
