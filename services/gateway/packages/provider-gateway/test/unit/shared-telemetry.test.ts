@@ -5,6 +5,7 @@ import { ProviderGatewayServiceClient, ProviderGatewayServiceService, RunWebRequ
 import {
   activeTraceparent,
   beginServiceColdStart,
+  BoundedSpanProcessor,
   continueGrpcTraces,
   completeServiceColdStart,
   createTelemetry,
@@ -109,6 +110,63 @@ describe("shared telemetry", () => {
       await telemetry.shutdown(5_000);
       expect(receiver.received(traceId)).toBe(true);
     } finally { receiver.close(); }
+  });
+
+  test("OTLP export resumes after a successful export and an empty timer interval", async () => {
+    const receiver = await otlpReceiver();
+    const telemetry = createTelemetry({ serviceName: "provider-gateway", diagnostics: { traceEndpoint: receiver.endpoint, traceSampleRatio: 1 } });
+    try {
+      const before = telemetry.tracer.startSpan("before_idle");
+      before.end();
+      const deadline = performance.now() + 5_000;
+      while (!receiver.received(before.spanContext().traceId) && performance.now() < deadline) {
+        await Bun.sleep(10);
+      }
+      expect(receiver.received(before.spanContext().traceId)).toBe(true);
+      // Exercise the production one-second timer with no new spans to export.
+      await Bun.sleep(1_200);
+      const after = telemetry.tracer.startSpan("after_idle");
+      after.end();
+      await telemetry.shutdown(5_000);
+      expect(after.spanContext().traceId).not.toBe(before.spanContext().traceId);
+      expect(receiver.received(after.spanContext().traceId)).toBe(true);
+    } finally {
+      await telemetry.shutdown(5_000);
+      receiver.close();
+    }
+  }, 15_000);
+
+  test("flush joins an in-flight export even when its batch emptied the queue", async () => {
+    let release: (() => void) | undefined;
+    let exports = 0;
+    const exporter: NonNullable<TelemetryOptions["exporter"]> = {
+      export: (spans, callback) => {
+        exports++;
+        expect(spans).toHaveLength(1);
+        release = () => callback({ code: 0 });
+      },
+      shutdown: async () => undefined,
+    };
+    const processor = new BoundedSpanProcessor(exporter, { start: false });
+    const telemetry = createTelemetry({ serviceName: "provider-gateway", diagnostics: { traceSampleRatio: 1 }, spanProcessors: [processor] });
+    try {
+      telemetry.tracer.startSpan("held_export").end();
+      const first = processor.forceFlush();
+      expect(exports).toBe(1);
+      expect(processor.queued).toBe(0);
+      let flushed = false;
+      const second = processor.forceFlush().then(() => { flushed = true; });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(flushed).toBe(false);
+      expect(exports).toBe(1);
+      release!();
+      await Promise.all([first, second]);
+      expect(flushed).toBe(true);
+      expect(exports).toBe(1);
+    } finally {
+      release?.();
+      await telemetry.shutdown();
+    }
   });
 
   test("a ratio of 0 exports no new root span and exports the span whose incoming parent is sampled", async () => {

@@ -192,6 +192,8 @@ lazily and is fed by a 2,048-span queue that refuses a span when full and
 counts it in `tetral_diagnostic_spans_dropped_total`, exporting batches of 256
 every second, each within ten seconds. The resource carries `service.name`,
 `service.version`, `service.instance.id` and `deployment.environment`.
+An empty timer interval leaves the exporter ready for later spans. A flush
+joins an active export even when that export has already emptied the queue.
 
 W3C `traceparent` is the only propagated header. Every gRPC client a service
 opens to an Engine service carries `traceparentClientInterceptor`, which writes

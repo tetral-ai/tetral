@@ -88,7 +88,9 @@ export class BoundedSpanProcessor implements SpanProcessor {
   }
 
   #drain(): Promise<void> {
-    this.#exporting ??= (async () => {
+    if (this.#exporting !== undefined) return this.#exporting;
+    if (this.#queue.length === 0) return Promise.resolve();
+    this.#exporting = (async () => {
       try {
         while (this.#queue.length > 0) await this.#export(this.#queue.splice(0, spanExportBatch));
       } finally {
