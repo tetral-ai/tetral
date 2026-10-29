@@ -313,7 +313,17 @@
         "type": "gauge"
       }
     },
-    "api": {},
+    "api": {
+      "drive_upload_budget_rejected_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "cause": [
+            "budget"
+          ]
+        }
+      }
+    },
     "auth": {
       "tetral_auth_api_key_usage_rows_updated_total": {
         "type": "counter",
@@ -455,6 +465,15 @@
             "drain",
             "moved",
             "stalled"
+          ]
+        }
+      },
+      "drive_upload_budget_rejected_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "cause": [
+            "budget"
           ]
         }
       }

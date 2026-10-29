@@ -28,6 +28,9 @@
 //   - Table drive_contents: content the drive holds, once per hash, at its
 //     blob_key in the blob store.
 //   - Table drive_blob_cleanup: blobs to delete once delete_after has passed.
+//   - Table drive_upload_budgets: each Workspace's upload budget, tokens as of
+//     refilled_at; a Workspace without a row has a full budget
+//     (upload_budget.go).
 //   - The commit notice on NoticeChannel.
 //
 // STATES:
@@ -40,7 +43,7 @@
 //
 // WRITERS (callers):
 //   - Create, Update, Delete, Redact, Restore (api).
-//   - PutContent, Commit (api, computer-hub).
+//   - PutContent, Commit, UploadBudget.Take (api, computer-hub).
 //
 // INVARIANTS:
 //   - Every read applies retention by age against the database clock

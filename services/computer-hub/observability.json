@@ -403,6 +403,15 @@
           "stalled"
         ]
       }
+    },
+    "drive_upload_budget_rejected_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "cause": [
+          "budget"
+        ]
+      }
     }
   },
   "spans": {
