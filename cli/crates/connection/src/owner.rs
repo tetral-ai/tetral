@@ -40,7 +40,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use drive::DriveTransfer;
+use drive::{DriveSync, DriveTransfer};
 use observe::{Identity, STARTUP, TraceContext};
 use protocol::bootstrap::BootstrapKey;
 use protocol::connection::{
@@ -217,6 +217,15 @@ pub(crate) enum Message {
     Outbox(OutboxEvent),
     Port(PortMessage),
     Sessions(oneshot::Sender<SessionsView>),
+    DriveSyncs(DriveSyncs),
+}
+
+/// A change of the drive syncs the Connection owner signals.
+pub(crate) enum DriveSyncs {
+    Added(SafeId, DriveSync),
+    Removed(SafeId),
+    Mounted(Id, SafeId),
+    Detached(Id, SafeId),
 }
 
 /// A handle on the Connection owner.
@@ -303,6 +312,30 @@ impl Connection {
     /// The entries of `GET /v1/sessions`: each Session binding owner's,
     /// which this caller asks for, since the Connection owner never waits
     /// for another owner, then each preparation still staged.
+    /// Adds `session_id`'s Drive sync owner, which is told of every
+    /// `connected`.
+    pub fn add_drive_sync(&self, session_id: SafeId, sync: DriveSync) {
+        self.send(Message::DriveSyncs(DriveSyncs::Added(session_id, sync)));
+    }
+
+    pub fn remove_drive_sync(&self, session_id: SafeId) {
+        self.send(Message::DriveSyncs(DriveSyncs::Removed(session_id)));
+    }
+
+    /// `session_id`'s drive sync has `drive_id` mounted: it gets the
+    /// drive's `drive.changed` notices until it is detached.
+    pub fn drive_mounted(&self, drive_id: Id, session_id: SafeId) {
+        self.send(Message::DriveSyncs(DriveSyncs::Mounted(
+            drive_id, session_id,
+        )));
+    }
+
+    pub fn drive_detached(&self, drive_id: Id, session_id: SafeId) {
+        self.send(Message::DriveSyncs(DriveSyncs::Detached(
+            drive_id, session_id,
+        )));
+    }
+
     pub async fn sessions(&self) -> Vec<SessionEntry> {
         let (reply, answer) = oneshot::channel();
         self.send(Message::Sessions(reply));
@@ -514,6 +547,10 @@ struct Owner {
     requests: HashMap<u64, Pending>,
     reported: Reported,
     owners: Owners,
+    /// Each Session's Drive sync owner, and the drive syncs that have each
+    /// drive mounted.
+    drive_syncs: HashMap<SafeId, DriveSync>,
+    mounted_drives: HashMap<Id, BTreeSet<SafeId>>,
     slots: ProbeSlots,
     /// The task pressure point `tetral_tasks`.
     task_pressure: TaskPressure,
@@ -536,6 +573,8 @@ impl Owner {
         let times = config.times;
         Owner {
             owners,
+            drive_syncs: HashMap::new(),
+            mounted_drives: HashMap::new(),
             slots: ProbeSlots::new(times.probe_slots),
             task_pressure: TaskPressure::new(observe::registry(), times.task_pressure_quiet),
             stop_replies: Vec::new(),
@@ -600,6 +639,10 @@ impl Owner {
                 let _ = reply.send(self.sessions_view());
                 return;
             }
+            Message::DriveSyncs(change) => {
+                self.drive_syncs_changed(change);
+                return;
+            }
             _ if matches!(self.phase, Phase::Stopped) => return,
             _ => state::seams::now(),
         };
@@ -615,9 +658,11 @@ impl Owner {
                 saved,
             } => self.persisted(phase, tag, credential, saved, now),
             Message::Outbox(event) => self.outbox_event(phase, event, now),
-            Message::Status(_) | Message::Stop(_) | Message::Port(_) | Message::Sessions(_) => {
-                phase
-            }
+            Message::Status(_)
+            | Message::Stop(_)
+            | Message::Port(_)
+            | Message::Sessions(_)
+            | Message::DriveSyncs(_) => phase,
         };
         self.reported.change(self.state());
     }
@@ -1070,6 +1115,7 @@ impl Owner {
                     Some((Some((_, true)), task, _, credential)) => {
                         held.stream = Stream::Live { stream, task };
                         self.reported.reconnected(Reconnect::Resume);
+                        self.signal_connected();
                         if matches!(held.renewal, Some(Renewal::Switching { .. })) {
                             held.renewal = None;
                             self.adopt(credential);
@@ -1111,6 +1157,7 @@ impl Owner {
     ) -> Phase {
         limit.set(self.times.event_max_bytes);
         STARTUP.first_connected(now);
+        self.signal_connected();
         if self.held_count > 0 {
             self.reported.reconnected(Reconnect::New);
         }
@@ -1275,6 +1322,20 @@ impl Owner {
                 );
                 Phase::Held(held)
             }
+            DownstreamPayload::DriveChanged(notice) => {
+                // No ACK; a notice for a drive no drive sync has mounted goes.
+                for session in self
+                    .mounted_drives
+                    .get(&notice.drive_id)
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(sync) = self.drive_syncs.get(session) {
+                        sync.drive_changed(notice.drive_id.clone(), notice.seq.get());
+                    }
+                }
+                Phase::Held(held)
+            }
             DownstreamPayload::CredentialRenew(renew) => {
                 self.renewal_notice(&mut held, renew.credential_id);
                 Phase::Held(held)
@@ -1301,6 +1362,43 @@ impl Owner {
                 self.blocked(Phase::Held(held), error)
             }
             _ => Phase::Held(held),
+        }
+    }
+
+    fn drive_syncs_changed(&mut self, change: DriveSyncs) {
+        match change {
+            DriveSyncs::Added(session, sync) => {
+                self.drive_syncs.insert(session, sync);
+            }
+            DriveSyncs::Removed(session) => {
+                self.drive_syncs.remove(&session);
+                for sessions in self.mounted_drives.values_mut() {
+                    sessions.remove(&session);
+                }
+                self.mounted_drives
+                    .retain(|_, sessions| !sessions.is_empty());
+            }
+            DriveSyncs::Mounted(drive, session) => {
+                self.mounted_drives
+                    .entry(drive)
+                    .or_default()
+                    .insert(session);
+            }
+            DriveSyncs::Detached(drive, session) => {
+                if let Some(sessions) = self.mounted_drives.get_mut(&drive) {
+                    sessions.remove(&session);
+                    if sessions.is_empty() {
+                        self.mounted_drives.remove(&drive);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every drive sync catches up after each `connected`, resumed or not.
+    fn signal_connected(&self) {
+        for sync in self.drive_syncs.values() {
+            sync.connected();
         }
     }
 

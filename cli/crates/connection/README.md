@@ -184,6 +184,11 @@ mailbox submission; the body owner releases the budget on its last reference.
   connection's start and end, and it answers with `OutboxEvent`s.
   `OutboxTimes` holds its durations, each a constant but for tests, and its
   `state::clock::Clock` is the CLI's clock but for tests.
+- `Connection::add_drive_sync` and `remove_drive_sync` keep each Session's
+  Drive sync owner, which the Connection owner tells of every `connected`,
+  resumed or not; `drive_mounted` and `drive_detached` keep the drive syncs
+  that have each drive mounted, to which each `drive.changed` goes, without
+  an ACK. A notice for a drive no drive sync has mounted is dropped.
 - `Connection::drive_transfer()` gives the drive transfer client
   (`drive_transfer::HttpDriveTransfer`), which takes the held connection
   and its key from the Connection owner (`DriveLink`) and tells it a
@@ -193,7 +198,7 @@ mailbox submission; the body owner releases the budget on its last reference.
 
 | File | Holds |
 |---|---|
-| `src/owner.rs` | The Connection owner: its phases, timers, the answers to the events request, ready and heartbeats, `disconnect`, the order of an event's handling and the ledger's admission (`admit`), staging and routing, the admission of a `session.prepare` and its `failed` report, the record `protocol.foreign_connection`, and the test seam counters `connection.attempt`, `connection.checked`, `connection.granted`, `connection.answered`, `connection.final_acked` and `route.session` |
+| `src/owner.rs` | The Connection owner: its phases, timers, the answers to the events request, ready and heartbeats, `disconnect`, the order of an event's handling and the ledger's admission (`admit`), staging and routing, the admission of a `session.prepare` and its `failed` report, the registry of drive syncs and the forwarding of `drive.changed`, the record `protocol.foreign_connection`, and the test seam counters `connection.attempt`, `connection.checked`, `connection.granted`, `connection.answered`, `connection.final_acked` and `route.session` |
 | `src/credential.rs` | A renewal's steps (`Renewal`): the fetch's body, the check of its answer, the replacement of `credentials.json`, and the records `credential.renewal_rejected` and `credential.renewal_not_saved`; the barrier `renewal.persisted` after the write is the owner's (`owner`) |
 | `src/drive_transfer.rs` | The drive transfer client: requests, `total`, the no-progress deadline `STALL`, answer bounds, validation against the request, the class of each answer and its retry, a rebind and a credential switch, and the record `drive_transfer.answer_rejected` |
 | `src/git_ticket.rs` | A git-ticket fetch (`TicketFetch`): its body and the sorting of its answer |
