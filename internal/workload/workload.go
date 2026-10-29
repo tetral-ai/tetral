@@ -697,6 +697,7 @@ func ForbiddenImportPrefixes() []string {
 		"github.com/tetral-ai/tetral/internal/agent",
 		"github.com/tetral-ai/tetral/internal/auth",
 		"github.com/tetral-ai/tetral/internal/blob",
+		"github.com/tetral-ai/tetral/internal/drive",
 		"github.com/tetral-ai/tetral/internal/encryption",
 		"github.com/tetral-ai/tetral/internal/environment",
 		"github.com/tetral-ai/tetral/internal/eventstream",
