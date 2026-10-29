@@ -603,7 +603,7 @@ func cleanupOrphanedDependencyContainers(ctx context.Context) error {
 		if err != nil || processIdentityAlive(pid, strings.TrimSpace(started)) {
 			continue
 		}
-		if err := runQuiet(ctx, "docker", "rm", "-f", container); err != nil {
+		if err := removeContainer(ctx, container); err != nil {
 			if removed, checkErr := waitDockerResourceRemoved(ctx, "container", "id", container); checkErr == nil && removed {
 				continue
 			}
@@ -617,7 +617,7 @@ func (m *dependencyManager) stop(ctx context.Context) error {
 	var first error
 	for index := len(m.containers) - 1; index >= 0; index-- {
 		started := time.Now()
-		if err := runQuiet(ctx, "docker", "rm", "-f", m.containers[index]); err != nil && first == nil {
+		if err := removeContainer(ctx, m.containers[index]); err != nil && first == nil {
 			first = err
 		}
 		m.recordDependencyTeardown(m.containerDependencies[index], time.Since(started))
