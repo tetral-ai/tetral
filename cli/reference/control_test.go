@@ -318,6 +318,26 @@ func TestAnswerControlChangesTheNextAnswer(t *testing.T) {
 		}
 	})
 
+	t.Run("hold_request", func(t *testing.T) {
+		ts, connectionID := readyOn(t)
+		ts.call("answer", map[string]any{"endpoint": "ready", "action": "hold_request"}, nil)
+		done := ts.postAsync("ready", "tetral_ck_a", readyBody(connectionID, "ready_1"))
+		waitFor(t, func() bool { return len(ts.state().Held) == 1 })
+		if accepted(ts, connectionID) {
+			t.Fatal("a held request was served before its release")
+		}
+		ts.call("credential", map[string]any{"action": "revoke", "credential_id": "cred_a"}, nil)
+		ts.call("answer", map[string]any{"action": "release"}, nil)
+		answer := receive(t, done)
+		if answer.status != http.StatusUnauthorized || answer.code() != "credential_revoked" {
+			t.Errorf("released answer %d %s; want it authenticated at its release", answer.status, answer.body)
+		}
+		requests := ts.state().Requests
+		if last := requests[len(requests)-1]; last.CredentialID != "cred_a" || last.Code != "credential_revoked" {
+			t.Errorf("logged %+v; want the revoked key's credential", last)
+		}
+	})
+
 	t.Run("wrong identity", func(t *testing.T) {
 		ts, connectionID := readyOn(t)
 		ts.call("answer", map[string]any{"endpoint": "ready", "action": "wrong_identity"}, nil)

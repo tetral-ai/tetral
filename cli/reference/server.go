@@ -373,7 +373,22 @@ func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec e
 		BodySHA256: hex.EncodeToString(digest[:]),
 	}
 	server.mu.Lock()
+	if hold := server.takeHold(spec.name); hold != nil {
+		held := &heldAnswer{Endpoint: spec.name, release: make(chan struct{})}
+		server.held = append(server.held, held)
+		server.mu.Unlock()
+		select {
+		case <-held.release:
+		case <-request.Context().Done():
+			server.mu.Lock()
+			server.releaseHeld(func(candidate *heldAnswer) bool { return candidate == held })
+			server.mu.Unlock()
+			return
+		}
+		server.mu.Lock()
+	}
 	entry.At = server.clock.Now()
+	entry.CredentialID = server.credentialOfKey(bearer(request))
 	cred, denied := server.authenticate(bearer(request), "", "", false)
 	if denied != nil {
 		server.mu.Unlock()

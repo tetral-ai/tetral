@@ -125,6 +125,16 @@ func (server *Server) authenticate(key, instanceID, credentialID string, events 
 	return found, nil
 }
 
+// credentialOfKey names the credential whose key is key, in any state.
+func (server *Server) credentialOfKey(key string) string {
+	for _, candidate := range server.credentials {
+		if candidate.ConnectionKey != "" && candidate.ConnectionKey == key {
+			return candidate.CredentialID
+		}
+	}
+	return ""
+}
+
 // live is the instance's connection while its lease lasts.
 func (server *Server) live(instanceID string) *connection {
 	instance := server.instances[instanceID]

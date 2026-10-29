@@ -24,7 +24,9 @@ type fault struct {
 	// without an answer), `withhold` (accept, then hold the answer until the
 	// answer control releases it), `wrong_identity` (answer for another
 	// message_id), `without_accepted` (answer the ACK without `accepted`),
-	// `schema_fail` (answer `200` with Body, `{}` by default), `error`
+	// `schema_fail` (answer `200` with Body, `{}` by default), `hold_request`
+	// (hold the request before it is authenticated until the answer control
+	// releases it, then serve it as it would be served then), `error`
 	// (answer Code with Status, by default the status the client error table
 	// gives Code, accepting nothing) or `throttle` (read the body at
 	// BytesPerSecond of the clock, so that a clock held still stalls it; it
@@ -46,7 +48,22 @@ type fault struct {
 func (server *Server) takeFault(endpoint, messageID string, throttle bool) *fault {
 	for index, candidate := range server.faults {
 		if candidate.Endpoint != endpoint || (candidate.MessageID != "" && candidate.MessageID != messageID) ||
-			(candidate.Action == "throttle") != throttle {
+			(candidate.Action == "throttle") != throttle || candidate.Action == "hold_request" {
+			continue
+		}
+		candidate.Count--
+		if candidate.Count <= 0 {
+			server.faults = slices.Delete(server.faults, index, index+1)
+		}
+		return candidate
+	}
+	return nil
+}
+
+// takeHold takes the next `hold_request` of an endpoint.
+func (server *Server) takeHold(endpoint string) *fault {
+	for index, candidate := range server.faults {
+		if candidate.Endpoint != endpoint || candidate.Action != "hold_request" {
 			continue
 		}
 		candidate.Count--
@@ -72,7 +89,10 @@ type requestLog struct {
 	Query        map[string]string `json:"query,omitempty"`
 	ConnectionID string            `json:"connection_id,omitempty"`
 	MessageID    string            `json:"message_id,omitempty"`
-	Traceparent  string            `json:"traceparent,omitempty"`
+	// CredentialID is the credential that the request's key names, in any
+	// state, so a test can tell which key a request carried.
+	CredentialID string `json:"credential_id,omitempty"`
+	Traceparent  string `json:"traceparent,omitempty"`
 	// BodySHA256 is the lowercase hexadecimal SHA-256 of an upstream
 	// message's body as read, so a test can tell a byte-identical retry.
 	BodySHA256 string `json:"body_sha256,omitempty"`
@@ -331,6 +351,10 @@ func (server *Server) controlAnswer(body json.RawMessage) (any, error) {
 		})
 		return map[string]any{}, nil
 	case "drop", "withhold", "wrong_identity", "without_accepted", "schema_fail":
+	case "hold_request":
+		if input.MessageID != "" {
+			return nil, errors.New("a hold_request matches an endpoint only, since it applies before the body is decoded")
+		}
 	case "delay":
 		if input.DelayMs <= 0 {
 			return nil, errors.New("a delay needs delay_ms above 0")
