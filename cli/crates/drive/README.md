@@ -15,9 +15,18 @@ Drives on this machine belong here, with two owners:
   the connection's rules, and gives them only the answers they act on
   (`Ended`). Each request carries the drive sync's binding as a watch; each
   new value is a binding of a later preparation.
+- The Content cache owner is the only writer under `cache/`; a blob enters
+  only when the whole content hashes to its name, and uncommitted content
+  never enters it. Its waits and the times of its slots read the clock it
+  is given; the free space it reads is given too, the volume's by default.
 
 ## Where things are
 
+- `cache.rs`: the Content cache owner (`ContentCache`): `cache/blobs/` and
+  `cache/tmp/`, a read's download with its digest check, adoption, last
+  read times, eviction under `FREE_SPACE_MIN`, removal of unnamed blobs,
+  and the download and upload slots, the pressure points
+  `tetral_downloads` and `tetral_uploads`.
 - `transfer.rs`: `DriveTransfer`, its requests (`Request`, `ListFiles`,
   `ListChanges`, `Upload`, `Commit`, `Download`), `ContentSink`, the answer
   classes (`Class`) and `Ended`.

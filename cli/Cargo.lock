@@ -1842,7 +1842,13 @@ name = "drive"
 version = "0.1.0-alpha.1"
 dependencies = [
  "bytes",
+ "observe",
  "protocol",
+ "rand 0.10.3",
+ "rustix",
+ "sha2 0.11.1",
+ "state",
+ "tempfile",
  "tokio",
 ]
 

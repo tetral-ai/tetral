@@ -7,5 +7,13 @@ publish.workspace = true
 
 [dependencies]
 bytes.workspace = true
+observe.workspace = true
 protocol.workspace = true
-tokio = { workspace = true, features = ["rt", "sync"] }
+rand.workspace = true
+rustix = { workspace = true, features = ["fs"] }
+sha2.workspace = true
+state.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+
+[dev-dependencies]
+tempfile.workspace = true
