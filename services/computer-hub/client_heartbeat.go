@@ -37,9 +37,13 @@ func (h *clientHandler) heartbeat(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if _, found, err := replayOf(ctx, tx, connection, instance.RouteHeartbeat, heartbeat.MessageID, fingerprint); found || err != nil {
-			answer = grantAcknowledge(connection.ID, heartbeat.MessageID, connection.Heartbeat.ValidForMS)
+		_, found, err := replayOf(ctx, tx, connection, instance.RouteHeartbeat, heartbeat.MessageID, fingerprint)
+		if err != nil {
 			return err
+		}
+		if found {
+			answer = grantAcknowledge(connection.ID, heartbeat.MessageID, connection.Heartbeat.ValidForMS)
+			return nil
 		}
 		switch {
 		case connection.ReadyAcceptedAt == nil:

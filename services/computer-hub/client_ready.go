@@ -56,9 +56,13 @@ func (h *clientHandler) ready(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if _, found, err := replayOf(ctx, tx, connection, instance.RouteReady, ready.MessageID, fingerprint); found || err != nil {
-			answer = readyAnswer(connection)
+		_, found, err := replayOf(ctx, tx, connection, instance.RouteReady, ready.MessageID, fingerprint)
+		if err != nil {
 			return err
+		}
+		if found {
+			answer = readyAnswer(connection)
+			return nil
 		}
 		if connection.ReadyAnswered() {
 			return refuse(protocol.ErrorInvalidMessage, "the connection's ready was already answered")

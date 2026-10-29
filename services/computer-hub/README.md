@@ -404,6 +404,10 @@ termination grace period carry the drain, which is why Helm refuses a
   heartbeat schedule and sequences of a first and a resumed stream; a
   revocation or deregistration ending the live connection with its
   disconnect.
+- `client_failure_test.go`: first ready/heartbeat cross-route replay conflicts
+  return typed 409 before response reconstruction. Authority and replay-ledger
+  query failures return 503 without accepting a message or changing the lease
+  or replay ledger.
 - `instruction_delivery_test.go`, with two hub servers of different pod names
   on one database: a resume on the other pod writing each unreported
   instruction once more as stored, the previous pod's stream closed without a

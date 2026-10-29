@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"log/slog"
+	"net/http"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -626,11 +627,19 @@ func externalAwaitBlock(ctx context.Context, t *testing.T, admin *sql.DB, holder
 }
 
 // lookupCounter counts the statements that call an Auth lookup function.
-type lookupCounter struct{ calls atomic.Int64 }
+type lookupCounter struct {
+	calls             atomic.Int64
+	failConnectionKey atomic.Bool
+}
 
 func (c *lookupCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
 	if strings.Contains(data.SQL, "tetral_auth_lookup") {
 		c.calls.Add(1)
+	}
+	if strings.Contains(data.SQL, "public.tetral_auth_lookup_connection_key") && c.failConnectionKey.CompareAndSwap(true, false) {
+		failed, cancel := context.WithCancel(ctx)
+		cancel()
+		return failed
 	}
 	return ctx
 }
@@ -645,7 +654,8 @@ func TestPostgreSQLAuthCheckSeparatesConnectionKeysFromOtherCredentials(t *testi
 	_, admin, privateKey := newTestAuthRouter(t)
 	workloadDB := storagetest.OpenWorkloadDB(t, admin, "auth")
 	lookups := &lookupCounter{}
-	resolver := auth.NewAuthorityResolver(workloadDB.OpenWorkload(t, "auth", lookups), "ws_auth_test", nil)
+	lookupDB := workloadDB.OpenWorkload(t, "auth", lookups)
+	resolver := auth.NewAuthorityResolver(lookupDB, "ws_auth_test", nil)
 	signer, err := auth.NewInternalPrincipalSignerFromBase64(privateKey)
 	if err != nil {
 		t.Fatal(err)
@@ -727,6 +737,40 @@ func TestPostgreSQLAuthCheckSeparatesConnectionKeysFromOtherCredentials(t *testi
 			}
 		})
 	}
+	assertUnavailable := func(t *testing.T) {
+		t.Helper()
+		response, err := adapter.Check(ctx, externalTestRequest("POST", "/v1/client/ready", "", []string{"Bearer " + known.Reveal()}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if externalTestStatus(response) != http.StatusInternalServerError || externalTestPrincipal(response) != "" {
+			t.Fatalf("dependency failure: status=%d principal present=%v", externalTestStatus(response), externalTestPrincipal(response) != "")
+		}
+		var envelope errorResponse
+		body := response.GetDeniedResponse().GetBody()
+		if err := json.Unmarshal([]byte(body), &envelope); err != nil || envelope.Type != "error" || envelope.Error.Type != "api_error" || envelope.Error.Message != "authentication unavailable" {
+			t.Fatalf("dependency denial = %s", body)
+		}
+	}
+	t.Run("connection key lookup failure after acquisition", func(t *testing.T) {
+		before := lookups.calls.Load()
+		lookups.failConnectionKey.Store(true)
+		assertUnavailable(t)
+		if lookups.failConnectionKey.Load() || lookups.calls.Load()-before != 1 {
+			t.Fatal("failure did not reach the connection-key lookup")
+		}
+	})
+	t.Run("connection key acquisition failure", func(t *testing.T) {
+		if err := lookupDB.Close(); err != nil {
+			t.Fatal(err)
+		}
+		before := lookups.calls.Load()
+		assertUnavailable(t)
+		if lookups.calls.Load() != before {
+			t.Fatal("closed pool unexpectedly reached lookup")
+		}
+	})
+
 }
 
 func externalTestBearer(ctx context.Context, t *testing.T, admin, runtime *sql.DB) (string, func() int64) {

@@ -429,7 +429,10 @@ administrative `TETRAL_TEST_DATABASE_URL` and create isolated clones/roles.
   frozen Bearer selection/duplicates, malformed metadata, actual lock-graph
   revoke/admission orders and interrupted database waits; the credential class
   rows drive each class on client and management paths and count the lookup
-  statements Auth's pool sends.
+  statements Auth's pool sends. Connection-key lookup failures after acquisition
+  and pool acquisition failures both return HTTP 500 with `api_error` and
+  `authentication unavailable`, without a signed principal; an unknown key
+  remains a 401 credential refusal.
 - `services/auth/grpc_test.go`: listener configuration and, within the owning
   PostgreSQL root, real native TLS peer rejection without credential admission,
   held Check across leaf renewal and trust overlap, retired-channel rejection,
