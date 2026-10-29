@@ -18,7 +18,7 @@ func TestPersonalAndProviderLaunchersComeOnline(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
 	record.boundary("both instances are user instances that POST /v1/instances registered; a cloud instance's claim bootstrap is not served yet")
-	record.boundary("credential delivery over a live connection (delivery: stream) is not served yet; only a delivery through configure and a restart is observed")
+	record.boundary("this scenario observes only credential delivery through configure and a restart; it does not exercise delivery over a live connection (delivery: stream)")
 	record.boundary("the idle exit itself does not happen: the run ends before 15 minutes without a command")
 	e := startEngine(t, record, engineOptions{})
 	controller, developer := e.controller(), e.developer()

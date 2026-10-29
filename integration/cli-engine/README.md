@@ -35,7 +35,7 @@ the repository and no CI workflow runs it.
 | Variable | Read when | Value |
 |---|---|---|
 | `TETRAL_MACHINE_OS` | always | `linux` or `macos`, where the machines run |
-| `TETRAL_CLI_BIN` | always | a CLI build for the Linux host; its `version` names the CLI commit of the record |
+| `TETRAL_CLI_BIN` | always | a CLI build for the Linux host at `<full-commit>/<os>-<arch>/<binary>`; the directory names the recorded source commit |
 | `TETRAL_ACCEPTANCE_DIR` | always | the directory records are written to |
 | `TETRAL_CLI_BIN_MACOS` | `macos` | a macOS build of the same CLI commit |
 | `TETRAL_MAC_SSH_DESTINATION`, `TETRAL_MAC_SSH_KEY` | `macos` | the Mac's `user@host` and the private key for it |
@@ -52,7 +52,7 @@ not run on, or two CLI builds of different commits.
 Set the inputs and run one test from this directory:
 
 ```bash
-go test -count=1 -timeout=60m -run '^TestLiveRenewalMovesTheConnectionToTheNewCredential$' ./...
+go test -count=1 -timeout=60m -run '^TestStreamOnlyDisconnectResumesTheSameConnection$' ./...
 ```
 
 Docker must be running for the containers.
@@ -69,7 +69,9 @@ replaces the file.
 ## Tests
 
 - `client_connection_test.go`: a stream that resumes on another pod after its
-  pod is killed, a stream-only disconnect, a held ready acknowledgement, and a
-  live credential renewal.
+  pod is killed, a stream-only disconnect, and a held ready acknowledgement.
+  The live credential renewal scenario is present but requires a CLI that
+  consumes `credential.renew`; the current CLI does not implement that consumer,
+  so this scenario cannot yet pass and is not current compatibility evidence.
 - `computer_management_test.go`: user instances launched the way a product
   app launches them, and a revocation that ends the live connection.
