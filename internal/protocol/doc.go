@@ -78,8 +78,11 @@
 //
 // Encode writes only the members a value holds, null only for a member set to
 // null, integers as their exact text, the schema's constants, and strings with
-// minimal escaping, so that the length of an encoding is the size its receiver
-// measures.
+// protocol-compatible escaping. Equivalent input spelling may change; admission
+// owners must validate and measure a compatible representation and prove that
+// release preserves meaning without growing the corresponding input/metadata
+// beyond measurement. The complete saved envelope remains byte-identical on
+// first delivery and every resend.
 //
 // # Terms
 //
