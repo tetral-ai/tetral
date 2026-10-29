@@ -183,18 +183,27 @@ as 1m30s; the template functions have no duration parser. */}}
 {{- define "tetral.diagnosticEnv" -}}
 {{- if not (has .Values.observability.logLevel (list "debug" "info" "warn" "error")) }}{{ fail "observability.logLevel must be debug, info, warn, or error" }}{{ end -}}
 {{- range $setting := list (dict "name" "logMaxRecordBytes" "min" 1024 "max" 65536) (dict "name" "logSummaryIntervalMs" "min" 100 "max" 3600000) (dict "name" "logBurst" "min" 1 "max" 1000) -}}
-{{- $raw := printf "%v" (index $.Values.observability $setting.name) -}}
+{{- $value := index $.Values.observability $setting.name -}}
+{{- $raw := toJson $value -}}
+{{- if kindIs "string" $value }}{{ $raw = $value }}{{ end -}}
 {{- if or (not (regexMatch "^[1-9][0-9]*$" $raw)) (lt (float64 $raw) (float64 $setting.min)) (gt (float64 $raw) (float64 $setting.max)) }}{{ fail (printf "observability.%s is outside its supported integer range" $setting.name) }}{{ end -}}
 {{- end -}}
 {{- $ratio := printf "%v" .Values.observability.traceSampleRatio -}}
 {{- if or (not (regexMatch "^(0|1)(\\.[0-9]+)?$" $ratio)) (gt (float64 $ratio) 1.0) }}{{ fail "observability.traceSampleRatio must be a decimal from 0 to 1" }}{{ end -}}
-{{- $slowQuery := printf "%v" .Values.observability.slowQueryMs -}}
+{{/* JSON keeps integral YAML numbers in this range decimal; printf may use an exponent. */}}
+{{- $slowQuery := toJson .Values.observability.slowQueryMs -}}
+{{- if kindIs "string" .Values.observability.slowQueryMs }}{{ $slowQuery = .Values.observability.slowQueryMs }}{{ end -}}
 {{- if or (not (regexMatch "^[1-9][0-9]*$" $slowQuery)) (gt (float64 $slowQuery) 9223372036854.0) }}{{ fail "observability.slowQueryMs must be a positive integer of milliseconds at most 9223372036854" }}{{ end -}}
-{{- $endpoint := .Values.observability.otlpEndpoint | default "" -}}
+{{- $endpoint := .Values.observability.otlpEndpoint -}}
 {{- if not (kindIs "string" $endpoint) }}{{ fail "observability.otlpEndpoint must be a string" }}{{ end -}}
+{{- if $endpoint -}}
+{{- $url := urlParse $endpoint -}}
+{{- if or (not (has $url.scheme (list "http" "https"))) (empty $url.host) }}{{ fail "observability.otlpEndpoint must be an http or https URL with a host" }}{{ end -}}
+{{- end -}}
 {{- $env := dict "TETRAL_LOG_LEVEL" .Values.observability.logLevel "TETRAL_LOG_MAX_RECORD_BYTES" .Values.observability.logMaxRecordBytes "TETRAL_LOG_SUMMARY_INTERVAL_MS" .Values.observability.logSummaryIntervalMs "TETRAL_LOG_BURST" .Values.observability.logBurst "TETRAL_TRACE_SAMPLE_RATIO" $ratio "TETRAL_DB_SLOW_QUERY_MS" $slowQuery -}}
 {{- if $endpoint }}{{ $_ := set $env "OTEL_EXPORTER_OTLP_ENDPOINT" $endpoint }}{{ end -}}
 {{- range $name, $value := $env }}
+{{- if not (kindIs "string" $value) }}{{ $value = toJson $value }}{{ end }}
 - name: {{ $name }}
   value: {{ $value | quote }}
 {{- end }}

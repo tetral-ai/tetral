@@ -1,7 +1,9 @@
 package helm_test
 
 import (
+	"bytes"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -305,6 +307,10 @@ func TestHelmObservabilityRejectsInvalidValues(t *testing.T) {
 		{name: "zero slow query", values: []string{"observability.slowQueryMs=0"}, wantInFail: "observability.slowQueryMs must be a positive integer of milliseconds at most 9223372036854"},
 		{name: "slow query over duration representation", values: []string{"observability.slowQueryMs=9223372036855"}, wantInFail: "observability.slowQueryMs must be a positive integer of milliseconds at most 9223372036854"},
 		{name: "fractional slow query", values: []string{"observability.slowQueryMs=2.5"}, wantInFail: "observability.slowQueryMs must be a positive integer of milliseconds at most 9223372036854"},
+		{name: "endpoint missing scheme", values: []string{`observability.otlpEndpoint="collector:4317"`, collector}, wantInFail: "observability.otlpEndpoint must be an http or https URL with a host"},
+		{name: "endpoint unsupported scheme", values: []string{`observability.otlpEndpoint="ftp://collector:4317"`, collector}, wantInFail: "observability.otlpEndpoint must be an http or https URL with a host"},
+		{name: "endpoint without host", values: []string{`observability.otlpEndpoint="http:///collector"`, collector}, wantInFail: "observability.otlpEndpoint must be an http or https URL with a host"},
+		{name: "non-string empty endpoint", values: []string{`observability.otlpEndpoint=0`}, wantInFail: "observability.otlpEndpoint must be a string"},
 		{name: "endpoint without collector peers", values: []string{endpoint}, wantInFail: "observability.otlpPeers must name the trace collector"},
 		{name: "empty collector peer", values: []string{endpoint, `observability.otlpPeers=[{}]`}, wantInFail: "observability.otlpPeers[0] must be a non-empty peer object"},
 		{name: "collector peer without namespace", values: []string{endpoint, `observability.otlpPeers=[{"podSelector":{"matchLabels":{"app.kubernetes.io/name":"otel-collector"}}}]`}, wantInFail: "observability.otlpPeers[0] must carry a namespaceSelector or an ipBlock"},
@@ -320,6 +326,60 @@ func TestHelmObservabilityRejectsInvalidValues(t *testing.T) {
 			}
 			if !strings.Contains(output, tc.wantInFail) {
 				t.Fatalf("invalid values %v failure does not contain %q:\n%s", tc.values, tc.wantInFail, output)
+			}
+		})
+	}
+}
+
+// A values file decodes YAML numerics differently from Helm's --set parser.
+// The warning threshold must survive that actual operator-facing boundary.
+func TestHelmDiagnosticIntegersFromYAML(t *testing.T) {
+	helm := requireHelm(t)
+	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
+	for _, tc := range []struct{ value, want string }{
+		{"1200000", "1200000"},
+		{"9223372036854", "9223372036854"},
+		{`"1200000"`, "1200000"},
+		{"1200000.5", ""},
+		{"9223372036855", ""},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			command := exec.Command(helm, "template", "tetral", chart, "-f", "-") //nolint:gosec // Test-owned Helm and chart paths.
+			command.Stdin = strings.NewReader("observability:\n  logSummaryIntervalMs: 1200000\n  slowQueryMs: " + tc.value + "\n")
+			output, err := command.CombinedOutput()
+			if tc.want == "" {
+				if err == nil || !strings.Contains(string(output), "observability.slowQueryMs must be a positive integer") {
+					t.Fatalf("invalid YAML threshold rendered or failed elsewhere: %v\n%s", err, output)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("render valid YAML threshold: %v\n%s", err, output)
+			}
+			objects := uniqueObjects(t, decodeManifestObjects(t, bytes.NewReader(output), "helm template YAML"))
+			for name, workload := range observedWorkloads(t, objects) {
+				for _, container := range workload.containers {
+					found := false
+					summaryFound := false
+					for _, raw := range configurationList(container["env"]) {
+						item := configurationMap(raw)
+						if item["name"] == "TETRAL_LOG_SUMMARY_INTERVAL_MS" {
+							summaryFound = true
+							if item["value"] != "1200000" {
+								t.Errorf("%s/%v summary interval=%v; want 1200000", name, container["name"], item["value"])
+							}
+						}
+						if item["name"] == "TETRAL_DB_SLOW_QUERY_MS" {
+							found = true
+							if item["value"] != tc.want {
+								t.Errorf("%s/%v threshold=%v; want %s", name, container["name"], item["value"], tc.want)
+							}
+						}
+					}
+					if !found || !summaryFound {
+						t.Errorf("%s/%v missing threshold or summary interval", name, container["name"])
+					}
+				}
 			}
 		})
 	}

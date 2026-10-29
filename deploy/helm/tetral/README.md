@@ -669,7 +669,7 @@ trace backend; the operator runs those and points Engine at them.
 
 | Value | Default | Accepted values | Effect |
 |---|---|---|---|
-| `otlpEndpoint` | `""` | empty, or an OTLP/gRPC endpoint such as `http://otel-collector.observability:4317` | `OTEL_EXPORTER_OTLP_ENDPOINT` in every workload; empty exports no trace |
+| `otlpEndpoint` | `""` | empty, or an `http`/`https` URL with a host, such as `http://otel-collector.observability:4317` | `OTEL_EXPORTER_OTLP_ENDPOINT` in every workload; empty exports no trace |
 | `otlpPeers` | `[]` | NetworkPolicy peers, each with a `namespaceSelector` or an `ipBlock`; required when `otlpEndpoint` is set | every workload NetworkPolicy allows egress to them on `otlpPort` |
 | `otlpPort` | `4317` | a TCP port, 1 to 65535 | the collector Pods' port as NetworkPolicy sees it after Service translation |
 | `traceSampleRatio` | `"1.0"` | a decimal from 0 to 1 | `TETRAL_TRACE_SAMPLE_RATIO`, the share of new traces sampled at their root; 0 samples none |
@@ -678,7 +678,9 @@ trace backend; the operator runs those and points Engine at them.
 | `serviceMonitor.enabled` | `false` | a boolean | one `monitoring.coreos.com/v1` ServiceMonitor per workload metrics Service |
 
 All values are under `observability`, and a value outside its accepted range
-fails the render. The default ratio is quoted because Helm renders an unquoted
+fails the render. Integral YAML diagnostic values are emitted as decimal strings,
+including values above one million; fractions and overflow are refused. The
+default ratio is quoted because Helm renders an unquoted
 `1.0` as `1`, which is equally valid. The workload NetworkPolicies live in
 `tetral-system` and `tetral-agent-runtime`, so a peer needs a
 `namespaceSelector` or an `ipBlock`: a `podSelector` alone would match only
