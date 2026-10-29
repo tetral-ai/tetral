@@ -577,3 +577,54 @@ func readServerSentEventOrEnd(stream *bufio.Reader) (string, string) {
 		}
 	}
 }
+
+func TestPendingRenewalIsResentWhenOldCredentialResumes(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	cli, stream := f.openOnline()
+	pending := f.renewal(cli, stream, "renew-before-resume", `{}`)["id"].(string)
+	if err := stream.stream.Close(); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, func() bool { return f.streams.lookup(stream.connectionID) == nil })
+	resumed := f.resume(f.url, cli, stream.connectionID)
+	if _, ok := resumed.next().Envelope.Payload.(protocol.HeartbeatPayload); !ok {
+		t.Fatal("resume did not start with heartbeat")
+	}
+	event := resumed.next()
+	renewal, ok := event.Envelope.Payload.(protocol.CredentialRenewPayload)
+	if !ok || renewal.CredentialID != pending || event.Envelope.MessageID != "renew_"+pending {
+		t.Fatalf("resumed notice = %s; want original pending renewal", event.Data)
+	}
+	// A later instruction requires another pass on this stream; the renewal
+	// must not be written again while it remains pending.
+	sentinel := f.issueInstruction(f.ctx, resumed.connectionID, "sess_after_renewal")
+	f.requireInstructions(resumed, sentinel)
+	requireNoEvent(t, resumed)
+	if f.credentialState(cli.InstanceID, pending) != "pending" || f.connectionRow(resumed.connectionID)["credential_id"] != cli.CredentialID {
+		t.Fatal("resume activated the renewal or changed credential ownership")
+	}
+	if n := f.count(`SELECT count(*) FROM instance_credentials WHERE instance_id=$1`, cli.InstanceID); n != 2 {
+		t.Fatalf("credentials = %d; want original plus pending", n)
+	}
+}
+
+func TestPendingRenewalCountsTowardCredentialLimit(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	cli, stream := f.openOnline()
+	pending := f.renewal(cli, stream, "renew-limit", `{}`)["id"].(string)
+	if f.credentialState(cli.InstanceID, cli.CredentialID) != "active" || f.credentialState(cli.InstanceID, pending) != "pending" {
+		t.Fatal("fixture needs one active and one pending credential")
+	}
+	if n := f.count(`SELECT count(*) FROM instance_credentials WHERE instance_id=$1`, cli.InstanceID); n != 2 {
+		t.Fatalf("credentials = %d; want 2", n)
+	}
+	before := f.rowCounts()
+	original, renewal := f.credentialRow(cli.CredentialID), f.credentialRow(pending)
+	status, body := f.do(http.MethodPost, "/v1/instances/"+cli.InstanceID+"/credentials", []string{"third-credential"}, `{"delivery":"response"}`)
+	requireAPIError(t, status, body, http.StatusConflict, "credential_limit_error", "")
+	if after := f.rowCounts(); after != before {
+		t.Fatalf("refused issue changed row counts: %v -> %v", before, after)
+	}
+	requireRowUnchanged(t, original, f.credentialRow(cli.CredentialID))
+	requireRowUnchanged(t, renewal, f.credentialRow(pending))
+}
