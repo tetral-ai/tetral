@@ -79,4 +79,6 @@ runs as child processes of itself.
   `configure.locked`, `configure.credentials_replaced` and
   `configure.config_replaced`, and the in-process tests of a commit stopped
   at each.
+- `src/drives.rs`: `drives enable`, which on Linux takes the root's lock
+  and changes nothing.
 - `src/output.rs`: the error codes, `CommandError` and the one result object.

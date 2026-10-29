@@ -23,7 +23,7 @@ use state::paths::{ROOT_VARIABLE, StateRoot};
 use state::private::{self, CheckError};
 
 use crate::output::{Code, CommandError};
-use crate::{configure, server};
+use crate::{configure, drives, server};
 
 #[derive(Parser)]
 #[command(
@@ -50,6 +50,19 @@ enum Command {
     Server {
         #[command(subcommand)]
         command: ServerCommand,
+    },
+    /// Enables drives on this machine.
+    Drives {
+        #[command(subcommand)]
+        command: DrivesCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DrivesCommand {
+    Enable {
+        #[arg(long)]
+        app: Option<String>,
     },
 }
 
@@ -80,6 +93,9 @@ impl Command {
                     ServerCommand::Run { app, .. }
                     | ServerCommand::Status { app }
                     | ServerCommand::Stop { app },
+            }
+            | Command::Drives {
+                command: DrivesCommand::Enable { app },
             } => app.as_deref(),
         }
     }
@@ -194,6 +210,9 @@ fn run_checked(
             ServerCommand::Status { .. } => server::status(root),
             ServerCommand::Stop { .. } => server::stop(root),
         },
+        Command::Drives {
+            command: DrivesCommand::Enable { .. },
+        } => drives::enable(root),
     }
 }
 
