@@ -2,27 +2,10 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 pub mod cache;
+pub mod catchup;
 pub mod state;
+pub mod sync;
 pub mod transfer;
 
-use tokio::sync::mpsc;
-
+pub use sync::DriveSync;
 pub use transfer::DriveTransfer;
-
-pub enum DriveSyncMessage {}
-
-pub type DriveSyncMailbox = mpsc::UnboundedSender<DriveSyncMessage>;
-
-pub fn spawn_drive_sync_owner() -> DriveSyncMailbox {
-    let (mailbox, mut messages) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        while let Some(message) = messages.recv().await {
-            handle_drive_sync_message(message);
-        }
-    });
-    mailbox
-}
-
-fn handle_drive_sync_message(message: DriveSyncMessage) {
-    match message {}
-}

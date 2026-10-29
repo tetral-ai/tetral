@@ -37,5 +37,9 @@ Drives on this machine belong here, with two owners:
 - `transfer.rs`: `DriveTransfer`, its requests (`Request`, `ListFiles`,
   `ListChanges`, `Upload`, `Commit`, `Download`), `ContentSink`, the answer
   classes (`Class`) and `Ended`.
-- `lib.rs`: `spawn_drive_sync_owner`, `DriveSyncMessage` and
-  `DriveSyncMailbox`.
+- `sync.rs`: the Drive sync owner (`DriveSync`): its messages, its current
+  binding, the triggers of each mounted drive's catch-up, its pages and
+  failed listings, and the check before a command.
+- `catchup.rs`: the writes of a finished listing and of a page of change
+  records (`finish_listing`, `apply_page`), the application of a record,
+  `page_applied_seq` and excluded paths.

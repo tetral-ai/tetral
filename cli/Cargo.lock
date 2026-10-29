@@ -1870,6 +1870,7 @@ dependencies = [
  "protocol",
  "rand 0.10.3",
  "rustix",
+ "serde_json",
  "sha2 0.11.1",
  "sqlx",
  "state",
