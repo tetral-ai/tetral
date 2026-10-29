@@ -209,6 +209,11 @@ computerHub:
   streamMaxAge: 30m
   streamDrainWindow: 10s
 
+drives:
+  # Bytes per minute each Workspace may upload to its drives, one budget shared
+  # by the api and the computer-hub; at least 65536, the least a request counts.
+  uploadBudgetBytesPerMinute: 500000000
+
 resources:
   agentRuntime:
     requests:

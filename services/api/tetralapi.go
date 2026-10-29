@@ -23,6 +23,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/encryption"
 	"github.com/tetral-ai/tetral/internal/environment"
 	"github.com/tetral-ai/tetral/internal/eventstream"
@@ -43,6 +44,7 @@ const (
 	envSessionEventMaxEventsPerRequest            = "TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST"
 	envTetralAuthInternalPrincipalPublicKey       = "TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64"
 	envDefaultEnvironmentArtifactRef              = "TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF"
+	envDriveUploadBudgetBytesPerMinute            = "TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE"
 	defaultSessionEventBodyByteCap          int64 = 1 << 20
 )
 
@@ -218,6 +220,9 @@ func BuildRouter(ctx context.Context, cfg RouterConfig) (handler http.Handler, r
 	}
 	defaultEnvironmentArtifactRef, err := loadDefaultEnvironmentArtifactRefFromEnv(cfg.Env)
 	if err != nil {
+		return nil, err
+	}
+	if _, err := loadDriveUploadBudgetFromEnv(cfg.Env); err != nil {
 		return nil, err
 	}
 	encryptor, err := encryption.NewAES256GCMEncryptor(cfg.VaultKey)
@@ -485,6 +490,20 @@ func loadDefaultEnvironmentArtifactRefFromEnv(env Env) (string, error) {
 		return "", workload.NewConfigError(envDefaultEnvironmentArtifactRef + " is required")
 	}
 	return ref, nil
+}
+
+// loadDriveUploadBudgetFromEnv reads the per-minute amount of each
+// Workspace's upload budget, which the computer-hub shares.
+func loadDriveUploadBudgetFromEnv(env Env) (int64, error) {
+	raw := env.Getenv(envDriveUploadBudgetBytesPerMinute)
+	if raw == "" {
+		return drive.DefaultUploadBudgetBytesPerMinute, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < drive.MinUploadCount {
+		return 0, workload.NewConfigError(fmt.Sprintf("%s must be an integer of at least %d", envDriveUploadBudgetBytesPerMinute, drive.MinUploadCount))
+	}
+	return value, nil
 }
 
 func defaultRuntimeControlConfig() runtimeControlConfig {

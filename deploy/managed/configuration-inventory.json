@@ -516,6 +516,7 @@
       ],
       "environment_keys": [
         "TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64",
+        "TETRAL_COMPUTER_HUB_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE",
         "TETRAL_COMPUTER_HUB_HTTP_ADDR",
         "TETRAL_COMPUTER_HUB_MAX_CREDENTIAL_LIFETIME",
         "TETRAL_COMPUTER_HUB_METRICS_ADDR",
@@ -537,12 +538,13 @@
         "min_cli_version": "0.0.0",
         "recommended_cli_version": "0.0.0",
         "stream_max_age": "30m",
-        "stream_drain_window": "10s"
+        "stream_drain_window": "10s",
+        "drive_upload_budget_bytes_per_minute": 500000000
       },
-      "units": "listen addresses, Go durations, semantic versions",
-      "unset_zero": "Whitespace empty addresses, an empty maximum credential lifetime, empty CLI versions and an empty stream age or drain window default; database DSN, principal key, page token key and pod name required.",
-      "constraints": "Metrics address differs from the public address; the principal key is a base64 Ed25519 public key; the maximum credential lifetime is a positive Go duration; the page token key is 32 bytes as 64 hexadecimal characters; both CLI versions are full semantic versions without a v prefix and the recommended one is not lower than the minimum; the pod name has 1 to 253 characters; the stream age is a positive Go duration and the drain window one of at most 15s; blob settings pass blob production readiness.",
-      "projection": "Fixed ports 8080/8081, computer-hub-url DSN key of the database Secret, blob Secret keys, the page-token-key of the Secret secrets.computerHubPageToken names, computerHub.autoscaling.minReplicas, maxReplicas and targetOpenStreamsPerPod (default 2, 10 and 1000) of its HorizontalPodAutoscaler, computerHub.maxCredentialLifetime (default 720h), computerHub.minCLIVersion and computerHub.recommendedCLIVersion (default 0.0.0 each), computerHub.streamMaxAge (default 30m) and computerHub.streamDrainWindow (default 10s), and the pod name from the downward API; no other hub setting is chart-owned.",
+      "units": "listen addresses, Go durations, semantic versions, bytes per minute",
+      "unset_zero": "Whitespace empty addresses, an empty maximum credential lifetime, empty CLI versions, an empty stream age or drain window and an empty drive upload budget default; database DSN, principal key, page token key and pod name required.",
+      "constraints": "Metrics address differs from the public address; the principal key is a base64 Ed25519 public key; the maximum credential lifetime is a positive Go duration; the page token key is 32 bytes as 64 hexadecimal characters; both CLI versions are full semantic versions without a v prefix and the recommended one is not lower than the minimum; the pod name has 1 to 253 characters; the stream age is a positive Go duration and the drain window one of at most 15s; the drive upload budget is an integer of at least 65536; blob settings pass blob production readiness.",
+      "projection": "Fixed ports 8080/8081, computer-hub-url DSN key of the database Secret, blob Secret keys, the page-token-key of the Secret secrets.computerHubPageToken names, computerHub.autoscaling.minReplicas, maxReplicas and targetOpenStreamsPerPod (default 2, 10 and 1000) of its HorizontalPodAutoscaler, computerHub.maxCredentialLifetime (default 720h), computerHub.minCLIVersion and computerHub.recommendedCLIVersion (default 0.0.0 each), computerHub.streamMaxAge (default 30m), computerHub.streamDrainWindow (default 10s) and drives.uploadBudgetBytesPerMinute (default 500000000), and the pod name from the downward API; no other hub setting is chart-owned.",
       "proofs": [
         "services/computer-hub/config_test.go",
         "deploy/helm/configuration_projection_test.go",
@@ -1149,6 +1151,7 @@
         "ENGINE_DATA_DIR",
         "ENGINE_PORT",
         "ENGINE_VAULT_KEY",
+        "TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE",
         "TETRAL_API_HTTP_ADDR",
         "TETRAL_API_METRICS_ADDR",
         "TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64",
@@ -1157,10 +1160,10 @@
         "TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST"
       ],
       "defaults": {},
-      "units": "listener addresses, filesystem paths, workspace identities",
-      "unset_zero": "Owning startup parser supplies paths/listeners; boot workspace/key references required.",
-      "constraints": "Trusted HTTP transport complete and role-scope boot authority; schema/role versions are storage contract, CLI results are deliberate output.",
-      "projection": "API ConfigMap/Secret refs and native HTTP trust; database preparation remains explicit operator command.",
+      "units": "listener addresses, filesystem paths, workspace identities, bytes per minute",
+      "unset_zero": "Owning startup parser supplies paths/listeners; boot workspace/key references required. An empty drive upload budget defaults to 500000000.",
+      "constraints": "Trusted HTTP transport complete and role-scope boot authority; schema/role versions are storage contract, CLI results are deliberate output. The drive upload budget is an integer of at least 65536.",
+      "projection": "API ConfigMap/Secret refs and native HTTP trust; database preparation remains explicit operator command. drives.uploadBudgetBytesPerMinute (default 500000000) through api-config.",
       "proofs": [
         "services/api/config_validators_test.go",
         "services/api/startup_config_surface_test.go"

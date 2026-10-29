@@ -66,6 +66,10 @@ func TestConfigFromEnv(t *testing.T) {
 		{name: "stream age zero", change: func(e mapEnv) { e[EnvStreamMaxAge] = "0s" }, reject: EnvStreamMaxAge},
 		{name: "drain window not a duration", change: func(e mapEnv) { e[EnvStreamDrainWindow] = "10" }, reject: EnvStreamDrainWindow},
 		{name: "drain window past the grace period's share", change: func(e mapEnv) { e[EnvStreamDrainWindow] = "15001ms" }, reject: EnvStreamDrainWindow},
+		{name: "upload budget at the least request count", change: func(e mapEnv) { e[EnvDriveUploadBudget] = "65536" }, check: func(c Config) bool {
+			return c.DriveUploadBudgetBytesPerMinute == 65536
+		}},
+		{name: "upload budget below the least request count", change: func(e mapEnv) { e[EnvDriveUploadBudget] = "65535" }, reject: EnvDriveUploadBudget},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := valid()

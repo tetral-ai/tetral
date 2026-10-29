@@ -71,6 +71,8 @@ spec:
               value: {{ .Values.computerHub.streamMaxAge | quote }}
             - name: TETRAL_COMPUTER_HUB_STREAM_DRAIN_WINDOW
               value: {{ .Values.computerHub.streamDrainWindow | quote }}
+            - name: TETRAL_COMPUTER_HUB_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE
+              value: {{ .Values.drives.uploadBudgetBytesPerMinute | int64 | quote }}
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT
               value: {{ .Values.observability.deploymentEnvironment | quote }}
             - name: TETRAL_SERVICE_VERSION

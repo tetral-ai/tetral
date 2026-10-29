@@ -104,6 +104,11 @@ spec:
                 configMapKeyRef:
                   name: api-config
                   key: TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF
+            - name: TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE
             - name: TETRAL_BLOB_ENDPOINT
               valueFrom:
                 secretKeyRef:

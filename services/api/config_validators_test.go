@@ -86,6 +86,18 @@ func TestLoadPositiveIntRejectionsAreConfigErrors(t *testing.T) {
 	}
 }
 
+// TestDriveUploadBudgetFloor proves the upload budget refuses a per-minute
+// amount below 65,536 bytes, the least a request counts.
+func TestDriveUploadBudgetFloor(t *testing.T) {
+	if got, err := loadDriveUploadBudgetFromEnv(envMapValidators{envDriveUploadBudgetBytesPerMinute: "65536"}); err != nil || got != 65536 {
+		t.Fatalf("65536 = %d, %v; want accepted", got, err)
+	}
+	_, err := loadDriveUploadBudgetFromEnv(envMapValidators{envDriveUploadBudgetBytesPerMinute: "65535"})
+	if _, ok := workload.AsConfigError(err); !ok {
+		t.Fatalf("65535: %v; want a ConfigError", err)
+	}
+}
+
 type envMapValidators map[string]string
 
 func (m envMapValidators) Getenv(key string) string { return m[key] }

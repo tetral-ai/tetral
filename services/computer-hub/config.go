@@ -3,12 +3,15 @@ package computerhub
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"golang.org/x/mod/semver"
 
 	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/transportsecurity"
 	"github.com/tetral-ai/tetral/internal/workload"
 )
@@ -30,6 +33,7 @@ const (
 	EnvPodName                    = "TETRAL_COMPUTER_HUB_POD_NAME"
 	EnvStreamMaxAge               = "TETRAL_COMPUTER_HUB_STREAM_MAX_AGE"
 	EnvStreamDrainWindow          = "TETRAL_COMPUTER_HUB_STREAM_DRAIN_WINDOW"
+	EnvDriveUploadBudget          = "TETRAL_COMPUTER_HUB_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE"
 
 	DefaultHTTPAddress           = ":8080"
 	DefaultMetricsAddress        = ":8081"
@@ -86,6 +90,9 @@ type Config struct {
 	// StreamDrainWindow is the time over which a stopping pod spreads the
 	// stream-only disconnects of its streams.
 	StreamDrainWindow time.Duration
+	// DriveUploadBudgetBytesPerMinute is the per-minute amount of each
+	// Workspace's upload budget, which the api shares.
+	DriveUploadBudgetBytesPerMinute int64
 }
 
 func ConfigFromEnv(env Env) (Config, error) {
@@ -152,6 +159,13 @@ func ConfigFromEnv(env Env) (Config, error) {
 	cfg.StreamDrainWindow, err = durationOrDefault(env.Getenv(EnvStreamDrainWindow), DefaultStreamDrainWindow)
 	if err != nil || cfg.StreamDrainWindow > MaxStreamDrainWindow {
 		return Config{}, workload.NewConfigError(EnvStreamDrainWindow + " must be a positive duration of at most 15s")
+	}
+	cfg.DriveUploadBudgetBytesPerMinute = drive.DefaultUploadBudgetBytesPerMinute
+	if raw := strings.TrimSpace(env.Getenv(EnvDriveUploadBudget)); raw != "" {
+		cfg.DriveUploadBudgetBytesPerMinute, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || cfg.DriveUploadBudgetBytesPerMinute < drive.MinUploadCount {
+			return Config{}, workload.NewConfigError(fmt.Sprintf("%s must be an integer of at least %d", EnvDriveUploadBudget, drive.MinUploadCount))
+		}
 	}
 	return cfg, nil
 }

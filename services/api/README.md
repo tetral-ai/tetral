@@ -56,6 +56,7 @@ as noted.
 | `ENGINE_VAULT_KEY` | 32-byte hex AES key encrypting vault credential secrets at rest; never carries request authentication. |
 | `TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64` | Base64-encoded Ed25519 public key used to verify the signed internal principal injected by the auth service. |
 | `TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF` | Prebuilt provider artifact reference used for environments with no custom packages. |
+| `TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE` | Optional; defaults to `500000000`. The per-minute amount of each Workspace's drive upload budget, shared with the computer-hub through `drive_upload_budgets` (`internal/drive`); startup refuses a value below `65536`, the least a request counts. Helm `drives.uploadBudgetBytesPerMinute`. |
 | `ENGINE_PORT` | Optional legacy fallback. Read only when `TETRAL_API_HTTP_ADDR` is unset, and then only for the port half — the listener becomes `:$ENGINE_PORT`. Setting `TETRAL_API_HTTP_ADDR` makes it inert. |
 
 The public API listener binds `:8080` (`TETRAL_API_HTTP_ADDR`); metrics bind
