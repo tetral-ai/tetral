@@ -5,6 +5,7 @@ pub mod attempt;
 pub mod backoff;
 pub mod classify;
 mod credential;
+pub mod drive_transfer;
 mod git_ticket;
 pub mod heartbeat;
 pub mod http;

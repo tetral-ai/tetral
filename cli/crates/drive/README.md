@@ -10,10 +10,17 @@ Drives on this machine belong here, with two owners:
 ## Design rules
 
 - Its owners follow the owner rules of `cli/README.md`.
-- Its owners send drive transfer requests only through `DriveTransfer`.
+- Its owners send drive transfer requests only through `DriveTransfer`
+  (`transfer`), which retries temporary answers, waits out a rebind and
+  the connection's rules, and gives them only the answers they act on
+  (`Ended`). Each request carries the drive sync's binding as a watch; each
+  new value is a binding of a later preparation.
 
 ## Where things are
 
-- `lib.rs`: `DriveTransfer`; `spawn_drive_sync_owner`, `DriveSyncMessage` and
+- `transfer.rs`: `DriveTransfer`, its requests (`Request`, `ListFiles`,
+  `ListChanges`, `Upload`, `Commit`, `Download`), `ContentSink`, the answer
+  classes (`Class`) and `Ended`.
+- `lib.rs`: `spawn_drive_sync_owner`, `DriveSyncMessage` and
   `DriveSyncMailbox`; `spawn_content_cache`, `ContentCacheMessage` and
   `ContentCacheMailbox`.

@@ -40,6 +40,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use drive::DriveTransfer;
 use observe::{Identity, STARTUP, TraceContext};
 use protocol::bootstrap::BootstrapKey;
 use protocol::connection::{
@@ -65,6 +66,7 @@ use crate::attempt::{self, ATTEMPT_TOTAL, AttemptKind};
 use crate::backoff::{BASE_MAX, BASE_START, Backoff, random_jitter};
 use crate::classify::{self, Read, SessionMessage};
 use crate::credential::{self, CREDENTIAL_PATH, INVALID_RESPONSE, Renewal};
+use crate::drive_transfer::{DriveLink, HttpDriveTransfer};
 use crate::git_ticket::{self, GIT_TICKET_PATH, TicketFetch};
 use crate::heartbeat::Heartbeats;
 use crate::http::{Answer, REQUEST_TOTAL, Transport};
@@ -222,6 +224,7 @@ pub(crate) enum Message {
 pub struct Connection {
     mailbox: mpsc::UnboundedSender<Message>,
     status: tokio::sync::watch::Receiver<ConnectionStatus>,
+    drive_transfer: Arc<HttpDriveTransfer>,
 }
 
 impl std::fmt::Debug for Message {
@@ -237,6 +240,13 @@ impl Connection {
         let (mailbox, inbox) = mpsc::unbounded_channel();
         let (events, reports) = mpsc::unbounded_channel();
         let transport = Arc::new(Transport::new(&config.server_url));
+        let (drive_link, link) = DriveLink::new(config.credential.key.clone());
+        let drive_transfer = Arc::new(HttpDriveTransfer::with_transport(
+            transport.clone(),
+            link,
+            events.clone(),
+            Clock::seams(),
+        ));
         let outbox = Outbox::spawn(OutboxConfig {
             transport: transport.clone(),
             key: config.credential.key.clone(),
@@ -254,13 +264,27 @@ impl Connection {
             sink,
             config.times.records_max,
         );
-        let owner = Owner::new(config, transport, outbox, owners, mailbox.clone());
+        let owner = Owner::new(
+            config,
+            transport,
+            outbox,
+            drive_link,
+            owners,
+            mailbox.clone(),
+        );
         let (status, snapshot) = tokio::sync::watch::channel(owner.status());
         tokio::spawn(own(owner, inbox, reports, status));
         Connection {
             mailbox,
             status: snapshot,
+            drive_transfer,
         }
+    }
+
+    /// The drive transfer client of the connection's credential, for the
+    /// Drive sync owners and the Content cache.
+    pub fn drive_transfer(&self) -> Arc<dyn DriveTransfer> {
+        self.drive_transfer.clone()
     }
 
     /// The last status published by the owner, without waiting for its mailbox.
@@ -476,6 +500,8 @@ struct Owner {
     times: Times,
     transport: Arc<Transport>,
     outbox: Outbox,
+    /// The drive transfer client's view of the held connection and its key.
+    drive: DriveLink,
     mailbox: mpsc::UnboundedSender<Message>,
     phase: Phase,
     /// The reconnect backoff; each upstream message has its own.
@@ -503,6 +529,7 @@ impl Owner {
         config: Config,
         transport: Arc<Transport>,
         outbox: Outbox,
+        drive: DriveLink,
         owners: Owners,
         mailbox: mpsc::UnboundedSender<Message>,
     ) -> Owner {
@@ -515,6 +542,7 @@ impl Owner {
             tasks_pending: BTreeSet::new(),
             transport,
             outbox,
+            drive,
             server_url: config.server_url,
             instance_id: config.instance_id,
             credential: config.credential,
@@ -1046,6 +1074,7 @@ impl Owner {
                             held.renewal = None;
                             self.adopt(credential);
                             let key = self.credential.key.clone();
+                            self.drive.switch_ended(&held.id, key.clone());
                             self.outbox.switch_ended(held.id.clone(), key);
                             self.next_renewal(&mut held);
                         }
@@ -1088,6 +1117,8 @@ impl Owner {
         self.held_count += 1;
         self.last_held = Some(id.clone());
         let tool_execution = self.ready.capabilities.tool_execution.is_some();
+        self.drive
+            .connection_started(id.clone(), self.credential.key.clone());
         self.outbox.connection_started(
             self.held_count,
             id.clone(),
@@ -1743,6 +1774,7 @@ impl Owner {
             self.next_renewal(&mut held);
             return Phase::Held(held);
         }
+        self.drive.switch_started(&held.id);
         self.outbox.switch_started(held.id.clone());
         match std::mem::replace(&mut held.stream, Stream::Waiting { at: now }) {
             Stream::Live { task, .. } => task.abort(),
@@ -1842,6 +1874,7 @@ impl Owner {
             self.owners.answer(&requester, ProbeSlot::Cancelled);
         }
         self.owners.connection_ended(&held.id);
+        self.drive.connection_ended(&held.id);
         self.outbox.connection_ended(held.id);
     }
 
@@ -2182,7 +2215,8 @@ mod tests {
             Arc::new(outbox.clone()),
             128,
         );
-        let mut owner = Owner::new(config, transport, outbox, owners, mailbox);
+        let drive = DriveLink::new(config.credential.key.clone()).0;
+        let mut owner = Owner::new(config, transport, outbox, drive, owners, mailbox);
         owner.backoff = Backoff::new(BASE_START, BASE_MAX, || 0.0);
         (owner, reports)
     }

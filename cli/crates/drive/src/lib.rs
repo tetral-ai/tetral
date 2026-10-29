@@ -1,11 +1,11 @@
 #![doc = include_str!("../README.md")]
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+pub mod transfer;
+
 use tokio::sync::mpsc;
 
-/// How the Drive sync owners and the Content cache send their drive transfer
-/// requests; its implementation belongs to the `connection` crate.
-pub trait DriveTransfer: Send + Sync {}
+pub use transfer::DriveTransfer;
 
 pub enum DriveSyncMessage {}
 

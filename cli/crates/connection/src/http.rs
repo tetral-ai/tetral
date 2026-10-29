@@ -70,6 +70,7 @@ pub enum Failure {
 pub struct Transport {
     client: reqwest::Client,
     uploads: Uploads,
+    drive: Uploads<DriveBody>,
     server_url: String,
     /// What each report attempt has seen of its socket, for the tests that
     /// move the clock only once an attempt has seen what the kernel did.
@@ -101,12 +102,25 @@ impl Transport {
         Transport {
             client,
             uploads: Uploads::new(Matcher::from_system()),
+            drive: Uploads::new(Matcher::from_system()),
             server_url: server_url.to_owned(),
             #[cfg(test)]
             attempts: Mutex::default(),
             #[cfg(test)]
             progress_sample: None,
         }
+    }
+
+    /// A transport whose attempts read their progress from `sample`
+    /// instead of their sockets: the bytes moved by each time of the clock.
+    #[cfg(test)]
+    pub(crate) fn sampled(
+        server_url: &str,
+        sample: impl Fn(Duration) -> u64 + Send + Sync + 'static,
+    ) -> Transport {
+        let mut transport = Self::new(server_url);
+        transport.progress_sample = Some(Arc::new(move |now| (sample(now), 0, false)));
+        transport
     }
 
     /// The attempts of reports this transport has made, in their order.
@@ -122,7 +136,7 @@ impl Transport {
         transport
     }
 
-    fn url(&self, path: &str) -> Url {
+    pub(crate) fn url(&self, path: &str) -> Url {
         Url::parse(&format!("{}{path}", self.server_url))
             .expect("the server URL rule gives a URL that takes a path")
     }
@@ -251,6 +265,69 @@ impl Transport {
         if let Some(socket) = socket {
             progress.read(socket, taken, now);
         }
+    }
+
+    /// One attempt of a drive transfer request, whose answer `read` takes
+    /// and whose body it reads, counting each byte in the counter it gets.
+    /// The attempt fails once `stall` passes on `clock` with no rise of the
+    /// bytes written to its socket or read of its answer, counted from its
+    /// start, so that connecting, TLS and waiting for the headers end then
+    /// too, and at `deadline` when it has one.
+    pub(crate) async fn drive<T, F>(
+        &self,
+        mut request: Request<DriveBody>,
+        deadline: Option<Duration>,
+        stall: Duration,
+        clock: &Clock,
+        read: impl FnOnce(http::Response<Incoming>, Arc<AtomicU64>) -> F,
+    ) -> Result<T, Failure>
+    where
+        F: Future<Output = Result<T, Failure>>,
+    {
+        let connection = capture_connection(&mut request);
+        let received = Arc::new(AtomicU64::new(0));
+        let reading = received.clone();
+        let answer = async {
+            match self.drive.send(request).await {
+                Ok(response) => read(response, reading).await,
+                Err(_) => Err(Failure::Network),
+            }
+        };
+        tokio::pin!(answer);
+        let mut last = clock.now();
+        let mut seen = 0;
+        let mut socket = None;
+        loop {
+            if socket.is_none() {
+                socket = socket_of(&connection);
+            }
+            let now = clock.now();
+            let moved = self.drive_progress(socket.as_deref(), &received, now);
+            if moved > seen {
+                seen = moved;
+                last = now;
+            }
+            let until = deadline.map_or(last + stall, |deadline| deadline.min(last + stall));
+            if clock.now() >= until {
+                return Err(Failure::Timeout);
+            }
+            tokio::select! {
+                answer = &mut answer => return answer,
+                () = clock.sleep_step(until) => {}
+            }
+        }
+    }
+
+    /// The bytes an attempt has written to its socket and read of its
+    /// answer.
+    fn drive_progress(&self, socket: Option<&Socket>, received: &AtomicU64, now: Duration) -> u64 {
+        #[cfg(test)]
+        if let Some(sample) = &self.progress_sample {
+            return sample(now).0;
+        }
+        let _ = now;
+        socket.map_or(0, |socket| socket.written.load(Ordering::Acquire))
+            + received.load(Ordering::Acquire)
     }
 
     /// `GET /v1/client/events` with `query`: the response once its status is
@@ -410,17 +487,22 @@ fn socket_of(connection: &CaptureConnection) -> Option<Arc<Socket>> {
 /// `proxies`: plain HTTP is sent to it in absolute form, HTTPS through its
 /// `CONNECT` tunnel. `Matcher::from_system` is the matcher that reqwest's
 /// client takes for the CLI's other requests.
-struct Uploads {
-    client: Client<UploadConnector, ReportBody>,
+struct Uploads<B = ReportBody> {
+    client: Client<UploadConnector, B>,
     proxies: Arc<Matcher>,
 }
 
-impl Uploads {
-    fn new(proxies: Matcher) -> Uploads {
+impl<B> Uploads<B>
+where
+    B: http_body::Body + Send + Unpin + 'static,
+    B::Data: Send,
+    B::Error: Into<BoxError>,
+{
+    fn new(proxies: Matcher) -> Uploads<B> {
         Self::configured(proxies, Arc::new(tls_config()))
     }
 
-    fn configured(proxies: Matcher, tls: Arc<rustls::ClientConfig>) -> Uploads {
+    fn configured(proxies: Matcher, tls: Arc<rustls::ClientConfig>) -> Uploads<B> {
         let mut http = HttpConnector::new();
         http.enforce_http(false);
         http.set_nodelay(true);
@@ -436,10 +518,7 @@ impl Uploads {
         Uploads { client, proxies }
     }
 
-    async fn send(
-        &self,
-        mut request: Request<ReportBody>,
-    ) -> Result<http::Response<Incoming>, BoxError> {
+    async fn send(&self, mut request: Request<B>) -> Result<http::Response<Incoming>, BoxError> {
         // A tunnel carries the proxy's credentials in its `CONNECT`; a
         // forwarded request carries them itself.
         if request.uri().scheme() == Some(&Scheme::HTTP)
@@ -747,6 +826,86 @@ impl http_body::Body for ReportBody {
     }
 }
 
+/// A drive transfer request's body: none, bytes, or a file of a given size
+/// read in chunks, which fails when the file holds another count.
+pub(crate) enum DriveBody {
+    Empty,
+    Bytes(Option<Bytes>),
+    File {
+        file: tokio::fs::File,
+        size: u64,
+        left: u64,
+        buffer: Box<[u8]>,
+    },
+}
+
+/// The bytes a file body reads at a time.
+const FILE_CHUNK_BYTES: usize = 65_536;
+
+impl DriveBody {
+    pub(crate) fn file(file: tokio::fs::File, size: u64) -> DriveBody {
+        DriveBody::File {
+            file,
+            size,
+            left: size,
+            buffer: vec![0; FILE_CHUNK_BYTES].into_boxed_slice(),
+        }
+    }
+}
+
+impl http_body::Body for DriveBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, std::io::Error>>> {
+        match self.get_mut() {
+            DriveBody::Empty => Poll::Ready(None),
+            DriveBody::Bytes(bytes) => {
+                Poll::Ready(bytes.take().map(|bytes| Ok(Frame::data(bytes))))
+            }
+            DriveBody::File {
+                file, left, buffer, ..
+            } => {
+                // One byte more than is left, so that a longer file is seen.
+                let want = usize::try_from(*left)
+                    .unwrap_or(usize::MAX)
+                    .saturating_add(1)
+                    .min(buffer.len());
+                let mut read = tokio::io::ReadBuf::new(&mut buffer[..want]);
+                ready!(tokio::io::AsyncRead::poll_read(
+                    Pin::new(file),
+                    cx,
+                    &mut read
+                ))?;
+                let count = read.filled().len() as u64;
+                if count > *left || (count == 0 && *left > 0) {
+                    return Poll::Ready(Some(Err(std::io::Error::other(
+                        "the file no longer holds its size",
+                    ))));
+                }
+                if count == 0 {
+                    return Poll::Ready(None);
+                }
+                *left -= count;
+                Poll::Ready(Some(Ok(Frame::data(Bytes::copy_from_slice(read.filled())))))
+            }
+        }
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        match self {
+            DriveBody::Empty => SizeHint::with_exact(0),
+            DriveBody::Bytes(bytes) => {
+                SizeHint::with_exact(bytes.as_ref().map_or(0, |bytes| bytes.len() as u64))
+            }
+            DriveBody::File { size, .. } => SizeHint::with_exact(*size),
+        }
+    }
+}
+
 async fn read_answer<B: http_body::Body + Unpin>(response: http::Response<B>) -> Answer {
     let (parts, body) = response.into_parts();
     let status = parts.status;
@@ -769,7 +928,10 @@ async fn read_answer<B: http_body::Body + Unpin>(response: http::Response<B>) ->
 }
 
 /// The body, refused before it is read past `limit` bytes.
-async fn read_bounded<B: http_body::Body + Unpin>(mut body: B, limit: usize) -> Option<Vec<u8>> {
+pub(crate) async fn read_bounded<B: http_body::Body + Unpin>(
+    mut body: B,
+    limit: usize,
+) -> Option<Vec<u8>> {
     if body
         .size_hint()
         .exact()

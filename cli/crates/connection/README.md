@@ -184,6 +184,10 @@ mailbox submission; the body owner releases the budget on its last reference.
   connection's start and end, and it answers with `OutboxEvent`s.
   `OutboxTimes` holds its durations, each a constant but for tests, and its
   `state::clock::Clock` is the CLI's clock but for tests.
+- `Connection::drive_transfer()` gives the drive transfer client
+  (`drive_transfer::HttpDriveTransfer`), which takes the held connection
+  and its key from the Connection owner (`DriveLink`) and tells it a
+  refusal under the connection's rules as `OutboxEvent::Refused`.
 
 ## Where things are
 
@@ -191,6 +195,7 @@ mailbox submission; the body owner releases the budget on its last reference.
 |---|---|
 | `src/owner.rs` | The Connection owner: its phases, timers, the answers to the events request, ready and heartbeats, `disconnect`, the order of an event's handling and the ledger's admission (`admit`), staging and routing, the admission of a `session.prepare` and its `failed` report, the record `protocol.foreign_connection`, and the test seam counters `connection.attempt`, `connection.checked`, `connection.granted`, `connection.answered`, `connection.final_acked` and `route.session` |
 | `src/credential.rs` | A renewal's steps (`Renewal`): the fetch's body, the check of its answer, the replacement of `credentials.json`, and the records `credential.renewal_rejected` and `credential.renewal_not_saved`; the barrier `renewal.persisted` after the write is the owner's (`owner`) |
+| `src/drive_transfer.rs` | The drive transfer client: requests, `total`, the no-progress deadline `STALL`, answer bounds, validation against the request, the class of each answer and its retry, a rebind and a credential switch, and the record `drive_transfer.answer_rejected` |
 | `src/git_ticket.rs` | A git-ticket fetch (`TicketFetch`): its body and the sorting of its answer |
 | `src/sessions.rs` | The Session binding owners as the Connection owner reaches them (`Owners`), `RECORDS_MAX`, and its side of `protocol::ports::ConnectionPort` |
 | `src/probe_slots.rs` | The probe slots, their waiting requests, `PROBES_MAX` and `PROBE_WAIT`, and the pressure point `tetral_probes`: its series and its rejection episodes |
@@ -203,7 +208,7 @@ mailbox submission; the body owner releases the budget on its last reference.
 | `src/staging.rs` | The staging queue and `STAGING_MAX` |
 | `src/ledger.rs` | The replay ledger, its limits and reserve, and when an entry goes |
 | `src/backoff.rs` | The backoff of reconnects and of each message's retries |
-| `src/http.rs` | `Transport`, the sorting of answers (`Answer`, `Failure`), `REQUEST_TOTAL`, a report's attempt bounded by its progress (`ReportRequest`, `Progress`), the client of report uploads (`Uploads`) with its counted connections (`Counted`, `Socket`), and the test seam counters `outbox.upload_checked` and `outbox.sent` |
+| `src/http.rs` | `Transport`, a drive transfer attempt bounded by its progress (`Transport::drive`, `DriveBody`), the sorting of answers (`Answer`, `Failure`), `REQUEST_TOTAL`, a report's attempt bounded by its progress (`ReportRequest`, `Progress`), the client of report uploads (`Uploads`) with its counted connections (`Counted`, `Socket`), and the test seam counters `outbox.upload_checked` and `outbox.sent` |
 | `src/outbox.rs` | The Report outbox: identities `r<n>`, admission, sending, retries, ACKs and refusals, connection ends, a credential switch and its key, the record `report.dropped`, and the test seam counters `outbox.answered` and `outbox.key_awaited` |
 | `src/report_memory.rs` | Shared report body ownership and ordinary/reserved byte accounting |
 | `src/report_deadline.rs` | A report attempt's total and `STALL_LIMIT` |

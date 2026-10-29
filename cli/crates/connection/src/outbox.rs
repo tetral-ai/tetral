@@ -59,9 +59,9 @@ pub enum OutboxEvent {
     /// The final report of the instruction `instruction` of `connection` is
     /// acknowledged.
     FinalAcked { connection: Id, instruction: Id },
-    /// Engine answered a report of `connection` with `401`, `403` or
-    /// `409 stale_connection`, which end the connection; the report waits
-    /// for that end.
+    /// Engine answered a report or a drive transfer request of
+    /// `connection` with `401`, `403` or `409 stale_connection`, which end
+    /// the connection; the request waits for that end.
     Refused { connection: Id, error: ErrorBody },
     /// Even reserved capacity could not retain a control reply or compact error.
     ResourceExhausted { connection: Id },
