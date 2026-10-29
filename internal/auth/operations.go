@@ -25,6 +25,23 @@ const (
 	OperationCredentialsRead             Operation = "credentials.read"
 	OperationCredentialsUpdate           Operation = "credentials.update"
 	OperationCredentialsValidateMcpOauth Operation = "credentials.validate_mcp_oauth"
+	OperationDriveChangesList            Operation = "drive_changes.list"
+	OperationDriveChangesStream          Operation = "drive_changes.stream"
+	OperationDriveFilesContentRead       Operation = "drive_files.content.read"
+	OperationDriveFilesCreate            Operation = "drive_files.create"
+	OperationDriveFilesDelete            Operation = "drive_files.delete"
+	OperationDriveFilesList              Operation = "drive_files.list"
+	OperationDriveVersionsContentRead    Operation = "drive_versions.content.read"
+	OperationDriveVersionsList           Operation = "drive_versions.list"
+	OperationDriveVersionsRead           Operation = "drive_versions.read"
+	OperationDriveVersionsRedact         Operation = "drive_versions.redact"
+	OperationDrivesCreate                Operation = "drives.create"
+	OperationDrivesDelete                Operation = "drives.delete"
+	OperationDrivesList                  Operation = "drives.list"
+	OperationDrivesRead                  Operation = "drives.read"
+	OperationDrivesRestore               Operation = "drives.restore"
+	OperationDrivesUpdate                Operation = "drives.update"
+	OperationDrivesUsageRead             Operation = "drives.usage.read"
 	OperationEnvironmentsArchive         Operation = "environments.archive"
 	OperationEnvironmentsCreate          Operation = "environments.create"
 	OperationEnvironmentsDelete          Operation = "environments.delete"
@@ -117,6 +134,23 @@ var registeredOperations = []Operation{
 	OperationCredentialsRead,
 	OperationCredentialsUpdate,
 	OperationCredentialsValidateMcpOauth,
+	OperationDriveChangesList,
+	OperationDriveChangesStream,
+	OperationDriveFilesContentRead,
+	OperationDriveFilesCreate,
+	OperationDriveFilesDelete,
+	OperationDriveFilesList,
+	OperationDriveVersionsContentRead,
+	OperationDriveVersionsList,
+	OperationDriveVersionsRead,
+	OperationDriveVersionsRedact,
+	OperationDrivesCreate,
+	OperationDrivesDelete,
+	OperationDrivesList,
+	OperationDrivesRead,
+	OperationDrivesRestore,
+	OperationDrivesUpdate,
+	OperationDrivesUsageRead,
 	OperationEnvironmentsArchive,
 	OperationEnvironmentsCreate,
 	OperationEnvironmentsDelete,
@@ -198,6 +232,8 @@ type OperationRoute struct {
 
 var operationRoutes = []OperationRoute{
 	{"DELETE", "/v1/api_keys/{api_key_id}", OperationAPIKeysDelete},
+	{"DELETE", "/v1/drives/{drive_id}", OperationDrivesDelete},
+	{"DELETE", "/v1/drives/{drive_id}/files", OperationDriveFilesDelete},
 	{"DELETE", "/v1/environments/{environment_id}", OperationEnvironmentsDelete},
 	{"DELETE", "/v1/files/{file_id}", OperationFilesDelete},
 	{"DELETE", "/v1/instances/{instance_id}", OperationInstancesDelete},
@@ -214,6 +250,16 @@ var operationRoutes = []OperationRoute{
 	{"GET", "/v1/agents/{agent_id}", OperationAgentsRead},
 	{"GET", "/v1/agents/{agent_id}/versions", OperationAgentVersionsList},
 	{"GET", "/v1/api_keys", OperationAPIKeysList},
+	{"GET", "/v1/drives", OperationDrivesList},
+	{"GET", "/v1/drives/usage", OperationDrivesUsageRead},
+	{"GET", "/v1/drives/{drive_id}", OperationDrivesRead},
+	{"GET", "/v1/drives/{drive_id}/changes", OperationDriveChangesList},
+	{"GET", "/v1/drives/{drive_id}/changes/stream", OperationDriveChangesStream},
+	{"GET", "/v1/drives/{drive_id}/files", OperationDriveFilesList},
+	{"GET", "/v1/drives/{drive_id}/files/content", OperationDriveFilesContentRead},
+	{"GET", "/v1/drives/{drive_id}/files/versions", OperationDriveVersionsList},
+	{"GET", "/v1/drives/{drive_id}/versions/{version_id}", OperationDriveVersionsRead},
+	{"GET", "/v1/drives/{drive_id}/versions/{version_id}/content", OperationDriveVersionsContentRead},
 	{"GET", "/v1/environments", OperationEnvironmentsList},
 	{"GET", "/v1/environments/{environment_id}", OperationEnvironmentsRead},
 	{"GET", "/v1/files", OperationFilesList},
@@ -254,6 +300,11 @@ var operationRoutes = []OperationRoute{
 	{"POST", "/v1/agents/{agent_id}", OperationAgentsUpdate},
 	{"POST", "/v1/agents/{agent_id}/archive", OperationAgentsArchive},
 	{"POST", "/v1/api_keys", OperationAPIKeysCreate},
+	{"POST", "/v1/drives", OperationDrivesCreate},
+	{"POST", "/v1/drives/{drive_id}", OperationDrivesUpdate},
+	{"POST", "/v1/drives/{drive_id}/files", OperationDriveFilesCreate},
+	{"POST", "/v1/drives/{drive_id}/restore", OperationDrivesRestore},
+	{"POST", "/v1/drives/{drive_id}/versions/{version_id}/redact", OperationDriveVersionsRedact},
 	{"POST", "/v1/environments", OperationEnvironmentsCreate},
 	{"POST", "/v1/environments/{environment_id}", OperationEnvironmentsUpdate},
 	{"POST", "/v1/environments/{environment_id}/archive", OperationEnvironmentsArchive},
