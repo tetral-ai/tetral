@@ -669,6 +669,60 @@ func TestFirstWriteIsRecordedWithoutAResendWhenItsRecordingPassFails(t *testing.
 	}
 }
 
+// TestReportedInstructionStillRecordsItsSuccessfulWrite stores an
+// instruction's report after a pass wrote it and before the next pass, which
+// records that write, selects what to write: the write is still recorded,
+// with one delivery span in the issuing trace, and is not repeated.
+func TestReportedInstructionStillRecordsItsSuccessfulWrite(t *testing.T) {
+	spans := tracetest.NewInMemoryExporter()
+	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: ServiceName, SyncExporter: spans, SampleRatio: 1})))
+	f := newHubFixture(t, 720*time.Hour)
+	_, stream := f.openOnline()
+	// A first instruction, written and recorded, shows that no earlier
+	// pass is still running when the pause is set.
+	warmup := f.issueInstruction(f.ctx, stream.connectionID, "sess_warmup")
+	f.requireInstructions(stream, warmup)
+	waitUntil(t, func() bool {
+		return f.count(`SELECT count(*) FROM connection_instructions WHERE message_id=$1 AND first_written_at IS NOT NULL`, warmup) == 1
+	})
+	traced, span := workload.StartRequestSpan(f.ctx, "test.report", "")
+	defer span.End()
+	traceparent := workload.ContextTraceparent(traced)
+	const selection = "reported_at IS NULL AND issue_seq<="
+	writing := f.pauseOn(selection)
+	instruction := f.issueInstruction(traced, stream.connectionID, "sess_reported")
+	<-writing.reached
+	// The next selection is that of the pass after the one that writes the
+	// instruction, which records its write.
+	recording := f.pauseOn(selection)
+	close(writing.release)
+	f.requireInstructions(stream, instruction)
+	<-recording.reached
+	f.markReported(stream.connectionID, instruction)
+	if f.count(`SELECT count(*) FROM connection_instructions WHERE message_id=$1 AND first_written_at IS NOT NULL`, instruction) != 0 {
+		t.Fatal("the write was recorded before the report was stored")
+	}
+	close(recording.release)
+	sentinel := f.issueInstruction(traced, stream.connectionID, "sess_after_report")
+	f.requireInstructions(stream, sentinel)
+	awaitDeliverySpan(t, spans, sentinel)
+	if f.count(`SELECT count(*) FROM connection_instructions WHERE message_id=$1 AND reported_at IS NOT NULL AND first_written_at IS NOT NULL`, instruction) != 1 {
+		t.Fatal("the reported instruction's write was not recorded")
+	}
+	for _, messageID := range []string{instruction, sentinel} {
+		delivered := deliverySpans(spans, messageID)
+		if len(delivered) != 1 || delivered[0].SpanContext.TraceID().String() != traceparent[3:35] {
+			t.Fatalf("delivery %s: %v; want exactly one in the issuing trace", messageID, delivered)
+		}
+	}
+	// The three first writes, the warmup's included, are the histogram's
+	// only samples.
+	if count := metricValue(t, f.pods[hubTestPod].metrics, "computerhub_instructions_queue_wait_seconds_count", ""); count != 3 {
+		t.Fatalf("queue-wait count = %v; want 3", count)
+	}
+	requireNoEvent(t, stream)
+}
+
 // deliverySpans selects only the original message, excluding progress sentinels.
 func deliverySpans(spans *tracetest.InMemoryExporter, messageID string) []tracetest.SpanStub {
 	var found []tracetest.SpanStub
