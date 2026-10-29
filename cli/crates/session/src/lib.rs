@@ -7,6 +7,7 @@ mod prepare;
 pub mod probe;
 pub mod probe_child;
 mod record;
+mod repositories;
 mod tools;
 
 pub use owner::{

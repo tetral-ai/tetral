@@ -11,7 +11,7 @@ use protocol::id::{Id, SafeId};
 use protocol::local::SessionEntry;
 use protocol::ports::{
     Close, ConnectionPort, Prepare, ProbeRequest, ProbeSlot, ReportSink, SessionFactory,
-    SessionHandle, ToolCall,
+    SessionHandle, TicketAnswer, TicketRequest, ToolCall,
 };
 use tokio::sync::mpsc;
 
@@ -27,6 +27,12 @@ pub(crate) enum PortMessage {
     Slot(Requester),
     Withdraw(Requester),
     Free,
+    GitTicket {
+        session_id: SafeId,
+        request: TicketRequest,
+        connection_id: Id,
+        binding_id: Id,
+    },
     RecordGone(SafeId),
     TasksGone(SafeId),
     TaskStaged(Duration),
@@ -59,6 +65,21 @@ impl ConnectionPort for Port {
 
     fn probe_slot_free(&self) {
         self.send(PortMessage::Free);
+    }
+
+    fn fetch_git_ticket(
+        &self,
+        session_id: &SafeId,
+        request: TicketRequest,
+        connection_id: &Id,
+        binding_id: &Id,
+    ) {
+        self.send(PortMessage::GitTicket {
+            session_id: session_id.clone(),
+            request,
+            connection_id: connection_id.clone(),
+            binding_id: binding_id.clone(),
+        });
     }
 
     fn record_gone(&self, session_id: &SafeId) {
@@ -183,6 +204,12 @@ impl Owners {
     pub fn answer(&self, (session_id, request): &Requester, answer: ProbeSlot) {
         if let Some(owned) = self.owners.get(session_id) {
             owned.handle.probe_slot(*request, answer);
+        }
+    }
+
+    pub fn git_ticket(&self, session_id: &SafeId, request: TicketRequest, answer: TicketAnswer) {
+        if let Some(owned) = self.owners.get(session_id) {
+            owned.handle.git_ticket(request, answer);
         }
     }
 

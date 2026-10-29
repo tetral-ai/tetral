@@ -213,6 +213,15 @@ pub struct ToolCall {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProbeRequest(pub u64);
 
+/// One git-ticket request of a Session binding owner, unique within it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TicketRequest(pub u64);
+
+/// The Connection owner's answer to a git-ticket request: the ticket, or
+/// the message a repository failure carries, the error body's `message` or
+/// the CLI's description of an answer that failed its schema.
+pub type TicketAnswer = Result<crate::connection::GitTicketResponse, String>;
+
 /// The Connection owner's answer to a probe-slot request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeSlot {
@@ -254,6 +263,8 @@ pub trait SessionHandle: Send + Sync {
     fn tool(&self, call: ToolCall);
     /// The answer to the owner's request `request`.
     fn probe_slot(&self, request: ProbeRequest, answer: ProbeSlot);
+    /// The answer to the owner's git-ticket request `request`.
+    fn git_ticket(&self, request: TicketRequest, answer: TicketAnswer);
     /// The connection ended: its bindings become `unavailable`.
     fn connection_ended(&self, connection_id: Id);
     /// The App Server shuts down: running probes are killed and every task
@@ -287,6 +298,17 @@ pub trait ConnectionPort: Send + Sync {
     fn probe_slot_withdraw(&self, session_id: &SafeId, request: ProbeRequest);
     /// Returns a slot once its probe is reaped, or unused (`ProbeSlotFree`).
     fn probe_slot_free(&self);
+    /// Fetches a git ticket for the binding `binding_id` of the connection
+    /// `connection_id` (`FetchGitTicket`); the answer comes through
+    /// [`SessionHandle::git_ticket`], and none comes once that connection
+    /// has ended.
+    fn fetch_git_ticket(
+        &self,
+        session_id: &SafeId,
+        request: TicketRequest,
+        connection_id: &Id,
+        binding_id: &Id,
+    );
     /// The Session's record is deleted (`RecordGone`).
     fn record_gone(&self, session_id: &SafeId);
     /// After the shutdown, every task of the Session is confirmed gone

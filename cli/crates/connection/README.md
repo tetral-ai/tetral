@@ -93,6 +93,12 @@ Server:
   with a credential being or already replaced is no refusal: the request
   is sent again with the new key under its `message_id` (`credential`,
   `owner`, `outbox`).
+- A git ticket is fetched for a Session binding owner as an ordinary request
+  of the held connection, sent again under its `message_id` after a network
+  failure, a timeout or a `5xx` until the request deadline, and held back
+  during a credential switch; a refusal or an answer that fails its schema
+  is the owner's failure, and no ticket answer is replayed (`git_ticket`,
+  `owner`).
 - A `session.prepare` is admitted before it reaches its Session binding
   owner: a payload that fails its schema gets `invalid_input`, and a Session
   without a record while `sessions::RECORDS_MAX` exist or a new operation
@@ -185,6 +191,7 @@ mailbox submission; the body owner releases the budget on its last reference.
 |---|---|
 | `src/owner.rs` | The Connection owner: its phases, timers, the answers to the events request, ready and heartbeats, `disconnect`, the order of an event's handling and the ledger's admission (`admit`), staging and routing, the admission of a `session.prepare` and its `failed` report, the record `protocol.foreign_connection`, and the test seam counters `connection.attempt`, `connection.checked`, `connection.granted`, `connection.answered`, `connection.final_acked` and `route.session` |
 | `src/credential.rs` | A renewal's steps (`Renewal`): the fetch's body, the check of its answer, the replacement of `credentials.json`, and the records `credential.renewal_rejected` and `credential.renewal_not_saved`; the barrier `renewal.persisted` after the write is the owner's (`owner`) |
+| `src/git_ticket.rs` | A git-ticket fetch (`TicketFetch`): its body and the sorting of its answer |
 | `src/sessions.rs` | The Session binding owners as the Connection owner reaches them (`Owners`), `RECORDS_MAX`, and its side of `protocol::ports::ConnectionPort` |
 | `src/probe_slots.rs` | The probe slots, their waiting requests, `PROBES_MAX` and `PROBE_WAIT`, and the pressure point `tetral_probes`: its series and its rejection episodes |
 | `src/task_pressure.rs` | The pressure point `tetral_tasks`: the running tasks, the staged `tool.execute` instructions and their waits, the `resource_exhausted` rejections, its series and its rejection episodes |

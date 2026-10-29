@@ -52,7 +52,7 @@ use protocol::fingerprint::fingerprint;
 use protocol::id::{Id, SafeId};
 use protocol::local::{ConnectionState, ErrorObject, SessionEntry, SessionState};
 use protocol::ports::{
-    Close, Prepare, ProbeSlot, ReportSink, SessionFactory, Submission, ToolCall,
+    Close, Prepare, ProbeSlot, ReportSink, SessionFactory, Submission, TicketRequest, ToolCall,
 };
 use protocol::time::Rfc3339Utc;
 use protocol::tool::ProtocolVersion;
@@ -65,6 +65,7 @@ use crate::backoff::{BASE_MAX, BASE_START, Backoff, random_jitter};
 use crate::classify::{self, Read, SessionMessage};
 use crate::clock::Clock;
 use crate::credential::{self, CREDENTIAL_PATH, INVALID_RESPONSE, Renewal};
+use crate::git_ticket::{self, GIT_TICKET_PATH, TicketFetch};
 use crate::heartbeat::Heartbeats;
 use crate::http::{Answer, REQUEST_TOTAL, Transport};
 use crate::ledger::{self, Entry, EntryState, Ledger, Need, Seen};
@@ -399,6 +400,8 @@ struct Held {
     /// The credentials of `credential.renew` notices not yet handled, each
     /// once: those received before `online` and during another renewal.
     notices: VecDeque<Id>,
+    /// The git-ticket fetches until their answers, by number.
+    tickets: HashMap<u64, TicketFetch>,
 }
 
 enum Stream {
@@ -438,6 +441,8 @@ enum Operation {
     Ready,
     Heartbeat(HeartbeatRequest),
     Credential,
+    /// The git-ticket fetch of that number.
+    GitTicket(u64),
 }
 
 #[derive(Clone)]
@@ -662,6 +667,12 @@ impl Owner {
                     self.owners.answer(&next, ProbeSlot::Granted);
                 }
             }
+            PortMessage::GitTicket {
+                session_id,
+                request,
+                connection_id,
+                binding_id,
+            } => self.fetch_git_ticket(session_id, request, &connection_id, &binding_id),
             PortMessage::RecordGone(session_id) => self.owners.record_gone(&session_id),
             PortMessage::TasksGone(session_id) => {
                 self.tasks_pending.remove(&session_id);
@@ -800,6 +811,24 @@ impl Owner {
         }
         if matches!(held.renewal, Some(Renewal::Switching { .. })) {
             return;
+        }
+        let due: Vec<u64> = held
+            .tickets
+            .iter_mut()
+            .filter(|(_, fetch)| fetch.retry_at.is_some_and(|at| now >= at))
+            .map(|(number, fetch)| {
+                fetch.retry_at = None;
+                *number
+            })
+            .collect();
+        for number in due {
+            let body = held.tickets[&number].body.clone();
+            self.post(
+                &held.id,
+                GIT_TICKET_PATH,
+                Operation::GitTicket(number),
+                body,
+            );
         }
         if let Some(ready) = held
             .registration
@@ -1078,6 +1107,7 @@ impl Owner {
             event_max_bytes: self.times.event_max_bytes,
             renewal: None,
             notices: VecDeque::new(),
+            tickets: HashMap::new(),
         });
         let message_id = held.next_message_id();
         let built = ready::ready(&self.ready, &held.id, message_id.clone(), now);
@@ -1366,8 +1396,16 @@ impl Owner {
                 self.fetch_rejected(&mut held, error.code.as_str());
                 Phase::Held(held)
             }
+            (Answer::Refused(error), Operation::GitTicket(number)) if !ends_connection(&error) => {
+                self.ticket_answered(&mut held, number, Answer::Refused(error), now);
+                Phase::Held(held)
+            }
             (Answer::Refused(error), _) => self.request_refused(held, &error, now),
             (answer, Operation::Credential) => self.credential_answered(held, answer, now),
+            (answer, Operation::GitTicket(number)) => {
+                self.ticket_answered(&mut held, number, answer, now);
+                Phase::Held(held)
+            }
             (answer, Operation::Ready) => self.ready_answered(held, &answer, now),
             (answer, Operation::Heartbeat(heartbeat)) => {
                 self.heartbeat_answered(held, &answer, heartbeat, now)
@@ -1715,6 +1753,79 @@ impl Owner {
         Phase::Held(held)
     }
 
+    /// Fetches a git ticket for a binding of the held connection; a fetch
+    /// asked for during a credential switch goes once the switch ends, and
+    /// one for another connection gets no answer, since that connection's
+    /// end has ended its preparation.
+    fn fetch_git_ticket(
+        &mut self,
+        session_id: SafeId,
+        request: TicketRequest,
+        connection_id: &Id,
+        binding_id: &Id,
+    ) {
+        let backoff = self.message_backoff();
+        let Phase::Held(held) = &mut self.phase else {
+            return;
+        };
+        if held.id != *connection_id {
+            return;
+        }
+        let message_id = held.next_message_id();
+        let Some(body) = git_ticket::request(&held.id, &message_id, binding_id) else {
+            self.owners.git_ticket(
+                &session_id,
+                request,
+                Err("the git ticket request failed its own check".to_owned()),
+            );
+            return;
+        };
+        self.last_tag += 1;
+        let number = self.last_tag;
+        let switching = matches!(held.renewal, Some(Renewal::Switching { .. }));
+        held.tickets.insert(
+            number,
+            TicketFetch {
+                session_id,
+                request,
+                body: body.clone(),
+                backoff,
+                retry_at: switching.then(state::seams::now),
+            },
+        );
+        if !switching {
+            let connection = held.id.clone();
+            self.post(
+                &connection,
+                GIT_TICKET_PATH,
+                Operation::GitTicket(number),
+                body,
+            );
+        }
+    }
+
+    /// The answer to the git-ticket fetch `number`: the Session binding
+    /// owner gets the ticket or the failure's message; no answer is retried
+    /// within the connection deadline.
+    fn ticket_answered(&mut self, held: &mut Held, number: u64, answer: Answer, now: Duration) {
+        let Some(fetch) = held.tickets.get_mut(&number) else {
+            return;
+        };
+        match git_ticket::answer(answer) {
+            Some(answer) => {
+                let fetch = held.tickets.remove(&number).expect("the fetch is pending");
+                self.owners
+                    .git_ticket(&fetch.session_id, fetch.request, answer);
+            }
+            None => {
+                let at = now + fetch.backoff.next_wait();
+                if held.deadline.is_some_and(|deadline| at < deadline) {
+                    fetch.retry_at = Some(at);
+                }
+            }
+        }
+    }
+
     /// Closes the connection's stream; the outbox drops its reports, the
     /// waiting probe-slot requests are cancelled and every Session binding
     /// owner ends the connection's bindings.
@@ -1925,6 +2036,11 @@ impl Held {
                     *retry_at = Some(now);
                 }
             }
+            Operation::GitTicket(number) => {
+                if let Some(fetch) = self.tickets.get_mut(number) {
+                    fetch.retry_at = Some(now);
+                }
+            }
         }
     }
 
@@ -1954,6 +2070,10 @@ impl Held {
                 Some(Renewal::Fetching { retry_at, .. }) => *retry_at,
                 _ => None,
             },
+            self.tickets
+                .values()
+                .filter_map(|fetch| fetch.retry_at)
+                .min(),
             stream,
         ]
         .into_iter()
@@ -2086,6 +2206,7 @@ mod tests {
                 event_max_bytes: crate::stream::TOOL_EVENT_MAX_BYTES,
                 renewal: None,
                 notices: VecDeque::new(),
+                tickets: HashMap::new(),
             }),
             task,
         )

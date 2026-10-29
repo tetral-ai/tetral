@@ -179,6 +179,13 @@ the isolated harness tests without starting the CLI.
   shutdown, the listing of a staged and of a failed preparation, reports
   refused as answering no issued instruction, a new binding refused by a
   full replay ledger, and a preparation that names an earlier connection.
+- `tests/repositories.rs`: a cloud computer's repositories against the
+  reference control server and `GitServer` with real `git`: repository paths
+  in the state root, a refused or empty ticket, a clone of a default branch,
+  a branch and a commit, a missing branch, an existing folder, a reuse with
+  the new ticket, unchanged global Git configuration, the cause of each
+  failed clone and its message's limit, a user computer that runs no `git`,
+  and a clone that finishes after its connection ended.
 - `tests/tool_admission.rs`: tool instructions against the reference control
   server: one event of up to 4,259,840 bytes read and a larger one that
   closes the stream unread, and the budgets of `input`, `chars` and metadata

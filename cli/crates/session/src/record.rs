@@ -4,7 +4,7 @@
 //! binding replaces only once it has `failed`, and the binding the Session
 //! had on an ended connection, `unavailable` until a new binding replaces it.
 
-use protocol::connection::PreparationError;
+use protocol::connection::{PreparationError, Repository, RepositoryFailure};
 use protocol::field::{AbsolutePath, Nullable};
 use protocol::id::{Id, SafeId};
 use protocol::local::{SessionEntry, SessionState};
@@ -37,6 +37,9 @@ pub struct Binding {
     pub waiting: Vec<Requester>,
     /// The reports of this binding's result that wait for their ACK.
     pub reports: Vec<ReportId>,
+    /// The repositories the preparation clones, and those that failed.
+    pub repositories: Vec<Repository>,
+    pub repository_failures: Vec<RepositoryFailure>,
     pub tasks: Tasks,
 }
 

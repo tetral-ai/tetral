@@ -3,7 +3,9 @@
 //! that the App Server never inspects a target itself and never changes its
 //! own working directory. It runs no user command and writes no project
 //! file; with `create_cwd` it creates only the missing directories of the
-//! target.
+//! target. After the directory's checks it reports, for each repository
+//! path, whether its resolved path lies in the state root and whether an
+//! entry exists there.
 
 use std::ffi::OsStr;
 use std::io::{self, Read};
@@ -42,15 +44,32 @@ pub struct Input {
     pub create_cwd: bool,
     /// The state root's canonical path.
     pub state_root: String,
+    /// The paths the preparation's repositories clone to.
+    #[serde(default)]
+    pub repository_paths: Vec<String>,
+}
+
+/// What the probe found at one repository path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryCheck {
+    /// The path resolved, its deepest existing ancestor through symbolic
+    /// links with the remaining components appended, is the state root or
+    /// below it.
+    pub inside_state_root: bool,
+    /// An entry, of any kind, exists at the path.
+    pub exists: bool,
 }
 
 /// The probe's one line of stdout.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Output {
-    /// The canonical working directory.
+    /// The canonical working directory and each repository path's check,
+    /// in the order of `repository_paths`.
     Entered {
         cwd: String,
+        #[serde(default)]
+        repositories: Vec<RepositoryCheck>,
     },
     Failed {
         error: PreparationError,
@@ -62,7 +81,14 @@ pub fn run(input: &[u8]) -> Vec<u8> {
     let output = match serde_json::from_slice::<Input>(input) {
         Ok(input) => match check(&input) {
             Ok(cwd) => match cwd.into_os_string().into_string() {
-                Ok(cwd) => Output::Entered { cwd },
+                Ok(cwd) => Output::Entered {
+                    cwd,
+                    repositories: input
+                        .repository_paths
+                        .iter()
+                        .map(|path| repository_check(Path::new(path), Path::new(&input.state_root)))
+                        .collect(),
+                },
                 Err(_) => Output::Failed {
                     error: PreparationError {
                         code: PreparationErrorCode::CwdInaccessible,
@@ -161,6 +187,35 @@ fn create_missing(target: &Path, state_root: &Path) -> Result<(), PreparationErr
     Ok(())
 }
 
+fn repository_check(path: &Path, state_root: &Path) -> RepositoryCheck {
+    RepositoryCheck {
+        inside_state_root: resolved(path).starts_with(state_root),
+        exists: std::fs::symlink_metadata(path).is_ok(),
+    }
+}
+
+/// `path` with its deepest existing ancestor resolved through symbolic
+/// links and the remaining components appended.
+fn resolved(path: &Path) -> PathBuf {
+    let mut remaining = Vec::new();
+    let mut ancestor = path;
+    loop {
+        if let Ok(resolved) = std::fs::canonicalize(ancestor) {
+            return remaining
+                .iter()
+                .rev()
+                .fold(resolved, |path, name| path.join(name));
+        }
+        match (ancestor.parent(), ancestor.file_name()) {
+            (Some(parent), Some(name)) => {
+                remaining.push(name.to_owned());
+                ancestor = parent;
+            }
+            _ => return lexical(path),
+        }
+    }
+}
+
 /// `path` with `.` removed and each `..` taking away the component before
 /// it, without reading the filesystem.
 pub fn lexical(path: &Path) -> PathBuf {
@@ -227,7 +282,7 @@ mod tests {
     fn code(line: &[u8]) -> PreparationErrorCode {
         match serde_json::from_slice(line).unwrap() {
             Output::Failed { error } => error.code,
-            Output::Entered { cwd } => panic!("entered {cwd}"),
+            Output::Entered { cwd, .. } => panic!("entered {cwd}"),
         }
     }
 
@@ -328,6 +383,7 @@ mod tests {
                 .to_owned(),
             create_cwd: true,
             state_root: "/unrelated-state-root".into(),
+            repository_paths: Vec::new(),
         };
         let result = check(&input);
         if succeeds {

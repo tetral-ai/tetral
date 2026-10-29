@@ -10,16 +10,18 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use execution::cleanup::Leftovers;
 use execution::supervisor::{SupervisorMailbox, SupervisorMessage, TaskListener};
+use protocol::connection::RepositoryFailure;
 use protocol::id::{Id, SafeId};
 use protocol::local::SessionState;
 use protocol::ports::{
     Close, ConnectionPort, EntriesReply, Prepare, ProbeRequest, ProbeSlot, ReportId,
     ReportListener, ReportOutcome, ReportSink, SessionFactory, SessionHandle, TaskOwnerReply,
-    TaskOwnership, ToolCall,
+    TaskOwnership, TicketAnswer, TicketRequest, ToolCall,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -46,6 +48,16 @@ pub enum SessionMessage {
     ProbeDone {
         operation: u64,
         output: Option<Output>,
+    },
+    GitTicket {
+        request: TicketRequest,
+        answer: TicketAnswer,
+    },
+    /// The repositories of `operation` are cloned or reused, but for
+    /// `failures`.
+    RepositoriesDone {
+        operation: u64,
+        failures: Vec<RepositoryFailure>,
     },
     Report {
         report: ReportId,
@@ -216,6 +228,10 @@ impl SessionHandle for Handle {
         self.send(SessionMessage::ProbeSlot { request, answer });
     }
 
+    fn git_ticket(&self, request: TicketRequest, answer: TicketAnswer) {
+        self.send(SessionMessage::GitTicket { request, answer });
+    }
+
     fn connection_ended(&self, connection_id: Id) {
         self.send(SessionMessage::ConnectionEnded(connection_id));
     }
@@ -276,6 +292,11 @@ pub(crate) struct SessionOwner<S> {
     pub requests: HashMap<ProbeRequest, u64>,
     /// Each probe not yet reaped, by operation.
     pub probes: HashMap<u64, Running>,
+    /// Each git-ticket request not yet answered, and its operation.
+    pub tickets: HashMap<TicketRequest, u64>,
+    /// The clones of each operation that still run, and whether it is still
+    /// current.
+    pub clones: HashMap<u64, Arc<AtomicBool>>,
     /// The tasks of ended connections, by connection and `task_id`, whose
     /// processes are not yet confirmed gone.
     pub unconfirmed: HashSet<(Id, Id)>,
@@ -328,6 +349,8 @@ impl<S: TaskStarter> SessionOwner<S> {
             last_request: 0,
             requests: HashMap::new(),
             probes: HashMap::new(),
+            tickets: HashMap::new(),
+            clones: HashMap::new(),
             unconfirmed: HashSet::new(),
             running: HashSet::new(),
             shutting_down: false,
@@ -345,6 +368,11 @@ impl<S: TaskStarter> SessionOwner<S> {
             SessionMessage::Prepare(prepare) => self.prepare(*prepare),
             SessionMessage::ProbeSlot { request, answer } => self.probe_slot(request, answer),
             SessionMessage::ProbeDone { operation, output } => self.probe_done(operation, output),
+            SessionMessage::GitTicket { request, answer } => self.git_ticket(request, answer),
+            SessionMessage::RepositoriesDone {
+                operation,
+                failures,
+            } => self.repositories_done(operation, failures),
             SessionMessage::Report { report, outcome } => self.report_outcome(report, outcome),
             SessionMessage::ConnectionEnded(connection) => self.connection_ended(&connection),
             SessionMessage::Shutdown => self.shutdown(),
@@ -473,10 +501,15 @@ impl<S: TaskStarter> SessionOwner<S> {
         self.answer_shutdown();
     }
 
-    /// Ends `operation`: a slot request it still has is withdrawn and its
-    /// probe killed. Its result, if one comes, is discarded since no binding
-    /// holds the operation any more.
+    /// Ends `operation`: a slot request it still has is withdrawn, its probe
+    /// killed and its clones told that it is no longer current. Its result,
+    /// if one comes, is discarded since no binding holds the operation any
+    /// more.
     pub(crate) fn end_operation(&mut self, operation: u64) {
+        self.tickets.retain(|_, waiting| *waiting != operation);
+        if let Some(current) = self.clones.get(&operation) {
+            current.store(false, Ordering::Release);
+        }
         let withdrawn: Vec<ProbeRequest> = self
             .requests
             .iter()
@@ -542,6 +575,8 @@ mod tests {
                 operation: 1,
                 waiting: Vec::new(),
                 reports: Vec::new(),
+                repositories: Vec::new(),
+                repository_failures: Vec::new(),
                 tasks: Default::default(),
             }),
             unavailable: None,
@@ -673,6 +708,7 @@ mod tests {
         fn probe_slot_withdraw(&self, _session_id: &SafeId, request: ProbeRequest) {
             self.withdrawn.lock().unwrap().push(request);
         }
+        fn fetch_git_ticket(&self, _: &SafeId, _: TicketRequest, _: &Id, _: &Id) {}
         fn probe_slot_free(&self) {
             self.freed.fetch_add(1, Ordering::SeqCst);
         }
@@ -1195,6 +1231,7 @@ mod tests {
         let passed = state::seams::now().saturating_sub(Duration::from_millis(1));
         let entered = Output::Entered {
             cwd: "/project".to_owned(),
+            repositories: Vec::new(),
         };
         let entry = entry_after_probe_done(passed, Some(entered)).await;
         assert_eq!(entry.state, SessionState::Failed);

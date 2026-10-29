@@ -102,6 +102,19 @@ that is no longer the binding's is discarded.
   `PROBE_LIMIT` whenever it wakes and wakes at least once per recheck interval
   while a probe runs; it acts on a passed limit before the message it woke
   for, so a result taken after the limit is discarded (`owner`).
+- A cloud computer's repositories are checked by the probe too: a `path` at
+  or below the state root, lexically or by its resolved path, fails the
+  preparation, and so does an existing entry at a `path` that
+  `sessions/<session_id>/repositories.json` does not list (`prepare`). A
+  preparation with repositories then asks the Connection owner for one git
+  ticket and clones or reuses each repository in order, one `git` child at
+  a time in its own process group with the App Server's environment; the
+  ticket, the URL rewrite to git-proxy and the commit identity go only into
+  each repository's local configuration, and the ticket into no log or
+  report (`repositories`). A clone that succeeds is listed in
+  `repositories.json` even when its preparation is no longer current, so
+  that the next preparation reuses it; a preparation with no repositories
+  runs no `git`.
 
 ## Entry points
 
@@ -129,4 +142,8 @@ that is no longer the binding's is discarded.
   report and its ACK.
 - `probe.rs`: the spawn and supervision of one probe (`spawn`, `Probe`,
   `PROBE_LIMIT`).
-- `probe_child.rs`: the probe's checks and the creation of a missing `cwd`.
+- `probe_child.rs`: the probe's checks, the creation of a missing `cwd` and
+  each repository path's check.
+- `repositories.rs`: `repositories.json`, the clone and reuse of each
+  repository, the cause and message of each failure, the fitting of a
+  report's failures to its limit, and the test seam counter `git.spawn`.

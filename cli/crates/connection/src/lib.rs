@@ -6,6 +6,7 @@ pub mod backoff;
 pub mod classify;
 pub mod clock;
 mod credential;
+mod git_ticket;
 pub mod heartbeat;
 pub mod http;
 pub mod ledger;

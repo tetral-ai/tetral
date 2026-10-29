@@ -129,9 +129,11 @@ mod tests {
             cwd: "/project".into(),
             create_cwd: false,
             state_root: "/root".into(),
+            repository_paths: Vec::new(),
         };
         let entered = Output::Entered {
             cwd: "/project".to_owned(),
+            repositories: Vec::new(),
         };
         // Both lines parse as the same result when read whole.
         let short = r#"{"cwd":"/project"}"#.to_owned();
