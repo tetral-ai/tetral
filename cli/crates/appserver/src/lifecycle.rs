@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use connection::{Connection, Credential, ReadyFields};
+use drive::cache::{CacheConfig, ContentCache, volume_free_space};
 use protocol::connection::SemVer;
 use protocol::local::{ServerState, Status};
 use session::{Factory, RootPaths, Shared, ToolContext};
@@ -200,6 +201,7 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
     };
     let state_root =
         state::paths::StateRoot::new(root.as_os_str()).expect("startup took this root's path");
+    let cache_root = canonical_root.clone();
     let sessions = Factory::new(
         Shared {
             paths: Arc::new(RootPaths {
@@ -244,6 +246,13 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
         sessions: Arc::new(sessions),
         times: times.connection,
     });
+    // The drive syncs read from it; it holds the App Server's transfer slots.
+    let _content_cache = ContentCache::spawn(CacheConfig {
+        free_space: volume_free_space(cache_root.clone()),
+        root: cache_root,
+        transfer: connection.drive_transfer(),
+        clock: state::clock::Clock::seams(),
+    })?;
     let (lifecycle, finished) = spawn(ShutdownParts {
         ownership,
         connection: connection.clone(),

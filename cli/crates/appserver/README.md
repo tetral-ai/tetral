@@ -85,7 +85,8 @@ ones it uses belong here too.
   owners' factory (`session::Factory`), given the state root as given and
   canonical and the running executable for the directory probe, and with
   `tasks::Supervisors`, which gives each admitted `exec_command` task its
-  Task supervisor, serves the App Server until the shutdown sequence
+  Task supervisor, and the Content cache owner (`drive::cache`) with the
+  connection's drive transfer client, serves the App Server until the shutdown sequence
   ends and gives `lifecycle::Ended`: the status as of then and the time left
   before the shutdown's deadline. `lifecycle::Times` holds the durations,
   each a constant but for tests.
@@ -102,7 +103,7 @@ ones it uses belong here too.
 - `capabilities.rs`: the capabilities of ready (`assemble`) and the startup
   checks of tool execution.
 - `lifecycle.rs`: the lifecycle task (`spawn`, `Lifecycle`) and `run`, which
-  starts the Connection owner and joins the local API, the signals and the
+  starts the Connection owner and the Content cache owner and joins the local API, the signals and the
   socket's freshness.
 - `local_api.rs`: the routes (`router`), the status fields that do not change
   while the App Server runs (`FixedStatus`), the sources of a status

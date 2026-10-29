@@ -38,5 +38,4 @@ Drives on this machine belong here, with two owners:
   `ListChanges`, `Upload`, `Commit`, `Download`), `ContentSink`, the answer
   classes (`Class`) and `Ended`.
 - `lib.rs`: `spawn_drive_sync_owner`, `DriveSyncMessage` and
-  `DriveSyncMailbox`; `spawn_content_cache`, `ContentCacheMessage` and
-  `ContentCacheMailbox`.
+  `DriveSyncMailbox`.
