@@ -19,11 +19,12 @@ type FileQuery struct {
 	Limit  int
 }
 
-func (s *Service) ListFiles(ctx context.Context, ws workspace.ID, driveID string, query FileQuery) ([]File, error) {
+// ListFiles returns at most query.Limit files and whether more exist.
+func (s *Service) ListFiles(ctx context.Context, ws workspace.ID, driveID string, query FileQuery) ([]File, bool, error) {
 	var files []File
 	err := s.read(ctx, ws, driveID, "drive.files_list", func(tx *dbconnect.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT `+fileColumns+` FROM drive_files WHERE workspace_id=$1 AND drive_id=$2 AND path>$3 AND path LIKE $4
-			ORDER BY path LIMIT $5`, string(ws), driveID, query.After, likePrefix(query.Prefix), query.Limit)
+			ORDER BY path LIMIT $5`, string(ws), driveID, query.After, likePrefix(query.Prefix), query.Limit+1)
 		if err != nil {
 			return err
 		}
@@ -37,7 +38,29 @@ func (s *Service) ListFiles(ctx context.Context, ws workspace.ID, driveID string
 		}
 		return rows.Err()
 	})
-	return files, err
+	more := len(files) > query.Limit
+	if more {
+		files = files[:query.Limit]
+	}
+	return files, more, err
+}
+
+// CurrentFile reads the path's current file, or returns ErrNotFound when the
+// path has none.
+func (s *Service) CurrentFile(ctx context.Context, ws workspace.ID, driveID, path string) (File, error) {
+	var file File
+	err := s.read(ctx, ws, driveID, "drive.current_file_read", func(tx *dbconnect.Tx) error {
+		if !storable(path) {
+			return ErrNotFound
+		}
+		var readErr error
+		file, readErr = scanFile(tx.QueryRow(ctx, `SELECT `+fileColumns+` FROM drive_files WHERE workspace_id=$1 AND drive_id=$2 AND path=$3`, string(ws), driveID, path))
+		if errors.Is(readErr, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return readErr
+	})
+	return file, err
 }
 
 // ListVersions lists a path's kept versions, oldest first.

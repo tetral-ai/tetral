@@ -248,7 +248,7 @@ func TestCommitDecisionRules(t *testing.T) {
 		if !errors.As(err, &rejected) || rejected.Index != 1 || rejected.Result.Reason != drive.ReasonPathRule {
 			t.Fatalf("error = %v, want the second change's path_rule rejection", err)
 		}
-		if files, err := f.api.ListFiles(f.ctx, f.ws, driveID, drive.FileQuery{Limit: 10}); err != nil || len(files) != 0 {
+		if files, _, err := f.api.ListFiles(f.ctx, f.ws, driveID, drive.FileQuery{Limit: 10}); err != nil || len(files) != 0 {
 			t.Fatalf("files = %v, %v; want none", files, err)
 		}
 	})

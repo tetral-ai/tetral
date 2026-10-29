@@ -178,6 +178,56 @@ func (s *Service) Get(ctx context.Context, ws workspace.ID, driveID string) (Dri
 	return found, err
 }
 
+// DriveCursor is the place of the last drive of a page in creation order.
+type DriveCursor struct {
+	CreatedAt time.Time
+	ID        string
+}
+
+// List returns at most limit active drives after the cursor, oldest first, and
+// whether more exist.
+func (s *Service) List(ctx context.Context, ws workspace.ID, after *DriveCursor, limit int) ([]Drive, bool, error) {
+	var drives []Drive
+	err := s.db.WithWorkspaceReadOnlyTx(ctx, string(ws), "drive.list", func(tx *dbconnect.Tx) error {
+		var afterAt, afterID any
+		if after != nil {
+			afterAt, afterID = after.CreatedAt, after.ID
+		}
+		rows, err := tx.Query(ctx, `SELECT `+driveColumns+` FROM drives WHERE workspace_id=$1 AND deleted_at IS NULL
+			AND ($2::timestamptz IS NULL OR (created_at,drive_id)>($2,$3::text)) ORDER BY created_at,drive_id LIMIT $4`, string(ws), afterAt, afterID, limit+1)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			found, err := scanDrive(rows)
+			if err != nil {
+				return err
+			}
+			drives = append(drives, found)
+		}
+		return rows.Err()
+	})
+	more := len(drives) > limit
+	if more {
+		drives = drives[:limit]
+	}
+	return drives, more, err
+}
+
+// WorkspaceUsage is the bytes and files of the current files over the
+// Workspace's drives; zero before its first file.
+func (s *Service) WorkspaceUsage(ctx context.Context, ws workspace.ID) (bytes, files int64, err error) {
+	err = s.db.WithWorkspaceReadOnlyTx(ctx, string(ws), "drive.usage_totals_read", func(tx *dbconnect.Tx) error {
+		err := tx.QueryRow(ctx, `SELECT bytes,files FROM drive_workspace_usage WHERE workspace_id=$1`, string(ws)).Scan(&bytes, &files)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	})
+	return bytes, files, err
+}
+
 // Update replaces the settings the update names, under the drive lock.
 func (s *Service) Update(ctx context.Context, ws workspace.ID, driveID string, update SettingsUpdate) (Drive, error) {
 	set, deleted := map[string]string{}, []string{}

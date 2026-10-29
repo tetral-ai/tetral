@@ -106,7 +106,7 @@ func TestRestore(t *testing.T) {
 	if result.Seq == nil || result.Restored != 1 || strings.Join(result.RedactedPaths, ",") != "r/redacted.txt" || strings.Join(result.RemovedPaths, ",") != "r/removed.txt" {
 		t.Fatalf("restore = seq %v, %+v; want r/file.txt restored, r/redacted.txt redacted, r/removed.txt removed", result.Seq, result)
 	}
-	files, err := f.api.ListFiles(f.ctx, f.ws, driveID, drive.FileQuery{Limit: 100})
+	files, _, err := f.api.ListFiles(f.ctx, f.ws, driveID, drive.FileQuery{Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -41,9 +41,10 @@ type ContentMissingError struct {
 func (e *ContentMissingError) Error() string { return "drive content missing" }
 
 // CommitRejectedError is an all_or_nothing commit rejected by the change at
-// Index, in request order; nothing was applied.
+// Index, in request order, of Path; nothing was applied.
 type CommitRejectedError struct {
 	Index  int
+	Path   string
 	Result ChangeResult
 }
 

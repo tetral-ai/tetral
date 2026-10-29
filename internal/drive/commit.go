@@ -172,7 +172,7 @@ func commitLocked(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, driveI
 			return CommitResult{}, err
 		}
 		if !result.Accepted && mode == ModeAllOrNothing {
-			return CommitResult{}, &CommitRejectedError{Index: i, Result: result}
+			return CommitResult{}, &CommitRejectedError{Index: i, Path: changes[i].Path, Result: result}
 		}
 		results[i] = result
 	}
