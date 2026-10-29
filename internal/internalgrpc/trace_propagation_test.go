@@ -194,7 +194,10 @@ func TestInternalStreamCarriesTheCorrelationFieldsOfItsFirstMessage(t *testing.T
 		}
 		return request.Interface()
 	}
-	callerCtx := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer trace-test")
+	callerCtx, callerSpan := workload.StartSpan(context.Background(), "stream.caller")
+	defer callerSpan.End()
+	callerTraceparent := workload.ContextTraceparent(callerCtx)
+	callerCtx = metadata.AppendToOutgoingContext(callerCtx, "authorization", "Bearer trace-test")
 	stream, err := conn.NewStream(callerCtx, &grpc.StreamDesc{StreamName: "Stream", ClientStreams: true}, sessionStreamMethod)
 	if err != nil {
 		t.Fatal(err)
@@ -234,15 +237,23 @@ func TestInternalStreamCarriesTheCorrelationFieldsOfItsFirstMessage(t *testing.T
 		}
 	}
 	got = map[string]string{}
+	serverSpans := 0
 	for _, exported := range spans.GetSpans() {
 		if exported.Name != sessionStreamMethod {
 			continue
+		}
+		serverSpans++
+		if exported.SpanContext.TraceID().String() != callerTraceparent[3:35] {
+			t.Fatalf("stream server trace %s; want caller trace %s", exported.SpanContext.TraceID(), callerTraceparent[3:35])
 		}
 		for _, attribute := range exported.Attributes {
 			if _, ok := want[string(attribute.Key)]; ok {
 				got[string(attribute.Key)] = attribute.Value.AsString()
 			}
 		}
+	}
+	if serverSpans != 1 {
+		t.Fatalf("server stream spans = %d; want 1", serverSpans)
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("server span fields = %v; want %v", got, want)
