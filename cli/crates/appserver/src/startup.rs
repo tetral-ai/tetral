@@ -42,6 +42,8 @@ pub struct Started {
     /// The records an earlier App Server left, read before the first
     /// connection, and which Sessions they keep `cleanup_pending`.
     pub leftovers: (Check, Leftovers),
+    /// Whether drives can be mounted, from the FUSE probe at start.
+    pub mounting: drive::mount::Mounting,
 }
 
 /// Owns the socket name for exactly as long as its root lock is held.
@@ -137,9 +139,10 @@ pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
     let tetral = std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .map_err(StartError::Executable)?;
-    let capabilities = capabilities::assemble(&tetral)?;
     let canonical_root =
         std::fs::canonicalize(root.path()).map_err(|error| IoFailure::new(root.path(), error))?;
+    let mounting = drive::mount::probe(&canonical_root);
+    let capabilities = capabilities::assemble(&tetral, &mounting)?;
     observe::STARTUP.config_loaded(state::seams::now());
     private::check_canonical_root_utf8(&canonical_root)?;
     execution::store::clear_task_parent(&execution::store::task_parent(&canonical_root));
@@ -170,6 +173,7 @@ pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
         root: root.path().to_path_buf(),
         canonical_root,
         leftovers,
+        mounting,
     })
 }
 

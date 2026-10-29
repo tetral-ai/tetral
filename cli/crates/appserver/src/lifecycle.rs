@@ -187,6 +187,7 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
         root,
         canonical_root,
         leftovers: (check, leftovers),
+        ..
     } = started;
     let socket_directory = socket.parent().unwrap_or(&socket).canonicalize()?;
     let tools = ToolContext {
