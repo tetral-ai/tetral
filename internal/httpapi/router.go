@@ -28,7 +28,7 @@ func NewRouter(sessionHandler *SessionHandler, apiKey string, options ...RouterO
 	applyRouterOptionDefaults(opts)
 
 	router.Use(RequestIDMiddleware)
-	router.Use(RequestLogMiddleware(opts.logger, WithRequestLogMetrics(opts.requestMetrics)))
+	router.Use(RequestLogMiddleware(opts.logger, WithRequestLogMetrics(opts.requestMetrics), WithLongRoutes(driveLongRoutes...)))
 	router.Use(recoveryMiddleware(opts.logger))
 
 	registerRoutes(router, sessionHandler, resolveAuthenticator(apiKey, opts), opts)
@@ -48,7 +48,7 @@ func NewRouterWithPanicHandler(sessionHandler *SessionHandler, apiKey string, op
 	applyRouterOptionDefaults(opts)
 
 	router.Use(RequestIDMiddleware)
-	router.Use(RequestLogMiddleware(opts.logger, WithRequestLogMetrics(opts.requestMetrics)))
+	router.Use(RequestLogMiddleware(opts.logger, WithRequestLogMetrics(opts.requestMetrics), WithLongRoutes(driveLongRoutes...)))
 	router.Use(recoveryMiddleware(opts.logger))
 
 	registerRoutes(router, sessionHandler, resolveAuthenticator(apiKey, opts), opts)
@@ -70,6 +70,7 @@ type routerOptions struct {
 	skillHandler        *SkillHandler
 	fileHandler         *FileHandler
 	memoryHandler       *MemoryHandler
+	driveHandler        *DriveHandler
 	sessionEventHandler *SessionEventHandler
 	sessionEventList    SessionEventListHandler
 	authenticator       auth.Authenticator
@@ -119,6 +120,10 @@ func WithFileHandler(h *FileHandler) RouterOption {
 // WithMemoryHandler installs implemented /v1/memory_stores route handlers.
 func WithMemoryHandler(h *MemoryHandler) RouterOption {
 	return func(o *routerOptions) { o.memoryHandler = h }
+}
+
+func WithDriveHandler(h *DriveHandler) RouterOption {
+	return func(o *routerOptions) { o.driveHandler = h }
 }
 
 // WithSessionEventHandler installs the public session-event ingress
@@ -337,6 +342,10 @@ func registerRoutes(router chi.Router, sessionHandler *SessionHandler, authentic
 		}
 
 		// Skills
+		if opts.driveHandler != nil {
+			registerDriveRoutes(r, opts.driveHandler, sessionHandler, opts)
+		}
+
 		if opts.skillHandler != nil {
 			registerPublicRoute(r, http.MethodPost, "/skills", opts.skillHandler.createSkill, sessionHandler, opts, false)
 			registerPublicRoute(r, http.MethodGet, "/skills", opts.skillHandler.listSkills, sessionHandler, opts, false)
@@ -362,6 +371,37 @@ func registerRoutes(router chi.Router, sessionHandler *SessionHandler, authentic
 		r.NotFound(unsupportedV1SurfaceHandler)
 		r.MethodNotAllowed(unsupportedV1SurfaceMethodNotAllowedHandler)
 	})
+}
+
+// driveLongRoutes stream content or change hints, so their duration is
+// observed with the long-operation buckets.
+var driveLongRoutes = []string{
+	"GET /v1/drives/{drive_id}/changes/stream",
+	"POST /v1/drives/{drive_id}/files",
+	"GET /v1/drives/{drive_id}/files/content",
+	"GET /v1/drives/{drive_id}/versions/{version_id}/content",
+}
+
+// registerDriveRoutes registers the developer drive API. The static usage
+// route comes before the drive ID route.
+func registerDriveRoutes(r chi.Router, h *DriveHandler, sessionHandler *SessionHandler, opts *routerOptions) {
+	registerPublicRoute(r, http.MethodPost, "/drives", h.createDrive, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodGet, "/drives", h.listDrives, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodGet, "/drives/usage", h.getUsage, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodGet, "/drives/{drive_id}", h.getDrive, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodPost, "/drives/{drive_id}", h.updateDrive, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodDelete, "/drives/{drive_id}", h.deleteDrive, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodPost, "/drives/{drive_id}/files", h.uploadFile, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodGet, "/drives/{drive_id}/files", h.listFiles, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodGet, "/drives/{drive_id}/files/content", h.downloadFile, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodDelete, "/drives/{drive_id}/files", h.deleteFile, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodGet, "/drives/{drive_id}/files/versions", h.listVersions, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodGet, "/drives/{drive_id}/versions/{version_id}", h.getVersion, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodGet, "/drives/{drive_id}/versions/{version_id}/content", h.getVersionContent, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodPost, "/drives/{drive_id}/versions/{version_id}/redact", h.redactVersion, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodGet, "/drives/{drive_id}/changes", h.listChanges, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodGet, "/drives/{drive_id}/changes/stream", h.streamChanges, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodPost, "/drives/{drive_id}/restore", h.restore, sessionHandler, opts, false)
 }
 
 func unsupportedV1SurfaceHandler(w http.ResponseWriter, r *http.Request) {

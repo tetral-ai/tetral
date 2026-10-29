@@ -115,6 +115,9 @@ var publicContractErrorTypes = map[string]struct{}{
 	"credential_limit_error":     {},
 	"instance_offline_error":     {},
 	"instance_unavailable_error": {},
+
+	"rate_limit_error":           {},
+	"drive_cursor_expired_error": {},
 }
 
 func TestEmittedErrorTypesMatchPublicContractSet(t *testing.T) {
