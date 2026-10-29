@@ -779,3 +779,48 @@ func TestInstanceListPagesInCreationOrder(t *testing.T) {
 	status, body := f.do(http.MethodGet, "/v1/instances/"+created[0]+"/credentials?page="+url.QueryEscape(token), nil, "")
 	requireAPIError(t, status, body, http.StatusBadRequest, "invalid_request_error", "page")
 }
+
+func TestCredentialIssuanceChecksReplayAndInputBeforeRefusal(t *testing.T) {
+	t.Run("deregistration refuses new issuance but preserves replay", func(t *testing.T) {
+		f := newHubFixture(t, 720*time.Hour)
+		cli := f.userInstance(time.Time{})
+		const body = `{"delivery":"response"}`
+		status, issued := f.issue(cli.InstanceID, "before-deregistration", body)
+		if status != http.StatusCreated {
+			t.Fatalf("initial issuance = %d", status)
+		}
+		if status, data := f.do(http.MethodDelete, "/v1/instances/"+cli.InstanceID, nil, ""); status != http.StatusNoContent {
+			t.Fatalf("deregister = %d %s", status, data)
+		}
+		before := f.rowCounts()
+		status, data := f.do(http.MethodPost, "/v1/instances/"+cli.InstanceID+"/credentials", []string{"after-deregistration"}, body)
+		requireAPIError(t, status, data, http.StatusForbidden, "instance_unavailable_error", "")
+		if after := f.rowCounts(); after != before {
+			t.Fatalf("refused issuance created rows: %v -> %v", before, after)
+		}
+		status, replayed := f.issue(cli.InstanceID, "before-deregistration", body)
+		key, present := replayed["connection_key"]
+		if status != http.StatusCreated || replayed["id"] != issued["id"] || !present || key != nil {
+			t.Fatalf("replay = %d %v; want original identity, status 201, null key", status, replayed)
+		}
+		if after := f.rowCounts(); after != before {
+			t.Fatalf("replay created rows: %v -> %v", before, after)
+		}
+	})
+	t.Run("invalid delivery precedes a full credential limit", func(t *testing.T) {
+		f := newHubFixture(t, 720*time.Hour)
+		cli := f.userInstance(time.Time{})
+		if status, _ := f.issue(cli.InstanceID, "second-active", `{"delivery":"response"}`); status != http.StatusCreated {
+			t.Fatalf("second issuance = %d", status)
+		}
+		if n := f.count(`SELECT count(*) FROM instance_credentials WHERE instance_id=$1 AND state='active' AND expires_at>clock_timestamp()`, cli.InstanceID); n != 2 {
+			t.Fatalf("active unexpired credentials = %d; want 2", n)
+		}
+		before := f.rowCounts()
+		status, data := f.do(http.MethodPost, "/v1/instances/"+cli.InstanceID+"/credentials", []string{"bad-delivery-at-limit"}, `{"delivery":"mail"}`)
+		requireAPIError(t, status, data, http.StatusBadRequest, "invalid_request_error", "delivery")
+		if after := f.rowCounts(); after != before {
+			t.Fatalf("refused issuance created rows: %v -> %v", before, after)
+		}
+	})
+}
