@@ -12,6 +12,7 @@ protocol.workspace = true
 rand.workspace = true
 rustix = { workspace = true, features = ["fs"] }
 sha2.workspace = true
+sqlx = { workspace = true, features = ["runtime-tokio"] }
 state.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 

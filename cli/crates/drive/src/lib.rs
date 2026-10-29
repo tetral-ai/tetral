@@ -2,6 +2,7 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 pub mod cache;
+pub mod state;
 pub mod transfer;
 
 use tokio::sync::mpsc;

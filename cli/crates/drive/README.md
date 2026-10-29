@@ -15,6 +15,10 @@ Drives on this machine belong here, with two owners:
   the connection's rules, and gives them only the answers they act on
   (`Ended`). Each request carries the drive sync's binding as a watch; each
   new value is a binding of a later preparation.
+- A drive sync is the only reader and writer of its Session's
+  `sync-state.db`; it changes its in-memory copy only after the write that
+  records the change has committed. A database SQLite cannot read, or of
+  another `user_version`, is left untouched.
 - The Content cache owner is the only writer under `cache/`; a blob enters
   only when the whole content hashes to its name, and uncommitted content
   never enters it. Its waits and the times of its slots read the clock it
@@ -27,6 +31,9 @@ Drives on this machine belong here, with two owners:
   read times, eviction under `FREE_SPACE_MIN`, removal of unnamed blobs,
   and the download and upload slots, the pressure points
   `tetral_downloads` and `tetral_uploads`.
+- `state.rs`: a Session's `sync-state.db` (`SyncState`): its creation, the
+  `user_version` check (`OpenError`), the six tables, their in-memory copy
+  (`Tables`) and the writes (`Write`), each one SQLite transaction.
 - `transfer.rs`: `DriveTransfer`, its requests (`Request`, `ListFiles`,
   `ListChanges`, `Upload`, `Commit`, `Download`), `ContentSink`, the answer
   classes (`Class`) and `Ended`.
