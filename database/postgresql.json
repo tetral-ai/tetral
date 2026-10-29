@@ -58,7 +58,14 @@
     "instance_connections",
     "connection_upstream_messages",
     "connection_protocol_errors",
-    "connection_instructions"
+    "connection_instructions",
+    "drives",
+    "drive_workspace_usage",
+    "drive_files",
+    "drive_versions",
+    "drive_changes",
+    "drive_contents",
+    "drive_blob_cleanup"
   ],
   "append_only_workspace_tables": [
     "session_file_attachment_consumptions",

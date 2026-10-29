@@ -4,6 +4,13 @@
   "workloads": {
     "api": {
       "tables": {
+        "drives": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_workspace_usage": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_files": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_versions": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_changes": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_contents": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_blob_cleanup": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "workspaces": ["SELECT", "INSERT", "UPDATE"],
         "sessions": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "session_threads": ["SELECT", "INSERT", "UPDATE", "DELETE"],
@@ -125,6 +132,13 @@
     },
     "cleanup": {
       "tables": {
+        "drives": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_workspace_usage": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_files": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_versions": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_changes": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_contents": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_blob_cleanup": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "session_runtime_status": ["SELECT", "UPDATE"],
         "cleanup_schedule_cursor": ["SELECT", "UPDATE"],
         "queue_partition_counters": ["SELECT", "INSERT", "UPDATE"],
@@ -250,6 +264,13 @@
     },
     "computer_hub": {
       "tables": {
+        "drives": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_workspace_usage": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_files": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_versions": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_changes": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_contents": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_blob_cleanup": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "instances": ["SELECT", "INSERT", "UPDATE"],
         "instance_credentials": ["SELECT", "INSERT", "UPDATE"],
         "instance_idempotency_records": ["SELECT", "INSERT", "DELETE"],
