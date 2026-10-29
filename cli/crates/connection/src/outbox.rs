@@ -1,6 +1,13 @@
 //! In-memory reports, admitted before the mailbox and shared unchanged by
 //! pending delivery and every HTTP attempt. The last body reference releases
 //! its budget; a connection end cancels delivery and drops pending reports.
+//!
+//! During a credential switch, from `switch_started` until the new key or
+//! the connection's end, no attempt or retry starts; a `401
+//! credential_revoked` answer to an attempt sent with an earlier key is no
+//! refusal, and the report is sent again with the new key under its
+//! `message_id`, because Engine revokes the old key when it commits the new
+//! one while attempts sent with it may still be in flight.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -100,10 +107,18 @@ enum Message {
     AddFinal(ReportId, Id),
     ConnectionStarted {
         connection: Id,
+        key: BootstrapKey,
         tool_execution: bool,
     },
     ConnectionEnded {
         connection: Id,
+    },
+    SwitchStarted {
+        connection: Id,
+    },
+    SwitchEnded {
+        connection: Id,
+        key: BootstrapKey,
     },
     Answered {
         report: ReportId,
@@ -121,10 +136,12 @@ impl Outbox {
         let events = config.events.clone();
         let (mailbox, inbox) = mpsc::unbounded_channel();
         let owner = Owner {
+            key: config.key.clone(),
             config,
             mailbox: mailbox.clone(),
             current: None,
             last_attempt: 0,
+            key_number: 0,
         };
         tokio::spawn(own(owner, inbox));
         Outbox {
@@ -136,15 +153,35 @@ impl Outbox {
         }
     }
 
-    /// The connection `connection`, the App Server's `number`th, is new;
-    /// `tool_execution` says whether its ready advertised tool execution.
-    pub fn connection_started(&self, _number: u64, connection: Id, tool_execution: bool) {
+    /// The connection `connection`, the App Server's `number`th, is new and
+    /// authenticated with `key`; `tool_execution` says whether its ready
+    /// advertised tool execution.
+    pub fn connection_started(
+        &self,
+        _number: u64,
+        connection: Id,
+        key: BootstrapKey,
+        tool_execution: bool,
+    ) {
         let mut admission = self.admission.lock().expect("report admission lock");
         *admission = Some((connection.clone(), 0));
         self.send(Message::ConnectionStarted {
             connection,
+            key,
             tool_execution,
         });
+    }
+
+    /// A credential switch of `connection` begins: no attempt starts until
+    /// `switch_ended` or the connection's end.
+    pub fn switch_started(&self, connection: Id) {
+        self.send(Message::SwitchStarted { connection });
+    }
+
+    /// The switch of `connection` ends with `key`, which every later
+    /// attempt carries.
+    pub fn switch_ended(&self, connection: Id, key: BootstrapKey) {
+        self.send(Message::SwitchEnded { connection, key });
     }
 
     pub fn connection_ended(&self, connection: Id) {
@@ -281,12 +318,18 @@ struct Owner {
     mailbox: mpsc::UnboundedSender<Message>,
     current: Option<Current>,
     last_attempt: u64,
+    /// The key every new attempt carries, and its number, which a new key
+    /// raises.
+    key: BootstrapKey,
+    key_number: u64,
 }
 
 /// The current connection and its reports.
 struct Current {
     id: Id,
     tool_execution: bool,
+    /// From the switch's start until its new key: no attempt starts.
+    switching: bool,
     reports: HashMap<ReportId, Pending>,
 }
 
@@ -309,8 +352,14 @@ struct Pending {
     listener: Option<Arc<dyn ReportListener>>,
     backoff: Backoff,
     retry_at: Option<Duration>,
-    /// The running attempt and its tag.
-    attempt: Option<(u64, AbortHandle)>,
+    /// The running attempt, its tag and the number of the key it carries.
+    attempt: Option<Running>,
+}
+
+struct Running {
+    tag: u64,
+    task: AbortHandle,
+    key_number: u64,
 }
 
 impl Owner {
@@ -329,19 +378,28 @@ impl Owner {
             }
             Message::ConnectionStarted {
                 connection,
+                key,
                 tool_execution,
             } => {
                 if let Some(current) = &self.current {
                     let ended = current.id.clone();
                     self.connection_ended(&ended).await;
                 }
+                self.new_key(key);
                 self.current = Some(Current {
                     id: connection,
                     tool_execution,
+                    switching: false,
                     reports: HashMap::new(),
                 });
             }
             Message::ConnectionEnded { connection } => self.connection_ended(&connection).await,
+            Message::SwitchStarted { connection } => {
+                if let Some(current) = self.current.as_mut().filter(|c| c.id == connection) {
+                    current.switching = true;
+                }
+            }
+            Message::SwitchEnded { connection, key } => self.switch_ended(&connection, key),
             Message::Answered {
                 report,
                 attempt,
@@ -377,13 +435,46 @@ impl Owner {
         self.attempt(report);
     }
 
-    /// Every attempt shares the original immutable body and its budget charge.
+    fn new_key(&mut self, key: BootstrapKey) {
+        if key != self.key {
+            self.key = key;
+            self.key_number += 1;
+        }
+    }
+
+    /// Takes the switch's new key and starts every report that waits for
+    /// it: one submitted during the switch, and one whose attempt with an
+    /// earlier key got `401 credential_revoked`.
+    fn switch_ended(&mut self, connection: &Id, key: BootstrapKey) {
+        let Some(current) = self.current.as_mut().filter(|c| c.id == *connection) else {
+            return;
+        };
+        current.switching = false;
+        let waiting: Vec<ReportId> = current
+            .reports
+            .iter()
+            .filter(|(_, pending)| pending.attempt.is_none() && pending.retry_at.is_none())
+            .map(|(report, _)| *report)
+            .collect();
+        self.new_key(key);
+        for report in waiting {
+            self.attempt(report);
+        }
+    }
+
+    /// Every attempt shares the original immutable body and its budget
+    /// charge. None starts during a switch: the report waits for its key,
+    /// counted as the test seam counter `outbox.key_awaited`.
     fn attempt(&mut self, report: ReportId) {
         self.last_attempt += 1;
         let tag = self.last_attempt;
         let Some(current) = self.current.as_mut() else {
             return;
         };
+        if current.switching {
+            state::seams::count("outbox.key_awaited");
+            return;
+        }
         let Some(pending) = current.reports.get_mut(&report) else {
             return;
         };
@@ -397,7 +488,7 @@ impl Owner {
         let bytes = pending.bytes.clone();
         let traceparent = pending.traceparent.clone();
         let transport = self.config.transport.clone();
-        let key = self.config.key.clone();
+        let key = self.key.clone();
         let clock = self.config.clock.clone();
         let stall = self.config.times.stall;
         let mailbox = self.mailbox.clone();
@@ -416,7 +507,11 @@ impl Owner {
             });
         })
         .abort_handle();
-        pending.attempt = Some((tag, task));
+        pending.attempt = Some(Running {
+            tag,
+            task,
+            key_number: self.key_number,
+        });
     }
 
     /// Applies the answer to a report's current attempt, counted as the test
@@ -436,13 +531,24 @@ impl Owner {
         let Some(pending) = current.reports.get_mut(&report) else {
             return false;
         };
-        if pending.attempt.as_ref().map(|(tag, _)| *tag) != Some(attempt) {
+        let Some(running) = pending.attempt.take_if(|running| running.tag == attempt) else {
             return false;
-        }
-        pending.attempt = None;
+        };
         let outcome = match answer {
             Answer::Success(body) if acknowledges(&body, &current.id, &pending.message_id) => {
                 ReportOutcome::Acked
+            }
+            Answer::Refused(error)
+                if error.code == ErrorCode::CredentialRevoked
+                    && (current.switching || running.key_number < self.key_number) =>
+            {
+                // It waits for the switch's key, or goes again with the key
+                // that replaced its own.
+                let again = !current.switching;
+                if again {
+                    self.attempt(report);
+                }
+                return true;
             }
             Answer::Refused(error)
                 if matches!(error.code.status(), 401 | 403)
@@ -487,9 +593,9 @@ impl Owner {
 
     async fn cancel(&mut self, report: ReportId) {
         if let Some(pending) = self.remove(report).await
-            && let Some((_, task)) = pending.attempt
+            && let Some(running) = pending.attempt
         {
-            task.abort();
+            running.task.abort();
         }
     }
 
@@ -503,8 +609,8 @@ impl Owner {
             return;
         };
         for pending in current.reports.values() {
-            if let Some((_, task)) = &pending.attempt {
-                task.abort();
+            if let Some(running) = &pending.attempt {
+                running.task.abort();
             }
         }
         for (report, pending) in current.reports {
@@ -524,7 +630,7 @@ impl Owner {
     /// Starts every retry whose wait has passed.
     fn send_due(&mut self) {
         let now = self.config.clock.now();
-        let Some(current) = self.current.as_mut() else {
+        let Some(current) = self.current.as_mut().filter(|current| !current.switching) else {
             return;
         };
         let due: Vec<ReportId> = current
@@ -733,6 +839,14 @@ mod tests {
         TestClock(Arc::new(AtomicU64::new(1_000_000_000_000)))
     }
 
+    fn test_key() -> BootstrapKey {
+        protocol::bootstrap::Bootstrap::decode(
+            br#"{"server_url":"http://127.0.0.1:1","instance_id":"inst_a","credential_id":"cred_a","connection_key":"tetral_ck_a","expires_at":"2099-01-01T00:00:00Z"}"#,
+        )
+        .unwrap()
+        .connection_key
+    }
+
     fn spawn_outbox(
         transport: Arc<Transport>,
         clock: &TestClock,
@@ -741,11 +855,7 @@ mod tests {
         let (events, receiver) = mpsc::unbounded_channel();
         let outbox = Outbox::spawn(OutboxConfig {
             transport,
-            key: protocol::bootstrap::Bootstrap::decode(
-                br#"{"server_url":"http://127.0.0.1:1","instance_id":"inst_a","credential_id":"cred_a","connection_key":"tetral_ck_a","expires_at":"2099-01-01T00:00:00Z"}"#,
-            )
-            .unwrap()
-            .connection_key,
+            key: test_key(),
             times,
             clock: clock.clock(),
             events,
@@ -805,7 +915,9 @@ mod tests {
     async fn admission_charges_the_mailbox_and_rejects_only_the_new_result() {
         let mut setup = setup(vec![]).await;
         setup.outbox.budget = Budget::new(512, 512);
-        setup.outbox.connection_started(1, id("conn_a"), false);
+        setup
+            .outbox
+            .connection_started(1, id("conn_a"), test_key(), false);
         // This current-thread task has not yielded since the submission;
         // the outbox owner has not read its mailbox yet.
         let first = setup
@@ -840,7 +952,9 @@ mod tests {
     async fn a_terminal_ack_and_a_rejected_new_result_leave_the_unacked_running_body_unchanged() {
         let mut setup = setup(vec![Reply::Unavailable, Reply::Ack, Reply::Unavailable]).await;
         setup.outbox.budget = Budget::new(4_096, 512);
-        setup.outbox.connection_started(1, id("conn_a"), true);
+        setup
+            .outbox
+            .connection_started(1, id("conn_a"), test_key(), true);
         let report = |phase: &'static str, status: &'static str, seq: i64| {
             let mut submission = Submission::new(id("conn_a"), move |connection_id, message_id| {
                 serde_json::from_value::<protocol::tool::ToolStatus>(serde_json::json!({
@@ -919,7 +1033,9 @@ mod tests {
         use protocol::connection::{SessionOutcome, SessionStatus};
         let mut setup = setup(vec![Reply::WrongAck, Reply::Ack]).await;
         setup.outbox.budget = Budget::new(0, 4_096);
-        setup.outbox.connection_started(1, id("conn_a"), false);
+        setup
+            .outbox
+            .connection_started(1, id("conn_a"), test_key(), false);
         let mut submission =
             Submission::new(id("conn_a"), |connection_id, message_id| SessionStatus {
                 connection_id,
@@ -962,7 +1078,9 @@ mod tests {
     async fn exhausted_reserve_ends_admission_without_acknowledging_any_report() {
         let mut setup = setup(vec![]).await;
         setup.outbox.budget = Budget::new(0, 0);
-        setup.outbox.connection_started(1, id("conn_a"), false);
+        setup
+            .outbox
+            .connection_started(1, id("conn_a"), test_key(), false);
         let report = setup.outbox.submit(protocol_error(&setup, "conn_a", None));
         assert_eq!(setup.outcomes.of(report), [ReportOutcome::Dropped]);
         assert!(
@@ -978,7 +1096,9 @@ mod tests {
     #[tokio::test]
     async fn a_deterministic_refusal_drops_and_destroys_the_body() {
         let setup = setup(vec![Reply::Refused]).await;
-        setup.outbox.connection_started(1, id("conn_a"), false);
+        setup
+            .outbox
+            .connection_started(1, id("conn_a"), test_key(), false);
         let report = setup.outbox.submit(protocol_error(&setup, "conn_a", None));
         let witnesses = setup.outbox.budget.witnesses();
         until(&setup, "refused body dropped", || {
@@ -1002,7 +1122,9 @@ mod tests {
             Reply::Ack,
         ])
         .await;
-        setup.outbox.connection_started(1, id("conn_a"), false);
+        setup
+            .outbox
+            .connection_started(1, id("conn_a"), test_key(), false);
         let traced = setup
             .outbox
             .submit(protocol_error(&setup, "conn_a", Some(TRACEPARENT)));
@@ -1055,7 +1177,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_connection_end_deletes_its_reports_and_sends_none_of_them_again() {
         let setup = setup(vec![Reply::Unavailable, Reply::Unavailable, Reply::Ack]).await;
-        setup.outbox.connection_started(1, id("conn_a"), false);
+        setup
+            .outbox
+            .connection_started(1, id("conn_a"), test_key(), false);
         let reports = [
             setup.outbox.submit(protocol_error(&setup, "conn_a", None)),
             setup.outbox.submit(protocol_error(&setup, "conn_a", None)),
@@ -1078,7 +1202,9 @@ mod tests {
         .await;
         setup.clock.advance(Duration::from_secs(120));
 
-        setup.outbox.connection_started(2, id("conn_b"), false);
+        setup
+            .outbox
+            .connection_started(2, id("conn_b"), test_key(), false);
         let stale = setup.outbox.submit(protocol_error(&setup, "conn_a", None));
         let next = setup.outbox.submit(protocol_error(&setup, "conn_b", None));
         until(&setup, "the next connection's ACK", || {
@@ -1227,7 +1353,7 @@ mod tests {
             };
             let transport = Arc::new(Transport::new(&url));
             let (outbox, _events) = spawn_outbox(transport.clone(), &clock, times);
-            outbox.connection_started(1, id("conn_a"), false);
+            outbox.connection_started(1, id("conn_a"), test_key(), false);
             outbox.submit(tool_list(100_000));
             // The clock stands still until the listener has read the first
             // request as far as it reads it.

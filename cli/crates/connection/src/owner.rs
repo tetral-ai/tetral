@@ -21,6 +21,14 @@
 //! its admission gets a failed preparation report; none changes a task,
 //! binding or result.
 //!
+//! A credential renewal runs on the held connection: the fetch, the write
+//! of `credentials.json` and the resume with the new credential
+//! ([`crate::credential`]). From the first resume attempt with it until
+//! `connected` or the connection's end the owner starts no other request,
+//! and a `401 credential_revoked` answer to a request sent with a credential
+//! no longer in use is not applied: that request is sent again with the new
+//! one. It tells the Report outbox the switch's start and the new key.
+//!
 //! The owner also admits each `session.prepare` before it reaches a Session
 //! binding owner ([`crate::sessions`]) and holds the probe slots
 //! ([`crate::probe_slots`]). Its stop is answered once every probe that
@@ -28,7 +36,7 @@
 //! reported its tasks' processes gone, so that the shutdown waits for them
 //! until its own deadline.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -48,6 +56,7 @@ use protocol::ports::{
 };
 use protocol::time::Rfc3339Utc;
 use protocol::tool::ProtocolVersion;
+use state::paths::StateRoot;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
@@ -55,6 +64,7 @@ use crate::attempt::{self, ATTEMPT_TOTAL, AttemptKind};
 use crate::backoff::{BASE_MAX, BASE_START, Backoff, random_jitter};
 use crate::classify::{self, Read, SessionMessage};
 use crate::clock::Clock;
+use crate::credential::{self, CREDENTIAL_PATH, INVALID_RESPONSE, Renewal};
 use crate::heartbeat::Heartbeats;
 use crate::http::{Answer, REQUEST_TOTAL, Transport};
 use crate::ledger::{self, Entry, EntryState, Ledger, Need, Seen};
@@ -142,6 +152,8 @@ pub struct Config {
     pub server_url: String,
     pub instance_id: Id,
     pub credential: Credential,
+    /// The state root whose `credentials.json` a renewal replaces.
+    pub state_root: StateRoot,
     pub ready: ReadyFields,
     /// The App Server's start on the seam clock.
     pub started: Duration,
@@ -192,6 +204,12 @@ pub(crate) enum Message {
     Answered {
         request: u64,
         answer: Answer,
+    },
+    /// The write of `credential` by the task tagged `tag` ended.
+    Persisted {
+        tag: u64,
+        credential: Credential,
+        saved: bool,
     },
     Outbox(OutboxEvent),
     Port(PortMessage),
@@ -350,6 +368,9 @@ enum Phase {
 struct Attempt {
     stream: u64,
     kind: AttemptKind,
+    /// The credential it authenticates with, the one in use from its
+    /// `connected` on.
+    credential: Credential,
     deadline: Duration,
     task: AbortHandle,
     /// The event limit its stream reads with.
@@ -374,6 +395,10 @@ struct Held {
     routed: HashSet<(String, String)>,
     /// The event limit that a resume's stream starts with.
     event_max_bytes: usize,
+    renewal: Option<Renewal>,
+    /// The credentials of `credential.renew` notices not yet handled, each
+    /// once: those received before `online` and during another renewal.
+    notices: VecDeque<Id>,
 }
 
 enum Stream {
@@ -412,6 +437,7 @@ struct Outgoing {
 enum Operation {
     Ready,
     Heartbeat(HeartbeatRequest),
+    Credential,
 }
 
 #[derive(Clone)]
@@ -425,12 +451,21 @@ struct HeartbeatRequest {
 struct Pending {
     connection: Id,
     operation: Operation,
+    /// The credential the request carries.
+    credential_id: Id,
     task: AbortHandle,
 }
 
 struct Owner {
+    server_url: String,
     instance_id: Id,
+    /// The credential in use, from the `connected` of the attempt that
+    /// carried it.
     credential: Credential,
+    /// A renewed credential written while no connection took it, which the
+    /// next attempt carries, as a restart would.
+    written: Option<Credential>,
+    state_root: StateRoot,
     ready: ReadyFields,
     started: Duration,
     times: Times,
@@ -475,8 +510,11 @@ impl Owner {
             tasks_pending: BTreeSet::new(),
             transport,
             outbox,
+            server_url: config.server_url,
             instance_id: config.instance_id,
             credential: config.credential,
+            written: None,
+            state_root: config.state_root,
             ready: config.ready,
             started: config.started,
             times,
@@ -504,7 +542,8 @@ impl Owner {
         } else {
             let kind = AttemptKind::Fresh { previous: None };
             let limit = self.times.event_max_bytes;
-            Phase::Connecting(self.attempt(kind, state::seams::now(), limit))
+            let credential = self.credential.clone();
+            Phase::Connecting(self.attempt(kind, state::seams::now(), limit, credential))
         };
         self.reported.change(self.state());
     }
@@ -537,6 +576,11 @@ impl Owner {
             Message::Event { stream, data } => self.event(phase, stream, data, now),
             Message::StreamEnded { stream } => self.stream_ended(phase, stream, now),
             Message::Answered { request, answer } => self.answered(phase, request, answer, now),
+            Message::Persisted {
+                tag,
+                credential,
+                saved,
+            } => self.persisted(phase, tag, credential, saved, now),
             Message::Outbox(event) => self.outbox_event(phase, event, now),
             Message::Status(_) | Message::Stop(_) | Message::Port(_) | Message::Sessions(_) => {
                 phase
@@ -694,7 +738,8 @@ impl Owner {
         self.phase = match phase {
             Phase::Waiting { at, kind } if now >= at => {
                 let limit = self.times.event_max_bytes;
-                Phase::Connecting(self.attempt(kind, now, limit))
+                let credential = self.written.clone().unwrap_or(self.credential.clone());
+                Phase::Connecting(self.attempt(kind, now, limit, credential))
             }
             Phase::Connecting(attempt) if now >= attempt.deadline => {
                 self.attempt_failed(Phase::Connecting(attempt), now)
@@ -724,7 +769,12 @@ impl Owner {
                 let kind = AttemptKind::Resume {
                     connection: held.id.clone(),
                 };
-                held.stream = Stream::Resuming(self.attempt(kind, now, held.event_max_bytes));
+                let credential = match &held.renewal {
+                    Some(Renewal::Switching { credential }) => credential.clone(),
+                    _ => self.credential.clone(),
+                };
+                let limit = held.event_max_bytes;
+                held.stream = Stream::Resuming(self.attempt(kind, now, limit, credential));
             }
             Stream::Resuming(attempt) if now >= attempt.deadline => {
                 attempt.task.abort();
@@ -738,8 +788,19 @@ impl Owner {
         Phase::Held(held)
     }
 
-    /// Sends ready and the latest heartbeat again once their retry is due.
+    /// Sends ready, the latest heartbeat and a renewal's fetch again once
+    /// their retry is due; during a switch it sends nothing.
     fn send_due(&mut self, held: &mut Held, now: Duration) {
+        if let Some(Renewal::Fetching { body, retry_at, .. }) = held.renewal.as_mut()
+            && retry_at.is_some_and(|at| now >= at)
+        {
+            *retry_at = None;
+            let body = body.clone();
+            self.post(&held.id, CREDENTIAL_PATH, Operation::Credential, body);
+        }
+        if matches!(held.renewal, Some(Renewal::Switching { .. })) {
+            return;
+        }
         if let Some(ready) = held
             .registration
             .as_mut()
@@ -770,17 +831,23 @@ impl Owner {
         self.last_tag
     }
 
-    /// Starts an attempt whose stream reads events of up to
-    /// `max_event_bytes`, counted as the test seam counter
+    /// Starts an attempt with `credential` whose stream reads events of up
+    /// to `max_event_bytes`, counted as the test seam counter
     /// `connection.attempt`.
-    fn attempt(&mut self, kind: AttemptKind, now: Duration, max_event_bytes: usize) -> Attempt {
+    fn attempt(
+        &mut self,
+        kind: AttemptKind,
+        now: Duration,
+        max_event_bytes: usize,
+        credential: Credential,
+    ) -> Attempt {
         state::seams::count("connection.attempt");
         let stream = self.tag();
         let limit = EventLimit::new(max_event_bytes);
         let task = tokio::spawn(attempt::run(
             self.transport.clone(),
-            self.credential.key.clone(),
-            kind.query(&self.instance_id, &self.credential.credential_id),
+            credential.key.clone(),
+            kind.query(&self.instance_id, &credential.credential_id),
             limit.clone(),
             stream,
             self.mailbox.clone(),
@@ -789,6 +856,7 @@ impl Owner {
         Attempt {
             stream,
             kind,
+            credential,
             deadline: now + self.times.attempt_total,
             task,
             limit,
@@ -811,6 +879,7 @@ impl Owner {
             Pending {
                 connection: connection.clone(),
                 operation,
+                credential_id: self.credential.credential_id.clone(),
                 task,
             },
         );
@@ -922,6 +991,7 @@ impl Owner {
             Phase::Connecting(attempt) if attempt.stream == stream => {
                 match attempt.kind.connected(&data) {
                     Some((connection, false)) => {
+                        self.adopt(attempt.credential);
                         self.new_connection(connection, stream, attempt.task, &attempt.limit, now)
                     }
                     _ => Phase::Connecting(attempt),
@@ -933,25 +1003,34 @@ impl Owner {
                         attempt.kind.connected(&data),
                         attempt.task.clone(),
                         attempt.limit.clone(),
+                        attempt.credential.clone(),
                     )),
                     _ => None,
                 };
                 let live =
                     matches!(&held.stream, Stream::Live { stream: live, .. } if *live == stream);
                 match resume {
-                    Some((Some((_, true)), task, _)) => {
+                    Some((Some((_, true)), task, _, credential)) => {
                         held.stream = Stream::Live { stream, task };
                         self.reported.reconnected(Reconnect::Resume);
+                        if matches!(held.renewal, Some(Renewal::Switching { .. })) {
+                            held.renewal = None;
+                            self.adopt(credential);
+                            let key = self.credential.key.clone();
+                            self.outbox.switch_ended(held.id.clone(), key);
+                            self.next_renewal(&mut held);
+                        }
                         Phase::Held(held)
                     }
-                    Some((Some((connection, false)), task, limit)) => {
+                    Some((Some((connection, false)), task, limit, credential)) => {
                         // The old connection ends, but not this stream, which
                         // carries the new one.
                         held.stream = Stream::Waiting { at: now };
                         self.release_held(*held);
+                        self.adopt(credential);
                         self.new_connection(connection, stream, task, &limit, now)
                     }
-                    Some((None, _, _)) => Phase::Held(held),
+                    Some((None, _, _, _)) => Phase::Held(held),
                     None if live => self.live_event(held, stream, data, now),
                     None => Phase::Held(held),
                 }
@@ -980,8 +1059,12 @@ impl Owner {
         self.held_count += 1;
         self.last_held = Some(id.clone());
         let tool_execution = self.ready.capabilities.tool_execution.is_some();
-        self.outbox
-            .connection_started(self.held_count, id.clone(), tool_execution);
+        self.outbox.connection_started(
+            self.held_count,
+            id.clone(),
+            self.credential.key.clone(),
+            tool_execution,
+        );
         let mut held = Box::new(Held {
             id,
             stream: Stream::Live { stream, task },
@@ -993,6 +1076,8 @@ impl Owner {
             ledger: Ledger::new(self.times.ledger),
             routed: HashSet::new(),
             event_max_bytes: self.times.event_max_bytes,
+            renewal: None,
+            notices: VecDeque::new(),
         });
         let message_id = held.next_message_id();
         let built = ready::ready(&self.ready, &held.id, message_id.clone(), now);
@@ -1129,6 +1214,10 @@ impl Owner {
                 );
                 Phase::Held(held)
             }
+            DownstreamPayload::CredentialRenew(renew) => {
+                self.renewal_notice(&mut held, renew.credential_id);
+                Phase::Held(held)
+            }
             DownstreamPayload::Disconnect(DisconnectPayload::Stream { .. }) => {
                 if let Stream::Live { task, .. } = &held.stream {
                     task.abort();
@@ -1260,12 +1349,25 @@ impl Owner {
             return phase;
         };
         state::seams::count("connection.answered");
-        let held = match phase {
+        let mut held = match phase {
             Phase::Held(held) if held.id == pending.connection => held,
             other => return other,
         };
+        let switching = matches!(held.renewal, Some(Renewal::Switching { .. }));
+        if let Answer::Refused(error) = &answer
+            && error.code == ErrorCode::CredentialRevoked
+            && (switching || pending.credential_id != self.credential.credential_id)
+        {
+            held.send_again(&pending.operation, now);
+            return Phase::Held(held);
+        }
         match (answer, pending.operation) {
+            (Answer::Refused(error), Operation::Credential) if !ends_connection(&error) => {
+                self.fetch_rejected(&mut held, error.code.as_str());
+                Phase::Held(held)
+            }
             (Answer::Refused(error), _) => self.request_refused(held, &error, now),
+            (answer, Operation::Credential) => self.credential_answered(held, answer, now),
             (answer, Operation::Ready) => self.ready_answered(held, &answer, now),
             (answer, Operation::Heartbeat(heartbeat)) => {
                 self.heartbeat_answered(held, &answer, heartbeat, now)
@@ -1310,6 +1412,7 @@ impl Owner {
                 for instruction in staged {
                     self.route(held_ref, instruction);
                 }
+                self.next_renewal(held_ref);
             }
             None => {
                 let at = now + ready.backoff.next_wait();
@@ -1460,10 +1563,165 @@ fn instruction_span(
 }
 
 impl Owner {
+    /// Takes `credential` as the one in use, from the `connected` of the
+    /// attempt that carried it.
+    fn adopt(&mut self, credential: Credential) {
+        if credential.credential_id != self.credential.credential_id {
+            self.credential = credential;
+        }
+        self.written = None;
+    }
+
+    /// A `credential.renew` for `credential_id`. One for the credential of
+    /// the running renewal, or already waiting, changes nothing.
+    fn renewal_notice(&mut self, held: &mut Held, credential_id: Id) {
+        let running = held
+            .renewal
+            .as_ref()
+            .is_some_and(|renewal| *renewal.credential_id() == credential_id);
+        if running || held.notices.contains(&credential_id) {
+            return;
+        }
+        held.notices.push_back(credential_id);
+        self.next_renewal(held);
+    }
+
+    /// Fetches the credential of the next notice, once the connection is
+    /// `online` and no renewal runs.
+    fn next_renewal(&mut self, held: &mut Held) {
+        if held.registration.is_some() || held.renewal.is_some() {
+            return;
+        }
+        while let Some(credential_id) = held.notices.pop_front() {
+            let message_id = held.next_message_id();
+            let Some(body) = credential::request(&held.id, &message_id, &credential_id) else {
+                continue;
+            };
+            self.post(
+                &held.id,
+                CREDENTIAL_PATH,
+                Operation::Credential,
+                body.clone(),
+            );
+            held.renewal = Some(Renewal::Fetching {
+                credential_id,
+                body,
+                backoff: self.message_backoff(),
+                retry_at: None,
+            });
+            return;
+        }
+    }
+
+    /// A fetch's answer that is never sent again: the credential in use
+    /// stays.
+    fn fetch_rejected(&mut self, held: &mut Held, code: &'static str) {
+        if let Some(renewal) = held.renewal.take() {
+            credential::rejected(renewal.credential_id(), code);
+        }
+        self.next_renewal(held);
+    }
+
+    /// A `2xx` answer or no answer to the fetch: the credential is written,
+    /// or the fetch is sent again within the connection deadline.
+    fn credential_answered(&mut self, mut held: Box<Held>, answer: Answer, now: Duration) -> Phase {
+        let Some(Renewal::Fetching {
+            credential_id,
+            backoff,
+            retry_at,
+            ..
+        }) = held.renewal.as_mut()
+        else {
+            return Phase::Held(held);
+        };
+        match answer {
+            Answer::Success(body) => match credential::fetched(&body, credential_id) {
+                Some(credential) => self.persist(&mut held, credential),
+                None => self.fetch_rejected(&mut held, INVALID_RESPONSE),
+            },
+            _ => {
+                let at = now + backoff.next_wait();
+                if held.deadline.is_some_and(|deadline| at < deadline) {
+                    *retry_at = Some(at);
+                }
+            }
+        }
+        Phase::Held(held)
+    }
+
+    /// Writes `credential` in a task of its own; the test seam barrier
+    /// `renewal.persisted` follows a write that succeeded.
+    fn persist(&mut self, held: &mut Held, credential: Credential) {
+        let tag = self.tag();
+        let root = self.state_root.clone();
+        let server_url = self.server_url.clone();
+        let instance_id = self.instance_id.clone();
+        let mailbox = self.mailbox.clone();
+        let written = credential.clone();
+        tokio::spawn(async move {
+            let writing = written.clone();
+            let saved = tokio::task::spawn_blocking(move || {
+                credential::persist(&root, &server_url, &instance_id, &writing).is_ok()
+            })
+            .await
+            .unwrap_or(false);
+            if saved {
+                state::seams::barrier("renewal.persisted").await;
+            }
+            let _ = mailbox.send(Message::Persisted {
+                tag,
+                credential: written,
+                saved,
+            });
+        });
+        held.renewal = Some(Renewal::Persisting { credential, tag });
+    }
+
+    /// The end of a write. Once written, the stream closes and the resume
+    /// with the new credential starts at the owner's next check; a write of
+    /// a renewal no longer running leaves the credential for the next
+    /// attempt, which reads the same file a restart would.
+    fn persisted(
+        &mut self,
+        phase: Phase,
+        tag: u64,
+        credential: Credential,
+        saved: bool,
+        now: Duration,
+    ) -> Phase {
+        let mut held = match phase {
+            Phase::Held(held) if matches!(&held.renewal, Some(Renewal::Persisting { tag: running, .. }) if *running == tag) => {
+                held
+            }
+            other => {
+                if saved {
+                    self.written = Some(credential);
+                }
+                return other;
+            }
+        };
+        if !saved {
+            held.renewal = None;
+            self.next_renewal(&mut held);
+            return Phase::Held(held);
+        }
+        self.outbox.switch_started(held.id.clone());
+        match std::mem::replace(&mut held.stream, Stream::Waiting { at: now }) {
+            Stream::Live { task, .. } => task.abort(),
+            Stream::Resuming(attempt) => attempt.task.abort(),
+            Stream::Waiting { .. } => {}
+        }
+        held.renewal = Some(Renewal::Switching { credential });
+        Phase::Held(held)
+    }
+
     /// Closes the connection's stream; the outbox drops its reports, the
     /// waiting probe-slot requests are cancelled and every Session binding
     /// owner ends the connection's bindings.
     fn release_held(&mut self, held: Held) {
+        if let Some(Renewal::Switching { credential }) = held.renewal {
+            self.written = Some(credential);
+        }
         match held.stream {
             Stream::Live { task, .. } => task.abort(),
             Stream::Resuming(attempt) => attempt.task.abort(),
@@ -1639,6 +1897,37 @@ impl Owner {
 }
 
 impl Held {
+    /// Sends `operation` again at the end of the switch, or at once when
+    /// none runs: a `401 credential_revoked` answered it under a credential
+    /// that is being or has been replaced.
+    fn send_again(&mut self, operation: &Operation, now: Duration) {
+        match operation {
+            Operation::Ready => {
+                if let Some(ready) = self
+                    .registration
+                    .as_mut()
+                    .and_then(|registration| registration.ready.as_mut())
+                {
+                    ready.retry_at = Some(now);
+                }
+            }
+            Operation::Heartbeat(heartbeat) => {
+                if let Some(latest) = self
+                    .heartbeat
+                    .as_mut()
+                    .filter(|latest| latest.seq == heartbeat.seq)
+                {
+                    latest.retry_at = Some(now);
+                }
+            }
+            Operation::Credential => {
+                if let Some(Renewal::Fetching { retry_at, .. }) = self.renewal.as_mut() {
+                    *retry_at = Some(now);
+                }
+            }
+        }
+    }
+
     fn next_message_id(&mut self) -> Id {
         self.messages += 1;
         Id::new(format!("c{}", self.messages)).expect("c<n> is an Id")
@@ -1661,6 +1950,10 @@ impl Held {
             self.heartbeat
                 .as_ref()
                 .and_then(|heartbeat| heartbeat.retry_at),
+            match &self.renewal {
+                Some(Renewal::Fetching { retry_at, .. }) => *retry_at,
+                _ => None,
+            },
             stream,
         ]
         .into_iter()
@@ -1668,6 +1961,15 @@ impl Held {
         .min()
         .unwrap_or(Duration::MAX)
     }
+}
+
+/// Whether a refusal ends the connection or blocks it ([`Owner::request_refused`]).
+fn ends_connection(error: &ErrorBody) -> bool {
+    matches!(error.code.status(), 401 | 403)
+        || matches!(
+            error.code,
+            ErrorCode::ConnectionConflict | ErrorCode::StaleConnection
+        )
 }
 
 fn error_object(error: &ErrorBody) -> ErrorObject {
@@ -1734,6 +2036,7 @@ mod tests {
                 )
                 .unwrap(),
             },
+            state_root: StateRoot::new(std::env::temp_dir().as_os_str()).unwrap(),
             started: Duration::ZERO,
             sessions: Arc::new(NoSessions),
             times: Times::default(),
@@ -1781,6 +2084,8 @@ mod tests {
                 ledger: Ledger::new(ledger::Limits::default()),
                 routed: HashSet::new(),
                 event_max_bytes: crate::stream::TOOL_EVENT_MAX_BYTES,
+                renewal: None,
+                notices: VecDeque::new(),
             }),
             task,
         )
@@ -1947,7 +2252,7 @@ mod tests {
         let connection = held.id.clone();
         owner
             .outbox
-            .connection_started(1, connection.clone(), false);
+            .connection_started(1, connection.clone(), owner.credential.key.clone(), false);
         owner.phase = Phase::Held(held);
         owner.handle(Message::Event {
             stream: 1,
@@ -2005,7 +2310,7 @@ mod tests {
         owner.last_held = Some(connection.clone());
         owner
             .outbox
-            .connection_started(1, connection.clone(), false);
+            .connection_started(1, connection.clone(), owner.credential.key.clone(), false);
         owner.phase = Phase::Held(held);
         let report =
             protocol_error::report(connection.clone(), ProtocolErrorKind::Unparseable, None);

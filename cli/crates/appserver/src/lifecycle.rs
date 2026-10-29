@@ -198,10 +198,12 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
             .as_ref()
             .and_then(|computer_use| computer_use.driver.clone()),
     };
+    let state_root =
+        state::paths::StateRoot::new(root.as_os_str()).expect("startup took this root's path");
     let sessions = Factory::new(
         Shared {
             paths: Arc::new(RootPaths {
-                given: root,
+                given: root.clone(),
                 canonical_utf8: canonical_root
                     .to_str()
                     .expect("startup validates the canonical root")
@@ -232,6 +234,7 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
             key: credentials.connection_key,
             expires_at: credentials.expires_at,
         },
+        state_root: state_root.clone(),
         ready: ReadyFields {
             cli_version: SemVer::new(fixed.cli_version.as_str())
                 .expect("the package version is a semantic version"),
@@ -323,6 +326,7 @@ mod tests {
                 key: bootstrap.connection_key,
                 expires_at: bootstrap.expires_at,
             },
+            state_root: root.clone(),
             ready: ReadyFields {
                 cli_version: SemVer::new("0.1.0").unwrap(),
                 capabilities: serde_json::from_value(

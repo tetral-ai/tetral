@@ -5,6 +5,7 @@ pub mod attempt;
 pub mod backoff;
 pub mod classify;
 pub mod clock;
+mod credential;
 pub mod heartbeat;
 pub mod http;
 pub mod ledger;

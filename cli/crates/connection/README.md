@@ -83,6 +83,16 @@ Server:
   An attempt ends at its size-scaled total or after 10 seconds without TCP
   acknowledgment progress, including connection establishment and waiting for
   the response (`report_deadline`, `http`).
+- A credential renewal fetches the credential that `credential.renew`
+  names once the connection is `online`, writes `credentials.json`
+  atomically and only then resumes the stream with it; a fetch Engine
+  refuses or answers without a valid credential, and a write that fails,
+  keep the current credential. From the first resume attempt with the new
+  credential until `connected` or the connection's end, neither owner
+  starts a request, and a `401 credential_revoked` answer to a request sent
+  with a credential being or already replaced is no refusal: the request
+  is sent again with the new key under its `message_id` (`credential`,
+  `owner`, `outbox`).
 - A `session.prepare` is admitted before it reaches its Session binding
   owner: a payload that fails its schema gets `invalid_input`, and a Session
   without a record while `sessions::RECORDS_MAX` exist or a new operation
@@ -134,12 +144,15 @@ for an attempt, connecting, a held connection in `registering`, `online` or
 `resuming`, `blocked` and `stopped`), the reconnect backoff, the last
 connection held, which a new connection names as its predecessor, the staged
 instructions, the held connection's replay ledger and the bindings it routed
-a `session.prepare` for, the handle of each Session binding owner and whether
+a `session.prepare` for and its renewal with the `credential.renew` notices
+it has not yet handled, the credential in use and one written that no
+connection has taken yet, the handle of each Session binding owner and whether
 it holds a record, the probe slots, the task pressure point, and the status
 fields `connection_state`, `connection_id`, `credential_id`, `expires_at`
 and `last_error`.
 
-The Report outbox owns the current connection's identity and pending reports,
+The Report outbox owns the current connection's identity, the key its
+attempts carry and whether a credential switch holds them back, and pending reports,
 each with its `r<n>` identity, shared immutable body, backoff and running attempt.
 Its shared admission handle allocates identities and charges encoded bodies before
 mailbox submission; the body owner releases the budget on its last reference.
@@ -171,6 +184,7 @@ mailbox submission; the body owner releases the budget on its last reference.
 | File | Holds |
 |---|---|
 | `src/owner.rs` | The Connection owner: its phases, timers, the answers to the events request, ready and heartbeats, `disconnect`, the order of an event's handling and the ledger's admission (`admit`), staging and routing, the admission of a `session.prepare` and its `failed` report, the record `protocol.foreign_connection`, and the test seam counters `connection.attempt`, `connection.checked`, `connection.granted`, `connection.answered`, `connection.final_acked` and `route.session` |
+| `src/credential.rs` | A renewal's steps (`Renewal`): the fetch's body, the check of its answer, the replacement of `credentials.json`, and the records `credential.renewal_rejected` and `credential.renewal_not_saved`; the barrier `renewal.persisted` after the write is the owner's (`owner`) |
 | `src/sessions.rs` | The Session binding owners as the Connection owner reaches them (`Owners`), `RECORDS_MAX`, and its side of `protocol::ports::ConnectionPort` |
 | `src/probe_slots.rs` | The probe slots, their waiting requests, `PROBES_MAX` and `PROBE_WAIT`, and the pressure point `tetral_probes`: its series and its rejection episodes |
 | `src/task_pressure.rs` | The pressure point `tetral_tasks`: the running tasks, the staged `tool.execute` instructions and their waits, the `resource_exhausted` rejections, its series and its rejection episodes |
@@ -183,7 +197,7 @@ mailbox submission; the body owner releases the budget on its last reference.
 | `src/ledger.rs` | The replay ledger, its limits and reserve, and when an entry goes |
 | `src/backoff.rs` | The backoff of reconnects and of each message's retries |
 | `src/http.rs` | `Transport`, the sorting of answers (`Answer`, `Failure`), `REQUEST_TOTAL`, a report's attempt bounded by its progress (`ReportRequest`, `Progress`), the client of report uploads (`Uploads`) with its counted connections (`Counted`, `Socket`), and the test seam counters `outbox.upload_checked` and `outbox.sent` |
-| `src/outbox.rs` | The Report outbox: identities `r<n>`, admission, sending, retries, ACKs and refusals, connection ends, the record `report.dropped`, and the test seam counter `outbox.answered` |
+| `src/outbox.rs` | The Report outbox: identities `r<n>`, admission, sending, retries, ACKs and refusals, connection ends, a credential switch and its key, the record `report.dropped`, and the test seam counters `outbox.answered` and `outbox.key_awaited` |
 | `src/report_memory.rs` | Shared report body ownership and ordinary/reserved byte accounting |
 | `src/report_deadline.rs` | A report attempt's total and `STALL_LIMIT` |
 | `src/clock.rs` | The clock the outbox reads |

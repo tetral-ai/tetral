@@ -154,6 +154,11 @@ the isolated harness tests without starting the CLI.
   correlation of protocol errors. A preparation rejected before any probe
   keeps one final report identity across a lost ACK and instruction replay;
   another instruction for the same binding owns a separate result.
+- `tests/renewal.rs`: credential renewal against the reference control
+  server: a connection that ends before the fetch, fetches answered
+  `404 not_found` or with a malformed key, a credential that cannot be
+  written, a restart right after the write, and reports in flight, held
+  back or submitted across the resume with the new credential.
 - `tests/preparation.rs`: Session preparation against the reference control
   server: each failed check and what it creates or never creates, links into
   the state root and to a project, `create_cwd`, a repeated, held, retargeted

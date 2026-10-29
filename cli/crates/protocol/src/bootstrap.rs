@@ -57,6 +57,13 @@ impl BootstrapKey {
     }
 }
 
+impl From<&crate::connection::ConnectionKey> for BootstrapKey {
+    /// A key that Engine issued, which the bootstrap's rule always accepts.
+    fn from(key: &crate::connection::ConnectionKey) -> BootstrapKey {
+        BootstrapKey(Text::new(key.expose()).expect("an issued key is nonempty"))
+    }
+}
+
 impl fmt::Debug for BootstrapKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("<redacted>")

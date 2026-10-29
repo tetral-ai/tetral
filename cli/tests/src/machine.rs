@@ -12,8 +12,11 @@
 //! the times that have passed. The Report outbox reports `outbox.answered`
 //! for each answer to a report's current attempt once it has applied it, a
 //! retry scheduled or the report released, `outbox.upload_checked` after
-//! each reading of an upload's socket, and `outbox.sent` once an attempt has
-//! seen every byte of its body acknowledged.
+//! each reading of an upload's socket, `outbox.sent` once an attempt has
+//! seen every byte of its body acknowledged, and `outbox.key_awaited` for
+//! each attempt it holds back during a credential switch. The Connection
+//! owner waits at the barrier `renewal.persisted` after it has written a
+//! renewed credential.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
