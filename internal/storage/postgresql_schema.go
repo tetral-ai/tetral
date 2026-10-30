@@ -1241,6 +1241,20 @@ const (
 		CONSTRAINT session_attachments_content_shape CHECK (content_sha256 ~ '^[0-9a-f]{64}$')
 	)`
 
+	// One row per attachment upload whose bytes are in the blob store and
+	// whose caller has not committed its session_attachments row
+	// (internal/imagestore). check_after is one hour after the upload's
+	// database clock; the collection releases the bytes of an entry still
+	// present then.
+	createPostgreSQLSessionAttachmentUploadsTable = `CREATE TABLE IF NOT EXISTS session_attachment_uploads (
+		workspace_id TEXT NOT NULL,
+		upload_id TEXT NOT NULL,
+		content_sha256 TEXT NOT NULL,
+		check_after TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (workspace_id, upload_id),
+		CONSTRAINT session_attachment_uploads_content_shape CHECK (content_sha256 ~ '^[0-9a-f]{64}$')
+	)`
+
 	createPostgreSQLRequestUsageDetailsTable = `CREATE TABLE IF NOT EXISTS request_usage_details (
 		workspace_id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
@@ -2142,6 +2156,9 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_session_attachments_content", "CREATE INDEX IF NOT EXISTS idx_session_attachments_content ON session_attachments(workspace_id, content_sha256)"},
 		{"index_session_attachments_session", "CREATE INDEX IF NOT EXISTS idx_session_attachments_session ON session_attachments(workspace_id, session_id)"},
 		{"index_session_attachments_created", "CREATE INDEX IF NOT EXISTS idx_session_attachments_created ON session_attachments(created_at)"},
+		{"create_session_attachment_uploads", createPostgreSQLSessionAttachmentUploadsTable},
+		{"index_session_attachment_uploads_content", "CREATE INDEX IF NOT EXISTS idx_session_attachment_uploads_content ON session_attachment_uploads(workspace_id, content_sha256)"},
+		{"index_session_attachment_uploads_check_after", "CREATE INDEX IF NOT EXISTS idx_session_attachment_uploads_check_after ON session_attachment_uploads(check_after)"},
 		{"create_session_resources", createPostgreSQLSessionResourcesTable},
 		{"create_session_resource_prefix_gc", createPostgreSQLSessionResourcePrefixGCTable},
 		{"create_session_file_resources", createPostgreSQLSessionFileResourcesTable},
@@ -2376,12 +2393,19 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 			USING (current_setting('tetral.transient_attachment_gc', true) = 'true')
 			WITH CHECK (current_setting('tetral.transient_attachment_gc', true) = 'true')`,
 		},
-		// The attachment collection reads expired rows across every
-		// workspace and deletes them in each row's own workspace
-		// transaction, so its cross-workspace policy is SELECT only.
+		// The attachment collection reads expired rows and upload entries
+		// across every workspace and deletes them in each one's own
+		// workspace transaction, so its cross-workspace policies are SELECT
+		// only.
 		postgresqlSchemaStep{
 			name: "rls_policy_attachment_gc_select",
 			ddl: `CREATE POLICY attachment_gc_select ON session_attachments
+			FOR SELECT
+			USING (current_setting('tetral.attachment_gc', true) = 'true')`,
+		},
+		postgresqlSchemaStep{
+			name: "rls_policy_attachment_upload_gc_select",
+			ddl: `CREATE POLICY attachment_gc_select ON session_attachment_uploads
 			FOR SELECT
 			USING (current_setting('tetral.attachment_gc', true) = 'true')`,
 		},

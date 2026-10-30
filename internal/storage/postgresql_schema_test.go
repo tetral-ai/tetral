@@ -2510,6 +2510,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"sandbox_lifecycle_operations",
 		"sandbox_output_capture_blobs",
 		"sandbox_output_capture_operations",
+		"session_attachment_uploads",
 		"session_attachments",
 		"session_background_tasks",
 		"session_bridge_operations",

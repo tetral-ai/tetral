@@ -72,7 +72,8 @@
     "computer_requests",
     "computer_bindings",
     "computer_git_tickets",
-    "session_attachments"
+    "session_attachments",
+    "session_attachment_uploads"
   ],
   "append_only_workspace_tables": [
     "session_file_attachment_consumptions",
@@ -121,6 +122,13 @@
     },
     {
       "table": "session_attachments",
+      "name": "attachment_gc_select",
+      "command": "SELECT",
+      "using": "(current_setting('tetral.attachment_gc'::text, true) = 'true'::text)",
+      "check": ""
+    },
+    {
+      "table": "session_attachment_uploads",
       "name": "attachment_gc_select",
       "command": "SELECT",
       "using": "(current_setting('tetral.attachment_gc'::text, true) = 'true'::text)",
