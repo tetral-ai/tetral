@@ -463,13 +463,13 @@ impl Owner {
         if self.write(write).await.is_err() {
             return;
         }
-        for file_id in removed {
-            let _ = std::fs::remove_file(self.content_path(drive, file_id));
-        }
         for (path, sha256) in adopt {
             if let Ok(sha256) = Sha256::new(sha256) {
                 let _ = self.cache.adopt(path, sha256).await;
             }
+        }
+        for file_id in removed {
+            let _ = std::fs::remove_file(self.content_path(drive, file_id));
         }
         if let Some(mounted) = self.mounted.get(drive) {
             for path in &restore {

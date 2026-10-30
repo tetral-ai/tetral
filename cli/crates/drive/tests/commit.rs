@@ -113,6 +113,9 @@ async fn a_change_during_a_commit_carries_the_committed_base_or_is_discarded_on_
     );
     commit.accepted();
     outcome(point).await;
+    // The accepted content is adopted into the cache.
+    let blob = env.root.path().join("cache/blobs").join(sha256(b"two"));
+    assert_eq!(std::fs::read(&blob).unwrap(), b"two");
 
     // A write during an accepted deletion is sent with a null base.
     session.remove("c", NO_TASK).await;
