@@ -52,6 +52,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -150,6 +151,8 @@ type Session struct {
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 	Resources          []*Resource
+	// Computers are the attached computers in addition order.
+	Computers []computer.Object
 }
 
 func normalizeApprovalMode(mode ApprovalMode) (ApprovalMode, error) {
@@ -223,9 +226,14 @@ type MemoryStoreResource struct {
 	MountPath     string
 }
 
+// GitHubRepositoryResource is one repository of a cloud computer. MountPath
+// is the resolved clone path: RequestedMountPath when the request named one,
+// otherwise <working_directory>/<repository name>.
 type GitHubRepositoryResource struct {
 	URL                         string
 	MountPath                   string
+	RequestedMountPath          *string
+	ComputerID                  string
 	CheckoutType                string
 	CheckoutRef                 string
 	GitIdentity                 *GitIdentity

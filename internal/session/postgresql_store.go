@@ -655,6 +655,9 @@ func (t *postgresqlTransaction) ListSessions(ctx context.Context, options ListOp
 	if hasMore {
 		results = results[:limit]
 	}
+	if err := t.attachComputers(ctx, results); err != nil {
+		return nil, false, err
+	}
 	return results, hasMore, nil
 }
 
@@ -1169,8 +1172,12 @@ func (t *postgresqlTransaction) ArchiveSession(ctx context.Context, sessionID st
 	if current.LifecycleState == LifecycleStateDeleted {
 		return nil, &ConflictError{Message: "session lifecycle transition is already in progress", InvalidRequest: true}
 	}
-	if current.Status == StatusRunning {
-		return nil, &ConflictError{Message: "running sessions cannot be archived", InvalidRequest: true}
+	if err := t.requireIdleRuntimeStatusForResourceMutation(ctx, sessionID); err != nil {
+		var running *ConflictError
+		if errors.As(err, &running) {
+			return nil, &ConflictError{Message: "running sessions cannot be archived", InvalidRequest: true}
+		}
+		return nil, err
 	}
 	if current.LifecycleState == LifecycleStateActive {
 		result, err := t.tx.Exec(ctx,
@@ -1779,14 +1786,15 @@ func (t *postgresqlTransaction) CreateResource(ctx context.Context, resource *Re
 		_, err := t.tx.Exec(ctx,
 			`INSERT INTO session_github_repository_resources (
 				workspace_id, session_id, resource_id, url, mount_path, checkout_type, checkout_ref,
-				git_identity_name, git_identity_email, authorization_token_encrypted
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+				git_identity_name, git_identity_email, authorization_token_encrypted, computer_id, path
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 			string(t.workspaceID), resource.SessionID, resource.ID,
-			resource.GitHubRepository.URL, resource.GitHubRepository.MountPath,
+			resource.GitHubRepository.URL, resource.GitHubRepository.RequestedMountPath,
 			nullableEmptyString(resource.GitHubRepository.CheckoutType),
 			nullableEmptyString(resource.GitHubRepository.CheckoutRef),
 			gitIdentityName, gitIdentityEmail,
 			resource.GitHubRepository.AuthorizationTokenEncrypted,
+			resource.GitHubRepository.ComputerID, resource.GitHubRepository.MountPath,
 		)
 		return mapPostgreSQLSessionError(err)
 	default:
@@ -2111,6 +2119,9 @@ func (t *postgresqlTransaction) loadSession(ctx context.Context, sessionID strin
 		return nil, err
 	}
 	sess.Resources = resources
+	if err := t.attachComputers(ctx, []*Session{sess}); err != nil {
+		return nil, err
+	}
 	return sess, nil
 }
 
@@ -2251,7 +2262,7 @@ const resourceSelectSQL = `SELECT
 	sr.session_id, sr.resource_id, sr.type, sr.created_at, sr.updated_at, sr.detached_at, sr.delete_requested_at, sr.storage_sequence,
 	sfr.source_file_id, sfr.file_id, sfr.mount_path,
 	smr.memory_store_id, smr.access, smr.instructions, smr.name, smr.description, smr.mount_path,
-	sgr.url, sgr.mount_path, sgr.checkout_type, sgr.checkout_ref, sgr.git_identity_name, sgr.git_identity_email
+	sgr.url, sgr.path, sgr.checkout_type, sgr.checkout_ref, sgr.git_identity_name, sgr.git_identity_email
 	FROM session_resources sr
 	LEFT JOIN session_file_resources sfr
 	  ON sfr.workspace_id = sr.workspace_id AND sfr.session_id = sr.session_id AND sfr.resource_id = sr.resource_id

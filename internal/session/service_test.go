@@ -15,8 +15,9 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/agent"
-	"github.com/tetral-ai/tetral/internal/environment"
+	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/files"
+	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/memory"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -747,24 +748,8 @@ func TestCreatePersistsSessionPrimaryThreadAndResources(t *testing.T) {
 	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 	store := newRecordingSessionStore()
 	fileIdentities := &recordingFileIdentities{}
-	envReader := &recordingEnvironmentReader{env: &environment.Environment{
-		ID:   "env_test",
-		Type: "environment",
-		Config: environment.EnvironmentConfig{
-			Type: "cloud",
-			Networking: &environment.NetworkingConfig{
-				Type:             "cidr_allow_list",
-				NetworkAllowList: "10.0.0.0/8",
-			},
-			Packages: environment.PackageMap{
-				"apt": []string{"git"},
-				"go":  []string{"golang.org/x/tools/cmd/stringer"},
-			},
-		},
-	}}
 	service := NewService(
 		testAgents{},
-		envReader,
 		fileIdentities,
 		testMemories{},
 		&recordingVaultValidator{},
@@ -897,17 +882,8 @@ func TestCreateWithMCPConfigurationCommitsIdleSession(t *testing.T) {
 		CreatedAt: fixed,
 		UpdatedAt: fixed,
 	}}
-	environments := &recordingEnvironmentReader{env: &environment.Environment{
-		ID:   "env_test",
-		Type: "environment",
-		Config: environment.EnvironmentConfig{
-			Type:       "cloud",
-			Networking: &environment.NetworkingConfig{Type: "cidr_allow_list", NetworkAllowList: "10.0.0.0/8"},
-		},
-	}}
 	service := NewService(
 		agents,
-		environments,
 		&recordingFileIdentities{},
 		testMemories{},
 		&recordingVaultValidator{},
@@ -940,7 +916,6 @@ func TestCreateRollsBackSessionAndThreadWhenBaselineCommitFails(t *testing.T) {
 	store.commitErr = durableErr
 	service := NewService(
 		testAgents{},
-		testEnvironments{},
 		&recordingFileIdentities{},
 		testMemories{},
 		&recordingVaultValidator{},
@@ -1043,60 +1018,6 @@ func TestCreatePreservesExplicitGitHubMountPathUnderWorkspace(t *testing.T) {
 	}
 }
 
-func TestCreateRejectsGitHubMountPathOutsideWorkspace(t *testing.T) {
-	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
-	store := newRecordingSessionStore()
-	service := newTestService(store, &recordingFileIdentities{}, &recordingVaultValidator{}, fixed)
-	mountPath := "/tmp/repos/tetral"
-
-	_, err := service.Create(context.Background(), workspace.DefaultID, CreateRequest{
-		Agent:         AgentReference{ID: "agent_test", Version: intPtr(2)},
-		EnvironmentID: "env_test",
-		Resources: []ResourceRequest{
-			{
-				Type:               string(ResourceTypeGitHubRepository),
-				GitHubURL:          "https://github.com/tetral-ai/tetral",
-				AuthorizationToken: "github_resource_token",
-				MountPath:          &mountPath,
-			},
-		},
-	})
-	var validation *ValidationError
-	if !errors.As(err, &validation) || validation.Message != "mount_path root is invalid" {
-		t.Fatalf("Create err = %T %v; want mount_path root validation", err, err)
-	}
-	if len(store.sessions) != 0 {
-		t.Fatalf("sessions persisted despite outside-workspace github mount_path: %v", store.sessions)
-	}
-}
-
-func TestCreateRejectsGitHubMountPathOverReservedSubtree(t *testing.T) {
-	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
-	store := newRecordingSessionStore()
-	service := newTestService(store, &recordingFileIdentities{}, &recordingVaultValidator{}, fixed)
-	mountPath := "/mnt/tetral/r2/repo"
-
-	_, err := service.Create(context.Background(), workspace.DefaultID, CreateRequest{
-		Agent:         AgentReference{ID: "agent_test", Version: intPtr(2)},
-		EnvironmentID: "env_test",
-		Resources: []ResourceRequest{
-			{
-				Type:               string(ResourceTypeGitHubRepository),
-				GitHubURL:          "https://github.com/tetral-ai/tetral",
-				AuthorizationToken: "github_resource_token",
-				MountPath:          &mountPath,
-			},
-		},
-	})
-	var validation *ValidationError
-	if !errors.As(err, &validation) || validation.Message != "mount_path overlaps a reserved path" {
-		t.Fatalf("Create err = %T %v; want reserved mount_path validation", err, err)
-	}
-	if len(store.sessions) != 0 {
-		t.Fatalf("sessions persisted despite reserved github mount_path: %v", store.sessions)
-	}
-}
-
 func TestCreateEnforcesDocumentedResourceCountBoundaries(t *testing.T) {
 	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 
@@ -1164,7 +1085,6 @@ func TestCreateEnforcesDocumentedResourceCountBoundaries(t *testing.T) {
 		store := newRecordingSessionStore()
 		service := NewService(
 			testAgents{},
-			testEnvironments{},
 			&recordingFileIdentities{},
 			memoryReaderByID{},
 			&recordingVaultValidator{},
@@ -1231,7 +1151,6 @@ func TestCreateEnforcesDocumentedResourceCountBoundaries(t *testing.T) {
 		store := newRecordingSessionStore()
 		service := NewService(
 			testAgents{},
-			testEnvironments{},
 			&recordingFileIdentities{},
 			memoryReaderByID{},
 			&recordingVaultValidator{},
@@ -1369,12 +1288,10 @@ func TestCreateEnforcesUnicodeCodePointBoundaries(t *testing.T) {
 func TestCreateRejectsDependencyFailuresBeforePersistence(t *testing.T) {
 	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 	dependencyErr := errors.New("dependency failed")
-	archivedAt := fixed.Add(-time.Minute)
 
 	tests := []struct {
 		name              string
 		agents            AgentReader
-		environments      EnvironmentReader
 		memories          MemoryStoreReader
 		vaults            VaultReferenceValidator
 		fileIdentities    *recordingFileIdentities
@@ -1387,18 +1304,6 @@ func TestCreateRejectsDependencyFailuresBeforePersistence(t *testing.T) {
 			agents:  failingAgentReader{err: dependencyErr},
 			request: CreateRequest{Agent: AgentReference{ID: "agent_missing"}, EnvironmentID: "env_test"},
 			wantErr: dependencyErr,
-		},
-		{
-			name:         "environment lookup",
-			environments: failingEnvironmentReader{err: dependencyErr},
-			request:      CreateRequest{Agent: AgentReference{ID: "agent_test"}, EnvironmentID: "env_missing"},
-			wantErr:      dependencyErr,
-		},
-		{
-			name:              "archived environment",
-			environments:      failingEnvironmentReader{env: &environment.Environment{ID: "env_archived", Type: "environment", ArchivedAt: &archivedAt}},
-			request:           CreateRequest{Agent: AgentReference{ID: "agent_test"}, EnvironmentID: "env_archived"},
-			wantValidationMsg: "environment is archived",
 		},
 		{
 			name:    "vault lookup",
@@ -1435,10 +1340,6 @@ func TestCreateRejectsDependencyFailuresBeforePersistence(t *testing.T) {
 			if agents == nil {
 				agents = testAgents{}
 			}
-			environments := testCase.environments
-			if environments == nil {
-				environments = testEnvironments{}
-			}
 			memories := testCase.memories
 			if memories == nil {
 				memories = testMemories{}
@@ -1453,7 +1354,6 @@ func TestCreateRejectsDependencyFailuresBeforePersistence(t *testing.T) {
 			}
 			service := NewService(
 				agents,
-				environments,
 				fileIdentities,
 				memories,
 				vaults,
@@ -1490,13 +1390,11 @@ func TestCreatePropagatesWorkspaceToDependencyBoundaries(t *testing.T) {
 	workspaceID := workspace.ID("workspace_dependency_proof")
 	store := newRecordingSessionStore()
 	agents := &recordingAgentReader{}
-	environments := &recordingEnvironmentReader{}
 	memories := &recordingMemoryReader{}
 	vaults := &recordingVaultValidator{}
 	fileIdentities := &recordingFileIdentities{}
 	service := NewService(
 		agents,
-		environments,
 		fileIdentities,
 		memories,
 		vaults,
@@ -1524,9 +1422,6 @@ func TestCreatePropagatesWorkspaceToDependencyBoundaries(t *testing.T) {
 
 	if agents.versionWorkspaces[0] != workspaceID {
 		t.Fatalf("agent workspace = %s; want %s", agents.versionWorkspaces[0], workspaceID)
-	}
-	if environments.workspaces[0] != workspaceID {
-		t.Fatalf("environment workspace = %s; want %s", environments.workspaces[0], workspaceID)
 	}
 	if memories.workspaces[0] != workspaceID {
 		t.Fatalf("memory workspace = %s; want %s", memories.workspaces[0], workspaceID)
@@ -1572,7 +1467,6 @@ func TestCreateRejectsMemoryStoreResourceWithoutIDBeforeLookupOrPersistence(t *t
 	memories := &recordingMemoryReader{}
 	service := NewService(
 		testAgents{},
-		testEnvironments{},
 		&recordingFileIdentities{},
 		memories,
 		&recordingVaultValidator{},
@@ -1612,7 +1506,6 @@ func TestCreateValidatesFileResourceInRequestOrderBeforeLaterMemoryLookup(t *tes
 	memories := &recordingMemoryReader{err: &memory.NotFoundError{Message: "memory store not found"}}
 	service := NewService(
 		testAgents{},
-		testEnvironments{},
 		fileIdentities,
 		memories,
 		&recordingVaultValidator{},
@@ -1648,7 +1541,6 @@ func TestCreateValidatesFileResourceInRequestOrderBeforeLaterGitHubValidation(t 
 	fileIdentities := &recordingFileIdentities{validateErr: fileErr}
 	service := NewService(
 		testAgents{},
-		testEnvironments{},
 		fileIdentities,
 		testMemories{},
 		&recordingVaultValidator{},
@@ -1719,7 +1611,6 @@ func TestCreateRejectsResourceFieldsOutsideSelectedTypeBeforePersistence(t *test
 			memories := &recordingMemoryReader{}
 			service := NewService(
 				testAgents{},
-				testEnvironments{},
 				fileIdentities,
 				memories,
 				&recordingVaultValidator{},
@@ -2488,18 +2379,13 @@ func TestDeleteResourceRequestsCleanupForMaterializedFile(t *testing.T) {
 	}
 }
 
-func TestDeleteResourceRequestsCleanupForMaterializedMemoryAndGitHubResources(t *testing.T) {
+func TestDeleteResourceRequestsCleanupForMaterializedMemoryResources(t *testing.T) {
 	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 	for _, resource := range []*Resource{
 		{
 			ID: "sesrsc_memory_delete", SessionID: "sesn_test", WorkspaceID: workspace.DefaultID,
 			StorageSequence: 1, Type: ResourceTypeMemoryStore, CreatedAt: fixed, UpdatedAt: fixed,
 			MemoryStore: &MemoryStoreResource{MemoryStoreID: "memstore_delete", Access: "read_write", MountPath: "/mnt/memory/delete"},
-		},
-		{
-			ID: "sesrsc_github_delete", SessionID: "sesn_test", WorkspaceID: workspace.DefaultID,
-			StorageSequence: 1, Type: ResourceTypeGitHubRepository, CreatedAt: fixed, UpdatedAt: fixed,
-			GitHubRepository: &GitHubRepositoryResource{URL: "https://github.com/tetral-ai/tetral", MountPath: "/workspace/tetral"},
 		},
 	} {
 		store := newRecordingSessionStore()
@@ -3126,7 +3012,6 @@ func TestPublicThreadAPIsProjectSDKShapeAndArchiveLifecycle(t *testing.T) {
 func newTestService(store *recordingSessionStore, fileIdentities *recordingFileIdentities, vaults *recordingVaultValidator, now time.Time) *Service {
 	service := NewService(
 		testAgents{},
-		testEnvironments{},
 		fileIdentities,
 		testMemories{},
 		vaults,
@@ -3333,37 +3218,6 @@ func testAgent(version int) *agent.Agent {
 	}
 }
 
-type testEnvironments struct{}
-
-func (testEnvironments) Get(context.Context, workspace.ID, string) (*environment.Environment, error) {
-	return &environment.Environment{ID: "env_test", Type: "environment"}, nil
-}
-
-type failingEnvironmentReader struct {
-	env *environment.Environment
-	err error
-}
-
-func (r failingEnvironmentReader) Get(context.Context, workspace.ID, string) (*environment.Environment, error) {
-	if r.err != nil {
-		return nil, r.err
-	}
-	return r.env, nil
-}
-
-type recordingEnvironmentReader struct {
-	workspaces []workspace.ID
-	env        *environment.Environment
-}
-
-func (r *recordingEnvironmentReader) Get(_ context.Context, ws workspace.ID, _ string) (*environment.Environment, error) {
-	r.workspaces = append(r.workspaces, ws)
-	if r.env != nil {
-		return r.env, nil
-	}
-	return &environment.Environment{ID: "env_test", Type: "environment"}, nil
-}
-
 type testMemories struct{}
 
 func (testMemories) GetStore(context.Context, workspace.ID, string) (*memory.Store, error) {
@@ -3461,6 +3315,7 @@ type recordingSessionStore struct {
 	deleteErr                  error
 	updateSessionCalls         int
 	resourceMutationCalls      int
+	idempotencyRecords         map[instance.IdempotencyScope]computer.IdempotencyRecord
 }
 
 func newRecordingSessionStore() *recordingSessionStore {
@@ -3649,6 +3504,68 @@ func (s *recordingSessionStore) ListResources(_ context.Context, _ workspace.ID,
 type recordingSessionTx struct {
 	store       *recordingSessionStore
 	workspaceID workspace.ID
+}
+
+// The computer methods record computers on the stored Session; the entry
+// checks run against PostgreSQL in the HTTP tests.
+func (tx *recordingSessionTx) CheckComputerEntries(_ context.Context, _ string, entries []computer.Entry) ([]computer.Checked, error) {
+	checked := make([]computer.Checked, len(entries))
+	for i, entry := range entries {
+		checked[i] = computer.Checked{Kind: computer.KindCloud, WorkingDirectory: computer.DefaultCloudWorkingDirectory, Networking: json.RawMessage(`{"type":"unrestricted"}`)}
+		if entry.EnvironmentID != nil {
+			checked[i].EnvironmentID = *entry.EnvironmentID
+		} else {
+			checked[i].Kind, checked[i].InstanceID = computer.KindUser, *entry.InstanceID
+		}
+		if entry.WorkingDirectory != nil {
+			checked[i].WorkingDirectory = *entry.WorkingDirectory
+		}
+	}
+	return checked, nil
+}
+
+func (tx *recordingSessionTx) AddComputers(_ context.Context, sessionID string, checked []computer.Checked) ([]string, error) {
+	sess, ok := tx.store.sessions[sessionID]
+	if !ok {
+		return nil, &NotFoundError{Message: "session not found"}
+	}
+	ids := make([]string, len(checked))
+	for i, value := range checked {
+		ids[i] = "comp_" + strconv.Itoa(len(sess.Computers)+1)
+		object := computer.Object{ID: ids[i], Kind: value.Kind, WorkingDirectory: value.WorkingDirectory, Networking: value.Networking,
+			Repositories: []computer.Repository{}, DriveExclude: value.DriveExclude, AssociationState: computer.Attached, ExecutionState: computer.Waiting}
+		if value.Kind == computer.KindCloud {
+			object.EnvironmentID = &checked[i].EnvironmentID
+		} else {
+			object.InstanceID, object.CurrentInstanceID = &checked[i].InstanceID, &checked[i].InstanceID
+		}
+		sess.Computers = append(sess.Computers, object)
+	}
+	return ids, nil
+}
+
+func (tx *recordingSessionTx) GetComputer(_ context.Context, sessionID string, computerID string) (computer.Object, error) {
+	if sess, ok := tx.store.sessions[sessionID]; ok {
+		for _, object := range sess.Computers {
+			if object.ID == computerID {
+				return object, nil
+			}
+		}
+	}
+	return computer.Object{}, &NotFoundError{Message: "computer not found"}
+}
+
+func (tx *recordingSessionTx) FindComputerIdempotencyRecord(_ context.Context, scope instance.IdempotencyScope) (computer.IdempotencyRecord, bool, error) {
+	record, ok := tx.store.idempotencyRecords[scope]
+	return record, ok, nil
+}
+
+func (tx *recordingSessionTx) SaveComputerIdempotencyRecord(_ context.Context, scope instance.IdempotencyScope, record computer.IdempotencyRecord) error {
+	if tx.store.idempotencyRecords == nil {
+		tx.store.idempotencyRecords = map[instance.IdempotencyScope]computer.IdempotencyRecord{}
+	}
+	tx.store.idempotencyRecords[scope] = record
+	return nil
 }
 
 func (tx *recordingSessionTx) Exec(context.Context, string, ...any) (ExecResult, error) {

@@ -18,7 +18,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
-	"github.com/tetral-ai/tetral/internal/environment"
 	"github.com/tetral-ai/tetral/internal/files"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/memory"
@@ -75,7 +74,6 @@ func newSessionIntegrationEnvOn(t *testing.T, runtimeDB, adminDB *sql.DB) *sessi
 	fileStore := files.NewPostgreSQLStore(runtimeClient, blob.NewFakeBlobStore())
 	service := session.NewService(
 		sessionIntegrationAgents{},
-		sessionIntegrationEnvironments{},
 		files.NewService(fileStore),
 		sessionIntegrationMemories{},
 		sessionIntegrationVaults{},
@@ -255,16 +253,12 @@ func TestSessionIntegrationReadUpdateArchiveDeleteAndResourcePolicies(t *testing
 		t.Fatalf("encrypted token = %q; want rotated encrypted value", encryptedToken)
 	}
 
-	for _, resource := range []sessionIntegrationResourceResponse{memoryResource, githubResource} {
-		recorder := env.request(http.MethodDelete, "/v1/sessions/"+created.ID+"/resources/"+resource.ID, "")
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("delete %s resource status = %d; want 200 body=%s", resource.Type, recorder.Code, recorder.Body.String())
-		}
-		var deletedResource sessionIntegrationDeleteResponse
-		decodeSessionIntegrationJSON(t, recorder, &deletedResource)
-		if deletedResource.ID != resource.ID || deletedResource.Type != "session_resource_deleted" {
-			t.Fatalf("delete %s resource response = %#v", resource.Type, deletedResource)
-		}
+	deleteMemory := env.request(http.MethodDelete, "/v1/sessions/"+created.ID+"/resources/"+memoryResource.ID, "")
+	assertHTTPStatus(t, deleteMemory, http.StatusOK)
+	var deletedResource sessionIntegrationDeleteResponse
+	decodeSessionIntegrationJSON(t, deleteMemory, &deletedResource)
+	if deletedResource.ID != memoryResource.ID || deletedResource.Type != "session_resource_deleted" {
+		t.Fatalf("delete memory_store resource response = %#v", deletedResource)
 	}
 
 	addRecorder := env.request(http.MethodPost, "/v1/sessions/"+created.ID+"/resources", `{"type":"file","file_id":"file_http_source_b","mount_path":"/workspace/delete-me.txt"}`)
@@ -933,12 +927,6 @@ func newSessionIntegrationAgent(version int) *agent.Agent {
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-}
-
-type sessionIntegrationEnvironments struct{}
-
-func (sessionIntegrationEnvironments) Get(context.Context, workspace.ID, string) (*environment.Environment, error) {
-	return &environment.Environment{ID: sessionIntegrationEnvironment, Type: "environment", Name: "HTTP Session Environment"}, nil
 }
 
 type sessionIntegrationMemories struct{}

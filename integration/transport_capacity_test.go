@@ -71,7 +71,7 @@ func runTransportAdmissionTraversal(t *testing.T, suffix string, bodyText func(i
 	// admitting work. Resolve the seeded Session through its real owning service.
 	sessionService := session.NewService(
 		agent.NewService(agent.NewPostgreSQLAgentStore(client), nil),
-		nil, nil, nil, nil,
+		nil, nil, nil,
 		session.NewPostgreSQLSessionStore(client), nil,
 	)
 	router := httpapi.NewRouter(

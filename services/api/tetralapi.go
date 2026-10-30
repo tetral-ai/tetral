@@ -307,7 +307,6 @@ func BuildRouter(ctx context.Context, cfg RouterConfig) (handler http.Handler, r
 	)
 	sessionService := session.NewService(
 		agentService,
-		environmentService,
 		fileIdentityService,
 		memoryService,
 		vaultService,

@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/agent"
-	"github.com/tetral-ai/tetral/internal/environment"
+	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/files"
 	"github.com/tetral-ai/tetral/internal/memory"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -15,10 +15,6 @@ import (
 type AgentReader interface {
 	Get(context.Context, workspace.ID, string) (*agent.Agent, error)
 	GetVersion(context.Context, workspace.ID, string, int) (*agent.Agent, error)
-}
-
-type EnvironmentReader interface {
-	Get(context.Context, workspace.ID, string) (*environment.Environment, error)
 }
 
 type FileIdentityService interface {
@@ -44,14 +40,20 @@ type AgentReference struct {
 	Version *int
 }
 
+// CreateRequest is a Session creation. Computers holds the computers entry
+// list when ComputersPresent; without it, EnvironmentID names the one cloud
+// computer. Idempotency is set when the request carried an Idempotency-Key.
 type CreateRequest struct {
-	Agent         AgentReference
-	EnvironmentID string
-	Title         *string
-	Metadata      map[string]string
-	Resources     []ResourceRequest
-	VaultIDs      []string
-	Providers     ProviderSelectors
+	Agent            AgentReference
+	EnvironmentID    string
+	Computers        []ComputerRequest
+	ComputersPresent bool
+	Title            *string
+	Metadata         map[string]string
+	Resources        []ResourceRequest
+	VaultIDs         []string
+	Providers        ProviderSelectors
+	Idempotency      *Idempotency
 }
 
 type ProviderSelectors map[string]ProviderCredentialSelector
@@ -136,6 +138,7 @@ type Response struct {
 	ArchivedAt         *time.Time            `json:"archived_at"`
 	Agent              *SessionAgentResponse `json:"agent"`
 	EnvironmentID      string                `json:"environment_id"`
+	Computers          []computer.Object     `json:"computers"`
 	VaultIDs           []string              `json:"vault_ids"`
 	Providers          ProviderSelectors     `json:"providers"`
 	Metadata           map[string]string     `json:"metadata"`
