@@ -210,6 +210,7 @@ var servicePackages = []string{
 	"./services/auth/cmd/tetral-auth",
 	"./services/api/cmd/tetral-api",
 	"./services/computer-hub/cmd/tetral-computer-hub",
+	"./services/git-proxy/cmd/git-proxy",
 }
 
 func (b *serviceBuilds) path(t *testing.T, name string) string {
@@ -238,7 +239,7 @@ func (b *serviceBuilds) remove() {
 }
 
 // engine is the real Engine of one test. Machines and test clients reach it
-// only through its public edge.
+// only through its public edge, and git-proxy through its TLS front.
 type engine struct {
 	t      *testing.T
 	record *acceptanceRecord
@@ -246,6 +247,10 @@ type engine struct {
 	// server_url.
 	serverURL string
 	edgePort  string
+	// gitProxyURL is the origin of git-proxy's TLS front, the git_proxy_url
+	// of every git ticket; gitProxyPort is its port.
+	gitProxyURL, gitProxyPort string
+	github                    *github
 	// apiKey is the workspace API key of the Controller and the developer.
 	apiKey string
 	// nats is the broker of the services that publish or subscribe.
@@ -334,6 +339,7 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 	})
 	e.startService("auth", "auth", "tetral-auth", authEnv, authAddresses[0])
 
+	vaultKey := randomHex(t, 32)
 	apiAddresses := reserveAddresses(t, 2)
 	dataDir := filepath.Join(t.TempDir(), "api-data")
 	if err := os.Mkdir(dataDir, 0o700); err != nil {
@@ -343,12 +349,31 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 		"TETRAL_API_HTTP_ADDR":                          apiAddresses[0],
 		"TETRAL_API_METRICS_ADDR":                       apiAddresses[1],
 		"TETRAL_HTTP_TRANSPORT":                         "plaintext",
-		"ENGINE_VAULT_KEY":                              randomHex(t, 32),
+		"ENGINE_VAULT_KEY":                              vaultKey,
 		"ENGINE_DATA_DIR":                               dataDir,
 		"TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64": publicKey,
 		"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF":       "ghcr.io/tetral-ai/sandbox:0.0.0-dev",
 	})
 	e.startService("api", "api", "tetral-api", apiEnv, apiAddresses[0])
+
+	e.github = startGitHub(t)
+	frontListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.gitProxyURL = "https://" + frontListener.Addr().String()
+	_, e.gitProxyPort, _ = net.SplitHostPort(frontListener.Addr().String())
+	gitProxyAddresses := reserveAddresses(t, 2)
+	e.startService("git-proxy", "git-proxy", "git-proxy", merge(databaseEnv("git_proxy"), map[string]string{
+		"TETRAL_GIT_PROXY_HTTP_ADDR":       gitProxyAddresses[0],
+		"TETRAL_GIT_PROXY_METRICS_ADDR":    gitProxyAddresses[1],
+		"TETRAL_GIT_PROXY_PUBLIC_BASE_URL": e.gitProxyURL,
+		"TETRAL_HTTP_TRANSPORT":            "plaintext",
+		"ENGINE_VAULT_KEY":                 vaultKey,
+		"HTTPS_PROXY":                      e.github.proxyURL,
+		"SSL_CERT_FILE":                    e.github.caPath,
+	}), gitProxyAddresses[1])
+	e.github.startGitProxyFront(frontListener, gitProxyAddresses[0])
 
 	pageTokenKey := randomHex(t, 32)
 	// The edge's address is fixed before the hubs start: it is the
@@ -370,8 +395,7 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 			"TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY":            pageTokenKey,
 			"TETRAL_COMPUTER_HUB_POD_NAME":                  pod,
 			"TETRAL_COMPUTER_HUB_SERVER_URL":                "http://" + edgeListener.Addr().String(),
-			// The harness runs no git-proxy; tickets name this origin only.
-			"TETRAL_COMPUTER_HUB_GIT_PROXY_URL": "https://git.tetral.example",
+			"TETRAL_COMPUTER_HUB_GIT_PROXY_URL":             e.gitProxyURL,
 		})
 		for key, value := range map[string]string{
 			"TETRAL_COMPUTER_HUB_MIN_CLI_VERSION":         options.minCLIVersion,
@@ -391,7 +415,7 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 		"api":          {{"api", "http://" + apiAddresses[0]}},
 		"computer-hub": hubs,
 	})
-	record.observe("Engine at %s through the public edge: auth, api and computer-hub (%s) as processes, PostgreSQL and MinIO containers, NATS", e.serverURL, strings.Join(slices.Sorted(maps.Keys(e.hubs)), ", "))
+	record.observe("Engine at %s through the public edge: auth, api and computer-hub (%s) as processes, PostgreSQL and MinIO containers, NATS; git-proxy as a process behind its TLS front at %s, reaching a GitHub stand-in through a CONNECT proxy", e.serverURL, strings.Join(slices.Sorted(maps.Keys(e.hubs)), ", "), e.gitProxyURL)
 	return e
 }
 
@@ -520,9 +544,9 @@ type serviceProcess struct {
 
 // startService starts the build name as the process label of service with
 // env, gives it its own workload token of the service's account and the
-// TokenReview endpoint, and waits until its /ready on httpAddress answers
+// TokenReview endpoint, and waits until its /ready on readyAddress answers
 // 200. It stops with SIGTERM when t ends.
-func (e *engine) startService(service, label, name string, env map[string]string, httpAddress string) *serviceProcess {
+func (e *engine) startService(service, label, name string, env map[string]string, readyAddress string) *serviceProcess {
 	t := e.t
 	t.Helper()
 	env = merge(env, e.identity.environment(), map[string]string{"TETRAL_DEPLOYMENT_ENVIRONMENT": "test", "TETRAL_SERVICE_VERSION": e.record.engineCommit})
@@ -541,7 +565,7 @@ func (e *engine) startService(service, label, name string, env map[string]string
 	deadline := time.Now().Add(60 * time.Second)
 	client := &http.Client{Timeout: time.Second}
 	for {
-		response, err := client.Get("http://" + httpAddress + "/ready")
+		response, err := client.Get("http://" + readyAddress + "/ready")
 		if err == nil {
 			_ = response.Body.Close()
 			if response.StatusCode == http.StatusOK {
@@ -679,7 +703,7 @@ func (s *machines) addLinux(name, app string) *machine {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	m := &machine{t: t, name: name, app: app, tetral: s.in.cliBin, home: filepath.Join(dir, "home"), host: linuxHost{}, record: s.record}
+	m := &machine{t: t, name: name, app: app, tetral: s.in.cliBin, home: filepath.Join(dir, "home"), gitCA: s.engine.github.caPath, host: linuxHost{}, record: s.record}
 	m.version()
 	return m
 }
@@ -691,6 +715,9 @@ type machine struct {
 	app    string
 	tetral string
 	home   string
+	// gitCA is the machine's copy of the test CA, which its App Server
+	// trusts for git-proxy through GIT_SSL_CAINFO.
+	gitCA  string
 	host   machineHost
 	record *acceptanceRecord
 	// cliVersion is what the machine's tetral --version wrote.
@@ -806,6 +833,34 @@ func (m *machine) status() map[string]any {
 	return result.object(m.t)
 }
 
+// directory is the absolute path of name beside the machine's state root,
+// on the machine's host.
+func (m *machine) directory(name string) string {
+	return filepath.Join(filepath.Dir(m.home), name)
+}
+
+// shell runs argv on the machine's host outside tetral, with the machine's
+// git trust, and returns its exit code and trimmed stdout.
+func (m *machine) shell(argv ...string) (int, string) {
+	m.t.Helper()
+	ctx, cancel := context.WithTimeout(m.t.Context(), 2*time.Minute)
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	command := m.host.command(ctx, map[string]string{"GIT_SSL_CAINFO": m.gitCA, "GIT_TERMINAL_PROMPT": "0"}, nil, nil, argv)
+	command.Stdout, command.Stderr = &stdout, &stderr
+	err := command.Run()
+	var exit *exec.ExitError
+	code := 0
+	switch {
+	case errors.As(err, &exit):
+		code = exit.ExitCode()
+	case err != nil:
+		m.t.Fatalf("run %s on %s: %v\n%s", strings.Join(argv, " "), m.name, err, stderr.String())
+	}
+	m.record.command("`%s` on %s exited %d", strings.Join(argv, " "), m.name, code)
+	return code, strings.TrimSpace(stdout.String())
+}
+
 // waitStatus reads the status until done accepts it or timeout passes.
 func (m *machine) waitStatus(timeout time.Duration, what string, done func(map[string]any) bool) map[string]any {
 	m.t.Helper()
@@ -840,7 +895,7 @@ func (m *machine) serve(args ...string) *cliProcess {
 	m.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &cliProcess{machine: m, stderr: newPIDWriter(), exited: make(chan struct{})}
-	p.command = m.host.command(ctx, map[string]string{"TETRAL_HOME": m.home}, nil, nil, append([]string{m.tetral}, m.args(append([]string{"server", "run"}, args...))...))
+	p.command = m.host.command(ctx, map[string]string{"TETRAL_HOME": m.home, "GIT_SSL_CAINFO": m.gitCA}, nil, nil, append([]string{m.tetral}, m.args(append([]string{"server", "run"}, args...))...))
 	p.command.Stdout, p.command.Stderr = &p.stdout, p.stderr
 	if err := p.command.Start(); err != nil {
 		cancel()

@@ -13,14 +13,23 @@ the repository and no CI workflow runs it.
 - PostgreSQL, MinIO and NATS in containers (`internal/testinfra`), the
   database prepared by `tetral-db-prepare` with one role per workload and the
   workspace created by `tetral-bootstrap`.
-- `auth`, `api` and `computer-hub` as processes built from this checkout, each
-  on its own database role.
+- `auth`, `api`, `computer-hub` and `git-proxy` as processes built from this
+  checkout, each on its own database role.
 - A public edge in the test process (`edge_test.go`): every request but the
   token exchange goes to `auth`'s Check first; a denial answers with Check's
   answer, and an allowed request goes on, with the signed principal, to the
   service its path names, round robin over that service's backends that are
   not down. A test can delay the answers of a path, take a backend down or
   read the event stream requests the edge saw.
+- GitHub for repository preparation (`github_test.go`): a TLS front in the
+  test process serves `git-proxy` at the `git_proxy_url` of every git ticket,
+  and machines trust it through `GIT_SSL_CAINFO`. `git-proxy` reaches
+  `github.com` through a CONNECT proxy in the test process (`HTTPS_PROXY`),
+  which tunnels to a GitHub stand-in: `git http-backend` over bare
+  repositories behind a `github.com` certificate of the test CA, which
+  `git-proxy` trusts through `SSL_CERT_FILE`, answering only requests that
+  carry the repository's token. Running needs `git` on the Linux host and on
+  every machine.
 - A TokenReview stand-in (`identity_test.go`) that authenticates each
   service's own service account token for internal gRPC calls.
 - CLI machines: a home directory and the CLI binary on the Linux host, or, on
@@ -69,9 +78,13 @@ replaces the file.
 ## Tests
 
 - `client_connection_test.go`: a stream that resumes on another pod after its
-  pod is killed, a stream-only disconnect, and a held ready acknowledgement.
+  pod is killed, a stream-only disconnect, a held ready acknowledgement with
+  70 Sessions to prepare, and a new git ticket at each preparation.
   The live credential renewal scenario is present but requires a CLI that
   consumes `credential.renew`; the current CLI does not implement that consumer,
   so this scenario cannot yet pass and is not current compatibility evidence.
 - `computer_management_test.go`: user instances launched the way a product
-  app launches them, and a revocation that ends the live connection.
+  app launches them, a revocation that ends the live connection, and
+  Controller claims of new and wake requests.
+- `developer_errors_test.go`: a preparation error written once per code.
+- `session_drive_test.go`: repositories cloned only on their computer.

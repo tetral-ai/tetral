@@ -20,7 +20,7 @@ import (
 // acknowledgement the Controller lost worked; the personal instance's
 // further credential, never delivered, is not in use. Last, the provider's
 // launch configures the bootstrap of a claim and its cloud instance comes
-// online holding no Session.
+// online and prepares the claimed computer's Session.
 func TestPersonalAndProviderLaunchersComeOnline(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
@@ -73,14 +73,14 @@ func TestPersonalAndProviderLaunchersComeOnline(t *testing.T) {
 	requireOnlyInUse(t, controller, personal.instance.ID, personal.credential.ID, undelivered.ID)
 	record.observe("personal instance read: connection.credential_id is still %s, which alone is in_use; the undelivered %s is not in use; none is revoked", personal.credential.ID, undelivered.ID)
 
-	s := developer.createCloudSession(ctx, "provider-claim")
+	cloud := set.add("provider-claim", "provider-launcher")
+	s := developer.createCloudSession(ctx, "provider-claim", cloud.directory("workspace"))
 	claimed := controller.claimRequest(ctx, e.recordRequest(s).ID, "provider-worker")
 	cloudInstance, cloudCredential := claimed.bootstrapFields(t)
-	cloud := set.add("provider-claim", "provider-launcher")
 	cloud.configure(claimed.Bootstrap)
 	cloud.serve("--idle-exit", "15m")
-	requireCloudOnline(t, controller, cloud, cloudInstance, cloudCredential, s.computerID)
-	record.observe("the provider launcher configured the bootstrap of a claim for cloud instance %s and came online with binding_count 0: it holds no Session", cloudInstance)
+	requireCloudOnline(t, e, cloud, cloudInstance, cloudCredential, s)
+	record.observe("the provider launcher configured the bootstrap of a claim for cloud instance %s, came online and prepared the claimed computer's Session", cloudInstance)
 }
 
 // requireOnlyInUse checks that instanceID's connection is online with
@@ -168,10 +168,22 @@ func TestRevocationEndsTheLiveConnectionAtOnce(t *testing.T) {
 	record.observe("20s after the due heartbeat: the same connection %s offline with lease_expires_at %s and last_heartbeat_at unchanged; no other connection; the CLI still blocked", connection.ID, later.Connection.LeaseExpiresAt.Format(time.RFC3339Nano))
 }
 
-// requireOnline waits until the machine's status and the instance read both
-// show the connection online with credentialID, and checks what the read
-// reports of it.
+// requireOnline waits until the machine is online with credentialID, as
+// waitOnline does, and checks that the instance has no computer and no
+// binding.
 func requireOnline(t *testing.T, controller *controllerClient, m *machine, instanceID, credentialID string) {
+	t.Helper()
+	object := waitOnline(t, controller, m, instanceID, credentialID)
+	if object.ComputerCount != 0 || object.BindingCount != 0 {
+		t.Fatalf("instance read computer_count %d binding_count %d; want 0 and 0", object.ComputerCount, object.BindingCount)
+	}
+	m.record.observe("%s: no computer and no binding on instance %s", m.name, instanceID)
+}
+
+// waitOnline waits until the machine's status and the instance read both
+// show the connection online with credentialID, checks what the read reports
+// of the connection and returns the read.
+func waitOnline(t *testing.T, controller *controllerClient, m *machine, instanceID, credentialID string) instanceObject {
 	t.Helper()
 	status := m.waitStatus(2*time.Minute, "connection_state online", func(status map[string]any) bool {
 		return statusField(status, "connection_state") == "online"
@@ -189,12 +201,11 @@ func requireOnline(t *testing.T, controller *controllerClient, m *machine, insta
 		t.Fatalf("instance read connection credential %s; want %s", object.Connection.CredentialID, credentialID)
 	case object.CLIVersion == nil || *object.CLIVersion != m.cliVersion:
 		t.Fatalf("instance read cli_version %v; the machine's tetral is %s", object.CLIVersion, m.cliVersion)
-	case object.ComputerCount != 0 || object.BindingCount != 0:
-		t.Fatalf("instance read computer_count %d binding_count %d; want 0 and 0", object.ComputerCount, object.BindingCount)
 	case object.Connection.ReadyAt == nil:
 		t.Fatalf("instance read connection %+v has no ready_at", object.Connection)
 	}
-	m.record.observe("%s: status online with connection %s; instance read online with credential %s, cli_version %s, ready_at %s, no computer and no binding", m.name, object.Connection.ID, credentialID, *object.CLIVersion, object.Connection.ReadyAt.Format(time.RFC3339Nano))
+	m.record.observe("%s: status online with connection %s; instance read online with credential %s, cli_version %s, ready_at %s", m.name, object.Connection.ID, credentialID, *object.CLIVersion, object.Connection.ReadyAt.Format(time.RFC3339Nano))
+	return object
 }
 
 // recordRequest records the open request of the Session's cloud computer
@@ -244,10 +255,13 @@ func (e *engine) ownerTx(fn func(context.Context, *dbconnect.Tx) error) {
 
 // requireCloudOnline waits until the machine's status and the instance read
 // both show the connection online with credentialID, and checks that the
-// instance is the active cloud instance of computerID, which holds it as
-// current, with no binding.
-func requireCloudOnline(t *testing.T, controller *controllerClient, m *machine, instanceID, credentialID, computerID string) instanceObject {
+// instance is the active cloud instance of the Session's computer, which
+// holds it as current. The ready prepares that computer on the connection:
+// it then waits until the computer is ready there in its working directory
+// and the instance counts that one prepared binding.
+func requireCloudOnline(t *testing.T, e *engine, m *machine, instanceID, credentialID string, s cloudSession) instanceObject {
 	t.Helper()
+	controller := e.controller()
 	status := m.waitStatus(2*time.Minute, "connection_state online", func(status map[string]any) bool {
 		return statusField(status, "connection_state") == "online"
 	})
@@ -260,12 +274,20 @@ func requireCloudOnline(t *testing.T, controller *controllerClient, m *machine, 
 	switch {
 	case object.Connection.ID != statusField(status, "connection_id") || object.Connection.CredentialID != credentialID:
 		t.Fatalf("instance read connection %+v; the CLI's status names connection %s with credential %s", object.Connection, status["connection_id"], credentialID)
-	case object.Kind != "cloud" || object.ComputerID == nil || *object.ComputerID != computerID || object.RegistrationState != "active":
-		t.Fatalf("instance read kind %s computer_id %v registration %s; want an active cloud instance of %s", object.Kind, object.ComputerID, object.RegistrationState, computerID)
-	case object.ComputerCount != 1 || object.BindingCount != 0 || object.Unused:
-		t.Fatalf("instance read computer_count %d binding_count %d unused %v; want 1, 0 and false", object.ComputerCount, object.BindingCount, object.Unused)
+	case object.Kind != "cloud" || object.ComputerID == nil || *object.ComputerID != s.computerID || object.RegistrationState != "active":
+		t.Fatalf("instance read kind %s computer_id %v registration %s; want an active cloud instance of %s", object.Kind, object.ComputerID, object.RegistrationState, s.computerID)
+	case object.ComputerCount != 1 || object.Unused:
+		t.Fatalf("instance read computer_count %d unused %v; want 1 and false", object.ComputerCount, object.Unused)
 	}
-	m.record.observe("%s: status online with connection %s; instance read online with credential %s, kind cloud, computer_id %s, computer_count 1, binding_count 0, not unused", m.name, object.Connection.ID, credentialID, computerID)
+	connectionID := object.Connection.ID
+	prepared := e.developer().waitComputer(t.Context(), s.sessionID, s.computerID, time.Minute, "a preparation reported on "+connectionID, func(c computerObject) bool {
+		return c.ConnectionID != nil && *c.ConnectionID == connectionID && c.ExecutionState != "preparing"
+	})
+	if prepared.ExecutionState != "ready" || prepared.CWD == nil || *prepared.CWD != prepared.WorkingDirectory {
+		t.Fatalf("computer %s after its preparation on %s: %+v; want ready in its working directory", s.computerID, connectionID, prepared)
+	}
+	object = controller.waitInstance(t.Context(), instanceID, 30*time.Second, "binding_count 1", func(object instanceObject) bool { return object.BindingCount == 1 })
+	m.record.observe("%s: status online with connection %s; instance read online with credential %s, kind cloud, computer_id %s, computer_count 1, not unused; the computer ready on that connection with cwd %s, and binding_count 1", m.name, connectionID, credentialID, s.computerID, *prepared.CWD)
 	return object
 }
 
@@ -285,18 +307,16 @@ func nextRequestEvent(t *testing.T, events <-chan requestEvent) requestEvent {
 }
 
 // startClaimedMachine claims a new request of the Session's computer and
-// starts a provider launch with the claim's bootstrap; it returns the
-// running server and the claim's instance once online.
-func startClaimedMachine(t *testing.T, e *engine, set *machines, s cloudSession, name string) (*cliProcess, string) {
+// starts a provider launch with the claim's bootstrap on m; it returns the
+// running server and the claim's instance once online and prepared.
+func startClaimedMachine(t *testing.T, e *engine, m *machine, s cloudSession) (*cliProcess, string) {
 	t.Helper()
-	controller := e.controller()
 	request := e.recordRequest(s)
-	claimed := controller.claimRequest(t.Context(), request.ID, "worker-"+name)
+	claimed := e.controller().claimRequest(t.Context(), request.ID, "worker-"+m.name)
 	instanceID, credentialID := claimed.bootstrapFields(t)
-	m := set.add(name, "provider-launcher")
 	m.configure(claimed.Bootstrap)
 	server := m.serve("--idle-exit", "15m")
-	requireCloudOnline(t, controller, m, instanceID, credentialID, s.computerID)
+	requireCloudOnline(t, e, m, instanceID, credentialID, s)
 	return server, instanceID
 }
 
@@ -327,7 +347,8 @@ func TestControllerStartsAMachineForANewRequest(t *testing.T) {
 	set := newMachines(t, in, needs{}, e, record)
 	ctx := t.Context()
 
-	s := developer.createCloudSession(ctx, "new-request")
+	m := set.add("cloud", "provider-launcher")
+	s := developer.createCloudSession(ctx, "new-request", m.directory("workspace"))
 	events := controller.openRequestStream(ctx, s.environmentID)
 	request := e.recordRequest(s)
 	if created := nextRequestEvent(t, events); created.name != "created" || created.request.ID != request.ID || created.request.Kind != "new" {
@@ -346,10 +367,9 @@ func TestControllerStartsAMachineForANewRequest(t *testing.T) {
 	if event := nextRequestEvent(t, events); event.name != "claimed" || event.request.ID != request.ID {
 		t.Fatalf("request stream event %+v; want claimed of %s", event, request.ID)
 	}
-	m := set.add("cloud", "provider-launcher")
 	m.configure(claimed.Bootstrap)
 	m.serve("--idle-exit", "15m")
-	requireCloudOnline(t, controller, m, instanceID, credentialID, s.computerID)
+	requireCloudOnline(t, e, m, instanceID, credentialID, s)
 
 	fulfilled := e.readRequest(request.ID)
 	current := developer.readComputer(ctx, s).CurrentInstanceID
@@ -375,8 +395,9 @@ func TestStoppedCloudInstanceWakesWithItsIdentity(t *testing.T) {
 	set := newMachines(t, in, needs{}, e, record)
 	ctx := t.Context()
 
-	s := developer.createCloudSession(ctx, "wake-request")
-	server, instanceID := startClaimedMachine(t, e, set, s, "cloud")
+	cloud := set.add("cloud", "provider-launcher")
+	s := developer.createCloudSession(ctx, "wake-request", cloud.directory("workspace"))
+	server, instanceID := startClaimedMachine(t, e, cloud, s)
 	first := controller.readInstance(ctx, instanceID).Connection.CredentialID
 	stopMachine(t, controller, server, instanceID)
 	record.observe("the machine of cloud instance %s stopped; the instance reads offline", instanceID)
@@ -390,10 +411,9 @@ func TestStoppedCloudInstanceWakesWithItsIdentity(t *testing.T) {
 	if wakeInstance != instanceID || claimed.WorkingDirectory != nil {
 		t.Fatalf("wake claim result %+v; want a bootstrap for %s without a working directory", claimed, instanceID)
 	}
-	m := server.machine
-	m.configure(claimed.Bootstrap)
-	m.serve("--idle-exit", "15m")
-	requireCloudOnline(t, controller, m, instanceID, wakeCredential, s.computerID)
+	cloud.configure(claimed.Bootstrap)
+	cloud.serve("--idle-exit", "15m")
+	requireCloudOnline(t, e, cloud, instanceID, wakeCredential, s)
 
 	revoked := false
 	for _, credential := range controller.listCredentials(ctx, instanceID) {
@@ -421,8 +441,9 @@ func TestFailedWakeRequestLeavesTheInstanceOffline(t *testing.T) {
 	set := newMachines(t, in, needs{}, e, record)
 	ctx := t.Context()
 
-	s := developer.createCloudSession(ctx, "failed-wake")
-	server, instanceID := startClaimedMachine(t, e, set, s, "cloud")
+	cloud := set.add("cloud", "provider-launcher")
+	s := developer.createCloudSession(ctx, "failed-wake", cloud.directory("workspace"))
+	server, instanceID := startClaimedMachine(t, e, cloud, s)
 	stopMachine(t, controller, server, instanceID)
 	wake := e.recordRequest(s)
 	claimed := controller.claimRequest(ctx, wake.ID, "worker-wake")
