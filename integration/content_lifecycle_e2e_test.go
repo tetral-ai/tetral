@@ -28,7 +28,7 @@ func TestContentLifecycleLocalEndToEnd(t *testing.T) {
 			waitContentSQLCount(t, chain.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='agent.tool_result'`, chain.session, 0)
 			// The command's status port remains held until the durable End is observed.
 			chain.provider.finish()
-			waitContentSQLCount(t, chain.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'`, chain.session, 1)
+			waitContentSQLCount(t, chain.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, chain.session, 1)
 			assertContentLifecycleHistory(t, chain.db, chain.session, contentReadCase)
 			assertContentSDKTexts(t, chain, []string{"alpha", "beta", "done"})
 			observed := chain.gateway.control(t, map[string]any{"kind": "observe"}, "observation")
@@ -51,7 +51,7 @@ func TestContentLifecycleLocalEndToEnd(t *testing.T) {
 		chain := startContentE2E(t, "error-after-complete-prefix", false, false)
 		chain.sdk.control(t, "send", map[string]any{"sessionId": chain.session, "text": "start-content-fixture"})
 		waitContentSQLCount(t, chain.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='span.model_request_end' AND payload_json::jsonb->>'is_error'='true'`, chain.session, 1)
-		waitContentSQLCount(t, chain.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'`, chain.session, 1)
+		waitContentSQLCount(t, chain.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, chain.session, 1)
 		// The existing Runtime budget permits three reschedules, each with a
 		// new model request. Gateway must never replay within one request.
 		assertContentSDKTexts(t, chain, []string{"alpha", "alpha", "alpha", "alpha"})
@@ -66,7 +66,7 @@ func TestContentLifecycleLocalEndToEnd(t *testing.T) {
 			chain := startContentE2E(t, "text", false, mode == "cold")
 			// Establish an actual previous turn for both warm and cold admission.
 			chain.sdk.control(t, "send", map[string]any{"sessionId": chain.session, "text": "start-content-fixture"})
-			waitContentSQLCount(t, chain.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'`, chain.session, 1)
+			waitContentSQLCount(t, chain.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, chain.session, 1)
 			if mode == "cold" {
 				chain.runtime.release(t, "evict-idle")
 				evicted := chain.runtime.marker(t, "idle-evicted")
@@ -106,7 +106,7 @@ func TestContentLifecycleLocalEndToEnd(t *testing.T) {
 				}
 			}
 			chain.sdk.control(t, "send", map[string]any{"sessionId": chain.session, "text": "start-content-fixture", "fileId": file.ID})
-			waitContentSQLCount(t, chain.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'`, chain.session, 2)
+			waitContentSQLCount(t, chain.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, chain.session, 2)
 			observed := chain.gateway.control(t, map[string]any{"kind": "observe"}, "observation")
 			var attachments []struct {
 				RequestOrdinal int    `json:"requestOrdinal"`

@@ -173,7 +173,8 @@ func TestPostgreSQLBridgeToolRelationWritersDeriveOneFact(t *testing.T) {
 		seedBridgeAPIOpenDurableTurn(t, f.admin, f.scope, "relation-termination")
 		if _, err := f.admin.ExecContext(f.ctx, `INSERT INTO session_runtime_status (
 			workspace_id,session_id,status,running_since,active_seconds_total,binding_id,binding_generation,created_at,updated_at
-		) VALUES ($1,$2,'running',now(),0,$3,$4,now(),now())`, f.scope.WorkspaceId, f.scope.SessionId,
+		) VALUES ($1,$2,'running',now(),0,$3,$4,now(),now())
+		ON CONFLICT (workspace_id,session_id) DO UPDATE SET status=EXCLUDED.status,idle_since=NULL,running_since=EXCLUDED.running_since,binding_id=EXCLUDED.binding_id,binding_generation=EXCLUDED.binding_generation`, f.scope.WorkspaceId, f.scope.SessionId,
 			f.scope.Binding.BindingId, f.scope.Binding.BindingGeneration); err != nil {
 			t.Fatalf("seed running Runtime residency: %v", err)
 		}

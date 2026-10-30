@@ -516,6 +516,12 @@ custody DTOs; Queue lease identity remains Runner-owned. Helpers receive the
 caller's transaction so context mutations and exact Queue ACK/NACK remain
 atomic. Shared packages never import Bridge or Runner business code.
 
+Every settlement that puts a thread idle or running again (pod-loss repair, a
+failed delivery, recovery activation, an MCP discovery input) ends by calling
+`runtimecontrol.RefreshSessionStatusTx`, the one writer of the Session's change
+between `running` and `idle`; Job Runner itself writes only the binding and
+cleanup columns of `session_runtime_status`.
+
 ## Testing
 
 Placement's existing probe and attempt timers also populate fixed-bucket

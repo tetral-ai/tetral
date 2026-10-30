@@ -189,7 +189,7 @@ func TestPostgreSQLReplicaBridgeRecovery(t *testing.T) {
 			}
 		}
 		var captures, adopted, idle, failures int
-		if err := admin.QueryRow(`SELECT (SELECT count(*) FROM sandbox_output_capture_operations WHERE session_id=$1),(SELECT count(*) FROM sandbox_output_capture_operations WHERE session_id=$1 AND state='adopted'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.error')`, session).Scan(&captures, &adopted, &idle, &failures); err != nil || captures != 1 || adopted != 1 || idle != 1 || failures != 0 || provider.calls.Load() != 1 {
+		if err := admin.QueryRow(`SELECT (SELECT count(*) FROM sandbox_output_capture_operations WHERE session_id=$1),(SELECT count(*) FROM sandbox_output_capture_operations WHERE session_id=$1 AND state='adopted'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.error')`, session).Scan(&captures, &adopted, &idle, &failures); err != nil || captures != 1 || adopted != 1 || idle != 1 || failures != 0 || provider.calls.Load() != 1 {
 			t.Fatalf("original capture=%d adopted=%d idle=%d failures=%d dispatches=%d err=%v", captures, adopted, idle, failures, provider.calls.Load(), err)
 		}
 	})

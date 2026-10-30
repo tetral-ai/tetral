@@ -19,14 +19,16 @@
 //	  transition is already in progress); running/rescheduling sessions cannot
 //	  be deleted.
 //
-//	Status (idle/running/rescheduling/terminated) — written by the runtime bridge
-//	(package bridge), NOT by this package, which only seeds idle at
-//	create:
-//	  (idle|running) -> rescheduling    markPublicSessionReschedulingTx
-//	  rescheduling   -> running         markPublicSessionRunningTx
-//	  rescheduling   -> idle            markPublicSessionIdleTx
+//	Status (idle/running/rescheduling/terminated) — read as sessions.status
+//	when that is rescheduling or terminated, otherwise as
+//	session_runtime_status.status, the Session's status over all its threads.
+//	This package only seeds both at create:
+//	  idle <-> running                  runtimecontrol.RefreshSessionStatusTx
+//	  (idle|running) -> rescheduling    markPublicSessionReschedulingTx (package bridge)
+//	  rescheduling   -> running         markPublicSessionRunningTx (package bridge)
+//	  rescheduling   -> idle            markPublicSessionIdleTx (package bridge)
 //	  (non-terminated) -> terminated    CommitRuntimeTermination (terminal)
-//	  the running/idle marks never overwrite a terminated row (WHERE status <> 'terminated').
+//	  the marks never overwrite a terminated row (WHERE status <> 'terminated').
 //
 //	ThreadStatus — 7 internal values (running, idle, requires_action,
 //	closed_for_runtime, rescheduling, terminated, failed) projected to the 4-value
@@ -37,15 +39,20 @@
 //     change (approval_mode or the Tools/MCPServers overlay); each advance enqueues
 //     exactly one runtime_config_update job.
 //   - archived_at is set exactly once, when LifecycleState reaches archived.
-//   - The public Status column is authored by the Runtime control paths in Bridge
+//   - The public Status is authored by the Runtime control paths in Bridge
 //     and Job Runner; this package seeds it to idle at create and never advances
-//     it thereafter.
+//     it thereafter. Operations allowed only while the Session is idle (computer
+//     addition, archive, resource mutation) check session_runtime_status.status
+//     under the Session's runtime mutation lock.
 //
 // UPDATE-WITH:
 //   - postgresql_store.go (CreateSession, ArchiveSession, DeleteSession, UpdateSession).
 //   - services/bridge/bridge_api_events.go (markPublicSessionRunningTx,
 //     markPublicSessionIdleTx, markPublicSessionReschedulingTx).
-//   - internal/runtimecontrol/termination.go (appendRuntimeTerminatedStatusTx).
+//   - internal/runtimecontrol/session_status.go (RefreshSessionStatusTx) and
+//     termination.go (appendRuntimeTerminatedStatusTx).
+//   - computers.go and internal/computer (the computers of Session creation
+//     and the add route).
 package session
 
 import (

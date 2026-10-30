@@ -81,11 +81,11 @@ func TestPrepareRuntimeRecoveryRequiresExactLiveQueueLeaseBeforeMutation(t *test
 	var runtimeStatus string
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1),
-		COALESCE((SELECT status FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1), 'absent')`, sessionID).Scan(&bindingCount, &runtimeStatus); err != nil {
+		(SELECT status || CASE WHEN updated_at = '2026-01-01T00:00:00Z' THEN '' ELSE ' changed' END FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1)`, sessionID).Scan(&bindingCount, &runtimeStatus); err != nil {
 		t.Fatalf("read recovery mutation census: %v", err)
 	}
-	if bindingCount != 0 || runtimeStatus != "absent" {
-		t.Fatalf("expired recovery mutated binding/status = %d/%s; want 0/absent", bindingCount, runtimeStatus)
+	if bindingCount != 0 || runtimeStatus != "idle" {
+		t.Fatalf("expired recovery mutated binding/status = %d/%s; want 0/the seeded idle row unchanged", bindingCount, runtimeStatus)
 	}
 }
 
@@ -115,8 +115,13 @@ func TestRuntimeRecoveryRevalidatesReclaimedLeaseBeforeBindingAndRuntime(t *test
 	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, sourceID, 1, "session.status_rescheduled", `{}`)
 	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_threads SET status='rescheduling' WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, threadID); err != nil {
+		t.Fatalf("seed rescheduled thread: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_status (workspace_id, session_id, status, idle_since, created_at, updated_at)
-		 VALUES ('default',$1,'idle',now(),now(),now())`, sessionID); err != nil {
+		 VALUES ('default',$1,'idle',now(),now(),now())
+		 ON CONFLICT (workspace_id, session_id) DO UPDATE SET idle_since = EXCLUDED.idle_since, updated_at = EXCLUDED.updated_at`, sessionID); err != nil {
 		t.Fatalf("seed runtime status: %v", err)
 	}
 	client := dbconnect.NewClientForTesting(runtimeDB)
@@ -246,7 +251,8 @@ func TestRuntimeRecoveryFinalExhaustionTerminatesSessionAndPendingRecovery(t *te
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, sourceB, 2, "session.status_rescheduled", `{}`)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_status (workspace_id, session_id, status, idle_since, created_at, updated_at)
-		 VALUES ('default',$1,'idle',now(),now(),now())`, sessionID); err != nil {
+		 VALUES ('default',$1,'idle',now(),now(),now())
+		 ON CONFLICT (workspace_id, session_id) DO UPDATE SET idle_since = EXCLUDED.idle_since, updated_at = EXCLUDED.updated_at`, sessionID); err != nil {
 		t.Fatalf("seed runtime status: %v", err)
 	}
 	client := dbconnect.NewClientForTesting(runtimeDB)

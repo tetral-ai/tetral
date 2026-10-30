@@ -978,7 +978,8 @@ func TestPostgreSQLReplacementRuntimeTerminationReplaysReceiptWithoutResidency(t
 	).Scan(&sessionStatus, &runtimeStatus, &lostBindingID, &lostBindingGeneration, &remainingBindings); err != nil {
 		t.Fatalf("read pod-loss provenance cleanup: %v", err)
 	}
-	if sessionStatus != "rescheduling" || runtimeStatus != "idle" || lostBindingID.Valid || lostBindingGeneration.Valid || remainingBindings != 0 {
+	// The rescheduling thread keeps the Session running.
+	if sessionStatus != "rescheduling" || runtimeStatus != "running" || lostBindingID.Valid || lostBindingGeneration.Valid || remainingBindings != 0 {
 		t.Fatalf("pod-loss cleanup session/runtime/provenance/bindings = %s/%s/%+v/%+v/%d", sessionStatus, runtimeStatus, lostBindingID, lostBindingGeneration, remainingBindings)
 	}
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))

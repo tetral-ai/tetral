@@ -500,7 +500,15 @@ changes provider-context eligibility while retaining the original audit events.
   and identify the request's Assistant message sequence; Runtime consumes those
   identities before constructing provider-visible entries. `FinishIdle` adopts a Sandbox-staged
   output-capture generation into `session_output_captures` and the file tables,
-  then writes `session.status_idle` in the same transaction.
+  then writes the thread's idle event in the same transaction.
+  Each transaction that changes a thread's status — `WriteEvent` of a
+  running event, `FinishIdle`, the reschedule leg of `WriteRequestEnd` and a
+  child's close, for every role — ends by calling
+  `runtimecontrol.RefreshSessionStatusTx`, which alone moves the Session
+  between `running` and `idle` and writes the Session's own
+  `session.status_running` and `session.status_idle` on the primary stream.
+  The main thread's status events carry its thread and stay on its thread
+  stream.
   `CommitRuntimeTermination` accepts only the live loop's current-thread
   declarations under the open durable-turn identity. A sub-agent declaration
   persists local failure and completion mail; other child roles persist local
@@ -725,7 +733,8 @@ and the `sessions.usage` projection; `session_output_captures`;
 `session_transient_attachments` and the file-attachment consumption records;
 `session_mcp_manifests`; `session_turn_retries`;
 `session_runtime_tool_results` (including the `tool_kind = mcp`
-claim/stage/consume lifecycle); `session_runtime_status` (Runtime running/idle writes)
+claim/stage/consume lifecycle); `session_runtime_status` (the binding columns, and the Session's running/idle
+change through `runtimecontrol.RefreshSessionStatusTx`)
 and the runtime-side writes on `session_threads` (child lifecycle; public
 archive admission stays with api). Through its RPCs it also writes the
 memory tables (`RunMemory`), the event change-log rows that ride every public

@@ -275,7 +275,7 @@ func runContentProcessRecovery(t *testing.T, spec contentCrashCase) {
 		t.Fatalf("repair changed original committed content: before=%+v after=%+v", before, after)
 	}
 	var idleBeforeRecovery int
-	if err := admin.QueryRow(`SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'`, session).Scan(&idleBeforeRecovery); err != nil {
+	if err := admin.QueryRow(`SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, session).Scan(&idleBeforeRecovery); err != nil {
 		t.Fatal(err)
 	}
 	if spec.tool {
@@ -352,7 +352,7 @@ func runContentProcessRecovery(t *testing.T, spec contentCrashCase) {
 			}
 			return completed == 1
 		})
-		waitContentSQLCount(t, admin, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'`, session, idleBeforeRecovery+1)
+		waitContentSQLCount(t, admin, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, session, idleBeforeRecovery+1)
 		assertContentCrashProviderCalls(t, gateway, 2)
 	}
 	if after := readContentCrashFacts(t, admin, session, originalRequest); !reflect.DeepEqual(before.Texts, after.Texts) {

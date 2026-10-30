@@ -1687,7 +1687,7 @@ func reconcileRuntimeRecoverySessionResidencyTx(
 		return err
 	}
 	idleWriteID := runtimeWriteID + ":session_idle"
-	idleStamp, err := runtimecontrol.InsertRuntimeTerminationEventTx(
+	_, err = runtimecontrol.InsertRuntimeTerminationEventTx(
 		ctx, tx, mainScope, mainThreadScope, idleWriteID, idleWriteID,
 		"session.status_idle", idlePayload, now,
 	)
@@ -1712,28 +1712,18 @@ func reconcileRuntimeRecoverySessionResidencyTx(
 	); err != nil {
 		return err
 	}
-	updated, err := tx.Exec(ctx,
-		`UPDATE session_runtime_status
-		    SET status = 'idle', status_event_id = $5, idle_since = $6,
-		        active_seconds_total = active_seconds_total + CASE
-		          WHEN running_since IS NULL THEN 0
-		          ELSE GREATEST(0, EXTRACT(EPOCH FROM ($6 - running_since)))
-		        END,
-		        running_since = NULL, cleanup_after = $7,
-		        cleanup_enqueued_at = NULL, cleanup_claimed_at = NULL, cleanup_job_id = NULL,
-		        updated_at = $6
-		  WHERE workspace_id = $1 AND session_id = $2
-		    AND binding_id = $3 AND binding_generation = $4`,
+	var resident bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM session_runtime_status
+		  WHERE workspace_id = $1 AND session_id = $2 AND binding_id = $3 AND binding_generation = $4)`,
 		job.WorkspaceID, job.SessionID, scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration(),
-		idleStamp.EventID, now, now.Add(runtimecontrol.IdleCleanupDelay),
-	)
-	if err != nil {
+	).Scan(&resident); err != nil {
 		return err
 	}
-	if !runtimecontrol.RowsAffected(updated) {
+	if !resident {
 		return status.Error(codes.FailedPrecondition, "runtime recovery residency is stale")
 	}
-	return nil
+	return runtimecontrol.RefreshSessionStatusTx(ctx, tx, job.WorkspaceID, job.SessionID, now)
 }
 
 func finalizeInterruptDeliveryExhaustionTx(
@@ -3005,9 +2995,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) activateRuntimeRecovery(ctx context.Con
 		}
 		result, err := tx.Exec(ctx,
 			`UPDATE session_runtime_status
-		    SET status='running', binding_id=$3, binding_generation=$4,
-		        running_since=COALESCE(running_since,$5), idle_since=NULL,
-		        cleanup_after=NULL, cleanup_enqueued_at=NULL, cleanup_claimed_at=NULL, cleanup_job_id=NULL, updated_at=$5
+		    SET binding_id=$3, binding_generation=$4, updated_at=$5
 		  WHERE workspace_id=$1 AND session_id=$2`,
 			job.WorkspaceID, job.SessionID, binding.BindingID, binding.BindingGeneration, now,
 		)
@@ -3016,6 +3004,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) activateRuntimeRecovery(ctx context.Con
 		}
 		if !runtimecontrol.RowsAffected(result) {
 			return runtimecontrol.PreparationError{Kind: "runtime_binding_unavailable", Message: "runtime residency is unavailable", Retryable: true}
+		}
+		if err := runtimecontrol.RefreshSessionStatusTx(ctx, tx, job.WorkspaceID, job.SessionID, now); err != nil {
+			return err
 		}
 		plan = RuntimeCommandPlan{
 			Target:           RuntimePodTarget{Namespace: binding.Namespace, PodName: binding.PodName, PodUID: binding.PodUID, RuntimeProcessID: binding.RuntimeProcessID, PodIP: binding.PodIP, Port: port},

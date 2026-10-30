@@ -319,16 +319,13 @@ func (s *PostgreSQLRuntimeDeliveryStore) finishMCPDiscoveryFailure(ctx context.C
 			if err != nil {
 				return err
 			}
-			stamp, err := runtimecontrol.InsertRuntimeTerminationEventTx(ctx, tx, scope, thread, writeID+":idle", "", "session.status_idle", idlePayload, now)
-			if err != nil {
+			if _, err := runtimecontrol.InsertRuntimeTerminationEventTx(ctx, tx, scope, thread, writeID+":idle", "", "session.status_idle", idlePayload, now); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE sessions SET status='idle', updated_at=$3 WHERE workspace_id=$1 AND id=$2 AND status <> 'terminated'`, job.WorkspaceID, job.SessionID, now); err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx, `UPDATE session_runtime_status SET status='idle', status_event_id=$3, idle_since=$4,
-				running_since=NULL, cleanup_after=$5, updated_at=$4 WHERE workspace_id=$1 AND session_id=$2 AND status='idle'`,
-				job.WorkspaceID, job.SessionID, stamp.EventID, now, now.Add(runtimecontrol.IdleCleanupDelay)); err != nil {
+			if err := runtimecontrol.RefreshSessionStatusTx(ctx, tx, job.WorkspaceID, job.SessionID, now); err != nil {
 				return err
 			}
 		}

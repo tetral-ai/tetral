@@ -45,7 +45,10 @@ func TestPostgreSQLRuntimePodLossInterruptFenceMatrix(t *testing.T) {
 				if _, err := admin.ExecContext(context.Background(),
 					`INSERT INTO session_runtime_status (
 						workspace_id, session_id, status, binding_id, binding_generation, created_at, updated_at
-					) VALUES ('default', $1, $2, $3, 1, $4, $4)`,
+					) VALUES ('default', $1, $2, $3, 1, $4, $4)
+					ON CONFLICT (workspace_id, session_id) DO UPDATE SET status = EXCLUDED.status,
+						idle_since = CASE WHEN EXCLUDED.status = 'idle' THEN session_runtime_status.idle_since END,
+						binding_id = EXCLUDED.binding_id, binding_generation = EXCLUDED.binding_generation`,
 					sessionID, runtimeStatus, bindingID, "2026-01-01T00:00:00Z"); err != nil {
 					t.Fatalf("seed runtime status: %v", err)
 				}

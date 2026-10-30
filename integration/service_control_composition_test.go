@@ -413,7 +413,7 @@ func TestPostgreSQLSeparatedOwnersCustodyReplay(t *testing.T) {
 		other.sessionID = "sesn_unrelated_custody"
 		other.threadID = "thr_unrelated_custody"
 		sessionfixture.SeedBridgeAPISession(t, f.admin, "default", other.sessionID, other.threadID)
-		other.sql(t, `INSERT INTO session_runtime_status(workspace_id,session_id,status,created_at,updated_at) VALUES('default',$1,'idle',clock_timestamp(),clock_timestamp())`, other.sessionID)
+		other.sql(t, `INSERT INTO session_runtime_status(workspace_id,session_id,status,created_at,updated_at) VALUES('default',$1,'idle',clock_timestamp(),clock_timestamp()) ON CONFLICT (workspace_id,session_id) DO NOTHING`, other.sessionID)
 		otherJob, otherLease := other.input(t)
 		f.sql(t, `UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second' WHERE id=$1`, otherJob.JobID)
 		if count, err := f.queue.ReclaimExpiredLeases(f.ctx, queue.ReclaimExpiredLeasesRequest{WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput, Limit: 1}); err != nil || count != 1 {

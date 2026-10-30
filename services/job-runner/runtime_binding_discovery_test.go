@@ -399,10 +399,15 @@ func seedDiscoveryBinding(t *testing.T, admin *sql.DB, workspaceID string, sessi
 	}
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, "bind_"+sessionID, generation, "pod-uid-"+sessionID)
 	if runtimeStatus == "" {
+		if _, err := admin.Exec(`DELETE FROM session_runtime_status WHERE workspace_id = $1 AND session_id = $2`, workspaceID, sessionID); err != nil {
+			t.Fatalf("drop discovery runtime status: %v", err)
+		}
 		return
 	}
 	if _, err := admin.Exec(`INSERT INTO session_runtime_status (workspace_id, session_id, status, binding_id, binding_generation, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, clock_timestamp(), clock_timestamp())`,
+		VALUES ($1, $2, $3, $4, $5, clock_timestamp(), clock_timestamp())
+		ON CONFLICT (workspace_id, session_id) DO UPDATE SET status = EXCLUDED.status, idle_since = NULL,
+			binding_id = EXCLUDED.binding_id, binding_generation = EXCLUDED.binding_generation`,
 		workspaceID, sessionID, runtimeStatus, "bind_"+sessionID, generation+generationOffset); err != nil {
 		t.Fatalf("seed discovery runtime status: %v", err)
 	}

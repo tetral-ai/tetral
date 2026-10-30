@@ -108,8 +108,10 @@
 //	session_pending_tool_uses                              Bridge (declaration insert, settlement, interrupt); Job Runner   Bridge LoadContext cold-resume,
 //	                                                        settlement through internal/runtimecontrol; api approval         Runtime pending ToolJob, api approval
 //	                                                        decision (pending -> resolving)                                  lookup
-//	session_runtime_status                                 Bridge, Job Runner (delivery, pod-loss repair, Session           cleanup scheduler (discovery function
-//	                                                        cleanup), the cleanup scheduler, and session-create seeding      and claims), Job Runner, repair
+//	session_runtime_status                                 status: runtimecontrol.RefreshSessionStatusTx (Bridge, Job       cleanup scheduler (discovery function
+//	                                                        Runner), session-create seeding, Session termination; binding    and claims), Job Runner, repair, api
+//	                                                        and cleanup columns: Bridge, Job Runner (delivery, pod-loss      idle check
+//	                                                        repair, Session cleanup), the cleanup scheduler
 //	cleanup_schedule_cursor                                cleanup scheduler (generation acquisition, fenced cycle          cleanup scheduler
 //	                                                        start, checkpoint and reset); initialization inserts the row
 //	session_runtime_bindings                               Job Runner (placement, delivery, pod-loss repair, Session        Job Runner delivery/reconcile/repair,
