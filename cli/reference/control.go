@@ -238,7 +238,8 @@ func (server *Server) controlInstruction(kind string) func(json.RawMessage) (any
 
 // controlSend writes any event on an instance's current stream as given,
 // a malformed one included, or writes again an instruction issued on the
-// stream's connection, sent or still queued. Nothing is recorded as issued.
+// stream's connection, sent or still queued. Nothing is recorded as issued;
+// a session.drives is noted so that its applied report is accepted.
 func (server *Server) controlSend(body json.RawMessage) (any, error) {
 	var input struct {
 		InstanceID string          `json:"instance_id"`
@@ -279,6 +280,7 @@ func (server *Server) controlSend(body json.RawMessage) (any, error) {
 		Type      string `json:"type"`
 	}
 	_ = json.Unmarshal(data, &fields)
+	conn.noteSentDrives(data)
 	conn.stream.send(data, fields.MessageID, fields.Type)
 	return map[string]any{"connection_id": conn.id}, nil
 }

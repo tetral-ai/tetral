@@ -71,7 +71,7 @@ object or `400` with the reason; an unknown `<name>` gets `404`.
 | `credential` | `add` a credential (a pending one with `renew` is offered on the instance's stream as `credential.renew`), `revoke` or `expire` one |
 | `prepare`, `close` | Issue `session.prepare` or `session.close` with the given payload on the instance's live connection |
 | `execute`, `stdin`, `cancel` | Issue `tool.execute`, `tool.stdin` or `tool.cancel` with the given payload, sizes over the protocol's budgets included, and the given `extra` envelope members |
-| `send` | Write any event on the instance's stream as given (`event`, or raw `data`), or write an issued instruction again (`resend`); nothing is issued |
+| `send` | Write any event on the instance's stream as given (`event`, or raw `data`), or write an issued instruction again (`resend`); nothing is issued, and the `applied` report answering a `session.drives` written this way is accepted |
 | `events` | Make the next `count` events requests hold their headers (`hold_headers`), send headers and no event (`headers_only`), send comments only (`comments_only`), connect, with their headers and `connected`, only once the clock has advanced by `delay_ms` from this control (`delay_connected`), or send a `connected` whose JSON is padded with spaces to `data_bytes` (`pad_connected`) |
 | `answer` | For the next `count` requests to an endpoint, or to one `message_id` there: `delay` by `delay_ms` of the clock, `drop` after accepting, `withhold` until `release` (of every withheld answer, or of an `endpoint`'s or a `message_id`'s, in any order), answer for a `wrong_identity`, answer the ACK `without_accepted`, answer `200` with a body that fails its schema (`schema_fail`), hold the request before it is authenticated until `release` and then serve it as it would be served then (`hold_request`, per endpoint), or answer an `error` code with the status the client error table gives it or with a given `status`, which a code outside the table needs; or, for the next `count` requests to an endpoint, read the body at `bytes_per_second` of the clock (`throttle`), so that a clock held still stalls it, the bytes read so far in the state's `throttled` |
 | `dispatch_before_ready_ack` | Send these Session instructions after the instance's next ready is accepted and before its ACK is answered, past the staging limit |
@@ -93,9 +93,12 @@ object or `400` with the reason; an unknown `<name>` gets `404`.
 - `tools.go`: the tool-status endpoint and its size checks.
 - `renewal.go`: credential renewal and the credential endpoint.
 - `gitticket.go`: the git-ticket endpoint.
+- `session_drives.go`: the `session.drives` written through `send` and the
+  `applied` reports that answer them.
 - `control.go`: `ControlHandler`, the controls and `Snapshot`.
 - `server_test.go` holds the refusals and protocol rules; `control_test.go`
-  one test per control; `tools_test.go` the tool controls and the
+  one test per control; `session_drives_test.go` the `applied` report of a sent
+  `session.drives`; `tools_test.go` the tool controls and the
   tool-status endpoint; `helpers_test.go` the HTTP and SSE test client;
   `cmd/tetral-reference/main_test.go` the default addresses of the command
   run as a process.

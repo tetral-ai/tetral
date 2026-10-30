@@ -692,14 +692,18 @@ func (server *Server) sessionStatus(w http.ResponseWriter, request *http.Request
 		apply: func(conn *connection, value any, _ []byte) (answer, *refusal) {
 			report := value.(*wire.SessionStatus)
 			instruction := conn.issued[string(report.RequestMessageID)]
-			answers := instruction != nil && instruction.sessionID == string(report.SessionID) &&
-				instruction.bindingID == string(report.BindingID) &&
-				((instruction.kind == "session.prepare" && (report.Status == "prepared" || report.Status == "failed")) ||
-					(instruction.kind == "session.close" && report.Status == "closed"))
+			drives := conn.answersSentDrives(report)
+			answers := drives ||
+				instruction != nil && instruction.sessionID == string(report.SessionID) &&
+					instruction.bindingID == string(report.BindingID) &&
+					((instruction.kind == "session.prepare" && (report.Status == "prepared" || report.Status == "failed")) ||
+						(instruction.kind == "session.close" && report.Status == "closed"))
 			if !answers {
 				return answer{}, refuse("unknown_instruction", "the report answers no instruction issued on this connection")
 			}
-			instruction.reported = true
+			if !drives {
+				instruction.reported = true
+			}
 			if !conn.firstReportStored {
 				conn.firstReportStored = true
 				server.release(conn)

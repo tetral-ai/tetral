@@ -56,6 +56,8 @@ type connection struct {
 	// stored Session report.
 	sessionIssued     int
 	firstReportStored bool
+	// drives holds each session.drives written through send, by message_id.
+	drives map[string]sentDrives
 }
 
 func (server *Server) addCredential(given Credential) error {
