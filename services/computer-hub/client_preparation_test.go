@@ -206,11 +206,12 @@ func TestFailedPreparationIsPreparedAgain(t *testing.T) {
 	if _, err := f.admin.ExecContext(f.ctx, `UPDATE computer_bindings SET state='closing' WHERE binding_id=$1`, thirdPayload.BindingID); err != nil {
 		t.Fatal(err)
 	}
-	acknowledged(t, f.report(cli, third, "status_late_closing", failed("cwd_forbidden")), "status_late_closing")
+	acknowledged(t, f.report(cli, third, "status_late_closing", prepared("/Users/me/elsewhere")), "status_late_closing")
+	computerRow = f.row(`SELECT execution_state,cwd FROM computers WHERE id='comp_sesn_again'`)
 	if f.bindingState(firstPayload.BindingID) != computer.BindingInvalid || f.bindingState(thirdPayload.BindingID) != computer.BindingClosing ||
 		f.count(`SELECT count(*) FROM session_events WHERE session_id='sesn_again'`) != events ||
-		f.row(`SELECT execution_state FROM computers WHERE id='comp_sesn_again'`)["execution_state"] != "ready" {
-		t.Fatal("a late report changed a binding, the computer or the Session's events")
+		computerRow["execution_state"] != "ready" || computerRow["cwd"] != "/Users/me/shop" {
+		t.Fatalf("after late prepared reports for an invalid and a closing binding: computer %v; a binding, the computer or the Session's events changed", computerRow)
 	}
 }
 
