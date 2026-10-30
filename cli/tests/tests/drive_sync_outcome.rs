@@ -705,6 +705,9 @@ async fn a_cancel_while_the_running_report_waits_for_its_sync_point_ends_the_com
     );
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while port.running.load(Ordering::SeqCst) == 0 {
+        if let Ok(report) = reports.try_recv() {
+            panic!("a report before the running report's sync point: {report}");
+        }
         assert!(
             tokio::time::Instant::now() < deadline,
             "the running report's sync point"
