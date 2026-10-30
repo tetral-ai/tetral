@@ -163,7 +163,7 @@ func TestMigrateSchemaCreatesStableReasoningMessageAssociation(t *testing.T) {
 }
 
 func TestPostgreSQLSchemaVersionOneChecksumIsGolden(t *testing.T) {
-	const want = "4420d56f8afbff683fc512059a6c0a47229256c6fe1a41ff90fd14e3617c2169"
+	const want = "3457a2e30d407ca5402dd0cade7bc35affc6c61aaa2afbca4de40e0953b6ae95"
 	if storage.PostgreSQLSchemaVersionOneChecksum != want {
 		t.Fatalf("PostgreSQLSchemaVersionOneChecksum = %q, want %q", storage.PostgreSQLSchemaVersionOneChecksum, want)
 	}
@@ -516,11 +516,11 @@ func TestMigrateSchemaRequiresGitHubResourceCredential(t *testing.T) {
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO session_github_repository_resources (
 			workspace_id, session_id, resource_id, url, mount_path, checkout_type, checkout_ref,
-			authorization_token_encrypted
+			authorization_token_encrypted, computer_id, path
 		) VALUES (
 			'wksp_github_credential', 'sesn_github_credential', 'sesrsc_token',
 			'https://github.com/tetral-ai/tetral', '/workspace/tetral', NULL, NULL,
-			decode('0102', 'hex')
+			decode('0102', 'hex'), 'comp_sesn_github_credential', '/workspace/tetral'
 		)`); err != nil {
 		t.Fatalf("insert github resource with token: %v", err)
 	}
@@ -535,10 +535,10 @@ func TestMigrateSchemaRequiresGitHubResourceCredential(t *testing.T) {
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO session_github_repository_resources (
 			workspace_id, session_id, resource_id, url, mount_path, checkout_type, checkout_ref,
-			authorization_token_encrypted
+			authorization_token_encrypted, computer_id, path
 		) VALUES (
 			'wksp_github_credential', 'sesn_github_credential', 'sesrsc_nulltoken',
-			'https://github.com/tetral-ai/nulltoken', '/workspace/nulltoken', NULL, NULL, NULL
+			'https://github.com/tetral-ai/nulltoken', '/workspace/nulltoken', NULL, NULL, NULL, 'comp_sesn_github_credential', '/workspace/nulltoken'
 		)`); err == nil {
 		t.Fatal("GitHub resource accepted a NULL authorization token")
 	}

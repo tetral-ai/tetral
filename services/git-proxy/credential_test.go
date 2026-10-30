@@ -457,10 +457,19 @@ func (e *repositoryTokenTestEnv) seedRepositoryCiphertext(t *testing.T, sessionI
 		t.Fatalf("seed session resource: %v", err)
 	}
 	if _, err := e.admin.ExecContext(context.Background(),
+		`INSERT INTO computers (
+			workspace_id, session_id, id, kind, environment_id, working_directory, networking, drive_exclude, association_state, execution_state
+		) VALUES ($1, $2, 'comp_' || $2, 'cloud', 'env_' || $2, '/workspace', '{"type":"unrestricted"}', '[]', 'attached', 'waiting')
+		ON CONFLICT DO NOTHING`,
+		string(workspace.DefaultID), sessionID,
+	); err != nil {
+		t.Fatalf("seed computer: %v", err)
+	}
+	if _, err := e.admin.ExecContext(context.Background(),
 		`INSERT INTO session_github_repository_resources (
 			workspace_id, session_id, resource_id, url, mount_path, checkout_type, checkout_ref,
-			authorization_token_encrypted
-		) VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6)`,
+			authorization_token_encrypted, computer_id, path
+		) VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, 'comp_' || $2, $5)`,
 		string(workspace.DefaultID), sessionID, resourceID, repoURL, "/workspace/"+resourceID, encrypted,
 	); err != nil {
 		t.Fatalf("seed github repository resource: %v", err)

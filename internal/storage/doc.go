@@ -67,6 +67,7 @@
 //   - postgresql_runner_discovery_schema.go (Job Runner cross-workspace binding-discovery policies and functions)
 //   - postgresql_auth_schema.go (Auth policy and token tables, lookup/lock/prune functions, key and grant triggers)
 //   - postgresql_instance_schema.go (instance, credential, idempotency, connection, replay, protocol-error and instruction tables; the connection key lookup and instruction pressure functions and their policies)
+//   - postgresql_computer_schema.go (computer and computer idempotency tables)
 //   - postgresql_drive_schema.go (drive, file, version, change, content, blob cleanup, usage and upload budget tables)
 //   - postgresql_cleanup_schema.go (Cleanup scheduling cursor, global due index, discovery policy and function)
 //   - postgresql_retention_schema.go (feed retention metadata, age and head indexes, owner-checked retention policies and functions)
@@ -155,15 +156,19 @@
 //	instance_idempotency_records                                                                                            connection key lookup function)
 //	instance_connections / connection_upstream_messages /  computer-hub through internal/instance and internal/hubflow      computer-hub (the instruction pressure
 //	connection_protocol_errors / connection_instructions                                                                    function across Workspaces)
+//	computers / computer_idempotency_records               api through internal/computer (Session creation, the add route)  api Session and computer reads,
+//	                                                                                                                         instance computer_count; computer-hub
 //
 // UPDATE-WITH: the table DDL in postgresql_schema.go,
 // postgresql_runtime_schema.go, postgresql_auth_schema.go,
-// postgresql_instance_schema.go, postgresql_cleanup_schema.go and
-// postgresql_retention_schema.go; the writer/reader services under
+// postgresql_instance_schema.go, postgresql_computer_schema.go,
+// postgresql_cleanup_schema.go and postgresql_retention_schema.go; the
+// writer/reader services under
 // services/bridge, services/job-runner, services/api, services/sandbox,
 // services/queue, services/cleanup, services/event-stream, services/git-proxy,
 // services/gateway, services/auth and services/computer-hub; the shared writers
 // in internal/runtimecontrol, internal/sessioneventwrite, internal/sessionevent,
-// internal/mcpmanifest, internal/session, internal/auth, internal/instance and
-// internal/hubflow; and the enforced grants in database/roles.json.
+// internal/mcpmanifest, internal/session, internal/auth, internal/instance,
+// internal/computer and internal/hubflow; and the enforced grants in
+// database/roles.json.
 package storage

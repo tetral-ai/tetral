@@ -1416,6 +1416,8 @@ const (
 		checkout_type TEXT,
 		checkout_ref TEXT,
 		authorization_token_encrypted BYTEA NOT NULL,
+		computer_id TEXT NOT NULL,
+		path TEXT NOT NULL,
 		PRIMARY KEY (workspace_id, session_id, resource_id),
 		FOREIGN KEY (workspace_id, session_id, resource_id) REFERENCES session_resources(workspace_id, session_id, resource_id) ON DELETE CASCADE,
 		CONSTRAINT session_github_repository_checkout_shape CHECK (
@@ -2115,6 +2117,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"comment_queue_jobs_ready_at", commentPostgreSQLQueueJobsReadyAt},
 	}...)
 	steps = append(steps, postgresqlInstanceTableSteps()...)
+	steps = append(steps, postgresqlComputerTableSteps()...)
 	steps = append(steps, postgresqlDriveTableSteps()...)
 	steps = append(steps, postgresqlCleanupScheduleTableSteps()...)
 	steps = append(steps, []postgresqlSchemaStep{

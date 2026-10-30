@@ -19,6 +19,12 @@ func TestSandboxLifecycleRunnersDeliverGitIdentityFromDurableResources(t *testin
 	// The input boundary is persisted resources. After this fixture, only
 	// production code creates/leases jobs, freezes/reads snapshots and builds
 	// provider requests. RunOnce controls scheduling, not the intermediate data.
+	if _, err := adminDB.Exec(`INSERT INTO computers (
+			workspace_id, session_id, id, kind, environment_id, working_directory, networking, drive_exclude, association_state, execution_state
+		) VALUES ('ws_execution_store', 'sesn_execution_store', 'comp_execution_store', 'cloud', 'env_execution_store',
+			'/workspace', '{"type":"unrestricted"}', '[]', 'attached', 'waiting')`); err != nil {
+		t.Fatal(err)
+	}
 	for _, repo := range []struct {
 		id, path    string
 		name, email any
@@ -33,9 +39,9 @@ func TestSandboxLifecycleRunnersDeliverGitIdentityFromDurableResources(t *testin
 		}
 		if _, err := adminDB.Exec(`INSERT INTO session_github_repository_resources (
 			workspace_id, session_id, resource_id, url, mount_path,
-			git_identity_name, git_identity_email, authorization_token_encrypted
+			git_identity_name, git_identity_email, authorization_token_encrypted, computer_id, path
 		) VALUES ('ws_execution_store', 'sesn_execution_store', $1,
-			'https://github.com/tetral-ai/' || $1, $2, $3, $4, 'encrypted-token')`,
+			'https://github.com/tetral-ai/' || $1, $2, $3, $4, 'encrypted-token', 'comp_execution_store', $2)`,
 			repo.id, repo.path, repo.name, repo.email); err != nil {
 			t.Fatal(err)
 		}
