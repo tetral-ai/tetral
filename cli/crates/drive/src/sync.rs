@@ -119,8 +119,13 @@ pub(crate) enum Message {
         reply: oneshot::Sender<Vec<Notice>>,
     },
     /// The drives the binding binds, as a preparation or a `session.drives`
-    /// mounts them.
-    Bind(Vec<Bound>),
+    /// mounts them, and each one's mount; the failures. One step, so that a
+    /// check never finds a bound drive whose mount is not yet tried and
+    /// leaves it out of its command.
+    BindAndMount {
+        bound: Vec<Bound>,
+        reply: oneshot::Sender<Vec<Failure>>,
+    },
     /// The drives the binding binds.
     Bound(oneshot::Sender<Vec<Bound>>),
     /// The bound drives not mounted.
@@ -339,9 +344,8 @@ impl DriveSync {
     /// Mounts each drive of `bound` that is not mounted, as a preparation
     /// or a `session.drives` does; the failures that are new.
     pub async fn mount_drives(&self, bound: Vec<Bound>) -> Vec<Failure> {
-        self.send(Message::Bind(bound.clone()));
         let (reply, answer) = oneshot::channel();
-        self.send(Message::CheckMounts { bound, reply });
+        self.send(Message::BindAndMount { bound, reply });
         let failures = answer.await.unwrap_or_default();
         let (reply, answer) = oneshot::channel();
         self.send(Message::Judge { failures, reply });
@@ -696,9 +700,11 @@ impl Owner {
             Message::Notices { task_id, reply } => {
                 let _ = reply.send(self.notices.remove(&task_id).unwrap_or_default());
             }
-            Message::Bind(bound) => {
+            Message::BindAndMount { bound, reply } => {
                 self.binds.store(!bound.is_empty(), Ordering::Release);
-                self.bound = bound;
+                self.bound = bound.clone();
+                let failures = self.check_mounts(bound);
+                let _ = reply.send(failures);
             }
             Message::Bound(reply) => {
                 let _ = reply.send(self.bound.clone());
