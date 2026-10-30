@@ -195,10 +195,18 @@ struct Env {
     reports: mpsc::UnboundedReceiver<Value>,
     port: Arc<Port>,
     owner: Arc<dyn SessionHandle>,
+    /// The Sessions' drive context, and the one a held context publishes.
+    drives: (watch::Sender<Option<Arc<DriveContext>>>, Arc<DriveContext>),
 }
 
 impl Env {
     fn new() -> Env {
+        Env::with_drives(true)
+    }
+
+    /// An `Env` whose drive context is published only when `published`;
+    /// [`Env::publish`] publishes it later.
+    fn with_drives(published: bool) -> Env {
         let seams = &SEAMS.1;
         let directory = tempfile::tempdir().unwrap();
         let canonical = directory.path().canonicalize().unwrap();
@@ -224,13 +232,14 @@ impl Env {
             free_space: Arc::new(|| Ok(u64::MAX)),
         })
         .unwrap();
-        let (_, drives) = watch::channel(Some(Arc::new(DriveContext {
+        let context = Arc::new(DriveContext {
             transfer,
             cache,
             mounting: Mounting::Fuse,
             registry: Arc::new(NoRegistry),
             clock,
-        })));
+        });
+        let (publish, drives) = watch::channel(published.then(|| context.clone()));
         let factory = Factory::new(
             Shared {
                 paths: Arc::new(RootPaths {
@@ -270,7 +279,13 @@ impl Env {
             reports,
             port,
             owner,
+            drives: (publish, context),
         }
+    }
+
+    /// Publishes the drive context a held `Env` keeps back.
+    fn publish(&self) {
+        let _ = self.drives.0.send(Some(self.drives.1.clone()));
     }
 
     fn advance(&self, step: Duration) {
@@ -597,4 +612,36 @@ async fn a_close_of_a_failed_binding_abandons_the_pending_changes_of_its_sync_st
         json!([{ "request_message_id": "close_1", "drive_id": DRIVE, "paths": ["f"], "paths_total": 1 }])
     );
     assert!(!directory.exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_close_admitted_while_the_drive_sync_opens_waits_for_the_open_and_leaves_no_file() {
+    let _serial = SERIAL.lock().await;
+    let mut env = Env::with_drives(false);
+    let seams = &SEAMS.1;
+    let opening = seams.count("drive_sync.opening");
+    let project = env.project.clone();
+    env.prepare("prep_a", "bind_a", &project);
+    // The open waits for the drive context, which the test holds back.
+    seams.wait_for_count("drive_sync.opening", opening + 1);
+    env.close("conn_a", "close_a", "bind_a");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    env.entries().await;
+    assert!(
+        env.reports.try_recv().is_err(),
+        "the close waits for the open"
+    );
+
+    env.publish();
+    let closed = loop {
+        let report = env.report().await;
+        if report["request_message_id"] == "close_a" {
+            break report;
+        }
+    };
+    assert_eq!(closed["status"], "closed", "{closed}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    env.entries().await;
+    let session = env.root.join("sessions").join(SESSION);
+    assert!(!session.exists(), "no file of the Session is left");
 }

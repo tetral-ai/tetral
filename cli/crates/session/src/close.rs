@@ -158,9 +158,13 @@ impl<S: TaskStarter> SessionOwner<S> {
 
     /// Whether every managed descendant the close waits for is gone: the
     /// tasks, probes and clones of the binding, or of the whole Session for
-    /// a late close, and no `session.drives` of the binding is being
-    /// handled.
+    /// a late close, no `session.drives` of the binding is being handled,
+    /// and no drive sync is being opened, which would write the Session's
+    /// directory again.
     fn descendants_gone(&self, kind: &Kind) -> bool {
+        if matches!(self.drive_sync, DriveSyncSlot::Opening(_)) {
+            return false;
+        }
         let Some(record) = &self.record else {
             return self.probes.is_empty() && self.clones.is_empty() && self.unconfirmed.is_empty();
         };

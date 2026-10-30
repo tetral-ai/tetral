@@ -58,8 +58,9 @@ that is no longer the binding's is discarded.
 - A close of the binding on the current connection prevents its staged
   starts and `session.drives`, has every running task of the binding end as
   at a cancel, and waits until the binding's tasks, probes and clones are
-  gone and a `session.drives` being handled has handed its `applied` report
-  to the outbox; then the final upload of the Session's drives, ending 30
+  gone, a `session.drives` being handled has handed its `applied` report
+  to the outbox and the Session's drive sync is no longer being opened,
+  since its open writes `sessions/<session_id>/`; then the final upload of the Session's drives, ending 30
   seconds after the close's admission, the drives' unmount, the deletion of
   the repositories, the tasks' temporary directories and
   `sessions/<session_id>/`, and the `closed` report with the abandoned
@@ -142,7 +143,9 @@ that is no longer the binding's is discarded.
 - A preparation that binds drives mounts them before its clones, through the
   Session's drive sync, which the owner opens from
   `sessions/<session_id>/sync-state.db` at the first such preparation once
-  the App Server's drive context exists (`drives::DriveContext`). The
+  the App Server's drive context exists (`drives::DriveContext`); each open
+  is counted as the test seam counter `drive_sync.opening`, and one whose
+  context never comes fails as a sync state that cannot be opened. The
   report lists the new mount failures in `drive_mount_failures`, and the
   drive sync keeps their texts when the report is built. A sync state that
   cannot be opened fails every bound drive with its error, once per drive

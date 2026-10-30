@@ -269,11 +269,15 @@ impl<S: TaskStarter> SessionOwner<S> {
         let reports = preparation.reports.clone();
         let mailbox = self.mailbox.clone();
         tokio::spawn(async move {
+            state::seams::count("drive_sync.opening");
             let context = loop {
                 if let Some(context) = contexts.borrow().clone() {
                     break context;
                 }
                 if contexts.changed().await.is_err() {
+                    // The owner, and a close, wait for this answer.
+                    let ended = Err("sync state: the App Server is stopping".to_owned());
+                    let _ = mailbox.send(SessionMessage::DriveSyncOpened(ended));
                     return;
                 }
             };
