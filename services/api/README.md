@@ -138,7 +138,10 @@ Environment's value at addition. Its repositories are stored as
 `github_repository` resource rows with `computer_id` and the resolved `path`
 (`mount_path`, or `<working_directory>/<name>`) and are fixed: `POST
 /resources` with a `github_repository` and `DELETE` of a repository resource
-answer `400`; token rotation stays allowed.
+answer `400`; token rotation stays allowed. Two repositories of one computer
+with the same path, or with URLs that name the same repository (owner and
+name compared case-insensitively, a trailing `.git` ignored), answer `400`;
+two computers of one Session may hold the same repository.
 
 `POST /v1/sessions/{session_id}/computers` adds one entry to an idle Session
 and answers `201` with the computer object. It requires `Idempotency-Key`
