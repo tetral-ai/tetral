@@ -1988,8 +1988,8 @@ func (f *machineMessageFixture) nonStartingRequests() []*agentruntimev1.AcceptNo
 // CM-15, Engine side: an addition while the Session runs is refused and
 // writes no message; one to an idle Session writes one added message, which
 // Job Runner accepts with no binding, so no Runtime is placed and no run
-// starts. A message still queued or accepted never makes the next addition
-// look busy.
+// starts. A message still queued or accepted never makes the next addition or
+// the archive of the main thread look busy.
 func TestComputerAdditionMessageNeverStartsARun(t *testing.T) {
 	f := newMachineMessageFixture(t, "sesn_mmsg_add")
 	f.setStatus("running")
@@ -2032,6 +2032,10 @@ func TestComputerAdditionMessageNeverStartsARun(t *testing.T) {
 	}
 	if code, _ := f.add("add-third-while-accepted"); code != http.StatusCreated {
 		t.Fatalf("addition with accepted messages = %d; want 201", code)
+	}
+	store := session.NewPostgreSQLSessionStore(f.api, session.WithPageTokenSecret([]byte("machine-message-secret-12345678")))
+	if thread, err := store.ArchiveThread(f.ctx, workspace.DefaultID, f.sessionID, f.mainID, time.Now().UTC()); err != nil || thread.ArchivedAt == nil {
+		t.Fatalf("main thread archive with a queued and two accepted messages = %+v, %v; want archived", thread, err)
 	}
 }
 
