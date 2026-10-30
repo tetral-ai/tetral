@@ -113,7 +113,7 @@ unauthenticated.
 | Memory Stores | Live create/list/get/update/archive/delete, memory rows, and versions |
 | Files | All five `/v1/files` routes live when a BlobStore is configured; without one, every `/v1/files` route returns 501 — not only uploads |
 | Skills | All nine `/v1/skills` routes live when a BlobStore is configured; without one, every `/v1/skills` route returns 501 — not only uploads |
-| Drives | The `/v1/drives` routes of the developer drive API, except `drives.skills.*`, live when a BlobStore is configured; without one they are not registered |
+| Drives | All `/v1/drives` routes of the developer drive API live when a BlobStore is configured; without one they are not registered |
 | Models | Live `GET /v1/models` and `GET /v1/models/{model_id}`, served from the in-code catalog |
 | API keys | Owned by the `auth` service |
 | Health (`GET /health`) | Live (200), unauthenticated |
@@ -127,7 +127,7 @@ for an API key, `user_actor` or `service_account_actor` for a direct token.
 
 - Lists take `limit` (default 20, above 100 treated as 100) and `page`, and
   return `{data, next_page}`: drives by creation, files by UTF-8 byte order of
-  `path`, a path's versions oldest first. The page token is signed with the API
+  `path`, Skills by UTF-8 byte order of `name`, a path's versions oldest first. The page token is signed with the API
   page-token secret and binds the Workspace, the list, the drive and its
   filter. `drives.changes.list` takes `after` (whole commits), `session_id` and
   `limit` 1 to 1,000, and returns `{data, has_more}`.
@@ -135,6 +135,14 @@ for an API key, `user_actor` or `service_account_actor` for a direct token.
   bytes with `413` before it takes from the upload budget, then takes the
   budget (`429 rate_limit_error` with `Retry-After` when refused), then streams
   the `file` part into the drive and writes it in one `all_or_nothing` commit.
+- `drives.skills.upload` (`internal/httpapi/drive_skill_handler.go`) refuses
+  a declared `Content-Length` above 32,505,856 bytes the same way, then takes
+  the budget, stages the one part `archive` (at most 30,000,000 bytes) and
+  checks it with `internal/drive/skillpackage`, the only place Engine checks
+  `SKILL.md`. A valid archive replaces `<skills_path><name>/` in one
+  `all_or_nothing` commit. `drives.skills.list` and `drives.skills.retrieve`
+  check each Skill's `SKILL.md` when they read it and report a failed rule in
+  `error`.
 - `drives.changes.stream` is SSE: each pod holds one LISTEN connection on
   `tetral_drive_changed`, opened when the router is built and closed with it;
   it reconnects after a failure, which writes

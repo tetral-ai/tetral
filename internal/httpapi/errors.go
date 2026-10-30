@@ -9,6 +9,7 @@ import (
 	agentErrors "github.com/tetral-ai/tetral/internal/agent"
 	authErrors "github.com/tetral-ai/tetral/internal/auth"
 	driveErrors "github.com/tetral-ai/tetral/internal/drive"
+	"github.com/tetral-ai/tetral/internal/drive/skillpackage"
 	environmentErrors "github.com/tetral-ai/tetral/internal/environment"
 	fileErrors "github.com/tetral-ai/tetral/internal/files"
 	instanceErrors "github.com/tetral-ai/tetral/internal/instance"
@@ -212,6 +213,7 @@ func classifyError(err error) errorClassification {
 	// Drive errors carry the answers of the developer drive API.
 	var driveRejected *driveErrors.CommitRejectedError
 	var driveRefused *driveErrors.UploadRefusedError
+	var skillInvalid *skillpackage.ValidationError
 
 	// Sandbox-layer error types are internal classifications only; HTTP
 	// responses must use existing public Engine error types and fixed safe
@@ -356,6 +358,10 @@ func classifyError(err error) errorClassification {
 		return classified(http.StatusGone, "drive_cursor_expired_error", "after is below the oldest change record the drive keeps")
 	case errors.Is(err, driveErrors.ErrContentTooLarge):
 		return classified(http.StatusRequestEntityTooLarge, "request_too_large", fmt.Sprintf("file exceeds the limit of %d bytes per file", driveErrors.MaxFileBytes))
+	case errors.Is(err, driveErrors.ErrSkillArchiveTooLarge):
+		return classified(http.StatusRequestEntityTooLarge, "request_too_large", driveErrors.ErrSkillArchiveTooLarge.Error())
+	case errors.As(err, &skillInvalid):
+		return classified(http.StatusBadRequest, "invalid_request_error", skillInvalid.Message)
 	case errors.As(err, &sandboxError):
 		return classifySandboxError(sandboxError)
 	default:

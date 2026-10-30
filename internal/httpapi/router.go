@@ -380,6 +380,7 @@ var driveLongRoutes = []string{
 	"POST /v1/drives/{drive_id}/files",
 	"GET /v1/drives/{drive_id}/files/content",
 	"GET /v1/drives/{drive_id}/versions/{version_id}/content",
+	"POST /v1/drives/{drive_id}/skills",
 }
 
 // registerDriveRoutes registers the developer drive API. The static usage
@@ -402,6 +403,10 @@ func registerDriveRoutes(r chi.Router, h *DriveHandler, sessionHandler *SessionH
 	registerPublicRoute(r, http.MethodGet, "/drives/{drive_id}/changes", h.listChanges, sessionHandler, opts, false)
 	registerPublicRoute(r, http.MethodGet, "/drives/{drive_id}/changes/stream", h.streamChanges, sessionHandler, opts, false)
 	registerPublicRoute(r, http.MethodPost, "/drives/{drive_id}/restore", h.restore, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodPost, "/drives/{drive_id}/skills", h.uploadSkill, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodGet, "/drives/{drive_id}/skills", h.listSkills, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodGet, "/drives/{drive_id}/skills/{name}", h.getSkill, sessionHandler, opts, false)
+	registerPublicRoute(r, http.MethodDelete, "/drives/{drive_id}/skills/{name}", h.deleteSkill, sessionHandler, opts, false)
 }
 
 func unsupportedV1SurfaceHandler(w http.ResponseWriter, r *http.Request) {
