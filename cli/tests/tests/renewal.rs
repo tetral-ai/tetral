@@ -477,11 +477,16 @@ fn reports_in_flight_held_back_or_submitted_across_the_switch_go_with_the_new_ke
         ),
         (&json!(RENEWED), &json!("true"), &json!(FIRST_CONNECTION))
     );
+    let answered = machine.seams.count("outbox.answered");
     answer_fault(engine, json!({"action": "release"}));
     send_data(engine, "[2]");
     wait_for_received(engine, "protocol-error", 3);
     tasks.terminal("task_switch");
     machine.advance(seconds(PAST_FIRST_RETRY));
+    // The held ACK, the 401, its attempt again and [2]'s answer.
+    machine
+        .seams
+        .wait_for_count("outbox.answered", answered + 4);
 
     let requests = engine.requests("protocol-error");
     let first = requests
@@ -501,6 +506,16 @@ fn reports_in_flight_held_back_or_submitted_across_the_switch_go_with_the_new_ke
         (&again[1]["credential_id"], &again[1]["status"]),
         (&json!(RENEWED), &json!(200))
     );
+    let acknowledged: Vec<&Value> = requests
+        .iter()
+        .filter(|request| request["credential_id"] == CREDENTIAL && request["status"] == 200)
+        .collect();
+    assert_eq!(acknowledged.len(), 1, "{requests:?}");
+    let sent = requests
+        .iter()
+        .filter(|request| request["body_sha256"] == acknowledged[0]["body_sha256"])
+        .count();
+    assert_eq!(sent, 1, "the report whose ACK was held is never sent again");
     let later = requests.last().unwrap();
     assert_eq!(
         (&later["credential_id"], &later["status"]),

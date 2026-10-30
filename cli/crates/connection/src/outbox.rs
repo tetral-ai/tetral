@@ -697,13 +697,15 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone)]
     enum Reply {
         Unavailable,
         LostAck,
         Refused,
         WrongAck,
         Ack,
+        /// The ACK, once the test notifies.
+        HeldAck(Arc<tokio::sync::Notify>),
     }
 
     /// An Engine that answers each report with the next scripted reply,
@@ -767,6 +769,10 @@ mod tests {
                             ),
                             Reply::WrongAck => (200, ack("r999")),
                             Reply::Ack => (200, ack(&message_id)),
+                            Reply::HeldAck(release) => {
+                                release.notified().await;
+                                (200, ack(&message_id))
+                            }
                         };
                         let response = format!(
                             "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
@@ -1172,6 +1178,33 @@ mod tests {
         let second = setup.engine.requests().last().unwrap().clone();
         assert_eq!(second.message_id(), "r2");
         assert_eq!(second.header("traceparent"), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ack_to_an_attempt_with_the_key_a_switch_replaced_acknowledges_the_report() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let setup = setup(vec![Reply::HeldAck(release.clone())]).await;
+        setup
+            .outbox
+            .connection_started(1, id("conn_a"), test_key(), false);
+        let report = setup.outbox.submit(protocol_error(&setup, "conn_a", None));
+        until(&setup, "the attempt with the old key", || {
+            setup.engine.requests().len() == 1
+        })
+        .await;
+        let renewed = protocol::bootstrap::Bootstrap::decode(
+            br#"{"server_url":"http://127.0.0.1:1","instance_id":"inst_a","credential_id":"cred_b","connection_key":"tetral_ck_b","expires_at":"2099-01-01T00:00:00Z"}"#,
+        )
+        .unwrap()
+        .connection_key;
+        setup.outbox.switch_started(id("conn_a"));
+        setup.outbox.switch_ended(id("conn_a"), renewed);
+        release.notify_one();
+        until(&setup, "the ACK", || {
+            setup.outcomes.of(report) == [ReportOutcome::Acked]
+        })
+        .await;
+        assert_eq!(setup.engine.requests().len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
