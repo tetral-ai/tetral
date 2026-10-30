@@ -75,6 +75,7 @@ type RuntimeInterruptDeliveryAuthority struct {
 
 type RuntimeCleanupFinalizer interface {
 	FinalizeRuntimeCleanup(context.Context, RuntimeJob) (RuntimeDeliveryResult, error)
+	FinalizeGoneRuntimeCleanup(context.Context, RuntimeJob) (RuntimeDeliveryResult, error)
 }
 
 type RuntimeCleanupDeliveryStore interface {
@@ -511,7 +512,7 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 				ErrorMessage: "cleanup finalizer is unavailable",
 			}, nil
 		}
-		return finalizer.FinalizeRuntimeCleanup(ctx, job)
+		return finalizer.FinalizeGoneRuntimeCleanup(ctx, job)
 	}
 	if plan.RecoveryPrepared {
 		activator, ok := d.Store.(RuntimeRecoveryActivationStore)

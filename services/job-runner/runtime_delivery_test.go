@@ -660,6 +660,10 @@ func (s *recordingRuntimeDeliveryStore) PrepareRuntimeInputRejection(_ context.C
 	return converted, nil
 }
 
+func (s *recordingRuntimeDeliveryStore) FinalizeGoneRuntimeCleanup(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
+	return s.FinalizeRuntimeCleanup(ctx, job)
+}
+
 func (s *recordingRuntimeDeliveryStore) FinalizeRuntimeCleanup(_ context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
 	s.cleanupJobs = append(s.cleanupJobs, job)
 	if s.cleanupResult.Status == "" {

@@ -30,15 +30,19 @@ func (s *PostgreSQLRuntimeDeliveryStore) cleanupTargetProvenGone(ctx context.Con
 	if !ok {
 		return false, nil
 	}
-	return prover.CleanupTargetProvenGone(ctx, tx, job, runtimecontrol.Binding{
-		BindingID:         claim.BindingID,
-		BindingGeneration: claim.BindingGeneration,
-		Namespace:         claim.Namespace,
-		PodName:           claim.PodName,
-		PodUID:            claim.PodUID,
-		PodIP:             claim.PodIP,
-		RuntimeProcessID:  claim.RuntimeProcessID,
-	})
+	return prover.CleanupTargetProvenGone(ctx, tx, job, claim.binding())
+}
+
+func (c cleanupSessionClaim) binding() runtimecontrol.Binding {
+	return runtimecontrol.Binding{
+		BindingID:         c.BindingID,
+		BindingGeneration: c.BindingGeneration,
+		Namespace:         c.Namespace,
+		PodName:           c.PodName,
+		PodUID:            c.PodUID,
+		PodIP:             c.PodIP,
+		RuntimeProcessID:  c.RuntimeProcessID,
+	}
 }
 
 type cleanupSessionClaim struct {
@@ -566,6 +570,18 @@ func cleanupHasNewerUnprocessedInputTx(ctx context.Context, tx *dbconnect.Tx, wo
 // Runtime binding. Sandbox resources outlive idle cleanup; Session deletion
 // records its own durable Sandbox release operation below.
 func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeCleanup(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
+	return s.finalizeRuntimeCleanup(ctx, job, false)
+}
+
+// FinalizeGoneRuntimeCleanup finalizes a cleanup whose Runtime pod is proven
+// gone. That is a pod loss, so before the binding is deleted its inputs go
+// back to Queue as the pod-loss repair hands them back; only one of the two
+// hands back a binding's inputs.
+func (s *PostgreSQLRuntimeDeliveryStore) FinalizeGoneRuntimeCleanup(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
+	return s.finalizeRuntimeCleanup(ctx, job, true)
+}
+
+func (s *PostgreSQLRuntimeDeliveryStore) finalizeRuntimeCleanup(ctx context.Context, job RuntimeJob, targetGone bool) (RuntimeDeliveryResult, error) {
 	if s == nil || s.Client == nil {
 		return RuntimeDeliveryResult{
 			Status:       RuntimeDeliveryRejected,
@@ -612,6 +628,11 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeCleanup(ctx context.Cont
 		}
 		if err := expireCleanupSandboxExecutionsTx(ctx, tx, loaded, now); err != nil {
 			return err
+		}
+		if targetGone && loaded.CleanupJobID != "" {
+			if _, err := runtimecontrol.HandBackRuntimeInputsTx(ctx, tx, loaded.WorkspaceID, loaded.SessionID, loaded.binding(), now); err != nil {
+				return err
+			}
 		}
 		if err := finalizeCleanupSessionTx(ctx, tx, loaded, now); err != nil {
 			return err
