@@ -1,14 +1,14 @@
 //! Drive sync reports of the rejections no sync point carries: the size of
-//! a report, one report per recorded task, a task named after a restart on
-//! a new connection, nothing sent again on another connection, and a
-//! report the ordinary budget refuses.
+//! a report, one report per recorded task, a background upload refused
+//! `413`, a task named after a restart on a new connection, nothing sent
+//! again on another connection, and a report the ordinary budget refuses.
 
 mod support;
 
 use std::sync::atomic::Ordering;
 
 use drive::report::{REPORT_MAX_BYTES, body};
-use drive::transfer::Binding;
+use drive::transfer::{Binding, Ended};
 use protocol::field::AbsolutePath;
 use protocol::id::{Id, SafeId};
 use protocol::ports::LONGEST_REPORT_MESSAGE_ID;
@@ -105,6 +105,37 @@ async fn one_commit_answer_gives_one_report_per_recorded_task() {
         );
         assert_eq!(report["drive_sync"]["committed"], 0);
     }
+}
+
+#[tokio::test]
+async fn a_background_upload_refused_413_gives_its_task_a_limit_report() {
+    let mut env = Env::new();
+    let session = env
+        .session("sess_a", drive::state::Write::default(), true)
+        .await;
+    // A background write of task 1, after its first sync point.
+    outcome(session.sync_point(Some(task(1)), Duration::ZERO, None)).await;
+    session.write("big", "large", 1).await;
+    session.task_exited(1);
+    let message = "a file holds at most 500000000 bytes";
+    env.call()
+        .await
+        .upload_ended(Ended::Decision(support::error_body(
+            "file_too_large",
+            message,
+            &[],
+        )));
+    support::eventually(|| env.reports.sent.lock().unwrap().len() == 1).await;
+    let report = env.reports.sent.lock().unwrap()[0].clone();
+    assert_eq!(report["task_id"], json!(task(1)));
+    let rejected = &report["drive_sync"]["rejected"];
+    assert_eq!(rejected.as_array().unwrap().len(), 1);
+    assert!(rejected[0]["path"].as_str().unwrap().ends_with("/big"));
+    assert_eq!(
+        (&rejected[0]["reason"], &rejected[0]["rule"]),
+        (&json!("limit"), &json!(message))
+    );
+    env.no_call(Duration::from_millis(150)).await;
 }
 
 #[tokio::test]
