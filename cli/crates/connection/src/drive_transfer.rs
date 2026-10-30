@@ -228,14 +228,14 @@ impl HttpDriveTransfer {
                 if let Some(held) = held {
                     break held;
                 }
-                wait(binding.changed()).await;
+                rebound(binding).await?;
             };
             let current = link.borrow_and_update().clone();
             if current.connection.as_ref() != Some(&held.connection_id) {
                 // The binding's connection ended: a rebind.
                 backoff.reset();
                 tokio::select! {
-                    () = wait(binding.changed()) => {}
+                    rebound = rebound(binding) => rebound?,
                     () = wait(link.changed()) => {}
                 }
                 continue;
@@ -258,7 +258,7 @@ impl HttpDriveTransfer {
             };
             let Some(answer) = answer else {
                 backoff.reset();
-                wait(binding.changed()).await;
+                rebound(binding).await?;
                 continue;
             };
             let raw = match answer {
@@ -317,9 +317,9 @@ impl HttpDriveTransfer {
                 }
                 ErrorCode::StaleConnection => {
                     self.refused(&held, error);
-                    wait(binding.changed()).await;
+                    rebound(binding).await?;
                 }
-                ErrorCode::StaleBinding => wait(binding.changed()).await,
+                ErrorCode::StaleBinding => rebound(binding).await?,
                 ErrorCode::CredentialRevoked
                     if {
                         let now = link.borrow();
@@ -331,7 +331,7 @@ impl HttpDriveTransfer {
                 }
                 code if code.status() == 401 || code == ErrorCode::InstanceUnavailable => {
                     self.refused(&held, error);
-                    wait(binding.changed()).await;
+                    rebound(binding).await?;
                 }
                 ErrorCode::ContentHashMismatch => return Err(Ended::ReRead),
                 ErrorCode::DriveCursorExpired => return Err(Ended::CursorExpired),
@@ -422,7 +422,17 @@ fn operation(endpoint: DriveTransferEndpoint) -> &'static str {
     }
 }
 
-/// Waits for a watch change; a closed channel never changes again.
+/// Waits for a change of the binding; once its drive sync has dropped the
+/// sender, the request ends.
+async fn rebound(binding: &mut BindingWatch) -> Result<(), Ended> {
+    binding.changed().await.map_err(|_| Ended::Permanent {
+        status: 0,
+        code: None,
+    })
+}
+
+/// Waits for a change of the link, which closes only at shutdown; a closed
+/// channel never changes again.
 async fn wait<E>(changed: impl std::future::Future<Output = Result<(), E>>) {
     if changed.await.is_err() {
         std::future::pending::<()>().await;

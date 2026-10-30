@@ -41,7 +41,8 @@ pub struct Binding {
 
 /// The drive sync's binding: `None` while it holds none, and a new value at
 /// each binding of a later preparation. Each attempt carries the value it
-/// holds then.
+/// holds then. A request that waits for a new binding ends once the drive
+/// sync has dropped the sender.
 pub type BindingWatch = watch::Receiver<Option<Binding>>;
 
 /// One request for `drive_id`.

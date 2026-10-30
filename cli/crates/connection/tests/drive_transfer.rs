@@ -842,7 +842,8 @@ async fn a_429_waits_its_retry_after_and_503s_wait_one_to_thirty_seconds_with_ji
 }
 
 #[tokio::test]
-async fn drive_access_denied_is_not_sent_again_and_stale_connection_tells_the_connection_owner() {
+async fn drive_access_denied_is_not_sent_again_stale_connection_tells_the_connection_owner_and_a_dropped_binding_ends_a_request()
+ {
     let mut harness = Harness::start().await;
     harness
         .stub
@@ -877,4 +878,22 @@ async fn drive_access_denied_is_not_sent_again_and_stale_connection_tells_the_co
     assert_eq!(seen[2].method, "GET");
     assert_eq!(seen[2].header("authorization"), Some("Bearer tetral_ck_a"));
     assert_eq!(sent.await.unwrap(), Outcome::Accepted);
+
+    // A request waiting for a new binding ends with its drive sync.
+    harness.stub.reply(json(
+        409,
+        &serde_json::json!({"code": "stale_binding", "message": "replaced"}),
+    ));
+    let sent = harness.send(Endpoint::Download, &Value::Null);
+    harness.stub.wait_for(4).await;
+    drop(std::mem::replace(
+        &mut harness.binding,
+        watch::Sender::new(None),
+    ));
+    let ended = tokio::time::timeout(Duration::from_secs(10), sent).await;
+    assert_eq!(
+        ended.expect("the request ends").unwrap(),
+        Outcome::Permanent(0, None)
+    );
+    assert_eq!(harness.stub.seen().len(), 4);
 }
