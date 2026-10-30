@@ -113,6 +113,15 @@ fn a_session_drives_waits_for_the_preparation_ack_is_ignored_while_closing_and_n
     wait_until("the ignored record", || {
         records(&machine.root, "drives.ignored_closing").len() == 1
     });
+    let ignored = &records(&machine.root, "drives.ignored_closing")[0];
+    assert_eq!(
+        (
+            &ignored["session.id"],
+            &ignored["binding.id"],
+            &ignored["message.id"]
+        ),
+        (&json!("sess_b"), &json!("bind_b"), &json!("drives_2"))
+    );
     machine.seams.release(PROBE_STARTED);
     assert_eq!(outcome(&engine, &close), closed());
     assert!(reports_for(&engine, "drives_2").is_empty());

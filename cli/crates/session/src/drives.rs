@@ -21,6 +21,7 @@ use drive::mount::{Bound, Failure, Mounting, Registry};
 use drive::state::{FILE_NAME, SyncState};
 use drive::transfer::Binding as DriveBinding;
 use drive::{DriveSync, DriveTransfer, SyncConfig};
+use observe::{Identity, TraceContext};
 use protocol::connection::{
     DriveAccess, DriveBinding as BoundDrive, DriveExclude, SessionOutcome, SessionStatus,
 };
@@ -129,6 +130,21 @@ impl<S: TaskStarter> SessionOwner<S> {
 
     /// A `session.drives` of the binding it names on its connection.
     pub(crate) fn drives(&mut self, drives: Drives) {
+        let Some(preparation) = &self.preparation else {
+            return;
+        };
+        let trace = drives.traceparent.as_deref().and_then(TraceContext::parse);
+        let session_id = preparation.session_id.to_id();
+        let _span = observe::correlation_span(
+            &[
+                (Identity::Session, session_id.as_str()),
+                (Identity::Binding, drives.binding_id.as_str()),
+                (Identity::Connection, drives.connection_id.as_str()),
+                (Identity::Message, drives.message_id.as_str()),
+            ],
+            trace.as_ref(),
+        )
+        .entered();
         let Some(binding) = self.current_binding().filter(|binding| {
             binding.binding_id == drives.binding_id && binding.connection_id == drives.connection_id
         }) else {
