@@ -270,6 +270,39 @@ func TestPreparedReportWritesEachFailureOnce(t *testing.T) {
 	}
 }
 
+// A user computer added while its instance's connection is online gets one
+// session.prepare, from the transaction that adds it; after the CLI's
+// prepared report through the session-status route, issuing again sends none.
+func TestOnlineUserComputerIsPreparedOnce(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	cli := f.userInstance(time.Time{})
+	stream := f.open(cli)
+	f.acceptReady(cli, stream, "ready_1")
+	f.userComputer(cli, "sesn_online")
+	issue := func() bool {
+		var issued bool
+		f.ownerTx(func(tx *dbconnect.Tx) error {
+			var err error
+			issued, err = computer.IssuePreparation(f.ctx, tx, f.ws, "sesn_online", "comp_sesn_online")
+			return err
+		})
+		return issued
+	}
+	if !issue() {
+		t.Fatal("the addition's issuance sent no session.prepare")
+	}
+	prepare, payload := prepareOn(t, stream)
+	acknowledged(t, f.report(cli, prepare, "status_1", prepared("/Users/me/shop")), "status_1")
+	if issue() {
+		t.Fatal("a prepared computer was prepared again")
+	}
+	computerRow := f.row(`SELECT execution_state,binding_id FROM computers WHERE id='comp_sesn_online'`)
+	if prepares := f.count(`SELECT count(*) FROM connection_instructions WHERE type='session.prepare'`); prepares != 1 ||
+		computerRow["execution_state"] != "ready" || computerRow["binding_id"] != payload.BindingID {
+		t.Fatalf("after the prepared report: %d session.prepare instructions, computer %v; want 1 and ready on %s", prepares, computerRow, payload.BindingID)
+	}
+}
+
 // CM-25, Engine side: a binding left preparing for 10 minutes of the test
 // clock stays preparing and then takes a prepared report, or a failed one.
 func TestPreparationWaitsWithoutATimeout(t *testing.T) {

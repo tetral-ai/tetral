@@ -364,8 +364,7 @@ func TestSessionComputerRepositoriesAreFixed(t *testing.T) {
 
 // A Session created with a user computer whose instance's connection is
 // already online stores exactly one session.prepare in the creation
-// transaction, for the computer's new preparing binding; once its prepared
-// report is stored, another issuance sends none.
+// transaction, for the computer's new preparing binding.
 func TestSessionCreationPreparesAnOnlineUserComputer(t *testing.T) {
 	if os.Getenv(storagetest.EnvTestDatabaseURL) == "" {
 		t.Skip(storagetest.EnvTestDatabaseURL + " is not set")
@@ -439,28 +438,6 @@ func TestSessionCreationPreparesAnOnlineUserComputer(t *testing.T) {
 	if len(envelopes) != 1 || json.Unmarshal([]byte(envelopes[0]), &envelope) != nil || envelope.Payload.SessionID != created.ID ||
 		envelope.Payload.Cwd != "/Users/me/shop" || user.ExecutionState != "preparing" || user.BindingID == nil || *user.BindingID != envelope.Payload.BindingID {
 		t.Fatalf("creation stored %v for computer %+v; want one session.prepare of its preparing binding", envelopes, user)
-	}
-
-	inTx(func(tx *dbconnect.Tx) error {
-		binding, err := computer.LockPreparation(ctx, tx, workspace.DefaultID, connectionID, created.ID, envelope.Payload.BindingID, envelope.MessageID)
-		if err != nil {
-			return err
-		}
-		now, err := instance.Now(ctx, tx)
-		if err != nil {
-			return err
-		}
-		if _, err := computer.StoreReport(ctx, tx, workspace.DefaultID, binding, computer.Report{Prepared: true, CWD: "/Users/me/shop"}, now); err != nil {
-			return err
-		}
-		issued, err := computer.IssuePreparation(ctx, tx, workspace.DefaultID, created.ID, user.ID)
-		if err == nil && issued {
-			t.Error("a prepared computer was prepared again")
-		}
-		return err
-	})
-	if envelopes := prepares(); len(envelopes) != 1 {
-		t.Fatalf("session.prepare instructions after the report = %d; want 1", len(envelopes))
 	}
 }
 
