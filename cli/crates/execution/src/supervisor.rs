@@ -984,6 +984,8 @@ impl Supervisor {
                         {
                             self.start = Some(state::seams::now());
                             self.context.activity.exec_started();
+                            // The exit may have been observed first.
+                            self.exec_exited();
                             self.find_leader(pid);
                             bytes = rest;
                         }
@@ -1489,7 +1491,6 @@ impl Supervisor {
         }
     }
 
-    /// The shell's exit has been observed: every waiting reply is made.
     /// An `exec_command` whose command started has exited, at the exit's
     /// time.
     fn exec_exited(&self) {
@@ -1498,6 +1499,7 @@ impl Supervisor {
         }
     }
 
+    /// The shell's exit has been observed: every waiting reply is made.
     fn exited(&mut self) {
         for waiter in std::mem::take(&mut self.waiters) {
             self.reply_waiter(waiter);
