@@ -5,11 +5,13 @@
 //! change is accepted, rejected or faulted, or at its end time, and then
 //! cancels every upload and commit of those drives.
 //!
-//! In abandon mode every covered change still pending is then abandoned:
-//! its `lost_changes` entries go to the Connection owner, and once they are
-//! written its pending row, the drive's stored commit and its content file
-//! go in one transaction, its path taking the drive's version; nothing of
-//! those drives is uploaded or committed until they are mounted again. In
+//! In abandon mode every change of those drives still pending, one
+//! recorded after the start included, is then abandoned: its `lost_changes`
+//! entries go to the Connection owner, and once they are written its
+//! pending row and the drive's stored commit go in one transaction, its
+//! path taking the drive's version, and its content file is removed after
+//! it; nothing of those drives is uploaded or committed until they are
+//! mounted again. In
 //! keep mode the changes stay pending; a stored commit is sent again when
 //! the binding becomes current on a new connection, or at the next start.
 //! A released final upload ends at once and cancels nothing: its uploads
@@ -240,8 +242,9 @@ impl Owner {
         self.sync_points_progress().await;
     }
 
-    /// Abandons the covered changes still pending once the Connection owner
-    /// has kept their entries.
+    /// Abandons every pending change of the covered drives, one recorded
+    /// after the start included, once the Connection owner has kept their
+    /// entries.
     async fn abandon(
         &mut self,
         upload: &Final,
@@ -249,10 +252,12 @@ impl Owner {
         connection: &dyn ConnectionPort,
     ) -> Vec<LostChange> {
         self.closed.extend(upload.drives.iter().cloned());
-        let mut abandoned: Vec<Key> = upload
-            .covered
-            .iter()
-            .filter(|key| self.state.tables().pending_changes.contains_key(*key))
+        let mut abandoned: Vec<Key> = self
+            .state
+            .tables()
+            .pending_changes
+            .keys()
+            .filter(|(drive, _)| upload.drives.contains(drive))
             .cloned()
             .collect();
         abandoned.sort();

@@ -81,6 +81,12 @@ async fn removed_and_read_only_drives_upload_first_and_abandon_what_is_held_at_3
         assert!(current_device(&point(&session, drive)).unwrap().is_some());
     }
     assert!(!handling.is_finished());
+    // A change written during the final upload is abandoned with the rest.
+    let late = point(&session, support::DRIVE).join("g");
+    tokio::task::spawn_blocking(move || std::fs::write(late, "late"))
+        .await
+        .unwrap()
+        .unwrap();
 
     env.advance(Duration::from_secs(30)).await;
     let Applied {
@@ -93,8 +99,10 @@ async fn removed_and_read_only_drives_upload_first_and_abandon_what_is_held_at_3
         .expect("not stopped");
     drop(puts);
     assert!(failures.is_empty(), "{failures:?}");
-    let entry = |drive: &str| json!({ "request_message_id": "drives_1", "drive_id": drive, "paths": ["f"], "paths_total": 1 });
-    let expected = json!([entry(support::DRIVE), entry(OTHER)]);
+    let expected = json!([
+        { "request_message_id": "drives_1", "drive_id": support::DRIVE, "paths": ["f", "g"], "paths_total": 2 },
+        { "request_message_id": "drives_1", "drive_id": OTHER, "paths": ["f"], "paths_total": 1 },
+    ]);
     assert_eq!(serde_json::to_value(&lost_changes).unwrap(), expected);
     assert_eq!(
         serde_json::to_value(&*keeper.0.lock().unwrap()).unwrap(),
