@@ -1,8 +1,8 @@
 //! `session.close` of a Session that binds a drive: the real Session binding
 //! owner of a `Factory`, its real drive sync with a FUSE mount, the real
 //! directory probe of a `test-seams` `tetral`, a stub `DriveTransfer` that
-//! holds every upload, a stub connection port that keeps `lost_changes`, and
-//! a drive clock the test moves.
+//! holds every upload until the test answers it, a stub connection port that
+//! keeps `lost_changes`, and a drive clock the test moves.
 #![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
@@ -15,7 +15,8 @@ use drive::cache::{CacheConfig, ContentCache};
 use drive::mount::{Mounting, Registry};
 use drive::mountinfo::current_device;
 use drive::transfer::{
-    Commit, ContentSink, Download, DriveTransfer, ListChanges, ListFiles, Request, Transfer, Upload,
+    Commit, ContentSink, Download, DriveTransfer, Ended, ListChanges, ListFiles, Request, Transfer,
+    Upload,
 };
 use execution::cleanup::Leftovers;
 use protocol::connection::LostChange;
@@ -34,10 +35,16 @@ use session::drives::DriveContext;
 use session::{Factory, NoTasks, RootPaths, Shared, Times, ToolContext};
 use state::clock::Clock;
 use tetral_tests::seams::{SOCKET_VARIABLE, Seams};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 const SESSION: &str = "sess_a";
 const DRIVE: &str = "drive_a";
+
+/// A held upload: its hash, and the way to answer it.
+type HeldUpload = (
+    String,
+    oneshot::Sender<Result<UploadContentResponse, Ended>>,
+);
 
 /// The seam harness of this test process, which counts `sync_state.write`.
 static SEAMS: LazyLock<(tempfile::TempDir, Seams)> = LazyLock::new(|| {
@@ -51,9 +58,9 @@ static SEAMS: LazyLock<(tempfile::TempDir, Seams)> = LazyLock::new(|| {
 /// The tests share the process's counters, so they run one at a time.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Lists an empty drive and holds every upload and commit; each upload's
-/// hash is told to the test.
-struct Stub(mpsc::UnboundedSender<String>);
+/// Lists an empty drive and holds every commit, and every upload until the
+/// test answers it.
+struct Stub(mpsc::UnboundedSender<HeldUpload>);
 
 impl DriveTransfer for Stub {
     fn list_files(&self, _: Request<ListFiles>) -> Transfer<'_, ListFilesResponse> {
@@ -67,8 +74,16 @@ impl DriveTransfer for Stub {
     }
 
     fn upload_content(&self, request: Request<Upload>) -> Transfer<'_, UploadContentResponse> {
-        let _ = self.0.send(request.body.sha256.as_str().to_owned());
-        Box::pin(std::future::pending())
+        let (answer, answered) = oneshot::channel();
+        let _ = self
+            .0
+            .send((request.body.sha256.as_str().to_owned(), answer));
+        Box::pin(async move {
+            match answered.await {
+                Ok(answer) => answer,
+                Err(_) => std::future::pending().await,
+            }
+        })
     }
 
     fn commit(&self, _: Request<Commit>) -> Transfer<'_, CommitResponse> {
@@ -175,7 +190,7 @@ struct Env {
     root: PathBuf,
     project: PathBuf,
     nanos: Arc<AtomicU64>,
-    uploads: mpsc::UnboundedReceiver<String>,
+    uploads: mpsc::UnboundedReceiver<HeldUpload>,
     reports: mpsc::UnboundedReceiver<Value>,
     port: Arc<Port>,
     owner: Arc<dyn SessionHandle>,
@@ -334,7 +349,7 @@ async fn a_close_stopped_by_the_connections_end_abandons_its_changes_once_under_
 
     // The close's final upload holds the content upload of `f`.
     env.close("conn_a", "close_1", "bind_a");
-    tokio::time::timeout(Duration::from_secs(30), env.uploads.recv())
+    let (hash, held) = tokio::time::timeout(Duration::from_secs(30), env.uploads.recv())
         .await
         .expect("f's upload within 30 s")
         .unwrap();
@@ -372,10 +387,19 @@ async fn a_close_stopped_by_the_connections_end_abandons_its_changes_once_under_
     let seams = &SEAMS.1;
     let writes = seams.count("sync_state.write");
     assert!(writes > 0, "the harness counts the drive sync's writes");
+    // The held upload's answer comes after the delete; nothing writes it.
+    let _ = held.send(Ok(serde_json::from_value(
+        json!({ "content_sha256": hash, "size_bytes": 3 }),
+    )
+    .unwrap()));
     env.advance(Duration::from_secs(60));
     tokio::time::sleep(Duration::from_millis(500)).await;
     env.entries().await;
     assert_eq!(seams.count("sync_state.write"), writes);
+    assert!(
+        env.uploads.try_recv().is_err(),
+        "no upload after the delete"
+    );
     assert!(!session.exists());
 
     // A repeat on the same connection gets the saved report; one on a
