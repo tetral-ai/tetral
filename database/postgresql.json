@@ -71,7 +71,8 @@
     "computer_idempotency_records",
     "computer_requests",
     "computer_bindings",
-    "computer_git_tickets"
+    "computer_git_tickets",
+    "session_attachments"
   ],
   "append_only_workspace_tables": [
     "session_file_attachment_consumptions",
@@ -117,6 +118,13 @@
       "command": "ALL",
       "using": "(current_setting('tetral.queue_maintenance'::text, true) = 'true'::text)",
       "check": "(current_setting('tetral.queue_maintenance'::text, true) = 'true'::text)"
+    },
+    {
+      "table": "session_attachments",
+      "name": "attachment_gc_select",
+      "command": "SELECT",
+      "using": "(current_setting('tetral.attachment_gc'::text, true) = 'true'::text)",
+      "check": ""
     },
     {
       "table": "session_transient_attachments",
