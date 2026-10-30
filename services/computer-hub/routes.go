@@ -33,8 +33,8 @@ func WithRequestMetrics(metrics httpapi.RequestMetricsRecorder) RouterOption {
 	return func(o *routerOptions) { o.metrics = metrics }
 }
 
-// WithInstanceRoutes serves the instance and instance credential routes over
-// the given database client.
+// WithInstanceRoutes serves the instance, instance credential and Controller
+// request routes over the given database client.
 func WithInstanceRoutes(routes InstanceRoutes) RouterOption {
 	return func(o *routerOptions) { o.instances = &routes }
 }
@@ -65,7 +65,7 @@ func NewRouter(verifier *auth.InternalPrincipalVerifier, opts ...RouterOption) h
 	// nothing; an event stream lives up to its age limit, so it is recorded
 	// but starts no span.
 	router.Use(httpapi.RequestLogMiddleware(options.logger, httpapi.WithRequestLogMetrics(options.metrics),
-		httpapi.WithLongRoutes(http.MethodGet+" "+routeInstanceStream, http.MethodGet+" "+routeClientEvents),
+		httpapi.WithLongRoutes(http.MethodGet+" "+routeInstanceStream, http.MethodGet+" "+routeRequestStream, http.MethodGet+" "+routeClientEvents),
 		httpapi.WithQuietRequests(http.MethodPost+" "+routeClientHeartbeat),
 		httpapi.WithUntracedRequests(http.MethodGet+" "+routeClientEvents)))
 	router.Use(httpapi.PublicRecoveryMiddleware(options.logger))

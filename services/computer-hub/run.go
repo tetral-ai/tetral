@@ -39,8 +39,10 @@ func Run(ctx context.Context, cfg Config, runtime Runtime) error {
 	readiness := workload.NewReadiness()
 	httpMetrics := workload.NewHTTPMetrics(ServiceName)
 	events := NewInstanceEvents(runtime.Database, cfg.RecommendedCLIVersion, logger)
-	instances := InstanceRoutes{Database: runtime.Database, MaxCredentialLifetime: cfg.MaxCredentialLifetime, PageTokenKey: cfg.PageTokenKey, RecommendedCLIVersion: cfg.RecommendedCLIVersion, Events: events}
+	requests := NewRequestEvents(runtime.Database, logger)
 	hub := newHubMetrics()
+	instances := InstanceRoutes{Database: runtime.Database, MaxCredentialLifetime: cfg.MaxCredentialLifetime, PageTokenKey: cfg.PageTokenKey, RecommendedCLIVersion: cfg.RecommendedCLIVersion,
+		ServerURL: cfg.ServerURL, Events: events, Requests: requests, Metrics: hub}
 	streams := NewStreams(runtime.Database, cfg.PodName, cfg.StreamMaxAge, nil, logger, hub)
 	clients := ClientRoutes{Database: runtime.Database, MinCLIVersion: cfg.MinCLIVersion, Streams: streams}
 	public := BuildHTTPHandler(readiness, NewRouter(cfg.PrincipalVerifier, WithLogger(logger), WithRequestMetrics(httpMetrics), WithInstanceRoutes(instances), WithClientRoutes(clients)))
@@ -50,6 +52,7 @@ func Run(ctx context.Context, cfg Config, runtime Runtime) error {
 		workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", runtime.Database)),
 		workload.WithMetricsCollector("computer_hub", hub.registry.Collector()),
 		workload.WithMetricsCollector("instruction_pressure", instructionPressure(runtime.Database)),
+		workload.WithMetricsCollector("request_pressure", requestPressure(runtime.Database)),
 	)
 	tlsOwner, tlsConfig, err := cfg.HTTPTransport.Open(ctx)
 	if err != nil {
@@ -66,8 +69,9 @@ func Run(ctx context.Context, cfg Config, runtime Runtime) error {
 	// window, and only then stops the notice listener.
 	streamsCtx, stopStreams := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopStreams()
-	eventsDone, streamsDone, drained := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	eventsDone, requestsDone, streamsDone, drained := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() { _ = events.Run(runCtx); close(eventsDone) }()
+	go func() { _ = requests.Run(runCtx); close(requestsDone) }()
 	go func() { _ = streams.Run(streamsCtx); close(streamsDone) }()
 	go func() {
 		defer close(drained)
@@ -76,7 +80,7 @@ func Run(ctx context.Context, cfg Config, runtime Runtime) error {
 		streams.Drain(streamsCtx, cfg.StreamDrainWindow)
 		stopStreams()
 	}()
-	defer func() { <-eventsDone; <-drained; <-streamsDone }()
+	defer func() { <-eventsDone; <-requestsDone; <-drained; <-streamsDone }()
 	listener := func(address, key string, handler http.Handler, tls bool) workload.Config {
 		config := workload.Config{
 			Metrics:               httpMetrics.Operations,

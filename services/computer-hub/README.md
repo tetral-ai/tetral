@@ -11,8 +11,9 @@ three prefixes here after `auth`'s Check.
 The service owns no table. It reads and writes through `internal/instance`
 (instances, their connection credentials, the idempotency records of the
 issuing routes, connections, their replay ledger, protocol-error reports and
-Session instructions)
-and runs the steps of `internal/hubflow` that span packages. It connects to PostgreSQL as the
+Session instructions) and `internal/computer` (Controller requests, and the
+computer whose request a ready fulfils), and runs the steps of
+`internal/hubflow` that span packages. It connects to PostgreSQL as the
 serving role `computer_hub` and holds the blob store open through
 `internal/blob` for drive content and images.
 
@@ -117,6 +118,57 @@ operations `instances.*` and `instance_credentials.*`.
   with the actor's credential kind and ID, `instance.id`, `credential.id` and
   `operation` `issue`, `fetch`, `activate` or `revoke`; the client routes'
   actor is the connection key.
+
+## Controller request routes
+
+A cloud computer without a usable instance holds at most one open request,
+which tool-call admission records (`computer.EnsureRequest`): `new` without a
+current instance, `wake` for an offline current instance.
+`GET /v1/instance_requests`, `GET /v1/instance_requests/stream` and
+`POST /v1/instance_requests/{request_id}/claim`, `…/release` and `…/fail` run
+under the operations `instance_requests.*`; claim, release and fail lock the
+request row `FOR UPDATE`.
+
+- The list and the stream require `environment_id` once, and the list accepts
+  `state` only as `pending`; anything else answers `400
+  invalid_request_error`. The list pages the Environment's pending requests in
+  creation order as the instance lists do, with both filters bound into the
+  token.
+- Claim takes `{worker_id}`, a nonempty string. A pending `new` request gets, in
+  one transaction, a new active unnamed `cloud` instance of the computer with
+  an `active` credential of delivery `claim` expiring after the maximum
+  lifetime, and answers `request`, `bootstrap` (`server_url` from
+  `TETRAL_COMPUTER_HUB_SERVER_URL`, `instance_id`, `credential_id`,
+  `connection_key`, `expires_at`) and the computer's `working_directory`. A
+  pending `wake` request first revokes its instance's never-used `pending`
+  credentials with cause `request_ended` and then issues a `pending` claim
+  credential, without `working_directory`; at the credential limit the
+  transaction rolls back and answers `409 credential_limit_error`. The worker
+  holding a claim gets the same IDs again with `connection_key: null`, another
+  worker `409 request_already_claimed_error`, and an ended request `409
+  request_not_pending_error`.
+- Release returns a claimed request to `pending` and fail ends it as `failed`,
+  each through `internal/hubflow` (`ReturnRequestToPending`, `FailRequest`),
+  which also ends the live connection of the claim credential the writer
+  revoked; a request already in the target state answers `200` unchanged, any
+  other `409 request_not_claimed_error`. A returned or failed `new` claim
+  revokes its credential (causes `new_claim_returned`, `request_ended`), which
+  retires its instance; a failed `wake` claim revokes its credential only
+  while it is still `pending`.
+- An accepted ready fulfils the requests of its instance
+  (`hubflow.AcceptReady`): a claimed `new` request, whose instance becomes the
+  computer's current instance, and a pending or claimed `wake` request.
+- The first use of a `claim` credential activates it and revokes every other
+  usable credential of the instance with cause `pending_activation`, so a
+  later use of one is recorded as reuse.
+- `instances.unused` changes only through `instance.SetUnused`, which
+  `computer.RefreshUnused` calls after each claim, return, fail and fulfilment.
+- Each transition calls `pg_notify` on `tetral_hub_instance_requests` in its
+  transaction; every pod listens (`RequestEvents.Run`, which writes
+  `request_events.listener_disconnected` after a failure) and writes
+  `created`, `claimed`, `pending` or `expired` with the request object to its
+  subscribers of that workspace and Environment, best effort as the instance
+  stream is.
 
 ## Client connection routes
 
@@ -318,7 +370,13 @@ live connection in every Workspace through
 `tetral_computer_hub_instruction_pressure`, so every pod reports the same
 totals and dashboards and alerts aggregate them with `max`, never `sum`; and
 `_queue_wait_seconds`. The hub refuses no instruction, so the
-point has no rejection counter.
+point has no rejection counter. The pressure point
+`computerhub_controller_requests` reads `_queued` (pending), `_in_progress`
+(claimed, not yet fulfilled) and `_oldest_queued_seconds` the same way through
+`tetral_computer_hub_request_pressure`; `_queue_wait_seconds` is observed from
+creation to claim by the pod that handles the claim, and
+`_rejected_total{cause}` counts each Controller `fail` as `failed`, with the
+episode records `pressure.rejecting_started` and `pressure.rejecting_ended`.
 
 A ready that carries `startup` and is answered for the first time records the
 `cli` cold start: the CLI's `config`, `connect` and `ready` phases with the
@@ -342,6 +400,7 @@ names a workspace.
 | `TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64` | required | Auth's Ed25519 public key for the signed internal principal |
 | `TETRAL_COMPUTER_HUB_MAX_CREDENTIAL_LIFETIME` | `720h` | how far after issuance an issued credential's `expires_at` may lie, and the lifetime of one issued without it; a positive Go duration, Helm `computerHub.maxCredentialLifetime` |
 | `TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY` | required | 32 bytes as 64 hexadecimal characters that sign list page tokens; every pod reads the same key from the Secret Helm `secrets.computerHubPageToken` names, key `page-token-key` |
+| `TETRAL_COMPUTER_HUB_SERVER_URL` | required | the Engine base URL a claim's bootstrap names as `server_url`: an absolute `http` or `https` URL with a host; Helm sets `https://` and `edge.apiHost` |
 | `TETRAL_COMPUTER_HUB_MIN_CLI_VERSION` | `0.0.0` | a ready from a CLI older than this semantic version is refused with `cli_upgrade_required`; Helm `computerHub.minCLIVersion` |
 | `TETRAL_COMPUTER_HUB_RECOMMENDED_CLI_VERSION` | `0.0.0` | an instance whose CLI is older than this semantic version reads `cli_update_available: true`; never lower than the minimum; Helm `computerHub.recommendedCLIVersion` |
 | `TETRAL_COMPUTER_HUB_POD_NAME` | required | this pod's name, from the downward API: the `hub_pod` of the connections whose streams it holds and the source of its connection notice channel |
@@ -371,8 +430,9 @@ termination grace period carry the drain, which is why Helm refuses a
 - `ConfigFromEnv` parses every `TETRAL_COMPUTER_HUB_*` setting and the
   principal key.
 - `NewRouter(verifier, ...)` is the public route table with its class checks;
-  `WithInstanceRoutes` serves the instance routes over a database client and
-  an `InstanceEvents` fan-out, which `Run` starts; `WithClientRoutes` serves
+  `WithInstanceRoutes` serves the instance and request routes over a database
+  client and the `InstanceEvents` and `RequestEvents` fan-outs, which `Run`
+  starts; `WithClientRoutes` serves
   the client routes over a database client and the pod's `Streams`, whose
   `Run` listens for connection notices and whose `StreamClock` tests drive;
   `BuildHTTPHandler` adds health and readiness. Tests mint principals with
@@ -395,6 +455,17 @@ termination grace period carry the drain, which is why Helm refuses a
   and an omitted expiry resolved once; paging 101 instances.
 - `instance_stream_test.go`: two streams in two workspaces each receive only
   their own workspace's noticed event.
+- `request_routes_test.go`, over HTTP with requests recorded in-process by
+  `EnsureRequest`: two workers claiming a `new` and a `wake` request at once,
+  the repeated claim and the claim after release; every other cell of the
+  state table; a `wake` claim at the credential limit changing nothing; a
+  returned `new` claim retiring its instance and an expired request making way
+  for the next; a refused ready leaving the claim and a Controller's fail
+  ending it; readies fulfilling a `wake` and a `new` request; reuse recorded
+  for a credential a `wake` claim replaced and not for a returned claim's;
+  malformed queries; paging one Environment's pending requests; one
+  Environment's stream events through another pod; the queue wait, the
+  pressure gauges read through two pools, and a fail counted once.
 - `client_routes_test.go`, over HTTP and SSE with the test CLI of
   `integration/enginetest` and a hand-driven `StreamClock`: each credential
   failure on the events route with no connection written; grants capped by the
@@ -466,8 +537,9 @@ termination grace period carry the drain, which is why Helm refuses a
 The service records through `internal/workload` with the shared HTTP request
 records and metrics, the cold start of a service pod, and the `auth.*`
 decision records of the signed principal and the operation gate, and the
-`instance_credential_audit` record, the two listeners' disconnect records and
-`client.protocol_error`, declared in [`observability.json`](observability.json),
+`instance_credential_audit` record, the three notice listeners' disconnect
+records and `client.protocol_error`, declared in
+[`observability.json`](observability.json),
 and the `cli` cold start reported by each first answered ready. Every record
 of a request the principal check admitted carries its `workspace.id` and
 `request.id` (`routes.go`). A `POST

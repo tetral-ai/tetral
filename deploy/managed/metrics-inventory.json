@@ -428,6 +428,36 @@
           ]
         }
       },
+      "computerhub_controller_requests_in_progress": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "computerhub_controller_requests_oldest_queued_seconds": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "computerhub_controller_requests_queue_wait_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {},
+        "buckets": "long"
+      },
+      "computerhub_controller_requests_queued": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "computerhub_controller_requests_rejected_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "cause": [
+            "failed"
+          ]
+        }
+      },
       "computerhub_instructions_in_progress": {
         "type": "gauge",
         "audience": "operators",

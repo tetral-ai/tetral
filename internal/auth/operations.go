@@ -65,6 +65,11 @@ const (
 	OperationInstancesList               Operation = "instances.list"
 	OperationInstancesRead               Operation = "instances.read"
 	OperationInstancesStream             Operation = "instances.stream"
+	OperationInstanceRequestsClaim       Operation = "instance_requests.claim"
+	OperationInstanceRequestsFail        Operation = "instance_requests.fail"
+	OperationInstanceRequestsList        Operation = "instance_requests.list"
+	OperationInstanceRequestsRelease     Operation = "instance_requests.release"
+	OperationInstanceRequestsStream      Operation = "instance_requests.stream"
 	OperationMemoriesCreate              Operation = "memories.create"
 	OperationMemoriesDelete              Operation = "memories.delete"
 	OperationMemoriesList                Operation = "memories.list"
@@ -180,6 +185,11 @@ var registeredOperations = []Operation{
 	OperationInstancesList,
 	OperationInstancesRead,
 	OperationInstancesStream,
+	OperationInstanceRequestsClaim,
+	OperationInstanceRequestsFail,
+	OperationInstanceRequestsList,
+	OperationInstanceRequestsRelease,
+	OperationInstanceRequestsStream,
 	OperationMemoriesCreate,
 	OperationMemoriesDelete,
 	OperationMemoriesList,
@@ -282,6 +292,8 @@ var operationRoutes = []OperationRoute{
 	{"GET", "/v1/files/{file_id}/content", OperationFilesContentRead},
 	{"GET", "/v1/instances", OperationInstancesList},
 	{"GET", "/v1/instances/stream", OperationInstancesStream},
+	{"GET", "/v1/instance_requests", OperationInstanceRequestsList},
+	{"GET", "/v1/instance_requests/stream", OperationInstanceRequestsStream},
 	{"GET", "/v1/instances/{instance_id}", OperationInstancesRead},
 	{"GET", "/v1/instances/{instance_id}/credentials", OperationInstanceCredentialsList},
 	{"GET", "/v1/memory_stores", OperationMemoryStoresList},
@@ -328,6 +340,9 @@ var operationRoutes = []OperationRoute{
 	{"POST", "/v1/files", OperationFilesCreate},
 	{"POST", "/v1/instances", OperationInstancesCreate},
 	{"POST", "/v1/instances/{instance_id}/credentials", OperationInstanceCredentialsCreate},
+	{"POST", "/v1/instance_requests/{request_id}/claim", OperationInstanceRequestsClaim},
+	{"POST", "/v1/instance_requests/{request_id}/fail", OperationInstanceRequestsFail},
+	{"POST", "/v1/instance_requests/{request_id}/release", OperationInstanceRequestsRelease},
 	{"POST", "/v1/memory_stores", OperationMemoryStoresCreate},
 	{"POST", "/v1/memory_stores/{memory_store_id}", OperationMemoryStoresUpdate},
 	{"POST", "/v1/memory_stores/{memory_store_id}/archive", OperationMemoryStoresArchive},

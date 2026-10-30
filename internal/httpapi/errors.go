@@ -214,6 +214,9 @@ func classifyError(err error) errorClassification {
 	var computerNotFound *computerErrors.NotFoundError
 	var computerNotAttachable *computerErrors.NotAttachableError
 	var computerAlreadyAttached *computerErrors.AlreadyAttachedError
+	var requestAlreadyClaimed *computerErrors.RequestAlreadyClaimedError
+	var requestNotPending *computerErrors.RequestNotPendingError
+	var requestNotClaimed *computerErrors.RequestNotClaimedError
 
 	var unavailable *UnavailableError
 
@@ -357,6 +360,12 @@ func classifyError(err error) errorClassification {
 		return classified(http.StatusConflict, "instance_not_attachable_error", computerNotAttachable.Error())
 	case errors.As(err, &computerAlreadyAttached):
 		return classified(http.StatusConflict, "computer_already_attached_error", computerAlreadyAttached.Error())
+	case errors.As(err, &requestAlreadyClaimed):
+		return classified(http.StatusConflict, "request_already_claimed_error", requestAlreadyClaimed.Error())
+	case errors.As(err, &requestNotPending):
+		return classified(http.StatusConflict, "request_not_pending_error", requestNotPending.Error())
+	case errors.As(err, &requestNotClaimed):
+		return classified(http.StatusConflict, "request_not_claimed_error", requestNotClaimed.Error())
 	case errors.As(err, &unavailable):
 		return classified(http.StatusServiceUnavailable, "api_error", unavailable.Message)
 	case errors.As(err, &driveRejected):
