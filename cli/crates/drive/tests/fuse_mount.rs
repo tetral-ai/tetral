@@ -3,7 +3,8 @@
 //! stopped is force-unmounted without the check hanging, mount points and
 //! their failures, the new-failure rule across checks and restarts, failed
 //! listings at checks, a state root reached through a symbolic link,
-//! `TETRAL_DRIVES`, and I/O under a detached mount.
+//! `TETRAL_DRIVES`, I/O under a detached mount, and a record replacing a
+//! file that a read through the mount is waiting on.
 #![cfg(target_os = "linux")]
 
 use std::collections::VecDeque;
@@ -48,6 +49,19 @@ enum Answer {
 struct Stub {
     files: Mutex<VecDeque<Answer>>,
     changes: Mutex<VecDeque<Answer>>,
+    /// The next list of changes waits for the notice, then answers these
+    /// records.
+    held_changes: Mutex<Option<(Arc<tokio::sync::Notify>, serde_json::Value)>>,
+    /// The bytes each download answers.
+    content: Vec<u8>,
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn ended(answer: Answer) -> Option<Ended> {
@@ -95,11 +109,19 @@ impl DriveTransfer for Stub {
             .unwrap()
             .pop_front()
             .unwrap_or(Answer::Listed);
+        let held = self.held_changes.lock().unwrap().take();
         Box::pin(async move {
             if let Some(ended) = ended(answer) {
                 return Err(ended);
             }
-            Ok(serde_json::from_value(json!({ "records": [], "has_more": false })).unwrap())
+            let records = match held {
+                Some((notice, records)) => {
+                    notice.notified().await;
+                    records
+                }
+                None => json!([]),
+            };
+            Ok(serde_json::from_value(json!({ "records": records, "has_more": false })).unwrap())
         })
     }
 
@@ -114,9 +136,12 @@ impl DriveTransfer for Stub {
     fn download_content<'a>(
         &'a self,
         _: Request<Download>,
-        _: &'a mut dyn ContentSink,
+        sink: &'a mut dyn ContentSink,
     ) -> Transfer<'a, ()> {
-        unimplemented!()
+        Box::pin(async move {
+            sink.append(&self.content).map_err(Ended::Sink)?;
+            Ok(())
+        })
     }
 }
 
@@ -168,7 +193,11 @@ impl Harness {
     }
 
     async fn start_at(directory: tempfile::TempDir, root: PathBuf) -> Harness {
-        let stub = Arc::new(Stub::default());
+        Harness::start_with(directory, root, Stub::default()).await
+    }
+
+    async fn start_with(directory: tempfile::TempDir, root: PathBuf, stub: Stub) -> Harness {
+        let stub = Arc::new(stub);
         let transfer: Arc<dyn DriveTransfer> = stub.clone();
         let cache = ContentCache::spawn(CacheConfig {
             root: root.clone(),
@@ -598,6 +627,55 @@ async fn io_under_a_detached_mount_fails_with_eio_and_records_nothing() {
     );
     assert!(harness.sync.tables().await.pending_changes.is_empty());
     assert_eq!(harness.calls(), ["+drive_a", "-drive_a", "+drive_a"]);
+    harness.detach_all(&["drive_a"]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_record_replacing_a_file_whose_read_waits_for_the_catch_up_answers_the_read() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    let content = b"new".to_vec();
+    let replaced = sha256(&content);
+    let harness = Harness::start_with(
+        directory,
+        root,
+        Stub {
+            content,
+            ..Stub::default()
+        },
+    )
+    .await;
+    assert!(harness.check(&["drive_a"]).await.is_empty());
+    let notice = Arc::new(tokio::sync::Notify::new());
+    *harness.stub.held_changes.lock().unwrap() = Some((
+        notice.clone(),
+        json!([{
+            "seq": 2, "index": 0, "path": "a.txt", "operation": "modified",
+            "version_id": "v_a2", "content_sha256": replaced,
+            "size_bytes": 3, "executable": false,
+        }]),
+    ));
+    harness.sync.drive_changed(Id::new("drive_a").unwrap(), 2);
+    // The read of `a.txt`, whose blob is not cached, waits for the catch-up
+    // with the kernel's page of the file locked.
+    let file = harness.point("drive_a").join("a.txt");
+    let read = tokio::task::spawn_blocking(move || std::fs::read(file));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    notice.notify_one();
+    let read = tokio::time::timeout(Duration::from_secs(20), read)
+        .await
+        .expect("the read is answered")
+        .unwrap();
+    assert_eq!(read.unwrap(), b"new");
+    let point = harness.point("drive_a");
+    let size = tokio::time::timeout(
+        Duration::from_secs(20),
+        blocking(move || std::fs::metadata(point.join("a.txt")).map(|meta| meta.len())),
+    )
+    .await
+    .expect("the mount answers");
+    assert_eq!(size.unwrap(), 3);
     harness.detach_all(&["drive_a"]).await;
 }
 

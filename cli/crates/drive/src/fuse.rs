@@ -3,8 +3,8 @@
 //! Each request runs as a task that replies when its operation completes,
 //! so a read waiting for a download blocks no other request. Entries and
 //! attributes are valid for 0 seconds and opens never keep cached pages;
-//! the owner invalidates an inode's pages when a record replaces its
-//! content. Once detached, every request answers `EIO`.
+//! the owner has an inode's pages invalidated, off its own task, when a
+//! record replaces its content. Once detached, every request answers `EIO`.
 
 use std::ffi::OsStr;
 use std::future::Future;

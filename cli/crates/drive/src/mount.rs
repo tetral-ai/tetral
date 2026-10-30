@@ -135,9 +135,17 @@ pub(crate) struct Mounted {
 }
 
 impl Mounted {
+    /// Invalidates the kernel's cached pages of `ino` off the drive sync
+    /// owner: the kernel locks those pages for the notice, and a READ or
+    /// WRITE holding one waits for the owner's answer.
     pub(crate) fn invalidate(&self, ino: u64) {
         #[cfg(target_os = "linux")]
-        let _ = self.notifier.inval_inode(fuser::INodeNo(ino), 0, 0);
+        {
+            let notifier = self.notifier.clone();
+            tokio::task::spawn_blocking(move || {
+                let _ = notifier.inval_inode(fuser::INodeNo(ino), 0, 0);
+            });
+        }
         #[cfg(not(target_os = "linux"))]
         let _ = ino;
     }
