@@ -19,7 +19,7 @@ use drive::transfer::{
     Upload,
 };
 use execution::cleanup::Leftovers;
-use protocol::connection::LostChange;
+use protocol::connection::{DriveAccess, DriveBinding, LostChange};
 use protocol::drive_transfer::{
     CommitResponse, ListChangesResponse, ListFilesResponse, UploadContentResponse,
 };
@@ -39,6 +39,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 const SESSION: &str = "sess_a";
 const DRIVE: &str = "drive_a";
+const OTHER: &str = "drive_b";
 
 /// A held upload: its hash, and the way to answer it.
 type HeldUpload = (
@@ -278,21 +279,34 @@ impl Env {
     }
 
     fn mount_point(&self) -> PathBuf {
+        self.mount_point_of(DRIVE)
+    }
+
+    fn mount_point_of(&self, drive: &str) -> PathBuf {
         self.root
             .join("sessions")
             .join(SESSION)
             .join("drives")
-            .join(DRIVE)
+            .join(drive)
     }
 
     /// Prepares `binding` on `conn_a`, binding the drive read-write, with
     /// `cwd` as its working directory.
     fn prepare(&self, message: &str, binding: &str, cwd: &Path) {
+        self.prepare_drives(message, binding, cwd, &[DRIVE]);
+    }
+
+    /// [`Env::prepare`] binding each of `drives` read-write.
+    fn prepare_drives(&self, message: &str, binding: &str, cwd: &Path, drives: &[&str]) {
+        let drives: Vec<Value> = drives
+            .iter()
+            .map(|drive| json!({ "drive_id": drive, "access": "read_write" }))
+            .collect();
         let payload = json!({
             "session_id": SESSION,
             "binding_id": binding,
             "cwd": cwd,
-            "drives": [{ "drive_id": DRIVE, "access": "read_write" }],
+            "drives": drives,
             "drive_exclude": [],
             "repositories": [],
         });
@@ -460,12 +474,26 @@ async fn a_close_abandons_what_its_held_upload_covers_30_seconds_after_its_admis
 async fn a_close_during_a_session_drives_uploads_only_after_its_applied_report() {
     let _serial = SERIAL.lock().await;
     let mut env = Env::new();
-    prepared_with_a_write(&mut env).await;
+    let project = env.project.clone();
+    env.prepare_drives("prepare_1", "bind_a", &project, &[DRIVE, OTHER]);
+    let prepared = env.report().await;
+    assert_eq!(prepared["status"], "prepared", "{prepared}");
+    for (drive, name) in [(DRIVE, "f"), (OTHER, "g")] {
+        let file = env.mount_point_of(drive).join(name);
+        tokio::task::spawn_blocking(move || std::fs::write(file, "new"))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    // The session.drives keeps only the other drive.
     env.owner.drives(Drives {
         connection_id: id("conn_a"),
         message_id: id("drives_1"),
         binding_id: id("bind_a"),
-        drives: Vec::new(),
+        drives: vec![DriveBinding {
+            drive_id: SafeId::new(OTHER).unwrap(),
+            access: DriveAccess::ReadWrite,
+        }],
         traceparent: None,
     });
     tokio::time::timeout(Duration::from_secs(30), env.uploads.recv())
@@ -482,12 +510,15 @@ async fn a_close_during_a_session_drives_uploads_only_after_its_applied_report()
         "{applied}"
     );
     assert_eq!(applied["lost_changes"][0]["paths"], json!(["f"]));
+    // The close's own final upload starts only now, 30 seconds after its
+    // admission, so it abandons what it holds at once.
     let closed = env.report().await;
     assert_eq!(closed["status"], "closed", "{closed}");
-    // The session.drives abandoned `f` and removed the drive: nothing is
-    // left for the close to abandon.
-    assert!(closed.get("lost_changes").is_none(), "{closed}");
-    assert_eq!(env.port.kept.lock().unwrap().len(), 1);
+    assert_eq!(
+        closed["lost_changes"],
+        json!([{ "request_message_id": "close_1", "drive_id": OTHER, "paths": ["g"], "paths_total": 1 }])
+    );
+    assert_eq!(env.port.kept.lock().unwrap().len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
