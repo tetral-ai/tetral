@@ -2016,7 +2016,7 @@ func (f *machineMessageFixture) nonStartingRequests() []*agentruntimev1.AcceptNo
 	return requests
 }
 
-// CM-15, Engine side: an addition while the Session runs is refused and
+// An addition while the Session runs is refused and
 // writes no message; one to an idle Session writes one added message, which
 // Job Runner accepts with no binding, so no Runtime is placed and no run
 // starts. A message still queued or accepted never makes the next addition or

@@ -136,10 +136,10 @@ func (f *hubFixture) bindingState(bindingID string) string {
 	return f.row(`SELECT state FROM computer_bindings WHERE binding_id=$1`, bindingID)["state"].(string)
 }
 
-// CC-33, Engine side, and the late report: a failed preparation is prepared
-// again with a new binding and no session.close; the same failure code again
-// writes no second error; a prepared report makes the computer ready; a late
-// report for an invalid or closing binding changes nothing.
+// A failed preparation is prepared again with a new binding and no
+// session.close; the same failure code again writes no second error; a prepared
+// report makes the computer ready; a late report for an invalid or closing
+// binding changes nothing.
 func TestFailedPreparationIsPreparedAgain(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	cli := f.userInstance(time.Time{})
@@ -215,10 +215,9 @@ func TestFailedPreparationIsPreparedAgain(t *testing.T) {
 	}
 }
 
-// CC-36, Engine side: a repository_path_forbidden failure on each of two cloud
-// computers writes one computer_preparation_error per computer. The cloud
-// computer's session.prepare creates its cwd and names its repository with
-// the platform identity.
+// A repository_path_forbidden failure on each of two cloud computers writes one
+// computer_preparation_error per computer. The cloud computer's session.prepare
+// creates its cwd and names its repository with the platform identity.
 func TestRepositoryPathFailuresWriteOneErrorPerComputer(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	for _, sessionID := range []string{"sesn_path_a", "sesn_path_b"} {
@@ -241,7 +240,7 @@ func TestRepositoryPathFailuresWriteOneErrorPerComputer(t *testing.T) {
 	}
 }
 
-// DE-5: a prepared report with two mount failures and one repository failure
+// A prepared report with two mount failures and one repository failure
 // writes two drive_mount_error and one repository_authentication_error; its
 // replay answers the same ACK and writes nothing.
 func TestPreparedReportWritesEachFailureOnce(t *testing.T) {
@@ -303,7 +302,7 @@ func TestOnlineUserComputerIsPreparedOnce(t *testing.T) {
 	}
 }
 
-// CM-25, Engine side: a binding left preparing for 10 minutes of the test
+// A binding left preparing for 10 minutes of the test
 // clock stays preparing and then takes a prepared report, or a failed one.
 func TestPreparationWaitsWithoutATimeout(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
@@ -338,7 +337,7 @@ func (f *hubFixture) fetchTicket(cli *enginetest.CLI, connectionID, messageID, b
 	return response
 }
 
-// CC-43, Engine side, and the tickets: each fetch issues a new ticket and
+// Each git ticket fetch issues a new ticket and
 // revokes the previous one, the table holds only hashes, a retry with the same
 // content is a new fetch; a binding of a user computer, of a cloud computer
 // without repositories or of another connection answers 409
@@ -499,7 +498,7 @@ func sessionComputerColdStarts(logs string) []map[string]any {
 	return records
 }
 
-// CM-28, the event: a computer whose session.prepare is exactly 65,536 bytes
+// A computer whose session.prepare is exactly 65,536 bytes
 // gets an event the test client's reader accepts, no longer than that.
 func TestPrepareAtTheSizeLimitFitsOneEvent(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)

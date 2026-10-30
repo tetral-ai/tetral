@@ -111,9 +111,9 @@ func (f *driveFixture) run() {
 
 func text(s string) *string { return &s }
 
-// DR-31 and DR-51 after one run: removed versions, change records and content
-// are deleted, kept ones stay, and stored_bytes counts each named content
-// once, current and old, while usage counts current files only.
+// After one run, removed versions, change records and content are deleted, kept
+// ones stay, and stored_bytes counts each named content once, current and old,
+// while usage counts current files only.
 func TestDriveCleanupDeletesWhatRetentionRemoved(t *testing.T) {
 	f := newDriveFixture(t)
 	ws := workspace.DefaultID
@@ -165,8 +165,8 @@ func TestDriveCleanupDeletesWhatRetentionRemoved(t *testing.T) {
 		t.Fatalf("restore of b.txt before its deletion = %+v, %v; want nothing restored", restored, err)
 	}
 
-	// DR-51: stored_bytes above max_bytes never refuses a write that fits by
-	// current files.
+	// stored_bytes above max_bytes never refuses a write that fits by current
+	// files.
 	limit := int64(10)
 	if _, err := f.api.Update(f.ctx, ws, id, drive.SettingsUpdate{Limits: &drive.LimitSettings{MaxBytes: &limit}}); err != nil {
 		t.Fatal(err)

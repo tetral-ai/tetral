@@ -101,9 +101,9 @@ func errorBody(t *testing.T, recorder *httptest.ResponseRecorder) (string, strin
 	return errorType, message, hasCode
 }
 
-// DE-6 for the computer routes, CM-14 and CM-19's computer part: each entry
-// check answers its status and error.type with no code field and adds no
-// computer; a replay answers the same computer, a changed replay conflicts.
+// Each entry check of the computer routes answers its status and error.type
+// with no code field and adds no computer; a replay answers the same computer,
+// a changed replay conflicts.
 func TestSessionComputerAddRules(t *testing.T) {
 	env := newSessionIntegrationEnv(t)
 	seedComputerInstances(t, env)
@@ -186,7 +186,7 @@ func TestSessionComputerAddRules(t *testing.T) {
 	}
 	assertHTTPStatus(t, env.request(http.MethodGet, route+"/comp_missing", ""), http.StatusNotFound)
 
-	// CM-14: one user instance attaches to three Sessions, and its
+	// One user instance attaches to three Sessions, and its
 	// computer_count counts them.
 	for i := 0; i < 2; i++ {
 		other := env.createSession(t, `{"agent":"agent_http_session","environment_id":"env_http_session","vault_ids":[]}`)
@@ -220,7 +220,7 @@ func instanceComputerCount(t *testing.T, env *sessionIntegrationEnv, instanceID 
 	return count
 }
 
-// CM-15: an addition while the Session runs is refused, and one to an idle
+// An addition while the Session runs is refused, and one to an idle
 // Session leaves it idle.
 func TestSessionComputerAddNeedsAnIdleSession(t *testing.T) {
 	env := newSessionIntegrationEnv(t)
@@ -441,7 +441,7 @@ func TestSessionCreationPreparesAnOnlineUserComputer(t *testing.T) {
 	}
 }
 
-// CM-28: a computer whose session.prepare would exceed 65,536 bytes is
+// A computer whose session.prepare would exceed 65,536 bytes is
 // refused at Session creation and at its addition, writing nothing; one of
 // exactly 65,536 bytes is added.
 func TestComputerPrepareSizeLimit(t *testing.T) {

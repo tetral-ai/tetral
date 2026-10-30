@@ -268,7 +268,7 @@ func TestDriveRoutes(t *testing.T) {
 		expectError(t, api.json(http.MethodGet, "/v1/drives/"+id+"/files/content?path=missing.txt", ""), http.StatusNotFound, "not_found_error", "not found")
 		expectError(t, api.json(http.MethodGet, "/v1/drives/"+id+"/files/content", ""), http.StatusBadRequest, "invalid_request_error", "path is required")
 
-		// DR-39: an old version's content after an overwrite.
+		// An old version's content stays readable after an overwrite.
 		old := api.json(http.MethodGet, "/v1/drives/"+id+"/versions/"+first.VersionID+"/content", "")
 		if old.status != http.StatusOK || string(old.body) != "one" {
 			t.Fatalf("old version content = %d %q", old.status, old.body)
@@ -281,7 +281,7 @@ func TestDriveRoutes(t *testing.T) {
 		other := api.newDrive(`{}`)
 		expectError(t, api.json(http.MethodGet, "/v1/drives/"+other+"/versions/"+first.VersionID, ""), http.StatusNotFound, "not_found_error", "not found")
 
-		// DR-32: the current version cannot be redacted; a redacted old
+		// The current version cannot be redacted; a redacted old
 		// version keeps its record and loses its content.
 		expectError(t, api.json(http.MethodPost, "/v1/drives/"+id+"/versions/"+second.VersionID+"/redact", ""), http.StatusConflict, "invalid_request_error", "the current version cannot be redacted; overwrite or delete the file first")
 		var redacted map[string]any
@@ -306,7 +306,7 @@ func TestDriveRoutes(t *testing.T) {
 			t.Fatalf("a.txt after the restore = %q; want two", current.body)
 		}
 
-		// DR-46: deleting twice answers the first deletion; a path never held
+		// Deleting twice answers the first deletion; a path never held
 		// is the non-disclosing 404.
 		var deleted, deletedAgain driveVersionAnswer
 		decodeDrive(t, api.json(http.MethodDelete, "/v1/drives/"+id+"/files?path=a.txt&expected_content_sha256="+digest("two"), ""), http.StatusOK, &deleted)
@@ -358,7 +358,7 @@ func TestDriveRoutes(t *testing.T) {
 	})
 
 	t.Run("usage", func(t *testing.T) {
-		// DR-52: the Workspace totals equal the sums over its drives, and the
+		// The Workspace totals equal the sums over its drives, and the
 		// route is never taken for a drive ID.
 		var before struct{ Bytes, Files int64 }
 		decodeDrive(t, api.json(http.MethodGet, "/v1/drives/usage", ""), http.StatusOK, &before)
@@ -400,7 +400,8 @@ func TestDriveRoutes(t *testing.T) {
 	})
 
 	t.Run("changes", func(t *testing.T) {
-		// DR-44 on a drive with more than 1,000 change records.
+		// The change list pages 20 records by default and at most 1,000, on a
+		// drive with more than 1,000 change records.
 		id := api.newDrive(`{}`)
 		ctx := context.Background()
 		content, err := api.drives.PutContent(ctx, workspace.DefaultID, id, strings.NewReader("x"), 1, "")
@@ -540,7 +541,7 @@ func TestDriveRoutes(t *testing.T) {
 		}
 	})
 	t.Run("restore", func(t *testing.T) {
-		// DR-50: the file whose version at as_of the count cap removed is
+		// The file whose version at as_of the count cap removed is
 		// listed; the other is restored.
 		id := api.newDrive(`{}`)
 		decodeDrive(t, api.upload(id, "kept.txt", "k0"), http.StatusCreated, nil)
@@ -614,8 +615,10 @@ func TestDriveUploadBudgetRefusal(t *testing.T) {
 	}
 }
 
-// DR-31 and DR-49 through the API, with rows aged in Postgres before any
-// cleanup runs.
+// Retention through the API, with rows aged in Postgres before any cleanup
+// runs: a version replaced 30 days ago and a file deleted 30 days ago leave
+// every read, and a file rewritten 12 times keeps 10 old versions while all
+// its change records stay listed.
 func TestDriveRetentionThroughTheAPI(t *testing.T) {
 	api := newDriveAPI(t, drive.DefaultUploadBudgetBytesPerMinute)
 
