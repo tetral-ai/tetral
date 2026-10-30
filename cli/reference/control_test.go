@@ -103,6 +103,25 @@ func TestSendControlWritesAnyEventOrADuplicate(t *testing.T) {
 	}
 }
 
+func TestSendControlWithCountWritesTheEventThatManyTimesPastTheBuffer(t *testing.T) {
+	ts := startServer(t)
+	stream, _ := ts.online()
+	count := streamBuffer + 10
+	done := make(chan struct{})
+	go func() {
+		ts.call("send", map[string]any{"instance_id": "inst_a", "count": count, "event": map[string]any{
+			"protocol_version": 1, "connection_id": "conn_other", "message_id": "msg_flood", "type": "heartbeat", "payload": map[string]any{},
+		}}, nil)
+		close(done)
+	}()
+	for range count {
+		if event := stream.next(); event["message_id"] != "msg_flood" {
+			t.Fatalf("event %v", event)
+		}
+	}
+	<-done
+}
+
 func TestEventsControlMakesEventsRequestsSilent(t *testing.T) {
 	for _, mode := range []string{"hold_headers", "headers_only", "comments_only"} {
 		t.Run(mode, func(t *testing.T) {

@@ -239,16 +239,22 @@ func (server *Server) controlInstruction(kind string) func(json.RawMessage) (any
 // controlSend writes any event on an instance's current stream as given,
 // a malformed one included, or writes again an instruction issued on the
 // stream's connection, sent or still queued. Nothing is recorded as issued;
-// a session.drives is noted so that its applied report is accepted.
+// a session.drives is noted so that its applied report is accepted. With
+// count, the same event is written that many times, each once the stream's
+// buffer has room.
 func (server *Server) controlSend(body json.RawMessage) (any, error) {
 	var input struct {
 		InstanceID string          `json:"instance_id"`
 		Event      json.RawMessage `json:"event"`
 		Data       *string         `json:"data"`
 		Resend     string          `json:"resend"`
+		Count      int             `json:"count"`
 	}
 	if err := decodeControl(body, &input); err != nil {
 		return nil, err
+	}
+	if input.Count > 1 {
+		return server.sendRepeated(input.InstanceID, input.Event, input.Count)
 	}
 	server.mu.Lock()
 	defer server.mu.Unlock()
@@ -283,6 +289,41 @@ func (server *Server) controlSend(body json.RawMessage) (any, error) {
 	conn.noteSentDrives(data)
 	conn.stream.send(data, fields.MessageID, fields.Type)
 	return map[string]any{"connection_id": conn.id}, nil
+}
+
+// sendRepeated writes event count times on the instance's current stream,
+// waiting for room in its buffer instead of closing it.
+func (server *Server) sendRepeated(instanceID string, event json.RawMessage, count int) (any, error) {
+	if len(event) == 0 {
+		return nil, errors.New("send with count needs event")
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		return nil, err
+	}
+	var fields struct {
+		MessageID string `json:"message_id"`
+		Type      string `json:"type"`
+	}
+	_ = json.Unmarshal(data, &fields)
+	for sent := 0; sent < count; {
+		server.mu.Lock()
+		conn := server.live(instanceID)
+		if conn == nil || conn.stream == nil || conn.stream.isClosed() {
+			server.mu.Unlock()
+			return nil, fmt.Errorf("instance %q has no open stream", instanceID)
+		}
+		room := len(conn.stream.frames) < cap(conn.stream.frames)
+		if room {
+			conn.stream.send(data, fields.MessageID, fields.Type)
+			sent++
+		}
+		server.mu.Unlock()
+		if !room {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	return map[string]any{"sent": count}, nil
 }
 
 // eventsMode is how one events request is answered instead of at once.
