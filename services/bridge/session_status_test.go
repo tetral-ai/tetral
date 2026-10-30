@@ -202,7 +202,7 @@ func TestSessionStatusFollowsEveryThread(t *testing.T) {
 		t.Fatalf("primary after both starts = %q; want %q", got, want)
 	}
 
-	f.idle(mainID, mainTurn, `{"type":"end_turn"}`)
+	f.idle(mainID, mainTurn, `{"type":"retries_exhausted"}`)
 	if status, _, _ := f.runtimeStatus(); status != "running" || slices.Contains(f.primaryTypes(), "session.status_idle") {
 		t.Fatalf("after the main idle with the child running: status %s, primary %q; want running and no session.status_idle", status, f.primaryTypes())
 	}
@@ -239,8 +239,8 @@ func TestSessionStatusFollowsEveryThread(t *testing.T) {
 		}
 	}
 	if len(sessionEvents) != 4 || sessionEvents[2].Type != "session.status_running" || sessionEvents[3].Type != "session.status_idle" ||
-		string(sessionEvents[3].StopReason) != `{"type":"end_turn"}` {
-		t.Fatalf("Session events = %+v; want a second running then an idle with the main thread's end_turn", sessionEvents)
+		string(sessionEvents[3].StopReason) != `{"type":"retries_exhausted"}` {
+		t.Fatalf("Session events = %+v; want a second running then an idle with the main thread's retries_exhausted", sessionEvents)
 	}
 	if got := f.threadOnlyStatusEvents(mainID); got != 2 {
 		t.Fatalf("main thread status events off the primary stream = %d; want 2", got)
