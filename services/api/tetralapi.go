@@ -344,7 +344,7 @@ func BuildRouter(ctx context.Context, cfg RouterConfig) (handler http.Handler, r
 	}
 	router := &ownedRouter{resources: ownedBlob}
 	if blobStore != nil {
-		driveHandler, stopChanges, err := buildDriveHandler(cfg, blobStore, uploadBudgetBytesPerMinute, eventPageTokenSecret)
+		driveHandler, stopChanges, err := buildDriveHandler(ctx, cfg, blobStore, uploadBudgetBytesPerMinute, eventPageTokenSecret)
 		if err != nil {
 			return nil, fmt.Errorf("drives: %w", err)
 		}
@@ -356,8 +356,10 @@ func BuildRouter(ctx context.Context, cfg RouterConfig) (handler http.Handler, r
 }
 
 // buildDriveHandler serves the drive API on blobStore and starts this pod's
-// LISTEN connection for drive change notices; stop ends it.
-func buildDriveHandler(cfg RouterConfig, blobStore blob.BlobStore, uploadBudgetBytesPerMinute int64, pageTokenSecret []byte) (*httpapi.DriveHandler, func(), error) {
+// LISTEN connection for drive change notices until ctx ends or stop is
+// called. ctx is the process context, so open change streams end when
+// shutdown begins instead of holding the HTTP drain to its timeout.
+func buildDriveHandler(ctx context.Context, cfg RouterConfig, blobStore blob.BlobStore, uploadBudgetBytesPerMinute int64, pageTokenSecret []byte) (*httpapi.DriveHandler, func(), error) {
 	drives, err := drive.NewService(cfg.RuntimeClient, blobStore, cfg.DataDir)
 	if err != nil {
 		return nil, nil, err
@@ -367,7 +369,7 @@ func buildDriveHandler(cfg RouterConfig, blobStore blob.BlobStore, uploadBudgetB
 		return nil, nil, err
 	}
 	changes := httpapi.NewDriveChanges(cfg.RuntimeClient, drives, cfg.Logger)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

@@ -117,6 +117,47 @@ func TestTetralAPIProductionRouterExercisesRepresentativeMatureFamilies(t *testi
 	assertTetralAPIResourcePrefixGCMarker(t, env.admin, sessionID, sessionPrefix)
 }
 
+// An open drive change stream ends when the process context ends, as it
+// does when shutdown begins, so the HTTP drain does not wait for it.
+func TestTetralAPIDriveChangeStreamEndsWithTheProcessContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	env := newTetralAPITestEnvWithContext(ctx, t, withTetralAPIBlobStore(blob.NewFakeBlobStore()))
+	created := requestTetralAPI(env.router, http.MethodPost, "/v1/drives", `{}`, tetralAPITestAPIKeyID)
+	var drive struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &drive); created.Code != http.StatusCreated || err != nil || drive.ID == "" {
+		t.Fatalf("POST /v1/drives = %d %s", created.Code, created.Body.String())
+	}
+	server := httptest.NewServer(env.router)
+	defer server.Close()
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/v1/drives/"+drive.ID+"/changes/stream", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-Tetral-Internal-Principal", tetralAPITestPrincipalToken(http.MethodGet, request.URL.Path, tetralAPITestAPIKeyID))
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET changes/stream = %d", response.StatusCode)
+	}
+	cancel()
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		_, _ = io.Copy(io.Discard, response.Body)
+	}()
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the change stream was still open 5 s after the process context ended")
+	}
+}
+
 func TestTetralAPIProductionRouterKeepsSkillRefsWithoutBlobStore(t *testing.T) {
 	env := newTetralAPITestEnv(t)
 	seedTetralAPISkillReference(t, env.admin, "skill_existing", "20260509120000")
@@ -188,6 +229,13 @@ func putTetralAPIBlob(t *testing.T, store blob.BlobStore, key string, body strin
 
 func newTetralAPITestEnv(t *testing.T, options ...tetralAPITestOption) tetralAPITestEnv {
 	t.Helper()
+	return newTetralAPITestEnvWithContext(context.Background(), t, options...)
+}
+
+// newTetralAPITestEnvWithContext builds the router with ctx in the place of
+// the process context.
+func newTetralAPITestEnvWithContext(ctx context.Context, t *testing.T, options ...tetralAPITestOption) tetralAPITestEnv {
+	t.Helper()
 	if os.Getenv(storagetest.EnvTestDatabaseURL) == "" {
 		t.Skip(storagetest.EnvTestDatabaseURL + " is not set")
 	}
@@ -205,7 +253,7 @@ func newTetralAPITestEnv(t *testing.T, options ...tetralAPITestOption) tetralAPI
 	for _, option := range options {
 		option(&config)
 	}
-	router, err := tetralapi.BuildRouter(context.Background(), config)
+	router, err := tetralapi.BuildRouter(ctx, config)
 	if err != nil {
 		t.Fatalf("BuildRouter: %v", err)
 	}
