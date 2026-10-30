@@ -31,6 +31,10 @@ const (
 	OperationDriveFilesCreate            Operation = "drive_files.create"
 	OperationDriveFilesDelete            Operation = "drive_files.delete"
 	OperationDriveFilesList              Operation = "drive_files.list"
+	OperationDriveSkillsCreate           Operation = "drive_skills.create"
+	OperationDriveSkillsDelete           Operation = "drive_skills.delete"
+	OperationDriveSkillsList             Operation = "drive_skills.list"
+	OperationDriveSkillsRead             Operation = "drive_skills.read"
 	OperationDriveVersionsContentRead    Operation = "drive_versions.content.read"
 	OperationDriveVersionsList           Operation = "drive_versions.list"
 	OperationDriveVersionsRead           Operation = "drive_versions.read"
@@ -140,6 +144,10 @@ var registeredOperations = []Operation{
 	OperationDriveFilesCreate,
 	OperationDriveFilesDelete,
 	OperationDriveFilesList,
+	OperationDriveSkillsCreate,
+	OperationDriveSkillsDelete,
+	OperationDriveSkillsList,
+	OperationDriveSkillsRead,
 	OperationDriveVersionsContentRead,
 	OperationDriveVersionsList,
 	OperationDriveVersionsRead,
@@ -234,6 +242,7 @@ var operationRoutes = []OperationRoute{
 	{"DELETE", "/v1/api_keys/{api_key_id}", OperationAPIKeysDelete},
 	{"DELETE", "/v1/drives/{drive_id}", OperationDrivesDelete},
 	{"DELETE", "/v1/drives/{drive_id}/files", OperationDriveFilesDelete},
+	{"DELETE", "/v1/drives/{drive_id}/skills/{name}", OperationDriveSkillsDelete},
 	{"DELETE", "/v1/environments/{environment_id}", OperationEnvironmentsDelete},
 	{"DELETE", "/v1/files/{file_id}", OperationFilesDelete},
 	{"DELETE", "/v1/instances/{instance_id}", OperationInstancesDelete},
@@ -258,6 +267,8 @@ var operationRoutes = []OperationRoute{
 	{"GET", "/v1/drives/{drive_id}/files", OperationDriveFilesList},
 	{"GET", "/v1/drives/{drive_id}/files/content", OperationDriveFilesContentRead},
 	{"GET", "/v1/drives/{drive_id}/files/versions", OperationDriveVersionsList},
+	{"GET", "/v1/drives/{drive_id}/skills", OperationDriveSkillsList},
+	{"GET", "/v1/drives/{drive_id}/skills/{name}", OperationDriveSkillsRead},
 	{"GET", "/v1/drives/{drive_id}/versions/{version_id}", OperationDriveVersionsRead},
 	{"GET", "/v1/drives/{drive_id}/versions/{version_id}/content", OperationDriveVersionsContentRead},
 	{"GET", "/v1/environments", OperationEnvironmentsList},
@@ -304,6 +315,7 @@ var operationRoutes = []OperationRoute{
 	{"POST", "/v1/drives/{drive_id}", OperationDrivesUpdate},
 	{"POST", "/v1/drives/{drive_id}/files", OperationDriveFilesCreate},
 	{"POST", "/v1/drives/{drive_id}/restore", OperationDrivesRestore},
+	{"POST", "/v1/drives/{drive_id}/skills", OperationDriveSkillsCreate},
 	{"POST", "/v1/drives/{drive_id}/versions/{version_id}/redact", OperationDriveVersionsRedact},
 	{"POST", "/v1/environments", OperationEnvironmentsCreate},
 	{"POST", "/v1/environments/{environment_id}", OperationEnvironmentsUpdate},
