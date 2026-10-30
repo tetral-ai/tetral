@@ -1,8 +1,8 @@
 //! The drive transfer client against a local HTTP stub on loopback that
 //! answers from `protocol/drive-transfer-v1.fixtures.json`, on a clock the
 //! test moves: the answers it accepts, the class of each answer, the
-//! deadlines, the retries and their delays, a rebind, and a download that
-//! resumes or restarts.
+//! deadlines, the retries and their delays, a rebind, the Connection
+//! owner's answers and its link, and a download that resumes or restarts.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,6 +34,15 @@ const CONTENT: &[u8] = b"hello, drive";
 fn key() -> BootstrapKey {
     Bootstrap::decode(
         br#"{"server_url":"http://127.0.0.1:1","instance_id":"inst_a","credential_id":"cred_a","connection_key":"tetral_ck_a","expires_at":"2099-01-01T00:00:00Z"}"#,
+    )
+    .unwrap()
+    .connection_key
+}
+
+/// The key a credential switch installs.
+fn renewed_key() -> BootstrapKey {
+    Bootstrap::decode(
+        br#"{"server_url":"http://127.0.0.1:1","instance_id":"inst_a","credential_id":"cred_b","connection_key":"tetral_ck_b","expires_at":"2099-01-01T00:00:00Z"}"#,
     )
     .unwrap()
     .connection_key
@@ -206,6 +215,8 @@ fn json(status: u16, value: &Value) -> Reply {
 
 #[derive(Default)]
 struct StubState {
+    /// Requests read whole, answered or not.
+    arrived: usize,
     /// Requests answered, each once its answer is written.
     seen: Vec<Seen>,
     replies: VecDeque<Reply>,
@@ -249,6 +260,13 @@ impl Stub {
         self.state.lock().unwrap().seen.clone()
     }
 
+    async fn wait_arrived(&self, count: usize) {
+        within(&format!("{count} requests arrived"), || {
+            self.state.lock().unwrap().arrived >= count
+        })
+        .await;
+    }
+
     async fn wait_for(&self, count: usize) -> Vec<Seen> {
         within(&format!("the stub has {count} requests"), || {
             self.seen().len() >= count
@@ -289,6 +307,7 @@ async fn serve(socket: tokio::net::TcpStream, state: Arc<Mutex<StubState>>, chan
     if reader.read_exact(&mut body).await.is_err() {
         return;
     }
+    state.lock().unwrap().arrived += 1;
     let reply = loop {
         let waiting = changed.notified();
         if let Some(reply) = state.lock().unwrap().replies.pop_front() {
@@ -346,7 +365,7 @@ struct Harness {
     clock: TestClock,
     binding: watch::Sender<Option<Binding>>,
     events: mpsc::UnboundedReceiver<OutboxEvent>,
-    _link: DriveLink,
+    link: DriveLink,
     /// The 429s an upload's `rate_limited` was told of.
     rate_limited: Arc<AtomicU64>,
 }
@@ -376,7 +395,7 @@ impl Harness {
             clock,
             binding,
             events,
-            _link: link,
+            link,
             rate_limited: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -943,4 +962,86 @@ async fn drive_access_denied_is_not_sent_again_stale_connection_tells_the_connec
         Outcome::Permanent(0, None)
     );
     assert_eq!(harness.stub.seen().len(), 4);
+}
+
+#[tokio::test]
+async fn connection_rule_answers_wait_for_a_new_binding_and_a_revoked_old_key_goes_again_with_the_new_one()
+ {
+    let mut harness = Harness::start().await;
+    let rebind = |harness: &Harness, connection: &str, binding: &str| {
+        harness.binding.send_replace(Some(Binding {
+            connection_id: id(connection),
+            binding_id: id(binding),
+        }));
+    };
+
+    // Any 401 and a 403 instance_unavailable: the Connection owner is told
+    // and the request waits for a new binding.
+    for (status, code) in [(401, "credential_invalid"), (403, "instance_unavailable")] {
+        let seen = harness.stub.seen().len();
+        harness.stub.reply(json(
+            status,
+            &serde_json::json!({"code": code, "message": "refused"}),
+        ));
+        let sent = harness.send(Endpoint::ListFiles, &Value::Null);
+        let event = tokio::time::timeout(Duration::from_secs(10), harness.events.recv())
+            .await
+            .expect("the Connection owner is told")
+            .unwrap();
+        assert!(
+            matches!(&event, OutboxEvent::Refused { connection, error }
+                if connection.as_str() == "conn_a" && error.code.as_str() == code),
+            "{event:?}"
+        );
+        harness.stub.reply(Endpoint::ListFiles.valid_answer());
+        let next = format!("bind_{status}");
+        rebind(&harness, "conn_a", &next);
+        let again = harness.stub.wait_for(seen + 2).await;
+        assert_eq!(
+            again[seen + 1].query("binding_id").as_deref(),
+            Some(next.as_str()),
+            "{code}"
+        );
+        assert_eq!(finished(sent).await, Outcome::Accepted, "{code}");
+    }
+
+    // A 401 credential_revoked to the old key during a switch: nothing is
+    // refused and the request goes again with the switch's key.
+    let seen = harness.stub.seen().len();
+    let sent = harness.send(Endpoint::ListFiles, &Value::Null);
+    harness.stub.wait_arrived(seen + 1).await;
+    harness.link.switch_started(&id("conn_a"));
+    harness.stub.reply(json(
+        401,
+        &serde_json::json!({"code": "credential_revoked", "message": "revoked"}),
+    ));
+    harness.stub.wait_for(seen + 1).await;
+    harness.stub.reply(Endpoint::ListFiles.valid_answer());
+    harness.link.switch_ended(&id("conn_a"), renewed_key());
+    let again = harness.stub.wait_for(seen + 2).await;
+    assert_eq!(
+        again[seen + 1].header("authorization"),
+        Some("Bearer tetral_ck_b")
+    );
+    assert_eq!(finished(sent).await, Outcome::Accepted);
+    assert!(harness.events.try_recv().is_err());
+
+    // The connection's end drops an attempt in flight; it goes again with
+    // the next connection's binding.
+    let seen = harness.stub.seen().len();
+    let sent = harness.send(Endpoint::ListFiles, &Value::Null);
+    harness.stub.wait_arrived(seen + 1).await;
+    harness.link.connection_ended(&id("conn_a"));
+    // The dropped attempt's request takes this reply.
+    harness.stub.reply(Reply::Withhold);
+    harness.stub.wait_for(seen + 1).await;
+    harness.link.connection_started(id("conn_b"), renewed_key());
+    harness.stub.reply(Endpoint::ListFiles.valid_answer());
+    rebind(&harness, "conn_b", "bind_b");
+    let again = harness.stub.wait_for(seen + 2).await;
+    assert_eq!(
+        again[seen + 1].query("binding_id").as_deref(),
+        Some("bind_b")
+    );
+    assert_eq!(finished(sent).await, Outcome::Accepted);
 }
