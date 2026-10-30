@@ -67,6 +67,7 @@
 //   - postgresql_runner_discovery_schema.go (Job Runner cross-workspace binding-discovery policies and functions)
 //   - postgresql_auth_schema.go (Auth policy and token tables, lookup/lock/prune functions, key and grant triggers)
 //   - postgresql_instance_schema.go (instance, credential, idempotency, connection, replay, protocol-error and instruction tables; the connection key lookup and instruction pressure functions and their policies)
+//   - postgresql_drive_schema.go (drive, file, version, change, content, blob cleanup, usage and upload budget tables)
 //   - postgresql_cleanup_schema.go (Cleanup scheduling cursor, global due index, discovery policy and function)
 //   - postgresql_retention_schema.go (feed retention metadata, age and head indexes, owner-checked retention policies and functions)
 //   - postgresql_migrator.go (version checksums, baseline steps, MigrateSchema/VerifySchema)
