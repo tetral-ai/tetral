@@ -291,7 +291,7 @@ approval-reviewer threads are never returned. Thread status is one of `running`,
 
 | Archive target | Result |
 | --- | --- |
-| `running` / `rescheduling`, or an active pending runtime input, or an unresolved external wait | `409 invalid_request_error` |
+| `running` / `rescheduling`, or an active pending runtime input other than a machine message, or an unresolved external wait | `409 invalid_request_error` |
 | primary thread (`sessions.main_thread_id`) while session runtime status ≠ `idle` | `409 invalid_request_error` |
 | already archived | idempotent — returns the current archived thread DTO |
 | missing or invisible | `404 not_found_error` |
