@@ -32,6 +32,7 @@ type driveAPI struct {
 	t       *testing.T
 	env     *authTestEnv
 	drives  *drive.Service
+	budget  *drive.UploadBudget
 	handler http.Handler
 	url     string
 }
@@ -67,7 +68,7 @@ func newDriveAPI(t *testing.T, budgetBytesPerMinute int64) *driveAPI {
 		cancel()
 		<-done
 	})
-	return &driveAPI{t: t, env: env, drives: drives, handler: handler, url: server.URL}
+	return &driveAPI{t: t, env: env, drives: drives, budget: budget, handler: handler, url: server.URL}
 }
 
 type driveResponse struct {
@@ -289,6 +290,21 @@ func TestDriveRoutes(t *testing.T) {
 			t.Fatalf("redacted = %v", redacted)
 		}
 		expectError(t, api.json(http.MethodGet, "/v1/drives/"+id+"/versions/"+first.VersionID+"/content", ""), http.StatusNotFound, "not_found_error", "not found")
+		// A restore to the redacted version leaves the file as it is and
+		// lists it.
+		asOf, _ := json.Marshal(map[string]any{"as_of": version["created_at"]})
+		var restored struct {
+			Seq           *int64
+			Restored      int
+			RedactedPaths []string `json:"redacted_paths"`
+		}
+		decodeDrive(t, api.json(http.MethodPost, "/v1/drives/"+id+"/restore", string(asOf)), http.StatusOK, &restored)
+		if restored.Seq != nil || restored.Restored != 0 || strings.Join(restored.RedactedPaths, ",") != "a.txt" {
+			t.Fatalf("restore to the redacted version = %+v; want no seq, nothing restored and a.txt listed", restored)
+		}
+		if current := api.json(http.MethodGet, "/v1/drives/"+id+"/files/content?path=a.txt", ""); string(current.body) != "two" {
+			t.Fatalf("a.txt after the restore = %q; want two", current.body)
+		}
 
 		// DR-46: deleting twice answers the first deletion; a path never held
 		// is the non-disclosing 404.
@@ -423,6 +439,24 @@ func TestDriveRoutes(t *testing.T) {
 		if len(listed.Data) != 1 || listed.Data[0]["path"] != "late.txt" {
 			t.Fatalf("changes after 1 = %v", listed.Data)
 		}
+
+		session := drive.Writer{Kind: drive.WriterSession, ID: "sesn_drive_changes", ComputerID: "comp_drive_changes"}
+		if _, err := api.drives.Commit(ctx, workspace.DefaultID, id, session, drive.ModeMachine, []drive.Change{
+			{Path: "machine.txt", Base: drive.Base{Kind: drive.BaseMustNotExist}, ContentSHA256: content.SHA256},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		for sessionID, want := range map[string]string{"sesn_drive_changes": "machine.txt", "sesn_other": ""} {
+			var filtered struct{ Data []map[string]any }
+			decodeDrive(t, api.json(http.MethodGet, "/v1/drives/"+id+"/changes?limit=1000&session_id="+sessionID, ""), http.StatusOK, &filtered)
+			var paths []string
+			for _, record := range filtered.Data {
+				paths = append(paths, record["path"].(string))
+			}
+			if strings.Join(paths, ",") != want {
+				t.Fatalf("changes of %s = %v; want %q", sessionID, paths, want)
+			}
+		}
 	})
 
 	t.Run("change stream", func(t *testing.T) {
@@ -468,6 +502,43 @@ func TestDriveRoutes(t *testing.T) {
 		}
 	})
 
+	t.Run("executable bit", func(t *testing.T) {
+		// An upload to a new path is not executable; one that replaces a file
+		// keeps that file's executable bit; one after a deletion is not.
+		id := api.newDrive(`{}`)
+		ctx := context.Background()
+		decodeDrive(t, api.upload(id, "run.sh", "v1"), http.StatusCreated, nil)
+		content, err := api.drives.PutContent(ctx, workspace.DefaultID, id, strings.NewReader("v1"), 2, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		machine := drive.Writer{Kind: drive.WriterSession, ID: "sesn_drive_exec", ComputerID: "comp_drive_exec"}
+		if _, err := api.drives.Commit(ctx, workspace.DefaultID, id, machine, drive.ModeMachine, []drive.Change{
+			{Path: "run.sh", Base: drive.Base{Kind: drive.BaseAny}, ContentSHA256: content.SHA256, Executable: true},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		executable := func() any {
+			var files struct{ Data []map[string]any }
+			decodeDrive(t, api.json(http.MethodGet, "/v1/drives/"+id+"/files?path_prefix=run.sh", ""), http.StatusOK, &files)
+			if len(files.Data) != 1 {
+				t.Fatalf("files = %v; want run.sh", files.Data)
+			}
+			return files.Data[0]["executable"]
+		}
+		if got := executable(); got != true {
+			t.Fatalf("executable after the machine commit = %v", got)
+		}
+		decodeDrive(t, api.upload(id, "run.sh", "v2"), http.StatusCreated, nil)
+		if got := executable(); got != true {
+			t.Fatalf("executable after an API replacement = %v; want the replaced file's true", got)
+		}
+		decodeDrive(t, api.json(http.MethodDelete, "/v1/drives/"+id+"/files?path=run.sh&expected_content_sha256="+digest("v2"), ""), http.StatusOK, nil)
+		decodeDrive(t, api.upload(id, "run.sh", "v3"), http.StatusCreated, nil)
+		if got := executable(); got != false {
+			t.Fatalf("executable after an upload following the deletion = %v; want false", got)
+		}
+	})
 	t.Run("restore", func(t *testing.T) {
 		// DR-50: the file whose version at as_of the count cap removed is
 		// listed; the other is restored.
@@ -532,12 +603,14 @@ func (zeros) Read(p []byte) (int, error) {
 
 func TestDriveUploadBudgetRefusal(t *testing.T) {
 	api := newDriveAPI(t, drive.MinUploadCount)
+	now := time.Now()
+	api.budget.WithClock(func() time.Time { return now })
 	id := api.newDrive(`{}`)
 	decodeDrive(t, api.upload(id, "a", "1"), http.StatusCreated, nil)
 	refused := api.upload(id, "b", "1")
 	expectError(t, refused, http.StatusTooManyRequests, "rate_limit_error", "")
-	if retry := refused.header.Get("Retry-After"); retry == "" || retry == "0" {
-		t.Fatalf("Retry-After = %q; want whole seconds of at least 1", retry)
+	if retry := refused.header.Get("Retry-After"); retry != "60" {
+		t.Fatalf("Retry-After = %q; want 60, the seconds a budget of one request per minute takes to refill", retry)
 	}
 }
 
