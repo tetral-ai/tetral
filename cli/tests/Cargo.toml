@@ -21,6 +21,8 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]
 drive.workspace = true
+execution.workspace = true
 flate2.workspace = true
 fuser.workspace = true
+session.workspace = true
 tar.workspace = true

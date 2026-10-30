@@ -160,10 +160,8 @@ dependencies = [
  "serde",
  "serde_json",
  "session",
- "sha2 0.11.1",
  "state",
  "tempfile",
- "tetral-tests",
  "thiserror 2.0.21",
  "tokio",
 ]
@@ -6692,6 +6690,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "base64 0.23.1",
  "drive",
+ "execution",
  "flate2",
  "fuser",
  "protocol",
@@ -6701,6 +6700,7 @@ dependencies = [
  "rustls",
  "sdk",
  "serde_json",
+ "session",
  "sha2 0.11.1",
  "state",
  "tar",
