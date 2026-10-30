@@ -2374,6 +2374,44 @@ mod tests {
         fn end(&self) {}
     }
 
+    /// Session owners that keep each git ticket answer they are given, as
+    /// (request, whether it failed).
+    #[derive(Default)]
+    struct TicketAnswers(std::sync::Mutex<Vec<(u64, bool)>>);
+
+    impl protocol::ports::SessionHandle for TicketAnswers {
+        fn prepare(&self, _: Prepare) {}
+        fn close(&self, _: Close) {}
+        fn drives(&self, _: Drives) {}
+        fn tool(&self, _: ToolCall) {}
+        fn probe_slot(&self, _: protocol::ports::ProbeRequest, _: ProbeSlot) {}
+        fn git_ticket(&self, request: TicketRequest, answer: protocol::ports::TicketAnswer) {
+            self.0.lock().unwrap().push((request.0, answer.is_err()));
+        }
+        fn connection_ended(&self, _: Id) {}
+        fn shutdown(&self) {}
+        fn entries(&self, reply: protocol::ports::EntriesReply) {
+            reply(Vec::new());
+        }
+        fn end(&self) {}
+    }
+
+    struct TicketFactory(Arc<TicketAnswers>);
+
+    impl SessionFactory for TicketFactory {
+        fn create(
+            &self,
+            _: SafeId,
+            _: Arc<dyn protocol::ports::ConnectionPort>,
+            _: Arc<dyn ReportSink>,
+        ) -> Arc<dyn protocol::ports::SessionHandle> {
+            self.0.clone()
+        }
+        fn unbound_tool(&self, _: ToolCall, _: Arc<dyn ReportSink>) {
+            panic!("this connection fixture admits no tools")
+        }
+    }
+
     fn owner_with_budget(
         budget: Arc<crate::report_memory::Budget>,
     ) -> (Owner, mpsc::UnboundedReceiver<OutboxEvent>) {
@@ -2557,22 +2595,46 @@ mod tests {
             held.renewal,
             Some(Renewal::Fetching { retry_at: Some(at), .. }) if at == Duration::from_secs(30)
         ));
-        let fetch = |backoff| TicketFetch {
+        let fetch = |request, backoff| TicketFetch {
             session_id: SafeId::new("sess_a").unwrap(),
-            request: TicketRequest(1),
+            request,
             body: Vec::new(),
             backoff,
             retry_at: None,
         };
         held.tickets.insert(
             1,
-            fetch(Backoff::new(Duration::from_secs(1), BASE_MAX, || 0.0)),
+            fetch(
+                TicketRequest(1),
+                Backoff::new(Duration::from_secs(1), BASE_MAX, || 0.0),
+            ),
         );
-        held.tickets.insert(2, fetch(backoff()));
+        held.tickets.insert(2, fetch(TicketRequest(2), backoff()));
+        let answers = Arc::new(TicketAnswers::default());
+        let (mailbox, _inbox) = mpsc::unbounded_channel();
+        owner.owners = Owners::new(
+            Arc::new(TicketFactory(answers.clone())),
+            Arc::new(Port { mailbox }),
+            Arc::new(owner.outbox.clone()),
+            128,
+        );
+        owner.owners.close(
+            &SafeId::new("sess_a").unwrap(),
+            Close {
+                connection_id: Id::new("conn_a").unwrap(),
+                message_id: Id::new("msg_a").unwrap(),
+                binding_id: Id::new("bind_a").unwrap(),
+            },
+        );
         owner.ticket_answered(&mut held, 1, failed(), Duration::ZERO);
         owner.ticket_answered(&mut held, 2, failed(), Duration::ZERO);
         assert_eq!(held.tickets[&1].retry_at, Some(Duration::from_secs(1)));
-        assert!(!held.tickets.contains_key(&2), "answered with its failure");
+        assert!(!held.tickets.contains_key(&2));
+        assert_eq!(
+            *answers.0.lock().unwrap(),
+            [(2, true)],
+            "only the fetch past the deadline is answered, with its failure"
+        );
         task.abort();
     }
 
