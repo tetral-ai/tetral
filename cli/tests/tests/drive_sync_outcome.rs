@@ -532,7 +532,7 @@ async fn a_mount_failure_is_in_the_first_report_and_a_view_image_result_and_down
     let cmd = format!("cat \"$TETRAL_DRIVES\"/{DRIVE}/c.txt");
     let (mailbox, mut reports) = fixture.start(
         "task",
-        json!({ "tool": "exec_command", "input": { "cmd": cmd, "wait_ms": 1_000, "on_wait_expiry": "detach" } }),
+        json!({ "tool": "exec_command", "input": { "cmd": cmd, "wait_ms": 5_000, "on_wait_expiry": "detach" } }),
     );
     tokio::time::timeout(Duration::from_secs(60), fixture.downloads.recv())
         .await
@@ -698,7 +698,7 @@ async fn a_cancel_while_the_running_report_waits_for_its_sync_point_ends_the_com
     let (mailbox, mut reports) = fixture.start_with(
         "task",
         json!({ "tool": "exec_command", "input": {
-            "cmd": cmd, "wait_ms": 250, "on_wait_expiry": "detach",
+            "cmd": cmd, "wait_ms": 5_000, "on_wait_expiry": "detach",
         } }),
         port.clone(),
         Arc::new(NoEvents),
