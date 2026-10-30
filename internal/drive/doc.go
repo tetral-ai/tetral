@@ -42,7 +42,8 @@
 //	                 (redacted_at set; names no content).
 //
 // WRITERS (callers):
-//   - Create, Update, Delete, Redact, Restore (api).
+//   - Create, Update, Delete, Redact, Restore, PublishSkill, DeleteSkill
+//     (api).
 //   - PutContent, Commit, UploadBudget.Take (api, computer-hub).
 //
 // INVARIANTS:
