@@ -22,8 +22,11 @@ type TicketStore interface {
 	FindByTokenHash(context.Context, []byte) (*gitticket.Ticket, error)
 }
 
+// TicketValidator accepts a live computer ticket from ComputerStore, and a
+// Session ticket from Store.
 type TicketValidator struct {
 	Store         TicketStore
+	ComputerStore TicketStore
 	Now           func() time.Time
 	RotationGrace time.Duration
 }
@@ -36,10 +39,7 @@ func (v TicketValidator) Validate(ctx context.Context, token string) (*gitticket
 	if err != nil {
 		return nil, ErrTicketUnauthorized
 	}
-	if v.Store == nil {
-		return nil, ErrTicketUnauthorized
-	}
-	row, err := v.Store.FindByTokenHash(ctx, hash)
+	row, err := v.find(ctx, hash)
 	if err != nil {
 		return nil, ErrTicketUnauthorized
 	}
@@ -57,6 +57,20 @@ func (v TicketValidator) Validate(ctx context.Context, token string) (*gitticket
 	default:
 		return nil, ErrTicketUnauthorized
 	}
+}
+
+func (v TicketValidator) find(ctx context.Context, hash []byte) (*gitticket.Ticket, error) {
+	if v.ComputerStore != nil {
+		row, err := v.ComputerStore.FindByTokenHash(ctx, hash)
+		var notFound *gitticket.NotFoundError
+		if !errors.As(err, &notFound) {
+			return row, err
+		}
+	}
+	if v.Store == nil {
+		return nil, ErrTicketUnauthorized
+	}
+	return v.Store.FindByTokenHash(ctx, hash)
 }
 
 func (v TicketValidator) now() time.Time {
