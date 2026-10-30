@@ -65,7 +65,15 @@ async fn at_the_end_time_held_changes_are_abandoned_and_their_paths_take_the_dri
 
     env.advance(Duration::from_secs(9)).await;
     assert!(keeper.0.lock().unwrap().is_empty());
+    // Nothing is removed until lost-changes.json holds the entries.
+    *keeper.1.lock().unwrap() = Some(Vec::new());
     env.advance(Duration::from_secs(1)).await;
+    support::eventually(|| !keeper.0.lock().unwrap().is_empty()).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(std::fs::read_dir(&content).unwrap().count() > 0);
+    for kept in keeper.1.lock().unwrap().take().unwrap() {
+        kept();
+    }
     let lost = ended(upload).await;
     let Call::Upload { answer: put, .. } = put else {
         unreachable!()

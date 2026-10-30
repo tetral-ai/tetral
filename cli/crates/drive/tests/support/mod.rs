@@ -779,9 +779,13 @@ impl Drop for Unmount {
     }
 }
 
-/// The Connection owner's side: keeps the entries it is given.
+/// The Connection owner's side: keeps the entries it is given, and replies
+/// at once or, while `held` is set, once the test takes the replies.
 #[derive(Default)]
-pub struct Keeper(pub Mutex<Vec<protocol::connection::LostChange>>);
+pub struct Keeper(
+    pub Mutex<Vec<protocol::connection::LostChange>>,
+    pub Mutex<Option<Vec<protocol::ports::KeptReply>>>,
+);
 
 impl protocol::ports::ConnectionPort for Keeper {
     fn probe_slot(&self, _: &SafeId, _: protocol::ports::ProbeRequest) {}
@@ -801,7 +805,10 @@ impl protocol::ports::ConnectionPort for Keeper {
         kept: protocol::ports::KeptReply,
     ) {
         self.0.lock().unwrap().extend(entries);
-        kept();
+        match self.1.lock().unwrap().as_mut() {
+            Some(held) => held.push(kept),
+            None => kept(),
+        }
     }
     fn owner_idle(&self, _: &SafeId, _: u64) {}
 }
