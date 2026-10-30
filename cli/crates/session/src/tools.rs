@@ -588,6 +588,10 @@ impl<S: TaskStarter> SessionOwner<S> {
     /// processes are not confirmed gone.
     pub(crate) fn cleanup_pending(&self) -> bool {
         !self.unconfirmed.is_empty()
+            || self
+                .clones
+                .values()
+                .any(|running| !running.current.load(std::sync::atomic::Ordering::Acquire))
             || self.preparation.as_ref().is_some_and(|preparation| {
                 preparation
                     .shared

@@ -366,7 +366,14 @@ impl<S: TaskStarter> SessionOwner<S> {
             }
         };
         let current = Arc::new(AtomicBool::new(true));
-        self.clones.insert(operation, current.clone());
+        let (kill, killed) = tokio::sync::watch::channel(false);
+        self.clones.insert(
+            operation,
+            repositories::Running {
+                current: current.clone(),
+                kill,
+            },
+        );
         let mailbox = self.mailbox.clone();
         tokio::spawn(async move {
             let failures = repositories::run(Job {
@@ -374,6 +381,7 @@ impl<S: TaskStarter> SessionOwner<S> {
                 repositories,
                 ticket,
                 current,
+                killed,
             })
             .await;
             let _ = mailbox.send(SessionMessage::RepositoriesDone {

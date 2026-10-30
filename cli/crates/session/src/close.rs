@@ -124,6 +124,10 @@ impl<S: TaskStarter> SessionOwner<S> {
         if matches!(kind, Kind::Ordinary { .. }) {
             self.close_binding(&close);
         }
+        // The Session's clones are managed descendants the close ends.
+        for running in self.clones.values() {
+            let _ = running.kill.send(true);
+        }
         self.closing = Some(Closing {
             kind,
             requesters: vec![close],

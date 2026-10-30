@@ -122,6 +122,12 @@ pub fn quiesce(machine: &Machine, routed: u64) {
 /// Ends the connection with a retryable connection `disconnect` and waits
 /// until the next connection is online.
 pub fn new_connection(engine: &ReferenceServer, machine: &Machine) {
+    new_connection_after(engine, machine, 1.2);
+}
+
+/// [`new_connection`] for a machine whose reconnect backoff has grown to at
+/// most `backoff` seconds, after reconnects without a confirmed heartbeat.
+pub fn new_connection_after(engine: &ReferenceServer, machine: &Machine, backoff: f64) {
     let old = machine.status()["connection_id"].clone();
     send(
         engine,
@@ -135,7 +141,7 @@ pub fn new_connection(engine: &ReferenceServer, machine: &Machine) {
     );
     machine.wait_for("disconnected");
     engine.advance(seconds(46.0));
-    machine.seams.advance(seconds(1.2));
+    machine.seams.advance(seconds(backoff));
     let status = machine.wait_for("online");
     assert_ne!(status["connection_id"], old);
 }

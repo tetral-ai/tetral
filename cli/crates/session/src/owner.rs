@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use execution::cleanup::Leftovers;
@@ -328,9 +328,8 @@ pub(crate) struct SessionOwner<S> {
     pub probes: HashMap<u64, Running>,
     /// Each git-ticket request not yet answered, and its operation.
     pub tickets: HashMap<TicketRequest, u64>,
-    /// The clones of each operation that still run, and whether it is still
-    /// current.
-    pub clones: HashMap<u64, Arc<AtomicBool>>,
+    /// The clones of each operation that still run.
+    pub clones: HashMap<u64, crate::repositories::Running>,
     /// The tasks of ended connections, by connection and `task_id`, whose
     /// processes are not yet confirmed gone.
     pub unconfirmed: HashSet<(Id, Id)>,
@@ -615,8 +614,8 @@ impl<S: TaskStarter> SessionOwner<S> {
     /// more.
     pub(crate) fn end_operation(&mut self, operation: u64) {
         self.tickets.retain(|_, waiting| *waiting != operation);
-        if let Some(current) = self.clones.get(&operation) {
-            current.store(false, Ordering::Release);
+        if let Some(running) = self.clones.get(&operation) {
+            running.current.store(false, Ordering::Release);
         }
         let withdrawn: Vec<ProbeRequest> = self
             .requests

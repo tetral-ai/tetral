@@ -22,7 +22,10 @@ use tetral_tests::machine::{
 };
 use tetral_tests::record::Case;
 use tetral_tests::reference::ReferenceServer;
-use tetral_tests::sessions::{new_connection, online_machine, prepare, reports_for};
+use tetral_tests::sessions::{
+    closed, failed, new_connection, new_connection_after, online_machine, outcome, prepare,
+    reports_for,
+};
 use tetral_tests::socket_directory;
 
 const GIT_SPAWN: &str = "git.spawn";
@@ -570,6 +573,11 @@ fn a_clone_held_past_its_connection_is_recorded_and_reused_by_the_next_preparati
     );
     git.wait_until_held();
     new_connection(&engine, &machine.machine);
+    let early = prepare(
+        &engine,
+        &payload("sess_a", "bind_2", &work.join("cwd"), repositories.clone()),
+    );
+    assert_eq!(outcome(&engine, &early), failed("cleanup_pending"));
     git.release();
     wait_until("the held clone in repositories.json", || {
         listed(&machine.machine, "sess_a") == [text(&path)]
@@ -586,10 +594,128 @@ fn a_clone_held_past_its_connection_is_recorded_and_reused_by_the_next_preparati
     let served = git.requests().len();
     let issued = prepare(
         &engine,
-        &payload("sess_a", "bind_2", &work.join("cwd"), repositories),
+        &payload("sess_a", "bind_3", &work.join("cwd"), repositories.clone()),
     );
     assert_eq!(failures(&report(&engine, &issued)), []);
     assert_eq!(git.requests().len(), served);
-    case.observe("after the next connection the clone is listed with feature checked out; the next preparation reused it without a clone or repository_path_exists");
+    case.observe("a preparation while the clone still ran failed with cleanup_pending; after the next connection the clone is listed with feature checked out; the next preparation reused it without a clone or repository_path_exists");
+    case.pass();
+
+    let mut case = record.case("a listed clone that was deleted");
+    fs::remove_dir_all(&path).unwrap();
+    // The second reconnect's backoff base is 2 seconds.
+    new_connection_after(&engine, &machine.machine, 2.4);
+    let issued = prepare(
+        &engine,
+        &payload("sess_a", "bind_4", &work.join("cwd"), repositories),
+    );
+    assert_eq!(failures(&report(&engine, &issued)), []);
+    assert!(git.requests().len() > served);
+    assert_eq!(
+        machine.in_repository(&path, &["branch", "--show-current"]),
+        "feature"
+    );
+    case.observe("the next preparation cloned it again");
+    case.pass();
+}
+
+#[test]
+fn a_late_clone_whose_checkout_fails_leaves_no_folder_and_a_close_kills_a_running_clone() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let (git, engine) = servers(base);
+    let mut case = record.case("a clone of a missing branch held until the connection ended");
+    let machine = GitMachine::start(&mut case, &engine, &git, base);
+    let remote = git.repository("alpha");
+    let work = base.join("work");
+    let cwd = work.join("cwd");
+    let late = work.join("late");
+    git.hold_pack();
+    prepare(
+        &engine,
+        &payload(
+            "sess_a",
+            "bind_1",
+            &cwd,
+            json!([repository(
+                &remote.url,
+                &late,
+                json!({ "type": "branch", "name": "missing" })
+            )]),
+        ),
+    );
+    git.wait_until_held();
+    new_connection(&engine, &machine.machine);
+    git.release();
+    // The Session prepares again once the late clone has ended.
+    let mut attempt = 1;
+    let prepared = loop {
+        attempt += 1;
+        let issued = prepare(
+            &engine,
+            &payload("sess_a", &format!("bind_{attempt}"), &cwd, json!([])),
+        );
+        let answer = outcome(&engine, &issued);
+        if answer != failed("cleanup_pending") || attempt == 50 {
+            break answer;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    assert_eq!(prepared.0, "prepared");
+    assert!(!late.exists());
+    assert!(listed(&machine.machine, "sess_a").is_empty());
+    case.observe("the clone finished after its connection, its checkout failed and its folder was removed unlisted");
+    case.pass();
+
+    let mut case = record.case("a session.close while the first of two clones is held");
+    git.hold_pack();
+    prepare(
+        &engine,
+        &payload(
+            "sess_b",
+            "bind_1",
+            &cwd,
+            json!([
+                repository(&remote.url, &work.join("first"), Value::Null),
+                repository(&remote.url, &work.join("second"), Value::Null),
+            ]),
+        ),
+    );
+    git.wait_until_held();
+    let spawned = machine.machine.seams.count(GIT_SPAWN);
+    let issued = engine.control(
+        "close",
+        json!({
+            "instance_id": INSTANCE,
+            "payload": { "session_id": "sess_b", "binding_id": "bind_1" },
+        }),
+    );
+    let closing = issued["message_id"].as_str().unwrap().to_owned();
+    assert_eq!(outcome(&engine, &closing), closed());
+    git.release();
+    assert_eq!(machine.machine.seams.count(GIT_SPAWN), spawned);
+    assert!(!work.join("second").exists());
+    case.observe("closed was reported while the clone's pack was still held; no git was spawned after the close and the second repository was never cloned");
+    case.pass();
+
+    let mut case = record.case("a repository path equal to a cwd that does not exist yet");
+    let together = work.join("together");
+    let issued = prepare(
+        &engine,
+        &payload(
+            "sess_c",
+            "bind_1",
+            &together,
+            json!([repository(&remote.url, &together, Value::Null)]),
+        ),
+    );
+    assert_eq!(failures(&report(&engine, &issued)), []);
+    assert_eq!(
+        machine.in_repository(&together, &["rev-parse", "HEAD"]),
+        remote.main
+    );
+    case.observe("prepared with the repository cloned into the cwd the probe created");
     case.pass();
 }

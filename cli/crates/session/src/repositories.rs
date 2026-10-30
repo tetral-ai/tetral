@@ -1,7 +1,6 @@
-//! A cloud computer's repositories: the path checks against the state root
-//! and against the clones this Session made (`repositories.json`), the
-//! clone or reuse of each repository through git-proxy, and the failures a
-//! preparation report lists.
+//! A cloud computer's repositories: the clones this Session made
+//! (`repositories.json`), the clone or reuse of each repository through
+//! git-proxy, and the failures a preparation report lists.
 //!
 //! Repositories are handled one at a time, each `git` a child process in its
 //! own process group with the App Server's environment and
@@ -9,21 +8,26 @@
 //! machine's proxy and certificate settings apply and Git never waits for a
 //! prompt. The ticket, the URL rewrite to git-proxy and the commit identity
 //! go only into each repository's own configuration; `origin` stays the
-//! repository's `url`. A clone that succeeds is recorded in
-//! `repositories.json` even after its preparation stopped being current, so
-//! that the next preparation reuses it instead of failing with
-//! `repository_path_exists`.
+//! repository's `url`, and a clone that receives nothing for 60 seconds
+//! fails. A clone that succeeds is recorded in `repositories.json` even
+//! after its preparation stopped being current, so that the next
+//! preparation reuses it instead of failing with `repository_path_exists`;
+//! one that fails after that leaves no folder. A close kills the `git`
+//! child's process group and ends the job.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use rustix::process::{Pid, Signal};
+
 use protocol::connection::{
     Checkout, GitTicketResponse, Repository, RepositoryFailure, RepositoryFailureCause,
 };
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::sync::watch;
 
 /// The file under the Session's directory that lists the paths of the
 /// repositories this Session cloned on this machine.
@@ -31,6 +35,9 @@ pub const REPOSITORIES_FILE: &str = "repositories.json";
 
 /// The bytes of a repository failure's `message`.
 pub const MESSAGE_MAX_BYTES: usize = 1_024;
+
+/// The failure of a `git` child that a close killed.
+const KILLED: &str = "git was killed by the Session's close";
 
 /// The bytes of a `git` child's stderr kept, its last ones, from which the
 /// cause and the message are read.
@@ -67,19 +74,33 @@ pub struct Job {
     /// Whether the preparation is still current; the owner clears it when
     /// the preparation ends.
     pub current: Arc<AtomicBool>,
+    /// True once a close kills the job.
+    pub killed: watch::Receiver<bool>,
 }
 
-/// Clones or reuses each repository in order and gives the failures.
+/// What the Session binding owner keeps of a job that runs.
+pub struct Running {
+    pub current: Arc<AtomicBool>,
+    pub kill: watch::Sender<bool>,
+}
+
+/// Clones or reuses each repository in order and gives the failures; a
+/// killed job stops.
 pub async fn run(job: Job) -> Vec<RepositoryFailure> {
     let mut failures = Vec::new();
     let listed = listed(&job.session_directory);
     for repository in &job.repositories {
+        if *job.killed.borrow() {
+            break;
+        }
         let path = repository.path.as_str();
-        let outcome = if listed.iter().any(|each| each == path) {
-            reuse(repository, &job.ticket).await
-        } else {
-            clone(&job, repository).await
-        };
+        // A listed clone that is gone is cloned again.
+        let outcome =
+            if listed.iter().any(|each| each == path) && std::fs::symlink_metadata(path).is_ok() {
+                reuse(repository, &job.ticket, &job.killed).await
+            } else {
+                clone(&job, repository).await
+            };
         if let Err((cause, message)) = outcome {
             failures.push(RepositoryFailure {
                 url: repository.url.clone(),
@@ -131,18 +152,25 @@ fn keys(repository: &Repository, ticket: &GitTicketResponse) -> [(String, String
 
 /// A clone this Session made: nothing is cloned, fetched or checked out;
 /// the four keys are replaced, the new ticket among them.
-async fn reuse(repository: &Repository, ticket: &GitTicketResponse) -> Result<(), Failure> {
+async fn reuse(
+    repository: &Repository,
+    ticket: &GitTicketResponse,
+    killed: &watch::Receiver<bool>,
+) -> Result<(), Failure> {
     let path = repository.path.as_str();
     for (key, value) in keys(repository, ticket) {
-        git(&[
-            "-C",
-            path,
-            "config",
-            "--local",
-            "--replace-all",
-            &key,
-            &value,
-        ])
+        git(
+            &[
+                "-C",
+                path,
+                "config",
+                "--local",
+                "--replace-all",
+                &key,
+                &value,
+            ],
+            killed,
+        )
         .await
         .map_err(|stderr| (RepositoryFailureCause::Clone, last_line(&stderr)))?;
     }
@@ -151,7 +179,16 @@ async fn reuse(repository: &Repository, ticket: &GitTicketResponse) -> Result<()
 
 async fn clone(job: &Job, repository: &Repository) -> Result<(), Failure> {
     let path = repository.path.as_str();
-    let mut arguments = vec!["clone".to_owned()];
+    // Not persisted: git aborts a transfer that receives nothing for 60 s.
+    let mut arguments = [
+        "-c",
+        "http.lowSpeedLimit=1",
+        "-c",
+        "http.lowSpeedTime=60",
+        "clone",
+    ]
+    .map(str::to_owned)
+    .to_vec();
     for (key, value) in keys(repository, &job.ticket) {
         arguments.push("-c".to_owned());
         arguments.push(format!("{key}={value}"));
@@ -159,9 +196,17 @@ async fn clone(job: &Job, repository: &Repository) -> Result<(), Failure> {
     arguments.push(repository.url.as_str().to_owned());
     arguments.push(path.to_owned());
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    git(&arguments)
+    // The folder of a clone no longer current that fails is removed: no
+    // listing names it, so it would fail every later preparation.
+    let abandon = |failure: Failure| {
+        if !job.current.load(Ordering::Acquire) {
+            let _ = std::fs::remove_dir_all(path);
+        }
+        failure
+    };
+    git(&arguments, &job.killed)
         .await
-        .map_err(|stderr| (clone_cause(&stderr), last_line(&stderr)))?;
+        .map_err(|stderr| abandon((clone_cause(&stderr), last_line(&stderr))))?;
     let current = job.current.load(Ordering::Acquire);
     if current {
         record(&job.session_directory, path)
@@ -169,12 +214,18 @@ async fn clone(job: &Job, repository: &Repository) -> Result<(), Failure> {
     }
     let checkout = match &repository.checkout.0 {
         None => Ok(()),
-        Some(Checkout::Branch { name, .. }) => git(&["-C", path, "checkout", name.as_str()]).await,
+        Some(Checkout::Branch { name, .. }) => {
+            git(&["-C", path, "checkout", name.as_str()], &job.killed).await
+        }
         Some(Checkout::Commit { sha, .. }) => {
-            git(&["-C", path, "checkout", "--detach", sha.as_str()]).await
+            git(
+                &["-C", path, "checkout", "--detach", sha.as_str()],
+                &job.killed,
+            )
+            .await
         }
     };
-    checkout.map_err(|stderr| (RepositoryFailureCause::Checkout, last_line(&stderr)))?;
+    checkout.map_err(|stderr| abandon((RepositoryFailureCause::Checkout, last_line(&stderr))))?;
     if !current {
         record(&job.session_directory, path)
             .map_err(|error| (RepositoryFailureCause::Clone, error))?;
@@ -184,7 +235,11 @@ async fn clone(job: &Job, repository: &Repository) -> Result<(), Failure> {
 
 /// Runs `git` with `arguments`, counted as the test seam counter
 /// `git.spawn`; the kept end of its stderr when it fails or cannot start.
-async fn git(arguments: &[&str]) -> Result<(), String> {
+/// A kill of the job kills its process group and reaps it.
+async fn git(arguments: &[&str], killed: &watch::Receiver<bool>) -> Result<(), String> {
+    if *killed.borrow() {
+        return Err(KILLED.to_owned());
+    }
     state::seams::count("git.spawn");
     let mut child = Command::new("git")
         .args(arguments)
@@ -198,24 +253,43 @@ async fn git(arguments: &[&str]) -> Result<(), String> {
         .kill_on_drop(true)
         .spawn()
         .map_err(|error| format!("git could not start: {error}"))?;
+    let group = child.id().and_then(|id| Pid::from_raw(id as i32));
     let mut stderr = child.stderr.take().expect("stderr is piped");
-    let mut kept = Vec::new();
-    let mut chunk = [0u8; 8_192];
-    loop {
-        match stderr.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
-            Ok(read) => {
-                kept.extend_from_slice(&chunk[..read]);
-                if kept.len() > STDERR_KEPT_BYTES {
-                    kept.drain(..kept.len() - STDERR_KEPT_BYTES);
+    let reap = async {
+        let mut kept = Vec::new();
+        let mut chunk = [0u8; 8_192];
+        loop {
+            match stderr.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    kept.extend_from_slice(&chunk[..read]);
+                    if kept.len() > STDERR_KEPT_BYTES {
+                        kept.drain(..kept.len() - STDERR_KEPT_BYTES);
+                    }
                 }
             }
         }
-    }
-    let status = child
-        .wait()
-        .await
-        .map_err(|error| format!("git could not be waited for: {error}"))?;
+        (child.wait().await, kept)
+    };
+    tokio::pin!(reap);
+    let mut killed = killed.clone();
+    let kill = async move {
+        if killed.wait_for(|killed| *killed).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    };
+    let (status, kept) = tokio::select! {
+        biased;
+        () = kill => {
+            if let Some(group) = group {
+                let _ = rustix::process::kill_process_group(group, Signal::KILL);
+            }
+            let _ = reap.await;
+            return Err(KILLED.to_owned());
+        }
+        reaped = &mut reap => reaped,
+    };
+    let status = status.map_err(|error| format!("git could not be waited for: {error}"))?;
     if status.success() {
         Ok(())
     } else {
