@@ -15,6 +15,7 @@ use drive::transfer::Ended;
 use protocol::drive_transfer::CommitChange;
 use protocol::drive_transfer::limits::{COMMIT_MAX_CHANGES, COMMIT_REQUEST_MAX_JSON_BYTES};
 use protocol::field::{Nullable, Sha256};
+use protocol::id::Id;
 use protocol::tool::{ChangeKind, RejectionReason};
 use rustix::io::Errno;
 use serde_json::json;
@@ -238,19 +239,35 @@ async fn a_lost_answer_is_sent_again_unchanged_after_a_restart_and_the_rewrite_f
 async fn content_missing_uploads_the_named_content_again_and_resends_the_rest_after_the_result() {
     let mut env = Env::new();
     let session = env.session("sess_a", Write::default(), true).await;
+    // A second drive, whose held commit keeps the result waiting.
+    let other = Id::new("drive_b").unwrap();
+    session.sync.mounted(other.clone(), Vec::new());
+    session.caught_up().await;
     session.write("a", "one", NO_TASK).await;
     session.write("b", "bee", NO_TASK).await;
+    session.write_in(&other, "c", "sea", NO_TASK).await;
     let point = session.sync_point(None, RESULT_WAIT, None);
-    env.call().await.uploaded();
-    env.call().await.uploaded();
-    let commit = env.call().await;
-    assert_eq!(commit.changes().len(), 2);
+    let mut commits = Vec::new();
+    while commits.len() < 2 {
+        match env.call().await {
+            call @ support::Call::Upload { .. } => call.uploaded(),
+            call => commits.push(call),
+        }
+    }
+    commits.sort_by_key(|call| call.changes().len());
+    let (held, commit) = (commits.remove(0), commits.remove(0));
+    assert_eq!(summary(held.changes())[0].0, "c");
     let missing = sha256(b"one");
     commit.commit_ended(Ended::Decision(error_body(
         "content_missing",
         "content is missing",
         &[&missing],
     )));
+    let upload = env.call().await;
+    assert_eq!(upload.sha256(), missing, "the named content uploads again");
+    // The rest is sent again only after the result is reported.
+    env.no_call(SHORT).await;
+    held.accepted();
     let listed = outcome(point).await;
     let mut uploading: Vec<&str> = listed
         .not_synced
@@ -262,13 +279,9 @@ async fn content_missing_uploads_the_named_content_again_and_resends_the_rest_af
         uploading,
         [session.machine_path("a"), session.machine_path("b")]
     );
-    let mut seen = [env.call().await, env.call().await];
-    seen.sort_by_key(|call| matches!(call, support::Call::Commit { .. }));
-    assert_eq!(seen[0].sha256(), missing, "the named content uploads again");
-    assert_eq!(
-        summary(seen[1].changes()),
-        [("b".to_owned(), "write", None)]
-    );
+    let resent = env.call().await;
+    assert_eq!(summary(resent.changes()), [("b".to_owned(), "write", None)]);
+    drop(upload);
 }
 
 #[tokio::test]
