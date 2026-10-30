@@ -45,6 +45,8 @@
 //   - Create, Update, Delete, Redact, Restore, PublishSkill, DeleteSkill
 //     (api).
 //   - PutContent, Commit, UploadBudget.Take (api, computer-hub).
+//   - Cleaner.CleanDrive and Cleaner.DeleteDueBlobs, the daily cleanup
+//     (cleanup); cleanup.go.
 //
 // INVARIANTS:
 //   - Every read applies retention by age against the database clock
