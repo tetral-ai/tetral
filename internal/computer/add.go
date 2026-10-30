@@ -203,5 +203,12 @@ func AddComputers(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessio
 		}
 		ids = append(ids, computerID)
 	}
+	// Only a user computer can have an online instance now, and it has no
+	// repositories, so its session.prepare lacks nothing stored later.
+	for _, computerID := range ids {
+		if _, err := IssuePreparation(ctx, tx, ws, sessionID, computerID); err != nil {
+			return nil, err
+		}
+	}
 	return ids, nil
 }

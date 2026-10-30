@@ -15,8 +15,11 @@ const (
 	RouteReady         = "ready"
 	RouteHeartbeat     = "heartbeat"
 	RouteProtocolError = "protocol-error"
-	// RouteCredential's records keep no answer: the answer held a key.
+	RouteSessionStatus = "session-status"
+	// RouteCredential's and RouteGitTicket's records keep no answer: the
+	// answer held a key or a ticket.
 	RouteCredential = "credential"
+	RouteGitTicket  = "git-ticket"
 )
 
 // LedgerEntry is the replay record of one message_id on a connection: the

@@ -10,7 +10,16 @@
 //     computer is added; a cloud computer copies its Environment's networking
 //     then. current_instance_id is a user computer's instance_id and a cloud
 //     computer's instance once one serves it. cwd, connection_id, binding_id
-//     and error_code/error_message describe the latest preparation.
+//     and error_code/error_message describe the latest preparation;
+//     last_failed_code is the code of the failure since the last success, so
+//     a repeated failure writes no second computer_preparation_error.
+//   - Table computer_bindings: one row per preparation of a computer on one
+//     connection, kind prepare for a session.prepare (late_close for the
+//     close of a Session a machine still holds). At most one binding of a
+//     computer on a connection is active (preparing, prepared or failed).
+//     created_at is the database clock of the transaction that issues the
+//     session.prepare and reported_at that of the one that stores its report;
+//     the session_computer cold start is their difference.
 //   - Table computer_idempotency_records: one row per (principal credential,
 //     route, Idempotency-Key) of Session creation or a computer addition,
 //     holding the fingerprint, with repository tokens hashed, and the Session
@@ -42,6 +51,18 @@
 //	association_state  attached -> detached (removal, archive)
 //	execution_state    waiting -> preparing -> ready | failed, then
 //	                   closing -> closed | unknown after detachment
+//	binding            preparing -> prepared | failed (StoreReport),
+//	                   failed -> invalid (PrepareAgain); a report on any other
+//	                   state changes nothing
+//
+// Preparation: IssuePreparation issues one session.prepare through the
+// connection's instruction store when the computer is attached, its current
+// instance has an online connection and it holds no active binding there; it
+// locks the connection before the computer, the order of the ready route.
+// StoreReport applies a stored report in the report's transaction and writes
+// its session.error events (WriteSessionErrors, under the Session's runtime
+// mutation advisory lock). CheckPrepareSize refuses a computer whose
+// session.prepare would exceed PrepareEnvelopeLimit, one SSE event.
 //
 // Machine messages: WriteMachineMessageTx is the one writer of
 // session_machine_messages; it reads the computer through ReadRuntimeRow,
@@ -60,14 +81,24 @@
 //   - api and computer-hub: WriteMachineMessageTx for each computer change the
 //     Runtime must learn (an addition; removals and replacements as their
 //     routes land).
+//   - api, through AddComputers: IssuePreparation for each new computer;
+//     only a user computer, which has no repositories, can be online then.
+//     internal/session calls CheckPrepareSize once a computer's repositories
+//     are resolved.
+//   - computer-hub: IssuePreparationsOn through hubflow.AcceptReady after
+//     fulfilment; LockPreparation, StoreReport and PreparationColdStart for
+//     POST /v1/client/session-status; LockGitTicketBinding for POST
+//     /v1/client/git-ticket.
 //   - computer-hub, through internal/instance: the attached computers of an
-//     instance give its computer_count.
+//     instance give its computer_count, and the bindings prepared on its live
+//     connection its binding_count.
 //   - computer-hub: ListPendingRequests, ReadRequest and ClaimRequest for the
 //     request routes; FulfilRequests through hubflow.AcceptReady;
 //     ReturnToPending and Fail only through hubflow.ReturnRequestToPending and
 //     hubflow.FailRequest, which end the revoked credential's connection.
-//   - Tool-call admission (EnsureRequest) and the cleanup phase (Expire, and
-//     ReturnToPending after the claim timeout), once they land.
+//   - Tool-call admission (EnsureRequest, IssuePreparation, PrepareAgain) and
+//     the cleanup phase (Expire, and ReturnToPending after the claim timeout),
+//     once they land.
 //
 // Every writer that changes an input of the unused rule calls RefreshUnused
 // in its transaction.

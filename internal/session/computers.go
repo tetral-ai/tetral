@@ -87,8 +87,33 @@ func (s *Service) checkComputersTx(ctx context.Context, tx Transaction, sessionI
 		if repositories[i], err = s.prepareRepositories(checked[i].WorkingDirectory, request.Repositories); err != nil {
 			return checkedComputers{}, err
 		}
+		// Sessions carry no drive bindings yet, so the size counts none.
+		if err := computer.CheckPrepareSize(sessionID, checked[i], preparedRepositories(repositories[i]), nil); err != nil {
+			return checkedComputers{}, err
+		}
 	}
 	return checkedComputers{checked: checked, repositories: repositories}, nil
+}
+
+// preparedRepositories are resolved repository resources as a
+// session.prepare names them.
+func preparedRepositories(resources []*Resource) []computer.Repository {
+	repositories := make([]computer.Repository, 0, len(resources))
+	for _, resource := range resources {
+		repository := resource.GitHubRepository
+		prepared := computer.Repository{URL: repository.URL, Path: repository.MountPath}
+		switch repository.CheckoutType {
+		case "branch":
+			prepared.Checkout = &computer.Checkout{Type: "branch", Name: repository.CheckoutRef}
+		case "commit":
+			prepared.Checkout = &computer.Checkout{Type: "commit", SHA: repository.CheckoutRef}
+		}
+		if repository.GitIdentity != nil {
+			prepared.GitIdentity = &computer.GitIdentity{Name: repository.GitIdentity.Name, Email: repository.GitIdentity.Email}
+		}
+		repositories = append(repositories, prepared)
+	}
+	return repositories
 }
 
 // storeComputersTx stores each checked computer and its repositories and

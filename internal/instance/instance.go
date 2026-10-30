@@ -199,6 +199,10 @@ func ReadObjects(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, values 
 	if err != nil {
 		return nil, err
 	}
+	bindings, err := bindingCounts(ctx, tx, ws, connections, now)
+	if err != nil {
+		return nil, err
+	}
 	objects := make([]InstanceObject, len(values))
 	for i, value := range values {
 		objects[i] = InstanceObject{
@@ -211,6 +215,7 @@ func ReadObjects(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, values 
 			CLIVersion:         value.CLIVersion,
 			CLIUpdateAvailable: value.CLIVersion != nil && VersionBelow(*value.CLIVersion, recommendedCLI),
 			ComputerCount:      computers[value.ID],
+			BindingCount:       bindings[value.ID],
 			ObservedAt:         FormatTime(now),
 		}
 		if connection, ok := connections[value.ID]; ok {
@@ -240,6 +245,38 @@ func computerCounts(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, inst
 			return nil, err
 		}
 		counts[instanceID] = count
+	}
+	return counts, rows.Err()
+}
+
+// bindingCounts returns, per instance, the bindings prepared on its
+// connection that is live at now.
+func bindingCounts(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connections map[string]Connection, now time.Time) (map[string]int, error) {
+	instanceOf := map[string]string{}
+	ids := make([]string, 0, len(connections))
+	for instanceID, connection := range connections {
+		if connection.Live(now) {
+			instanceOf[connection.ID] = instanceID
+			ids = append(ids, connection.ID)
+		}
+	}
+	counts := map[string]int{}
+	if len(ids) == 0 {
+		return counts, nil
+	}
+	rows, err := tx.Query(ctx, `SELECT connection_id,count(*) FROM computer_bindings
+		WHERE workspace_id=$1 AND connection_id=ANY($2) AND state='prepared' GROUP BY connection_id`, string(ws), ids)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var connectionID string
+		var count int
+		if err := rows.Scan(&connectionID, &count); err != nil {
+			return nil, err
+		}
+		counts[instanceOf[connectionID]] = count
 	}
 	return counts, rows.Err()
 }

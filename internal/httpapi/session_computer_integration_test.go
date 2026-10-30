@@ -3,15 +3,20 @@ package httpapi_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/session"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -355,4 +360,166 @@ func TestSessionComputerRepositoriesAreFixed(t *testing.T) {
 	if len(repositories) != 1 || repositories[0].ID != repositoryID || repositories[0].Path != "/src/app" || repositories[0].MountPath == nil || *repositories[0].MountPath != "/src/app" {
 		t.Fatalf("repositories after the refused changes = %+v; want only %s at /src/app", repositories, repositoryID)
 	}
+}
+
+// A Session created with a user computer whose instance's connection is
+// already online stores exactly one session.prepare in the creation
+// transaction, for the computer's new preparing binding; once its prepared
+// report is stored, another issuance sends none.
+func TestSessionCreationPreparesAnOnlineUserComputer(t *testing.T) {
+	if os.Getenv(storagetest.EnvTestDatabaseURL) == "" {
+		t.Skip(storagetest.EnvTestDatabaseURL + " is not set")
+	}
+	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	env := newSessionIntegrationEnvOn(t, storagetest.OpenWorkloadDB(t, admin, "api").DB, admin)
+	seedComputerInstances(t, env)
+	owner := dbconnect.NewClientForTesting(admin)
+	ctx := context.Background()
+	inTx := func(fn func(*dbconnect.Tx) error) {
+		t.Helper()
+		if err := owner.WithWorkspaceTx(ctx, string(workspace.DefaultID), "test.online_instance", fn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var connectionID string
+	inTx(func(tx *dbconnect.Tx) error {
+		now, err := instance.Now(ctx, tx)
+		if err != nil {
+			return err
+		}
+		credential, _, err := instance.IssueCredential(ctx, tx, workspace.DefaultID, "inst_mac", instance.CredentialActive, now, now.Add(time.Hour))
+		if err != nil {
+			return err
+		}
+		connection, err := instance.CreateConnection(ctx, tx, workspace.DefaultID, instance.NewConnection{ID: instance.NewConnectionID(), InstanceID: "inst_mac",
+			CredentialID: credential.ID, HubPod: "computer-hub-0", ConnectedAt: now, LeaseExpiresAt: now.Add(45 * time.Second)})
+		if err != nil {
+			return err
+		}
+		connectionID = connection.ID
+		return instance.AcceptReady(ctx, tx, workspace.DefaultID, connection, instance.ReadyAcceptance{MessageID: "ready_1", AcceptedAt: now,
+			LeaseExpiresAt: now.Add(45 * time.Second), ValidForMS: 45000, OS: "macos", Arch: "aarch64", CLIVersion: "1.0.0", Capabilities: json.RawMessage(`{}`)})
+	})
+
+	response := env.request(http.MethodPost, "/v1/sessions", `{"agent":"agent_http_session","vault_ids":[],"computers":[{"environment_id":"env_http_session"},{"instance_id":"inst_mac","working_directory":"/Users/me/shop"}]}`)
+	assertHTTPStatus(t, response, http.StatusOK)
+	var created computerSession
+	decodeSessionIntegrationJSON(t, response, &created)
+	prepares := func() []string {
+		rows, err := admin.QueryContext(ctx, `SELECT envelope FROM connection_instructions WHERE connection_id=$1 AND type='session.prepare' ORDER BY issue_seq`, connectionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = rows.Close() }()
+		var envelopes []string
+		for rows.Next() {
+			var envelope string
+			if err := rows.Scan(&envelope); err != nil {
+				t.Fatal(err)
+			}
+			envelopes = append(envelopes, envelope)
+		}
+		return envelopes
+	}
+	var user computerObject
+	for _, candidate := range created.Computers {
+		if candidate.Kind == "user" {
+			user = candidate
+		}
+	}
+	envelopes := prepares()
+	var envelope struct {
+		MessageID string `json:"message_id"`
+		Payload   struct {
+			SessionID string `json:"session_id"`
+			BindingID string `json:"binding_id"`
+			Cwd       string `json:"cwd"`
+		} `json:"payload"`
+	}
+	if len(envelopes) != 1 || json.Unmarshal([]byte(envelopes[0]), &envelope) != nil || envelope.Payload.SessionID != created.ID ||
+		envelope.Payload.Cwd != "/Users/me/shop" || user.ExecutionState != "preparing" || user.BindingID == nil || *user.BindingID != envelope.Payload.BindingID {
+		t.Fatalf("creation stored %v for computer %+v; want one session.prepare of its preparing binding", envelopes, user)
+	}
+
+	inTx(func(tx *dbconnect.Tx) error {
+		binding, err := computer.LockPreparation(ctx, tx, workspace.DefaultID, connectionID, created.ID, envelope.Payload.BindingID, envelope.MessageID)
+		if err != nil {
+			return err
+		}
+		now, err := instance.Now(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if _, err := computer.StoreReport(ctx, tx, workspace.DefaultID, binding, computer.Report{Prepared: true, CWD: "/Users/me/shop"}, now); err != nil {
+			return err
+		}
+		issued, err := computer.IssuePreparation(ctx, tx, workspace.DefaultID, created.ID, user.ID)
+		if err == nil && issued {
+			t.Error("a prepared computer was prepared again")
+		}
+		return err
+	})
+	if envelopes := prepares(); len(envelopes) != 1 {
+		t.Fatalf("session.prepare instructions after the report = %d; want 1", len(envelopes))
+	}
+}
+
+// CM-28: a computer whose session.prepare would exceed 65,536 bytes is
+// refused at Session creation and at its addition, writing nothing; one of
+// exactly 65,536 bytes is added.
+func TestComputerPrepareSizeLimit(t *testing.T) {
+	env := newSessionIntegrationEnv(t)
+	paths := make([]string, 66)
+	for i := range paths {
+		paths[i] = drivePathOf(i, 1000)
+	}
+	tooLarge := `{"environment_id":"env_http_session","drive_exclude":[{"drive_id":"drive_big","paths":` + string(mustMarshal(t, paths)) + `}]}`
+	refused := func(name string, recorder *httptest.ResponseRecorder) {
+		t.Helper()
+		if errorType, message, _ := errorBody(t, recorder); recorder.Code != http.StatusBadRequest || errorType != "invalid_request_error" ||
+			message != "computer session.prepare would exceed the 65536-byte limit" {
+			t.Fatalf("%s = %d %s; want 400 invalid_request_error naming the limit", name, recorder.Code, recorder.Body.String())
+		}
+	}
+	refused("creation", env.request(http.MethodPost, "/v1/sessions", `{"agent":"agent_http_session","vault_ids":[],"computers":[`+tooLarge+`]}`))
+	if sessions := countSessionIntegrationRows(t, env.admin, `SELECT count(*) FROM sessions WHERE workspace_id = $1`, workspace.DefaultID); sessions != 0 || env.computerRows(t) != 0 {
+		t.Fatalf("refused creation left %d Sessions and %d computers", sessions, env.computerRows(t))
+	}
+	created := env.createSession(t, `{"agent":"agent_http_session","environment_id":"env_http_session","vault_ids":[]}`)
+	route := "/v1/sessions/" + created.ID + "/computers"
+	refused("addition", env.requestWithKey(http.MethodPost, route, "too-large", tooLarge))
+	if env.computerRows(t) != 1 || countSessionIntegrationRows(t, env.admin, `SELECT count(*) FROM connection_instructions WHERE workspace_id = $1`, workspace.DefaultID) != 0 {
+		t.Fatal("the refused addition wrote a computer or an instruction")
+	}
+
+	exclude := []computer.DriveExclude{{DriveID: "drive_big"}}
+	for i := 0; computer.PrepareEnvelopeSize(created.ID, computer.KindCloud, "/workspace", exclude, nil, nil) < computer.PrepareEnvelopeLimit-1100; i++ {
+		exclude[0].Paths = append(exclude[0].Paths, drivePathOf(i, 1000))
+	}
+	missing := computer.PrepareEnvelopeLimit - computer.PrepareEnvelopeSize(created.ID, computer.KindCloud, "/workspace", exclude, nil, nil)
+	exclude[0].Paths = append(exclude[0].Paths, drivePathOf(len(exclude[0].Paths), (missing-3)/2), drivePathOf(len(exclude[0].Paths)+1, missing-3-(missing-3)/2-3))
+	if size := computer.PrepareEnvelopeSize(created.ID, computer.KindCloud, "/workspace", exclude, nil, nil); size != computer.PrepareEnvelopeLimit {
+		t.Fatalf("built size = %d; want exactly the limit", size)
+	}
+	exact := `{"environment_id":"env_http_session","drive_exclude":` + string(mustMarshal(t, exclude)) + `}`
+	assertHTTPStatus(t, env.requestWithKey(http.MethodPost, route, "exact", exact), http.StatusCreated)
+}
+
+// drivePathOf is the i-th distinct drive path of n bytes, in segments of at
+// most 250 bytes.
+func drivePathOf(i, n int) string {
+	path := []byte(fmt.Sprintf("p%05d", i) + strings.Repeat("a", n-6))
+	for at := 250; at < n-1; at += 251 {
+		path[at] = '/'
+	}
+	return string(path)
+}
+
+func mustMarshal(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
