@@ -2621,6 +2621,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credential_revoked_sends_a_heartbeat_of_the_old_credential_again_and_blocks_on_the_current_one()
+     {
+        let revoked = || {
+            Answer::Refused(ErrorBody {
+                code: ErrorCode::CredentialRevoked,
+                message: String::new(),
+                retry_after_ms: None,
+                missing_sha256: None,
+            })
+        };
+        // (the credential the heartbeat carried, whether it is sent again)
+        for (carried, again) in [("cred_old", true), ("cred_a", false)] {
+            let (mut owner, _) = owner_with_budget(crate::report_memory::Budget::new(512, 512));
+            let (mut held, task) = held(1);
+            let (heartbeat, _) = heartbeat_ack(1, 1);
+            held.heartbeat = Some(Outgoing {
+                stream: 1,
+                message_id: heartbeat.message_id.clone(),
+                body: Vec::new(),
+                first_send: Duration::ZERO,
+                seq: 1,
+                backoff: Backoff::new(BASE_START, BASE_MAX, || 0.0),
+                retry_at: None,
+            });
+            owner.requests.insert(
+                7,
+                Pending {
+                    connection: held.id.clone(),
+                    operation: Operation::Heartbeat(heartbeat),
+                    credential_id: Id::new(carried).unwrap(),
+                    task: task.abort_handle(),
+                },
+            );
+            let now = Duration::from_secs(5);
+            match owner.answered(Phase::Held(held), 7, revoked(), now) {
+                Phase::Held(held) if again => {
+                    assert_eq!(held.heartbeat.unwrap().retry_at, Some(now));
+                }
+                Phase::Blocked if !again => {}
+                _ => panic!("{carried}: sent again {again} expected"),
+            }
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
     async fn a_real_final_report_ack_releases_only_its_instruction_from_the_owner_ledger() {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
