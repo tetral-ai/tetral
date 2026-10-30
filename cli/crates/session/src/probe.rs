@@ -144,15 +144,36 @@ mod tests {
             (long, OUTPUT_MAX_BYTES, None),
             (short, 8, None),
         ];
-        for (index, (line, limit, expected)) in rows.into_iter().enumerate() {
-            let program = directory.path().join(format!("probe-{index}"));
-            std::fs::write(&program, format!("#!/bin/sh\necho '{line}'\n")).unwrap();
-            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let (result, done) = oneshot::channel();
-            let _probe = spawn(&program, &input, limit, move |output| {
-                let _ = result.send(output);
+        let programs: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .map(|(index, (line, _, _))| {
+                let program = directory.path().join(format!("probe-{index}"));
+                std::fs::write(&program, format!("#!/bin/sh\necho '{line}'\n")).unwrap();
+                std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+                program
             })
-            .unwrap();
+            .collect();
+        for ((line, limit, expected), program) in rows.into_iter().zip(programs) {
+            // A child that another test forks while a script was open for
+            // writing holds it until that child's exec: the exec here fails
+            // with ETXTBSY meanwhile.
+            let mut busy = 0;
+            let (_probe, done) = loop {
+                let (result, done) = oneshot::channel();
+                match spawn(&program, &input, limit, move |output| {
+                    let _ = result.send(output);
+                }) {
+                    Ok(probe) => break (probe, done),
+                    Err(error)
+                        if error.kind() == io::ErrorKind::ExecutableFileBusy && busy < 100 =>
+                    {
+                        busy += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("{}: {error}", program.display()),
+                }
+            };
             assert_eq!(
                 done.await.unwrap(),
                 expected,
