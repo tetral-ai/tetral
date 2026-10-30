@@ -921,11 +921,11 @@ async fn a_429_waits_its_retry_after_and_503s_wait_one_to_thirty_seconds_with_ji
     });
     let sent = tokio::spawn(async move { outcome(client.upload_content(request).await) });
     within("the 429 handled", || counted.load(Ordering::SeqCst) == 1).await;
-    let mut seen = 1;
     let mut waits = vec![Duration::from_secs(3)];
     waits.extend([1, 2, 4, 8, 16, 30, 30].map(Duration::from_secs));
     for (index, wait) in waits.iter().enumerate() {
-        let last = index + 1 == waits.len();
+        let seen = index + 1;
+        let last = seen == waits.len();
         harness.stub.reply(if last {
             Endpoint::Upload.valid_answer()
         } else {
@@ -941,7 +941,6 @@ async fn a_429_waits_its_retry_after_and_503s_wait_one_to_thirty_seconds_with_ji
         let longest = if index == 0 { *wait } else { wait.mul_f64(1.2) };
         harness.clock.set(start + longest);
         harness.stub.wait_for(seen + 1).await;
-        seen += 1;
         harness.clock.settle().await;
     }
     assert_eq!(finished(sent).await, Outcome::Accepted);
