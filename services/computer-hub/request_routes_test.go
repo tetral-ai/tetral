@@ -640,6 +640,26 @@ func TestRequestStreamCarriesItsEnvironmentsEvents(t *testing.T) {
 	}
 }
 
+// TestRequestStreamsEndWhenTheListenerListensAgain drops the LISTEN
+// connection of the request event channel: the open stream ends once it
+// listens again, since the notices sent meanwhile are lost, and a stream
+// opened after that gets the next request's created event.
+func TestRequestStreamsEndWhenTheListenerListensAgain(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	before := streamedEventsOf(t, f.openRequestStream(f.url, "env_sesn_relisten"))
+	f.restartChannelListener(computer.RequestEventChannel)
+	before.ended(t)
+	after := f.openRequestStream(f.url, "env_sesn_relisten")
+	f.cloudComputer("sesn_relisten", false)
+	request := f.ensureRequest("sesn_relisten")
+	name, data := readServerSentEvent(t, after)
+	var object map[string]any
+	decodeJSON(t, []byte(data), &object)
+	if name != computer.RequestEventCreated || object["id"] != request.ID {
+		t.Fatalf("event on the new stream %s %s; want created of %s", name, data, request.ID)
+	}
+}
+
 // TestClaimObservesTheRequestQueueWait claims a request created 2 seconds
 // earlier by the database clock: the claiming hub server observes one queue
 // wait of 2 seconds, plus the claim's own time.

@@ -50,11 +50,19 @@ func NewRequestEvents(database *dbconnect.Client, logger *slog.Logger) *RequestE
 }
 
 // Run listens on computer.RequestEventChannel, reconnecting after a failure,
-// until ctx ends; then it closes every subscriber.
+// until ctx ends; then it closes every subscriber. Each time it listens again
+// after a failure it ends every open stream, since the notices sent while it
+// was disconnected are lost: each Controller then lists the requests again.
 func (e *RequestEvents) Run(ctx context.Context) error {
 	defer e.closeAll()
 	listener := queue.PostgreSQLNotificationListener{Client: e.database, Operation: "computer_hub.request_events"}
-	onReady := func() { e.listeningOnce.Do(func() { close(e.listening) }) }
+	onReady := func() {
+		first := false
+		e.listeningOnce.Do(func() { first = true; close(e.listening) })
+		if !first {
+			e.endStreams(false)
+		}
+	}
 	return queue.RunListener(ctx, listener, computer.RequestEventChannel, onReady, func(payload string) { e.deliver(ctx, payload) }, func(err error) {
 		e.logger.WarnContext(ctx, "request_events.listener_disconnected",
 			slog.String("operation", "computer_hub.request_events"),
@@ -95,10 +103,14 @@ func (e *RequestEvents) dropLocked(scope requestScope, subscriber *instanceSubsc
 	close(subscriber.events)
 }
 
-func (e *RequestEvents) closeAll() {
+func (e *RequestEvents) closeAll() { e.endStreams(true) }
+
+// endStreams ends every subscriber's stream; with closed, later subscribe
+// calls fail.
+func (e *RequestEvents) endStreams(closed bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.closed = true
+	e.closed = e.closed || closed
 	for scope, subscribers := range e.subscribers {
 		for subscriber := range subscribers {
 			e.dropLocked(scope, subscriber)

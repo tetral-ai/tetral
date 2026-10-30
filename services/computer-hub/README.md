@@ -172,7 +172,8 @@ request row `FOR UPDATE`.
   `request_events.listener_disconnected` after a failure) and writes
   `created`, `claimed`, `pending` or `expired` with the request object to its
   subscribers of that workspace and Environment, best effort as the instance
-  stream is.
+  stream is: a pod that listens again after a failure ends every open request
+  stream, and its Controller lists the requests again.
 
 ## Client connection routes
 
