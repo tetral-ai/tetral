@@ -16,6 +16,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
 use protocol::drive_transfer::CommitResponse;
@@ -62,11 +63,9 @@ pub struct DriveSync {
     pub(crate) cache: ContentCache,
     pub(crate) tasks: Arc<dyn TaskOwnership>,
     pub(crate) clock: Clock,
-    /// The drives the Session's binding binds, as last mounted.
-    bound: Arc<std::sync::Mutex<Vec<Bound>>>,
-    /// The new mount failures of each `exec_command`'s check, for its first
-    /// report.
-    first_failures: Arc<std::sync::Mutex<HashMap<String, Vec<Failure>>>>,
+    /// Whether the binding binds a drive, which only the owner writes, for
+    /// `TETRAL_DRIVES`.
+    binds: Arc<std::sync::atomic::AtomicBool>,
     /// `sessions/<session_id>` under the canonical root.
     session_dir: PathBuf,
     mounting: Mounting,
@@ -117,6 +116,23 @@ pub(crate) enum Message {
         task_id: String,
         reply: oneshot::Sender<Vec<Notice>>,
     },
+    /// The drives the binding binds, as a preparation or a `session.drives`
+    /// mounts them.
+    Bind(Vec<Bound>),
+    /// The drives the binding binds.
+    Bound(oneshot::Sender<Vec<Bound>>),
+    /// The new mount failures of an `exec_command`'s check, kept for its
+    /// first report.
+    FirstFailures {
+        task_id: String,
+        failures: Vec<Failure>,
+    },
+    TakeFirstFailures {
+        task_id: String,
+        reply: oneshot::Sender<Vec<Failure>>,
+    },
+    /// A check whose caller went away before its end.
+    DropCheck(u64),
     /// Mounts each bound drive that is not mounted; the failures.
     CheckMounts {
         bound: Vec<Bound>,
@@ -240,6 +256,9 @@ impl DriveSync {
             check_ids: 0,
             clean: std::collections::HashSet::new(),
             handle: None,
+            bound: Vec::new(),
+            binds: Arc::default(),
+            first_failures: HashMap::new(),
         };
         let sync = DriveSync {
             mailbox,
@@ -247,8 +266,7 @@ impl DriveSync {
             cache: config.cache,
             tasks: config.tasks,
             clock: config.clock,
-            bound: Arc::default(),
-            first_failures: Arc::default(),
+            binds: owner.binds.clone(),
             session_dir: owner.session_dir.clone(),
             mounting: owner.mounting.clone(),
             final_ids: Arc::default(),
@@ -308,7 +326,7 @@ impl DriveSync {
     /// Mounts each drive of `bound` that is not mounted, as a preparation
     /// or a `session.drives` does; the failures that are new.
     pub async fn mount_drives(&self, bound: Vec<Bound>) -> Vec<Failure> {
-        *self.bound.lock().expect("bound lock") = bound.clone();
+        self.send(Message::Bind(bound.clone()));
         let (reply, answer) = oneshot::channel();
         self.send(Message::CheckMounts { bound, reply });
         let failures = answer.await.unwrap_or_default();
@@ -327,11 +345,17 @@ impl DriveSync {
         let Ok((check, mut earlier)) = answer.await else {
             return Vec::new();
         };
+        // A caller that goes away before the end drops the check.
+        let mut open = OpenCheck {
+            mailbox: self.mailbox.clone(),
+            check: Some(check),
+        };
         let (reply, answer) = oneshot::channel();
         self.send(Message::CheckMounts { bound, reply });
         earlier.extend(answer.await.unwrap_or_default());
         self.check().await;
         let (reply, answer) = oneshot::channel();
+        open.check = None;
         self.send(Message::EndCheck {
             check,
             earlier,
@@ -503,6 +527,12 @@ pub(crate) struct Owner {
     pub(crate) clean: std::collections::HashSet<String>,
     /// A handle on this owner, for the mounts' adapters.
     pub(crate) handle: Option<DriveSync>,
+    /// The drives the binding binds, as last mounted.
+    bound: Vec<Bound>,
+    binds: Arc<std::sync::atomic::AtomicBool>,
+    /// The new mount failures of each `exec_command`'s check, for its first
+    /// report.
+    first_failures: HashMap<String, Vec<Failure>>,
 }
 
 pub(crate) fn now_ns() -> i64 {
@@ -644,6 +674,22 @@ impl Owner {
             }
             Message::Notices { task_id, reply } => {
                 let _ = reply.send(self.notices.remove(&task_id).unwrap_or_default());
+            }
+            Message::Bind(bound) => {
+                self.binds.store(!bound.is_empty(), Ordering::Release);
+                self.bound = bound;
+            }
+            Message::Bound(reply) => {
+                let _ = reply.send(self.bound.clone());
+            }
+            Message::FirstFailures { task_id, failures } => {
+                self.first_failures.insert(task_id, failures);
+            }
+            Message::TakeFirstFailures { task_id, reply } => {
+                let _ = reply.send(self.first_failures.remove(&task_id).unwrap_or_default());
+            }
+            Message::DropCheck(check) => {
+                self.checking.remove(&check);
             }
             Message::CheckMounts { bound, reply } => {
                 let failures = self.check_mounts(bound);
@@ -1036,14 +1082,16 @@ impl protocol::ports::DriveSyncPort for DriveSync {
     fn check(&self, check: protocol::ports::DriveCheck) -> protocol::ports::DriveAnswer {
         let sync = self.clone();
         Box::pin(async move {
-            let bound = sync.bound.lock().expect("bound lock").clone();
+            let (reply, answer) = oneshot::channel();
+            sync.send(Message::Bound(reply));
+            let bound = answer.await.unwrap_or_default();
             let failures = sync.check_drives(bound).await;
             if !check.view_image {
                 if !failures.is_empty() {
-                    sync.first_failures
-                        .lock()
-                        .expect("failures lock")
-                        .insert(check.task_id.as_str().to_owned(), failures);
+                    sync.send(Message::FirstFailures {
+                        task_id: check.task_id.as_str().to_owned(),
+                        failures,
+                    });
                 }
                 return None;
             }
@@ -1065,11 +1113,14 @@ impl protocol::ports::DriveSyncPort for DriveSync {
         Box::pin(async move {
             let outcome = outcome.await;
             let failures = match point.first {
-                true => sync
-                    .first_failures
-                    .lock()
-                    .expect("failures lock")
-                    .remove(&task),
+                true => {
+                    let (reply, answer) = oneshot::channel();
+                    sync.send(Message::TakeFirstFailures {
+                        task_id: task.clone(),
+                        reply,
+                    });
+                    answer.await.ok()
+                }
                 false => None,
             };
             let downloading = match point.running {
@@ -1102,8 +1153,22 @@ impl protocol::ports::DriveSyncPort for DriveSync {
     }
 
     fn drives_variable(&self) -> Option<PathBuf> {
-        let binds = !self.bound.lock().expect("bound lock").is_empty();
+        let binds = self.binds.load(Ordering::Acquire);
         crate::mount::drives_variable(&self.session_dir, binds, &self.mounting)
+    }
+}
+
+/// A check between its begin and its end.
+struct OpenCheck {
+    mailbox: mpsc::UnboundedSender<Message>,
+    check: Option<u64>,
+}
+
+impl Drop for OpenCheck {
+    fn drop(&mut self) {
+        if let Some(check) = self.check.take() {
+            let _ = self.mailbox.send(Message::DropCheck(check));
+        }
     }
 }
 

@@ -570,6 +570,39 @@ async fn failed_listings_are_reported_at_the_checks_once_per_distinct_error() {
     assert!(harness.check(&["drive_a"]).await.is_empty());
     assert!(harness.sync.tables().await.mount_errors.is_empty());
     harness.detach_all(&["drive_a"]).await;
+
+    // A check dropped while it waits for a catch-up leaves later failed
+    // listings to the next check.
+    let harness = Harness::start().await;
+    assert!(harness.check(&["drive_a"]).await.is_empty());
+    let notice = Arc::new(tokio::sync::Notify::new());
+    *harness.stub.held_changes.lock().unwrap() = Some((notice.clone(), json!([])));
+    harness.sync.connected();
+    let sync = harness.sync.clone();
+    let dropped = tokio::spawn(async move { sync.check_drives(bound(&["drive_a"])).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    dropped.abort();
+    let _ = dropped.await;
+    notice.notify_one();
+    harness.sync.tables().await;
+    harness
+        .stub
+        .changes
+        .lock()
+        .unwrap()
+        .push_back(Answer::Invalid);
+    harness.sync.connected();
+    for _ in 0..500 {
+        if harness.stub.changes.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        harness.check(&["drive_a"]).await,
+        [failure("drive_a", "list changes: invalid answer")]
+    );
+    harness.detach_all(&["drive_a"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -656,7 +689,7 @@ async fn a_record_replacing_a_file_whose_read_waits_for_the_catch_up_answers_the
             "size_bytes": 3, "executable": false,
         }]),
     ));
-    harness.sync.drive_changed(Id::new("drive_a").unwrap(), 2);
+    harness.sync.connected();
     // The read of `a.txt`, whose blob is not cached, waits for the catch-up
     // with the kernel's page of the file locked.
     let file = harness.point("drive_a").join("a.txt");
