@@ -150,6 +150,8 @@ web:
   searchEndpoint: https://s.jina.ai/
   readerEndpoint: https://r.jina.ai/
 
+# git-proxy's public host; https://<gitProxyHost> is also the git_proxy_url
+# of the git tickets computer-hub issues to cloud computers.
 gitProxyHost: git.tetral.example
 bootstrapWorkspaceID: existing-workspace-id
 

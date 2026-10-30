@@ -370,6 +370,8 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 			"TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY":            pageTokenKey,
 			"TETRAL_COMPUTER_HUB_POD_NAME":                  pod,
 			"TETRAL_COMPUTER_HUB_SERVER_URL":                "http://" + edgeListener.Addr().String(),
+			// The harness runs no git-proxy; tickets name this origin only.
+			"TETRAL_COMPUTER_HUB_GIT_PROXY_URL": "https://git.tetral.example",
 		})
 		for key, value := range map[string]string{
 			"TETRAL_COMPUTER_HUB_MIN_CLI_VERSION":         options.minCLIVersion,

@@ -73,6 +73,8 @@ spec:
               value: {{ .Values.computerHub.streamDrainWindow | quote }}
             - name: TETRAL_COMPUTER_HUB_SERVER_URL
               value: "https://{{ .Values.edge.apiHost }}"
+            - name: TETRAL_COMPUTER_HUB_GIT_PROXY_URL
+              value: "https://{{ .Values.gitProxyHost }}"
             - name: TETRAL_COMPUTER_HUB_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE
               value: {{ .Values.drives.uploadBudgetBytesPerMinute | int64 | quote }}
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT

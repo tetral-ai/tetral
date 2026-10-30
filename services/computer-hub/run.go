@@ -44,7 +44,7 @@ func Run(ctx context.Context, cfg Config, runtime Runtime) error {
 	instances := InstanceRoutes{Database: runtime.Database, MaxCredentialLifetime: cfg.MaxCredentialLifetime, PageTokenKey: cfg.PageTokenKey, RecommendedCLIVersion: cfg.RecommendedCLIVersion,
 		ServerURL: cfg.ServerURL, Events: events, Requests: requests, Metrics: hub}
 	streams := NewStreams(runtime.Database, cfg.PodName, cfg.StreamMaxAge, nil, logger, hub)
-	clients := ClientRoutes{Database: runtime.Database, MinCLIVersion: cfg.MinCLIVersion, Streams: streams}
+	clients := ClientRoutes{Database: runtime.Database, MinCLIVersion: cfg.MinCLIVersion, Streams: streams, GitProxyURL: cfg.GitProxyURL}
 	public := BuildHTTPHandler(readiness, NewRouter(cfg.PrincipalVerifier, WithLogger(logger), WithRequestMetrics(httpMetrics), WithInstanceRoutes(instances), WithClientRoutes(clients)))
 	metrics := workload.HealthRouter(readiness,
 		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),

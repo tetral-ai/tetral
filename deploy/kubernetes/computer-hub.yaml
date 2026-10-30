@@ -93,6 +93,8 @@ spec:
               value: "10s"
             - name: TETRAL_COMPUTER_HUB_SERVER_URL
               value: https://api.tetral.example
+            - name: TETRAL_COMPUTER_HUB_GIT_PROXY_URL
+              value: https://git.tetral.example
             - name: TETRAL_COMPUTER_HUB_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE
               value: "500000000"
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT

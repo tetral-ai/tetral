@@ -184,7 +184,7 @@ func (f *hubFixture) addPod(name string) *hubPod {
 		Events:                f.events,
 		Requests:              pod.requests,
 		Metrics:               pod.metrics,
-	}), WithClientRoutes(ClientRoutes{Database: f.client, MinCLIVersion: f.settings.minCLIVersion, Streams: pod.streams}))
+	}), WithClientRoutes(ClientRoutes{Database: f.client, MinCLIVersion: f.settings.minCLIVersion, Streams: pod.streams, GitProxyURL: testGitProxyURL}))
 	server := httptest.NewServer(BuildHTTPHandler(workload.NewReadiness(), router))
 	f.t.Cleanup(server.Close)
 	pod.url = server.URL
