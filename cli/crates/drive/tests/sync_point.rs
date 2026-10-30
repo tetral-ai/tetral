@@ -44,12 +44,7 @@ async fn an_upload_starts_two_seconds_after_the_last_write_or_at_the_task_exit_a
 
     // A write during the PUT cancels it; the next PUT names the new hash.
     session.write("a", "two", 1).await;
-    tokio::time::sleep(SHORT).await;
-    assert_eq!(
-        env.stub.puts_open.load(Ordering::SeqCst),
-        0,
-        "the PUT is cancelled"
-    );
+    support::eventually(|| env.stub.puts_open.load(Ordering::SeqCst) == 0).await;
     drop(put);
     env.advance(QUIET).await;
     assert_eq!(env.call().await.sha256(), sha256(b"two"));
@@ -75,14 +70,13 @@ async fn three_sessions_share_eight_upload_slots_in_the_order_their_uploads_beca
                 .await;
         }
     }
+    // A's exit asks for all its slots at once: once its first PUT comes,
+    // the rest of A's uploads wait before B's and C's.
     a.task_exited(1);
-    tokio::time::sleep(SHORT).await;
+    let mut held = vec![env.call().await];
     b.task_exited(1);
-    tokio::time::sleep(SHORT).await;
     c.task_exited(1);
-
-    let mut held = Vec::new();
-    for _ in 0..8 {
+    for _ in 1..8 {
         held.push(env.call().await);
     }
     env.no_call(SHORT).await;
