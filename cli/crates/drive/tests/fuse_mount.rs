@@ -385,6 +385,20 @@ async fn a_mount_of_this_app_server_is_left_alone_and_mount_points_are_made_or_m
     };
     assert_eq!(listed, ["a.txt"], "old.txt stays hidden under the mount");
 
+    // A hard link fails with EPERM and stores nothing.
+    let before = harness.sync.tables().await;
+    let linked = {
+        let point = harness.point("drive_old");
+        blocking(move || std::fs::hard_link(point.join("a.txt"), point.join("b.txt"))).await
+    };
+    assert_eq!(
+        linked.unwrap_err().raw_os_error(),
+        Some(rustix::io::Errno::PERM.raw_os_error())
+    );
+    assert_eq!(harness.sync.tables().await, before);
+    let content = harness.session().join("content").join("drive_old");
+    assert_eq!(std::fs::read_dir(content).map_or(0, Iterator::count), 0);
+
     let calls = harness.calls();
     harness.check(&["drive_new", "drive_old"]).await;
     assert_eq!(harness.device("drive_new"), Some(device));

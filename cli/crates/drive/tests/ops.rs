@@ -711,21 +711,6 @@ async fn drive_files_at_local_only_paths_are_shown_and_replaced_only_while_unwri
 }
 
 #[tokio::test]
-async fn a_hard_link_fails_with_eperm_and_stores_nothing() {
-    let stub = Stub::default();
-    stub.list("a.txt", "a", false);
-    let harness = Harness::start(stub, &[]).await;
-    let before = harness.tables().await;
-    let ino = harness.ino("a.txt").await;
-    assert_eq!(
-        harness.sync.link(&harness.drive, ino, TOP_INODE).await,
-        Err(Errno::PERM)
-    );
-    assert_eq!(harness.tables().await, before);
-    assert_eq!(harness.content_files(), 0);
-}
-
-#[tokio::test]
 async fn every_pending_change_carries_its_base_and_a_rename_uploads_nothing() {
     let stub = Stub::default();
     stub.list("a.txt", "a", false);
