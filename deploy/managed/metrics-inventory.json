@@ -1342,14 +1342,18 @@
         "labels": {
           "kind": [
             "cli",
-            "service_pod"
+            "service_pod",
+            "session_computer"
           ],
           "phase": [
             "config",
             "connect",
             "dependencies",
+            "instance",
+            "prepare",
             "ready",
-            "register"
+            "register",
+            "request"
           ],
           "service": "service names"
         },
@@ -1361,7 +1365,8 @@
         "labels": {
           "kind": [
             "cli",
-            "service_pod"
+            "service_pod",
+            "session_computer"
           ],
           "scope": [
             "engine",

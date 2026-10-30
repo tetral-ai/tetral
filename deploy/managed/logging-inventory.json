@@ -8514,9 +8514,12 @@
             "config_ms": "integer",
             "connect_ms": "integer",
             "dependencies_ms": "integer",
+            "instance_ms": "integer",
             "outcome": "string",
+            "prepare_ms": "integer",
             "ready_ms": "integer",
-            "register_ms": "integer"
+            "register_ms": "integer",
+            "request_ms": "integer"
           }
         },
         "cold_start.phase_completed": {
