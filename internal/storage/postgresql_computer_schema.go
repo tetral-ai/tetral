@@ -63,5 +63,6 @@ func postgresqlComputerTableSteps() []postgresqlSchemaStep {
 		{"foreign_key_session_github_repository_resources_computer", `ALTER TABLE session_github_repository_resources ADD FOREIGN KEY(workspace_id,session_id,computer_id) REFERENCES computers(workspace_id,session_id,id)`},
 		{"index_computers_session_seq", `CREATE INDEX idx_computers_session_seq ON computers(workspace_id,session_id,storage_sequence)`},
 		{"index_computers_attached_instance", `CREATE INDEX idx_computers_attached_instance ON computers(workspace_id,current_instance_id) WHERE association_state='attached'`},
+		{"create_session_machine_messages", createPostgreSQLSessionMachineMessagesTable},
 	}
 }

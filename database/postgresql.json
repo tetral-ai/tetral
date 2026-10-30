@@ -72,7 +72,8 @@
   ],
   "append_only_workspace_tables": [
     "session_file_attachment_consumptions",
-    "session_message_parts"
+    "session_message_parts",
+    "session_machine_messages"
   ],
   "global_tables": [
     "platform_provider_keys",

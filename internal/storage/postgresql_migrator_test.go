@@ -163,7 +163,7 @@ func TestMigrateSchemaCreatesStableReasoningMessageAssociation(t *testing.T) {
 }
 
 func TestPostgreSQLSchemaVersionOneChecksumIsGolden(t *testing.T) {
-	const want = "3457a2e30d407ca5402dd0cade7bc35affc6c61aaa2afbca4de40e0953b6ae95"
+	const want = "ce9fd7b34df48497defc316d0153ad4e4f87074a83ccb3c8ce0e8662fd9819ba"
 	if storage.PostgreSQLSchemaVersionOneChecksum != want {
 		t.Fatalf("PostgreSQLSchemaVersionOneChecksum = %q, want %q", storage.PostgreSQLSchemaVersionOneChecksum, want)
 	}

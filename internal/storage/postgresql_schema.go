@@ -720,7 +720,7 @@ const (
 		committed_at TIMESTAMPTZ,
 		PRIMARY KEY (workspace_id, runtime_input_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
-		CONSTRAINT session_runtime_inbox_kind_shape CHECK (input_kind IN ('messages', 'interrupt_control', 'tool_confirmation', 'task_notification', 'agent_mail', 'approval_review', 'rejection')),
+		CONSTRAINT session_runtime_inbox_kind_shape CHECK (input_kind IN ('messages', 'interrupt_control', 'tool_confirmation', 'task_notification', 'agent_mail', 'approval_review', 'rejection', 'machine_message')),
 		CONSTRAINT session_runtime_inbox_status_shape CHECK (status IN ('queued', 'delivering', 'accepted', 'parked', 'committed', 'cancelled', 'dead_lettered')),
 		CONSTRAINT session_runtime_inbox_sequence_shape CHECK (
 			(sequence_from IS NULL AND sequence_to IS NULL)
@@ -728,6 +728,8 @@ const (
 		),
 		CONSTRAINT session_runtime_inbox_binding_shape CHECK (
 			(status = 'queued' AND binding_id IS NULL AND binding_generation IS NULL AND target_pod_uid IS NULL)
+			OR (status = 'accepted' AND input_kind = 'machine_message'
+				AND binding_id IS NULL AND binding_generation IS NULL AND target_pod_uid IS NULL)
 			OR (status IN ('delivering', 'accepted', 'parked', 'committed')
 				AND binding_id IS NOT NULL AND binding_id <> ''
 				AND binding_generation IS NOT NULL AND binding_generation > 0
@@ -808,6 +810,22 @@ const (
 		MAXVALUE 4294967295
 		START WITH 1
 		NO CYCLE`
+
+	// session_machine_messages holds one row per machine message: a change to
+	// one of the Session's computers that the Runtime learns through a
+	// machine_message input of the same runtime_input_id. payload_json is the
+	// change and the computer's Runtime row at that moment.
+	createPostgreSQLSessionMachineMessagesTable = `CREATE TABLE IF NOT EXISTS session_machine_messages (
+		workspace_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		runtime_input_id TEXT NOT NULL,
+		computer_id TEXT NOT NULL,
+		change TEXT NOT NULL CHECK (change IN ('added', 'removed', 'replaced')),
+		payload_json TEXT NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (workspace_id, runtime_input_id),
+		FOREIGN KEY (workspace_id, session_id, computer_id) REFERENCES computers(workspace_id, session_id, id) ON DELETE CASCADE
+	)`
 
 	createPostgreSQLSessionMCPManifestsTable = `CREATE TABLE IF NOT EXISTS session_mcp_manifests (
 		workspace_id TEXT NOT NULL,

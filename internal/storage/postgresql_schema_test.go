@@ -362,6 +362,7 @@ func TestSessionRuntimeInboxKindShapeOnlyAllowsRuntimeInputKinds(t *testing.T) {
 		"agent_mail",
 		"approval_review",
 		"rejection",
+		"machine_message",
 	} {
 		if !strings.Contains(definition, required) {
 			t.Fatalf("session_runtime_inbox_kind_shape missing runtime input kind %q: %s", required, definition)
@@ -445,6 +446,7 @@ func TestSessionRuntimeInboxBindingShapeRequiresCompleteDeliveryIdentity(t *test
 	}{
 		{name: "queued cannot carry binding", status: "queued", bindingID: "bind_inbox", generation: int64(1), podUID: "pod_inbox"},
 		{name: "delivering requires binding", status: "delivering"},
+		{name: "accepted requires binding outside machine messages", status: "accepted"},
 	}
 	for _, statusValue := range []string{"parked", "cancelled", "dead_lettered"} {
 		invalidShapes = append(invalidShapes,
@@ -2515,6 +2517,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"session_file_resources",
 		"session_git_tickets",
 		"session_github_repository_resources",
+		"session_machine_messages",
 		"session_mcp_manifests",
 		"session_memory_store_resources",
 		"session_message_parts",

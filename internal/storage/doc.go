@@ -160,6 +160,8 @@
 //	connection_protocol_errors / connection_instructions                                                                    function across Workspaces)
 //	computers / computer_idempotency_records               api through internal/computer (Session creation, the add route)  api Session and computer reads,
 //	                                                                                                                         instance computer_count; computer-hub
+//	session_machine_messages                               api and computer-hub through internal/computer                   Job Runner delivery of machine_message
+//	                                                        (WriteMachineMessageTx); insert-only                             inputs
 //
 // UPDATE-WITH: the table DDL in postgresql_schema.go,
 // postgresql_runtime_schema.go, postgresql_auth_schema.go,
