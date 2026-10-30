@@ -19,7 +19,7 @@ use protocol::id::Id;
 use protocol::tool::{ChangeKind, RejectionReason};
 use rustix::io::Errno;
 use serde_json::json;
-use support::{Env, NO_TASK, error_body, outcome, seed, sha256, summary};
+use support::{Env, NO_TASK, error_body, outcome, seed, sha256, summary, task};
 
 const SHORT: Duration = Duration::from_millis(150);
 
@@ -411,33 +411,70 @@ async fn changes_pending_before_their_folder_became_a_repository_keep_recording_
 {
     let mut env = Env::new();
     let session = env.session("sess_a", Write::default(), true).await;
-    session.write("a", "one", NO_TASK).await;
-    session.write("b", "new", NO_TASK).await;
+    session.task_started(1);
+    // `a` and `d` are uploaded, not yet committed, when the folder becomes
+    // a repository: a later change must record a new upload.
+    session.write("a", "one", 1).await;
+    session.write("d", "old", 1).await;
+    env.advance(Duration::from_secs(2)).await;
+    assert_eq!(uploads(&mut env, 2).await, sorted([b"one", b"old"]));
+    session.write("b", "new", 1).await;
     let drive = session.drive.clone();
     session
         .sync
-        .mkdir(&drive, TOP_INODE, b".git", Some(NO_TASK))
+        .mkdir(&drive, TOP_INODE, b".git", Some(1))
         .await
         .unwrap();
-    // The removal of the new file `b` settles its pending write, and a
-    // later write of `a` records on its own.
-    session.remove("b", NO_TASK).await;
-    session.write("a", "two", NO_TASK).await;
-    let pending: Vec<String> = session
+    // The removal of the new file `b` settles its pending write; a later
+    // write of `a` and a rename of the local-only `c` onto `d` record.
+    session.remove("b", 1).await;
+    session.write("a", "two", 1).await;
+    session.write("c", "sea", 1).await;
+    session
+        .sync
+        .rename(&drive, TOP_INODE, b"c", TOP_INODE, b"d", Some(1))
+        .await
+        .unwrap();
+    let mut pending: Vec<String> = session
         .tables()
         .await
         .pending_changes
         .into_keys()
         .map(|(_, path)| path)
         .collect();
-    assert_eq!(pending, ["a"]);
-    let point = session.sync_point(None, RESULT_WAIT, None);
-    let upload = env.call().await;
-    assert_eq!(upload.sha256(), sha256(b"two"));
-    upload.uploaded();
+    pending.sort();
+    assert_eq!(pending, ["a", "d"]);
+    let point = session.sync_point(Some(task(1)), RESULT_WAIT, None);
+    assert_eq!(uploads(&mut env, 2).await, sorted([b"two", b"sea"]));
     let commit = env.call().await;
-    assert_eq!(summary(commit.changes()), [("a".to_owned(), "write", None)]);
+    let mut committed = summary(commit.changes());
+    committed.sort();
+    assert_eq!(
+        committed,
+        [
+            ("a".to_owned(), "write", None),
+            ("d".to_owned(), "write", None)
+        ]
+    );
     commit.accepted();
-    assert_eq!(outcome(point).await.committed, 1);
+    assert_eq!(outcome(point).await.committed, 2);
     assert!(session.tables().await.pending_changes.is_empty());
+}
+
+/// The digests of the next `count` uploads, each answered as uploaded, sorted.
+async fn uploads(env: &mut Env, count: usize) -> Vec<String> {
+    let mut digests = Vec::new();
+    for _ in 0..count {
+        let upload = env.call().await;
+        digests.push(upload.sha256().to_owned());
+        upload.uploaded();
+    }
+    digests.sort();
+    digests
+}
+
+fn sorted<const N: usize>(contents: [&[u8; 3]; N]) -> Vec<String> {
+    let mut digests: Vec<String> = contents.iter().map(|bytes| sha256(*bytes)).collect();
+    digests.sort();
+    digests
 }
