@@ -306,12 +306,14 @@ func (s *PostgreSQLRuntimeDeliveryStore) finishMCPDiscoveryFailure(ctx context.C
 			return err
 		}
 		// This input never reached Runtime. Do not idle a different active run,
-		// pending approval, or a sibling thread merely because its delivery failed.
+		// pending approval, or a sibling thread merely because its delivery
+		// failed; an input that never starts a run is not one.
 		var active bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM session_threads WHERE workspace_id=$1 AND session_id=$2
 			AND status IN ('running','rescheduling','requires_action')) OR EXISTS (
-			SELECT 1 FROM session_runtime_inbox WHERE workspace_id=$1 AND session_id=$2 AND status IN ('delivering','accepted','parked'))`,
-			job.WorkspaceID, job.SessionID).Scan(&active); err != nil {
+			SELECT 1 FROM session_runtime_inbox WHERE workspace_id=$1 AND session_id=$2 AND status IN ('delivering','accepted','parked')
+			AND input_kind <> ALL($3))`,
+			job.WorkspaceID, job.SessionID, queue.NonStartingRuntimeInputKinds()).Scan(&active); err != nil {
 			return err
 		}
 		if !active && thread.Role == "main" {
