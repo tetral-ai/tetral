@@ -316,8 +316,10 @@ impl SyncState {
     }
 
     /// Commits `write` in one SQLite transaction, then applies it to the
-    /// in-memory copy; on an error neither changes.
+    /// in-memory copy; on an error neither changes. Each attempt counts the
+    /// seam counter `sync_state.write`.
     pub async fn apply(&mut self, write: Write) -> Result<(), sqlx::Error> {
+        state::seams::count("sync_state.write");
         let mut transaction = self.connection.begin().await?;
         for (drive, path) in &write.files_removed {
             sqlx::query("DELETE FROM files WHERE drive_id = ? AND path = ?")
