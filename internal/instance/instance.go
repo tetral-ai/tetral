@@ -63,6 +63,28 @@ func LockInstanceNoKeyUpdate(ctx context.Context, tx *dbconnect.Tx, ws workspace
 	return scanInstance(tx.QueryRow(ctx, `SELECT `+instanceColumns+` FROM instances WHERE workspace_id=$1 AND id=$2 FOR NO KEY UPDATE`, string(ws), instanceID))
 }
 
+// CreateCloudInstance creates an active cloud instance with a new inst_ ID
+// for computerID of sessionID, the computer whose claim creates it.
+func CreateCloudInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, computerID, sessionID string) (Instance, error) {
+	return scanInstance(tx.QueryRow(ctx, `INSERT INTO instances (workspace_id,id,kind,registration_state,computer_id,session_id)
+		VALUES ($1,$2,$3,'active',$4,$5) RETURNING `+instanceColumns, string(ws), id.New("inst_"), KindCloud, computerID, sessionID))
+}
+
+// SetUnused is the one writer of an instance's unused. It writes value when
+// it differs from the stored one and, when unused turns true, queues the
+// unused instance event in the same transaction. internal/computer.RefreshUnused
+// decides the value.
+func SetUnused(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string, value bool) error {
+	result, err := tx.Exec(ctx, `UPDATE instances SET unused=$3 WHERE workspace_id=$1 AND id=$2 AND unused<>$3`, string(ws), instanceID, value)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed == 0 || !value {
+		return err
+	}
+	return NotifyInstanceEvent(ctx, tx, ws, instanceID, EventUnused)
+}
+
 // CreateUserInstance creates an active user instance named name with a new
 // inst_ ID.
 func CreateUserInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, name string) (Instance, error) {
@@ -182,8 +204,10 @@ func ReadObjects(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, values 
 		objects[i] = InstanceObject{
 			ID:                 value.ID,
 			Kind:               value.Kind,
+			ComputerID:         value.ComputerID,
 			Name:               value.Name,
 			RegistrationState:  value.RegistrationState,
+			Unused:             value.Unused,
 			CLIVersion:         value.CLIVersion,
 			CLIUpdateAvailable: value.CLIVersion != nil && VersionBelow(*value.CLIVersion, recommendedCLI),
 			ComputerCount:      computers[value.ID],

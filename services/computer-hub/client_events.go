@@ -99,17 +99,22 @@ func (h *clientHandler) events(w http.ResponseWriter, r *http.Request) {
 		started   instance.Connection
 		resumed   bool
 		activated string
-		replaced  string
+		replaced  []string
 	)
 	err = h.clientTx(ctx, id.workspace, "computer_hub.client_events", func(tx *dbconnect.Tx) error {
-		activated, replaced = "", ""
+		activated, replaced = "", nil
 		granted, err := authorize(ctx, tx, id, true, false, "")
 		if err != nil {
 			return err
 		}
 		activating := granted.credential.State == instance.CredentialPending
-		if activating && granted.credential.ReplacesCredentialID != nil {
-			// Locked before the connection, the order every request keeps.
+		// The credentials an activation replaces are locked before the
+		// connection, the order every request keeps.
+		if activating && granted.credential.Delivery == instance.DeliveryClaim {
+			if err := instance.LockOtherCredentials(ctx, tx, id.workspace, id.instanceID, granted.credential.ID); err != nil {
+				return err
+			}
+		} else if activating && granted.credential.ReplacesCredentialID != nil {
 			if _, err := instance.LockCredential(ctx, tx, id.workspace, id.instanceID, *granted.credential.ReplacesCredentialID); err != nil {
 				return err
 			}

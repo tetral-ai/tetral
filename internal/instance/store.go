@@ -41,7 +41,13 @@ type Instance struct {
 	CLIVersion *string
 	// LastReuse is the latest use of a credential that a pending
 	// credential's activation revoked, nil before the first.
-	LastReuse       *Reuse
+	LastReuse *Reuse
+	// ComputerID and SessionID name, for a cloud instance, the computer
+	// whose claim created it; nil for a user instance. Unused is the
+	// instance object's unused (SetUnused).
+	ComputerID      *string
+	SessionID       *string
+	Unused          bool
 	StorageSequence int64
 }
 
@@ -62,7 +68,7 @@ type Credential struct {
 	ExpiresAt       time.Time
 	RevokedAt       *time.Time
 	RevocationCause *string
-	// Delivery is DeliveryResponse or DeliveryStream. A stream delivery
+	// Delivery is DeliveryResponse, DeliveryStream or DeliveryClaim. A stream delivery
 	// renews the connection RenewalConnectionID, replacing
 	// ReplacesCredentialID; FetchedAt is when its key was fetched.
 	Delivery             string
@@ -76,7 +82,7 @@ type Credential struct {
 }
 
 const instanceColumns = `workspace_id,id,kind,name,registration_state,created_at,deregistered_at,cli_version,
- last_credential_reuse_credential_id,last_credential_reuse_at,storage_sequence`
+ last_credential_reuse_credential_id,last_credential_reuse_at,computer_id,session_id,unused,storage_sequence`
 const credentialColumns = `workspace_id,instance_id,id,state,issued_at,expires_at,revoked_at,revocation_cause,
  delivery,renewal_connection_id,replaces_credential_id,fetched_at,used_at,storage_sequence`
 
@@ -96,9 +102,10 @@ type scanner interface{ Scan(dest ...any) error }
 
 func scanInstance(row scanner) (Instance, error) {
 	var value Instance
-	var name, cliVersion, reused sql.NullString
+	var name, cliVersion, reused, computerID, sessionID sql.NullString
 	var deregistered, reusedAt sql.NullTime
-	err := row.Scan(&value.WorkspaceID, &value.ID, &value.Kind, &name, &value.RegistrationState, &value.CreatedAt, &deregistered, &cliVersion, &reused, &reusedAt, &value.StorageSequence)
+	err := row.Scan(&value.WorkspaceID, &value.ID, &value.Kind, &name, &value.RegistrationState, &value.CreatedAt, &deregistered, &cliVersion, &reused, &reusedAt,
+		&computerID, &sessionID, &value.Unused, &value.StorageSequence)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Instance{}, ErrNotFound
 	}
@@ -113,6 +120,7 @@ func scanInstance(row scanner) (Instance, error) {
 		value.DeregisteredAt = &at
 	}
 	value.CLIVersion = stringOrNil(cliVersion)
+	value.ComputerID, value.SessionID = stringOrNil(computerID), stringOrNil(sessionID)
 	if reused.Valid {
 		value.LastReuse = &Reuse{CredentialID: reused.String, DetectedAt: reusedAt.Time.UTC()}
 	}

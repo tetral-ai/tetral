@@ -8,17 +8,20 @@
 //
 // OWNS:
 //   - Table instances: one row per registration of a CLI with a Workspace.
-//     kind is user (name is its display label) or cloud (name is NULL). The
-//     row stays after deregistration as a tombstone, so an instance ID is
+//     kind is user (name is its display label) or cloud (name is NULL;
+//     computer_id and session_id name the computer whose claim created it).
+//     The row stays after deregistration as a tombstone, so an instance ID is
 //     never issued again. last_credential_reuse_* is the latest use of a
-//     credential that an activation revoked.
+//     credential that an activation revoked. unused is the instance object's
+//     unused, decided by internal/computer.RefreshUnused.
 //   - Table instance_credentials: one row per connection credential of an
 //     instance. A row stores only key_digest, the SHA-256 digest of its key,
 //     unique across every Workspace. delivery is response (the key is in the
-//     issuing response) or stream (a live renewal of renewal_connection_id,
+//     issuing response), stream (a live renewal of renewal_connection_id,
 //     replacing replaces_credential_id, whose key_digest stays NULL until
-//     its one fetch at fetched_at); used_at is a pending credential's first
-//     authenticated use, which activated it.
+//     its one fetch at fetched_at) or claim (in a Controller's claim result,
+//     active for a new instance, pending for a wake); used_at is a pending
+//     credential's first authenticated use, which activated it.
 //   - Table instance_idempotency_records: one row per (principal credential,
 //     route, Idempotency-Key) of an issuing request, holding the canonical
 //     request fingerprint and the instance and credential it created.
@@ -54,8 +57,9 @@
 //
 //	instances.registration_state: active, deregistered (deregistered_at set).
 //	instance_credentials.state:   pending, active, revoked (revoked_at and
-//	                              revocation_cause delete, deregistration or
-//	                              pending_activation set). Expiry is never
+//	                              revocation_cause delete, deregistration,
+//	                              pending_activation, new_claim_returned or
+//	                              request_ended set). Expiry is never
 //	                              stored: a credential
 //	                              whose expires_at is not later than the
 //	                              database clock reads as expired
@@ -69,12 +73,21 @@
 //
 //	Transitions (writer; callers):
 //	  (none) -> active user instance      CreateUserInstance   computer-hub
+//	  (none) -> active cloud instance     CreateCloudInstance  internal/computer (claim)
+//	  unused -> its new value, an unused
+//	    event when it turns true          SetUnused            internal/computer (RefreshUnused)
 //	  (none) -> active credential         IssueCredential      computer-hub
+//	  (none) -> claim credential          IssueClaimCredential internal/computer (claim)
+//	  pending -> revoked (request_ended)  RevokePendingCredentials internal/computer (wake claim)
+//	  claim credential -> revoked
+//	    (new_claim_returned, request_ended) RevokeClaimCredential internal/computer
 //	  (none) -> pending stream renewal    IssueRenewal         computer-hub
 //	  renewal unfetched -> fetched        FetchCredential      computer-hub
 //	  pending -> active, the replaced
-//	    credential, unless expired,
-//	    -> revoked (pending_activation)   ActivateCredential   computer-hub
+//	    credentials (a renewal's one, or
+//	    every other for a claim's), unless
+//	    expired, -> revoked
+//	    (pending_activation)              ActivateCredential   computer-hub
 //	  latest reuse -> newer one           RecordCredentialReuse computer-hub
 //	  pending/active -> revoked (delete)  RevokeCredential     computer-hub
 //	  active -> deregistered instance,
