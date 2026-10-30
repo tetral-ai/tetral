@@ -30,7 +30,11 @@ ones it uses belong here too.
   unconfirmed old processes take precedence over connection errors. Display
   priority never clears the restrictions owned by cleanup.
 - The capabilities that ready advertises are assembled once at start from
-  the providers this build has (`capabilities`). `tool_execution` lists the
+  the providers this build has (`capabilities`). `drives.mount` is true
+  when the FUSE probe at start succeeded (`drive::mount::probe`), which
+  creates `run/fuse-probe` and mounts and unmounts an empty filesystem
+  there; otherwise its `no FUSE: <error>` is the reason every bound drive
+  fails with, and the start goes on. `tool_execution` lists the
   tools whose startup checks pass: all three while the resolved `tetral`
   is an executable regular file, and `exec_command` only while
   `/bin/bash` or `/bin/sh` is executable; with none, the ready carries no
@@ -98,14 +102,13 @@ ones it uses belong here too.
 
 - `startup::lock(root)` and then `startup::serve(root, lock)` start an App
   Server and give `Started`; `lifecycle::run(started, fixed, times,
-  idle_exit)` starts
-  the Connection owner and its Report outbox with the Session binding
-  owners' factory (`session::Factory`), given the state root as given and
-  canonical and the running executable for the directory probe, and with
-  `tasks::Supervisors`, which gives each admitted `exec_command` task its
-  Task supervisor, and the Content cache owner (`drive::cache`) with the
-  connection's drive transfer client, serves the App Server until the shutdown sequence
-  ends and gives `lifecycle::Ended`: the status as of then and the time left
+  idle_exit)` starts the Connection owner and its Report outbox with the
+  Session binding owners' factory (`session::Factory`), given the state
+  root as given and canonical and the running executable for the directory
+  probe, and with `tasks::Supervisors`, which gives each admitted
+  `exec_command` task its Task supervisor, and the Content cache owner
+  (`drive::cache`) with the connection's drive transfer client, serves the
+  App Server until the shutdown sequence ends and gives `lifecycle::Ended`: the status as of then and the time left
   before the shutdown's deadline. `lifecycle::Times` holds the durations,
   each a constant but for tests.
 

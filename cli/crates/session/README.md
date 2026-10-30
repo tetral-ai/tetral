@@ -84,7 +84,9 @@ that is no longer the binding's is discarded.
   record an earlier App Server left for the Session is unconfirmed
   (`execution::cleanup::Leftovers`), a preparation of the Session fails with
   `cleanup_pending`, checked right after the connection it names. The
-  shutdown sends every task the end through the termination procedure, and
+  shutdown first detaches every mount of the Session's drive sync
+  (`fusermount3 -u -z`), then sends every task the end through the
+  termination procedure, and
   once each started task's processes are confirmed gone the owner tells the
   Connection owner (`ConnectionPort::tasks_gone`). A host process belongs to
   the task whose reported namespace holds it

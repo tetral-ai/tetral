@@ -2,10 +2,10 @@
 //! connection it names, an earlier execution of the Session still being
 //! cleaned up, the cases against the Session's binding, the state
 //! root checked lexically without touching the target, a probe slot, the
-//! probe, the repository paths' checks, the git ticket and the clones
-//! (`repositories`), the commit of its result while the connection, binding
-//! and operation are all still current, the report and, on its ACK,
-//! `prepared`.
+//! probe, the repository paths' checks, the mounts of the bound drives
+//! (`drives`), the git ticket and the clones (`repositories`), the commit
+//! of its result while the connection, binding and operation are all still
+//! current, the report and, on its ACK, `prepared`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -260,7 +260,8 @@ impl<S: TaskStarter> SessionOwner<S> {
     /// The probe of `operation` found its canonical `cwd`. A repository path
     /// in the state root, lexically or resolved, then one where an entry
     /// that this Session did not clone exists, fails the preparation;
-    /// otherwise its repositories are cloned once a git ticket comes.
+    /// otherwise its bound drives are mounted (`drives`), then its
+    /// repositories are cloned once a git ticket comes.
     fn probed(&mut self, operation: u64, cwd: AbsolutePath, checks: &[RepositoryCheck]) {
         let (Some(preparation), Some(binding)) = (
             &self.preparation,

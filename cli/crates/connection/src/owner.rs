@@ -314,9 +314,6 @@ impl Connection {
             .expect("the Connection owner answers every message")
     }
 
-    /// The entries of `GET /v1/sessions`: each Session binding owner's,
-    /// which this caller asks for, since the Connection owner never waits
-    /// for another owner, then each preparation still staged.
     /// Adds `session_id`'s Drive sync owner, which is told of every
     /// `connected`.
     pub fn add_drive_sync(&self, session_id: SafeId, sync: DriveSync) {
@@ -348,6 +345,9 @@ impl Connection {
         answer.await.unwrap_or_default()
     }
 
+    /// The entries of `GET /v1/sessions`: each Session binding owner's,
+    /// which this caller asks for, since the Connection owner never waits
+    /// for another owner, then each preparation still staged.
     pub async fn sessions(&self) -> Vec<SessionEntry> {
         let (reply, answer) = oneshot::channel();
         self.send(Message::Sessions(reply));
