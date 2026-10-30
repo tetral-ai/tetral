@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +35,7 @@ const (
 	EnvStreamMaxAge               = "TETRAL_COMPUTER_HUB_STREAM_MAX_AGE"
 	EnvStreamDrainWindow          = "TETRAL_COMPUTER_HUB_STREAM_DRAIN_WINDOW"
 	EnvDriveUploadBudget          = "TETRAL_COMPUTER_HUB_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE"
+	EnvServerURL                  = "TETRAL_COMPUTER_HUB_SERVER_URL"
 
 	DefaultHTTPAddress           = ":8080"
 	DefaultMetricsAddress        = ":8081"
@@ -93,6 +95,8 @@ type Config struct {
 	// DriveUploadBudgetBytesPerMinute is the per-minute amount of each
 	// Workspace's upload budget, which the api shares.
 	DriveUploadBudgetBytesPerMinute int64
+	// ServerURL is the Engine base URL a claim's bootstrap gives the CLI.
+	ServerURL string
 }
 
 func ConfigFromEnv(env Env) (Config, error) {
@@ -159,6 +163,10 @@ func ConfigFromEnv(env Env) (Config, error) {
 	cfg.StreamDrainWindow, err = durationOrDefault(env.Getenv(EnvStreamDrainWindow), DefaultStreamDrainWindow)
 	if err != nil || cfg.StreamDrainWindow > MaxStreamDrainWindow {
 		return Config{}, workload.NewConfigError(EnvStreamDrainWindow + " must be a positive duration of at most 15s")
+	}
+	cfg.ServerURL = strings.TrimSpace(env.Getenv(EnvServerURL))
+	if parsed, err := url.Parse(cfg.ServerURL); err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+		return Config{}, workload.NewConfigError(EnvServerURL + " must be the absolute http or https Engine base URL")
 	}
 	cfg.DriveUploadBudgetBytesPerMinute = drive.DefaultUploadBudgetBytesPerMinute
 	if raw := strings.TrimSpace(env.Getenv(EnvDriveUploadBudget)); raw != "" {

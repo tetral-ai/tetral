@@ -87,6 +87,8 @@ sandbox:
 edge:
   enabled: false
   gatewayClassName: tetral-envoy-gateway
+  # The public API host; https://<apiHost> is also the server_url of the
+  # bootstraps that Controller claims return to CLIs.
   apiHost: api.tetral.example
   apiTLSSecretName: tetral-api-public-tls
   gitTLSSecretName: tetral-git-public-tls

@@ -344,6 +344,12 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 	e.startService("api", "api", "tetral-api", apiEnv, apiAddresses[0])
 
 	pageTokenKey := randomHex(t, 32)
+	// The edge's address is fixed before the hubs start: it is the
+	// server_url of the bootstraps their claims return.
+	edgeListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
 	var hubs [][2]string
 	e.hubs = map[string]*serviceProcess{}
 	for i := range max(options.hubPods, 1) {
@@ -356,6 +362,7 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 			"TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64": publicKey,
 			"TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY":            pageTokenKey,
 			"TETRAL_COMPUTER_HUB_POD_NAME":                  pod,
+			"TETRAL_COMPUTER_HUB_SERVER_URL":                "http://" + edgeListener.Addr().String(),
 		})
 		for key, value := range map[string]string{
 			"TETRAL_COMPUTER_HUB_MIN_CLI_VERSION":         options.minCLIVersion,
@@ -370,7 +377,7 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 		hubs = append(hubs, [2]string{pod, "http://" + hubAddresses[0]})
 	}
 
-	e.edge, e.serverURL, e.edgePort = startEdge(t, authAddresses[2], map[string][][2]string{
+	e.edge, e.serverURL, e.edgePort = startEdge(t, edgeListener, authAddresses[2], map[string][][2]string{
 		"auth":         {{"auth", "http://" + authAddresses[0]}},
 		"api":          {{"api", "http://" + apiAddresses[0]}},
 		"computer-hub": hubs,

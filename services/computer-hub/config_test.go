@@ -21,7 +21,8 @@ func TestConfigFromEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	valid := func() mapEnv {
-		return mapEnv{EnvDatabaseURL: "postgres://hub@db/tetral", EnvInternalPrincipalPublicKey: base64.StdEncoding.EncodeToString(public), EnvPageTokenKey: strings.Repeat("ab", 32), EnvPodName: "computer-hub-0"}
+		return mapEnv{EnvDatabaseURL: "postgres://hub@db/tetral", EnvInternalPrincipalPublicKey: base64.StdEncoding.EncodeToString(public), EnvPageTokenKey: strings.Repeat("ab", 32), EnvPodName: "computer-hub-0",
+			EnvServerURL: "https://api.tetral.example"}
 	}
 	for _, tc := range []struct {
 		name   string
@@ -30,7 +31,8 @@ func TestConfigFromEnv(t *testing.T) {
 		reject string
 	}{
 		{name: "required settings", change: func(mapEnv) {}, check: func(c Config) bool {
-			return c.DatabaseURL == "postgres://hub@db/tetral" && c.PrincipalVerifier != nil && string(c.PageTokenKey) == strings.Repeat("\xab", 32)
+			return c.DatabaseURL == "postgres://hub@db/tetral" && c.PrincipalVerifier != nil && string(c.PageTokenKey) == strings.Repeat("\xab", 32) &&
+				c.ServerURL == "https://api.tetral.example"
 		}},
 		{name: "maximum credential lifetime", change: func(e mapEnv) { e[EnvMaxCredentialLifetime] = "1h" }, check: func(c Config) bool {
 			return c.MaxCredentialLifetime == time.Hour
@@ -60,6 +62,8 @@ func TestConfigFromEnv(t *testing.T) {
 			e[EnvMinCLIVersion], e[EnvRecommendedCLIVersion] = "1.10.0", "1.9.0"
 		}, reject: EnvRecommendedCLIVersion},
 		{name: "no pod name", change: func(e mapEnv) { delete(e, EnvPodName) }, reject: EnvPodName},
+		{name: "no server URL", change: func(e mapEnv) { delete(e, EnvServerURL) }, reject: EnvServerURL},
+		{name: "server URL without a host", change: func(e mapEnv) { e[EnvServerURL] = "https:///v1" }, reject: EnvServerURL},
 		{name: "stream age and drain window", change: func(e mapEnv) { e[EnvStreamMaxAge], e[EnvStreamDrainWindow] = "10m", "15s" }, check: func(c Config) bool {
 			return c.StreamMaxAge == 10*time.Minute && c.StreamDrainWindow == 15*time.Second
 		}},

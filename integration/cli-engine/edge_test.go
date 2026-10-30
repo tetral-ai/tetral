@@ -102,7 +102,7 @@ func edgeRoute(method, path string) (service string, checked, ok bool) {
 // with its origin and port. services maps a service name to its backends'
 // names and HTTP origins; a route to a service the test did not start, or
 // whose backends are all down, answers 502.
-func startEdge(t *testing.T, authGRPCAddress string, services map[string][][2]string) (*edge, string, string) {
+func startEdge(t *testing.T, listener net.Listener, authGRPCAddress string, services map[string][][2]string) (*edge, string, string) {
 	t.Helper()
 	connection, err := grpc.NewClient(authGRPCAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -117,10 +117,6 @@ func startEdge(t *testing.T, authGRPCAddress string, services map[string][][2]st
 			}
 			e.services[name] = append(e.services[name], &backend{name: named[0], origin: origin})
 		}
-	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
 	}
 	server := &http.Server{Handler: e, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = server.Serve(listener) }()
