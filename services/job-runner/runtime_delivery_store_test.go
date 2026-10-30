@@ -1936,16 +1936,16 @@ func (f *machineMessageFixture) deliverNext() bool {
 	return true
 }
 
-// cleanUpIdleWithPodGone makes the Session idle with its cleanup due, then
-// runs the idle cleanup job as Job Runner does after the Runtime pod is gone,
-// and requires the binding deleted.
-func (f *machineMessageFixture) cleanUpIdleWithPodGone() {
+// cleanUpIdle makes the Session idle with its cleanup due, then runs the idle
+// cleanup job as Job Runner does, with the Runtime pod gone or accepting the
+// cleanup, and requires the binding deleted.
+func (f *machineMessageFixture) cleanUpIdle(podGone bool) {
 	f.t.Helper()
 	seedBridgeAPIEvent(f.t, f.admin, "default", f.sessionID, f.mainID, "sevt_idle_"+f.sessionID, 1, "session.status_idle", `{"type":"session.status_idle"}`)
 	f.exec(`UPDATE session_events SET latest_stream_position=1 WHERE workspace_id='default' AND event_id=$1`, "sevt_idle_"+f.sessionID)
 	f.exec(`UPDATE session_runtime_status SET status='idle', status_event_id=$2, cleanup_job_id='cleanup_mmsg', cleanup_enqueued_at=clock_timestamp()
 		WHERE workspace_id='default' AND session_id=$1`, f.sessionID, "sevt_idle_"+f.sessionID)
-	f.podLost = true
+	f.podLost = podGone
 	if _, err := f.queue.Enqueue(f.ctx, queue.EnqueueRequest{
 		ID: id.New(queue.JobIDPrefix), WorkspaceID: workspace.DefaultID, Kind: queue.KindCleanupSession,
 		PartitionKey: queue.FormatSessionPartitionKey(workspace.DefaultID, f.sessionID),
@@ -1963,7 +1963,7 @@ func (f *machineMessageFixture) cleanUpIdleWithPodGone() {
 		f.t.Fatalf("process the idle cleanup: %v", err)
 	}
 	if _, bindings, _ := f.sessionFacts(); bindings != 0 {
-		f.t.Fatalf("bindings after the idle cleanup of a gone pod = %d; want 0", bindings)
+		f.t.Fatalf("bindings after the idle cleanup = %d; want 0", bindings)
 	}
 }
 
@@ -2279,14 +2279,16 @@ func TestPodLossDuringDeliveryHandsBackTheDeliveringMessage(t *testing.T) {
 // Idle cleanup that finds the Runtime pod gone hands the binding's messages
 // back before it deletes the binding: an accepted one returns to queued with
 // a new job, and a delivering one keeps its job, which delivers it once to the
-// Runtime that holds the Session next.
-func TestIdleCleanupOfAGonePodHandsBackMachineMessages(t *testing.T) {
+// Runtime that holds the Session next. A cleanup the Runtime accepts is its
+// own release and leaves an accepted one as it is.
+func TestIdleCleanupHandsBackMachineMessagesOnlyForAGonePod(t *testing.T) {
 	for _, tc := range []struct {
-		name, session string
-		delivering    bool
+		name, session        string
+		delivering, podAlive bool
 	}{
 		{name: "accepted", session: "sesn_mmsg_gone_accepted"},
 		{name: "delivering", session: "sesn_mmsg_gone_delivering", delivering: true},
+		{name: "accepted, Runtime accepts the cleanup", session: "sesn_mmsg_alive_accepted", podAlive: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newMachineMessageFixture(t, tc.session)
@@ -2303,7 +2305,14 @@ func TestIdleCleanupOfAGonePodHandsBackMachineMessages(t *testing.T) {
 			if got := f.messages()[0]; got.Status != want || !got.Bound {
 				t.Fatalf("message before the cleanup = %+v; want %s under the binding", got, want)
 			}
-			f.cleanUpIdleWithPodGone()
+			before := f.messages()[0]
+			f.cleanUpIdle(!tc.podAlive)
+			if tc.podAlive {
+				if got := f.messages()[0]; got != before {
+					t.Fatalf("message after the cleanup the Runtime accepted = %+v; want it as it was: %+v", got, before)
+				}
+				return
+			}
 			if got := f.messages()[0]; got.Status != "queued" || got.Bound || got.ActiveJobs != 1 {
 				t.Fatalf("message after the idle cleanup = %+v; want queued with no binding and one job", got)
 			}
