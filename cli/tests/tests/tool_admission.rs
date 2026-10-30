@@ -228,9 +228,11 @@ fn release_answers(tasks: &TaskMachine) {
     answer_fault(&tasks.engine, json!({"action": "release"}));
 }
 
-/// Records `closes` closes of Sessions without a record, which nothing
-/// reports, so that each keeps its ledger entry. Each chunk is routed
-/// before the next is sent, so that every wait covers a bounded number.
+/// Records `closes` closes of Sessions without a record. The reference
+/// server issued none of them, so it refuses each `closed` report
+/// `unknown_instruction`; a refused report acknowledges nothing, so each
+/// close keeps its ledger entry. Each chunk is routed before the next is
+/// sent, so that every wait covers a bounded number.
 fn fill_ledger(tasks: &TaskMachine, closes: usize) {
     const CHUNK: usize = 500;
     let seams = &tasks.machine().seams;
@@ -863,8 +865,9 @@ fn an_instruction_whose_final_ack_comes_after_a_resume_keeps_its_ledger_entry_un
         tasks.terminal("task_held");
         resume(&tasks);
         release_answers(&tasks);
-        // Closes of absent Sessions produce no reports. The held task is
-        // therefore the only remaining final ACK. Wait for the Connection
+        // The closes of absent Sessions get only refused reports, which
+        // acknowledge nothing. The held task is therefore the only remaining
+        // final ACK. Wait for the Connection
         // owner to apply it, not just for the outbox to enqueue it: a resend
         // handled first would change the entry's last-delivery stream and
         // allow that ACK to remove it immediately.
