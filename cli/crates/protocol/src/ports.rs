@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::connection::{DownstreamType, McpTools, SessionPreparePayload, SessionStatus};
 use crate::id::{Id, SafeId};
 use crate::local::SessionEntry;
-use crate::tool::{DriveSyncReport, ProtocolErrorReport, ToolStatus};
+use crate::tool::{DriveSyncOutcome, DriveSyncReport, ProtocolErrorReport, ToolStatus};
 use crate::{DecodeError, Message, decode, encode};
 
 /// The endpoints of the reports that answer or follow instructions.
@@ -285,6 +285,44 @@ pub type TaskOwnerReply = Box<dyn FnOnce(Option<Id>) + Send>;
 /// namespace belongs to none.
 pub trait TaskOwnership: Send + Sync {
     fn task_of(&self, pid: u32, reply: TaskOwnerReply);
+}
+
+/// A call's drive check, before its command starts or its image is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriveCheck {
+    pub task_id: Id,
+    /// A `view_image`, whose result's `drive_sync` the answer is; an
+    /// `exec_command`'s failures go to its first report instead.
+    pub view_image: bool,
+}
+
+/// The sync point of a result being built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriveSyncPoint {
+    pub task_id: Id,
+    /// The `report_seq` 1 report of an `exec_command`.
+    pub first: bool,
+    /// The result's `status` is `running`.
+    pub running: bool,
+    /// How long it waits for the content of the changes it covers.
+    pub wait: Duration,
+    pub traceparent: Option<String>,
+}
+
+/// A result's finished `drive_sync`, or none.
+pub type DriveAnswer =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Option<DriveSyncOutcome>> + Send>>;
+
+/// How a Task supervisor reaches its Session's Drive sync owner; its
+/// implementation belongs to `drive`, which builds and fits every
+/// `drive_sync` itself.
+pub trait DriveSyncPort: Send + Sync + std::fmt::Debug {
+    /// Mounts every bound drive found unmounted and waits for catch-up,
+    /// never for this machine's own uploads.
+    fn check(&self, check: DriveCheck) -> DriveAnswer;
+    fn sync_point(&self, point: DriveSyncPoint) -> DriveAnswer;
+    /// The `TETRAL_DRIVES` value of the Session's commands, if any.
+    fn drives_variable(&self) -> Option<std::path::PathBuf>;
 }
 
 /// How Session binding owners and Drive sync owners reach the Connection

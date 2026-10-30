@@ -22,7 +22,7 @@ pub const RESULT_WAIT: Duration = Duration::from_secs(30);
 /// What a sync point is asked for.
 #[derive(Debug, Clone)]
 pub struct SyncPointRequest {
-    /// The task of the call; none for an `edit`.
+    /// The task of the call.
     pub task_id: Option<String>,
     /// [`RESULT_WAIT`], or zero for a `running` result.
     pub wait: Duration,

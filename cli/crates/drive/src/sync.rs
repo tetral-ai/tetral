@@ -60,6 +60,14 @@ pub struct DriveSync {
     pub(crate) cache: ContentCache,
     pub(crate) tasks: Arc<dyn TaskOwnership>,
     clock: Clock,
+    /// The drives the Session's binding binds, as last mounted.
+    bound: Arc<std::sync::Mutex<Vec<Bound>>>,
+    /// The new mount failures of each `exec_command`'s check, for its first
+    /// report.
+    first_failures: Arc<std::sync::Mutex<HashMap<String, Vec<Failure>>>>,
+    /// `sessions/<session_id>` under the canonical root.
+    session_dir: PathBuf,
+    mounting: Mounting,
 }
 
 impl std::fmt::Debug for DriveSync {
@@ -221,6 +229,10 @@ impl DriveSync {
             cache: config.cache,
             tasks: config.tasks,
             clock: config.clock,
+            bound: Arc::default(),
+            first_failures: Arc::default(),
+            session_dir: owner.session_dir.clone(),
+            mounting: owner.mounting.clone(),
         };
         let mut owner = owner;
         owner.handle = Some(sync.clone());
@@ -277,6 +289,7 @@ impl DriveSync {
     /// Mounts each drive of `bound` that is not mounted, as a preparation
     /// or a `session.drives` does; the failures that are new.
     pub async fn mount_drives(&self, bound: Vec<Bound>) -> Vec<Failure> {
+        *self.bound.lock().expect("bound lock") = bound.clone();
         let (reply, answer) = oneshot::channel();
         self.send(Message::CheckMounts { bound, reply });
         let failures = answer.await.unwrap_or_default();
@@ -972,4 +985,112 @@ fn failed(request: &str, ended: &Ended) -> String {
         } => format!("{request}: {status} {code}"),
         _ => format!("{request}: invalid answer"),
     }
+}
+
+impl protocol::ports::DriveSyncPort for DriveSync {
+    fn check(&self, check: protocol::ports::DriveCheck) -> protocol::ports::DriveAnswer {
+        let sync = self.clone();
+        Box::pin(async move {
+            let bound = sync.bound.lock().expect("bound lock").clone();
+            let failures = sync.check_drives(bound).await;
+            if !check.view_image {
+                if !failures.is_empty() {
+                    sync.first_failures
+                        .lock()
+                        .expect("failures lock")
+                        .insert(check.task_id.as_str().to_owned(), failures);
+                }
+                return None;
+            }
+            sync.fitted(crate::outcome::Facts {
+                unmounted: unmounted(failures),
+                ..crate::outcome::Facts::default()
+            })
+        })
+    }
+
+    fn sync_point(&self, point: protocol::ports::DriveSyncPoint) -> protocol::ports::DriveAnswer {
+        let sync = self.clone();
+        let task = point.task_id.as_str().to_owned();
+        let outcome = self.sync_point(SyncPointRequest {
+            task_id: Some(task.clone()),
+            wait: point.wait,
+            traceparent: point.traceparent,
+        });
+        Box::pin(async move {
+            let outcome = outcome.await;
+            let failures = match point.first {
+                true => sync
+                    .first_failures
+                    .lock()
+                    .expect("failures lock")
+                    .remove(&task),
+                false => None,
+            };
+            let downloading = match point.running {
+                true => sync.downloading().await,
+                false => Vec::new(),
+            };
+            sync.fitted(crate::outcome::Facts {
+                committed: outcome.committed,
+                deleted: outcome.deleted,
+                rejected: outcome.rejected,
+                not_synced: outcome.not_synced,
+                downloading: downloading
+                    .into_iter()
+                    .filter_map(|download| {
+                        Some(protocol::tool::DriveDownload {
+                            path: protocol::field::AbsolutePath::new(
+                                download.path.to_string_lossy().into_owned(),
+                            )
+                            .ok()?,
+                            downloaded_bytes: protocol::field::Count::saturating(
+                                download.downloaded_bytes,
+                            ),
+                            size_bytes: protocol::field::Count::saturating(download.size_bytes),
+                        })
+                    })
+                    .collect(),
+                unmounted: unmounted(failures.unwrap_or_default()),
+            })
+        })
+    }
+
+    fn drives_variable(&self) -> Option<PathBuf> {
+        let binds = !self.bound.lock().expect("bound lock").is_empty();
+        crate::mount::drives_variable(&self.session_dir, binds, &self.mounting)
+    }
+}
+
+impl DriveSync {
+    /// Fits `facts`; the `unmounted` entries placed are reported, and the
+    /// others stay new for the next check.
+    fn fitted(&self, facts: crate::outcome::Facts) -> Option<protocol::tool::DriveSyncOutcome> {
+        let fitted = crate::outcome::fit(facts);
+        if !fitted.placed.is_empty() {
+            self.reported(
+                fitted
+                    .placed
+                    .iter()
+                    .map(|failure| Failure {
+                        drive_id: failure.drive_id.as_str().to_owned(),
+                        error: failure.error.as_str().to_owned(),
+                    })
+                    .collect(),
+            );
+        }
+        fitted.drive_sync
+    }
+}
+
+fn unmounted(failures: Vec<Failure>) -> Vec<protocol::tool::DriveMountFailure> {
+    failures
+        .into_iter()
+        .filter_map(|failure| {
+            Some(protocol::tool::DriveMountFailure {
+                drive_id: Id::new(failure.drive_id).ok()?,
+                error: protocol::field::NonEmptyString::new(failure.error).ok()?,
+            })
+        })
+        .collect()
 }

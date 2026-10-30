@@ -146,6 +146,8 @@ pub struct Stub {
     pub files: Mutex<Vec<Value>>,
     pub records: Mutex<Vec<Value>>,
     pub contents: Mutex<HashMap<String, Vec<u8>>>,
+    /// Hashes whose downloads stop after their first byte and never end.
+    pub held_downloads: Mutex<std::collections::HashSet<String>>,
     calls: mpsc::UnboundedSender<Call>,
     /// The upload-content calls in progress, and the most at once.
     pub puts_open: AtomicU64,
@@ -257,7 +259,12 @@ impl DriveTransfer for SessionStub {
         sink: &'a mut dyn ContentSink,
     ) -> Transfer<'a, ()> {
         Box::pin(async move {
-            let bytes = self.stub.contents.lock().unwrap()[request.body.sha256.as_str()].clone();
+            let hash = request.body.sha256.as_str();
+            let bytes = self.stub.contents.lock().unwrap()[hash].clone();
+            if self.stub.held_downloads.lock().unwrap().contains(hash) {
+                sink.append(&bytes[..1]).map_err(Ended::Sink)?;
+                return std::future::pending().await;
+            }
             sink.append(&bytes).map_err(Ended::Sink)
         })
     }
@@ -315,6 +322,7 @@ impl Env {
             files: Mutex::default(),
             records: Mutex::default(),
             contents: Mutex::default(),
+            held_downloads: Mutex::default(),
             calls: sender,
             puts_open: AtomicU64::new(0),
             puts_most: AtomicU64::new(0),

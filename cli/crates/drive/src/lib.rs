@@ -11,6 +11,7 @@ pub mod mount;
 #[cfg(target_os = "linux")]
 pub mod mountinfo;
 pub mod ops;
+pub mod outcome;
 pub mod paths;
 pub mod state;
 pub mod sync;

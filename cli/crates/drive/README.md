@@ -71,6 +71,9 @@ Drives on this machine belong here, with two owners:
 - `commit.rs`: due changes, commit building and splitting, the answers,
   stored commits sent again after a start, `409 content_missing` and the
   drive winning over a rejected change.
+- `outcome.rs`: the facts of a result's `drive_sync` (`Facts`) and their
+  fitting into 65,536 bytes (`fit`); `DriveSync` answers the Task
+  supervisor's `DriveSyncPort` with it (`sync.rs`).
 - `sync_point.rs`: a result's sync point (`SyncPointRequest`): coverage,
   the wait (`RESULT_WAIT`), the commit step and the outcome (`SyncOutcome`).
 - `local.rs`: the rows one operation changes (`Edit`), the pending changes it
