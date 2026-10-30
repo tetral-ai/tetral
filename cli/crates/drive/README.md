@@ -77,6 +77,8 @@ Drives on this machine belong here, with two owners:
 - `report.rs`: drive sync reports of the rejections no sync point
   carries, one per recorded task, built for the current binding and
   handed to the outbox once (`body`).
+- `lost_changes.rs`: `lost_changes` entries and their fitting into a
+  report's or ready's 65,536 bytes (`fit`).
 - `sync_point.rs`: a result's sync point (`SyncPointRequest`): coverage,
   the wait (`RESULT_WAIT`), the commit step and the outcome (`SyncOutcome`).
 - `local.rs`: the rows one operation changes (`Edit`), the pending changes it

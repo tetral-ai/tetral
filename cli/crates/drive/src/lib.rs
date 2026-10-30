@@ -7,6 +7,7 @@ pub mod commit;
 #[cfg(target_os = "linux")]
 pub mod fuse;
 pub mod local;
+pub mod lost_changes;
 pub mod mount;
 #[cfg(target_os = "linux")]
 pub mod mountinfo;
