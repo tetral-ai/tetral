@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -366,4 +367,24 @@ func TestDriveSkillEntries(t *testing.T) {
 		t.Fatalf("files under the deleted Skill = %+v, %v", files, err)
 	}
 	expectError(t, api.json(http.MethodGet, "/v1/drives/"+id+"/skills/a-b", ""), http.StatusNotFound, "not_found_error", "")
+
+	// Deleting a Skill leaves every other folder as it was: one whose name
+	// starts like it, and one whose name its own matches as a LIKE pattern.
+	for _, name := range []string{"a_b", "a_bc", "a-b"} {
+		write("skills/"+name+"/SKILL.md", valid(name))
+	}
+	others := func() []drive.File {
+		t.Helper()
+		files, _, err := api.drives.ListFiles(ctx, workspace.DefaultID, id, drive.FileQuery{Prefix: "skills/", Limit: 100})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return slices.DeleteFunc(files, func(f drive.File) bool { return strings.HasPrefix(f.Path, "skills/a_b/") })
+	}
+	before := others()
+	decodeDrive(t, api.json(http.MethodDelete, "/v1/drives/"+id+"/skills/a_b", ""), http.StatusNoContent, nil)
+	expectError(t, api.json(http.MethodGet, "/v1/drives/"+id+"/skills/a_b", ""), http.StatusNotFound, "not_found_error", "")
+	if after := others(); !slices.Equal(after, before) {
+		t.Fatalf("files beside the deleted Skill a_b = %+v; want them unchanged: %+v", after, before)
+	}
 }
