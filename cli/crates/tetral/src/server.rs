@@ -3,6 +3,8 @@
 //! status as of its exit; `server status` and `server stop` reach the App
 //! Server only through the local API.
 
+use std::time::Duration;
+
 use appserver::lifecycle::{self, Times};
 use appserver::local_api::FixedStatus;
 use appserver::startup::{self, StartError};
@@ -12,7 +14,12 @@ use state::paths::{self, StateRoot};
 use crate::commands::{check_failed, io_failed};
 use crate::output::{Code, CommandError};
 
-pub fn run(root: &StateRoot, observer: &observe::Observer) -> Result<Value, CommandError> {
+/// `idle_exit` is the `--idle-exit` duration, already checked.
+pub fn run(
+    root: &StateRoot,
+    observer: &observe::Observer,
+    idle_exit: Option<Duration>,
+) -> Result<Value, CommandError> {
     let runtime = runtime()?;
     let lock = startup::lock(root).map_err(start_failed)?;
     let ended = runtime.block_on(async {
@@ -29,7 +36,7 @@ pub fn run(root: &StateRoot, observer: &observe::Observer) -> Result<Value, Comm
             instance_id: started.configuration.credentials.instance_id.clone(),
             cli_version: env!("CARGO_PKG_VERSION").to_owned(),
         };
-        lifecycle::run(started, fixed, Times::default())
+        lifecycle::run(started, fixed, Times::default(), idle_exit)
             .await
             .map_err(|error| CommandError::new(Code::IoFailed, error.to_string()))
     })?;

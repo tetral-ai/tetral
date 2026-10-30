@@ -240,7 +240,8 @@ which owns that task's process tree; the translation of a call's
 ## Where things are
 
 - `supervisor.rs`: `spawn`, a task's `TaskSpec` and its `TaskListener`, the
-  shared `Context` and its `Bounds`, `SupervisorMessage`, `Control`
+  shared `Context` and its `Bounds` and `ActivitySink`, told of each
+  `exec_command` command's start and exit, `SupervisorMessage`, `Control`
   and `SupervisorMailbox`; the start, the running loop, the reports, the
   controls with their waiters and replies, the confirmation and the
   cleanup.

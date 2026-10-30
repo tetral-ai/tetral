@@ -191,6 +191,9 @@ mailbox submission; the body owner releases the budget on its last reference.
   resumed or not; `drive_mounted` and `drive_detached` keep the drive syncs
   that have each drive mounted, to which each `drive.changed` goes, without
   an ACK. A notice for a drive no drive sync has mounted is dropped.
+  `Connection::drive_syncs` gives them all, for the upload before an idle
+  exit. The Connection owner tells `Config::activity` of each `tool.execute`,
+  `tool.stdin`, `tool.cancel` and `mcp.call` it reads, duplicates included.
 - `Connection::drive_transfer()` gives the drive transfer client
   (`drive_transfer::HttpDriveTransfer`), which takes the held connection
   and its key from the Connection owner (`DriveLink`) and tells it a

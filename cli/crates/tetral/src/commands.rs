@@ -102,7 +102,7 @@ impl Command {
 }
 
 /// `<duration>`: a positive integer followed by `s`, `m` or `h`.
-fn duration(text: &str) -> Option<Duration> {
+pub(crate) fn duration(text: &str) -> Option<Duration> {
     let (count, unit) = text.split_at_checked(text.len().checked_sub(1)?)?;
     let seconds: u64 = match unit {
         "s" => 1,
@@ -206,7 +206,9 @@ fn run_checked(
     match command {
         Command::Configure { .. } => configure::run(root, app, io::stdin().lock()),
         Command::Server { command } => match command {
-            ServerCommand::Run { .. } => server::run(root, observer),
+            ServerCommand::Run { idle_exit, .. } => {
+                server::run(root, observer, idle_exit.as_deref().and_then(duration))
+            }
             ServerCommand::Status { .. } => server::status(root),
             ServerCommand::Stop { .. } => server::stop(root),
         },

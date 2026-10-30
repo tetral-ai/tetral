@@ -55,8 +55,9 @@ runs as child processes of itself.
   the log file, which it opens once the start can no longer fail; one that
   cannot be opened is recorded as `log.file_open_failed`, and the App Server
   runs on. The command checks `--idle-exit`'s `<duration>`, a positive
-  integer followed by `s`, `m` or `h`, with its other arguments; the App
-  Server does not act on it.
+  integer followed by `s`, `m` or `h`, with its other arguments; with it the
+  App Server also exits once idle that long (`appserver::idle`), with exit
+  code 0 and its status.
 - `tetral server status --app <app>` and `tetral server stop --app <app>`:
   `GET /v1/status` and `POST /v1/shutdown` through the SDK, writing the status
   or `{}`; `server_not_running` when no App Server is listening. One five-second

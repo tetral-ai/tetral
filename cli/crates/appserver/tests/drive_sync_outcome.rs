@@ -266,6 +266,7 @@ async fn a_restricted_command_reaches_the_drive_through_tetral_drives_under_a_li
             reports: Arc::new(Reports(sent, AtomicU64::new(1))),
             bounds: Bounds::default(),
             boot_id: None,
+            activity: Arc::new(protocol::ports::NoActivity),
         },
     );
     mailbox.send(SupervisorMessage::Start).unwrap();

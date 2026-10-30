@@ -8,11 +8,11 @@ use execution::isolation::Isolation;
 use execution::limits::Visible;
 use execution::store::{LOG_HEAD_BYTES, TaskFiles};
 use execution::supervisor::{self, Bounds, Context, SupervisorMailbox, TaskListener, TaskSpec};
-use protocol::ports::ReportSink;
+use protocol::ports::{ActivitySink, ReportSink};
 use session::{TaskStart, TaskStarter};
 
 /// What every supervisor of this App Server is started with.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Supervisors {
     /// The running `tetral`, canonical.
     pub tetral: PathBuf,
@@ -20,6 +20,8 @@ pub struct Supervisors {
     pub bounds: Bounds,
     /// The running system's boot ID, read at the start.
     pub boot_id: Option<String>,
+    /// Told of each `exec_command` command's start and exit.
+    pub activity: Arc<dyn ActivitySink>,
 }
 
 impl TaskStarter for Supervisors {
@@ -55,6 +57,7 @@ impl TaskStarter for Supervisors {
                 reports,
                 bounds: self.bounds,
                 boot_id: self.boot_id.clone(),
+                activity: self.activity.clone(),
             },
         ))
     }

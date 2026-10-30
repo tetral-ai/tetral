@@ -53,8 +53,8 @@ use protocol::fingerprint::fingerprint;
 use protocol::id::{Id, SafeId};
 use protocol::local::{ConnectionState, ErrorObject, SessionEntry, SessionState};
 use protocol::ports::{
-    Close, Drives, Prepare, ProbeSlot, ReportSink, SessionFactory, Submission, TicketRequest,
-    ToolCall,
+    ActivitySink, Close, Drives, Prepare, ProbeSlot, ReportSink, SessionFactory, Submission,
+    TicketRequest, ToolCall,
 };
 use protocol::time::Rfc3339Utc;
 use protocol::tool::ProtocolVersion;
@@ -164,6 +164,8 @@ pub struct Config {
     pub started: Duration,
     /// Creates the Session binding owner of each Session.
     pub sessions: Arc<dyn SessionFactory>,
+    /// Told of each tool and local MCP instruction read from the stream.
+    pub activity: Arc<dyn ActivitySink>,
     pub times: Times,
 }
 
@@ -220,6 +222,7 @@ pub(crate) enum Message {
     Port(PortMessage),
     Sessions(oneshot::Sender<SessionsView>),
     DriveSyncs(DriveSyncs),
+    DriveSyncList(oneshot::Sender<Vec<DriveSync>>),
 }
 
 /// A change of the drive syncs the Connection owner signals.
@@ -336,6 +339,13 @@ impl Connection {
         self.send(Message::DriveSyncs(DriveSyncs::Detached(
             drive_id, session_id,
         )));
+    }
+
+    /// Each Session's Drive sync owner.
+    pub async fn drive_syncs(&self) -> Vec<DriveSync> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Message::DriveSyncList(reply));
+        answer.await.unwrap_or_default()
     }
 
     pub async fn sessions(&self) -> Vec<SessionEntry> {
@@ -565,6 +575,7 @@ struct Owner {
     /// The Sessions whose tasks the stop still waits for.
     tasks_pending: BTreeSet<SafeId>,
     lost_changes: KeptLostChanges,
+    activity: Arc<dyn ActivitySink>,
 }
 
 impl Owner {
@@ -593,6 +604,7 @@ impl Owner {
             credential: config.credential,
             written: None,
             lost_changes: KeptLostChanges::load(&config.state_root),
+            activity: config.activity,
             state_root: config.state_root,
             ready: config.ready,
             started: config.started,
@@ -650,6 +662,10 @@ impl Owner {
                 self.drive_syncs_changed(change);
                 return;
             }
+            Message::DriveSyncList(reply) => {
+                let _ = reply.send(self.drive_syncs.values().cloned().collect());
+                return;
+            }
             _ if matches!(self.phase, Phase::Stopped) => return,
             _ => state::seams::now(),
         };
@@ -669,7 +685,8 @@ impl Owner {
             | Message::Stop(_)
             | Message::Port(_)
             | Message::Sessions(_)
-            | Message::DriveSyncs(_) => phase,
+            | Message::DriveSyncs(_)
+            | Message::DriveSyncList(_) => phase,
         };
         self.reported.change(self.state());
     }
@@ -1252,7 +1269,12 @@ impl Owner {
                 Phase::Held(held)
             }
             Read::Other(envelope, data) => self.connection_message(held, &envelope, &data, now),
-            Read::Session(message) => self.session_instruction(held, stream, message, now),
+            Read::Session(message) => {
+                if message.is_activity() {
+                    self.activity.tool_instruction_arrived(now);
+                }
+                self.session_instruction(held, stream, message, now)
+            }
         }
     }
 
@@ -2396,6 +2418,7 @@ mod tests {
             state_root,
             started: Duration::ZERO,
             sessions: Arc::new(NoSessions),
+            activity: Arc::new(protocol::ports::NoActivity),
             times: Times::default(),
         };
         let transport = Arc::new(Transport::new(&config.server_url));

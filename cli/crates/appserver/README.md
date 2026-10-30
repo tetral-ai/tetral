@@ -73,6 +73,21 @@ ones it uses belong here too.
   Unconfirmed task records remain for the next start; the deadline does not
   prove all processes have been reaped. Log flushing receives the remaining
   budget and has its own one-second maximum.
+- With `--idle-exit`, the idle timer keeps the idle start: the App
+  Server's start, moved to the arrival of every `tool.execute`,
+  `tool.stdin`, `tool.cancel` and `mcp.call` the Connection owner reads and
+  to the exit of every `exec_command` command, which the Connection owner
+  and each Task supervisor report through `protocol::ports::ActivitySink`.
+  The idle time counts only while no such command runs. When it reaches the
+  duration, every Session's drive sync uploads and commits its pending
+  changes as a final upload in keep mode ending 30 seconds later, and then
+  the shutdown above starts. A tool instruction read before that upload
+  ended releases it, so its uploads and commits go on as ordinary ones,
+  and moves the idle start; the timer handles its messages in arrival
+  order. The test seam barrier `idle.uploading` holds the upload's end and
+  the counter `idle.checked` counts each reading of the clock and each
+  message (`idle`, run by the lifecycle task). Without the option no timer
+  runs.
 - While it runs, the App Server sets the socket's modification time to now
   every `SOCKET_TOUCH_INTERVAL` of the seam clock and counts each as the test
   seam counter `socket.touched` (`startup::keep_socket_fresh`).
@@ -80,7 +95,8 @@ ones it uses belong here too.
 ## Entry points
 
 - `startup::lock(root)` and then `startup::serve(root, lock)` start an App
-  Server and give `Started`; `lifecycle::run(started, fixed, times)` starts
+  Server and give `Started`; `lifecycle::run(started, fixed, times,
+  idle_exit)` starts
   the Connection owner and its Report outbox with the Session binding
   owners' factory (`session::Factory`), given the state root as given and
   canonical and the running executable for the directory probe, and with
@@ -109,4 +125,6 @@ ones it uses belong here too.
   while the App Server runs (`FixedStatus`), the sources of a status
   (`StatusSources`) and `current_status`.
 - `shutdown.rs`: the shutdown sequence and its deadline.
+- `idle.rs`: the idle timer and the upload before the exit, which the
+  lifecycle task runs (`IdleExit`), and its `ActivitySink` on `Lifecycle`.
 - `tasks.rs`: `Supervisors`, the Session binding owners' `TaskStarter`.

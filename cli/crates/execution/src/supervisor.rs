@@ -53,7 +53,7 @@ use observe::{Identity, TraceContext};
 use protocol::field::PositiveInt;
 use protocol::id::Id;
 use protocol::ports::{
-    DriveAnswer, DriveCheck, DriveSyncPoint, DriveSyncPort, ReportId, ReportListener,
+    ActivitySink, DriveAnswer, DriveCheck, DriveSyncPoint, DriveSyncPort, ReportId, ReportListener,
     ReportOutcome, ReportSink,
 };
 use protocol::tool::{
@@ -201,6 +201,8 @@ pub struct Context {
     /// The running system's boot ID, which each record carries; without it
     /// no record is written.
     pub boot_id: Option<String>,
+    /// Told of each `exec_command` command's start and exit.
+    pub activity: Arc<dyn ActivitySink>,
 }
 
 /// The waits and sizes of a supervisor, each a constant but for tests.
@@ -963,6 +965,7 @@ impl Supervisor {
                             && let Some(rest) = bytes.strip_prefix(crate::child::STARTED)
                         {
                             self.start = Some(state::seams::now());
+                            self.context.activity.exec_started();
                             self.find_leader(pid);
                             bytes = rest;
                         }
@@ -974,6 +977,7 @@ impl Supervisor {
                 waited_status = wait_child(self.process.as_mut()), if self.exit.is_none() => {
                     let facts = waited_status.map_or_else(|_| ExitFacts::default(), ExitFacts::observed);
                     self.exit = Some((facts, state::seams::now()));
+                    self.exec_exited();
                     self.exited();
                 }
                 () = initial_wait(wait_ends, started), if !waited && quiet => {
@@ -1030,6 +1034,7 @@ impl Supervisor {
         drop((self.out.reader.take(), self.err.reader.take()));
         if self.exit.is_none() {
             self.exit = Some((ExitFacts::default(), state::seams::now()));
+            self.exec_exited();
         }
         self.exited();
         if self.writing.is_some() {
@@ -1463,6 +1468,14 @@ impl Supervisor {
     }
 
     /// The shell's exit has been observed: every waiting reply is made.
+    /// An `exec_command` whose command started has exited, at the exit's
+    /// time.
+    fn exec_exited(&self) {
+        if let (Some(_), Some((_, at))) = (self.start, &self.exit) {
+            self.context.activity.exec_exited(*at);
+        }
+    }
+
     fn exited(&mut self) {
         for waiter in std::mem::take(&mut self.waiters) {
             self.reply_waiter(waiter);
@@ -2575,6 +2588,7 @@ mod tests {
             }),
             bounds: Bounds::default(),
             boot_id: None,
+            activity: Arc::new(protocol::ports::NoActivity),
         };
         let tool: ToolInput =
             serde_json::from_value(json!({"tool":"exec_command","input":{"cmd":"unused"}}))

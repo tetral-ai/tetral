@@ -140,6 +140,24 @@ impl Machine {
         )
     }
 
+    /// [`Machine::start_with_tools`] with `arguments` after `server run`'s
+    /// own.
+    pub fn start_with_tools_and(
+        case: &mut Case,
+        directory: &Path,
+        bootstrap: &Value,
+        arguments: &[&str],
+    ) -> Machine {
+        let mut command_line = vec!["server", "run", "--app", APP];
+        command_line.extend_from_slice(arguments);
+        let mut server_run =
+            Tetral::new(command_line).current_dir(&crate::workspace_dir().join("tests"));
+        for (name, value) in tool_environment() {
+            server_run = server_run.env(name, value);
+        }
+        Machine::start_as(case, directory, bootstrap, server_run)
+    }
+
     /// [`Machine::start_with_tools`] with the App Server run from the
     /// `tetral` at `tetral`, such as a build with a `bwrap` digest, and with
     /// `path` as its `PATH`.

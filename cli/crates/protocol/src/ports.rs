@@ -292,6 +292,30 @@ pub trait SessionHandle: Send + Sync {
     fn end(&self);
 }
 
+/// The activity that keeps an App Server with an idle exit running; its
+/// implementation belongs to `appserver`. Each time is on the seam clock.
+pub trait ActivitySink: Send + Sync {
+    /// The Connection owner read a `tool.execute`, `tool.stdin`,
+    /// `tool.cancel` or `mcp.call` from the stream at `at`, duplicates
+    /// included (`ToolInstructionArrived`).
+    fn tool_instruction_arrived(&self, at: Duration);
+    /// An `exec_command` task's command actually started (`ExecStarted`).
+    fn exec_started(&self);
+    /// An `exec_command` task whose command started exited at `at`
+    /// (`ExecExited`).
+    fn exec_exited(&self, at: Duration);
+}
+
+/// Activity that nothing observes: the App Server runs without an idle
+/// exit.
+pub struct NoActivity;
+
+impl ActivitySink for NoActivity {
+    fn tool_instruction_arrived(&self, _: Duration) {}
+    fn exec_started(&self) {}
+    fn exec_exited(&self, _: Duration) {}
+}
+
 /// Takes the `task_id` of the task a host process belongs to, or `None`.
 pub type TaskOwnerReply = Box<dyn FnOnce(Option<Id>) + Send>;
 
