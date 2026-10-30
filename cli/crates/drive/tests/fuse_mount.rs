@@ -28,7 +28,7 @@ use protocol::drive_transfer::{
     CommitResponse, ListChangesResponse, ListFilesResponse, UploadContentResponse,
 };
 use protocol::id::{Id, SafeId};
-use protocol::ports::{TaskOwnerReply, TaskOwnership};
+use protocol::ports::{DriveSyncPort, TaskOwnerReply, TaskOwnership};
 use serde_json::json;
 use state::clock::Clock;
 
@@ -370,6 +370,11 @@ async fn a_mount_of_this_app_server_is_left_alone_and_mount_points_are_made_or_m
         .prepare(&["drive_new", "drive_old", "drive_file"])
         .await;
     assert_eq!(failures, [failure("drive_file", NOT_A_DIRECTORY)]);
+    // Set while one of the bound drives failed.
+    assert_eq!(
+        DriveSyncPort::drives_variable(&harness.sync),
+        harness.point("drive_new").parent().map(Path::to_path_buf)
+    );
     let device = harness.device("drive_new").expect("drive_new is mounted");
     assert!(harness.device("drive_old").is_some());
     harness.check(&["drive_new", "drive_old"]).await;
@@ -634,13 +639,9 @@ async fn a_state_root_through_a_symbolic_link_finds_its_own_mount() {
 }
 
 #[test]
-fn tetral_drives_is_set_while_a_drive_is_bound_on_a_machine_that_can_mount() {
+fn tetral_drives_is_unset_without_a_bound_drive_or_on_a_machine_that_cannot_mount() {
     let session = Path::new("/r/sessions/sess_a");
     let unavailable = Mounting::Unavailable("no FUSE: test".to_owned());
-    assert_eq!(
-        drives_variable(session, true, &Mounting::Fuse),
-        Some(session.join("drives"))
-    );
     assert_eq!(drives_variable(session, false, &Mounting::Fuse), None);
     assert_eq!(drives_variable(session, true, &unavailable), None);
 }
