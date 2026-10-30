@@ -82,6 +82,10 @@ pub struct TaskStart {
     pub drive_sync: Option<Arc<dyn protocol::ports::DriveSyncPort>>,
 }
 
+/// A task its staging queue started: its `task_id`, its supervisor and the
+/// time it was staged.
+type StartedTask = (Id, SupervisorMailbox, Duration);
+
 /// One binding's tasks: its registry by `task_id` and its staging queue.
 #[derive(Debug, Default)]
 pub struct Tasks {
@@ -200,7 +204,7 @@ impl Tasks {
     /// The staged tasks in arrival order up to the first staged
     /// `session.drives`, each now started, with its supervisor and the time
     /// it was staged; and that `session.drives`, which leaves the queue.
-    fn start_staged(&mut self) -> (Vec<(Id, SupervisorMailbox, Duration)>, Option<Box<Drives>>) {
+    fn start_staged(&mut self) -> (Vec<StartedTask>, Option<Box<Drives>>) {
         let mut started = Vec::new();
         while let Some(entry) = self.staged.pop_front() {
             let (task_id, staged) = match entry {
