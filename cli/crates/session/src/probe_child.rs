@@ -3,9 +3,10 @@
 //! that the App Server never inspects a target itself and never changes its
 //! own working directory. It runs no user command and writes no project
 //! file; with `create_cwd` it creates only the missing directories of the
-//! target. After the directory's checks it reports, for each repository
-//! path, whether its resolved path lies in the state root and whether an
-//! entry exists there.
+//! target. With the directory's result it reports, for each repository
+//! path as it stood before the directory's checks created anything, whether
+//! its resolved path lies in the state root and whether an entry exists
+//! there.
 
 use std::ffi::OsStr;
 use std::io::{self, Read};
@@ -79,25 +80,26 @@ pub enum Output {
 /// Checks the directory that `input` names and gives the line to write.
 pub fn run(input: &[u8]) -> Vec<u8> {
     let output = match serde_json::from_slice::<Input>(input) {
-        Ok(input) => match check(&input) {
-            Ok(cwd) => match cwd.into_os_string().into_string() {
-                Ok(cwd) => Output::Entered {
-                    cwd,
-                    repositories: input
-                        .repository_paths
-                        .iter()
-                        .map(|path| repository_check(Path::new(path), Path::new(&input.state_root)))
-                        .collect(),
-                },
-                Err(_) => Output::Failed {
-                    error: PreparationError {
-                        code: PreparationErrorCode::CwdInaccessible,
-                        message: CANONICAL_PATH_NOT_UTF8.to_owned(),
+        Ok(input) => {
+            // Checked before the cwd checks create anything.
+            let repositories = input
+                .repository_paths
+                .iter()
+                .map(|path| repository_check(Path::new(path), Path::new(&input.state_root)))
+                .collect();
+            match check(&input) {
+                Ok(cwd) => match cwd.into_os_string().into_string() {
+                    Ok(cwd) => Output::Entered { cwd, repositories },
+                    Err(_) => Output::Failed {
+                        error: PreparationError {
+                            code: PreparationErrorCode::CwdInaccessible,
+                            message: CANONICAL_PATH_NOT_UTF8.to_owned(),
+                        },
                     },
                 },
-            },
-            Err(error) => Output::Failed { error },
-        },
+                Err(error) => Output::Failed { error },
+            }
+        }
         Err(error) => Output::Failed {
             error: PreparationError::new(
                 PreparationErrorCode::InvalidInput,
