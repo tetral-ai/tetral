@@ -142,6 +142,14 @@ impl TestClock {
     }
 }
 
+/// The outcome of `sent`, which must come within ten seconds.
+async fn finished(sent: tokio::task::JoinHandle<Outcome>) -> Outcome {
+    tokio::time::timeout(Duration::from_secs(10), sent)
+        .await
+        .expect("the request ends")
+        .unwrap()
+}
+
 async fn within(what: &str, mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !ready() {
@@ -198,6 +206,7 @@ fn json(status: u16, value: &Value) -> Reply {
 
 #[derive(Default)]
 struct StubState {
+    /// Requests answered, each once its answer is written.
     seen: Vec<Seen>,
     replies: VecDeque<Reply>,
 }
@@ -282,18 +291,17 @@ async fn serve(socket: tokio::net::TcpStream, state: Arc<Mutex<StubState>>, chan
     }
     let reply = loop {
         let waiting = changed.notified();
-        {
-            let mut state = state.lock().unwrap();
-            if let Some(reply) = state.replies.pop_front() {
-                state.seen.push(Seen {
-                    method: method.clone(),
-                    target: target.clone(),
-                    headers: headers.clone(),
-                });
-                break reply;
-            }
+        if let Some(reply) = state.lock().unwrap().replies.pop_front() {
+            break reply;
         }
         waiting.await;
+    };
+    let answered = || {
+        state.lock().unwrap().seen.push(Seen {
+            method,
+            target,
+            headers,
+        });
     };
     let socket = reader.get_mut();
     match reply {
@@ -312,8 +320,12 @@ async fn serve(socket: tokio::net::TcpStream, state: Arc<Mutex<StubState>>, chan
             ));
             let _ = socket.write_all(head.as_bytes()).await;
             let _ = socket.write_all(&body).await;
+            answered();
         }
-        Reply::Withhold => std::future::pending().await,
+        Reply::Withhold => {
+            answered();
+            std::future::pending().await
+        }
         Reply::Stall { body } => {
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -321,6 +333,7 @@ async fn serve(socket: tokio::net::TcpStream, state: Arc<Mutex<StubState>>, chan
             );
             let _ = socket.write_all(head.as_bytes()).await;
             let _ = socket.write_all(&body).await;
+            answered();
             std::future::pending().await
         }
     }
@@ -334,6 +347,8 @@ struct Harness {
     binding: watch::Sender<Option<Binding>>,
     events: mpsc::UnboundedReceiver<OutboxEvent>,
     _link: DriveLink,
+    /// The 429s an upload's `rate_limited` was told of.
+    rate_limited: Arc<AtomicU64>,
 }
 
 impl Harness {
@@ -362,6 +377,7 @@ impl Harness {
             binding,
             events,
             _link: link,
+            rate_limited: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -541,10 +557,13 @@ impl Harness {
                     .unwrap()
                     .parse()
                     .unwrap();
+                let counted = self.rate_limited.clone();
                 let request = self.request(Upload {
                     sha256: Sha256::new(path["value"]["sha256"].as_str().unwrap()).unwrap(),
                     content: Content::Bytes(Bytes::from(vec![b'x'; length])),
-                    rate_limited: None,
+                    rate_limited: Some(Arc::new(move || {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                    })),
                 });
                 tokio::spawn(async move { outcome(client.upload_content(request).await) })
             }
@@ -660,7 +679,11 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
                 Outcome::Accepted
             }
             (true, "rate_limited") => {
-                harness.stub.wait_for(seen + 1).await;
+                let told = harness.rate_limited.load(Ordering::SeqCst);
+                within("the 429 handled", || {
+                    harness.rate_limited.load(Ordering::SeqCst) > told
+                })
+                .await;
                 harness.stub.reply(endpoint.valid_answer());
                 harness.advance(Duration::from_secs(1)).await;
                 Outcome::Accepted
@@ -675,7 +698,7 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
             (true, "request_too_large") => Outcome::Permanent(status, Some("request_too_large")),
             (true, other) => panic!("no class for {other}"),
         };
-        assert_eq!(sent.await.unwrap(), expected, "{name}");
+        assert_eq!(finished(sent).await, expected, "{name}");
         let logs = rejections().lock().unwrap()[logged..].to_vec();
         let expected_logs: Vec<String> = match &expected {
             Outcome::Permanent(_, None) => vec!["invalid_response".to_owned()],
@@ -833,8 +856,7 @@ async fn a_429_waits_its_retry_after_and_503s_wait_one_to_thirty_seconds_with_ji
         })),
     });
     let sent = tokio::spawn(async move { outcome(client.upload_content(request).await) });
-    harness.stub.wait_for(1).await;
-    harness.clock.settle().await;
+    within("the 429 handled", || counted.load(Ordering::SeqCst) == 1).await;
     let mut seen = 1;
     let mut waits = vec![Duration::from_secs(3)];
     waits.extend([1, 2, 4, 8, 16, 30, 30].map(Duration::from_secs));
@@ -862,7 +884,7 @@ async fn a_429_waits_its_retry_after_and_503s_wait_one_to_thirty_seconds_with_ji
         seen += 1;
         harness.clock.settle().await;
     }
-    assert_eq!(sent.await.unwrap(), Outcome::Accepted);
+    assert_eq!(finished(sent).await, Outcome::Accepted);
     assert_eq!(counted.load(Ordering::SeqCst), 1);
 }
 
