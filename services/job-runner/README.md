@@ -377,7 +377,7 @@ these phases, missing-grant rollback and workspace isolation.
   each queued such input without an active job, in creation order. Pod-loss
   repair hands accepted ones back to Queue; a Runtime's own release leaves them
   as they are. Such an input or its job never makes the Session look busy to a
-  Session update, a thread archive or recovery's residency check.
+  Session update or a thread archive.
 - **Agent-mail custody.** Child creation atomically persists the child, context
   prefix, first mail, Inbox row, Queue job, and spawn receipt. First and later
   mail then share one delivery path: `CommitInputs` makes the Message durable,
@@ -423,7 +423,9 @@ these phases, missing-grant rollback and workspace isolation.
   records `runtime_recovery_exhausted` through the shared termination
   settlement. A main Thread terminalizes the Session and its pending recovery
   custody; a child Thread is terminalized alone, its exact lease is
-  dead-lettered and Session residency is recomputed. A Session that is already
+  dead-lettered and the Session's status follows its other threads, with or
+  without a binding; the main thread's own status and events stay as they
+  are. A Session that is already
   terminated cancels the lease without another termination.
 - **Conformance.**
   [runtime_handoff_test.go](runtime_handoff_test.go),

@@ -1727,9 +1727,6 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeRuntimeRecoveryDelivery(
 			if !settled {
 				return runtimecontrol.PreparationError{Kind: "runtime_recovery_authority_lost", Message: "runtime recovery lease changed during finalization", Retryable: true}
 			}
-			if err := reconcileRuntimeRecoverySessionResidencyTx(ctx, tx, job, scope, runtimeWriteID, now); err != nil {
-				return err
-			}
 		}
 		finalized = RuntimeDeliveryResult{
 			Status: RuntimeDeliveryRejected, Retryable: false,
@@ -1765,98 +1762,6 @@ func settleRuntimeRecoveryExactLeaseTx(
 		return false, err
 	}
 	return runtimecontrol.RowsAffected(updated), nil
-}
-
-// Child recovery exhaustion closes only that Thread. Session residency stays
-// with the current binding while another direct durable owner still needs the
-// Runtime; otherwise it re-enters the existing idle cleanup path.
-func reconcileRuntimeRecoverySessionResidencyTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	job RuntimeJob,
-	scope *bridgev1.RuntimeScope,
-	runtimeWriteID string,
-	now time.Time,
-) error {
-	var remainingWork bool
-	if err := tx.QueryRow(ctx,
-		`SELECT EXISTS (
-		   SELECT 1 FROM session_threads
-		    WHERE workspace_id = $1 AND session_id = $2
-		      AND status IN ('running', 'rescheduling')
-		 ) OR EXISTS (
-		   SELECT 1 FROM session_runtime_inbox
-		    WHERE workspace_id = $1 AND session_id = $2
-		      AND status IN ('queued', 'delivering', 'accepted')
-		      AND input_kind <> ALL($5)
-		 ) OR EXISTS (
-		   SELECT 1 FROM queue_jobs
-		    WHERE workspace_id = $1 AND kind = $3 AND partition_key = $4
-		      AND status IN ('pending', 'leased')
-		 )`,
-		job.WorkspaceID, job.SessionID, queue.KindRuntimeRecovery,
-		queue.FormatSessionPartitionKey(workspace.ID(job.WorkspaceID), job.SessionID),
-		queue.NonStartingRuntimeInputKinds(),
-	).Scan(&remainingWork); err != nil {
-		return err
-	}
-	if remainingWork {
-		return nil
-	}
-	var mainThreadID string
-	if err := tx.QueryRow(ctx,
-		`SELECT main_thread_id FROM sessions WHERE workspace_id = $1 AND id = $2`,
-		job.WorkspaceID, job.SessionID,
-	).Scan(&mainThreadID); err != nil {
-		return err
-	}
-	mainScope := runtimecontrol.ScopeForThread(scope, mainThreadID)
-	mainThreadScope, err := runtimecontrol.LockThreadMutationRowTx(ctx, tx, mainScope)
-	if err != nil {
-		return err
-	}
-	idlePayload, err := runtimecontrol.IdleStatusPayloadJSON(`{"type":"end_turn"}`)
-	if err != nil {
-		return err
-	}
-	idleWriteID := runtimeWriteID + ":session_idle"
-	_, err = runtimecontrol.InsertRuntimeTerminationEventTx(
-		ctx, tx, mainScope, mainThreadScope, idleWriteID, idleWriteID,
-		"session.status_idle", idlePayload, now,
-	)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE session_threads
-		    SET status = 'idle', last_active_at = $4, updated_at = $4
-		  WHERE workspace_id = $1 AND session_id = $2 AND id = $3
-		    AND status IN ('idle', 'running', 'rescheduling')`,
-		job.WorkspaceID, job.SessionID, mainThreadID, now,
-	); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE sessions
-		    SET status = CASE WHEN status = 'rescheduling' THEN 'idle' ELSE status END,
-		        updated_at = $3
-		  WHERE workspace_id = $1 AND id = $2 AND status <> 'terminated'`,
-		job.WorkspaceID, job.SessionID, now,
-	); err != nil {
-		return err
-	}
-	var resident bool
-	if err := tx.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM session_runtime_status
-		  WHERE workspace_id = $1 AND session_id = $2 AND binding_id = $3 AND binding_generation = $4)`,
-		job.WorkspaceID, job.SessionID, scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration(),
-	).Scan(&resident); err != nil {
-		return err
-	}
-	if !resident {
-		return status.Error(codes.FailedPrecondition, "runtime recovery residency is stale")
-	}
-	return runtimecontrol.RefreshSessionStatusTx(ctx, tx, job.WorkspaceID, job.SessionID, now)
 }
 
 func finalizeInterruptDeliveryExhaustionTx(

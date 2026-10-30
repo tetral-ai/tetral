@@ -379,11 +379,15 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 	for _, testCase := range []struct {
 		name              string
 		activeSibling     bool
+		mainWaits         bool
+		noBinding         bool
 		wantRuntimeStatus string
 		wantCleanup       bool
 	}{
 		{name: "active sibling keeps residency", activeSibling: true, wantRuntimeStatus: "running"},
 		{name: "no remaining work arms cleanup", wantRuntimeStatus: "idle", wantCleanup: true},
+		{name: "a waiting main thread keeps its wait", mainWaits: true, wantRuntimeStatus: "idle", wantCleanup: true},
+		{name: "no binding", noBinding: true, wantRuntimeStatus: "idle", wantCleanup: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -407,8 +411,16 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 				t.Fatalf("seed non-mail child role: %v", err)
 			}
 			seedBridgeAPIEvent(t, admin, "default", sessionID, childThreadID, sourceID, 2, "session.thread_status_rescheduled", `{}`)
-			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+			if testCase.noBinding {
+				// A pod loss removed the binding and no recovery attempt placed the Session again.
+				if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status SET binding_id=NULL, binding_generation=NULL
+					WHERE workspace_id='default' AND session_id=$1`, sessionID); err != nil {
+					t.Fatalf("seed unbound runtime status: %v", err)
+				}
+			} else {
+				seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+			}
 			if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET status='running' WHERE workspace_id='default' AND id=$1`, sessionID); err != nil {
 				t.Fatalf("seed child recovery Session state: %v", err)
 			}
@@ -420,6 +432,14 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 				if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='running'
 					WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, siblingThreadID); err != nil {
 					t.Fatalf("seed active sibling: %v", err)
+				}
+			}
+			if testCase.mainWaits {
+				seedBridgeAPIEvent(t, admin, "default", sessionID, mainThreadID, "evt_child_recovery_main_waits_"+suffix, 3, "session.status_idle",
+					`{"type":"session.status_idle","stop_reason":{"type":"requires_action","event_ids":["evt_child_recovery_call_`+suffix+`"]}}`)
+				if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='requires_action'
+					WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, mainThreadID); err != nil {
+					t.Fatalf("seed waiting main thread: %v", err)
 				}
 			}
 			client := dbconnect.NewClientForTesting(runtimeDB)
@@ -452,7 +472,7 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 			var queueStatus, sessionStatus, childStatus, runtimeStatus string
 			var cleanupAfter sql.NullTime
 			var statusEventID, runtimeBindingID sql.NullString
-			var bindingCount, failureEvents, closeoutEvents int
+			var bindingCount, failureEvents, closeoutEvents, mainIdleEvents int
 			if err := admin.QueryRowContext(context.Background(), `SELECT
 				(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
 				(SELECT status FROM sessions WHERE workspace_id='default' AND id=$2),
@@ -463,20 +483,31 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 				(SELECT binding_id FROM session_runtime_status WHERE workspace_id='default' AND session_id=$2),
 				(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$2),
 				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$2 AND session_thread_id=$3 AND type='session.error'),
-				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$2 AND session_thread_id=$3 AND type='session.thread_status_terminated')`,
-				queued.ID, sessionID, childThreadID,
-			).Scan(&queueStatus, &sessionStatus, &childStatus, &runtimeStatus, &cleanupAfter, &statusEventID, &runtimeBindingID, &bindingCount, &failureEvents, &closeoutEvents); err != nil {
+				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$2 AND session_thread_id=$3 AND type='session.thread_status_terminated'),
+				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$2 AND session_thread_id=$4 AND type='session.status_idle')`,
+				queued.ID, sessionID, childThreadID, mainThreadID,
+			).Scan(&queueStatus, &sessionStatus, &childStatus, &runtimeStatus, &cleanupAfter, &statusEventID, &runtimeBindingID, &bindingCount, &failureEvents, &closeoutEvents, &mainIdleEvents); err != nil {
 				t.Fatalf("read child recovery finalization: %v", err)
 			}
 			if queueStatus != queue.StatusDeadLettered || sessionStatus == "terminated" || childStatus != "failed" ||
 				runtimeStatus != testCase.wantRuntimeStatus || cleanupAfter.Valid != testCase.wantCleanup ||
-				!runtimeBindingID.Valid || runtimeBindingID.String != bindingID || bindingCount != 1 ||
-				failureEvents != 1 || closeoutEvents != 1 {
-				t.Fatalf("child finalization = Queue %s Session %s child %s Runtime %s cleanup %v statusEvent %v binding %v/%d events %d/%d",
-					queueStatus, sessionStatus, childStatus, runtimeStatus, cleanupAfter, statusEventID, runtimeBindingID, bindingCount, failureEvents, closeoutEvents)
+				(testCase.noBinding != (!runtimeBindingID.Valid && bindingCount == 0)) || (!testCase.noBinding && (runtimeBindingID.String != bindingID || bindingCount != 1)) ||
+				failureEvents != 1 || closeoutEvents != 1 || (mainIdleEvents == 1) != testCase.mainWaits {
+				t.Fatalf("child finalization = Queue %s Session %s child %s Runtime %s cleanup %v statusEvent %v binding %v/%d events %d/%d main idle %d",
+					queueStatus, sessionStatus, childStatus, runtimeStatus, cleanupAfter, statusEventID, runtimeBindingID, bindingCount, failureEvents, closeoutEvents, mainIdleEvents)
 			}
 			if testCase.wantCleanup && !statusEventID.Valid {
 				t.Fatal("idle child finalization omitted cleanup idle fence")
+			}
+			if testCase.mainWaits {
+				var stopReason string
+				if err := admin.QueryRowContext(context.Background(), `SELECT payload_json::jsonb->>'stop_reason' FROM session_events
+					WHERE workspace_id='default' AND session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, sessionID).Scan(&stopReason); err != nil {
+					t.Fatalf("read Session idle: %v", err)
+				}
+				if want := `{"type": "requires_action", "event_ids": ["evt_child_recovery_call_` + suffix + `"]}`; stopReason != want {
+					t.Fatalf("Session idle stop reason = %s; want %s", stopReason, want)
+				}
 			}
 			if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
 				WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeRecovery, Limit: 1,
