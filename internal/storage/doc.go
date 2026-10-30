@@ -52,8 +52,8 @@
 //     lock-only runtime process functions, the Job Runner binding-discovery
 //     upper and page functions, the Auth credential lookup, authority lock
 //     and token prune functions, the Auth connection key lookup, the Computer
-//     Hub instruction pressure function, the Cleanup due-Session discovery
-//     function, the Cleanup due-blob Workspace discovery function, and the
+//     Hub instruction and request pressure functions, the Cleanup due-Session,
+//     drive page and due-blob Workspace discovery functions, and the
 //     Cleanup receipt/change and Queue Job Runner terminal
 //     retention functions. The baseline also inserts the Cleanup scheduling cursor's
 //     singleton row. It stays portable across
@@ -68,9 +68,9 @@
 //   - postgresql_runner_discovery_schema.go (Job Runner cross-workspace binding-discovery policies and functions)
 //   - postgresql_auth_schema.go (Auth policy and token tables, lookup/lock/prune functions, key and grant triggers)
 //   - postgresql_instance_schema.go (instance, credential, idempotency, connection, replay, protocol-error and instruction tables; the connection key lookup and instruction pressure functions and their policies)
-//   - postgresql_computer_schema.go (computer and computer idempotency tables)
+//   - postgresql_computer_schema.go (computer, request, binding, git ticket and computer idempotency tables and the machine message table's step; the request pressure function and the request_pressure and git_ticket_lookup policies)
 //   - postgresql_drive_schema.go (drive, file, version, change, content, blob cleanup, usage and upload budget tables)
-//   - postgresql_cleanup_schema.go (Cleanup scheduling cursor, global due index, discovery policy and function)
+//   - postgresql_cleanup_schema.go (Cleanup scheduling cursor, global due index; the due-Session, drive page and due-blob Workspace discovery policies and functions)
 //   - postgresql_retention_schema.go (feed retention metadata, age and head indexes, owner-checked retention policies and functions)
 //   - postgresql_migrator.go (version checksums, baseline steps, MigrateSchema/VerifySchema)
 //   - postgresql_migration_logging.go (safe transaction diagnostics)
