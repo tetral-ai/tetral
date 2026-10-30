@@ -413,15 +413,23 @@ async fn a_page_that_ends_inside_a_commit_keeps_applied_seq_before_it() {
     harness
         .changes((5, None), Ok(changes_page(records, true)))
         .await;
-    harness
-        .changes(
-            (7, Some(599)),
-            Ok(changes_page(
-                vec![record(7, 600, "seven/600", Some("7"))],
-                false,
-            )),
-        )
-        .await;
+    // The owner wrote the first page before it asked for the second.
+    let Call::Changes {
+        after_seq: 7,
+        after_index: Some(599),
+        answer,
+    } = harness.call().await
+    else {
+        panic!("list changes after 7 and index 599 was due");
+    };
+    assert_eq!(harness.applied_seq().await, 6);
+    answer
+        .send(Ok(changes_page(
+            vec![record(7, 600, "seven/600", Some("7"))],
+            false,
+        )))
+        .ok()
+        .unwrap();
     harness.until_applied(7).await;
     assert_eq!(harness.applied_seq().await, 7);
     assert_eq!(harness.versions().await.len(), 1_001);
