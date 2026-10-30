@@ -11,9 +11,12 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
+// Ticket is a git ticket: a Session's, or, with ComputerID set, a cloud
+// computer's.
 type Ticket struct {
 	WorkspaceID workspace.ID
 	SessionID   string
+	ComputerID  string
 	TicketID    string
 	TokenHash   []byte
 	Status      string

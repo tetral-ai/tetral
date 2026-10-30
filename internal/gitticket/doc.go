@@ -3,6 +3,13 @@
 // OWNS:
 //   - Table session_git_tickets: every read and write to it flows through
 //     PostgreSQLGitTicketStore; no other package reaches the table directly.
+//   - Table computer_git_tickets: a cloud computer's tickets, live or revoked.
+//     IssueComputerTicket, in computer-hub's git-ticket transaction, revokes
+//     the computer's live ticket and stores a new live one, so a computer has
+//     at most one live ticket (partial unique index); the raw token is
+//     returned once. PostgreSQLComputerTicketStore.FindByTokenHash reads one
+//     for git-proxy through the same git_ticket_lookup handshake, as a Ticket
+//     with ComputerID set, whose repositories are the only ones it reaches.
 //   - The Ticket durable domain type and the status vocabulary StatusPending,
 //     StatusLive, StatusRotated, which is the CHECK-constrained status column.
 //   - The capability-token format: a 256-bit token (TokenBytes=32) encoded
