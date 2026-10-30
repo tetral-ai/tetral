@@ -15,6 +15,12 @@
 //     route, Idempotency-Key) of Session creation or a computer addition,
 //     holding the fingerprint, with repository tokens hashed, and the Session
 //     and computer the request produced.
+//   - Table session_machine_messages: one row per machine message, written by
+//     WriteMachineMessageTx in the transaction that changes the computer, with
+//     the change (added, removed, replaced) and the computer's Runtime row at
+//     that moment; its runtime_input_id names the machine_message input of the
+//     Session's main thread that carries it to the Runtime. Rows are never
+//     updated.
 //   - The repositories of a cloud computer are Session resources
 //     (internal/session) whose rows name the computer and the resolved path;
 //     this package reads them for the computer object.
@@ -25,6 +31,10 @@
 //	execution_state    waiting -> preparing -> ready | failed, then
 //	                   closing -> closed | unknown after detachment
 //
+// Machine messages: WriteMachineMessageTx is the one writer of
+// session_machine_messages; it reads the computer through ReadRuntimeRow,
+// which projects any computer of the Session, removed ones included.
+//
 // A computer is created attached and waiting by AddComputers, the one writer
 // of new computers. The read route serves an attached computer and a detached
 // one whose closure is closing or unknown.
@@ -33,7 +43,11 @@
 //   - api, through internal/session: CheckEntries and AddComputers at Session
 //     creation and at POST /v1/sessions/{session_id}/computers, ListAttached
 //     for the Session object, Get for the computer read route, and the
-//     idempotency records of both writes.
+//     idempotency records of both writes. The add route alone writes an added
+//     machine message; Session creation writes none.
+//   - api and computer-hub: WriteMachineMessageTx for each computer change the
+//     Runtime must learn (an addition; removals and replacements as their
+//     routes land).
 //   - computer-hub, through internal/instance: the attached computers of an
 //     instance give its computer_count.
 package computer
