@@ -56,9 +56,13 @@ impl std::fmt::Debug for DriveContext {
 /// client has started.
 pub type DriveContexts = watch::Receiver<Option<Arc<DriveContext>>>;
 
-/// A context that never comes, for owners that bind no drives.
-pub fn no_drives() -> DriveContexts {
-    watch::channel(None).1
+/// A drive context that never comes, for test owners. Its sender is never
+/// dropped: a closed channel reads as the App Server stopping.
+#[cfg(test)]
+pub(crate) fn no_drives() -> DriveContexts {
+    let (sender, contexts) = watch::channel(None);
+    std::mem::forget(sender);
+    contexts
 }
 
 /// The Session's drive sync.
