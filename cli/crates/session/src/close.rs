@@ -331,6 +331,23 @@ impl<S: TaskStarter> SessionOwner<S> {
         if let Some(preparation) = &self.preparation {
             preparation.connection.record_gone(&preparation.session_id);
         }
+        self.idle_after_close();
+    }
+
+    /// Once the Session's record is gone, no close runs, no saved report
+    /// may answer a repeated close and no `closed` report of a record-less
+    /// owner awaits its outcome, the owner asks to end.
+    fn idle_after_close(&self) {
+        if self.record.is_none()
+            && self.closing.is_none()
+            && self.saved.is_none()
+            && self.closed_reports.is_empty()
+            && let Some(preparation) = &self.preparation
+        {
+            preparation
+                .connection
+                .owner_idle(&preparation.session_id, self.received);
+        }
     }
 
     /// The connection `connection` ended: an ordinary close of one of its
@@ -344,6 +361,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             .is_some_and(|saved| saved.connection_id == *connection)
         {
             self.saved = None;
+            self.idle_after_close();
         }
         let Some(closing) = self.closing.as_mut() else {
             return;

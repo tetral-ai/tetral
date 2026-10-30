@@ -915,6 +915,49 @@ mod tests {
         assert!(entries(&owner).await.is_err(), "the owner's task ended");
     }
 
+    #[tokio::test]
+    async fn a_closed_owner_with_a_record_asks_to_end_once_its_saved_report_goes_with_its_connection()
+     {
+        let directory = tempfile::tempdir().unwrap();
+        let mut shared = shared();
+        let paths = Arc::make_mut(&mut shared.paths);
+        paths.given = directory.path().to_path_buf();
+        paths.canonical = directory.path().to_path_buf();
+        let connection = Arc::new(TestConnection::default());
+        let reports = Arc::new(HeldReports::default());
+        let (mailbox, messages) = mpsc::unbounded_channel();
+        let preparation = Preparation {
+            session_id: SafeId::new("sess_1").unwrap(),
+            connection: connection.clone(),
+            reports: reports.clone(),
+            shared,
+        };
+        let mut owner = SessionOwner::new(Some(preparation), NoTasks, mailbox.clone());
+        owner.record = Some(record_with(SessionState::Prepared));
+        tokio::spawn(own(owner, messages));
+        let (reply, _) = oneshot::channel();
+        mailbox
+            .send(SessionMessage::Close {
+                close: close_of("bind_1"),
+                reply,
+            })
+            .unwrap();
+        while reports.0.lock().unwrap().is_empty() {
+            handled(&mailbox).await;
+            tokio::task::yield_now().await;
+        }
+        handled(&mailbox).await;
+        assert!(
+            connection.idle.lock().unwrap().is_empty(),
+            "its saved report stays"
+        );
+        mailbox
+            .send(SessionMessage::ConnectionEnded(id("conn_1")))
+            .unwrap();
+        handled(&mailbox).await;
+        assert_eq!(connection.idle.lock().unwrap().len(), 1);
+    }
+
     fn close_of(binding_id: &str) -> Close {
         Close {
             connection_id: id("conn_1"),
