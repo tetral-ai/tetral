@@ -196,7 +196,9 @@ report budgets share the Runtime contract:
 chart's `imageStore.lifetimeSeconds`) is how long an image store attachment
 stays live after it is stored. Every 60 seconds the image store collection
 deletes at most 100 rows past that lifetime, across Workspaces, and the bytes
-no row names any more (`internal/imagestore`).
+no row and no upload entry names any more; it then releases at most 100
+upload entries past their `check_after`, the bytes of uploads whose caller
+never stored them (`internal/imagestore`).
 
 Report timeout must be shorter than report interval, which must be shorter than
 freshness. Admission and release attempts must fit within the drain budget. An
@@ -737,7 +739,8 @@ projection with its Assistant `session_message_parts`; `session_pending_tool_use
 `session_runtime_inbox` (Runtime commits and interrupt receipts); request usage detail rows
 and the `sessions.usage` projection; `session_output_captures`;
 `session_transient_attachments` and the file-attachment consumption records;
-the collection of expired `session_attachments` rows and their blobs;
+the collection of expired `session_attachments` rows, past-due
+`session_attachment_uploads` entries and their blobs;
 `session_mcp_manifests`; `session_turn_retries`;
 `session_runtime_tool_results` (including the `tool_kind = mcp`
 claim/stage/consume lifecycle); `session_runtime_status` (the binding columns, and the Session's running/idle
@@ -780,7 +783,7 @@ handoff, Bridge recovery and worker drain compose the actual owning services.
 | `bridge_api_tasks_test.go` | Background-task creation, follow-up projection, and idempotent result commit |
 | `bridge_api_mcp_test.go`, `mcp_manifest_continuity_test.go`, `mcp_collision_split_test.go` | MCP claim/commit idempotency, reservation fencing, capture-before-deliver, generation-ordered supersession, collision split |
 | `bridge_api_attachments_test.go`, `bridge_api_file_attachments_test.go`, `attachment_transport_test.go`, `scoped_transport_capacity_test.go` | Read-only Gateway resolvers, scope validation, offset-addressed file chunk reads, helper-transport capacity scoping |
-| `bridge_api_image_store_test.go` | Image store attachments, against MinIO as the bridge role: live until the lifetime ends, unavailable to another Session, collected with their bytes, shared bytes kept until the last row expires |
+| `bridge_api_image_store_test.go` | Image store attachments, against MinIO as the bridge role: live until the lifetime ends, unavailable to another Session, collected with their bytes by one pass, shared bytes kept until the last row expires |
 | `session_status_test.go` | The Session's running and idle over all its threads: one `session.status_running` and one `session.status_idle` per change, a running child keeping the Session running, the main thread's stop reason and every waiting call of `requires_action` in the Session idle |
 | `closeout_sentinel_test.go` | `scope_superseded` stale mapping and precise `closeout_unrepairable` status typing |
 | `completion_mail_test.go`, `integration/completion_mail_delivery_test.go` | Child completion-return discriminator, atomic envelope-plus-wake write, and a final answer holding U+0000 read, admitted and cold-loaded verbatim by the parent |

@@ -95,14 +95,18 @@ func newImageStoreFixture(t *testing.T) *imageStoreFixture {
 	return f
 }
 
-// store stores data as a PNG attachment of session's thread, as Bridge
-// stores an MCP Connector result.
+// store uploads data as a PNG attachment of session's thread and stores it,
+// as Bridge stores an MCP Connector result.
 func (f *imageStoreFixture) store(session string, data []byte) imagestore.Reference {
 	f.t.Helper()
+	upload, err := imagestore.Upload(context.Background(), f.bridge.Client, f.blobs, workspace.DefaultID, "image/png", data)
+	if err != nil {
+		f.t.Fatal(err)
+	}
 	var reference imagestore.Reference
 	if err := f.bridge.Client.WithWorkspaceTx(context.Background(), "default", "test.store_attachment", func(tx *dbconnect.Tx) error {
 		var err error
-		reference, err = imagestore.Store(context.Background(), tx, f.blobs, workspace.DefaultID, session, "thr_"+session, "image/png", data)
+		reference, err = imagestore.Store(context.Background(), tx, workspace.DefaultID, upload, session, "thr_"+session)
 		return err
 	}); err != nil {
 		f.t.Fatal(err)

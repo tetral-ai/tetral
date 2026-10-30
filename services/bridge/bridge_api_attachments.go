@@ -220,7 +220,7 @@ func logAttachmentGC(logger *slog.Logger, result imagestore.CollectResult, err e
 			slog.Bool("terminal", false),
 			slog.String("error.class", "attachment_gc_error"),
 			slog.String("error.code", "delete_failed"),
-			slog.String("error.message_safe", "one or more attachment contents were not released"),
+			slog.String("error.message_safe", "one or more attachment contents or upload entries were not released"),
 		)...)
 	case result.Deleted > 0:
 		logger.Info("bridge.attachment.gc_completed", attrs...)

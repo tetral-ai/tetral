@@ -22,8 +22,9 @@ import (
 )
 
 // Session deletion cleanup, as the job_runner role, deletes every attachment
-// row of the deleted Session and the bytes no other row names, and keeps the
-// bytes another Session's row still names.
+// row of the deleted Session and the bytes no other row and no upload entry
+// names, and keeps the bytes another Session's row or an upload entry still
+// names.
 func TestSessionDeleteCleanupReleasesOnlyUnsharedAttachmentBytes(t *testing.T) {
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -40,14 +41,24 @@ func TestSessionDeleteCleanupReleasesOnlyUnsharedAttachmentBytes(t *testing.T) {
 	blobs := cleanupMinIO(t)
 	roles := storagetest.OpenWorkloadDB(t, admin, "job_runner")
 	writer := dbconnect.NewClientForTesting(roles.OpenWorkload(t, "api", nil))
-	for _, attachment := range []struct{ session, data string }{{deleted, "only deleted"}, {deleted, "shared"}, {kept, "shared"}} {
+	upload := func(data string) imagestore.Uploaded {
+		t.Helper()
+		upload, err := imagestore.Upload(context.Background(), writer, blobs, workspace.DefaultID, "image/png", []byte(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return upload
+	}
+	for _, attachment := range []struct{ session, data string }{{deleted, "only deleted"}, {deleted, "shared"}, {kept, "shared"}, {deleted, "uploaded again"}} {
+		uploaded := upload(attachment.data)
 		if err := writer.WithWorkspaceTx(context.Background(), "default", "test.store_attachment", func(tx *dbconnect.Tx) error {
-			_, err := imagestore.Store(context.Background(), tx, blobs, workspace.DefaultID, attachment.session, "thr_"+attachment.session, "image/png", []byte(attachment.data))
+			_, err := imagestore.Store(context.Background(), tx, workspace.DefaultID, uploaded, attachment.session, "thr_"+attachment.session)
 			return err
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
+	upload("uploaded again")
 
 	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(roles.DB), admin, 9090)
 	store.AttachmentBlobStore = blobs
@@ -62,9 +73,9 @@ func TestSessionDeleteCleanupReleasesOnlyUnsharedAttachmentBytes(t *testing.T) {
 	if err := admin.QueryRow(`SELECT count(*) FILTER (WHERE session_id=$1), count(*) FILTER (WHERE session_id=$2) FROM session_attachments`, deleted, kept).Scan(&deletedRows, &keptRows); err != nil {
 		t.Fatal(err)
 	}
-	if deletedRows != 0 || keptRows != 1 || cleanupBlobExists(t, blobs, "only deleted") || !cleanupBlobExists(t, blobs, "shared") {
-		t.Fatalf("after the cleanup: %d rows of the deleted Session, %d of the other; unshared bytes stored %v, shared %v; want 0, 1, false, true",
-			deletedRows, keptRows, cleanupBlobExists(t, blobs, "only deleted"), cleanupBlobExists(t, blobs, "shared"))
+	if deletedRows != 0 || keptRows != 1 || cleanupBlobExists(t, blobs, "only deleted") || !cleanupBlobExists(t, blobs, "shared") || !cleanupBlobExists(t, blobs, "uploaded again") {
+		t.Fatalf("after the cleanup: %d rows of the deleted Session, %d of the other; unshared bytes stored %v, shared %v, uploaded again %v; want 0, 1, false, true, true",
+			deletedRows, keptRows, cleanupBlobExists(t, blobs, "only deleted"), cleanupBlobExists(t, blobs, "shared"), cleanupBlobExists(t, blobs, "uploaded again"))
 	}
 }
 

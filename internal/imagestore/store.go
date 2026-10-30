@@ -13,6 +13,15 @@ type Reference struct {
 	SizeBytes    int64  `json:"size_bytes"`
 }
 
+// Uploaded is an upload whose bytes are stored and whose entry keeps them
+// until Store records it in the caller's transaction.
+type Uploaded struct {
+	UploadID      string
+	ContentSHA256 string
+	MediaType     string
+	SizeBytes     int64
+}
+
 // Attachment is a resolved attachment's media type and bytes.
 type Attachment struct {
 	MediaType string

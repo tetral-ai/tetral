@@ -2866,7 +2866,7 @@
           "errors": {
             "delete_failed": {
               "class": "attachment_gc_error",
-              "message_safe": "one or more attachment contents were not released"
+              "message_safe": "one or more attachment contents or upload entries were not released"
             }
           }
         },

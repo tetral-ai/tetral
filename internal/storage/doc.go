@@ -142,8 +142,11 @@
 //	session_runtime_tool_results                           Bridge (accept/consume); Sandbox Service (execute/result)         Runtime result wait, Bridge replay, MCP lifecycle
 //	session_transient_attachments                          Sandbox Service (stage); Bridge (activate/consume/GC)             Gateway ResolveTransientAttachment,
 //	                                                                                                                         Bridge LoadContext
-//	session_attachments                                    internal/imagestore: Bridge collection past the lifetime         Bridge ResolveAttachment through
-//	                                                        (CollectExpired); Job Runner Session deletion (DeleteSession)    imagestore.Resolve
+//	session_attachments                                    internal/imagestore: Store in its callers' transactions;         Bridge ResolveAttachment through
+//	                                                        Bridge collection past the lifetime (CollectExpired); Job        imagestore.Resolve
+//	                                                        Runner Session deletion (DeleteSession)
+//	session_attachment_uploads                             internal/imagestore: Upload and Store; Bridge collection past    Bridge collection and Job Runner
+//	                                                        check_after (CollectExpired)                                     Session deletion (blob release)
 //	session_provider_auth                                  api upserts (rotate + soft-delete siblings,               Gateway provider credential resolution
 //	                                                       not insert-only); Vault hard-deletes on credential delete
 //	queue_jobs                                             owning services admit atomically; Queue Service transitions;    Sandbox Service, Job Runner,
