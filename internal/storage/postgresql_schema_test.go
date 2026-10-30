@@ -2475,6 +2475,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"auth_workspace_grants",
 		"cleanup_schedule_cursor",
 		"computer_idempotency_records",
+		"computer_requests",
 		"computers",
 		"connection_instructions",
 		"connection_protocol_errors",

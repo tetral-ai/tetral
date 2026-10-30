@@ -2287,6 +2287,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 	}
 	steps = append(steps, postgresqlAuthFunctionSteps()...)
 	steps = append(steps, postgresqlInstanceFunctionSteps()...)
+	steps = append(steps, postgresqlComputerFunctionSteps()...)
 	steps = append(steps, postgresqlJobRunnerDiscoverySteps()...)
 	steps = append(steps, postgresqlCleanupDiscoverySteps()...)
 	steps = append(steps, postgresqlRetentionMaintenanceSteps()...)

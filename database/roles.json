@@ -279,7 +279,8 @@
         "drive_contents": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "drive_blob_cleanup": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "drive_upload_budgets": ["SELECT", "INSERT", "UPDATE"],
-        "computers": ["SELECT"],
+        "computers": ["SELECT", "UPDATE"],
+        "computer_requests": ["SELECT", "UPDATE"],
         "session_machine_messages": ["SELECT", "INSERT"],
         "instances": ["SELECT", "INSERT", "UPDATE"],
         "instance_credentials": ["SELECT", "INSERT", "UPDATE"],
@@ -290,7 +291,7 @@
         "connection_instructions": ["SELECT", "INSERT", "UPDATE"],
         "tetral_schema_migrations": ["SELECT"]
       },
-      "functions": ["tetral_computer_hub_instruction_pressure()"]
+      "functions": ["tetral_computer_hub_instruction_pressure()", "tetral_computer_hub_request_pressure()"]
     }
   }
 }

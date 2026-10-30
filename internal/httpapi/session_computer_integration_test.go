@@ -77,7 +77,8 @@ func (e *sessionIntegrationEnv) computerRows(t *testing.T) int {
 func seedComputerInstances(t *testing.T, env *sessionIntegrationEnv) {
 	t.Helper()
 	env.exec(t, `INSERT INTO instances (workspace_id,id,kind,name,registration_state) VALUES ('default','inst_mac','user','mac','active'),
-		('default','inst_mini','user','mini','active'),('default','inst_cloud','cloud',NULL,'active')`)
+		('default','inst_mini','user','mini','active')`)
+	env.exec(t, `INSERT INTO instances (workspace_id,id,kind,registration_state,computer_id,session_id) VALUES ('default','inst_cloud','cloud','active','comp_elsewhere','sesn_elsewhere')`)
 	env.exec(t, `INSERT INTO instances (workspace_id,id,kind,name,registration_state,deregistered_at) VALUES ('default','inst_gone','user','gone','deregistered',clock_timestamp())`)
 	env.exec(t, `INSERT INTO environments (workspace_id,id,name,config_json,archived_at,created_at,updated_at)
 		VALUES ('default','env_archived','archived','{}',clock_timestamp(),clock_timestamp(),clock_timestamp())`)

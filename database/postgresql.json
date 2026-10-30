@@ -68,7 +68,8 @@
     "drive_blob_cleanup",
     "drive_upload_budgets",
     "computers",
-    "computer_idempotency_records"
+    "computer_idempotency_records",
+    "computer_requests"
   ],
   "append_only_workspace_tables": [
     "session_file_attachment_consumptions",
@@ -183,6 +184,13 @@
       "name": "instruction_pressure",
       "command": "SELECT",
       "using": "((current_setting('tetral.instruction_pressure'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('connection_instructions'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "computer_requests",
+      "name": "request_pressure",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.request_pressure'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('computer_requests'::regclass)::oid))))",
       "check": ""
     },
     {

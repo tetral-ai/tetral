@@ -162,6 +162,8 @@
 //	                                                                                                                         instance computer_count; computer-hub
 //	session_machine_messages                               api and computer-hub through internal/computer                   Job Runner delivery of machine_message
 //	                                                        (WriteMachineMessageTx); insert-only                             inputs
+//	computer_requests                                      computer-hub through internal/computer and internal/hubflow      computer-hub request routes (the request
+//	                                                        (claims, fulfilment at ready, release, fail)                      pressure function across Workspaces)
 //
 // UPDATE-WITH: the table DDL in postgresql_schema.go,
 // postgresql_runtime_schema.go, postgresql_auth_schema.go,
