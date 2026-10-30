@@ -173,8 +173,8 @@ for an API key, `user_actor` or `service_account_actor` for a direct token.
 - `drives.skills.upload` (`internal/httpapi/drive_skill_handler.go`) refuses
   a declared `Content-Length` above 32,505,856 bytes the same way, then takes
   the budget, stages the one part `archive` (at most 30,000,000 bytes) and
-  checks it with `internal/drive/skillpackage`, the only place Engine checks
-  `SKILL.md`. A valid archive replaces `<skills_path><name>/` in one
+  checks it with `internal/drive/skillpackage`, the only checker of a drive
+  Skill's `SKILL.md`. A valid archive replaces `<skills_path><name>/` in one
   `all_or_nothing` commit. `drives.skills.list` and `drives.skills.retrieve`
   check each Skill's `SKILL.md` when they read it and report a failed rule in
   `error`.

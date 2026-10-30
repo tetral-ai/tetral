@@ -1,6 +1,6 @@
 // Package skillpackage checks a Skill archive published to a drive: a zip
-// with one root folder holding SKILL.md. It is the only place Engine checks
-// SKILL.md; every failed rule is a *ValidationError naming the rule.
+// with one root folder holding SKILL.md. It is the only checker of a drive
+// Skill's SKILL.md; every failed rule is a *ValidationError naming the rule.
 package skillpackage
 
 import (
