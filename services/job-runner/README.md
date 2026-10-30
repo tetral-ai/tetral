@@ -313,8 +313,11 @@ thread's accepted-input queue is non-empty) remains the final authority.
 **Delete exception.** The Session-delete transaction is the producer of the
 durable `sandbox_release` operation. The `session_delete_cleanup` branch clears
 hot Runtime custody, joins that release operation idempotently, and waits for
-Sandbox Service and Sandbox Queue custody to close before deleting private
-Sandbox rows. Job Runner never performs the provider call. The serving
+Sandbox Service and Sandbox Queue custody to close, then deletes the Session's
+image store attachments (`imagestore.DeleteSession`: every row, and the bytes no
+other Session's row names; a failure retries the job with
+`attachment_cleanup_failed`), and then the private Sandbox rows. Job Runner
+never performs the provider call. The serving
 `job_runner` role can lock and schedule cleanup of output-capture operations and
 retire their private operation/blob rows after release and Queue custody close.
 It cannot create captures. Staged captures first retain one durable Sandbox
