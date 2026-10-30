@@ -112,6 +112,8 @@ pub(crate) enum Message {
     ReadEnded(u64),
     /// The reads waiting for blobs: machine path, hash and size.
     Reads(oneshot::Sender<Vec<(PathBuf, String, u64)>>),
+    #[cfg(feature = "test-seams")]
+    NoticesTaken(oneshot::Sender<(u64, BTreeMap<String, i64>)>),
     Notices {
         task_id: String,
         reply: oneshot::Sender<Vec<Notice>>,
@@ -320,6 +322,15 @@ impl DriveSync {
     pub async fn tables(&self) -> Tables {
         let (reply, answer) = oneshot::channel();
         self.send(Message::Tables(reply));
+        answer.await.unwrap_or_default()
+    }
+
+    /// The `connected` notices the owner has taken, and each drive's
+    /// highest `drive.changed` seq.
+    #[cfg(feature = "test-seams")]
+    pub async fn notices_taken(&self) -> (u64, BTreeMap<String, i64>) {
+        let (reply, answer) = oneshot::channel();
+        self.send(Message::NoticesTaken(reply));
         answer.await.unwrap_or_default()
     }
 
@@ -617,6 +628,14 @@ impl Owner {
 
     async fn handle(&mut self, message: Message) {
         match message {
+            #[cfg(feature = "test-seams")]
+            Message::NoticesTaken(reply) => {
+                let notified = self.notified.iter();
+                let _ = reply.send((
+                    self.connected,
+                    notified.map(|(drive, seq)| (drive.clone(), *seq)).collect(),
+                ));
+            }
             Message::Connected => {
                 self.connected += 1;
                 let drives: Vec<String> = self.mounts.keys().cloned().collect();

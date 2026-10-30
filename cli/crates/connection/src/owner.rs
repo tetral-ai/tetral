@@ -2666,6 +2666,160 @@ mod tests {
         }
     }
 
+    /// A Session's drive sync under `root` that mounts nothing and whose
+    /// requests go nowhere.
+    async fn drive_sync(root: &std::path::Path, session: &str) -> DriveSync {
+        struct NoRegistry;
+        impl drive::mount::Registry for NoRegistry {
+            fn add(&self, _: SafeId, _: DriveSync) {}
+            fn remove(&self, _: SafeId) {}
+            fn mounted(&self, _: Id, _: SafeId) {}
+            fn detached(&self, _: Id, _: SafeId) {}
+        }
+        struct NoTasks;
+        impl protocol::ports::TaskOwnership for NoTasks {
+            fn task_of(&self, _: u32, reply: protocol::ports::TaskOwnerReply) {
+                reply(None);
+            }
+        }
+        struct NoReports;
+        impl ReportSink for NoReports {
+            fn submit(&self, _: Submission) -> protocol::ports::ReportId {
+                protocol::ports::ReportId(0)
+            }
+            fn cancel(&self, _: protocol::ports::ReportId) {}
+            fn add_final(&self, _: protocol::ports::ReportId, _: Id) {}
+        }
+        let key = protocol::bootstrap::Bootstrap::decode(
+            br#"{"server_url":"http://127.0.0.1:1","instance_id":"inst_a","credential_id":"cred_a","connection_key":"tetral_ck_a","expires_at":"2099-01-01T00:00:00Z"}"#,
+        )
+        .unwrap()
+        .connection_key;
+        let clock = Clock::new(|| Duration::ZERO, Duration::from_millis(1));
+        let (events, _) = mpsc::unbounded_channel();
+        let transfer: Arc<dyn DriveTransfer> =
+            Arc::new(crate::drive_transfer::HttpDriveTransfer::new(
+                "http://127.0.0.1:1",
+                DriveLink::new(key).1,
+                events,
+                clock.clone(),
+            ));
+        let cache = drive::cache::ContentCache::spawn(drive::cache::CacheConfig {
+            root: root.to_owned(),
+            transfer: transfer.clone(),
+            clock: clock.clone(),
+            free_space: Arc::new(|| Ok(u64::MAX)),
+        })
+        .unwrap();
+        let session_dir = root.join("sessions").join(session);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let state = drive::state::SyncState::create(&session_dir.join("sync-state.db"))
+            .await
+            .unwrap();
+        DriveSync::spawn(drive::SyncConfig {
+            session_id: SafeId::new(session).unwrap(),
+            root: root.to_owned(),
+            state,
+            transfer,
+            cache,
+            tasks: Arc::new(NoTasks),
+            mounting: drive::mount::Mounting::Fuse,
+            registry: Arc::new(NoRegistry),
+            clock,
+            reports: Arc::new(NoReports),
+        })
+    }
+
+    fn downstream(connection: &str, message_id: &str, kind: &str, payload: Value) -> String {
+        json!({
+            "protocol_version": 1, "connection_id": connection, "message_id": message_id,
+            "type": kind, "payload": payload,
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn every_connected_reaches_every_drive_sync_and_drive_changed_those_that_mounted_its_drive()
+     {
+        let root = tempfile::tempdir().unwrap();
+        let (mut owner, _) = owner_with_budget(crate::report_memory::Budget::new(512, 512));
+        let (a, b) = (
+            drive_sync(root.path(), "sess_a").await,
+            drive_sync(root.path(), "sess_b").await,
+        );
+        let session = |text: &str| SafeId::new(text).unwrap();
+        for change in [
+            DriveSyncs::Added(session("sess_a"), a.clone()),
+            DriveSyncs::Added(session("sess_b"), b.clone()),
+            DriveSyncs::Mounted(id_of("drive_a"), session("sess_a")),
+            DriveSyncs::Mounted(id_of("drive_b"), session("sess_a")),
+            DriveSyncs::Mounted(id_of("drive_b"), session("sess_b")),
+        ] {
+            owner.drive_syncs_changed(change);
+        }
+        let now = Duration::from_secs(1);
+        let (held, task) = held(1);
+        let mut phase = Phase::Held(held);
+        let changed = |drive: &str, seq: i64| {
+            downstream(
+                "conn_a",
+                &format!("msg_changed_{seq}"),
+                "drive.changed",
+                json!({"drive_id": drive, "seq": seq}),
+            )
+        };
+        for (drive, seq) in [("drive_a", 5), ("drive_b", 6), ("drive_c", 7)] {
+            phase = owner.event(phase, 1, changed(drive, seq), now);
+        }
+        owner.drive_syncs_changed(DriveSyncs::Detached(id_of("drive_b"), session("sess_b")));
+        phase = owner.event(phase, 1, changed("drive_b", 8), now);
+
+        // A resumed connected, then a new connection's.
+        let credential = owner.credential.clone();
+        let attempt = |stream, kind| Attempt {
+            stream,
+            kind,
+            credential: credential.clone(),
+            deadline: Duration::from_secs(60),
+            task: task.abort_handle(),
+            limit: EventLimit::new(1_024),
+        };
+        let Phase::Held(mut held) = phase else {
+            panic!("held connection");
+        };
+        held.stream = Stream::Resuming(attempt(
+            2,
+            AttemptKind::Resume {
+                connection: id_of("conn_a"),
+            },
+        ));
+        let connected = |connection: &str, resumed: bool| {
+            downstream(
+                connection,
+                "msg_connected",
+                "connected",
+                json!({"resumed": resumed}),
+            )
+        };
+        let phase = owner.event(Phase::Held(held), 2, connected("conn_a", true), now);
+        assert!(
+            matches!(&phase, Phase::Held(held) if matches!(held.stream, Stream::Live { stream: 2, .. }))
+        );
+        let fresh = attempt(3, AttemptKind::Fresh { previous: None });
+        let phase = owner.event(Phase::Connecting(fresh), 3, connected("conn_b", false), now);
+        assert!(matches!(&phase, Phase::Held(held) if held.id.as_str() == "conn_b"));
+
+        let seqs = |pairs: &[(&str, i64)]| {
+            (pairs.iter().map(|(drive, seq)| ((*drive).to_owned(), *seq))).collect()
+        };
+        assert_eq!(
+            a.notices_taken().await,
+            (2, seqs(&[("drive_a", 5), ("drive_b", 8)]))
+        );
+        assert_eq!(b.notices_taken().await, (2, seqs(&[("drive_b", 6)])));
+        task.abort();
+    }
+
     #[tokio::test]
     async fn a_real_final_report_ack_releases_only_its_instruction_from_the_owner_ledger() {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
