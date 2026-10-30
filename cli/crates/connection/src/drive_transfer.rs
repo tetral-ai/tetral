@@ -862,43 +862,23 @@ mod tests {
 
     use protocol::field::Sha256;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-    use tokio::sync::oneshot;
 
     use super::*;
 
     #[tokio::test]
     async fn a_put_whose_bytes_keep_moving_past_ten_seconds_completes_within_its_total() {
-        const SIZE: usize = 200_000;
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // Far more than the loopback socket buffers hold, read 64 KiB in
+        // each second of the clock: only the bytes the client writes move.
+        const SIZE: usize = 32 << 20;
+        const READ: usize = 512 << 10;
+        let listening = tokio::net::TcpSocket::new_v4().unwrap();
+        listening.set_recv_buffer_size(4_096).unwrap();
+        listening.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = listening.listen(1).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let sha256 = "a".repeat(64);
-        let (answer, may_answer) = oneshot::channel::<()>();
-        let answered = sha256.clone();
         let again = Arc::new(AtomicU64::new(0));
         let counting = again.clone();
-        let stub = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            // A second connection is an attempt sent again: the first failed.
-            tokio::spawn(async move {
-                while listener.accept().await.is_ok() {
-                    counting.fetch_add(1, Ordering::SeqCst);
-                }
-            });
-            let mut read = vec![0; SIZE + 4_096];
-            let mut total = 0;
-            while !read[..total].windows(4).any(|window| window == b"\r\n\r\n") || total < SIZE {
-                total += socket.read(&mut read[total..]).await.unwrap();
-            }
-            may_answer.await.unwrap();
-            let body = format!(r#"{{"content_sha256":"{answered}","size_bytes":{SIZE}}}"#);
-            let head = format!(
-                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                body.len()
-            );
-            socket.write_all(head.as_bytes()).await.unwrap();
-            socket.write_all(body.as_bytes()).await.unwrap();
-        });
         let nanos = Arc::new(AtomicU64::new(0));
         let reads = Arc::new(AtomicU64::new(0));
         let clock = {
@@ -911,8 +891,7 @@ mod tests {
                 Duration::from_millis(1),
             )
         };
-        // A byte moves in every second of the clock.
-        let transport = Arc::new(Transport::sampled(&url, |now| now.as_secs()));
+        let transport = Arc::new(Transport::new(&url));
         let key = protocol::bootstrap::Bootstrap::decode(
             br#"{"server_url":"http://127.0.0.1:1","instance_id":"inst_a","credential_id":"cred_a","connection_key":"tetral_ck_a","expires_at":"2099-01-01T00:00:00Z"}"#,
         )
@@ -933,15 +912,29 @@ mod tests {
             binding: binding.subscribe(),
             traceparent: None,
             body: Upload {
-                sha256: Sha256::new(sha256).unwrap(),
+                sha256: Sha256::new(sha256.clone()).unwrap(),
                 content: Content::Bytes(Bytes::from(vec![b'x'; SIZE])),
                 rate_limited: None,
             },
         };
-        assert_eq!(total(SIZE as u64), Duration::from_secs(40));
+        assert!(total(SIZE as u64) > Duration::from_secs(25));
         let sending = client.clone();
         let sent = tokio::spawn(async move { sending.upload_content(request).await });
+        let (mut socket, _) = listener.accept().await.unwrap();
+        // A second connection is an attempt sent again: the first failed.
+        tokio::spawn(async move {
+            while listener.accept().await.is_ok() {
+                counting.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let mut read = vec![0; SIZE + 4_096];
+        let mut taken = 0;
         for second in 1..=25 {
+            socket
+                .read_exact(&mut read[taken..taken + READ])
+                .await
+                .unwrap();
+            taken += READ;
             let start = reads.load(Ordering::SeqCst);
             nanos.store(second * 1_000_000_000, Ordering::SeqCst);
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -952,9 +945,25 @@ mod tests {
             assert!(!sent.is_finished(), "ended at {second} s");
             assert_eq!(again.load(Ordering::SeqCst), 0, "sent again by {second} s");
         }
-        answer.send(()).unwrap();
+        let body_at = loop {
+            if let Some(end) = read[..taken]
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                && taken >= end + 4 + SIZE
+            {
+                break end + 4;
+            }
+            taken += socket.read(&mut read[taken..]).await.unwrap();
+        };
+        assert_eq!(taken, body_at + SIZE);
+        let body = format!(r#"{{"content_sha256":"{sha256}","size_bytes":{SIZE}}}"#);
+        let head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        socket.write_all(head.as_bytes()).await.unwrap();
+        socket.write_all(body.as_bytes()).await.unwrap();
         let uploaded = sent.await.unwrap().unwrap();
         assert_eq!(uploaded.size_bytes.get(), SIZE as i64);
-        stub.await.unwrap();
     }
 }

@@ -173,6 +173,8 @@ struct Seen {
     method: String,
     target: String,
     headers: Vec<(String, String)>,
+    /// The test clock's time when the request arrived.
+    at: Duration,
 }
 
 impl Seen {
@@ -201,8 +203,12 @@ enum Reply {
     },
     /// No answer while the client waits.
     Withhold,
-    /// The head with the whole body's length, then `body` and nothing more.
-    Stall { body: Vec<u8> },
+    /// The head with the whole body's length, then `body`, then `more`'s
+    /// bytes once it is notified, and nothing more.
+    Stall {
+        body: Vec<u8>,
+        more: Option<(Arc<Notify>, Vec<u8>)>,
+    },
 }
 
 fn json(status: u16, value: &Value) -> Reply {
@@ -217,6 +223,7 @@ fn json(status: u16, value: &Value) -> Reply {
 struct StubState {
     /// Requests read whole, answered or not.
     arrived: usize,
+    clock: TestClock,
     /// Requests answered, each once its answer is written.
     seen: Vec<Seen>,
     replies: VecDeque<Reply>,
@@ -230,10 +237,13 @@ struct Stub {
 }
 
 impl Stub {
-    async fn start() -> Stub {
+    async fn start(clock: TestClock) -> Stub {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let state = Arc::new(Mutex::new(StubState::default()));
+        let state = Arc::new(Mutex::new(StubState {
+            clock,
+            ..StubState::default()
+        }));
         let changed = Arc::new(Notify::new());
         let (serving, waking) = (state.clone(), changed.clone());
         tokio::spawn(async move {
@@ -258,6 +268,10 @@ impl Stub {
 
     fn seen(&self) -> Vec<Seen> {
         self.state.lock().unwrap().seen.clone()
+    }
+
+    fn arrived(&self) -> usize {
+        self.state.lock().unwrap().arrived
     }
 
     async fn wait_arrived(&self, count: usize) {
@@ -307,7 +321,11 @@ async fn serve(socket: tokio::net::TcpStream, state: Arc<Mutex<StubState>>, chan
     if reader.read_exact(&mut body).await.is_err() {
         return;
     }
-    state.lock().unwrap().arrived += 1;
+    let at = {
+        let mut state = state.lock().unwrap();
+        state.arrived += 1;
+        state.clock.now()
+    };
     let reply = loop {
         let waiting = changed.notified();
         if let Some(reply) = state.lock().unwrap().replies.pop_front() {
@@ -320,6 +338,7 @@ async fn serve(socket: tokio::net::TcpStream, state: Arc<Mutex<StubState>>, chan
             method,
             target,
             headers,
+            at,
         });
     };
     let socket = reader.get_mut();
@@ -345,7 +364,7 @@ async fn serve(socket: tokio::net::TcpStream, state: Arc<Mutex<StubState>>, chan
             answered();
             std::future::pending().await
         }
-        Reply::Stall { body } => {
+        Reply::Stall { body, more } => {
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 CONTENT.len()
@@ -353,6 +372,10 @@ async fn serve(socket: tokio::net::TcpStream, state: Arc<Mutex<StubState>>, chan
             let _ = socket.write_all(head.as_bytes()).await;
             let _ = socket.write_all(&body).await;
             answered();
+            if let Some((release, more)) = more {
+                release.notified().await;
+                let _ = socket.write_all(&more).await;
+            }
             std::future::pending().await
         }
     }
@@ -373,9 +396,9 @@ struct Harness {
 impl Harness {
     async fn start() -> Harness {
         rejections();
-        let stub = Stub::start().await;
         let clock = TestClock::default();
         clock.set(Duration::from_secs(1_000));
+        let stub = Stub::start(clock.clone()).await;
         let (link, links) = DriveLink::new(key());
         link.connection_started(id("conn_a"), key());
         let (sender, events) = mpsc::unbounded_channel();
@@ -682,7 +705,7 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
             (true, "stale_binding") => {
                 harness.stub.wait_for(seen + 1).await;
                 harness.advance(Duration::from_secs(60)).await;
-                assert_eq!(harness.stub.seen().len(), seen + 1, "{name}");
+                assert_eq!(harness.stub.arrived(), seen + 1, "{name}");
                 harness.stub.reply(endpoint.valid_answer());
                 let next = id(&format!("bind_{seen}"));
                 harness.binding.send_replace(Some(Binding {
@@ -756,7 +779,7 @@ async fn withheld_headers_fail_the_attempt_after_ten_seconds_and_it_is_sent_agai
     harness.stub.reply(Endpoint::ListFiles.valid_answer());
     harness.advance(Duration::from_millis(1)).await;
     // Not sent again before the first temporary wait of 1 second.
-    assert_eq!(harness.stub.seen().len(), 1);
+    assert_eq!(harness.stub.arrived(), 1);
     // The first temporary failure waits 1 second and at most 20% more.
     harness.advance(Duration::from_millis(1_200)).await;
     harness.stub.wait_for(2).await;
@@ -765,11 +788,16 @@ async fn withheld_headers_fail_the_attempt_after_ten_seconds_and_it_is_sent_agai
 
 impl Harness {
     /// Starts a download of [`CONTENT`] into a shared sink whose first
-    /// answer stalls after five bytes, and waits until the client has
-    /// those bytes and has looked at its clock since.
-    async fn stalled_download(&self) -> (Shared, tokio::task::JoinHandle<Outcome>) {
+    /// answer stalls after five bytes, or after `more` once notified, and
+    /// waits until the client has the five bytes and has looked at its clock
+    /// since.
+    async fn stalled_download(
+        &self,
+        more: Option<(Arc<Notify>, Vec<u8>)>,
+    ) -> (Shared, tokio::task::JoinHandle<Outcome>) {
         self.stub.reply(Reply::Stall {
             body: CONTENT[..5].to_vec(),
+            more,
         });
         let client = self.client.clone();
         let request = self.request(Download {
@@ -789,23 +817,40 @@ impl Harness {
 }
 
 #[tokio::test]
-async fn a_stalled_download_fails_after_ten_seconds_and_resumes_with_a_range() {
+async fn a_stalled_download_fails_ten_seconds_after_its_last_byte_and_resumes_with_a_range() {
     let harness = Harness::start().await;
-    let (sink, sent) = harness.stalled_download().await;
+    let release = Arc::new(Notify::new());
+    let (sink, sent) = harness
+        .stalled_download(Some((release.clone(), CONTENT[5..6].to_vec())))
+        .await;
+    let start = harness.clock.now();
+    // A byte received at 9 seconds moves the deadline past 10.
+    harness.advance(Duration::from_secs(9)).await;
+    release.notify_one();
+    within("the sixth byte received", || sink.bytes().len() == 6).await;
+    harness.clock.settle().await;
+    harness.advance(Duration::from_secs(1)).await;
+    assert_eq!(harness.stub.arrived(), 1);
     harness
-        .advance(Duration::from_secs(10) - Duration::from_millis(1))
+        .advance(Duration::from_secs(9) - Duration::from_millis(1))
         .await;
     harness.advance(Duration::from_millis(1)).await;
     harness.stub.reply(Reply::Answer {
         status: 206,
-        headers: vec![("Content-Range", format!("bytes 5-11/{}", CONTENT.len()))],
-        body: CONTENT[5..].to_vec(),
+        headers: vec![("Content-Range", format!("bytes 6-11/{}", CONTENT.len()))],
+        body: CONTENT[6..].to_vec(),
     });
     // Not sent again before the first temporary wait of 1 second.
-    assert_eq!(harness.stub.seen().len(), 1);
+    assert_eq!(harness.stub.arrived(), 1);
     harness.advance(Duration::from_millis(1_200)).await;
     let seen = harness.stub.wait_for(2).await;
-    assert_eq!(seen[1].header("range"), Some("bytes=5-"));
+    assert_eq!(seen[1].header("range"), Some("bytes=6-"));
+    // Sent again after the stall at 19 seconds and its wait of 1 second.
+    assert!(
+        seen[1].at >= start + Duration::from_secs(20),
+        "{:?}",
+        seen[1].at - start
+    );
     assert_eq!(sent.await.unwrap(), Outcome::Accepted);
     assert_eq!(sink.bytes(), CONTENT);
     assert_eq!(sink.restarts(), 1);
@@ -814,7 +859,7 @@ async fn a_stalled_download_fails_after_ten_seconds_and_resumes_with_a_range() {
 #[tokio::test]
 async fn a_resumed_download_answered_200_restarts_at_byte_zero() {
     let harness = Harness::start().await;
-    let (sink, sent) = harness.stalled_download().await;
+    let (sink, sent) = harness.stalled_download(None).await;
     harness.advance(Duration::from_secs(10)).await;
     harness.stub.reply(Endpoint::Download.valid_answer());
     harness.advance(Duration::from_millis(1_200)).await;
@@ -892,11 +937,7 @@ async fn a_429_waits_its_retry_after_and_503s_wait_one_to_thirty_seconds_with_ji
         });
         let start = harness.clock.now();
         harness.advance(*wait - Duration::from_millis(1)).await;
-        assert_eq!(
-            harness.stub.seen().len(),
-            seen,
-            "before the wait of {wait:?}"
-        );
+        assert_eq!(harness.stub.arrived(), seen, "before the wait of {wait:?}");
         let longest = if index == 0 { *wait } else { wait.mul_f64(1.2) };
         harness.clock.set(start + longest);
         harness.stub.wait_for(seen + 1).await;
@@ -920,7 +961,7 @@ async fn drive_access_denied_is_not_sent_again_stale_connection_tells_the_connec
         Outcome::Permanent(403, Some("drive_access_denied"))
     );
     harness.advance(Duration::from_secs(60)).await;
-    assert_eq!(harness.stub.seen().len(), 1);
+    assert_eq!(harness.stub.arrived(), 1);
 
     harness.stub.reply(json(
         409,
@@ -961,7 +1002,7 @@ async fn drive_access_denied_is_not_sent_again_stale_connection_tells_the_connec
         ended.expect("the request ends").unwrap(),
         Outcome::Permanent(0, None)
     );
-    assert_eq!(harness.stub.seen().len(), 4);
+    assert_eq!(harness.stub.arrived(), 4);
 }
 
 #[tokio::test]

@@ -113,18 +113,6 @@ impl Transport {
         }
     }
 
-    /// A transport whose attempts read their progress from `sample`
-    /// instead of their sockets: the bytes moved by each time of the clock.
-    #[cfg(test)]
-    pub(crate) fn sampled(
-        server_url: &str,
-        sample: impl Fn(Duration) -> u64 + Send + Sync + 'static,
-    ) -> Transport {
-        let mut transport = Self::new(server_url);
-        transport.progress_sample = Some(Arc::new(move |now| (sample(now), 0, false)));
-        transport
-    }
-
     /// The attempts of reports this transport has made, in their order.
     #[cfg(test)]
     pub(crate) fn attempts(&self) -> Vec<AttemptSeen> {
