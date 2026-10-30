@@ -1773,6 +1773,7 @@ type machineMessageFixture struct {
 	runner     *JobRunner
 	router     http.Handler
 	candidate  enginekubernetes.BindingCandidate
+	podLost    bool
 	sessionID  string
 	mainID     string
 	computerID string
@@ -1802,8 +1803,12 @@ func newMachineMessageFixture(t *testing.T, sessionID string) *machineMessageFix
 	f.store = NewPostgreSQLRuntimeDeliveryStore(runner, 9090, KubernetesRuntimeTargetResolver{
 		LoadClient: runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, runtimeLoadFixture(0)) })),
 		Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+			if f.podLost {
+				return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
+			}
 			return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{f.candidate})
 		},
+		GetPod: fixtureAbsentRuntimePod,
 	})
 	f.sender = &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	f.runner = &JobRunner{
@@ -2130,6 +2135,39 @@ func TestPodLossHandsBackAcceptedMessages(t *testing.T) {
 	}
 	if _, bindings, _ := f.sessionFacts(); bindings != 0 || len(f.sender.requests) != 2 {
 		t.Fatalf("after the pod loss: %d bindings, %d Runtime calls; want no binding and only the two first deliveries", bindings, len(f.sender.requests))
+	}
+}
+
+// A pod loss while a machine message is delivering: its job's next attempt
+// finds the pod gone and runs the lost-binding repair, and the job, prepared
+// again with no binding, leaves an added message accepted and a replaced one
+// queued, both with no binding.
+func TestPodLossDuringDeliveryReleasesTheDeliveringMessage(t *testing.T) {
+	for change, want := range map[string]string{computer.ChangeAdded: "accepted", computer.ChangeReplaced: "queued"} {
+		t.Run(change, func(t *testing.T) {
+			f := newMachineMessageFixture(t, "sesn_mmsg_lost_"+change)
+			f.bind("bind_mmsg_lost_" + change)
+			f.sender.result = RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true,
+				ErrorKind: "runtime_transport_unavailable", ErrorMessage: "runtime transport unavailable"}
+			f.write(change, true)
+			if processed := f.deliverAll(); processed != 1 {
+				t.Fatalf("processed %d jobs; want one", processed)
+			}
+			if got := f.messages(); got[0].Status != "delivering" || !got[0].Bound || got[0].ActiveJobs != 1 {
+				t.Fatalf("message before the pod loss = %+v; want delivering under the binding with its job", got[0])
+			}
+			f.podLost = true
+			f.exec(`UPDATE queue_jobs SET available_at=clock_timestamp()-interval '1 second' WHERE workspace_id='default' AND kind='runtime_input' AND status='pending'`)
+			if processed := f.deliverAll(); processed != 1 {
+				t.Fatalf("processed %d jobs after the pod loss; want one", processed)
+			}
+			if got := f.messages(); got[0].Status != want || got[0].Bound || got[0].ActiveJobs != 0 {
+				t.Fatalf("message after the pod loss = %+v; want %s with no binding or job", got[0], want)
+			}
+			if _, bindings, _ := f.sessionFacts(); bindings != 0 || len(f.sender.requests) != 1 {
+				t.Fatalf("after the pod loss: %d bindings, %d Runtime calls; want no binding and only the first attempt", bindings, len(f.sender.requests))
+			}
+		})
 	}
 }
 

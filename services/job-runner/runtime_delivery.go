@@ -1073,9 +1073,10 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 // prepareNonStartingInputTx prepares an input that never starts a run and
 // never places a Runtime for it. With no binding, an added or removed machine
 // message is accepted unbound, since the next load reads the computer rows,
-// and every other such input stays queued until a binding transaction
-// enqueues it again; either way the job completes. With a binding, it claims
-// delivery to that Runtime.
+// and every other such input is queued unbound until a binding transaction
+// enqueues it again; either way the job completes. A row still delivering to
+// a binding that a pod loss removed is treated the same way. With a binding,
+// it claims delivery to that Runtime.
 func (s *PostgreSQLRuntimeDeliveryStore) prepareNonStartingInputTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, port int, now time.Time) (RuntimeCommandPlan, error) {
 	if job.InputKind != queue.RuntimeInputKindMachineMessage {
 		return RuntimeCommandPlan{}, runtimecontrol.PreparationError{Kind: "runtime_inbox_invariant", Message: "input kind has no delivery payload", Retryable: false}
@@ -1092,12 +1093,15 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareNonStartingInputTx(ctx context.C
 		return RuntimeCommandPlan{}, err
 	}
 	if !found {
+		status, from := "queued", []string{"delivering"}
 		if change == computer.ChangeAdded || change == computer.ChangeRemoved {
-			if _, err := tx.Exec(ctx, `UPDATE session_runtime_inbox SET status='accepted', updated_at=$4
-				WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3 AND status='queued'`,
-				job.WorkspaceID, job.SessionID, job.RuntimeInputID, now); err != nil {
-				return RuntimeCommandPlan{}, err
-			}
+			status, from = "accepted", []string{"queued", "delivering"}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE session_runtime_inbox
+			SET status=$4, binding_id=NULL, binding_generation=NULL, target_pod_uid=NULL, updated_at=$5
+			WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3 AND status=ANY($6)`,
+			job.WorkspaceID, job.SessionID, job.RuntimeInputID, status, now, from); err != nil {
+			return RuntimeCommandPlan{}, err
 		}
 		acked, err := queue.AckTx(ctx, tx, queue.AckRequest{WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken, Now: now})
 		if err != nil {
