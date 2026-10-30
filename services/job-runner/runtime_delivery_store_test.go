@@ -1831,7 +1831,10 @@ func newMachineMessageFixture(t *testing.T, sessionID string) *machineMessageFix
 	f.workloads = storagetest.OpenWorkloadDB(t, admin, "job_runner")
 	f.api = dbconnect.NewClientForTesting(f.workloads.OpenWorkload(t, "api", nil))
 	runner := dbconnect.NewClientForTesting(f.workloads.DB)
-	f.queue = queue.NewPostgreSQLStore(runner)
+	// A failed delivery backs off a full minute, so each test decides when the
+	// retry runs.
+	f.queue = queue.NewPostgreSQLStoreWithRetryPolicy(runner, queue.RetryPolicy{BaseDelay: time.Minute, MaxDelay: time.Minute,
+		RandomInt64: func(bound int64) int64 { return bound - 1 }})
 	f.store = NewPostgreSQLRuntimeDeliveryStore(runner, 9090, KubernetesRuntimeTargetResolver{
 		LoadClient: runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, runtimeLoadFixture(0)) })),
 		Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
