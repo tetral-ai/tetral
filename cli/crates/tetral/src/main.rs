@@ -2,6 +2,7 @@
 
 mod commands;
 mod configure;
+mod diag;
 mod drives;
 mod output;
 mod server;

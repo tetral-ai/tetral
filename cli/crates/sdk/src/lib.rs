@@ -93,6 +93,27 @@ impl Client {
             .await
     }
 
+    /// `GET /v1/status`, then `GET /v1/metrics` as text, both within one
+    /// five-second deadline.
+    pub async fn status_and_metrics(&self) -> Result<(Status, String), Error> {
+        let deadline = state::seams::now() + Duration::from_secs(5);
+        let calls = async {
+            let status = self.call(Method::GET, "/v1/status", StatusCode::OK).await?;
+            let metrics = self
+                .fetch(Method::GET, "/v1/metrics", StatusCode::OK)
+                .await?;
+            let metrics =
+                String::from_utf8(metrics).map_err(|error| Error::Decode(error.to_string()))?;
+            Ok((status, metrics))
+        };
+        tokio::select! {
+            answer = calls => answer,
+            () = state::seams::sleep_until_counted(deadline, "local.response_deadline_checked") => {
+                Err(Error::NotResponding)
+            }
+        }
+    }
+
     pub async fn sessions(&self) -> Result<Sessions, Error> {
         self.call(Method::GET, "/v1/sessions", StatusCode::OK).await
     }
@@ -142,6 +163,17 @@ impl Client {
         path: &str,
         success: StatusCode,
     ) -> Result<T, Error> {
+        let body = self.fetch(method, path, success).await?;
+        serde_json::from_slice(&body).map_err(|error| Error::Decode(error.to_string()))
+    }
+
+    /// The body of the answer to `method` `path`, which must be `success`.
+    async fn fetch(
+        &self,
+        method: Method,
+        path: &str,
+        success: StatusCode,
+    ) -> Result<Vec<u8>, Error> {
         let stream =
             UnixStream::connect(&self.socket)
                 .await
@@ -165,7 +197,7 @@ impl Client {
         if status != success {
             return Err(Error::Http { status, body });
         }
-        serde_json::from_slice(&body).map_err(|error| Error::Decode(error.to_string()))
+        Ok(body)
     }
 
     async fn read(&self, mut body: Incoming) -> Result<Vec<u8>, Error> {
