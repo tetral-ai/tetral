@@ -222,16 +222,6 @@ async fn mount_failures_reach_only_the_first_result_and_downloads_only_running_o
         })
         .await;
     assert_eq!(checked.drive_sync, None);
-    let unmounted: Vec<&str> = checked
-        .unmounted
-        .iter()
-        .map(|drive| drive.as_str())
-        .collect();
-    assert_eq!(
-        unmounted,
-        [support::DRIVE],
-        "the drive its check left unmounted"
-    );
     // A stdin reply before the first report gets none of its failures.
     let reply = port
         .sync_point(point(false, true))
@@ -267,9 +257,18 @@ async fn a_view_image_result_carries_its_check_s_mount_failure_alone() {
         task_id: protocol::id::Id::new("task_2").unwrap(),
         view_image: true,
     };
-    let outcome = port
-        .check(check.clone())
-        .await
+    let checked = port.check(check.clone()).await;
+    let unmounted: Vec<&str> = checked
+        .unmounted
+        .iter()
+        .map(|drive| drive.as_str())
+        .collect();
+    assert_eq!(
+        unmounted,
+        [support::DRIVE],
+        "the drive its check left unmounted"
+    );
+    let outcome = checked
         .drive_sync
         .expect("the view_image result's drive_sync");
     valid(&outcome);
