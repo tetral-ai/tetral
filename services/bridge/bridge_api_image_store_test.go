@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"testing"
@@ -46,9 +47,8 @@ func TestResolveAttachmentServesItsSessionUntilTheLifetimeEnds(t *testing.T) {
 	if got := f.resolve("sesn_image_one", reference.AttachmentID); got.GetUnavailable() == nil {
 		t.Fatalf("resolve at the end = %v; want unavailable", got)
 	}
-	f.collectUntil(func() bool { return f.rows() == 0 })
-	if f.blobExists("one image") {
-		t.Fatal("the collected attachment's bytes are still stored")
+	if deleted := f.collectPass(); deleted != 1 || f.rows() != 0 || f.blobExists("one image") {
+		t.Fatalf("the collection pass deleted %d rows, leaving %d rows and the bytes stored %v; want 1, 0 and false", deleted, f.rows(), f.blobExists("one image"))
 	}
 }
 
@@ -61,14 +61,13 @@ func TestAttachmentCollectionKeepsSharedBytesUntilTheLastRowExpires(t *testing.T
 	second := f.store("sesn_image_one", []byte("shared image"))
 
 	f.age(first, time.Minute)
-	f.collectUntil(func() bool { return f.rows() == 1 })
-	if !f.blobExists("shared image") || string(f.resolve("sesn_image_one", second.AttachmentID).GetResolved().GetData()) != "shared image" {
-		t.Fatal("after the first row's collection the shared bytes are gone or the second row does not resolve")
+	if deleted := f.collectPass(); deleted != 1 || f.rows() != 1 || !f.blobExists("shared image") ||
+		string(f.resolve("sesn_image_one", second.AttachmentID).GetResolved().GetData()) != "shared image" {
+		t.Fatalf("the first row's pass deleted %d rows, leaving %d; want 1 and 1, with the shared bytes stored and the second row resolving", deleted, f.rows())
 	}
 	f.age(second, time.Minute)
-	f.collectUntil(func() bool { return f.rows() == 0 })
-	if f.blobExists("shared image") {
-		t.Fatal("the bytes of the collected last row are still stored")
+	if deleted := f.collectPass(); deleted != 1 || f.rows() != 0 || f.blobExists("shared image") {
+		t.Fatalf("the last row's pass deleted %d rows, leaving %d and the bytes stored %v; want 1, 0 and false", deleted, f.rows(), f.blobExists("shared image"))
 	}
 }
 
@@ -141,19 +140,43 @@ func (f *imageStoreFixture) rows() int {
 	return rows
 }
 
-// collectUntil runs Bridge's collection task until done holds.
-func (f *imageStoreFixture) collectUntil(done func() bool) {
+// collectPass runs Bridge's collection task until a pass deletes
+// attachments and returns how many that one pass deleted, from its log
+// record; a pass that finds nothing expired writes none.
+func (f *imageStoreFixture) collectPass() int {
 	f.t.Helper()
-	stop := StartAttachmentGC(context.Background(), f.bridge, nil, 20*time.Millisecond, 100)
+	records := make(chan slog.Record, 16)
+	stop := StartAttachmentGC(context.Background(), f.bridge, slog.New(recordHandler(records)), 20*time.Millisecond, 100)
 	defer stop()
-	deadline := time.Now().Add(10 * time.Second)
-	for !done() {
-		if time.Now().After(deadline) {
-			f.t.Fatalf("the collection task did not reach the expected rows within 10s; %d rows", f.rows())
+	select {
+	case record := <-records:
+		deleted := -1
+		record.Attrs(func(attr slog.Attr) bool {
+			if attr.Key == "attachment.deleted" {
+				deleted = int(attr.Value.Int64())
+			}
+			return true
+		})
+		if record.Message != "bridge.attachment.gc_completed" {
+			f.t.Fatalf("collection pass record %q; want bridge.attachment.gc_completed", record.Message)
 		}
-		time.Sleep(20 * time.Millisecond)
+		return deleted
+	case <-time.After(10 * time.Second):
+		f.t.Fatalf("no collection pass deleted an attachment within 10s; %d rows", f.rows())
+		return 0
 	}
 }
+
+// recordHandler sends every log record to records.
+type recordHandler chan<- slog.Record
+
+func (h recordHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h recordHandler) Handle(_ context.Context, record slog.Record) error {
+	h <- record.Clone()
+	return nil
+}
+func (h recordHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h recordHandler) WithGroup(string) slog.Handler      { return h }
 
 // blobExists reports whether the bytes data are stored for the Workspace.
 func (f *imageStoreFixture) blobExists(data string) bool {
