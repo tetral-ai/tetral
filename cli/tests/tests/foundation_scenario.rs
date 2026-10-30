@@ -1,7 +1,8 @@
 //! The foundation units in one run of the actual `tetral` against the
 //! reference control server: `configure` from stdin, `server run`, Session
 //! preparations across a staged ready ACK, a resumed stream and a fresh
-//! connection, a report on an ended connection, a close and `server stop`.
+//! connection, a report in flight when its connection ends, a close and
+//! `server stop`.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -83,6 +84,23 @@ fn the_foundation_units_work_together_from_configure_to_server_stop() {
     case.pass();
 
     let mut case = record.case("the resume withheld past the deadline, then a fresh connection");
+    // A preparation whose report the reference server holds before reading
+    // it, while the first connection ends.
+    let held = || engine.state()["held"].as_array().map_or(0, Vec::len);
+    let on_first = || {
+        engine
+            .requests("session-status")
+            .iter()
+            .filter(|request| request["connection_id"] == FIRST_CONNECTION)
+            .count()
+    };
+    let sent_on_first = on_first();
+    answer_fault(
+        &engine,
+        json!({ "endpoint": "session-status", "action": "hold_request" }),
+    );
+    let in_flight = prepare(&engine, &payload("sess_c", "bind_c", &project_b));
+    tetral_tests::app_server::wait_until("the report held", || held() == 1);
     let attempts = engine.requests("events").len();
     engine.control("events", json!({ "mode": "hold_headers", "count": 1 }));
     engine.control("break_stream", json!({ "instance_id": INSTANCE }));
@@ -92,6 +110,8 @@ fn the_foundation_units_work_together_from_configure_to_server_stop() {
     engine.advance(seconds(44.5));
     machine.advance(seconds(43.81));
     assert_eq!(machine.state(), "disconnected");
+    // The connection's end stops the report's attempt.
+    tetral_tests::app_server::wait_until("the held report withdrawn", || held() == 0);
     // The CLI retries on its own until Engine's lease of the ended
     // connection lapses.
     for _ in 0..60 {
@@ -118,22 +138,18 @@ fn the_foundation_units_work_together_from_configure_to_server_stop() {
     case.observe("the new binding_id replaced the failed binding and was prepared");
     case.pass();
 
-    let mut case = record.case("a report on the first connection");
-    let answered = reports_for(&engine, &preparation_a)[0].clone();
-    let mut stale = answered.clone();
-    stale["message_id"] = json!("msg_stale_report");
-    let response = reqwest::blocking::Client::new()
-        .post(format!("{}/v1/client/session-status", engine.url))
-        .bearer_auth(KEY)
-        .json(&stale)
-        .send()
-        .unwrap();
-    assert_eq!(answered["connection_id"], FIRST_CONNECTION);
-    assert_eq!(response.status().as_u16(), 409);
-    let body: Value = response.json().unwrap();
-    assert_eq!(body["code"], "stale_connection", "{body}");
+    let mut case = record.case("a report in flight when the first connection ended");
+    // Past the first retry wait of a report.
+    machine.advance(seconds(1.5));
+    assert!(reports_for(&engine, &in_flight).is_empty());
+    assert_eq!(
+        on_first(),
+        sent_on_first,
+        "nothing more names the first connection"
+    );
     assert_eq!(machine.status()["connection_id"], fresh);
-    case.observe("a report naming the first connection was refused with 409 stale_connection and the fresh connection stayed online");
+    assert_eq!(machine.state(), "online");
+    case.observe("the report held at the reference server when the first connection ended was withdrawn by the CLI and never sent on the fresh connection, which stayed online");
     case.pass();
 
     let mut case = record.case("one Session closed, then server stop");
