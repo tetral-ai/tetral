@@ -61,7 +61,7 @@ pub struct DriveSync {
     pub(crate) session_id: SafeId,
     pub(crate) cache: ContentCache,
     pub(crate) tasks: Arc<dyn TaskOwnership>,
-    clock: Clock,
+    pub(crate) clock: Clock,
     /// The drives the Session's binding binds, as last mounted.
     bound: Arc<std::sync::Mutex<Vec<Bound>>>,
     /// The new mount failures of each `exec_command`'s check, for its first
@@ -165,6 +165,10 @@ pub(crate) enum Message {
     },
     /// The final upload `id` ends at once in keep mode.
     FinalKeep(u64),
+    RemoveDrive {
+        drive: String,
+        reply: oneshot::Sender<()>,
+    },
     Close(oneshot::Sender<()>),
 }
 
@@ -465,7 +469,7 @@ pub(crate) struct Owner {
     pub(crate) mounts: HashMap<String, Mount>,
     /// The highest `drive.changed` seq received for each drive.
     notified: HashMap<String, i64>,
-    unmounted: BTreeMap<String, String>,
+    pub(crate) unmounted: BTreeMap<String, String>,
     connected: u64,
     generations: u64,
     checks: Vec<oneshot::Sender<()>>,
@@ -683,6 +687,10 @@ impl Owner {
                 self.final_upload(id, request, reply).await;
             }
             Message::FinalKeep(id) => self.final_keep(id).await,
+            Message::RemoveDrive { drive, reply } => {
+                self.remove_drive(&drive).await;
+                let _ = reply.send(());
+            }
             Message::Close(_) => unreachable!("the run loop ends at a close"),
         }
     }

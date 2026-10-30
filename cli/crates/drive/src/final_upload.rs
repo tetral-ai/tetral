@@ -61,8 +61,8 @@ impl FinalUpload {
 
     /// Waits for its end: the `lost_changes` entries it kept, unfitted, in
     /// `drive_id` order; none in keep mode.
-    pub async fn ended(self) -> Vec<LostChange> {
-        self.lost_changes.await.unwrap_or_default()
+    pub async fn ended(&mut self) -> Vec<LostChange> {
+        (&mut self.lost_changes).await.unwrap_or_default()
     }
 }
 

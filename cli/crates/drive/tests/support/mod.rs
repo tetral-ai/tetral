@@ -352,6 +352,9 @@ pub struct Env {
     pub stub: Arc<Stub>,
     pub cache: ContentCache,
     pub clock: TestClock,
+    /// How the Sessions' drives are mounted: not at all unless a test asks
+    /// for real FUSE mounts.
+    pub mounting: Mounting,
     calls: mpsc::UnboundedReceiver<Call>,
 }
 
@@ -385,6 +388,7 @@ impl Env {
             stub,
             cache,
             clock,
+            mounting: Mounting::Unavailable("no FUSE: test".to_owned()),
             calls,
         }
     }
@@ -423,7 +427,7 @@ impl Env {
             }),
             cache: self.cache.clone(),
             tasks: Arc::new(Tasks),
-            mounting: Mounting::Unavailable("no FUSE: test".to_owned()),
+            mounting: self.mounting.clone(),
             registry: Arc::new(NoRegistry),
             clock: self.clock.clock(),
             reports: self.reports.clone(),
@@ -518,28 +522,35 @@ impl Session {
     /// Writes `content` as the whole of the top-level file `path`, made by
     /// process `pid`.
     pub async fn write(&self, path: &str, content: &str, pid: u32) {
-        let ino = match self.ino(path).await {
+        self.write_in(&self.drive.clone(), path, content, pid).await;
+    }
+
+    /// [`Session::write`] in the drive `drive`.
+    pub async fn write_in(&self, drive: &Id, path: &str, content: &str, pid: u32) {
+        let ino = match self
+            .sync
+            .lookup(drive, TOP_INODE, path.as_bytes())
+            .await
+            .map(|attr| attr.ino)
+        {
             Ok(ino) => {
                 let set = SetAttr {
                     size: Some(0),
                     ..SetAttr::default()
                 };
-                self.sync
-                    .setattr(&self.drive, ino, set, Some(pid))
-                    .await
-                    .unwrap();
+                self.sync.setattr(drive, ino, set, Some(pid)).await.unwrap();
                 ino
             }
             Err(_) => {
                 self.sync
-                    .create(&self.drive, TOP_INODE, path.as_bytes(), 0o644, Some(pid))
+                    .create(drive, TOP_INODE, path.as_bytes(), 0o644, Some(pid))
                     .await
                     .unwrap()
                     .ino
             }
         };
         self.sync
-            .write(&self.drive, ino, 0, content.as_bytes(), Some(pid))
+            .write(drive, ino, 0, content.as_bytes(), Some(pid))
             .await
             .unwrap();
     }
@@ -744,4 +755,49 @@ pub fn seed(writes: &[String], deletes: &[String]) -> Write {
         });
     }
     seed
+}
+
+/// Lazily unmounts what a test left mounted under `root`.
+pub struct Unmount(pub PathBuf);
+
+impl Drop for Unmount {
+    fn drop(&mut self) {
+        let Ok(root) = self.0.canonicalize() else {
+            return;
+        };
+        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+        for point in mountinfo.lines().filter_map(|line| line.split(' ').nth(4)) {
+            if std::path::Path::new(point).starts_with(&root) {
+                let _ = std::process::Command::new("fusermount3")
+                    .args(["-u", "-z", point])
+                    .status();
+            }
+        }
+    }
+}
+
+/// The Connection owner's side: keeps the entries it is given.
+#[derive(Default)]
+pub struct Keeper(pub Mutex<Vec<protocol::connection::LostChange>>);
+
+impl protocol::ports::ConnectionPort for Keeper {
+    fn probe_slot(&self, _: &SafeId, _: protocol::ports::ProbeRequest) {}
+    fn probe_slot_withdraw(&self, _: &SafeId, _: protocol::ports::ProbeRequest) {}
+    fn probe_slot_free(&self) {}
+    fn fetch_git_ticket(&self, _: &SafeId, _: protocol::ports::TicketRequest, _: &Id, _: &Id) {}
+    fn record_gone(&self, _: &SafeId) {}
+    fn tasks_gone(&self, _: &SafeId) {}
+    fn task_staged(&self, _: Duration) {}
+    fn task_unstaged(&self, _: Duration) {}
+    fn task_started(&self, _: Option<Duration>) {}
+    fn task_ended(&self) {}
+    fn task_refused(&self) {}
+    fn keep_lost_changes(
+        &self,
+        entries: Vec<protocol::connection::LostChange>,
+        kept: protocol::ports::KeptReply,
+    ) {
+        self.0.lock().unwrap().extend(entries);
+        kept();
+    }
 }

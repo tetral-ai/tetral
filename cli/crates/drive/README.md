@@ -77,6 +77,8 @@ Drives on this machine belong here, with two owners:
 - `report.rs`: drive sync reports of the rejections no sync point
   carries, one per recorded task, built for the current binding and
   handed to the outbox once (`body`).
+- `binding_change.rs`: the five steps of a `session.drives`
+  (`BindingChange`, `Applied`) and the removal of a drive's rows.
 - `final_upload.rs`: the final upload of some drives (`FinalUploadRequest`):
   its end time, abandon and keep mode (`FinalMode`), and abandoning.
 - `lost_changes.rs`: `lost_changes` entries and their fitting into a

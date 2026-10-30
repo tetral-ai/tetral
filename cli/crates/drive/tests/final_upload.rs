@@ -4,40 +4,17 @@
 
 mod support;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use drive::{FinalMode, FinalUpload, FinalUploadRequest};
 use protocol::connection::LostChange;
 use protocol::drive_transfer::CommitChange;
-use protocol::id::{Id, SafeId};
-use protocol::ports::{ConnectionPort, KeptReply, ProbeRequest, TicketRequest};
+use protocol::id::Id;
 use serde_json::json;
 
 use drive::transfer::Ended;
-use support::{Call, Env, Session, key, seed};
-
-/// The Connection owner's side: keeps the entries it is given.
-#[derive(Default)]
-struct Keeper(Mutex<Vec<LostChange>>);
-
-impl ConnectionPort for Keeper {
-    fn probe_slot(&self, _: &SafeId, _: ProbeRequest) {}
-    fn probe_slot_withdraw(&self, _: &SafeId, _: ProbeRequest) {}
-    fn probe_slot_free(&self) {}
-    fn fetch_git_ticket(&self, _: &SafeId, _: TicketRequest, _: &Id, _: &Id) {}
-    fn record_gone(&self, _: &SafeId) {}
-    fn tasks_gone(&self, _: &SafeId) {}
-    fn task_staged(&self, _: Duration) {}
-    fn task_unstaged(&self, _: Duration) {}
-    fn task_started(&self, _: Option<Duration>) {}
-    fn task_ended(&self) {}
-    fn task_refused(&self) {}
-    fn keep_lost_changes(&self, entries: Vec<LostChange>, kept: KeptReply) {
-        self.0.lock().unwrap().extend(entries);
-        kept();
-    }
-}
+use support::{Call, Env, Keeper, Session, key, seed};
 
 fn abandon(keeper: &Arc<Keeper>) -> FinalMode {
     FinalMode::Abandon {
@@ -54,7 +31,7 @@ fn start(session: &Session, end: Duration, mode: FinalMode) -> FinalUpload {
     })
 }
 
-async fn ended(upload: FinalUpload) -> Vec<LostChange> {
+async fn ended(mut upload: FinalUpload) -> Vec<LostChange> {
     tokio::time::timeout(Duration::from_secs(10), upload.ended())
         .await
         .expect("the final upload ends within 10 s")
