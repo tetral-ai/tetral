@@ -141,6 +141,7 @@ func TestSessionComputerAddRules(t *testing.T) {
 		{"other networking on a user computer", "r13", `{"instance_id":"inst_mini","working_directory":"/w","networking":{"type":"cidr_allow_list"}}`, 400, "invalid_request_error", "networking"},
 		{"repositories on a user computer", "r14", `{"instance_id":"inst_mini","working_directory":"/w","repositories":[` + repo("https://github.com/acme/app", "") + `]}`, 400, "invalid_request_error", "repositories"},
 		{"two repositories with one path", "r15", `{"environment_id":"env_http_session","repositories":[` + repo("https://github.com/acme/app", "/src") + `,` + repo("https://github.com/acme/lib", "/src") + `]}`, 400, "invalid_request_error", "/src"},
+		{"one repository twice at two paths", "r19", `{"environment_id":"env_http_session","repositories":[` + repo("https://github.com/acme/app", "/src/a") + `,` + repo("https://github.com/Acme/App.git", "/src/b") + `]}`, 400, "invalid_request_error", "duplicate GitHub repository URL"},
 		{"drive_exclude without drive_id", "r16", `{"environment_id":"env_http_session","drive_exclude":[{"drive_id":"","paths":["a"]}]}`, 400, "invalid_request_error", "drive_id"},
 		{"drive_exclude path outside the rules", "r17", `{"environment_id":"env_http_session","drive_exclude":[{"drive_id":"drive_a","paths":["../up"]}]}`, 400, "invalid_request_error", `"../up"`},
 		{"missing Idempotency-Key", "", `{"environment_id":"env_http_session"}`, 400, "invalid_request_error", "Idempotency-Key"},
@@ -185,6 +186,10 @@ func TestSessionComputerAddRules(t *testing.T) {
 		t.Fatalf("computer read = %d %s", read.Code, read.Body.String())
 	}
 	assertHTTPStatus(t, env.request(http.MethodGet, route+"/comp_missing", ""), http.StatusNotFound)
+
+	// Another computer of the Session may hold the same repository.
+	assertHTTPStatus(t, env.requestWithKey(http.MethodPost, route, "add-cloud-same-repository",
+		`{"environment_id":"env_http_session","repositories":[{"url":"https://github.com/Acme/App.git","authorization_token":"github_token_same"}]}`), http.StatusCreated)
 
 	// One user instance attaches to three Sessions, and its
 	// computer_count counts them.
