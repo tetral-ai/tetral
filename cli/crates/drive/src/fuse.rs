@@ -343,15 +343,13 @@ impl Filesystem for Adapter {
     fn link(
         &self,
         _req: &Request,
-        _ino: INodeNo,
-        _newparent: INodeNo,
+        ino: INodeNo,
+        newparent: INodeNo,
         _newname: &OsStr,
         reply: ReplyEntry,
     ) {
-        reply.error(if self.detached.load(Ordering::Acquire) {
-            Errno::EIO
-        } else {
-            Errno::EPERM
+        self.run(reply, move |sync, drive, reply| async move {
+            entry(reply, sync.link(&drive, ino.0, newparent.0).await);
         });
     }
 
