@@ -3505,6 +3505,26 @@
             "phase": "string"
           }
         },
+        "drive.cleanup_failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "drive.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "workspace.id": "string"
+          },
+          "errors": {
+            "drive_cleanup_failed": {
+              "class": "dependency_unavailable",
+              "message_safe": "drive cleanup failed"
+            }
+          }
+        },
         "queue.notification_listener.disconnected": {
           "level": "WARN",
           "log_type": "app",
