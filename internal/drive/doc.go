@@ -2,9 +2,9 @@
 // to their root, every change kept as a version, committed in numbered
 // commits. It is the only package that reads or writes drive state, and Commit
 // is the only way a version comes to exist. Each method runs its own
-// Workspace-scoped transaction; Commit, Redact, Restore and Delete hold the
-// drive row lock (lockDrive), which serializes them per drive whichever service
-// calls.
+// Workspace-scoped transaction; Commit, Redact, Restore, PublishSkill,
+// DeleteSkill and Delete hold the drive row lock (lockDrive), which serializes
+// them per drive whichever service calls.
 //
 // Terms: a current file is a path whose current version is not a deletion; an
 // old version is any other version of the path. A path's fold key is the path

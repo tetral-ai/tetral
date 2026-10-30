@@ -79,29 +79,50 @@ func (s *Service) PublishSkill(ctx context.Context, ws workspace.ID, driveID str
 		return Skill{}, err
 	}
 	folder := d.SkillsPath + pkg.Name + "/"
-	changes := make([]Change, 0, len(pkg.Files))
-	written := make(map[string]bool, len(pkg.Files))
+	writes := make([]Change, 0, len(pkg.Files))
 	for _, f := range pkg.Files {
 		content, err := s.putSkillFile(ctx, ws, driveID, f)
 		if err != nil {
 			return Skill{}, err
 		}
-		changes = append(changes, Change{Path: folder + f.Path, Base: Base{Kind: BaseAny}, ContentSHA256: content.SHA256, Executable: f.Executable})
-		written[folder+f.Path] = true
+		writes = append(writes, Change{Path: folder + f.Path, Base: Base{Kind: BaseAny}, ContentSHA256: content.SHA256, Executable: f.Executable})
 	}
-	current, err := s.filesUnder(ctx, ws, driveID, folder)
-	if err != nil {
-		return Skill{}, err
-	}
-	for _, f := range current {
-		if !written[f.Path] {
-			changes = append(changes, Change{Path: f.Path, Delete: true, Base: Base{Kind: BaseAny}})
-		}
-	}
-	if _, err := s.Commit(ctx, ws, driveID, writer, ModeAllOrNothing, changes); err != nil {
+	if err := s.replaceFolder(ctx, ws, driveID, writer, folder, writes); err != nil {
 		return Skill{}, err
 	}
 	return Skill{Name: pkg.Name, Description: &pkg.Description}, nil
+}
+
+// replaceFolder makes folder hold exactly writes, all under it, in one
+// all_or_nothing commit that also deletes every other current file under
+// folder. It lists the folder inside the commit, under the drive lock, so a
+// commit that changed the folder first cannot leave files behind.
+func (s *Service) replaceFolder(ctx context.Context, ws workspace.ID, driveID string, writer Writer, folder string, writes []Change) error {
+	if err := writer.validate(); err != nil {
+		return err
+	}
+	return s.db.WithWorkspaceTx(ctx, string(ws), "drive.commit", func(tx *dbconnect.Tx) error {
+		locked, err := lockDrive(ctx, tx, ws, driveID)
+		if err != nil {
+			return err
+		}
+		current, err := currentPathsUnder(ctx, tx, ws, driveID, folder)
+		if err != nil {
+			return err
+		}
+		written := make(map[string]bool, len(writes))
+		for _, change := range writes {
+			written[change.Path] = true
+		}
+		changes := append(make([]Change, 0, len(writes)+len(current)), writes...)
+		for _, path := range current {
+			if !written[path] {
+				changes = append(changes, Change{Path: path, Delete: true, Base: Base{Kind: BaseAny}})
+			}
+		}
+		_, err = commitLocked(ctx, tx, ws, driveID, locked, writer, ModeAllOrNothing, changes)
+		return err
+	})
 }
 
 func (s *Service) putSkillFile(ctx context.Context, ws workspace.ID, driveID string, f skillpackage.File) (Content, error) {
@@ -113,20 +134,23 @@ func (s *Service) putSkillFile(ctx context.Context, ws workspace.ID, driveID str
 	return s.PutContent(ctx, ws, driveID, body, f.SizeBytes, "")
 }
 
-// filesUnder returns every current file whose path starts with folder.
-func (s *Service) filesUnder(ctx context.Context, ws workspace.ID, driveID, folder string) ([]File, error) {
-	var all []File
-	for after := ""; ; {
-		files, more, err := s.ListFiles(ctx, ws, driveID, FileQuery{After: after, Prefix: folder, Limit: 1000})
-		if err != nil {
+// currentPathsUnder returns the path of every current file under folder.
+func currentPathsUnder(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, driveID, folder string) ([]string, error) {
+	rows, err := tx.Query(ctx, `SELECT path FROM drive_files WHERE workspace_id=$1 AND drive_id=$2 AND path LIKE $3 ORDER BY path`,
+		string(ws), driveID, likePrefix(folder))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var paths []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
 			return nil, err
 		}
-		all = append(all, files...)
-		if !more {
-			return all, nil
-		}
-		after = files[len(files)-1].Path
+		paths = append(paths, path)
 	}
+	return paths, rows.Err()
 }
 
 // Skills returns at most limit entries with a name above after, in UTF-8
@@ -189,16 +213,7 @@ func (s *Service) DeleteSkill(ctx context.Context, ws workspace.ID, driveID, nam
 	if err != nil {
 		return err
 	}
-	files, err := s.filesUnder(ctx, ws, driveID, strings.TrimSuffix(skillMD.Path, skillpackage.SkillMD))
-	if err != nil {
-		return err
-	}
-	changes := make([]Change, 0, len(files))
-	for _, f := range files {
-		changes = append(changes, Change{Path: f.Path, Delete: true, Base: Base{Kind: BaseAny}})
-	}
-	_, err = s.Commit(ctx, ws, driveID, writer, ModeAllOrNothing, changes)
-	return err
+	return s.replaceFolder(ctx, ws, driveID, writer, strings.TrimSuffix(skillMD.Path, skillpackage.SkillMD), nil)
 }
 
 func (s *Service) skillMD(ctx context.Context, ws workspace.ID, driveID, name string) (File, error) {

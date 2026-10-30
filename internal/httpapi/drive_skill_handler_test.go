@@ -4,6 +4,9 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"io/fs"
 	"mime/multipart"
 	"net/http"
@@ -11,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/drive/skillpackage"
@@ -222,6 +226,86 @@ func TestDriveSkillRepublish(t *testing.T) {
 	versions, err := api.drives.ListVersions(ctx, workspace.DefaultID, id, "skills/report/run.sh")
 	if err != nil || len(versions) != 2 || versions[0].Executable || !versions[1].Executable {
 		t.Fatalf("run.sh versions = %+v, %v; want not executable, then executable", versions, err)
+	}
+}
+
+// Two publishes of one Skill that overlap leave the folder equal to one of
+// the two archives: each publish lists the folder inside its own commit, so
+// the later one deletes what the earlier one wrote and the archive lacks.
+func TestDriveSkillOverlappingPublishesLeaveOneArchive(t *testing.T) {
+	api := newDriveAPI(t, drive.DefaultUploadBudgetBytesPerMinute)
+	ctx := context.Background()
+	id := api.newDrive(`{}`)
+	decodeDrive(t, api.uploadSkill(id, skillZip(t, file("report/SKILL.md", reportSkillMD("First.")), file("report/old.txt", "old"))), http.StatusCreated, nil)
+	archives := []map[string]string{
+		{"report/SKILL.md": reportSkillMD("A."), "report/a.txt": "a"},
+		{"report/SKILL.md": reportSkillMD("B."), "report/b.txt": "b"},
+	}
+	lock, err := api.env.admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lock.ExecContext(ctx, `SELECT 1 FROM drives WHERE drive_id=$1 FOR UPDATE`, id); err != nil {
+		t.Fatal(err)
+	}
+	statuses := make(chan int, len(archives))
+	for i, archive := range archives {
+		var entries []zipEntry
+		for path, body := range archive {
+			entries = append(entries, file(path, body))
+		}
+		data := skillZip(t, entries...)
+		go func() { statuses <- api.uploadSkill(id, data).status }()
+		waitForLockWaits(t, api.env.admin, i+1)
+	}
+	if err := lock.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	for range archives {
+		if status := <-statuses; status != http.StatusCreated {
+			t.Fatalf("overlapping publish = %d; want %d", status, http.StatusCreated)
+		}
+	}
+	files, _, err := api.drives.ListFiles(ctx, workspace.DefaultID, id, drive.FileQuery{Prefix: "skills/report/", Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	folder := map[string]string{}
+	for _, f := range files {
+		folder[strings.TrimPrefix(f.Path, "skills/")] = f.ContentSHA256
+	}
+	for _, archive := range archives {
+		if len(folder) == len(archive) {
+			matches := true
+			for path, body := range archive {
+				sum := sha256.Sum256([]byte(body))
+				matches = matches && folder[path] == hex.EncodeToString(sum[:])
+			}
+			if matches {
+				return
+			}
+		}
+	}
+	t.Fatalf("folder after two overlapping publishes holds %d files %v; want exactly one archive's files", len(folder), files)
+}
+
+// waitForLockWaits returns once n sessions of the test database wait for a
+// lock.
+func waitForLockWaits(t *testing.T, admin *sql.DB, n int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		if err := admin.QueryRow(`SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d sessions waited for a lock within 10s; want %d", waiting, n)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
