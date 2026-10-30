@@ -262,12 +262,26 @@ impl Owner {
     }
 
     /// The listings and due marks of paths with no pending change.
-    fn forget_settled(&mut self) {
+    pub(crate) fn forget_settled(&mut self) {
         let pending = &self.state.tables().pending_changes;
         self.listed.retain(|key| pending.contains_key(key));
         self.listed_uploading
             .retain(|key| pending.contains_key(key));
         self.startup_due.retain(|key| pending.contains_key(key));
+    }
+
+    /// A final upload cancelled `drive`'s commit in flight: a sync point
+    /// waiting for its answer lists its changes `uploading`.
+    pub(crate) fn commit_cancelled(&mut self, drive: &str, changes: &[CommitChange]) {
+        for point in self.sync_points.values_mut() {
+            if point.waiting.remove(drive).is_some() {
+                point.uploading.extend(
+                    changes
+                        .iter()
+                        .map(|change| Owner::key(drive, change.path())),
+                );
+            }
+        }
     }
 
     /// Every change of a commit of `sync_point` whose answer was

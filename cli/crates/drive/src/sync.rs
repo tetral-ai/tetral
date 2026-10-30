@@ -70,6 +70,7 @@ pub struct DriveSync {
     /// `sessions/<session_id>` under the canonical root.
     session_dir: PathBuf,
     mounting: Mounting,
+    pub(crate) final_ids: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl std::fmt::Debug for DriveSync {
@@ -157,6 +158,13 @@ pub(crate) enum Message {
     },
     TaskStarted(String),
     TaskExited(String),
+    FinalUpload {
+        id: u64,
+        request: crate::final_upload::FinalUploadRequest,
+        reply: oneshot::Sender<Vec<protocol::connection::LostChange>>,
+    },
+    /// The final upload `id` ends at once in keep mode.
+    FinalKeep(u64),
     Close(oneshot::Sender<()>),
 }
 
@@ -194,6 +202,8 @@ impl DriveSync {
             listed_uploading: HashSet::new(),
             reported_tasks: HashSet::new(),
             startup_due: HashSet::new(),
+            final_uploads: BTreeMap::new(),
+            closed: HashSet::new(),
             flights: HashMap::new(),
             flight_ids: 0,
             recorded_during_flight: HashSet::new(),
@@ -236,6 +246,7 @@ impl DriveSync {
             first_failures: Arc::default(),
             session_dir: owner.session_dir.clone(),
             mounting: owner.mounting.clone(),
+            final_ids: Arc::default(),
         };
         let mut owner = owner;
         owner.handle = Some(sync.clone());
@@ -429,9 +440,14 @@ pub(crate) struct Owner {
     pub(crate) listed_uploading: HashSet<Key>,
     /// The tasks that finished their first sync point.
     pub(crate) reported_tasks: HashSet<String>,
-    /// The changes pending at start or when the binding became current on
-    /// a new connection, until a commit carries them.
+    /// The changes pending at start, when the binding became current on a
+    /// new connection or at a final upload, until a commit carries them.
     pub(crate) startup_due: HashSet<Key>,
+    /// The final uploads in progress.
+    pub(crate) final_uploads: BTreeMap<u64, crate::final_upload::Final>,
+    /// The drives whose final upload abandoned changes: nothing of them is
+    /// uploaded or committed until they are mounted again.
+    pub(crate) closed: HashSet<String>,
     /// The commit in flight of each drive mount.
     pub(crate) flights: HashMap<String, Flight>,
     pub(crate) flight_ids: u64,
@@ -500,7 +516,7 @@ impl Owner {
             .collect();
         self.resend_stored();
         loop {
-            let wake = [self.quiet_wake(), self.sync_point_wake()]
+            let wake = [self.quiet_wake(), self.sync_point_wake(), self.final_wake()]
                 .into_iter()
                 .flatten()
                 .min();
@@ -510,6 +526,7 @@ impl Owner {
                     () = self.clock.sleep_until(at) => {
                         self.quiet_uploads();
                         self.sync_points_progress().await;
+                        self.final_uploads_progress().await;
                         continue;
                     }
                 },
@@ -525,6 +542,7 @@ impl Owner {
                 None => return,
             };
             self.handle(message).await;
+            self.final_uploads_progress().await;
             self.answer_checks();
         }
     }
@@ -552,6 +570,8 @@ impl Owner {
             self.start_upload(key, None);
         }
         self.startup_due.extend(keys);
+        // A commit a final upload cancelled in keep mode goes first.
+        self.resend_stored();
         self.changes_ready().await;
     }
 
@@ -659,6 +679,10 @@ impl Owner {
             } => self.sync_point(request, began, reply).await,
             Message::TaskStarted(task) => self.task_started(task),
             Message::TaskExited(task) => self.task_exited(&task),
+            Message::FinalUpload { id, request, reply } => {
+                self.final_upload(id, request, reply).await;
+            }
+            Message::FinalKeep(id) => self.final_keep(id).await,
             Message::Close(_) => unreachable!("the run loop ends at a close"),
         }
     }
@@ -678,6 +702,7 @@ impl Owner {
         self.generations += 1;
         self.unmounted.remove(&drive);
         self.clean.remove(&drive);
+        self.closed.remove(&drive);
         self.mounts.insert(
             drive.clone(),
             Mount {

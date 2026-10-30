@@ -124,6 +124,7 @@ impl Owner {
                 change.change == "write" && !change.uploaded && change.fault_code.is_none()
             })
             && !self.uploads.running.contains_key(key)
+            && !self.closed.contains(&key.0)
     }
 
     /// Starts the upload of `key` when it is uploadable; `traceparent` is

@@ -2,8 +2,9 @@
 //! is built and split, its answers, `409 content_missing`, faults, and the
 //! drive winning over a rejected change. Each mount has at most one commit
 //! in flight; its changes are recorded in `inflight_commits` before the
-//! first sending, and an App Server start sends a stored commit again,
-//! unchanged, before any other commit of its mount.
+//! first sending, and an App Server start, or the binding becoming current
+//! on a new connection after a final upload cancelled it, sends a stored
+//! commit again, unchanged, before any other commit of its mount.
 
 use std::collections::{BTreeSet, HashSet};
 use std::time::Duration;
@@ -13,6 +14,7 @@ use protocol::drive_transfer::{CommitChange, CommitResponse, CommitResult, Curre
 use protocol::field::{AbsolutePath, NonEmptyString, Nullable, Sha256};
 use protocol::id::Id;
 use protocol::tool::{ChangeKind, DriveRejection, RejectionReason};
+use tokio::task::AbortHandle;
 
 use crate::state::{self, InflightChange, Key, PendingChange, Tables};
 use crate::sync::{Message, Owner, now_ns};
@@ -32,6 +34,7 @@ pub(crate) struct Flight {
     pub sync_point: Option<u64>,
     /// When the request's deadline passes, for a sync point waiting on it.
     pub deadline: Duration,
+    pub task: AbortHandle,
 }
 
 /// A rejected change for a result or a drive sync report.
@@ -167,7 +170,7 @@ impl Owner {
         traceparent: Option<String>,
         covered: &HashSet<Key>,
     ) -> bool {
-        if self.flights.contains_key(drive) {
+        if self.flights.contains_key(drive) || self.closed.contains(drive) {
             return false;
         }
         let due: Vec<CommitChange> = self
@@ -236,6 +239,9 @@ impl Owner {
         let Ok(drive_id) = Id::new(drive) else {
             return;
         };
+        if self.closed.contains(drive) {
+            return;
+        }
         self.flight_ids += 1;
         let id = self.flight_ids;
         let bytes = serde_json::to_vec(&changes).map_or(0, |json| json.len());
@@ -249,7 +255,7 @@ impl Owner {
         };
         let (transfer, mailbox) = (self.transfer.clone(), self.mailbox.clone());
         let drive_key = drive.to_owned();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let answer = transfer.commit(request).await;
             let _ = mailbox.send(Message::CommitAnswered {
                 drive: drive_key,
@@ -264,12 +270,14 @@ impl Owner {
                 changes,
                 sync_point,
                 deadline: self.clock.now() + crate::transfer::total(bytes as u64),
+                task: task.abort_handle(),
             },
         );
     }
 
-    /// At start: each mount's stored commit is sent again, unchanged,
-    /// before any other.
+    /// At start, and when the binding becomes current on a new connection:
+    /// each mount's stored commit with none in flight is sent again,
+    /// unchanged, before any other.
     pub(crate) fn resend_stored(&mut self) {
         let drives: BTreeSet<String> = self
             .state
@@ -279,6 +287,9 @@ impl Owner {
             .map(|(drive, _)| drive.clone())
             .collect();
         for drive in drives {
+            if self.flights.contains_key(&drive) {
+                continue;
+            }
             let changes: Vec<CommitChange> = self
                 .state
                 .tables()
@@ -622,7 +633,7 @@ fn set_current(row: &mut crate::state::FileRow, current: Option<&CurrentVersion>
 
 /// The `file_id`s of the content files of `drive` that `after` no longer
 /// names.
-fn removed_content(drive: &str, before: &Tables, after: &Tables) -> Vec<i64> {
+pub(crate) fn removed_content(drive: &str, before: &Tables, after: &Tables) -> Vec<i64> {
     before
         .files
         .iter()
