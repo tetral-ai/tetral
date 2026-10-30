@@ -502,8 +502,8 @@ termination grace period carry the drain, which is why Helm refuses a
   their own workspace's noticed event.
 - `request_routes_test.go`, over HTTP with requests recorded in-process by
   `EnsureRequest`: two workers claiming a `new` and a `wake` request at once,
-  the repeated claim and the claim after release; every other cell of the
-  state table; a `wake` claim at the credential limit changing nothing; a
+  the repeated claim and the claim after release; every other action on a
+  request in every state; a `wake` claim at the credential limit changing nothing; a
   returned `new` claim retiring its instance and an expired request making way
   for the next; a refused ready leaving the claim and a Controller's fail
   ending it; readies fulfilling a `wake` and a `new` request; reuse recorded

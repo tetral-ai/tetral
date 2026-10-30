@@ -2,7 +2,7 @@ package drive
 
 import "errors"
 
-// The contract fixes these; none is a setting.
+// These are fixed values of the API; none is a setting.
 const (
 	MaxFileBytes      int64 = 500_000_000
 	WorkspaceMaxBytes int64 = 500_000_000_000

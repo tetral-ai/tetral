@@ -61,7 +61,7 @@
 //     crash leaves a blob the cleanup cannot find (content.go).
 //   - Path rules 1 to 6 are lexical (CheckPath, paths.go); 7 to 9 compare fold
 //     keys with drive_files as the commit has changed it so far.
-//   - The limits and retention periods the contract fixes are in limits.go.
+//   - The fixed limits and retention periods of the API are in limits.go.
 //
 // UPDATE-WITH: internal/storage/postgresql_drive_schema.go,
 // database/postgresql.json, database/roles.json.

@@ -185,14 +185,14 @@ type Claim struct {
 	Revoked          []string
 }
 
-// ClaimRequest claims requestID for workerID as the state table says: a
-// pending new request gets a new cloud instance with an active credential
-// expiring maxLifetime after issuance, a pending wake request a pending
-// credential for its instance after that instance's never-used pending
-// credentials are revoked (instance.CredentialLimitError when two active ones
-// remain, and the caller's transaction must roll back). A claimed request
-// answers the same claim without a key to its worker and
-// RequestAlreadyClaimedError to any other; an ended one RequestNotPendingError.
+// ClaimRequest claims requestID for workerID: a pending new request gets a new
+// cloud instance with an active credential expiring maxLifetime after issuance,
+// a pending wake request a pending credential for its instance after that
+// instance's never-used pending credentials are revoked
+// (instance.CredentialLimitError when two active ones remain, and the caller's
+// transaction must roll back). A claimed request answers the same claim without
+// a key to its worker and RequestAlreadyClaimedError to any other; an ended one
+// RequestNotPendingError.
 func ClaimRequest(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, requestID, workerID string, maxLifetime time.Duration) (Claim, error) {
 	request, err := lockRequest(ctx, tx, ws, requestID)
 	if err != nil {

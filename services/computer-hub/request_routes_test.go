@@ -238,8 +238,8 @@ func TestOneWorkerWinsTheClaimOfARequest(t *testing.T) {
 }
 
 // TestRequestRoutesAnswerEveryState sends claim, release and fail to a
-// request in each state, one row per answer of the state table that the
-// claim test does not reach. A refused route leaves the request as it was.
+// request in each state, one row per answer that the claim test does not
+// reach. A refused route leaves the request as it was.
 func TestRequestRoutesAnswerEveryState(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	// into returns a new request brought into state by the writers that

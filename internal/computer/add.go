@@ -43,8 +43,10 @@ type Checked struct {
 }
 
 // CheckEntries checks entries, the computers one request adds to the
-// Session, field by field in the order of the contract's field table, and
-// fills their defaults. A cloud computer copies its Environment's networking
+// Session, one entry at a time, in this order: exactly one of environment_id
+// and instance_id, the Environment or instance it names, working_directory,
+// networking, repositories and drive_exclude; the first broken rule answers.
+// It fills their defaults. A cloud computer copies its Environment's networking
 // now, so a later Environment change does not reach it.
 func CheckEntries(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string, entries []Entry) ([]Checked, error) {
 	checked := make([]Checked, 0, len(entries))

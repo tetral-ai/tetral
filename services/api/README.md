@@ -126,12 +126,14 @@ computers. Session creation takes `computers`, or the top-level
 `environment_id` as a one-computer list (a cloud computer at `/workspace`
 holding the `github_repository` entries of `resources`); `computers` with
 `environment_id`, or with a `github_repository` resource, answers `400`, and
-every Session needs at least one cloud computer. Each entry is checked in the
-contract's field order and nothing is written when one fails: `400
-invalid_request_error`, `404 not_found_error` (an unknown Environment or
-instance), `409 instance_not_attachable_error` (a cloud or deregistered
-instance) or `409 computer_already_attached_error` (an instance named twice or
-already attached to the Session). A computer's `networking` copies its
+every Session needs at least one cloud computer. Each entry is checked in
+this order, and nothing is written when one fails: exactly one of
+`environment_id` and `instance_id`, the Environment or instance it names,
+`working_directory`, `networking`, `repositories` and `drive_exclude`. A
+failure answers `400 invalid_request_error`, `404 not_found_error` (an
+unknown Environment or instance), `409 instance_not_attachable_error` (a
+cloud or deregistered instance) or `409 computer_already_attached_error` (an
+instance named twice or already attached to the Session). A computer's `networking` copies its
 Environment's value at addition. Its repositories are stored as
 `github_repository` resource rows with `computer_id` and the resolved `path`
 (`mount_path`, or `<working_directory>/<name>`) and are fixed: `POST

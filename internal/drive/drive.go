@@ -114,7 +114,8 @@ func (w Writer) validate() error {
 	return nil
 }
 
-// MarshalJSON writes the contract's DriveWriter shape.
+// MarshalJSON writes the writer object of the API: its type and the ID
+// fields that type names.
 func (w Writer) MarshalJSON() ([]byte, error) {
 	switch w.Kind {
 	case WriterAPIKey:

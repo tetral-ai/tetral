@@ -37,7 +37,8 @@ const (
 // the read route no longer serves.
 var ErrNotFound = errors.New("computer: not found")
 
-// InvalidError answers an entry that breaks a rule of the field table.
+// InvalidError answers a computer entry that breaks a field rule of
+// CheckEntries; Message names the field and the rule.
 type InvalidError struct{ Message string }
 
 func (e *InvalidError) Error() string { return e.Message }
