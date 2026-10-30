@@ -24,7 +24,8 @@
 //! `starting`, and leaves the drives it found unmounted out of the task's
 //! permissions; each execution report and each newly built `tool.stdin`
 //! reply runs its sync point before it is frozen, and carries its
-//! `drive_sync`.
+//! `drive_sync`. While a `running` report's sync point runs, output, the
+//! controls and the command's end go on being handled.
 //! A file tool's task runs its child instead of a command
 //! ([`crate::file_tools`]): `running` from the spawn, its `terminal` report
 //! is made once the child's result is received, or once its child is gone
@@ -69,7 +70,7 @@ use tokio::sync::mpsc;
 use tracing::Instrument;
 
 use crate::cancel::Receipt;
-use crate::capture::StreamCapture;
+use crate::capture::{StreamCapture, Window};
 use crate::cleanup;
 use crate::exec::{self, ExecCall, ExitFacts, OnExpiry, Outcome};
 use crate::file_tools::{FileCall, Pipes};
@@ -395,6 +396,18 @@ impl Work {
 
 /// The availability check while it runs.
 type Checking = Pin<Box<dyn Future<Output = Result<Available, PolicyRejection>> + Send>>;
+
+/// A report's sync point: its `drive_sync`, and how long it took.
+type Synced = Pin<Box<dyn Future<Output = (Option<DriveSyncOutcome>, Duration)> + Send>>;
+
+/// A `running` report whose sync point has not answered yet: its outcome
+/// and output windows as of the wait's end.
+struct PendingRunning {
+    outcome: Outcome,
+    stdout: Window,
+    stderr: Window,
+    synced: Synced,
+}
 
 /// Why a task did not reach `running`.
 enum Start {
@@ -951,6 +964,9 @@ impl Supervisor {
         let wait_ends = self.spawned + call.wait;
         let mut waited = false;
         let mut forgotten = false;
+        // The `running` report waits for its sync point while the task's
+        // output, controls and ending go on.
+        let mut pending: Option<PendingRunning> = None;
         self.next_write();
         loop {
             // A launch failure is written before the sandbox exits, but may
@@ -1032,8 +1048,12 @@ impl Supervisor {
                         (Some(_), OnExpiry::Kill) => {
                             self.ending = Some((Termination::begin(pid, bounds.termination), Expiry::Wait));
                         }
-                        (Some(start), OnExpiry::Detach) => self.report_running(start).await,
+                        (Some(start), OnExpiry::Detach) => pending = Some(self.running_report(start)),
                     }
+                }
+                answered = async { pending.as_mut().expect("a pending report").synced.as_mut().await }, if pending.is_some() => {
+                    let running = pending.take().expect("a pending report");
+                    self.report_running_synced(running, answered);
                 }
                 () = state::seams::sleep_until(lifetime_ends), if detached && started && quiet => {
                     self.ending = Some((Termination::begin(pid, bounds.termination), Expiry::Lifetime));
@@ -1073,6 +1093,10 @@ impl Supervisor {
                     None => forgotten = true,
                 },
             }
+        }
+        if let Some(mut running) = pending.take() {
+            let answered = running.synced.as_mut().await;
+            self.report_running_synced(running, answered);
         }
         drop((self.out.reader.take(), self.err.reader.take()));
         if self.exit.is_none() {
@@ -1289,7 +1313,15 @@ impl Supervisor {
 
     /// The `running` report at the end of a `detach` initial wait, from both
     /// streams' windows.
+    #[cfg(test)]
     async fn report_running(&mut self, start: Duration) {
+        let mut running = self.running_report(start);
+        let answered = running.synced.as_mut().await;
+        self.report_running_synced(running, answered);
+    }
+
+    /// The `running` report as of now, its sync point started.
+    fn running_report(&mut self, start: Duration) -> PendingRunning {
         let (stdout, stderr) = (
             self.out.capture.take_window(),
             self.err.capture.take_window(),
@@ -1297,8 +1329,27 @@ impl Supervisor {
         let mut outcome = self.outcome(HelperStatus::Running, None, ExitFacts::default());
         outcome.duration = state::seams::now().saturating_sub(start);
         outcome.metrics = None;
-        self.report(ReportPhase::Running, outcome, &stdout, &stderr)
-            .await;
+        let synced = Box::pin(self.sync_point(self.report_seq == 0, ReportPhase::Running));
+        PendingRunning {
+            outcome,
+            stdout,
+            stderr,
+            synced,
+        }
+    }
+
+    fn report_running_synced(
+        &mut self,
+        running: PendingRunning,
+        answered: (Option<DriveSyncOutcome>, Duration),
+    ) {
+        let PendingRunning {
+            outcome,
+            stdout,
+            stderr,
+            ..
+        } = running;
+        self.report_synced(ReportPhase::Running, outcome, &stdout, &stderr, answered);
     }
 
     /// An `exec_command` result with empty streams, no duration and the
@@ -1354,11 +1405,24 @@ impl Supervisor {
     async fn report(
         &mut self,
         phase: ReportPhase,
-        mut outcome: Outcome,
+        outcome: Outcome,
         stdout: &(dyn StreamOutput + Sync),
         stderr: &(dyn StreamOutput + Sync),
     ) {
-        let (drive_sync, took) = self.sync_point(self.report_seq == 0, phase).await;
+        let answered = self.sync_point(self.report_seq == 0, phase).await;
+        self.report_synced(phase, outcome, stdout, stderr, answered);
+    }
+
+    /// Fits the report with its sync point's answer and hands it to the
+    /// outbox.
+    fn report_synced(
+        &mut self,
+        phase: ReportPhase,
+        mut outcome: Outcome,
+        stdout: &(dyn StreamOutput + Sync),
+        stderr: &(dyn StreamOutput + Sync),
+        (drive_sync, took): (Option<DriveSyncOutcome>, Duration),
+    ) {
         outcome.drive_sync = drive_sync;
         if let Some(metrics) = outcome.metrics.as_mut() {
             metrics.sync_ms = exec::millis(took);

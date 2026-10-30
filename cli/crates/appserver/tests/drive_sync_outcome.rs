@@ -350,6 +350,17 @@ impl Fixture {
         task: &str,
         tool: Value,
     ) -> (SupervisorMailbox, mpsc::UnboundedReceiver<Value>) {
+        self.start_with(task, tool, self.port.clone(), Arc::new(NoEvents))
+    }
+
+    /// [`Fixture::start`] with another drive sync port and task listener.
+    fn start_with(
+        &self,
+        task: &str,
+        tool: Value,
+        port: Arc<dyn protocol::ports::DriveSyncPort>,
+        listener: Arc<dyn TaskListener>,
+    ) -> (SupervisorMailbox, mpsc::UnboundedReceiver<Value>) {
         let policy = self.policy();
         let inputs = self.inputs();
         let admitted = TranslationInputs {
@@ -372,7 +383,7 @@ impl Fixture {
             traceparent: None,
             received: state::seams::now(),
             record: self.real_root.join(format!("record_{task}")),
-            listener: Arc::new(NoEvents),
+            listener,
             drive_sync: None,
         };
         let mailbox = supervisor::spawn(
@@ -390,7 +401,7 @@ impl Fixture {
         mailbox
             .send(SupervisorMessage::Drives(Box::new(TaskDrives {
                 permissions: TaskPermissions::admit(Some(&policy), &inputs).unwrap(),
-                drive_sync: Some(self.port.clone()),
+                drive_sync: Some(port),
             })))
             .unwrap();
         mailbox.send(SupervisorMessage::Start).unwrap();
@@ -642,6 +653,117 @@ async fn a_command_whose_check_found_a_failed_mount_runs_without_that_drive_besi
         "{later}"
     );
     assert_eq!(unmounted(&later), Vec::<String>::new(), "{later}");
+    fixture.sync.detach_all();
+}
+
+/// A drive sync port whose checks find nothing and whose `running` sync
+/// points answer only once the test releases them.
+#[derive(Debug, Default)]
+struct HeldRunning {
+    running: AtomicU64,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl protocol::ports::DriveSyncPort for HeldRunning {
+    fn check(&self, _: protocol::ports::DriveCheck) -> protocol::ports::DriveCheckAnswer {
+        Box::pin(async { protocol::ports::DriveChecked::default() })
+    }
+
+    fn sync_point(&self, point: protocol::ports::DriveSyncPoint) -> protocol::ports::DriveAnswer {
+        if !point.running {
+            return Box::pin(async { None });
+        }
+        self.running.fetch_add(1, Ordering::SeqCst);
+        let release = self.release.clone();
+        Box::pin(async move {
+            release.notified().await;
+            None
+        })
+    }
+
+    fn drives_variable(&self) -> Option<PathBuf> {
+        None
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancel_while_the_running_report_waits_for_its_sync_point_ends_the_command_at_once() {
+    let fixture = Fixture::new(vec![DRIVE], &[], Vec::new(), b"").await;
+    let port = Arc::new(HeldRunning::default());
+    let ticks = fixture.project.join("ticks");
+    let cmd = format!(
+        "while true; do echo tick >> '{}'; sleep 0.05; done",
+        ticks.display()
+    );
+    let (mailbox, mut reports) = fixture.start_with(
+        "task",
+        json!({ "tool": "exec_command", "input": {
+            "cmd": cmd, "wait_ms": 250, "on_wait_expiry": "detach",
+        } }),
+        port.clone(),
+        Arc::new(NoEvents),
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while port.running.load(Ordering::SeqCst) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the running report's sync point"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Held sync point: the cancel is answered and the command ends within
+    // the termination's bounds.
+    mailbox
+        .send(SupervisorMessage::Cancel(Box::new(Control {
+            connection_id: id("conn_a"),
+            correlation: correlation("task", "cancel"),
+            traceparent: None,
+            payload: serde_json::from_value(json!({
+                "session_id": SESSION, "binding_id": "bind_a",
+                "tool_use_event_id": "event", "task_id": "task",
+            }))
+            .unwrap(),
+        })))
+        .unwrap();
+    let bound = Duration::from_secs(10);
+    let reply = tokio::time::timeout(bound, reports.recv())
+        .await
+        .expect("the cancel's reply while the sync point is held")
+        .unwrap();
+    assert_eq!(reply["request_message_id"], "cancel", "{reply}");
+    assert_eq!(reply["result"]["result"]["cancelled"], true, "{reply}");
+    // The termination ends within its bounds; the command then writes no
+    // more ticks.
+    let size = || std::fs::metadata(&ticks).map_or(0, |metadata| metadata.len());
+    let deadline = tokio::time::Instant::now() + bound;
+    loop {
+        let before = size();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if size() == before {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the command ended while the sync point is held"
+        );
+    }
+    assert!(size() > 0, "the command ran");
+    assert!(
+        reports.try_recv().is_err(),
+        "the running report waits for its sync point"
+    );
+
+    // Released: the running report, then the terminal one.
+    port.release.notify_one();
+    let running = next(&mut reports, "the running report").await;
+    assert_eq!(running["phase"], "running", "{running}");
+    let terminal = next(&mut reports, "the terminal report").await;
+    assert_eq!(terminal["phase"], "terminal", "{terminal}");
+    assert_eq!(
+        terminal["result"]["result"]["cancelled"], true,
+        "{terminal}"
+    );
     fixture.sync.detach_all();
 }
 
