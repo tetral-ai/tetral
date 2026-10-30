@@ -17,11 +17,10 @@ The typed client of the App Server's local API belongs here, for apps that run
   within one five-second deadline, or an `Error`:
   `NotRunning` when the socket is missing or refuses the connection,
   `NotResponding` when status, shutdown or status and metrics exceed their
-  five-second total
-  deadline (connect through the complete response body), `Http`
-  with the status and body of any answer but the endpoint's success,
-  `Decode` for a body that does not decode or exceeds the response limit, and
-  `Io` for every other failure.
+  five-second total deadline (connect through the complete response body),
+  `Http` with the status and body of any answer but the endpoint's success,
+  `Decode` for a body that does not decode or exceeds the response limit,
+  and `Io` for every other failure.
 - A response body is read up to `RESPONSE_MAX_BYTES`, or the limit given to
   `Client::with_response_limit`, and refused past it.
 
