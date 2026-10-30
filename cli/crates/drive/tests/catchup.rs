@@ -700,6 +700,46 @@ async fn a_check_waits_for_the_notified_seq_and_a_catch_up_begun_after_connected
         .expect("the check ends")
         .unwrap();
     assert_eq!(harness.applied_seq().await, 6);
+
+    // A notice whose catch-up finds nothing yet keeps the check waiting
+    // until a later one applies its seq.
+    harness.sync.drive_changed(Id::new(DRIVE).unwrap(), 7);
+    harness
+        .changes((6, None), Ok(changes_page(Vec::new(), false)))
+        .await;
+    let check = ready(&harness.sync);
+    harness.no_call().await;
+    assert!(!check.is_finished());
+    harness.sync.drive_changed(Id::new(DRIVE).unwrap(), 7);
+    harness
+        .changes(
+            (6, None),
+            Ok(changes_page(vec![record(7, 0, "f", Some("7"))], false)),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(10), check)
+        .await
+        .expect("the check ends")
+        .unwrap();
+
+    // A `connected` alone starts a catch-up, which the check waits for.
+    harness.sync.connected();
+    let check = ready(&harness.sync);
+    let held = match harness.call().await {
+        Call::Changes {
+            after_seq: 7,
+            answer,
+            ..
+        } => answer,
+        _ => panic!("list changes after 7 was due"),
+    };
+    harness.no_call().await;
+    assert!(!check.is_finished());
+    held.send(Ok(changes_page(Vec::new(), false))).ok().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), check)
+        .await
+        .expect("the check ends")
+        .unwrap();
 }
 
 #[tokio::test]
