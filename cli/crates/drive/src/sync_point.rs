@@ -72,7 +72,8 @@ impl SyncPoint {
 }
 
 impl Owner {
-    /// Steps 1 to 3 of a sync point; the others follow its progress.
+    /// Starts a sync point: covers the Session's pending changes, starts
+    /// their uploads and begins the wait; the rest follows its progress.
     pub(crate) async fn sync_point(
         &mut self,
         request: SyncPointRequest,
@@ -173,9 +174,9 @@ impl Owner {
         }
     }
 
-    /// Step 4: the covered changes still uploading are listed; each mount
-    /// with a commit in flight lists its covered changes, and the others
-    /// send their due changes.
+    /// Ends the wait: the covered changes still uploading are listed; each
+    /// mount with a commit in flight lists its covered changes, and the
+    /// others send their due changes.
     async fn commit_step(&mut self, id: u64) {
         let Some(point) = self.sync_points.get_mut(&id) else {
             return;
@@ -286,7 +287,7 @@ impl Owner {
 
     /// Every change of a commit of `sync_point` whose answer was
     /// `409 content_missing` is listed `uploading`.
-    pub(crate) fn commit_lost(
+    pub(crate) fn commit_content_missing(
         &mut self,
         sync_point: Option<u64>,
         drive: &str,
@@ -351,8 +352,8 @@ impl Owner {
         }
     }
 
-    /// Steps 5 and 6: the outcome goes to the caller, then the commits it
-    /// held back are sent again.
+    /// Reports the outcome to the caller, then sends again the commits it
+    /// held back.
     async fn outcome(&mut self, id: u64) {
         let Some(mut point) = self.sync_points.remove(&id) else {
             return;
@@ -416,7 +417,7 @@ impl Owner {
         self.changes_ready().await;
     }
 
-    fn absolute(&self, key: &Key) -> AbsolutePath {
+    pub(crate) fn absolute(&self, key: &Key) -> AbsolutePath {
         AbsolutePath::new(
             self.machine_path(&key.0, &key.1)
                 .to_string_lossy()

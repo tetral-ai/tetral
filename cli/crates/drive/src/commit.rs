@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use protocol::drive_transfer::limits;
 use protocol::drive_transfer::{CommitChange, CommitResponse, CommitResult, CurrentVersion};
-use protocol::field::{AbsolutePath, NonEmptyString, Nullable, Sha256};
+use protocol::field::{NonEmptyString, Nullable, Sha256};
 use protocol::id::Id;
 use protocol::tool::{ChangeKind, DriveRejection, RejectionReason};
 use tokio::task::AbortHandle;
@@ -323,7 +323,7 @@ impl Owner {
                     .iter()
                     .flat_map(|hashes| hashes.iter().map(|hash| hash.as_str().to_owned()))
                     .collect();
-                self.commit_lost(flight.sync_point, &drive, &flight.changes);
+                self.commit_content_missing(flight.sync_point, &drive, &flight.changes);
                 resend = self.content_missing(&drive, &flight, &missing).await;
             }
             Err(ended) => {
@@ -447,7 +447,10 @@ impl Owner {
                             .and_then(|pending| pending.task_id.clone()),
                         entry: self.rejection(
                             &key,
-                            change,
+                            match change {
+                                CommitChange::Write { .. } => ChangeKind::Write,
+                                CommitChange::Delete { .. } => ChangeKind::Delete,
+                            },
                             *reason,
                             rule.clone(),
                             current.as_ref(),
@@ -549,23 +552,15 @@ impl Owner {
     pub(crate) fn rejection(
         &self,
         key: &Key,
-        change: &CommitChange,
+        change: ChangeKind,
         reason: RejectionReason,
         rule: Option<NonEmptyString>,
         current: Option<&CurrentVersion>,
     ) -> DriveRejection {
         let conflict = reason == RejectionReason::Conflict;
         DriveRejection {
-            path: AbsolutePath::new(
-                self.machine_path(&key.0, &key.1)
-                    .to_string_lossy()
-                    .into_owned(),
-            )
-            .expect("a machine path is absolute"),
-            change: match change {
-                CommitChange::Write { .. } => ChangeKind::Write,
-                CommitChange::Delete { .. } => ChangeKind::Delete,
-            },
+            path: self.absolute(key),
+            change,
             reason,
             rule,
             current_version_id: current
@@ -598,15 +593,9 @@ impl Owner {
         for file_id in removed {
             let _ = std::fs::remove_file(self.content_path(&key.0, file_id));
         }
-        let Some(commit_change) = change_of(&PendingChange {
-            content_sha256: Some("0".repeat(64)),
-            ..change.clone()
-        }) else {
-            return;
-        };
         let entry = self.rejection(
             key,
-            &commit_change,
+            ChangeKind::Write,
             RejectionReason::Limit,
             NonEmptyString::new(message).ok(),
             None,
