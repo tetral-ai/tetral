@@ -116,6 +116,9 @@ var publicContractErrorTypes = map[string]struct{}{
 	"instance_offline_error":     {},
 	"instance_unavailable_error": {},
 
+	"instance_not_attachable_error":   {},
+	"computer_already_attached_error": {},
+
 	"rate_limit_error":           {},
 	"drive_cursor_expired_error": {},
 }

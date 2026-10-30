@@ -104,7 +104,7 @@ unauthenticated.
 
 | Group | Status |
 |-------|--------|
-| Sessions | Live create/list/get/update/archive/delete and session resources |
+| Sessions | Live create/list/get/update/archive/delete, session resources, and session computers (add, get) |
 | Session threads | Live read surface under `/v1/sessions/{id}/threads` (list, get, archive) |
 | Session events | Live `POST /v1/sessions/{id}/events` (the admission-capped agent/session input path) and `GET` list. The SSE surfaces are owned by the `event-stream` service |
 | Agents | Live create/list/get (optionally at a specific version via a query parameter)/update/archive/version list. A version is read through the get route's version selector |
@@ -117,6 +117,39 @@ unauthenticated.
 | Models | Live `GET /v1/models` and `GET /v1/models/{model_id}`, served from the in-code catalog |
 | API keys | Owned by the `auth` service |
 | Health (`GET /health`) | Live (200), unauthenticated |
+
+### Session computers
+
+`internal/httpapi/computer_handler.go` and `internal/session/computers.go`
+serve the computers of a Session on `internal/computer`, the one writer of new
+computers. Session creation takes `computers`, or the top-level
+`environment_id` as a one-computer list (a cloud computer at `/workspace`
+holding the `github_repository` entries of `resources`); `computers` with
+`environment_id`, or with a `github_repository` resource, answers `400`, and
+every Session needs at least one cloud computer. Each entry is checked in the
+contract's field order and nothing is written when one fails: `400
+invalid_request_error`, `404 not_found_error` (an unknown Environment or
+instance), `409 instance_not_attachable_error` (a cloud or deregistered
+instance) or `409 computer_already_attached_error` (an instance named twice or
+already attached to the Session). A computer's `networking` copies its
+Environment's value at addition. Its repositories are stored as
+`github_repository` resource rows with `computer_id` and the resolved `path`
+(`mount_path`, or `<working_directory>/<name>`) and are fixed: `POST
+/resources` with a `github_repository` and `DELETE` of a repository resource
+answer `400`; token rotation stays allowed.
+
+`POST /v1/sessions/{session_id}/computers` adds one entry to an idle Session
+and answers `201` with the computer object. It requires `Idempotency-Key`
+(trimmed, 1 to 255 bytes, scoped to the credential, method and path, kept in
+`computer_idempotency_records` for the Session's life); a replay answers the
+same computer, a changed body `409 idempotency_conflict_error`. Session
+creation takes the same optional key and replays the same Session. `GET
+/v1/sessions/{session_id}/computers/{computer_id}` answers an `attached`
+computer, or a `detached` one still `closing` or `unknown`; otherwise `404`.
+Every Session object carries `computers`, its `attached` computers in
+addition order, and `environment_id`, the first attached cloud computer's
+Environment or `""`. An instance's `computer_count` counts the computers
+attached to it.
 
 ### Drives
 
@@ -202,9 +235,12 @@ There is no `deleting` state — delete tombstones synchronously and enqueues it
 cleanup atomically. `lifecycle_state` is one of three distinct durable axes;
 mutations also read the projected Session status, which combines stored
 `sessions.status` (`idle`, `rescheduling`, or `terminated`) with the live
-`session_runtime_status.status` residency row (`idle` or `running`). A session
-mutation — `update`, resource add, resource delete — requires the projected
-status to equal `idle` exactly: any non-`idle` status (`running`,
+`session_runtime_status.status` row (`running` while any thread of any role is
+`running` or `rescheduling`, `idle` when none is; written only by
+`runtimecontrol.RefreshSessionStatusTx`). A session mutation — `update`,
+resource add, resource delete, computer addition, archive — requires the
+projected status to equal `idle` exactly, read under the Session's runtime
+mutation lock: any non-`idle` status (`running`,
 `rescheduling`, or `terminated`) is rejected, and so is a `lifecycle_state` of
 `archiving`. A non-idle or archiving target returns
 `409 invalid_request_error`. Session
@@ -372,9 +408,9 @@ metadata lives in Postgres. Types are `file`, `github_repository`, and
 
 | Route | Behavior |
 | --- | --- |
-| `POST /resources` | Add a `file` resource referencing an already-uploaded file plus optional `mount_path`. The session must be `idle`. The transaction increments the resource revision; when a current Sandbox handle exists it also enqueues materialization, otherwise the first approved Sandbox tool materializes the latest revision during lazy activation. Non-idle or archiving sessions return `409`. |
+| `POST /resources` | Add a `file` resource (a `github_repository` → `400`; repositories come with their computer) referencing an already-uploaded file plus optional `mount_path`. The session must be `idle`. The transaction increments the resource revision; when a current Sandbox handle exists it also enqueues materialization, otherwise the first approved Sandbox tool materializes the latest revision during lazy activation. Non-idle or archiving sessions return `409`. |
 | `POST /resources/{id}` | `github_repository` token rotation only — write-only `{authorization_token}`, encrypted at rest, returned redacted; admitted in any run state. A `file` or `memory_store` resource carries no mutable field → `400`. |
-| `DELETE /resources/{id}` | Tombstone/detach for every type. The session must be `idle`. A resource with no materialized Sandbox handle detaches immediately; otherwise the row becomes deletion-pending and the same transaction advances the resource revision and enqueues materialization. Non-idle or archiving sessions return `409`. |
+| `DELETE /resources/{id}` | Tombstone/detach for `file` and `memory_store` resources (a `github_repository` → `400`). The session must be `idle`. A resource with no materialized Sandbox handle detaches immediately; otherwise the row becomes deletion-pending and the same transaction advances the resource revision and enqueues materialization. Non-idle or archiving sessions return `409`. |
 
 `memory_store` resources are attached explicitly by ID at session create — never
 silently defaulted and never added through `POST /resources`. A declared `file`

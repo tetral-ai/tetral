@@ -210,6 +210,10 @@ func registerRoutes(router chi.Router, sessionHandler *SessionHandler, authentic
 		registerPublicRoute(r, http.MethodGet, "/models", listModels, sessionHandler, opts, false)
 		registerPublicRoute(r, http.MethodGet, "/models/{model_id}", retrieveModel, sessionHandler, opts, false)
 
+		// Computers
+		registerPublicRoute(r, http.MethodPost, "/sessions/{session_id}/computers", sessionHandler.addComputer, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodGet, "/sessions/{session_id}/computers/{computer_id}", sessionHandler.getComputer, sessionHandler, opts, false)
+
 		// Resources
 		registerPublicRoute(r, http.MethodPost, "/sessions/{session_id}/resources", sessionHandler.addResource, sessionHandler, opts, false)
 		registerPublicRoute(r, http.MethodGet, "/sessions/{session_id}/resources", sessionHandler.listResources, sessionHandler, opts, false)

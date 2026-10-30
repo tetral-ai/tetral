@@ -8,6 +8,7 @@ import (
 
 	agentErrors "github.com/tetral-ai/tetral/internal/agent"
 	authErrors "github.com/tetral-ai/tetral/internal/auth"
+	computerErrors "github.com/tetral-ai/tetral/internal/computer"
 	driveErrors "github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/drive/skillpackage"
 	environmentErrors "github.com/tetral-ai/tetral/internal/environment"
@@ -208,6 +209,12 @@ func classifyError(err error) errorClassification {
 	var instanceOffline *instanceErrors.OfflineError
 	var instanceUnavailable *instanceErrors.UnavailableError
 
+	// Computer errors carry the answers of the Session computer routes.
+	var computerInvalid *computerErrors.InvalidError
+	var computerNotFound *computerErrors.NotFoundError
+	var computerNotAttachable *computerErrors.NotAttachableError
+	var computerAlreadyAttached *computerErrors.AlreadyAttachedError
+
 	var unavailable *UnavailableError
 
 	// Drive errors carry the answers of the developer drive API.
@@ -342,6 +349,14 @@ func classifyError(err error) errorClassification {
 		return classified(http.StatusConflict, "instance_offline_error", instanceOffline.Error())
 	case errors.As(err, &instanceUnavailable):
 		return classified(http.StatusForbidden, "instance_unavailable_error", instanceUnavailable.Error())
+	case errors.As(err, &computerInvalid):
+		return classified(http.StatusBadRequest, "invalid_request_error", computerInvalid.Message)
+	case errors.As(err, &computerNotFound):
+		return classified(http.StatusNotFound, "not_found_error", computerNotFound.Message)
+	case errors.As(err, &computerNotAttachable):
+		return classified(http.StatusConflict, "instance_not_attachable_error", computerNotAttachable.Error())
+	case errors.As(err, &computerAlreadyAttached):
+		return classified(http.StatusConflict, "computer_already_attached_error", computerAlreadyAttached.Error())
 	case errors.As(err, &unavailable):
 		return classified(http.StatusServiceUnavailable, "api_error", unavailable.Message)
 	case errors.As(err, &driveRejected):
