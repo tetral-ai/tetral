@@ -245,6 +245,37 @@ async fn content_missing_uploads_the_named_content_again_and_resends_the_rest_af
 }
 
 #[tokio::test]
+async fn content_missing_for_a_renamed_cache_file_uploads_its_blob() {
+    let mut env = Env::new();
+    env.stub.list("c", "sea");
+    let session = env.session("sess_a", Write::default(), true).await;
+    assert_eq!(session.read("c").await.unwrap(), "sea");
+    let drive = session.drive.clone();
+    session
+        .sync
+        .rename(&drive, TOP_INODE, b"c", TOP_INODE, b"d", Some(NO_TASK))
+        .await
+        .unwrap();
+    let point = session.sync_point(None, RESULT_WAIT, None);
+    let commit = env.call().await;
+    let sea = sha256(b"sea");
+    commit.commit_ended(Ended::Decision(error_body(
+        "content_missing",
+        "content is missing",
+        &[&sea],
+    )));
+    outcome(point).await;
+    // The deletion of `c` is sent again; the blob of `d` uploads.
+    let mut seen = [env.call().await, env.call().await];
+    seen.sort_by_key(|call| matches!(call, support::Call::Commit { .. }));
+    assert_eq!(seen[0].sha256(), sea, "the blob uploads");
+    assert_eq!(
+        summary(seen[1].changes()),
+        [("c".to_owned(), "delete", Some(sea.clone()))]
+    );
+}
+
+#[tokio::test]
 async fn file_too_large_is_a_limit_rejection_and_removes_a_new_file() {
     let mut env = Env::new();
     let session = env.session("sess_a", Write::default(), true).await;

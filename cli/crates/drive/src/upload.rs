@@ -63,6 +63,9 @@ pub(crate) struct Uploads {
     pub sizes: HashMap<Key, i64>,
     /// The `exec_command` tasks of the Session that run.
     pub running_tasks: HashSet<String>,
+    /// The writes whose content a commit answered `409 content_missing`:
+    /// their next upload sends it, a `cache` file's from its blob.
+    pub missing: HashSet<Key>,
 }
 
 fn sha256_of(path: &std::path::Path) -> std::io::Result<(String, i64)> {
@@ -158,8 +161,16 @@ impl Owner {
                 .filter(|(drive, _)| *drive == key.0)
                 .map(|(_, sha256)| sha256.clone()),
         );
+        let missing = self.uploads.missing.remove(key);
+        if missing && let Some(sha256) = &row.local_sha256 {
+            held.remove(sha256);
+        }
         let source = match row.content.as_deref() {
             Some("session") => Source::File(self.content_path(&key.0, row.file_id)),
+            _ if missing => Source::File(
+                self.blobs
+                    .join(row.local_sha256.as_deref().unwrap_or_default()),
+            ),
             _ => Source::Cache {
                 sha256: row.local_sha256.clone().unwrap_or_default(),
                 size: row.size.unwrap_or(0),

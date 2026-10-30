@@ -356,7 +356,8 @@ impl Owner {
     }
 
     /// `409 content_missing`: the writes naming a missing hash upload
-    /// again; the other changes are the commit to send again.
+    /// again with a request, a `cache` file's from its blob; the other
+    /// changes are the commit to send again.
     async fn content_missing(
         &mut self,
         drive: &str,
@@ -378,6 +379,7 @@ impl Owner {
                 self.uploads
                     .put
                     .remove(&(drive.to_owned(), content_sha256.as_str().to_owned()));
+                self.uploads.missing.insert(key.clone());
                 reupload.push(key);
             }
         }
