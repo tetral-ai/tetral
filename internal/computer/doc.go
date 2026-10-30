@@ -21,12 +21,24 @@
 //     that moment; its runtime_input_id names the machine_message input of the
 //     Session's main thread that carries it to the Runtime. Rows are never
 //     updated.
+//   - Table computer_requests: one row per Controller request of a cloud
+//     computer without a usable instance, new (no current instance) or wake
+//     (an offline current instance). At most one request of a computer is
+//     open (pending or claimed); every waiting call shares it. Each
+//     transition notifies RequestEventChannel, which every hub pod turns into
+//     request stream events.
+//   - The rule of an instance's unused (RefreshUnused), which
+//     internal/instance.SetUnused stores.
 //   - The repositories of a cloud computer are Session resources
 //     (internal/session) whose rows name the computer and the resolved path;
 //     this package reads them for the computer object.
 //
 // STATES:
 //
+//	request            pending -> claimed (ClaimRequest) -> fulfilled (FulfilRequests),
+//	                   claimed -> pending (ReturnToPending) | failed (Fail),
+//	                   pending -> fulfilled (a wake's ready) | expired (Expire)
+//	                   | failed (Fail of a wake whose instance is deregistered)
 //	association_state  attached -> detached (removal, archive)
 //	execution_state    waiting -> preparing -> ready | failed, then
 //	                   closing -> closed | unknown after detachment
@@ -50,4 +62,13 @@
 //     routes land).
 //   - computer-hub, through internal/instance: the attached computers of an
 //     instance give its computer_count.
+//   - computer-hub: ListPendingRequests, ReadRequest and ClaimRequest for the
+//     request routes; FulfilRequests through hubflow.AcceptReady;
+//     ReturnToPending and Fail only through hubflow.ReturnRequestToPending and
+//     hubflow.FailRequest, which end the revoked credential's connection.
+//   - Tool-call admission (EnsureRequest) and the cleanup phase (Expire, and
+//     ReturnToPending after the claim timeout), once they land.
+//
+// Every writer that changes an input of the unused rule calls RefreshUnused
+// in its transaction.
 package computer
