@@ -276,7 +276,9 @@ async fn twenty_downloads_run_eight_at_a_time_in_the_order_their_reads_came() {
         let bytes = format!("content {index}").into_bytes();
         let hash = sha256(&bytes);
         stub.serve(&hash, &bytes);
-        let session = if index % 2 == 0 { "sess_a" } else { "sess_b" };
+        // Turns between Sessions would grant sess_b's first read before
+        // sess_a's last four.
+        let session = if index < 12 { "sess_a" } else { "sess_b" };
         reads.push(tokio::spawn(cache.read(needed(
             session,
             &hash,
