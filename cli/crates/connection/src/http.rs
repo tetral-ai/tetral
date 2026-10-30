@@ -65,6 +65,8 @@ pub enum Failure {
     Server,
     /// A body over its limit, or an error answer whose body does not decode.
     Unreadable,
+    /// A download's local write failed.
+    Sink(std::io::ErrorKind),
 }
 
 pub struct Transport {

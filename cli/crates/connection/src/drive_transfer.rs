@@ -270,6 +270,7 @@ impl HttpDriveTransfer {
                 Err(Failure::Redirect | Failure::Unreadable) => {
                     return Err(self.rejected(endpoint, 0, None));
                 }
+                Err(Failure::Sink(kind)) => return Err(Ended::Sink(kind.into())),
             };
             if (200..300).contains(&raw.status) {
                 if raw.body.is_none() && matches!(into, Into2xx::Memory(_)) {
@@ -476,13 +477,15 @@ async fn read(
             });
         }
         if streamed == Streamed::Whole {
-            sink.restart().map_err(|_| Failure::Unreadable)?;
+            sink.restart()
+                .map_err(|error| Failure::Sink(error.kind()))?;
         }
         while let Some(frame) = body.frame().await {
             let frame = frame.map_err(|_| Failure::Network)?;
             if let Ok(chunk) = frame.into_data() {
                 received.fetch_add(chunk.len() as u64, Ordering::AcqRel);
-                sink.append(&chunk).map_err(|_| Failure::Unreadable)?;
+                sink.append(&chunk)
+                    .map_err(|error| Failure::Sink(error.kind()))?;
             }
         }
         return Ok(Raw {

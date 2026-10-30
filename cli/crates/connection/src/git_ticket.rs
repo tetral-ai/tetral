@@ -57,7 +57,9 @@ pub(crate) fn answer(answer: Answer) -> TicketAnswer {
             Failure::Timeout => "the git ticket fetch timed out",
             Failure::Redirect => "the git ticket fetch was answered with a redirect",
             Failure::Server => "the git ticket fetch was answered with a server error",
-            Failure::Unreadable => "the git ticket fetch got an unreadable answer",
+            Failure::Unreadable | Failure::Sink(_) => {
+                "the git ticket fetch got an unreadable answer"
+            }
         }
         .to_owned()),
     }

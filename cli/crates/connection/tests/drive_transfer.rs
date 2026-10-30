@@ -782,6 +782,31 @@ async fn a_resumed_download_answered_200_restarts_at_byte_zero() {
     assert_eq!(sink.bytes(), CONTENT);
     // Once at the first answer and once at the 200 that restarted it.
     assert_eq!(sink.restarts(), 2);
+
+    // A local write that fails ends the download as the sink's failure.
+    struct Full;
+    impl ContentSink for Full {
+        fn received(&self) -> u64 {
+            0
+        }
+        fn restart(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn append(&mut self, _: &[u8]) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::StorageFull.into())
+        }
+    }
+    harness.stub.reply(Endpoint::Download.valid_answer());
+    let request = harness.request(Download {
+        sha256: Sha256::new("a".repeat(64)).unwrap(),
+        size: CONTENT.len() as u64,
+    });
+    let ended = harness.client.download_content(request, &mut Full).await;
+    assert!(
+        matches!(&ended, Err(Ended::Sink(error)) if error.kind() == std::io::ErrorKind::StorageFull),
+        "{:?}",
+        ended.err().map(|ended| format!("{ended:?}"))
+    );
 }
 
 #[tokio::test]
