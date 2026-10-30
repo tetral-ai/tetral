@@ -1,12 +1,14 @@
 package joint
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -76,7 +78,9 @@ func (c *controllerClient) decode(response apiResponse, want int, target any) {
 type instanceObject struct {
 	ID                  string            `json:"id"`
 	Kind                string            `json:"kind"`
+	ComputerID          *string           `json:"computer_id"`
 	RegistrationState   string            `json:"registration_state"`
+	Unused              bool              `json:"unused"`
 	Connection          *connectionObject `json:"connection"`
 	CLIVersion          *string           `json:"cli_version"`
 	CLIUpdateAvailable  bool              `json:"cli_update_available"`
@@ -203,4 +207,105 @@ func bootstrap(serverURL, instanceID string, credential credentialObject) []byte
 		"expires_at":     credential.ExpiresAt.UTC().Format(time.RFC3339Nano),
 	})
 	return data
+}
+
+// requestObject is a Controller request as the request routes serve it.
+type requestObject struct {
+	ID            string  `json:"id"`
+	Kind          string  `json:"kind"`
+	EnvironmentID string  `json:"environment_id"`
+	InstanceID    *string `json:"instance_id"`
+	State         string  `json:"state"`
+	WorkerID      *string `json:"worker_id"`
+}
+
+// claimResult is the answer to a claim; bootstrap is the object configure
+// --from-stdin reads, kept as received.
+type claimResult struct {
+	Request          requestObject   `json:"request"`
+	Bootstrap        json.RawMessage `json:"bootstrap"`
+	WorkingDirectory *string         `json:"working_directory"`
+}
+
+// bootstrapFields are the IDs of a claim's bootstrap.
+func (r claimResult) bootstrapFields(t *testing.T) (instanceID, credentialID string) {
+	t.Helper()
+	var fields struct {
+		InstanceID   string `json:"instance_id"`
+		CredentialID string `json:"credential_id"`
+	}
+	if err := json.Unmarshal(r.Bootstrap, &fields); err != nil {
+		t.Fatalf("decode bootstrap %s: %v", r.Bootstrap, err)
+	}
+	return fields.InstanceID, fields.CredentialID
+}
+
+// listRequests is the first page of environmentID's pending requests.
+func (c *controllerClient) listRequests(ctx context.Context, environmentID string) []requestObject {
+	c.t.Helper()
+	var page struct {
+		Data []requestObject `json:"data"`
+	}
+	c.decode(c.do(ctx, http.MethodGet, "/v1/instance_requests?environment_id="+environmentID+"&state=pending&limit=100", "", nil), http.StatusOK, &page)
+	return page.Data
+}
+
+func (c *controllerClient) claimRequest(ctx context.Context, requestID, workerID string) claimResult {
+	c.t.Helper()
+	var result claimResult
+	c.decode(c.do(ctx, http.MethodPost, "/v1/instance_requests/"+requestID+"/claim", "", map[string]string{"worker_id": workerID}), http.StatusOK, &result)
+	return result
+}
+
+func (c *controllerClient) failRequest(ctx context.Context, requestID string) requestObject {
+	c.t.Helper()
+	var object requestObject
+	c.decode(c.do(ctx, http.MethodPost, "/v1/instance_requests/"+requestID+"/fail", "", nil), http.StatusOK, &object)
+	return object
+}
+
+// requestEvent is one event of the request stream.
+type requestEvent struct {
+	name    string
+	request requestObject
+}
+
+// openRequestStream subscribes to environmentID's request stream through the
+// edge and returns its events as they arrive.
+func (c *controllerClient) openRequestStream(ctx context.Context, environmentID string) <-chan requestEvent {
+	c.t.Helper()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/instance_requests/stream?environment_id="+environmentID, nil)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	request.Header.Set("X-Api-Key", c.apiKey)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		c.t.Fatalf("open the request stream: %v", err)
+	}
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "text/event-stream" {
+		_ = response.Body.Close()
+		c.t.Fatalf("request stream answered %d %s", response.StatusCode, response.Header.Get("Content-Type"))
+	}
+	c.t.Cleanup(func() { _ = response.Body.Close() })
+	c.record.command("Controller `GET /v1/instance_requests/stream?environment_id=%s` opened", environmentID)
+	events := make(chan requestEvent, 16)
+	go func() {
+		defer close(events)
+		scanner := bufio.NewScanner(response.Body)
+		var name string
+		for scanner.Scan() {
+			line := scanner.Text()
+			switch {
+			case strings.HasPrefix(line, "event: "):
+				name = strings.TrimPrefix(line, "event: ")
+			case strings.HasPrefix(line, "data: "):
+				var object requestObject
+				if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &object) == nil {
+					events <- requestEvent{name: name, request: object}
+				}
+			}
+		}
+	}()
+	return events
 }

@@ -31,6 +31,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/blob/blobtest"
+	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/testinfra"
 	"github.com/tetral-ai/tetral/internal/transportsecurity"
 )
@@ -253,6 +254,11 @@ type engine struct {
 	edge     *edge
 	// hubs are the computer-hub processes by pod name.
 	hubs map[string]*serviceProcess
+	// ownerURL and databaseCA reach PostgreSQL as the table owner, for what
+	// a test writes or reads in-process in place of a service; owner is that
+	// connection once opened.
+	ownerURL, databaseCA string
+	owner                *dbconnect.Client
 }
 
 // engineOptions are the settings a test gives the Engine services. hubPods
@@ -297,6 +303,7 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 	e.nats = nats
 	e.identity = newIdentity(t)
 	roleURL, migrationOwner := prepareDatabase(t, postgres)
+	e.ownerURL, e.databaseCA = roleURL(migrationOwner), filepath.Join(postgres.Directory, "ca.pem")
 	databaseEnv := func(role string) map[string]string {
 		return map[string]string{"TETRAL_DATABASE_URL": roleURL(role), "TETRAL_DATABASE_TLS_CA_PATH": filepath.Join(postgres.Directory, "ca.pem"), "TETRAL_DATABASE_TLS_SERVER_NAME": postgresName}
 	}
