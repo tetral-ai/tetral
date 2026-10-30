@@ -1324,6 +1324,15 @@ impl Owner {
             .into_iter()
             .filter(|path| edit.entry(path).is_some())
             .collect();
+        // A moved folder's entry may land at an excluded path below the
+        // target.
+        let exclude = self.exclude_of(drive);
+        if moved
+            .iter()
+            .any(|from| paths::excluded(&format!("{target}{}", &from[source.len()..]), exclude))
+        {
+            return Err(Errno::ACCESS);
+        }
         let mut files = Vec::new();
         for from in &moved {
             let to = format!("{target}{}", &from[source.len()..]);

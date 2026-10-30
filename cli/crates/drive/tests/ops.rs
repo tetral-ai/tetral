@@ -514,6 +514,26 @@ async fn excluded_paths_fail_with_eacces_at_them_and_enoent_below_and_record_not
 }
 
 #[tokio::test]
+async fn a_folder_moved_so_that_an_entry_lands_at_an_excluded_path_fails_with_eacces() {
+    let stub = Stub::default();
+    let harness = Harness::start(stub, &["out/datasets/"]).await;
+    harness.mkdir("", "box").await.unwrap();
+    harness.mkdir("box", "datasets").await.unwrap();
+    harness.create("box/datasets", b"a.csv").await.unwrap();
+    let before = harness.tables().await;
+    let drive = harness.drive.clone();
+    assert_eq!(
+        harness
+            .sync
+            .rename(&drive, TOP_INODE, b"box", TOP_INODE, b"out", Some(TASK_PID))
+            .await
+            .err(),
+        Some(Errno::ACCESS)
+    );
+    assert_eq!(harness.tables().await, before);
+}
+
+#[tokio::test]
 async fn of_the_permissions_only_the_executable_bit_is_recorded() {
     let stub = Stub::default();
     stub.list("run.sh", "echo", false);
