@@ -174,6 +174,12 @@
     "kind": "remaining_provider_budget"
   },
   {
+    "method": "ResolveAttachment",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveAttachment",
+    "timeoutMs": null,
+    "kind": "remaining_provider_budget"
+  },
+  {
     "method": "ResolveFileAttachmentMetadata",
     "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveFileAttachmentMetadata",
     "timeoutMs": null,

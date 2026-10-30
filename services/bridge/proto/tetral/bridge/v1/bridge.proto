@@ -37,6 +37,7 @@ service AgentRuntimeBridgeService {
   rpc AuthorizeWebToolExecution(AuthorizeWebToolExecutionRequest) returns (AuthorizeWebToolExecutionResponse);
   rpc RunMemory(RunMemoryRequest) returns (RunMemoryResponse);
   rpc ResolveTransientAttachment(ResolveTransientAttachmentRequest) returns (ResolveTransientAttachmentResponse);
+  rpc ResolveAttachment(ResolveAttachmentRequest) returns (ResolveAttachmentResponse);
   rpc ResolveFileAttachmentMetadata(ResolveFileAttachmentMetadataRequest) returns (ResolveFileAttachmentMetadataResponse);
   rpc ReadFileAttachmentChunk(ReadFileAttachmentChunkRequest) returns (ReadFileAttachmentChunkResponse);
   rpc McpManifestChanged(McpManifestChangedRequest) returns (McpManifestChangedResponse);
@@ -484,6 +485,28 @@ message ResolveTransientAttachmentResponse {
   oneof outcome {
     ResolvedTransientAttachment resolved = 1;
     TransientAttachmentUnavailable unavailable = 2;
+  }
+}
+
+// An attachment of the image store, resolved for a model request while it
+// is live and belongs to the scope's Session.
+message ResolveAttachmentRequest {
+  RuntimeScope scope = 1;
+  string attachment_id = 2;
+}
+
+message ResolvedAttachment {
+  string media_type = 1;
+  bytes data = 2;
+}
+
+// An unknown attachment, another Session's or an expired one.
+message AttachmentUnavailable {}
+
+message ResolveAttachmentResponse {
+  oneof outcome {
+    ResolvedAttachment resolved = 1;
+    AttachmentUnavailable unavailable = 2;
   }
 }
 

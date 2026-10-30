@@ -447,7 +447,7 @@ func checkBridgePolicyBoundaries(t *testing.T, evidence bridgePolicyEvidence) {
 			t.Fatalf("%s parsed default differs from its owner", method)
 		}
 	}
-	if fixed != 36 || scaled != 1 || remaining != 3 || len(evidence.DefaultPolicies) != 40 {
+	if fixed != 36 || scaled != 1 || remaining != 4 || len(evidence.DefaultPolicies) != 41 {
 		t.Fatal("Bridge policy semantic coverage differs")
 	}
 	if evidence.Defaults["registerRuntimeProcess"].EnvironmentKey != "TETRAL_RUNTIME_REGISTER_TIMEOUT_MS" || evidence.Defaults["reportRuntimeProcess"].EnvironmentKey != "TETRAL_RUNTIME_REPORT_TIMEOUT_MS" {

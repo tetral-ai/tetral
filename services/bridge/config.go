@@ -3,6 +3,7 @@ package agentruntimebridge
 import (
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
@@ -27,6 +28,14 @@ const EnvCompactionRescheduleBudget = "TETRAL_COMPACTION_RESCHEDULE_BUDGET"
 
 const EnvDatabaseURL = "TETRAL_DATABASE_URL"
 
+// EnvAttachmentLifetimeSeconds is how long an image store attachment stays
+// live after it is stored, in whole seconds.
+const EnvAttachmentLifetimeSeconds = "TETRAL_BRIDGE_ATTACHMENT_LIFETIME_SECONDS"
+
+// DefaultAttachmentLifetime is the attachment lifetime when
+// EnvAttachmentLifetimeSeconds is unset.
+const DefaultAttachmentLifetime = time.Hour
+
 const defaultProviderRescheduleBudget = int64(3)
 
 const defaultCompactionRescheduleBudget = int64(2)
@@ -42,6 +51,7 @@ type BridgeAPIConfig struct {
 	GatewayTokenPath           string
 	ProviderRescheduleBudget   int64
 	CompactionRescheduleBudget int64
+	AttachmentLifetime         time.Duration
 }
 
 func BridgeAPIConfigFromEnv(env Env) (BridgeAPIConfig, error) {
@@ -53,6 +63,7 @@ func BridgeAPIConfigFromEnv(env Env) (BridgeAPIConfig, error) {
 		GatewayTokenPath:           strings.TrimSpace(env.Getenv(EnvBridgeGatewayTokenPath)),
 		ProviderRescheduleBudget:   defaultProviderRescheduleBudget,
 		CompactionRescheduleBudget: defaultCompactionRescheduleBudget,
+		AttachmentLifetime:         DefaultAttachmentLifetime,
 	}
 	if cfg.MCPConnectorGRPCAddress == "" {
 		return BridgeAPIConfig{}, workload.NewConfigError(EnvBridgeMCPConnectorGRPCAddr + " is required")
@@ -75,6 +86,13 @@ func BridgeAPIConfigFromEnv(env Env) (BridgeAPIConfig, error) {
 	}
 	if cfg.CompactionRescheduleBudget, err = parseBoundedRescheduleBudget(env.Getenv(EnvCompactionRescheduleBudget), EnvCompactionRescheduleBudget, defaultCompactionRescheduleBudget); err != nil {
 		return BridgeAPIConfig{}, err
+	}
+	if raw := strings.TrimSpace(env.Getenv(EnvAttachmentLifetimeSeconds)); raw != "" {
+		seconds, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || seconds <= 0 {
+			return BridgeAPIConfig{}, workload.NewConfigError(EnvAttachmentLifetimeSeconds + " must be a positive integer")
+		}
+		cfg.AttachmentLifetime = time.Duration(seconds) * time.Second
 	}
 	if cfg.ProcessPolicy, err = runtimecontrol.ProcessPolicyFromEnv(env.Getenv); err != nil {
 		return BridgeAPIConfig{}, err

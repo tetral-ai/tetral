@@ -2812,6 +2812,64 @@
             "workspace.id": "string"
           }
         },
+        "bridge.attachment.gc_completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "attachment.deleted": "integer",
+            "attachment.failed": "integer",
+            "component": "string",
+            "event.kind": "string",
+            "operation": "string"
+          }
+        },
+        "bridge.attachment.gc_failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "attachment.deleted": "integer",
+            "attachment.failed": "integer",
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "scan_failed": {
+              "class": "attachment_gc_error",
+              "message_safe": "attachment GC scan failed"
+            }
+          }
+        },
+        "bridge.attachment.gc_partial": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "attachment.deleted": "integer",
+            "attachment.failed": "integer",
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "delete_failed": {
+              "class": "attachment_gc_error",
+              "message_safe": "one or more attachment contents were not released"
+            }
+          }
+        },
         "bridge.execution_result_listener.disconnected": {
           "level": "WARN",
           "log_type": "app",

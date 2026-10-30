@@ -3,6 +3,7 @@ package agentruntimebridge
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 )
@@ -25,8 +26,8 @@ func TestBridgeAPIConfigRequiresMCPConnectorRoute(t *testing.T) {
 	if cfg.MCPConnectorGRPCAddress != env[EnvBridgeMCPConnectorGRPCAddr] || cfg.GatewayTokenPath != env[EnvBridgeGatewayTokenPath] {
 		t.Fatalf("BridgeAPIConfigFromEnv = %#v; want env projection", cfg)
 	}
-	if cfg.ProviderRescheduleBudget != 3 || cfg.CompactionRescheduleBudget != 2 {
-		t.Fatalf("BridgeAPIConfigFromEnv retry budgets = %d/%d; want 3/2", cfg.ProviderRescheduleBudget, cfg.CompactionRescheduleBudget)
+	if cfg.ProviderRescheduleBudget != 3 || cfg.CompactionRescheduleBudget != 2 || cfg.AttachmentLifetime != time.Hour {
+		t.Fatalf("BridgeAPIConfigFromEnv retry budgets = %d/%d, attachment lifetime %s; want 3/2 and 1h", cfg.ProviderRescheduleBudget, cfg.CompactionRescheduleBudget, cfg.AttachmentLifetime)
 	}
 
 	for _, missing := range []string{EnvBridgeMCPConnectorGRPCAddr, EnvBridgeGatewayTokenPath} {
@@ -46,10 +47,13 @@ func TestBridgeAPIConfigRequiresMCPConnectorRoute(t *testing.T) {
 		name  string
 		key   string
 		value string
+		want  string
 	}{
-		{name: "provider negative", key: EnvProviderRescheduleBudget, value: "-1"},
-		{name: "provider too large", key: EnvProviderRescheduleBudget, value: "11"},
-		{name: "compaction malformed", key: EnvCompactionRescheduleBudget, value: "two"},
+		{name: "provider negative", key: EnvProviderRescheduleBudget, value: "-1", want: " must be an integer between 0 and 10"},
+		{name: "provider too large", key: EnvProviderRescheduleBudget, value: "11", want: " must be an integer between 0 and 10"},
+		{name: "compaction malformed", key: EnvCompactionRescheduleBudget, value: "two", want: " must be an integer between 0 and 10"},
+		{name: "attachment lifetime zero", key: EnvAttachmentLifetimeSeconds, value: "0", want: " must be a positive integer"},
+		{name: "attachment lifetime with a unit", key: EnvAttachmentLifetimeSeconds, value: "1h", want: " must be a positive integer"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			invalid := configTestEnv{
@@ -57,8 +61,8 @@ func TestBridgeAPIConfigRequiresMCPConnectorRoute(t *testing.T) {
 				EnvBridgeGatewayTokenPath:     env[EnvBridgeGatewayTokenPath],
 				test.key:                      test.value,
 			}
-			if _, err := BridgeAPIConfigFromEnv(invalid); err == nil || !strings.Contains(err.Error(), test.key+" must be an integer between 0 and 10") {
-				t.Fatalf("BridgeAPIConfigFromEnv %s error = %v; want bounded integer validation", test.key, err)
+			if _, err := BridgeAPIConfigFromEnv(invalid); err == nil || !strings.Contains(err.Error(), test.key+test.want) {
+				t.Fatalf("BridgeAPIConfigFromEnv %s=%s error = %v; want %q", test.key, test.value, err, test.key+test.want)
 			}
 		})
 	}

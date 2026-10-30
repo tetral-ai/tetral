@@ -322,6 +322,7 @@
         "TETRAL_BRIDGE_ADMISSION_TIMEOUT_MS",
         "TETRAL_BRIDGE_API_GRPC_ADDR",
         "TETRAL_BRIDGE_API_HTTP_ADDR",
+        "TETRAL_BRIDGE_ATTACHMENT_LIFETIME_SECONDS",
         "TETRAL_BRIDGE_BACKGROUND_RESULT_WAIT_TIMEOUT_MS",
         "TETRAL_BRIDGE_GATEWAY_TOKEN_PATH",
         "TETRAL_BRIDGE_MCP_CONNECTOR_GRPC_ADDR",
@@ -800,6 +801,7 @@
         "TETRAL_BRIDGE_REFRESH_RUNTIME_BINDING_TOKEN_TIMEOUT_MS",
         "TETRAL_BRIDGE_RELEASE_RUNTIME_BINDING_TIMEOUT_MS",
         "TETRAL_BRIDGE_RELINQUISH_MCP_TOOL_RESULT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_RESOLVE_ATTACHMENT_TIMEOUT_MS",
         "TETRAL_BRIDGE_RESOLVE_CHILD_THREAD_TIMEOUT_MS",
         "TETRAL_BRIDGE_RESOLVE_FILE_ATTACHMENT_METADATA_TIMEOUT_MS",
         "TETRAL_BRIDGE_RESOLVE_TRANSIENT_ATTACHMENT_TIMEOUT_MS",
@@ -957,6 +959,10 @@
         "resolveTransientAttachment": {
           "kind": "remaining_provider_budget",
           "environment_key": "TETRAL_BRIDGE_RESOLVE_TRANSIENT_ATTACHMENT_TIMEOUT_MS"
+        },
+        "resolveAttachment": {
+          "kind": "remaining_provider_budget",
+          "environment_key": "TETRAL_BRIDGE_RESOLVE_ATTACHMENT_TIMEOUT_MS"
         },
         "resolveFileAttachmentMetadata": {
           "kind": "remaining_provider_budget",

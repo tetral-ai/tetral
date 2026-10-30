@@ -10,6 +10,7 @@ metadata:
 data:
   TETRAL_PROVIDER_RESCHEDULE_BUDGET: '3'
   TETRAL_COMPACTION_RESCHEDULE_BUDGET: '2'
+  TETRAL_BRIDGE_ATTACHMENT_LIFETIME_SECONDS: {{ .Values.imageStore.lifetimeSeconds | quote }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -102,6 +103,11 @@ spec:
                 configMapKeyRef:
                   name: bridge-config
                   key: TETRAL_COMPACTION_RESCHEDULE_BUDGET
+            - name: TETRAL_BRIDGE_ATTACHMENT_LIFETIME_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: bridge-config
+                  key: TETRAL_BRIDGE_ATTACHMENT_LIFETIME_SECONDS
             - name: KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH
               value: /var/run/secrets/tetral-kubernetes-api/bridge-api-tokenreview/token
             - name: KUBERNETES_API_SERVER_URL

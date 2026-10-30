@@ -476,3 +476,8 @@ authIssuerNetwork:
   peers: []
   ports:
     - 443
+
+# imageStore.lifetimeSeconds is how long an image or document attachment stays
+# readable after it is stored; Bridge collects it afterwards.
+imageStore:
+  lifetimeSeconds: 3600
