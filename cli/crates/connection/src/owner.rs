@@ -1852,12 +1852,9 @@ impl Owner {
                 Some(credential) => self.persist(&mut held, credential),
                 None => self.fetch_rejected(&mut held, INVALID_RESPONSE),
             },
-            _ => {
-                let at = now + backoff.next_wait();
-                if held.deadline.is_some_and(|deadline| at < deadline) {
-                    *retry_at = Some(at);
-                }
-            }
+            // The connection's end ends the renewal, so a retry past the
+            // current deadline is kept: heartbeat ACKs move the deadline.
+            _ => *retry_at = Some(now + backoff.next_wait()),
         }
         Phase::Held(held)
     }
@@ -1981,25 +1978,24 @@ impl Owner {
     }
 
     /// The answer to the git-ticket fetch `number`: the Session binding
-    /// owner gets the ticket or the failure's message; no answer is retried
-    /// within the connection deadline.
+    /// owner gets the ticket or the failure's message. A fetch that got no
+    /// answer is sent again when its next attempt starts before the
+    /// connection deadline, and fails otherwise.
     fn ticket_answered(&mut self, held: &mut Held, number: u64, answer: Answer, now: Duration) {
         let Some(fetch) = held.tickets.get_mut(&number) else {
             return;
         };
-        match git_ticket::answer(answer) {
-            Some(answer) => {
-                let fetch = held.tickets.remove(&number).expect("the fetch is pending");
-                self.owners
-                    .git_ticket(&fetch.session_id, fetch.request, answer);
-            }
-            None => {
-                let at = now + fetch.backoff.next_wait();
-                if held.deadline.is_some_and(|deadline| at < deadline) {
-                    fetch.retry_at = Some(at);
-                }
+        if matches!(answer, Answer::Failed(_)) {
+            let at = now + fetch.backoff.next_wait();
+            if held.deadline.is_some_and(|deadline| at < deadline) {
+                fetch.retry_at = Some(at);
+                return;
             }
         }
+        let answer = git_ticket::answer(answer);
+        let fetch = held.tickets.remove(&number).expect("the fetch is pending");
+        self.owners
+            .git_ticket(&fetch.session_id, fetch.request, answer);
     }
 
     /// Closes the connection's stream; the outbox drops its reports, the
@@ -2537,6 +2533,47 @@ mod tests {
             vec![ConnectionState::Stopped]
         );
         assert!(answer.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_credential_fetch_is_retried_past_the_deadline_and_a_ticket_fetch_fails_there() {
+        let (mut owner, _) = owner_with_budget(crate::report_memory::Budget::new(512, 512));
+        let (mut held, task) = held(1);
+        held.deadline = Some(Duration::from_secs(10));
+        let backoff = || Backoff::new(Duration::from_secs(30), BASE_MAX, || 0.0);
+        held.renewal = Some(Renewal::Fetching {
+            credential_id: Id::new("cred_b").unwrap(),
+            body: Vec::new(),
+            backoff: backoff(),
+            retry_at: None,
+        });
+        let failed = || Answer::Failed(crate::http::Failure::Server);
+        let Phase::Held(mut held) = owner.credential_answered(held, failed(), Duration::ZERO)
+        else {
+            panic!("held connection");
+        };
+        // Heartbeat ACKs may still move the deadline past the retry.
+        assert!(matches!(
+            held.renewal,
+            Some(Renewal::Fetching { retry_at: Some(at), .. }) if at == Duration::from_secs(30)
+        ));
+        let fetch = |backoff| TicketFetch {
+            session_id: SafeId::new("sess_a").unwrap(),
+            request: TicketRequest(1),
+            body: Vec::new(),
+            backoff,
+            retry_at: None,
+        };
+        held.tickets.insert(
+            1,
+            fetch(Backoff::new(Duration::from_secs(1), BASE_MAX, || 0.0)),
+        );
+        held.tickets.insert(2, fetch(backoff()));
+        owner.ticket_answered(&mut held, 1, failed(), Duration::ZERO);
+        owner.ticket_answered(&mut held, 2, failed(), Duration::ZERO);
+        assert_eq!(held.tickets[&1].retry_at, Some(Duration::from_secs(1)));
+        assert!(!held.tickets.contains_key(&2), "answered with its failure");
+        task.abort();
     }
 
     #[tokio::test]

@@ -95,9 +95,10 @@ Server:
   `owner`, `outbox`).
 - A git ticket is fetched for a Session binding owner as an ordinary request
   of the held connection, sent again under its `message_id` after a network
-  failure, a timeout or a `5xx` until the request deadline, and held back
-  during a credential switch; a refusal or an answer that fails its schema
-  is the owner's failure, and no ticket answer is replayed (`git_ticket`,
+  failure, a timeout or a `5xx` while its next attempt starts before the
+  connection deadline, and held back during a credential switch; a refusal,
+  an answer that fails its schema or a last attempt without an answer is
+  the owner's failure, and no ticket answer is replayed (`git_ticket`,
   `owner`).
 - A `session.prepare` is admitted before it reaches its Session binding
   owner: a payload that fails its schema gets `invalid_input`, and a Session
@@ -150,8 +151,8 @@ for an attempt, connecting, a held connection in `registering`, `online` or
 `resuming`, `blocked` and `stopped`), the reconnect backoff, the last
 connection held, which a new connection names as its predecessor, the staged
 instructions, the held connection's replay ledger and the bindings it routed
-a `session.prepare` for and its renewal with the `credential.renew` notices
-it has not yet handled, the credential in use and one written that no
+a `session.prepare` for, its git-ticket fetches and its renewal with the
+`credential.renew` notices it has not yet handled, the credential in use and one written that no
 connection has taken yet, the handle of each Session binding owner and whether
 it holds a record, the probe slots, the task pressure point, and the status
 fields `connection_state`, `connection_id`, `credential_id`, `expires_at`

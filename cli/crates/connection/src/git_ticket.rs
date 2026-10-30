@@ -1,8 +1,10 @@
 //! The git-ticket fetch that a Session binding owner asks for before it
 //! clones a preparation's repositories (`FetchGitTicket`): one ordinary
 //! request of the held connection, sent again with its `message_id` after a
-//! network failure, a timeout or a `5xx`. Engine issues a new ticket at
-//! every fetch, a retry included, so no answer is replayed.
+//! network failure, a timeout or a `5xx` while the connection deadline
+//! allows, and failed with a description of the last failure once it does
+//! not. Engine issues a new ticket at every fetch, a retry included, so no
+//! answer is replayed.
 
 use std::time::Duration;
 
@@ -12,7 +14,7 @@ use protocol::ports::{TicketAnswer, TicketRequest};
 use protocol::tool::ProtocolVersion;
 
 use crate::backoff::Backoff;
-use crate::http::Answer;
+use crate::http::{Answer, Failure};
 use crate::ready;
 
 pub(crate) const GIT_TICKET_PATH: &str = "/v1/client/git-ticket";
@@ -42,14 +44,21 @@ pub(crate) fn request(connection: &Id, message_id: &Id, binding_id: &Id) -> Opti
     ready::checked(&request, connection, message_id)
 }
 
-/// The answer the Session binding owner gets, or `None` for an answer that
-/// is retried. A refusal that ends the connection is the Connection owner's.
-pub(crate) fn answer(answer: Answer) -> Option<TicketAnswer> {
+/// The answer the Session binding owner gets for an answer that is not
+/// retried. A refusal that ends the connection is the Connection owner's.
+pub(crate) fn answer(answer: Answer) -> TicketAnswer {
     match answer {
-        Answer::Success(body) => Some(
-            protocol::decode::<GitTicketResponse>(&body).map_err(|_| INVALID_ANSWER.to_owned()),
-        ),
-        Answer::Refused(error) => Some(Err(error.message)),
-        Answer::Failed(_) => None,
+        Answer::Success(body) => {
+            protocol::decode::<GitTicketResponse>(&body).map_err(|_| INVALID_ANSWER.to_owned())
+        }
+        Answer::Refused(error) => Err(error.message),
+        Answer::Failed(failure) => Err(match failure {
+            Failure::Network => "the git ticket fetch failed on the network",
+            Failure::Timeout => "the git ticket fetch timed out",
+            Failure::Redirect => "the git ticket fetch was answered with a redirect",
+            Failure::Server => "the git ticket fetch was answered with a server error",
+            Failure::Unreadable => "the git ticket fetch got an unreadable answer",
+        }
+        .to_owned()),
     }
 }
