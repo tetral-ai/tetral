@@ -154,7 +154,7 @@ func TestConfigurationOperationalProjectionUsesOwningParsers(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/configured=%v", profile, configured), func(t *testing.T) {
 				values := []string{"transport.profile=" + profile}
 				qwant := map[string]int64{"reclaim_seconds": 30, "reclaim_limit": 100, "base_ms": 1000, "cap_ms": 60000, "attempts": 10}
-				rwant := map[string]int64{"lease_ms": 30000, "heartbeat_ms": 10000, "jobs": 8, "accept_non_starting_ms": 30000}
+				rwant := map[string]int64{"lease_ms": 30000, "heartbeat_ms": 10000, "jobs": 8}
 				dwant := workload.DefaultDiagnosticConfig()
 				if configured {
 					values = append(values, "queue.leaseReclaimIntervalSeconds=17", "queue.leaseReclaimLimit=23", "queue.retryBaseMs=700", "queue.retryCapMs=9000", "queue.retryMaxAttempts=4", "jobRunner.leaseDurationMs=24000", "jobRunner.heartbeatIntervalMs=6000", "jobRunner.maxJobs=3", "jobRunner.acceptNonStartingInputTimeoutMs=12000", "observability.logLevel=warn", "observability.logMaxRecordBytes=8192", "observability.logSummaryIntervalMs=7000", "observability.logBurst=3", "observability.traceSampleRatio=0.25", "observability.slowQueryMs=900", "observability.otlpEndpoint=http://otel-collector.observability:4317", `observability.otlpPeers[0].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=observability`, "observability.deploymentEnvironment=projection-test", "observability.serviceVersion=projection-version", "lifecycle.providerDrainMs=200", "lifecycle.providerJoinMs=1000", "lifecycle.mcpDrainMs=250", "lifecycle.mcpJoinMs=1200")
@@ -180,7 +180,12 @@ func TestConfigurationOperationalProjectionUsesOwningParsers(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := requireProjection(runnerOperational(r), rwant); err != nil {
+				rgot := runnerOperational(r)
+				if !configured {
+					// An unconfigured timeout only restates values.yaml.
+					delete(rgot, "accept_non_starting_ms")
+				}
+				if err := requireProjection(rgot, rwant); err != nil {
 					t.Fatal(err)
 				}
 				for role, env := range envs {
