@@ -312,6 +312,7 @@ func workloadPrivilegeMismatches(t *testing.T, admin *sql.DB, contract database.
 		{"tetral_job_runner_binding_page", "public.tetral_job_runner_binding_page(text,text,text,text,integer)", "tetral_job_runner_binding_page(text, text, text, text, integer)"},
 		{"tetral_cleanup_due_sessions", "public.tetral_cleanup_due_sessions(timestamptz,timestamptz,text,integer)", "tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer)"},
 		{"tetral_cleanup_drive_page", "public.tetral_cleanup_drive_page(text,text,integer)", "tetral_cleanup_drive_page(text, text, integer)"},
+		{"tetral_cleanup_due_blob_workspaces", "public.tetral_cleanup_due_blob_workspaces(text,integer)", "tetral_cleanup_due_blob_workspaces(text, integer)"},
 		{"tetral_prune_event_idempotency", "public.tetral_prune_event_idempotency(timestamptz,timestamptz,text,text,bytea,integer)", "tetral_prune_event_idempotency(timestamptz, timestamptz, text, text, bytea, integer)"},
 		{"tetral_prune_event_changes", "public.tetral_prune_event_changes(timestamptz,timestamptz,text,text,bigint,integer)", "tetral_prune_event_changes(timestamptz, timestamptz, text, text, bigint, integer)"},
 		{"tetral_prune_job_runner_jobs", "public.tetral_prune_job_runner_jobs(text,timestamptz,integer)", "tetral_prune_job_runner_jobs(text, timestamptz, integer)"},

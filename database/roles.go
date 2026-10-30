@@ -69,6 +69,7 @@ func LoadRoleContract() (RoleContract, error) {
 				(function == "tetral_job_runner_binding_page(text, text, text, text, integer)" && workload == "job_runner") ||
 				(function == "tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer)" && workload == "cleanup") ||
 				(function == "tetral_cleanup_drive_page(text, text, integer)" && workload == "cleanup") ||
+				(function == "tetral_cleanup_due_blob_workspaces(text, integer)" && workload == "cleanup") ||
 				(function == "tetral_prune_event_idempotency(timestamptz, timestamptz, text, text, bytea, integer)" && workload == "cleanup") ||
 				(function == "tetral_prune_event_changes(timestamptz, timestamptz, text, text, bigint, integer)" && workload == "cleanup") ||
 				(function == "tetral_prune_job_runner_jobs(text, timestamptz, integer)" && workload == "queue") ||

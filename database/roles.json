@@ -158,6 +158,7 @@
       "functions": [
         "tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer)",
         "tetral_cleanup_drive_page(text, text, integer)",
+        "tetral_cleanup_due_blob_workspaces(text, integer)",
         "tetral_prune_event_idempotency(timestamptz, timestamptz, text, text, bytea, integer)",
         "tetral_prune_event_changes(timestamptz, timestamptz, text, text, bigint, integer)"
       ]

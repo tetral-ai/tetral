@@ -221,8 +221,9 @@ func TestDriveCleanupKeepsRecentUnnamedContent(t *testing.T) {
 }
 
 // A deleted drive in another Workspace leaves no row and no blob, and a blob
-// left by a killed upload is deleted once its delete_after has passed; one
-// already missing counts as deleted.
+// left by a killed upload is deleted once its delete_after has passed, also
+// in a Workspace that no longer has a drive; one already missing counts as
+// deleted.
 func TestDriveCleanupRemovesDeletedDrivesAndDueBlobs(t *testing.T) {
 	f := newDriveFixture(t)
 	other := workspace.ID("ws_drive_cleanup_other")
@@ -255,6 +256,13 @@ func TestDriveCleanupRemovesDeletedDrivesAndDueBlobs(t *testing.T) {
 	}
 	f.exec(`INSERT INTO drive_blob_cleanup(workspace_id,blob_key,delete_after) VALUES ('default',$1,clock_timestamp()-interval '1 minute'),
 		('default',$2,clock_timestamp()+interval '1 hour'),('default',$3,clock_timestamp()-interval '1 minute')`, killed, pending, missing)
+	driveless := workspace.ID("ws_drive_cleanup_driveless")
+	f.exec(`INSERT INTO workspaces (id, type, name, created_at) VALUES ($1, 'workspace', $1, clock_timestamp())`, string(driveless))
+	orphan := "drives/" + string(driveless) + "/drv_gone/killed"
+	if err := f.blobs.Put(f.ctx, orphan, strings.NewReader("partial"), 7); err != nil {
+		t.Fatal(err)
+	}
+	f.exec(`INSERT INTO drive_blob_cleanup(workspace_id,blob_key,delete_after) VALUES ($1,$2,clock_timestamp()-interval '1 minute')`, string(driveless), orphan)
 
 	f.run()
 
@@ -279,5 +287,8 @@ func TestDriveCleanupRemovesDeletedDrivesAndDueBlobs(t *testing.T) {
 	}
 	if f.count(`SELECT count(*) FROM drive_blob_cleanup WHERE blob_key=$1`, missing) != 0 {
 		t.Fatal("a due entry whose blob is already missing survived")
+	}
+	if f.blobs.Has(orphan) || f.count(`SELECT count(*) FROM drive_blob_cleanup WHERE workspace_id=$1`, string(driveless)) != 0 {
+		t.Fatal("the due entry of a Workspace with no drive survived")
 	}
 }

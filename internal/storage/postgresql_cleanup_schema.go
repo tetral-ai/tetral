@@ -111,6 +111,38 @@ AS $$ BEGIN
  END IF;
 END $$`
 
+// Only tetral_cleanup_due_blob_workspaces, executing as the actual table
+// owner with its purpose flag set, reads blob cleanup entries across
+// Workspaces; it returns Workspace IDs only.
+const createPostgreSQLCleanupDueBlobDiscoveryPolicy = `CREATE POLICY cleanup_due_blob_discovery ON drive_blob_cleanup
+ FOR SELECT
+ USING (current_setting('tetral.cleanup_due_blob_discovery', true) = 'true' AND current_user = (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'public.drive_blob_cleanup'::regclass))`
+
+// tetral_cleanup_due_blob_workspaces returns at most $2 Workspaces after the
+// exclusive Workspace $1, in order, that hold a drive_blob_cleanup entry whose
+// delete_after has passed, so a Workspace whose last drive is gone still gets
+// its due blobs deleted. It rejects an empty position and a limit outside
+// 1..100 with invalid_parameter_value.
+const createPostgreSQLCleanupDueBlobWorkspacesFunction = `CREATE FUNCTION public.tetral_cleanup_due_blob_workspaces(text, integer)
+RETURNS TABLE(workspace_id text)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog
+AS $$ BEGIN
+ IF $1 = '' THEN
+  RAISE EXCEPTION 'invalid cleanup blob position' USING ERRCODE='22023';
+ END IF;
+ IF $2 IS NULL OR $2 < 1 OR $2 > 100 THEN
+  RAISE EXCEPTION 'invalid cleanup blob limit' USING ERRCODE='22023';
+ END IF;
+ PERFORM pg_catalog.set_config('tetral.cleanup_due_blob_discovery','true',true);
+ IF $1 IS NULL THEN
+  RETURN QUERY SELECT DISTINCT c.workspace_id FROM public.drive_blob_cleanup c
+   WHERE c.delete_after <= pg_catalog.clock_timestamp() ORDER BY c.workspace_id LIMIT $2;
+ ELSE
+  RETURN QUERY SELECT DISTINCT c.workspace_id FROM public.drive_blob_cleanup c
+   WHERE c.workspace_id > $1 AND c.delete_after <= pg_catalog.clock_timestamp() ORDER BY c.workspace_id LIMIT $2;
+ END IF;
+END $$`
+
 func postgresqlCleanupScheduleTableSteps() []postgresqlSchemaStep {
 	return []postgresqlSchemaStep{
 		{"create_cleanup_schedule_cursor", createPostgreSQLCleanupScheduleCursorTable},
@@ -128,5 +160,9 @@ func postgresqlCleanupDiscoverySteps() []postgresqlSchemaStep {
 		{"rls_policy_cleanup_drive_discovery", createPostgreSQLCleanupDriveDiscoveryPolicy},
 		{"create_cleanup_drive_page", createPostgreSQLCleanupDrivePageFunction},
 		{"revoke_cleanup_drive_page_public", `REVOKE ALL ON FUNCTION public.tetral_cleanup_drive_page(text, text, integer) FROM PUBLIC`},
+		{"rls_policy_cleanup_due_blob_discovery_drop", "DROP POLICY IF EXISTS cleanup_due_blob_discovery ON drive_blob_cleanup"},
+		{"rls_policy_cleanup_due_blob_discovery", createPostgreSQLCleanupDueBlobDiscoveryPolicy},
+		{"create_cleanup_due_blob_workspaces", createPostgreSQLCleanupDueBlobWorkspacesFunction},
+		{"revoke_cleanup_due_blob_workspaces_public", `REVOKE ALL ON FUNCTION public.tetral_cleanup_due_blob_workspaces(text, integer) FROM PUBLIC`},
 	}
 }

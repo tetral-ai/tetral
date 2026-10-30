@@ -23,6 +23,7 @@ contracts.
   `tetral_auth_lookup_connection_key`; for Cleanup
   only, `tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer)`,
   `tetral_cleanup_drive_page(text, text, integer)`,
+  `tetral_cleanup_due_blob_workspaces(text, integer)`,
   `tetral_prune_event_idempotency` and `tetral_prune_event_changes`; for
   Queue only, `tetral_prune_job_runner_jobs`; and, for Computer Hub only,
   `tetral_computer_hub_instruction_pressure()`.
@@ -91,7 +92,12 @@ The daily drive cleanup discovers drives the same way:
 `tetral.cleanup_drive_discovery`, which the SELECT-only
 `cleanup_drive_discovery` policy on `drives` checks with the table owner, and
 returns Workspace and drive IDs only, deleted drives included. Every per-drive
-step then runs in that drive's Workspace-scoped transactions.
+step then runs in that drive's Workspace-scoped transactions. After the drives,
+`public.tetral_cleanup_due_blob_workspaces(text,integer)` sets
+`tetral.cleanup_due_blob_discovery` for the owner-checked
+`cleanup_due_blob_discovery` policy on `drive_blob_cleanup` and returns the
+IDs of the Workspaces holding a due entry, including those that no longer have
+a drive.
 
 Retention uses the same pattern with the flag `tetral.retention_maintenance`.
 Cleanup alone executes
@@ -288,7 +294,7 @@ These owner tests pin the serving paths repaired after role restriction:
 | queue | Job Runner terminal retention | `tetral_prune_job_runner_jobs` EXECUTE beside its existing `queue_jobs` grants; `internal/queue/job_runner_retention_test.go` runs the installed role and checks the same denials |
 | event_stream | Feed head, retention gap and shared idle signal | `session_event_feed_retention SELECT`; `internal/eventstream/retention_test.go` reads heads and gaps and `internal/eventstream/session_signals_test.go` reads Session signals through the installed role |
 | job_runner | Session deletion retires output-capture custody after Sandbox release | `sandbox_output_capture_operations SELECT/UPDATE/DELETE` (row lock, cleanup scheduling, terminal retirement), `sandbox_output_capture_blobs SELECT/DELETE` (scoped deletion), with no capture `INSERT`; `services/job-runner/runtime_output_capture_role_test.go` uses the installed role, preserves pending Queue work and foreign custody, and checks rollback when required grants are revoked |
-| cleanup | Daily drive cleanup | `tetral_cleanup_drive_page` EXECUTE beside the drive table grants; `services/cleanup/drives_test.go` runs the installed role through discovery across Workspaces, per-drive deletions and blob cleanup entries |
+| cleanup | Daily drive cleanup | `tetral_cleanup_drive_page` and `tetral_cleanup_due_blob_workspaces` EXECUTE beside the drive table grants; `services/cleanup/drives_test.go` runs the installed role through discovery across Workspaces, per-drive deletions and blob cleanup entries |
 | cleanup | Global due-Session scheduling | `tetral_cleanup_due_sessions` EXECUTE, `cleanup_schedule_cursor SELECT/UPDATE`, `session_runtime_status SELECT/UPDATE` and Queue admission, with no `workspaces` read; `services/cleanup/scheduler_test.go` runs the installed role through discovery, claims and fenced cursor writes, and `discovery_boundary_test.go` checks its denied direct reads and cursor `INSERT`/`DELETE` and every other role's denied execution |
 
 The installer test independently inspects all live public tables, sequences and declared function capabilities,

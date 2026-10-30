@@ -379,10 +379,12 @@ Deleted content leaves its blob key in `drive_blob_cleanup`, due now. A failed
 drive writes `ERROR drive.cleanup_failed` with `workspace.id` and `drive.id`,
 and the run goes on.
 
-After the drives, `Cleaner.DeleteDueBlobs` deletes, for each Workspace the
-run found, the blob of every `drive_blob_cleanup` entry whose `delete_after`
-has passed and then the entry; a blob already missing counts as deleted, and a
-failed delete keeps its entry. A failed drive or blob deletion fails the run,
+After the drives, the run pages, 100 at a time, the Workspaces that hold a
+`drive_blob_cleanup` entry whose `delete_after` has passed, through
+`public.tetral_cleanup_due_blob_workspaces(text, integer)`, so a Workspace
+whose last drive is gone is still visited. For each, `Cleaner.DeleteDueBlobs`
+deletes the blob of every due entry and then the entry; a blob already missing
+counts as deleted, and a failed delete keeps its entry. A failed drive or blob deletion fails the run,
 and the Job with it, once the blobs are done; failed discovery fails it at
 once.
 

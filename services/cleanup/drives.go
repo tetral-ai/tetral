@@ -22,13 +22,13 @@ type discoveredDrive struct {
 }
 
 // RunDrives runs the daily drive cleanup once: every drive of every Workspace
-// in (workspace_id, drive_id) order, then the due blobs of each Workspace it
-// found. A failed drive is logged as drive.cleanup_failed and the run goes
-// on; the run then fails after the blobs. Failed discovery or ctx ending
-// stops the run at once.
+// in (workspace_id, drive_id) order, then the due blobs of every Workspace
+// that holds a due blob cleanup entry, whether or not it still has a drive. A
+// failed drive is logged as drive.cleanup_failed and the run goes on; the run
+// then fails after the blobs. Failed discovery or ctx ending stops the run at
+// once.
 func RunDrives(ctx context.Context, client *dbconnect.Client, blobs blob.BlobStore, logger *slog.Logger) error {
 	cleaner := drive.NewCleaner(client, blobs)
-	var workspaces []workspace.ID
 	failed := 0
 	var after *discoveredDrive
 	for {
@@ -37,11 +37,7 @@ func RunDrives(ctx context.Context, client *dbconnect.Client, blobs blob.BlobSto
 			return err
 		}
 		for _, found := range page {
-			ws := workspace.ID(found.workspaceID)
-			if len(workspaces) == 0 || workspaces[len(workspaces)-1] != ws {
-				workspaces = append(workspaces, ws)
-			}
-			if err := cleaner.CleanDrive(ctx, ws, found.driveID); err != nil {
+			if err := cleaner.CleanDrive(ctx, workspace.ID(found.workspaceID), found.driveID); err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
@@ -55,10 +51,24 @@ func RunDrives(ctx context.Context, client *dbconnect.Client, blobs blob.BlobSto
 		after = &page[len(page)-1]
 	}
 	var errs []error
-	for _, ws := range workspaces {
-		if err := cleaner.DeleteDueBlobs(ctx, ws); err != nil {
-			errs = append(errs, err)
+	var afterWorkspace *string
+	for {
+		page, err := discoverDueBlobWorkspaces(ctx, client, afterWorkspace)
+		if err != nil {
+			return err
 		}
+		for _, ws := range page {
+			if err := cleaner.DeleteDueBlobs(ctx, workspace.ID(ws)); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				errs = append(errs, err)
+			}
+		}
+		if len(page) < drivePageSize {
+			break
+		}
+		afterWorkspace = &page[len(page)-1]
 	}
 	if failed > 0 {
 		errs = append(errs, fmt.Errorf("%d drive cleanups failed", failed))
@@ -84,6 +94,26 @@ func discoverDrives(ctx context.Context, client *dbconnect.Client, after *discov
 				return err
 			}
 			page = append(page, found)
+		}
+		return rows.Err()
+	})
+	return page, err
+}
+
+func discoverDueBlobWorkspaces(ctx context.Context, client *dbconnect.Client, after *string) ([]string, error) {
+	var page []string
+	err := client.WithTx(ctx, "tetralcleanup.discover_due_blobs", &sql.TxOptions{ReadOnly: true}, func(tx *dbconnect.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT workspace_id FROM public.tetral_cleanup_due_blob_workspaces($1, $2)`, after, drivePageSize)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var ws string
+			if err := rows.Scan(&ws); err != nil {
+				return err
+			}
+			page = append(page, ws)
 		}
 		return rows.Err()
 	})

@@ -53,7 +53,8 @@
 //     upper and page functions, the Auth credential lookup, authority lock
 //     and token prune functions, the Auth connection key lookup, the Computer
 //     Hub instruction pressure function, the Cleanup due-Session discovery
-//     function, and the Cleanup receipt/change and Queue Job Runner terminal
+//     function, the Cleanup due-blob Workspace discovery function, and the
+//     Cleanup receipt/change and Queue Job Runner terminal
 //     retention functions. The baseline also inserts the Cleanup scheduling cursor's
 //     singleton row. It stays portable across
 //     self-managed PostgreSQL and managed providers.
