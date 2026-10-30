@@ -78,9 +78,8 @@
 //     for the Session object, Get for the computer read route, and the
 //     idempotency records of both writes. The add route alone writes an added
 //     machine message; Session creation writes none.
-//   - api and computer-hub: WriteMachineMessageTx for each computer change the
-//     Runtime must learn (an addition; removals and replacements as their
-//     routes land).
+//   - api, through internal/session: WriteMachineMessageTx for a computer
+//     addition.
 //   - api, through AddComputers: IssuePreparation for each new computer;
 //     only a user computer, which has no repositories, can be online then.
 //     internal/session calls CheckPrepareSize once a computer's repositories
@@ -96,9 +95,6 @@
 //     request routes; FulfilRequests through hubflow.AcceptReady;
 //     ReturnToPending and Fail only through hubflow.ReturnRequestToPending and
 //     hubflow.FailRequest, which end the revoked credential's connection.
-//   - Tool-call admission (EnsureRequest, IssuePreparation, PrepareAgain) and
-//     the cleanup phase (Expire, and ReturnToPending after the claim timeout),
-//     once they land.
 //
 // Every writer that changes an input of the unused rule calls RefreshUnused
 // in its transaction.

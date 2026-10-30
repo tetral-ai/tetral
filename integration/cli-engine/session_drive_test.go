@@ -13,7 +13,7 @@ import (
 func TestRepositoriesAreClonedOnlyOnTheirComputer(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("the requests are recorded in-process with computer.EnsureRequest; no machine-bound call waits for them, since Engine does not route tool calls to a computer yet")
+	record.boundary("the requests are recorded in-process with computer.EnsureRequest; no machine-bound call waits for them, since no Engine path routes a tool call to a computer")
 	record.boundary("the requests that answer 400, a user computer with repositories and two repositories with one path, create nothing and reach no machine; they are not repeated here")
 	e := startEngine(t, record, engineOptions{})
 	developer := e.developer()

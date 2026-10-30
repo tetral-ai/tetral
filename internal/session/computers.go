@@ -87,7 +87,7 @@ func (s *Service) checkComputersTx(ctx context.Context, tx Transaction, sessionI
 		if repositories[i], err = s.prepareRepositories(checked[i].WorkingDirectory, request.Repositories); err != nil {
 			return checkedComputers{}, err
 		}
-		// Sessions carry no drive bindings yet, so the size counts none.
+		// A Session has no drive bindings, so the size counts none.
 		if err := computer.CheckPrepareSize(sessionID, checked[i], preparedRepositories(repositories[i]), nil); err != nil {
 			return checkedComputers{}, err
 		}

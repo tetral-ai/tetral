@@ -16,8 +16,7 @@
 //
 // Writers:
 //   - Store, in the caller's transaction, so the row commits with the caller's
-//     event or result row: api (message attachments, custom tool results),
-//     computer-hub (machine tool results) and Bridge (MCP Connector results).
+//     event or result row.
 //   - CollectExpired, Bridge's collection of rows past their lifetime across
 //     Workspaces, through the SELECT-only attachment_gc policy that the
 //     transaction setting tetral.attachment_gc enables.

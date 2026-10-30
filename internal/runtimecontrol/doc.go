@@ -24,8 +24,8 @@
 // Inputs that never start a run (queue.IsNonStartingRuntimeInputKind):
 // AppendNonStartingInputTx is the one writer of a new Inbox row of such a kind,
 // queued, unbound and without events, together with its runtime_input job. Its
-// caller is internal/computer.WriteMachineMessageTx (api; computer-hub as its
-// routes land). Such a row may be accepted with no binding;
+// caller is internal/computer.WriteMachineMessageTx (api). Such a row may be
+// accepted with no binding;
 // HandBackQuiescedRuntimeInputsTx leaves an accepted one as it is, and
 // HandBackRuntimeInputsTx (pod loss) hands it back with a new job built by
 // RuntimeInputEnqueueRequest.

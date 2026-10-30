@@ -24,7 +24,7 @@ import (
 func TestKilledHubPodsCLIsResumeOnOtherPods(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("no task runs and no instruction waits when the pod dies: Engine does not prepare Sessions or route tool calls to a computer yet")
+	record.boundary("no task runs and no instruction waits when the pod dies: the test creates no Session, and no Engine path routes a tool call to a computer")
 	e := startEngine(t, record, engineOptions{hubPods: 2})
 	controller := e.controller()
 	set := newMachines(t, in, needs{}, e, record)
@@ -109,7 +109,7 @@ func TestKilledHubPodsCLIsResumeOnOtherPods(t *testing.T) {
 func TestStreamOnlyDisconnectResumesTheSameConnection(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("no command runs across the disconnect: Engine does not route tool calls to a computer yet")
+	record.boundary("no command runs across the disconnect: no Engine path routes a tool call to a computer")
 	record.boundary("the stream age is 20 seconds instead of the default 30 minutes")
 	e := startEngine(t, record, engineOptions{hubPods: 2, streamMaxAge: "20s"})
 	controller := e.controller()
@@ -219,7 +219,7 @@ func TestDelayedReadyAcknowledgementKeepsTheConnection(t *testing.T) {
 func TestLiveRenewalMovesTheConnectionToTheNewCredential(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("no binding and no task are on the connection during the renewal: Engine does not prepare Sessions or route tool calls to a computer yet")
+	record.boundary("no binding and no task are on the connection during the renewal: the test creates no Session, and no Engine path routes a tool call to a computer")
 	e := startEngine(t, record, engineOptions{})
 	controller := e.controller()
 	set := newMachines(t, in, needs{}, e, record)
@@ -317,7 +317,7 @@ func requireCLIConnection(t *testing.T, m *machine, connectionID string) {
 func TestEachPreparationFetchesANewGitTicket(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("the requests are recorded in-process with computer.EnsureRequest; no machine-bound call waits for them, since Engine does not route tool calls to a computer yet")
+	record.boundary("the requests are recorded in-process with computer.EnsureRequest; no machine-bound call waits for them, since no Engine path routes a tool call to a computer")
 	record.boundary("the machine is stopped with SIGTERM, not by its idle exit")
 	e := startEngine(t, record, engineOptions{})
 	controller, developer := e.controller(), e.developer()

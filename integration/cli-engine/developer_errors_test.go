@@ -13,7 +13,7 @@ import (
 func TestPreparationErrorsAreWrittenOncePerCode(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("no call prepares the computer again: Engine does not admit tool calls yet, so neither the repeated cwd_not_found failure nor the cwd_inaccessible one is observed")
+	record.boundary("no call prepares the computer again: no Engine path admits a tool call to a computer, so neither the repeated cwd_not_found failure nor the cwd_inaccessible one is observed")
 	e := startEngine(t, record, engineOptions{})
 	controller, developer := e.controller(), e.developer()
 	set := newMachines(t, in, needs{}, e, record)

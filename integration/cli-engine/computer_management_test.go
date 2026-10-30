@@ -113,7 +113,7 @@ func requireOnlyInUse(t *testing.T, controller *controllerClient, instanceID, in
 func TestRevocationEndsTheLiveConnectionAtOnce(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("no dispatch races the revocation: Engine does not route tool calls to a computer yet")
+	record.boundary("no dispatch races the revocation: no Engine path routes a tool call to a computer")
 	e := startEngine(t, record, engineOptions{})
 	controller := e.controller()
 	set := newMachines(t, in, needs{}, e, record)
@@ -341,7 +341,7 @@ func stopMachine(t *testing.T, controller *controllerClient, server *cliProcess,
 func TestControllerStartsAMachineForANewRequest(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("the request is recorded in-process with computer.EnsureRequest; no machine-bound call waits for it, since Engine does not route tool calls to a computer yet")
+	record.boundary("the request is recorded in-process with computer.EnsureRequest; no machine-bound call waits for it, since no Engine path routes a tool call to a computer")
 	e := startEngine(t, record, engineOptions{})
 	controller, developer := e.controller(), e.developer()
 	set := newMachines(t, in, needs{}, e, record)
@@ -388,7 +388,7 @@ func TestControllerStartsAMachineForANewRequest(t *testing.T) {
 func TestStoppedCloudInstanceWakesWithItsIdentity(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("the requests are recorded in-process with computer.EnsureRequest; no machine-bound call waits for them, since Engine does not route tool calls to a computer yet")
+	record.boundary("the requests are recorded in-process with computer.EnsureRequest; no machine-bound call waits for them, since no Engine path routes a tool call to a computer")
 	record.boundary("the machine is stopped with SIGTERM, not by its idle exit")
 	e := startEngine(t, record, engineOptions{})
 	controller, developer := e.controller(), e.developer()
@@ -434,8 +434,8 @@ func TestStoppedCloudInstanceWakesWithItsIdentity(t *testing.T) {
 func TestFailedWakeRequestLeavesTheInstanceOffline(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("the requests are recorded in-process with computer.EnsureRequest; no machine-bound call waits for them, since Engine does not route tool calls to a computer yet")
-	record.boundary("only a failed wake request is observed; a wake request's expiry belongs to the cleanup phase, which does not run yet")
+	record.boundary("the requests are recorded in-process with computer.EnsureRequest; no machine-bound call waits for them, since no Engine path routes a tool call to a computer")
+	record.boundary("only a failed wake request is observed; a wake request's expiry belongs to the cleanup phase, which no Engine process runs")
 	e := startEngine(t, record, engineOptions{})
 	controller, developer := e.controller(), e.developer()
 	set := newMachines(t, in, needs{}, e, record)
