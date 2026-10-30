@@ -173,6 +173,10 @@ func ReadObjects(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, values 
 	if err != nil {
 		return nil, err
 	}
+	computers, err := computerCounts(ctx, tx, ws, ids)
+	if err != nil {
+		return nil, err
+	}
 	objects := make([]InstanceObject, len(values))
 	for i, value := range values {
 		objects[i] = InstanceObject{
@@ -182,6 +186,7 @@ func ReadObjects(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, values 
 			RegistrationState:  value.RegistrationState,
 			CLIVersion:         value.CLIVersion,
 			CLIUpdateAvailable: value.CLIVersion != nil && VersionBelow(*value.CLIVersion, recommendedCLI),
+			ComputerCount:      computers[value.ID],
 			ObservedAt:         FormatTime(now),
 		}
 		if connection, ok := connections[value.ID]; ok {
@@ -192,6 +197,27 @@ func ReadObjects(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, values 
 		}
 	}
 	return objects, nil
+}
+
+// computerCounts returns, per instance, the attached computers whose
+// current instance it is.
+func computerCounts(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceIDs []string) (map[string]int, error) {
+	rows, err := tx.Query(ctx, `SELECT current_instance_id,count(*) FROM computers
+		WHERE workspace_id=$1 AND current_instance_id=ANY($2) AND association_state='attached' GROUP BY current_instance_id`, string(ws), instanceIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	counts := map[string]int{}
+	for rows.Next() {
+		var instanceID string
+		var count int
+		if err := rows.Scan(&instanceID, &count); err != nil {
+			return nil, err
+		}
+		counts[instanceID] = count
+	}
+	return counts, rows.Err()
 }
 
 // ReadObject returns the instance object of value observed at now.
