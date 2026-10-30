@@ -119,9 +119,35 @@ fn credentials_file(root: &Path) -> Value {
 }
 
 #[test]
-fn a_connection_that_ends_before_the_fetch_leaves_the_credential_pending_and_the_old_one_working() {
+fn a_notice_while_registering_is_fetched_once_online_and_not_when_the_connection_ends_first() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
+    let mut case = record.case("credential.renew while registering, then ready's ACK");
+    let engine = one_credential_engine();
+    answer_fault(&engine, json!({"endpoint": "ready", "action": "withhold"}));
+    let directory = tempfile::tempdir().unwrap();
+    let machine = Machine::start(
+        &mut case,
+        directory.path(),
+        &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+    );
+    machine.wait_for("registering");
+    wait_until("the ready held", || held_count(&engine) == 1);
+    offer(&engine, RENEWED, RENEWED_KEY);
+    assert_eq!(credential_state(&engine, RENEWED)["renewals_sent"], 1);
+    assert!(engine.requests("credential").is_empty());
+    answer_fault(&engine, json!({"action": "release"}));
+    wait_until("the switch to the renewed credential", || {
+        machine.status()["credential_id"] == RENEWED
+    });
+    let fetches = engine.requests("credential");
+    assert_eq!(fetches.len(), 1, "{fetches:?}");
+    assert_eq!(fetches[0]["status"], 200);
+    assert_eq!(credential_state(&engine, RENEWED)["state"], "active");
+    case.observe("no fetch while registering; once ready's ACK came the notice was fetched once and the connection switched to the renewed credential");
+    case.pass();
+    drop(machine);
+
     let mut case = record
         .case("credential.renew while registering, then the connection ends before ready's ACK");
     let engine = one_credential_engine();
