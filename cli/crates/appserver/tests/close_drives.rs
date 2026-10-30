@@ -499,3 +499,47 @@ async fn a_close_of_a_replaced_binding_leaves_the_live_bindings_mount() {
     );
     assert_eq!(current_device(&point).unwrap(), device);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_close_of_a_failed_binding_abandons_the_pending_changes_of_its_sync_state() {
+    let _serial = SERIAL.lock().await;
+    let mut env = Env::new();
+    // A change still pending from an earlier App Server.
+    let directory = env.root.join("sessions").join(SESSION);
+    state::files::create_private_dirs(&directory).unwrap();
+    let mut sync_state = drive::state::SyncState::create(&directory.join(drive::state::FILE_NAME))
+        .await
+        .unwrap();
+    sync_state
+        .apply(drive::state::Write {
+            pending: vec![drive::state::PendingChange {
+                drive_id: DRIVE.to_owned(),
+                path: "f".to_owned(),
+                change: "delete".to_owned(),
+                base_sha256: Some("a".repeat(64)),
+                content_sha256: None,
+                executable: None,
+                uploaded: false,
+                last_write_at: 0,
+                task_id: None,
+                fault_code: None,
+            }],
+            ..drive::state::Write::default()
+        })
+        .await
+        .unwrap();
+    sync_state.close().await;
+    let missing = env.project.join("missing");
+    env.prepare("prepare_1", "bind_a", &missing);
+    let failed = env.report().await;
+    assert_eq!(failed["status"], "failed", "{failed}");
+
+    env.close("conn_a", "close_1", "bind_a");
+    let closed = env.report().await;
+    assert_eq!(closed["status"], "closed", "{closed}");
+    assert_eq!(
+        closed["lost_changes"],
+        json!([{ "request_message_id": "close_1", "drive_id": DRIVE, "paths": ["f"], "paths_total": 1 }])
+    );
+    assert!(!directory.exists());
+}

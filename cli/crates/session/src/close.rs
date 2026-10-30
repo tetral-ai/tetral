@@ -4,8 +4,10 @@
 //! binding admits nothing more and its tasks end (step 1 and 2); once every
 //! managed descendant of the binding is gone and a `session.drives` being
 //! handled has sent its report (step 3), the final upload of every bound
-//! drive runs until 30 seconds after the close was admitted (step 4); then
-//! the drives are unmounted and the clones, the tasks' temporary
+//! drive runs until 30 seconds after the close was admitted (step 4), and
+//! without an open drive sync every pending change of `sync-state.db` is
+//! abandoned instead; then the drives are unmounted and the clones, the
+//! tasks' temporary
 //! directories and `sessions/<session_id>/` are deleted (step 5), and the
 //! `closed` report goes out (step 6). A late close, for a Session with no
 //! binding of the close's connection, waits for every descendant of the
@@ -241,8 +243,8 @@ impl<S: TaskStarter> SessionOwner<S> {
         }
     }
 
-    /// Step 5, and for a late close the abandoning of every pending change
-    /// first.
+    /// Step 5, and first the abandoning of every pending change for a late
+    /// close, or for any close whose drive sync is not open.
     fn delete(&mut self) {
         let Some(closing) = self.closing.as_mut() else {
             return;
@@ -280,8 +282,7 @@ impl<S: TaskStarter> SessionOwner<S> {
                     lost = lost_changes::entries(request_message_id, pending.into_keys());
                 }
                 sync.close().await;
-            } else if late
-                && let Some(request_message_id) = &request_message_id
+            } else if let Some(request_message_id) = &request_message_id
                 && let Ok(state) =
                     drive::state::SyncState::open(&directory.join(drive::state::FILE_NAME)).await
             {
