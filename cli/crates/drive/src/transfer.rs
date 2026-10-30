@@ -119,28 +119,6 @@ pub trait ContentSink: Send {
     fn append(&mut self, bytes: &[u8]) -> io::Result<()>;
 }
 
-/// The class of an answer, as the drive transfer client sorts it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Class {
-    /// A network failure, a passed deadline, `500`, `502`, `503`, `504` or
-    /// `429`: sent again after a delay.
-    Temporary,
-    /// `409 stale_connection` or `409 stale_binding`: sent again with the
-    /// binding of a later preparation.
-    Rebind,
-    /// `401` or `403 instance_unavailable`: the connection's rules, then as a
-    /// rebind.
-    ConnectionRule,
-    /// `400 content_hash_mismatch`.
-    ReRead,
-    /// `410 drive_cursor_expired`.
-    CursorExpired,
-    /// `409 content_missing` or `413 file_too_large`.
-    Decision,
-    /// Anything else, `403 drive_access_denied` included.
-    Permanent,
-}
-
 /// How a request ended without the answer it asked for.
 #[derive(Debug)]
 pub enum Ended {

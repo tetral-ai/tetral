@@ -43,9 +43,10 @@ Drives on this machine belong here, with two owners:
   `user_version` check (`OpenError`), the six tables, their in-memory copy
   (`Tables`) and the writes (`Write`), each one SQLite transaction.
 - `transfer.rs`: `DriveTransfer`, its requests (`Request`, `ListFiles`,
-  `ListChanges`, `Upload`, `Commit`, `Download`), `ContentSink`, the answer
-  classes (`Class`), `Ended`, and the request deadline of a PUT or a commit
-  (`total`).
+  `ListChanges`, `Upload`, `Commit`, `Download`), `ContentSink`, `Ended`,
+  the ways a request ends that callers act on (the client retries
+  temporary, rebind and connection-rule answers itself), and the request
+  deadline of a PUT or a commit (`total`).
 - `sync.rs`: the Drive sync owner (`DriveSync`): its messages, its current
   binding, the triggers of each mounted drive's catch-up, its pages and
   failed listings, the check before a command, and the wake of the quiet
