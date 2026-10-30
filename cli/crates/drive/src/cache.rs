@@ -2,7 +2,8 @@
 //! `$TETRAL_HOME/cache/`. `cache/blobs/<sha256>` holds committed content
 //! only, each hash once however many Sessions and drives name it; content
 //! enters only when the whole of it hashes to its name. Downloads write into
-//! `cache/tmp/`, which the owner empties when it starts. Opening a blob for a
+//! `cache/tmp/`, which the owner empties when it starts, and reach the disk
+//! before their rename into `cache/blobs/`. Opening a blob for a
 //! read sets its modification time, its last read time; while the state
 //! root's volume has less than [`FREE_SPACE_MIN`] free, the blobs read
 //! longest ago are deleted.
@@ -661,7 +662,7 @@ impl DownloadTask {
         let whole = downloaded
             && sink.received.load(Ordering::Acquire) == needed.size
             && hash == needed.sha256.as_str()
-            && sink.file.flush().is_ok();
+            && sink.file.sync_all().is_ok();
         drop(sink.file);
         if !whole {
             let _ = fs::remove_file(&path);
