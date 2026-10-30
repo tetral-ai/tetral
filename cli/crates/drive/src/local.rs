@@ -141,7 +141,7 @@ impl<'a> Edit<'a> {
         }
     }
 
-    fn pending(&self, path: &str) -> Option<&PendingChange> {
+    pub(crate) fn pending(&self, path: &str) -> Option<&PendingChange> {
         match self.pending.get(path) {
             Some(change) => change.as_ref(),
             None => self.tables.pending_changes.get(&self.key(path)),

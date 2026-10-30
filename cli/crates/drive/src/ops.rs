@@ -1149,9 +1149,11 @@ impl Owner {
             row.mtime_ns = Some(edit.now_ns);
             row.ctime_ns = Some(edit.now_ns);
         }
-        let local_only = row.local_only.is_some();
+        // A change recorded before the path became local-only keeps
+        // recording until a sync point settles it.
+        let records = row.local_only.is_none() || edit.pending(path).is_some();
         edit.set_row(row);
-        if !local_only {
+        if records {
             edit.record_write(path, written, task.as_deref());
         }
         let write = edit.into_write();
@@ -1231,7 +1233,8 @@ impl Owner {
         let mut after = After::default();
         let tables = self.state.tables();
         let mut edit = Edit::new(tables, drive, now_ns()).ok_or(Errno::IO)?;
-        let synced = row.kind == "file" && edit.local_only(&path, "file").is_none();
+        let synced = row.kind == "file"
+            && (edit.local_only(&path, "file").is_none() || edit.pending(&path).is_some());
         vacate(&mut edit, &path);
         if synced {
             edit.record_delete(&path, task.as_deref());
@@ -1325,7 +1328,8 @@ impl Owner {
         for from in &moved {
             let to = format!("{target}{}", &from[source.len()..]);
             let row = edit.entry(from).expect("a moved entry").clone();
-            let synced_from = row.kind == "file" && edit.local_only(from, "file").is_none();
+            let synced_from = row.kind == "file"
+                && (edit.local_only(from, "file").is_none() || edit.pending(from).is_some());
             let there = edit.row(&to).cloned();
             vacate(&mut edit, from);
             edit.set_row(FileRow {
@@ -1355,7 +1359,7 @@ impl Owner {
             if *synced_from {
                 edit.record_delete(from, task.as_deref());
             }
-            if edit.local_only(to, "file").is_none() {
+            if edit.local_only(to, "file").is_none() || edit.pending(to).is_some() {
                 edit.record_write(to, Written::Moved(cache.as_deref()), task.as_deref());
             }
         }

@@ -8,6 +8,7 @@ mod support;
 
 use std::time::Duration;
 
+use drive::ops::TOP_INODE;
 use drive::state::Write;
 use drive::sync_point::RESULT_WAIT;
 use drive::transfer::Ended;
@@ -332,4 +333,40 @@ async fn an_upload_answered_429_counts_one_rate_limited_rejection_in_the_local_m
         "tetral_uploads_rejected_total{{cause=\"rate_limited\"}} {}",
         before + 1
     )));
+}
+
+#[tokio::test]
+async fn changes_pending_before_their_folder_became_a_repository_keep_recording_and_are_committed()
+{
+    let mut env = Env::new();
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.write("a", "one", NO_TASK).await;
+    session.write("b", "new", NO_TASK).await;
+    let drive = session.drive.clone();
+    session
+        .sync
+        .mkdir(&drive, TOP_INODE, b".git", Some(NO_TASK))
+        .await
+        .unwrap();
+    // The removal of the new file `b` settles its pending write, and a
+    // later write of `a` records on its own.
+    session.remove("b", NO_TASK).await;
+    session.write("a", "two", NO_TASK).await;
+    let pending: Vec<String> = session
+        .tables()
+        .await
+        .pending_changes
+        .into_keys()
+        .map(|(_, path)| path)
+        .collect();
+    assert_eq!(pending, ["a"]);
+    let point = session.sync_point(None, RESULT_WAIT, None);
+    let upload = env.call().await;
+    assert_eq!(upload.sha256(), sha256(b"two"));
+    upload.uploaded();
+    let commit = env.call().await;
+    assert_eq!(summary(commit.changes()), [("a".to_owned(), "write", None)]);
+    commit.accepted();
+    assert_eq!(outcome(point).await.committed, 1);
+    assert!(session.tables().await.pending_changes.is_empty());
 }
