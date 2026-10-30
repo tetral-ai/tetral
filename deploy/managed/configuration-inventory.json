@@ -291,8 +291,8 @@
       },
       "units": "milliseconds, jobs",
       "unset_zero": "Exact empty defaults; absent heartbeat derives lease/3; zero invalid.",
-      "constraints": "Lease 5000..300000 ms; heartbeat < lease; Queue direct Job Runner lease transport caps batch; pool>=2; drain+join<=35000; direct port matches transport profile. Runtime command method timeout names are derived from the eight fixed Runtime methods; placement uses bounded probes, rounds, response bytes and memory threshold, distinct from lease policy.",
-      "projection": "jobRunner operational values and lifecycle.runnerDrainMs/cancelJoinMs; fixed dependency addresses/identity refs remain domain/deployment policy. Runtime command and placement controls intentionally use owning defaults; process env overrides stay with their owner.",
+      "constraints": "Lease 5000..300000 ms; heartbeat < lease; Queue direct Job Runner lease transport caps batch; pool>=2; drain+join<=35000; direct port matches transport profile. Runtime command method timeout names are derived from the nine fixed Runtime methods; placement uses bounded probes, rounds, response bytes and memory threshold, distinct from lease policy.",
+      "projection": "jobRunner operational values and lifecycle.runnerDrainMs/cancelJoinMs; fixed dependency addresses/identity refs remain domain/deployment policy. Runtime command and placement controls intentionally use owning defaults, except the AcceptNonStartingInput attempt bound from jobRunner.acceptNonStartingInputTimeoutMs; process env overrides stay with their owner.",
       "proofs": [
         "services/job-runner/config_test.go",
         "deploy/helm/configuration_projection_test.go",
@@ -306,7 +306,8 @@
         "TETRAL_RUNTIME_INTERRUPT_TIMEOUT_MS",
         "TETRAL_RUNTIME_RESOLVE_TOOL_CONFIRMATION_TIMEOUT_MS",
         "TETRAL_RUNTIME_APPLY_RUNTIME_CONFIG_TIMEOUT_MS",
-        "TETRAL_RUNTIME_CLEANUP_SESSION_TIMEOUT_MS"
+        "TETRAL_RUNTIME_CLEANUP_SESSION_TIMEOUT_MS",
+        "TETRAL_RUNTIME_ACCEPT_NON_STARTING_INPUT_TIMEOUT_MS"
       ]
     },
     {

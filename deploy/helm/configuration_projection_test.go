@@ -136,7 +136,8 @@ func queueOperational(cfg queueservice.Config) map[string]int64 {
 	return map[string]int64{"reclaim_seconds": int64(cfg.LeaseReclaimInterval / time.Second), "reclaim_limit": int64(cfg.LeaseReclaimBatchLimit), "base_ms": int64(cfg.RetryBaseDelay / time.Millisecond), "cap_ms": int64(cfg.RetryMaxDelay / time.Millisecond), "attempts": int64(cfg.RetryMaxAttempts)}
 }
 func runnerOperational(cfg runner.JobRunnerConfig) map[string]int64 {
-	return map[string]int64{"lease_ms": int64(cfg.LeaseDuration / time.Millisecond), "heartbeat_ms": int64(cfg.HeartbeatInterval / time.Millisecond), "jobs": int64(cfg.MaxJobs)}
+	return map[string]int64{"lease_ms": int64(cfg.LeaseDuration / time.Millisecond), "heartbeat_ms": int64(cfg.HeartbeatInterval / time.Millisecond), "jobs": int64(cfg.MaxJobs),
+		"accept_non_starting_ms": int64(cfg.CommandPolicy.AcceptNonStartingInput / time.Millisecond)}
 }
 func requireProjection(actual, expected any) error {
 	if !reflect.DeepEqual(actual, expected) {
@@ -153,12 +154,12 @@ func TestConfigurationOperationalProjectionUsesOwningParsers(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/configured=%v", profile, configured), func(t *testing.T) {
 				values := []string{"transport.profile=" + profile}
 				qwant := map[string]int64{"reclaim_seconds": 30, "reclaim_limit": 100, "base_ms": 1000, "cap_ms": 60000, "attempts": 10}
-				rwant := map[string]int64{"lease_ms": 30000, "heartbeat_ms": 10000, "jobs": 8}
+				rwant := map[string]int64{"lease_ms": 30000, "heartbeat_ms": 10000, "jobs": 8, "accept_non_starting_ms": 30000}
 				dwant := workload.DefaultDiagnosticConfig()
 				if configured {
-					values = append(values, "queue.leaseReclaimIntervalSeconds=17", "queue.leaseReclaimLimit=23", "queue.retryBaseMs=700", "queue.retryCapMs=9000", "queue.retryMaxAttempts=4", "jobRunner.leaseDurationMs=24000", "jobRunner.heartbeatIntervalMs=6000", "jobRunner.maxJobs=3", "observability.logLevel=warn", "observability.logMaxRecordBytes=8192", "observability.logSummaryIntervalMs=7000", "observability.logBurst=3", "observability.traceSampleRatio=0.25", "observability.slowQueryMs=900", "observability.otlpEndpoint=http://otel-collector.observability:4317", `observability.otlpPeers[0].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=observability`, "observability.deploymentEnvironment=projection-test", "observability.serviceVersion=projection-version", "lifecycle.providerDrainMs=200", "lifecycle.providerJoinMs=1000", "lifecycle.mcpDrainMs=250", "lifecycle.mcpJoinMs=1200")
+					values = append(values, "queue.leaseReclaimIntervalSeconds=17", "queue.leaseReclaimLimit=23", "queue.retryBaseMs=700", "queue.retryCapMs=9000", "queue.retryMaxAttempts=4", "jobRunner.leaseDurationMs=24000", "jobRunner.heartbeatIntervalMs=6000", "jobRunner.maxJobs=3", "jobRunner.acceptNonStartingInputTimeoutMs=12000", "observability.logLevel=warn", "observability.logMaxRecordBytes=8192", "observability.logSummaryIntervalMs=7000", "observability.logBurst=3", "observability.traceSampleRatio=0.25", "observability.slowQueryMs=900", "observability.otlpEndpoint=http://otel-collector.observability:4317", `observability.otlpPeers[0].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=observability`, "observability.deploymentEnvironment=projection-test", "observability.serviceVersion=projection-version", "lifecycle.providerDrainMs=200", "lifecycle.providerJoinMs=1000", "lifecycle.mcpDrainMs=250", "lifecycle.mcpJoinMs=1200")
 					qwant = map[string]int64{"reclaim_seconds": 17, "reclaim_limit": 23, "base_ms": 700, "cap_ms": 9000, "attempts": 4}
-					rwant = map[string]int64{"lease_ms": 24000, "heartbeat_ms": 6000, "jobs": 3}
+					rwant = map[string]int64{"lease_ms": 24000, "heartbeat_ms": 6000, "jobs": 3, "accept_non_starting_ms": 12000}
 					dwant.Level = 4
 					dwant.MaxRecordBytes = 8192
 					dwant.SummaryInterval = 7 * time.Second

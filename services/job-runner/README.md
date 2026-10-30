@@ -448,8 +448,10 @@ direct command has one attempt; Queue owns later delivery and receipt recovery.
 The descriptor-complete policy covers AcceptInput, RecoverThread, AcceptAgentMail,
 AcceptTaskNotification, AcceptNonStartingInput, Interrupt, ResolveToolConfirmation,
 ApplyRuntimeConfig and CleanupSession. Each initial attempt bound is 30000ms and can
-be configured with `TETRAL_RUNTIME_<METHOD_IN_SNAKE_CASE>_TIMEOUT_MS`; caller and
-lease deadlines remain shorter where applicable. The interrupt plan and native client consume
+be configured with `TETRAL_RUNTIME_<METHOD_IN_SNAKE_CASE>_TIMEOUT_MS`; Helm sets
+`TETRAL_RUNTIME_ACCEPT_NON_STARTING_INPUT_TIMEOUT_MS` from
+`jobRunner.acceptNonStartingInputTimeoutMs`. Caller and lease deadlines remain
+shorter where applicable. The interrupt plan and native client consume
 that same typed policy rather than separate fixed limits.
 
 ## Manifest discovery

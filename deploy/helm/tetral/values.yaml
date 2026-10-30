@@ -184,6 +184,8 @@ jobRunner:
   leaseDurationMs: 30000
   heartbeatIntervalMs: 10000
   maxJobs: 8
+  # Attempt bound of one AcceptNonStartingInput call to a Runtime Pod.
+  acceptNonStartingInputTimeoutMs: 30000
 
 computerHub:
   # The HorizontalPodAutoscaler keeps between minReplicas and maxReplicas hub
