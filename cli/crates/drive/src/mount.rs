@@ -60,17 +60,19 @@ pub fn drives_variable(
 }
 
 /// The capability probe: mounts an empty FUSE filesystem at
-/// `R/run/fuse-probe` and unmounts it.
+/// `R/run/fuse-probe` through `fusermount3`, as drive mounts do, and
+/// unmounts it.
 #[cfg(target_os = "linux")]
 pub fn probe(root: &Path) -> Mounting {
-    struct Empty;
-    impl fuser::Filesystem for Empty {}
     let point = root.join("run").join("fuse-probe");
     let mounted = state::files::create_private_dirs(&point)
-        .map_err(|error| error.source)
-        .and_then(|()| fuser::Session::new(Empty, &point, &config(true)))
-        .and_then(|session| session.spawn())
-        .and_then(fuser::BackgroundSession::umount_and_join);
+        .map_err(|error| error.source.to_string())
+        .and_then(|()| fusermount(&point, true))
+        .and_then(|device| {
+            let unmounted = lazy_unmount(&point);
+            drop(device);
+            unmounted
+        });
     match mounted {
         Ok(()) => Mounting::Fuse,
         Err(error) => Mounting::Unavailable(format!("no FUSE: {error}")),
@@ -81,23 +83,6 @@ pub fn probe(root: &Path) -> Mounting {
 #[cfg(not(target_os = "linux"))]
 pub fn probe(_root: &Path) -> Mounting {
     Mounting::Unavailable("drives not enabled".to_owned())
-}
-
-#[cfg(target_os = "linux")]
-fn config(read_only: bool) -> fuser::Config {
-    use fuser::MountOption;
-    let mut config = fuser::Config::default();
-    config.mount_options = vec![
-        MountOption::FSName("tetral".to_owned()),
-        MountOption::Subtype("tetral".to_owned()),
-        MountOption::DefaultPermissions,
-        if read_only {
-            MountOption::RO
-        } else {
-            MountOption::RW
-        },
-    ];
-    config
 }
 
 /// `<error>` of a failure text: the I/O error as Rust displays it, or
