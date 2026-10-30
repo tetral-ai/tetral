@@ -279,8 +279,8 @@ func gitProxyUpstreamHeaders(inbound http.Header) http.Header {
 			upstream[name] = append([]string(nil), values...)
 		}
 	}
-	// Suppress net/http's default User-Agent; the contract's upstream header
-	// set is the Git smart-HTTP allowlist above plus injected Authorization.
+	// Suppress net/http's default User-Agent; the upstream header set is the
+	// Git smart-HTTP allowlist above plus the injected Authorization.
 	upstream["User-Agent"] = nil
 	return upstream
 }
