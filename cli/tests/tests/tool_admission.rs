@@ -229,8 +229,10 @@ fn release_answers(tasks: &TaskMachine) {
 }
 
 /// Records `closes` closes of Sessions without a record, which nothing
-/// reports, so that each keeps its ledger entry.
+/// reports, so that each keeps its ledger entry. Each chunk is routed
+/// before the next is sent, so that every wait covers a bounded number.
 fn fill_ledger(tasks: &TaskMachine, closes: usize) {
+    const CHUNK: usize = 500;
     let seams = &tasks.machine().seams;
     let connection_id = tasks.machine().status()["connection_id"].clone();
     let routed = seams.count("route.session");
@@ -245,8 +247,10 @@ fn fill_ledger(tasks: &TaskMachine, closes: usize) {
                 "payload": { "session_id": format!("sess_fill_{index}"), "binding_id": "bind_1" },
             }),
         );
+        if (index + 1) % CHUNK == 0 || index + 1 == closes {
+            seams.wait_for_count("route.session", routed + index as u64 + 1);
+        }
     }
-    seams.wait_for_count("route.session", routed + closes as u64);
 }
 
 /// Ends the current stream with a stream-only `disconnect` and waits for
