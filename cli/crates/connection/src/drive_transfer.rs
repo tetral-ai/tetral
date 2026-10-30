@@ -46,21 +46,11 @@ use crate::outbox::OutboxEvent;
 /// start: connecting and TLS, and waiting for the headers, included.
 pub const STALL: Duration = Duration::from_secs(10);
 
-/// The total of a PUT or a commit for each started share of this many
-/// request bytes.
-pub const SCALE_BYTES: u64 = 65_536;
-pub const TOTAL_PER_SCALE: Duration = Duration::from_secs(10);
-
 /// The bytes read of a `2xx` body, by endpoint, and of an error body.
 pub const UPLOAD_ANSWER_MAX_BYTES: usize = 65_536;
 pub const ERROR_MAX_BYTES: usize = 16_777_216;
 
-/// The total of a PUT or a commit of `request_bytes`:
-/// 10 s × max(1, ceil(request_bytes / 65,536)).
-pub fn total(request_bytes: u64) -> Duration {
-    let shares = request_bytes.div_ceil(SCALE_BYTES).max(1);
-    TOTAL_PER_SCALE * u32::try_from(shares).unwrap_or(u32::MAX)
-}
+pub use drive::transfer::{SCALE_BYTES, TOTAL_PER_SCALE, total};
 
 /// What drive transfer requests take from the Connection owner: the held
 /// connection, if any, its key and whether a credential switch holds
