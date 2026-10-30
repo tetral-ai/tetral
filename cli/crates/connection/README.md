@@ -176,7 +176,9 @@ mailbox submission; the body owner releases the budget on its last reference.
   `Instruction`: the instruction as read, whether the ledger recorded it and
   as a new operation, and the span its work runs in; a `session.prepare`, a
   `session.close` and a tool instruction (`protocol::ports::ToolCall`) go to
-  their Session's owner.
+  their Session's owner; a `session.close` for a Session without one creates
+  an owner without a record for that late close, which ends once its
+  report is acknowledged or dropped.
 - `Times` holds the owner's durations and limits, each a constant but for
   tests.
 - `Outbox::spawn(OutboxConfig)` starts the Report outbox, which implements

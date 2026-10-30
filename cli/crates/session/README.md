@@ -55,6 +55,28 @@ that is no longer the binding's is discarded.
   each task's start and the end of each started task, its processes
   confirmed gone or its start rejected, and each `tool.execute` it
   rejects `resource_exhausted` (`ConnectionPort`, `tools`).
+- A close of the binding on the current connection prevents its staged
+  starts and `session.drives`, has every running task of the binding end as
+  at a cancel, and waits until the binding's tasks, probes and clones are
+  gone and a `session.drives` being handled has handed its `applied` report
+  to the outbox; then the final upload of the Session's drives, ending 30
+  seconds after the close's admission, the drives' unmount, the deletion of
+  the repositories, the tasks' temporary directories and
+  `sessions/<session_id>/`, and the `closed` report with the abandoned
+  changes. Each repeat of a close that is still running gets the same
+  report; a repeat after it gets the saved report, kept until that
+  connection ends. A close of a binding that a new binding of the same
+  connection replaced is `closed` at once (`close`).
+- A late close, for a Session with no binding on the close's connection,
+  waits for every managed descendant of the Session, keeps the pending
+  changes of its sync state as `lost_changes` under the close's
+  `message_id`, deletes the Session's data as above without uploading and
+  reports `closed`. The connection's end during an ordinary close before
+  its report ends its final upload in keep mode: nothing is abandoned,
+  deleted or reported, and the late close that follows joins the wait.
+  An owner created for the close of a Session with no record asks the
+  Connection owner to end it once its reports have their outcomes
+  (`close`).
 - A task's supervisor reports its PID namespace and its confirmed end to
   the owner. A connection's end sends every task of its binding the end
   (staged ones never start, running ones end at once) and keeps each started
@@ -142,6 +164,8 @@ that is no longer the binding's is discarded.
 - `owner.rs`: `Factory`, `SessionMessage`, `SessionMailbox`, the owner's
   loop and state, `TaskStarter`, and a close, a connection's end and the
   shutdown as they end a preparation.
+- `close.rs`: the steps of an ordinary and a late close, the saved
+  `closed` report, and the deletion of the Session's local data.
 - `tools.rs`: the admission of tool instructions (`ToolContext`,
   `TaskStart`), a binding's task registry and staging queue (`Tasks`),
   their reports, the tasks' events (`TaskKey`, `TaskEvent`),

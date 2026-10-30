@@ -288,6 +288,8 @@ pub trait SessionHandle: Send + Sync {
     /// The owner's bindings as `GET /v1/sessions` lists them, read from its
     /// state alone.
     fn entries(&self, reply: EntriesReply);
+    /// The owner's task ends; the Connection owner routes it nothing more.
+    fn end(&self);
 }
 
 /// Takes the `task_id` of the task a host process belongs to, or `None`.
@@ -384,6 +386,11 @@ pub trait ConnectionPort: Send + Sync {
     /// Appends a final upload's `lost_changes` entries to the kept ones
     /// (`KeepLostChanges`); `kept` runs once they are written.
     fn keep_lost_changes(&self, entries: Vec<LostChange>, kept: KeptReply);
+    /// An owner that holds no record has had the outcome of every report it
+    /// made, after taking `received` instructions (`OwnerIdle`); the
+    /// Connection owner ends it ([`SessionHandle::end`]) when it has routed
+    /// it no later one.
+    fn owner_idle(&self, session_id: &SafeId, received: u64);
 }
 
 /// Runs once kept `lost_changes` entries are written.

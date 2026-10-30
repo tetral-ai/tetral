@@ -372,6 +372,11 @@ impl DriveSync {
         async move { answer.await.unwrap_or_default() }
     }
 
+    /// The drive sync's clock, which final uploads end by.
+    pub fn now(&self) -> std::time::Duration {
+        self.clock.now()
+    }
+
     /// An `exec_command` task of the Session started.
     pub fn task_started(&self, task_id: &Id) {
         self.send(Message::TaskStarted(task_id.as_str().to_owned()));

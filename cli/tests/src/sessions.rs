@@ -51,7 +51,8 @@ pub fn reports_for(engine: &ReferenceServer, message_id: &str) -> Vec<Value> {
 }
 
 /// Waits for the report that answers `message_id` and gives what it says:
-/// `prepared` and its `cwd`, or `failed` and its error's code.
+/// `prepared` and its `cwd`, `failed` and its error's code, or `closed` and
+/// nothing.
 pub fn outcome(engine: &ReferenceServer, message_id: &str) -> (String, String) {
     let mut reports = Vec::new();
     wait_until(&format!("the report answering {message_id}"), || {
@@ -62,7 +63,8 @@ pub fn outcome(engine: &ReferenceServer, message_id: &str) -> (String, String) {
     let status = report["status"].as_str().unwrap().to_owned();
     let detail = match status.as_str() {
         "prepared" => report["cwd"].as_str().unwrap().to_owned(),
-        _ => report["error"]["code"].as_str().unwrap().to_owned(),
+        "failed" => report["error"]["code"].as_str().unwrap().to_owned(),
+        _ => String::new(),
     };
     (status, detail)
 }
@@ -76,6 +78,10 @@ pub fn prepared(cwd: &Path) -> (String, String) {
 
 pub fn failed(code: &str) -> (String, String) {
     ("failed".to_owned(), code.to_owned())
+}
+
+pub fn closed() -> (String, String) {
+    ("closed".to_owned(), String::new())
 }
 
 /// `GET /v1/sessions` on the machine's App Server.

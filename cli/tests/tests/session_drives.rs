@@ -11,8 +11,10 @@ use tetral_tests::app_server::wait_until;
 use tetral_tests::machine::{answer_fault, one_credential_engine, send, wait_for_received};
 use tetral_tests::reference::ReferenceServer;
 use tetral_tests::sessions::{
-    online_machine, outcome, prepare, prepared, quiesce, records, reports_for, state_of,
+    closed, online_machine, outcome, prepare, prepared, quiesce, records, reports_for, state_of,
 };
+
+const PROBE_STARTED: &str = "probe.started";
 use tetral_tests::socket_directory;
 
 /// A `session.prepare` payload with no drives and no repositories.
@@ -27,8 +29,18 @@ fn payload(session: &str, binding: &str, cwd: &Path) -> Value {
     })
 }
 
-/// Writes a `session.drives` of no drives on `connection`.
+/// Writes a `session.drives` of no drives for `sess_a` on `connection`.
 fn send_drives(engine: &ReferenceServer, connection: &Value, message_id: &str, binding: &str) {
+    send_drives_of(engine, connection, message_id, "sess_a", binding);
+}
+
+fn send_drives_of(
+    engine: &ReferenceServer,
+    connection: &Value,
+    message_id: &str,
+    session: &str,
+    binding: &str,
+) {
     send(
         engine,
         json!({
@@ -36,9 +48,9 @@ fn send_drives(engine: &ReferenceServer, connection: &Value, message_id: &str, b
             "connection_id": connection,
             "message_id": message_id,
             "type": "session.drives",
-            "session_id": "sess_a",
+            "session_id": session,
             "binding_id": binding,
-            "payload": { "session_id": "sess_a", "binding_id": binding, "drives": [] },
+            "payload": { "session_id": session, "binding_id": binding, "drives": [] },
         }),
     );
 }
@@ -82,20 +94,29 @@ fn a_session_drives_waits_for_the_preparation_ack_is_ignored_while_closing_and_n
     case.pass();
 
     let mut case = record.case("a session.drives for a closing binding");
-    engine.control(
+    // The close waits for the binding's held probe, so the binding stays
+    // closing until the probe is released.
+    machine.seams.hold(PROBE_STARTED);
+    prepare(&engine, &payload("sess_b", "bind_b", &project));
+    machine.seams.wait_until_waiting(PROBE_STARTED, 1);
+    let issued = engine.control(
         "close",
         json!({
             "instance_id": tetral_tests::machine::INSTANCE,
-            "payload": { "session_id": "sess_a", "binding_id": "bind_a" },
+            "payload": { "session_id": "sess_b", "binding_id": "bind_b" },
         }),
     );
-    send_drives(&engine, &connection, "drives_2", "bind_a");
-    quiesce(&machine, 4);
+    let close = issued["message_id"].as_str().unwrap().to_owned();
+    send_drives_of(&engine, &connection, "drives_2", "sess_b", "bind_b");
+    quiesce(&machine, 5);
+    assert_eq!(state_of(&machine, "sess_b"), "closing");
     wait_until("the ignored record", || {
         records(&machine.root, "drives.ignored_closing").len() == 1
     });
+    machine.seams.release(PROBE_STARTED);
+    assert_eq!(outcome(&engine, &close), closed());
     assert!(reports_for(&engine, "drives_2").is_empty());
-    case.observe("the closing binding's session.drives was not reported and wrote one drives.ignored_closing record; the close's own report belongs to Session close and is checked there");
+    case.observe("the closing binding's session.drives was not reported and wrote one drives.ignored_closing record; once the held probe was released the close reported closed");
     case.pass();
 
     let mut case = record.case("a session.drives naming a binding the CLI never received");
@@ -106,9 +127,9 @@ fn a_session_drives_waits_for_the_preparation_ack_is_ignored_while_closing_and_n
         (&error["error"]["code"], &error["request_message_id"]),
         (&json!("invalid_message"), &json!("drives_3"))
     );
-    quiesce(&machine, 5);
+    quiesce(&machine, 6);
     assert!(reports_for(&engine, "drives_3").is_empty());
-    assert_eq!(state_of(&machine, "sess_a"), "closing");
+    assert_eq!(state_of(&machine, "sess_a"), "prepared");
     case.observe("one protocol-error report with invalid_message named the session.drives; no session-status answered it and the binding is unchanged");
     case.pass();
 }

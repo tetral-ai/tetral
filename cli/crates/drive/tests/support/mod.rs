@@ -800,4 +800,5 @@ impl protocol::ports::ConnectionPort for Keeper {
         self.0.lock().unwrap().extend(entries);
         kept();
     }
+    fn owner_idle(&self, _: &SafeId, _: u64) {}
 }

@@ -1,7 +1,10 @@
 //! The Session binding owners as the Connection owner reaches them: one per
 //! `session_id`, created when the first `session.prepare` of its Session is
 //! routed, which also creates its Session record; the record counts until
-//! its owner reports it gone. At most `RECORDS_MAX` records exist.
+//! its owner reports it gone. At most `RECORDS_MAX` records exist. A
+//! `session.close` of a Session without an owner creates one that holds no
+//! record; it ends once its reports have their outcomes and it has taken
+//! every instruction routed to it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -42,6 +45,7 @@ pub(crate) enum PortMessage {
     TaskEnded,
     TaskRefused,
     KeepLostChanges(Vec<LostChange>, Kept),
+    OwnerIdle(SafeId, u64),
 }
 
 /// The reply of a `KeepLostChanges`.
@@ -124,6 +128,10 @@ impl ConnectionPort for Port {
     fn keep_lost_changes(&self, entries: Vec<LostChange>, kept: KeptReply) {
         self.send(PortMessage::KeepLostChanges(entries, Kept(kept)));
     }
+
+    fn owner_idle(&self, session_id: &SafeId, received: u64) {
+        self.send(PortMessage::OwnerIdle(session_id.clone(), received));
+    }
 }
 
 /// What `GET /v1/sessions` is read from: the owners, which its handler asks
@@ -136,6 +144,9 @@ pub(crate) struct SessionsView {
 struct Owned {
     handle: Arc<dyn SessionHandle>,
     record: bool,
+    /// The instructions routed to it: each `session.prepare`, `session.close`,
+    /// `session.drives` and tool instruction.
+    routed: u64,
 }
 
 pub(crate) struct Owners {
@@ -183,22 +194,51 @@ impl Owners {
                     .factory
                     .create(session_id, self.port.clone(), self.reports.clone()),
                 record: false,
+                routed: 0,
             });
         owned.record = true;
+        owned.routed += 1;
         owned.handle.prepare(prepare);
     }
 
-    /// Hands `close` to its Session's owner, when the Session has one.
-    pub fn close(&self, session_id: &SafeId, close: Close) {
-        if let Some(owned) = self.owners.get(session_id) {
-            owned.handle.close(close);
-        }
+    /// Hands `close` to its Session's owner. A Session without one gets an
+    /// owner that holds no record and counts against no limit, which runs
+    /// the close as a late close.
+    pub fn close(&mut self, session_id: &SafeId, close: Close) {
+        let owned = self
+            .owners
+            .entry(session_id.clone())
+            .or_insert_with(|| Owned {
+                handle: self.factory.create(
+                    session_id.clone(),
+                    self.port.clone(),
+                    self.reports.clone(),
+                ),
+                record: false,
+                routed: 0,
+            });
+        owned.routed += 1;
+        owned.handle.close(close);
     }
 
     /// Hands `drives` to its Session's owner, when the Session has one.
-    pub fn drives(&self, session_id: &SafeId, drives: Drives) {
-        if let Some(owned) = self.owners.get(session_id) {
+    pub fn drives(&mut self, session_id: &SafeId, drives: Drives) {
+        if let Some(owned) = self.owners.get_mut(session_id) {
+            owned.routed += 1;
             owned.handle.drives(drives);
+        }
+    }
+
+    /// Ends the owner of `session_id` when it holds no record and has taken
+    /// every instruction routed to it (`received`); otherwise it handles
+    /// the later ones first.
+    pub fn idle(&mut self, session_id: &SafeId, received: u64) {
+        let ends = self
+            .owners
+            .get(session_id)
+            .is_some_and(|owned| !owned.record && owned.routed == received);
+        if ends && let Some(owned) = self.owners.remove(session_id) {
+            owned.handle.end();
         }
     }
 
@@ -213,12 +253,15 @@ impl Owners {
     /// Hands `call` to its Session's owner, or, for a Session without one,
     /// to the factory, which rejects it; it never creates an owner or a
     /// record.
-    pub fn tool(&self, call: ToolCall) {
+    pub fn tool(&mut self, call: ToolCall) {
         let owned = SafeId::new(call.session_id.as_str())
             .ok()
-            .and_then(|session_id| self.owners.get(&session_id));
+            .and_then(|session_id| self.owners.get_mut(&session_id));
         match owned {
-            Some(owned) => owned.handle.tool(call),
+            Some(owned) => {
+                owned.routed += 1;
+                owned.handle.tool(call);
+            }
             None => self.factory.unbound_tool(call, self.reports.clone()),
         }
     }
@@ -261,5 +304,119 @@ impl Owners {
             .values()
             .map(|owned| owned.handle.clone())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use protocol::ports::{EntriesReply, ReportId, Submission, TicketAnswer};
+
+    use super::*;
+
+    /// Records each call its owners take, by name.
+    #[derive(Default)]
+    struct Calls(Mutex<Vec<&'static str>>);
+
+    struct Recording(Arc<Calls>);
+
+    impl SessionHandle for Recording {
+        fn prepare(&self, _: Prepare) {
+            self.0.0.lock().unwrap().push("prepare");
+        }
+        fn close(&self, _: Close) {
+            self.0.0.lock().unwrap().push("close");
+        }
+        fn drives(&self, _: Drives) {}
+        fn tool(&self, _: ToolCall) {}
+        fn probe_slot(&self, _: ProbeRequest, _: ProbeSlot) {}
+        fn git_ticket(&self, _: TicketRequest, _: TicketAnswer) {}
+        fn connection_ended(&self, _: Id) {}
+        fn shutdown(&self) {}
+        fn entries(&self, reply: EntriesReply) {
+            reply(Vec::new());
+        }
+        fn end(&self) {
+            self.0.0.lock().unwrap().push("end");
+        }
+    }
+
+    struct Factory(Arc<Calls>);
+
+    impl SessionFactory for Factory {
+        fn create(
+            &self,
+            _: SafeId,
+            _: Arc<dyn ConnectionPort>,
+            _: Arc<dyn ReportSink>,
+        ) -> Arc<dyn SessionHandle> {
+            Arc::new(Recording(self.0.clone()))
+        }
+        fn unbound_tool(&self, _: ToolCall, _: Arc<dyn ReportSink>) {}
+    }
+
+    struct NoReports;
+
+    impl ReportSink for NoReports {
+        fn submit(&self, _: Submission) -> ReportId {
+            ReportId(0)
+        }
+        fn cancel(&self, _: ReportId) {}
+        fn add_final(&self, _: ReportId, _: Id) {}
+    }
+
+    fn id(value: &str) -> Id {
+        Id::new(value).unwrap()
+    }
+
+    fn close() -> Close {
+        Close {
+            connection_id: id("conn_1"),
+            message_id: id("msg_close"),
+            binding_id: id("bind_1"),
+        }
+    }
+
+    #[test]
+    fn an_owner_without_a_record_ends_only_once_it_has_taken_every_routed_instruction() {
+        let calls = Arc::new(Calls::default());
+        let (mailbox, _messages) = mpsc::unbounded_channel();
+        let mut owners = Owners::new(
+            Arc::new(Factory(calls.clone())),
+            Arc::new(Port { mailbox }),
+            Arc::new(NoReports),
+            RECORDS_MAX,
+        );
+        let session = SafeId::new("sess_1").unwrap();
+        owners.close(&session, close());
+        owners.close(&session, close());
+        // It asked after taking the first close only.
+        owners.idle(&session, 1);
+        assert!(owners.owns("sess_1"));
+        owners.idle(&session, 2);
+        assert!(!owners.owns("sess_1"));
+        assert_eq!(*calls.0.lock().unwrap(), ["close", "close", "end"]);
+
+        // A preparation routed after its close makes it count as a record.
+        let other = SafeId::new("sess_2").unwrap();
+        owners.close(&other, close());
+        let payload = serde_json::json!({
+            "session_id": "sess_2", "binding_id": "bind_1", "cwd": "/project",
+            "drives": [], "drive_exclude": [], "repositories": [],
+        });
+        owners.prepare(
+            other.clone(),
+            Prepare {
+                connection_id: id("conn_1"),
+                message_id: id("msg_prepare"),
+                addressed_connection_id: id("conn_1"),
+                payload: serde_json::from_value(payload).unwrap(),
+                fingerprint: "a".repeat(64),
+                traceparent: None,
+            },
+        );
+        owners.idle(&other, 2);
+        assert!(owners.owns("sess_2"));
     }
 }

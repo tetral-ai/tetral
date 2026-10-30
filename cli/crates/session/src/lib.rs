@@ -2,6 +2,7 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 mod cases;
+mod close;
 pub mod drives;
 mod owner;
 mod prepare;

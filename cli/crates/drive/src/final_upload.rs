@@ -53,10 +53,30 @@ pub struct FinalUpload {
     lost_changes: oneshot::Receiver<Vec<LostChange>>,
 }
 
-impl FinalUpload {
+/// What ends a final upload at once in keep mode, apart from its end.
+pub struct FinalKeeper {
+    id: u64,
+    mailbox: mpsc::UnboundedSender<Message>,
+}
+
+impl FinalKeeper {
     /// Ends it at once in keep mode, as the connection's end does.
     pub fn keep_now(&self) {
         let _ = self.mailbox.send(Message::FinalKeep(self.id));
+    }
+}
+
+impl FinalUpload {
+    /// Ends it at once in keep mode, as the connection's end does.
+    pub fn keep_now(&self) {
+        self.keeper().keep_now();
+    }
+
+    pub fn keeper(&self) -> FinalKeeper {
+        FinalKeeper {
+            id: self.id,
+            mailbox: self.mailbox.clone(),
+        }
     }
 
     /// Waits for its end: the `lost_changes` entries it kept, unfitted, in

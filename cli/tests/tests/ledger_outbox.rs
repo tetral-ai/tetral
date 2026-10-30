@@ -365,16 +365,24 @@ fn a_session_instruction_delivered_again_is_routed_once_and_its_message_id_with_
         r#"{"protocol_version":1,"connection_id":"conn_1","message_id":"msg_close","type":"session.close","payload":{"session_id":"sess_a","binding_id":"bind_b"}}"#,
     );
     send_data(&engine, "not json");
-    // Events are handled in stream order and reports are numbered in the
-    // order they are submitted, so the last event's report is r2 only when
-    // exactly one protocol error came before it.
-    let reports = by_message_id(wait_for_received(&engine, "protocol-error", 2));
-    let reported: Vec<(&str, &str, Option<&str>)> = reports
+    // The Connection owner handles events in stream order and numbers its
+    // reports in that order; the late close's own `closed` report may take
+    // any number between them.
+    wait_for_received(&engine, "protocol-error", 2);
+    wait_until("the late close's report", || {
+        !engine.requests("session-status").is_empty()
+    });
+    let mut reports = engine.received("protocol-error");
+    reports.sort_by_key(|report| {
+        report["body"]["message_id"].as_str().unwrap()[1..]
+            .parse::<u64>()
+            .unwrap()
+    });
+    let reported: Vec<(&str, Option<&str>)> = reports
         .iter()
         .map(|report| {
             let body = &report["body"];
             (
-                body["message_id"].as_str().unwrap(),
                 body["error"]["code"].as_str().unwrap(),
                 body.get("request_message_id")
                     .map(|id| id.as_str().unwrap()),
@@ -384,11 +392,12 @@ fn a_session_instruction_delivered_again_is_routed_once_and_its_message_id_with_
     assert_eq!(
         reported,
         [
-            ("r1", "message_conflict", Some("msg_close")),
-            ("r2", "invalid_message", None)
+            ("message_conflict", Some("msg_close")),
+            ("invalid_message", None)
         ]
     );
     assert_eq!(machine.routed(), 1);
-    case.observe("the close was routed once; the copy with members reordered and whitespace added started nothing; the changed binding_id gave one message_conflict naming msg_close and was not routed");
+    assert_eq!(engine.requests("session-status").len(), 1);
+    case.observe("the close was routed once and its late close sent one closed report; the copy with members reordered and whitespace added started nothing; the changed binding_id gave one message_conflict naming msg_close and was not routed");
     case.pass();
 }

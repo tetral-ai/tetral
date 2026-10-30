@@ -754,6 +754,9 @@ impl Owner {
                 binding_id,
             } => self.fetch_git_ticket(session_id, request, &connection_id, &binding_id),
             PortMessage::RecordGone(session_id) => self.owners.record_gone(&session_id),
+            PortMessage::OwnerIdle(session_id, received) => {
+                self.owners.idle(&session_id, received);
+            }
             PortMessage::TasksGone(session_id) => {
                 self.tasks_pending.remove(&session_id);
             }
@@ -2328,11 +2331,29 @@ mod tests {
             _: Arc<dyn protocol::ports::ConnectionPort>,
             _: Arc<dyn ReportSink>,
         ) -> Arc<dyn protocol::ports::SessionHandle> {
-            panic!("this connection fixture admits no Session")
+            Arc::new(Silent)
         }
         fn unbound_tool(&self, _: ToolCall, _: Arc<dyn ReportSink>) {
             panic!("this connection fixture admits no tools")
         }
+    }
+
+    /// The owner a close creates in this fixture: it answers nothing.
+    struct Silent;
+
+    impl protocol::ports::SessionHandle for Silent {
+        fn prepare(&self, _: Prepare) {}
+        fn close(&self, _: Close) {}
+        fn drives(&self, _: Drives) {}
+        fn tool(&self, _: ToolCall) {}
+        fn probe_slot(&self, _: protocol::ports::ProbeRequest, _: ProbeSlot) {}
+        fn git_ticket(&self, _: TicketRequest, _: protocol::ports::TicketAnswer) {}
+        fn connection_ended(&self, _: Id) {}
+        fn shutdown(&self) {}
+        fn entries(&self, reply: protocol::ports::EntriesReply) {
+            reply(Vec::new());
+        }
+        fn end(&self) {}
     }
 
     fn owner_with_budget(
