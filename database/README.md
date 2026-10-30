@@ -8,8 +8,8 @@ contracts.
   dimension; Session and Thread isolation remains explicit relational and
   lifecycle ownership inside a Workspace. Ordinary Workspace tables get one
   read/write isolation policy. The append-only Workspace tables
-  (`session_file_attachment_consumptions` and `session_message_parts`) get only
-  a Workspace SELECT policy and a Workspace INSERT policy, so no serving role
+  (`session_file_attachment_consumptions`, `session_message_parts` and
+  `session_machine_messages`) get only a Workspace SELECT policy and a Workspace INSERT policy, so no serving role
   can update or delete their rows even where a grant would allow it.
 - `roles.json` declares the exact table and sequence privileges, and the
   allowlisted SECURITY DEFINER function grants, for each serving workload. The
