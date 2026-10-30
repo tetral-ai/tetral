@@ -939,6 +939,9 @@ impl Owner {
             self.local_change(key);
         }
         if !changed.is_empty() {
+            // A covered write the operation settled leaves nothing to wait
+            // for.
+            self.sync_points_progress().await;
             self.changes_ready().await;
         }
         for path in after.remove_files {

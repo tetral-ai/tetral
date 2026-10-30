@@ -307,3 +307,17 @@ async fn a_sync_point_s_requests_carry_its_traceparent_and_a_quiet_period_upload
     assert!(matches!(put, Call::Upload { .. }));
     assert_eq!(put.traceparent(), None);
 }
+
+#[tokio::test]
+async fn a_covered_write_removed_during_the_wait_ends_the_wait() {
+    let mut env = Env::new();
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.write("a", "gone soon", NO_TASK).await;
+    let point = session.sync_point(None, RESULT_WAIT, None);
+    let _held = env.call().await;
+    session.remove("a", NO_TASK).await;
+    let result = tokio::time::timeout(Duration::from_secs(10), outcome(point))
+        .await
+        .expect("the result before the wait passes");
+    assert!(result.not_synced.is_empty(), "{:?}", result.not_synced);
+}
