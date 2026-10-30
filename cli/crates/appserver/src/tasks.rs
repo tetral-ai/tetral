@@ -44,6 +44,7 @@ impl TaskStarter for Supervisors {
             received: task.received,
             record: task.record,
             listener,
+            drive_sync: task.drive_sync,
         };
         Some(supervisor::spawn(
             spec,

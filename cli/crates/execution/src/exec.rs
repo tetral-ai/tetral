@@ -191,6 +191,7 @@ pub struct Outcome {
     pub cancelled: Option<bool>,
     pub was_running: Option<bool>,
     pub written_bytes: Option<u64>,
+    pub drive_sync: Option<protocol::tool::DriveSyncOutcome>,
 }
 
 impl Outcome {
@@ -215,7 +216,7 @@ impl Outcome {
                 duration_ms: millis(self.duration),
             }),
             metrics: self.metrics,
-            drive_sync: None,
+            drive_sync: self.drive_sync,
         }
     }
 }

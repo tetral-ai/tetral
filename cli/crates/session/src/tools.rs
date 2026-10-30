@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use execution::policy::{TaskPermissions, TranslationInputs, validate};
+use execution::policy::{DriveMount, SessionDrives, TaskPermissions, TranslationInputs, validate};
 use execution::report::{Body, Correlation, Report};
 use execution::supervisor::{
     Control, SupervisorMailbox, SupervisorMessage, TASK_NOT_FOUND, TaskListener,
@@ -78,6 +78,8 @@ pub struct TaskStart {
     pub traceparent: Option<String>,
     /// When the instruction was received, on the seam clock.
     pub received: Duration,
+    /// The Session's drive sync, once it is open.
+    pub drive_sync: Option<Arc<dyn protocol::ports::DriveSyncPort>>,
 }
 
 /// One binding's tasks: its registry by `task_id` and its staging queue.
@@ -254,15 +256,18 @@ impl<S: TaskStarter> SessionOwner<S> {
                 "the connection has no room to record a new task",
             ));
         }
-        let cwd = named_binding(self.record.as_ref(), call)
+        let named = named_binding(self.record.as_ref(), call);
+        let cwd = named
             .and_then(|binding| binding.cwd.as_ref())
             .map(|cwd| PathBuf::from(cwd.as_str()));
+        let drives = named.and_then(|binding| self.session_drives(binding));
         let task_name = store::task_name();
         let (payload, permissions) = validated(
             shared,
             call,
             cwd.as_deref().unwrap_or(&shared.paths.canonical),
             &task_name,
+            drives,
         )?;
         let prepared = self
             .record
@@ -299,6 +304,10 @@ impl<S: TaskStarter> SessionOwner<S> {
             record: cleanup::record_path(root, &task_name),
             traceparent: call.traceparent.clone(),
             received: call.received,
+            drive_sync: match &self.drive_sync {
+                crate::drives::DriveSyncSlot::Open(sync) => Some(Arc::new(sync.clone())),
+                _ => None,
+            },
         };
         let staged = binding.state == SessionState::PreparedPendingAck;
         let tool = tool_of(&start.tool);
@@ -464,6 +473,17 @@ impl<S: TaskStarter> SessionOwner<S> {
             TaskEvent::Gone => entry.gone = true,
             TaskEvent::Withdrawn => {}
         }
+        // The drive sync's upload triggers: the quiet period while an
+        // `exec_command` runs, and the exit of the task that wrote.
+        if let crate::drives::DriveSyncSlot::Open(sync) = &self.drive_sync {
+            match event {
+                TaskEvent::Started(_) if entry.tool == ExecutionTool::ExecCommand => {
+                    sync.task_started(&task.task_id);
+                }
+                TaskEvent::Gone => sync.task_exited(&task.task_id),
+                _ => {}
+            }
+        }
     }
 
     /// After the shutdown has ended every task, tells the Connection owner
@@ -581,7 +601,13 @@ pub(crate) fn unbound(shared: &Shared, call: ToolCall, reports: &dyn ReportSink)
             "the connection has no room to record a new task",
         ),
         DownstreamType::ToolExecute => {
-            match validated(shared, &call, &shared.paths.canonical, &store::task_name()) {
+            match validated(
+                shared,
+                &call,
+                &shared.paths.canonical,
+                &store::task_name(),
+                None,
+            ) {
                 Err(body) => body,
                 Ok(_) => binding_unavailable(),
             }
@@ -601,6 +627,28 @@ fn named_binding<'a>(record: Option<&'a Record>, call: &ToolCall) -> Option<&'a 
         })
 }
 
+impl<S: TaskStarter> SessionOwner<S> {
+    /// The drive mounts a task of `binding` reaches: those under the
+    /// `TETRAL_DRIVES` folder its drive sync gives, each with its access.
+    fn session_drives(&self, binding: &Binding) -> Option<SessionDrives> {
+        let crate::drives::DriveSyncSlot::Open(sync) = &self.drive_sync else {
+            return None;
+        };
+        let directory = protocol::ports::DriveSyncPort::drives_variable(sync)?;
+        Some(SessionDrives {
+            mounts: binding
+                .drives
+                .iter()
+                .map(|drive| DriveMount {
+                    path: directory.join(drive.drive_id.as_str()),
+                    access: drive.access,
+                })
+                .collect(),
+            directory,
+        })
+    }
+}
+
 /// Steps 3 and 4 of a `tool.execute`: its schema, budgets and tool against
 /// the ready's list, then its policy, translated with `cwd` as the working
 /// directory its trusted programs are looked up from and `task_name` naming
@@ -610,6 +658,7 @@ fn validated(
     call: &ToolCall,
     cwd: &Path,
     task_name: &str,
+    drives: Option<SessionDrives>,
 ) -> Result<(ExecutePayload, TaskPermissions), Body> {
     let (payload, value) = match protocol::decode_value::<Downstream>(call.data.as_bytes()) {
         Ok((
@@ -629,7 +678,7 @@ fn validated(
         socket_directory: shared.tools.socket_directory.clone(),
         task_temporary_directory: store::task_temporary_directory(&parent, task_name),
         task_directories: parent,
-        drives: None,
+        drives,
         trusted_programs: isolation::trusted_programs(
             &shared.tools.tetral,
             shared.tools.cua_driver.as_deref(),

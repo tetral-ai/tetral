@@ -2,7 +2,7 @@
 //! without the CLI's credential and control variables, then the call's
 //! `env` in key order, then the entries that `env` cannot override. No
 //! variable whose name begins with `TETRAL_` reaches a command, inherited or
-//! requested.
+//! requested; the CLI sets only `TETRAL_DRIVES` itself.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -72,11 +72,13 @@ pub struct NulEntry {
 
 /// The environment of a command whose App Server runs with `inherited` and
 /// whose call asks for `requested`; `TMPDIR` is the task's temporary
-/// directory `temporary`. An inherited entry that is not UTF-8 is left out.
+/// directory `temporary`, and `TETRAL_DRIVES` is `drives` when the Session's
+/// drive sync gives one. An inherited entry that is not UTF-8 is left out.
 pub fn command_environment(
     inherited: impl IntoIterator<Item = (OsString, OsString)>,
     requested: Option<&BTreeMap<String, String>>,
     temporary: &Path,
+    drives: Option<&Path>,
 ) -> Result<HashMap<String, String>, NulEntry> {
     let mut environment: HashMap<String, String> = inherited
         .into_iter()
@@ -95,6 +97,9 @@ pub fn command_environment(
         environment.insert(name.to_owned(), value.to_owned());
     }
     environment.insert("TMPDIR".to_owned(), temporary.display().to_string());
+    if let Some(drives) = drives {
+        environment.insert("TETRAL_DRIVES".to_owned(), drives.display().to_string());
+    }
     Ok(environment)
 }
 
@@ -137,7 +142,7 @@ mod tests {
             ("TETRAL_SECRET".into(), "excluded".into()),
         ]);
         let environment =
-            command_environment(inherited, Some(&requested), Path::new("/task/tmp")).unwrap();
+            command_environment(inherited, Some(&requested), Path::new("/task/tmp"), None).unwrap();
         let file = command_environment_file(&environment).unwrap();
         let decoded: HashMap<String, String> = serde_json::from_reader(file).unwrap();
         assert_eq!(decoded, environment);
@@ -149,7 +154,14 @@ mod tests {
         }
         assert!(!decoded.contains_key("NON_UTF8"));
         assert!(!decoded.keys().any(|name| name.starts_with(CONTROL_PREFIX)));
+        // `TETRAL_DRIVES` is the drive sync's value, never the call's.
+        let requested = BTreeMap::from([("TETRAL_DRIVES".into(), "/elsewhere".into())]);
+        let drives = Path::new("/state/sessions/s/drives");
+        let set = command_environment([], Some(&requested), Path::new("/t"), Some(drives)).unwrap();
+        assert_eq!(set["TETRAL_DRIVES"], "/state/sessions/s/drives");
+        let unset = command_environment([], Some(&requested), Path::new("/t"), None).unwrap();
+        assert!(!unset.contains_key("TETRAL_DRIVES"));
         let invalid = BTreeMap::from([("CUSTOM_VALUE".into(), "invalid\0value".into())]);
-        assert!(command_environment([], Some(&invalid), Path::new("/task/tmp")).is_err());
+        assert!(command_environment([], Some(&invalid), Path::new("/task/tmp"), None).is_err());
     }
 }

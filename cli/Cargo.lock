@@ -160,8 +160,10 @@ dependencies = [
  "serde",
  "serde_json",
  "session",
+ "sha2 0.11.1",
  "state",
  "tempfile",
+ "tetral-tests",
  "thiserror 2.0.21",
  "tokio",
 ]

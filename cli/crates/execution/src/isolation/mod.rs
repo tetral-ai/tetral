@@ -364,6 +364,7 @@ mod tests {
             [("PATH".into(), "/usr/bin:/bin".into())],
             Some(&requested),
             directory.path(),
+            None,
         )
         .unwrap();
         let environment = crate::env::command_environment_file(&environment).unwrap();
