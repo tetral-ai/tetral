@@ -25,6 +25,48 @@ type AcceptedRuntimeInput struct {
 	QueueStatus     sql.NullString
 }
 
+// CancelInterruptedAcceptedInputsTx cancels, in the interrupt's commit, the
+// thread's accepted messages and rejections before the interrupt's fence,
+// which the Runtime drops at that interrupt, each with its pending job (one
+// whose lease expired before its acknowledgement). Queue's interrupt
+// cancellation settles the queued and delivering ones the same way; without
+// this, a later hand-back would deliver an interrupted message again. While
+// the interrupt's job is leased no other input of the thread is delivered or
+// leased, so none of their jobs is leased.
+func CancelInterruptedAcceptedInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, sessionID, threadID, interruptEventID string, now time.Time) error {
+	var eventType string
+	var fence int64
+	if err := tx.QueryRow(ctx,
+		`SELECT type, sequence FROM session_events
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND event_id = $4`,
+		workspaceID, sessionID, threadID, interruptEventID,
+	).Scan(&eventType, &fence); dbconnect.IsNoRows(err) {
+		return PreparationError{Kind: "runtime_inbox_invariant", Message: "interrupt event is missing", Retryable: false}
+	} else if err != nil {
+		return err
+	}
+	if eventType != "user.interrupt" && eventType != ChildInterruptRequestedEventType {
+		return PreparationError{Kind: "runtime_inbox_invariant", Message: "interrupt event type is invalid", Retryable: false}
+	}
+	_, err := tx.Exec(ctx,
+		`WITH cancelled AS (
+		   UPDATE session_runtime_inbox
+		      SET status = 'cancelled', updated_at = $5
+		    WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+		      AND status = 'accepted'
+		      AND input_kind IN ('messages', 'rejection') AND sequence_to < $4
+		   RETURNING runtime_input_id
+		 )
+		 UPDATE queue_jobs job
+		    SET status = 'cancelled', cancelled_at = $5, updated_at = $5
+		   FROM cancelled
+		  WHERE job.workspace_id = $1 AND job.kind = 'runtime_input' AND job.status = 'pending'
+		    AND job.dedupe_key = 'runtime_input:' || $1 || ':' || $2 || ':' || cancelled.runtime_input_id`,
+		workspaceID, sessionID, threadID, fence, now,
+	)
+	return err
+}
+
 // HandBackRuntimeInputsTx transfers noncommitted input custody to Queue. The
 // caller must hold Session arbitration and the exact binding/process fence,
 // established either by cooperative release or proven-loss repair. Existing
