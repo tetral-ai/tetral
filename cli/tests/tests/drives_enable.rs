@@ -1,4 +1,4 @@
-//! LA-12 on Linux: `tetral drives enable` succeeds with `{}` and changes
+//! On Linux: `tetral drives enable` succeeds with `{}` and changes
 //! nothing, and fails with `server_running` while an App Server owns the
 //! root.
 #![cfg(target_os = "linux")]

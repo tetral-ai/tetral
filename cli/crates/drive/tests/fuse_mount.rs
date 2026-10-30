@@ -543,8 +543,8 @@ async fn failed_listings_are_reported_at_the_checks_once_per_distinct_error() {
     ];
     assert_eq!(three, [vec![failure("drive_a", denied)], vec![], vec![]]);
 
-    // The form of DT-19: a failed listing after a preparation's mount is
-    // held, and reported with the next check's own failed listing.
+    // A failed listing after a preparation's mount is held, and reported
+    // with the next check's own failed listing.
     let harness = Harness::start().await;
     harness.stub.files.lock().unwrap().push_back(Answer::Denied);
     assert!(harness.prepare(&["drive_a"]).await.is_empty());

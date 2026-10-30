@@ -1099,7 +1099,7 @@ fn holds(bytes: &[u8], needle: &str) -> bool {
 }
 
 #[test]
-fn la_17_the_log_file_rotates_into_three_files_and_stderr_accounts_for_every_record() {
+fn the_log_file_rotates_into_three_files_and_stderr_accounts_for_every_record() {
     use tetral_tests::machine::{
         CREDENTIAL, INSTANCE, KEY as ENGINE_KEY, Machine, bootstrap as engine_bootstrap,
         one_credential_engine,
@@ -1239,7 +1239,7 @@ fn la_17_the_log_file_rotates_into_three_files_and_stderr_accounts_for_every_rec
 const LOG_NAMES: [&str; 3] = ["tetral.log", "tetral.log.1", "tetral.log.2"];
 
 #[test]
-fn la_18_metrics_serve_exactly_the_local_families_after_a_resume_and_with_a_waiting_probe() {
+fn metrics_serve_exactly_the_local_families_after_a_resume_and_with_a_waiting_probe() {
     use tetral_tests::machine::{
         CREDENTIAL, FIRST_CONNECTION, INSTANCE, KEY as ENGINE_KEY, Machine,
         bootstrap as engine_bootstrap, one_credential_engine, seconds,
@@ -1298,12 +1298,12 @@ fn la_18_metrics_serve_exactly_the_local_families_after_a_resume_and_with_a_wait
     assert_eq!(series(&text, "tetral_probes_limit"), 8.0);
     assert_eq!(series(&text, "tetral_probes_queued"), 1.0);
     machine.seams.release("probe.started");
-    case.observe("the scrape held exactly the 27 local families; reconnects resume 1, probes limit 8 and queued 1 while the ninth waited; the upload's 429 is counted in-process, as the line's rule for rows that need drive transfer states");
+    case.observe("the scrape held exactly the 27 local families; reconnects resume 1, probes limit 8 and queued 1 while the ninth waited; the upload's 429 is counted in-process by the drive crate's commit tests");
     case.pass();
 }
 
 #[test]
-fn la_19_diag_bundles_exactly_its_entries_with_or_without_an_app_server_and_refuses_its_output() {
+fn diag_bundles_exactly_its_entries_with_or_without_an_app_server_and_refuses_its_output() {
     use tetral_tests::machine::{
         CREDENTIAL, INSTANCE, KEY as ENGINE_KEY, Machine, bootstrap as engine_bootstrap,
         one_credential_engine,
