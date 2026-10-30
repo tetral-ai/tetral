@@ -867,7 +867,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_put_whose_bytes_keep_moving_past_ten_seconds_completes_within_its_total() {
-        // Far more than the loopback socket buffers hold, read 64 KiB in
+        // Far more than the loopback socket buffers hold, read 512 KiB in
         // each second of the clock: only the bytes the client writes move.
         const SIZE: usize = 32 << 20;
         const READ: usize = 512 << 10;
