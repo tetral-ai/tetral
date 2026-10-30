@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::connection::{
-    DownstreamType, LostChange, McpTools, SessionPreparePayload, SessionStatus,
+    DownstreamType, DriveBinding, LostChange, McpTools, SessionPreparePayload, SessionStatus,
 };
 use crate::id::{Id, SafeId};
 use crate::local::SessionEntry;
@@ -183,6 +183,17 @@ pub struct Close {
     pub binding_id: Id,
 }
 
+/// A `session.drives` for the Session binding owner of its `session_id`.
+#[derive(Debug, Clone)]
+pub struct Drives {
+    pub connection_id: Id,
+    pub message_id: Id,
+    pub binding_id: Id,
+    pub drives: Vec<DriveBinding>,
+    /// The instruction's `traceparent`, when it is usable.
+    pub traceparent: Option<String>,
+}
+
 /// A `tool.execute`, `tool.stdin` or `tool.cancel` that the replay ledger
 /// has read, for the Session binding owner of its `session_id`, which
 /// decodes, admits or rejects it.
@@ -262,6 +273,7 @@ pub trait SessionFactory: Send + Sync {
 pub trait SessionHandle: Send + Sync {
     fn prepare(&self, prepare: Prepare);
     fn close(&self, close: Close);
+    fn drives(&self, drives: Drives);
     fn tool(&self, call: ToolCall);
     /// The answer to the owner's request `request`.
     fn probe_slot(&self, request: ProbeRequest, answer: ProbeSlot);

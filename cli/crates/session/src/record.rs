@@ -49,6 +49,9 @@ pub struct Binding {
     pub drive_exclude: Vec<DriveExclude>,
     pub drive_mount_failures: Vec<Failure>,
     pub tasks: Tasks,
+    /// While a `session.drives` is handled: ends its final upload in keep
+    /// mode when the connection ends.
+    pub applying: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// A `session.prepare` that a report answers.

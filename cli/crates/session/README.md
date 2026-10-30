@@ -146,6 +146,9 @@ that is no longer the binding's is discarded.
   `TaskStart`), a binding's task registry and staging queue (`Tasks`),
   their reports, the tasks' events (`TaskKey`, `TaskEvent`),
   `cleanup_pending` and the owner of a host process.
+- `drives.rs`: the drive sync of a preparation's mounts, and a
+  `session.drives`: its queueing, the hold of later commands, its handling
+  on the drive sync and its `applied` report.
 - `record.rs`: `Record`, `Binding` and the entries of `GET /v1/sessions`.
 - `cases.rs`: the cases of a `session.prepare` (`Case`, `decide`).
 - `prepare.rs`: the steps of a preparation, from the connection check to the

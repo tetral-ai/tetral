@@ -53,7 +53,8 @@ use protocol::fingerprint::fingerprint;
 use protocol::id::{Id, SafeId};
 use protocol::local::{ConnectionState, ErrorObject, SessionEntry, SessionState};
 use protocol::ports::{
-    Close, Prepare, ProbeSlot, ReportSink, SessionFactory, Submission, TicketRequest, ToolCall,
+    Close, Drives, Prepare, ProbeSlot, ReportSink, SessionFactory, Submission, TicketRequest,
+    ToolCall,
 };
 use protocol::time::Rfc3339Utc;
 use protocol::tool::ProtocolVersion;
@@ -1998,14 +1999,15 @@ impl Owner {
 
     /// Hands a Session instruction on once the ready ACK came, counted as
     /// the test seam counter `route.session`: a `session.prepare`, a
-    /// `session.close` or a tool instruction to the Session binding owner of
-    /// its `session_id`.
+    /// `session.close`, a `session.drives` or a tool instruction to the
+    /// Session binding owner of its `session_id`.
     fn route(&mut self, held: &mut Held, instruction: Instruction) {
         state::seams::count("route.session");
         let _entered = instruction.span.clone().entered();
         match instruction.message.envelope.kind {
             DownstreamType::SessionPrepare => self.route_prepare(held, instruction),
             DownstreamType::SessionClose => self.route_close(held, &instruction),
+            DownstreamType::SessionDrives => self.route_drives(held, &instruction),
             DownstreamType::ToolExecute
             | DownstreamType::ToolStdin
             | DownstreamType::ToolCancel => self.route_tool(held, instruction),
@@ -2155,6 +2157,42 @@ impl Owner {
             binding_id: close.binding_id,
         };
         self.owners.close(&close.session_id, close_message);
+    }
+
+    /// Hands a `session.drives` to its Session's owner; one whose binding
+    /// no `session.prepare` of this connection named is a protocol error.
+    fn route_drives(&mut self, held: &Held, instruction: &Instruction) {
+        let message = &instruction.message;
+        let Ok(Downstream {
+            payload: DownstreamPayload::SessionDrives(drives),
+            ..
+        }) = protocol::decode::<Downstream>(message.data.as_bytes())
+        else {
+            return;
+        };
+        let routed = (
+            drives.session_id.as_str().to_owned(),
+            drives.binding_id.as_str().to_owned(),
+        );
+        if !held.routed.contains(&routed) {
+            return self.protocol_error(
+                &held.id,
+                ProtocolErrorKind::UnknownBinding,
+                Some(message.envelope.message_id.clone()),
+                instruction.trace.as_ref(),
+            );
+        }
+        let drives_message = Drives {
+            connection_id: held.id.clone(),
+            message_id: message.envelope.message_id.clone(),
+            binding_id: drives.binding_id,
+            drives: drives.drives,
+            traceparent: instruction
+                .trace
+                .as_ref()
+                .map(|trace| trace.header_value().to_owned()),
+        };
+        self.owners.drives(&drives.session_id, drives_message);
     }
 }
 

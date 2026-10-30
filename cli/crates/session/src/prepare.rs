@@ -115,6 +115,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             drive_exclude: prepare.payload.drive_exclude.clone(),
             drive_mount_failures: Vec::new(),
             tasks: Default::default(),
+            applying: None,
         };
         let record = self.record.get_or_insert_with(Record::default);
         record.current = Some(binding);

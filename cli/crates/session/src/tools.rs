@@ -33,7 +33,7 @@ use execution::{cleanup, isolation, process, store};
 use protocol::connection::{Downstream, DownstreamPayload, DownstreamType};
 use protocol::id::Id;
 use protocol::local::SessionState;
-use protocol::ports::{ReportSink, TaskOwnerReply, ToolCall};
+use protocol::ports::{Drives, ReportSink, TaskOwnerReply, ToolCall};
 use protocol::tool::{
     ControlErrorCode, ExecutePayload, ExecutionTool, ProtocolError, RejectionCode,
     ToolExecutionCapability, ToolInput, VisibleLimits,
@@ -86,9 +86,18 @@ pub struct TaskStart {
 #[derive(Debug, Default)]
 pub struct Tasks {
     registry: HashMap<Id, Task>,
-    /// The tasks admitted while the binding waits for its ACK, in arrival
-    /// order, each with the time on the seam clock it was staged.
-    staged: VecDeque<(Id, Duration)>,
+    /// The tasks admitted while the binding waits for its ACK or for the
+    /// report of a `session.drives`, and the `session.drives` that wait, in
+    /// arrival order.
+    staged: VecDeque<Staged>,
+}
+
+/// An entry of a binding's staging queue.
+#[derive(Debug)]
+enum Staged {
+    /// A task, with the time on the seam clock it was staged.
+    Task(Id, Duration),
+    Drives(Box<Drives>),
 }
 
 struct Task {
@@ -127,7 +136,10 @@ impl Tasks {
     /// staged.
     fn prevent_staged(&mut self) -> Vec<Duration> {
         let mut unstaged = Vec::new();
-        for (task_id, staged) in std::mem::take(&mut self.staged) {
+        for entry in std::mem::take(&mut self.staged) {
+            let Staged::Task(task_id, staged) = entry else {
+                continue;
+            };
             if let Some(task) = self.registry.get_mut(&task_id) {
                 task.state = TaskState::Prevented;
                 if task.supervisor.is_some() {
@@ -185,17 +197,34 @@ impl Tasks {
         }
     }
 
-    /// The staged tasks in arrival order, each now started, with its
-    /// supervisor and the time it was staged.
-    fn start_staged(&mut self) -> Vec<(Id, SupervisorMailbox, Duration)> {
-        std::mem::take(&mut self.staged)
-            .into_iter()
-            .filter_map(|(task_id, staged)| {
-                let task = self.registry.get_mut(&task_id)?;
+    /// The staged tasks in arrival order up to the first staged
+    /// `session.drives`, each now started, with its supervisor and the time
+    /// it was staged; and that `session.drives`, which leaves the queue.
+    fn start_staged(&mut self) -> (Vec<(Id, SupervisorMailbox, Duration)>, Option<Box<Drives>>) {
+        let mut started = Vec::new();
+        while let Some(entry) = self.staged.pop_front() {
+            let (task_id, staged) = match entry {
+                Staged::Task(task_id, staged) => (task_id, staged),
+                Staged::Drives(drives) => return (started, Some(drives)),
+            };
+            if let Some(task) = self.registry.get_mut(&task_id) {
                 task.state = TaskState::Started;
-                Some((task_id, task.supervisor.clone()?, staged))
-            })
-            .collect()
+                if let Some(supervisor) = task.supervisor.clone() {
+                    started.push((task_id, supervisor, staged));
+                }
+            }
+        }
+        (started, None)
+    }
+
+    /// Queues a `session.drives` behind the instructions staged before it.
+    pub fn stage_drives(&mut self, drives: Drives) {
+        self.staged.push_back(Staged::Drives(Box::new(drives)));
+    }
+
+    /// Whether anything waits in the staging queue.
+    pub fn has_staged(&self) -> bool {
+        !self.staged.is_empty()
     }
 }
 
@@ -309,7 +338,11 @@ impl<S: TaskStarter> SessionOwner<S> {
                 _ => None,
             },
         };
-        let staged = binding.state == SessionState::PreparedPendingAck;
+        // A task waits behind the ACK, and behind a `session.drives` handled
+        // or staged before it.
+        let staged = binding.state == SessionState::PreparedPendingAck
+            || binding.applying.is_some()
+            || binding.tasks.has_staged();
         let tool = tool_of(&start.tool);
         let listener = Arc::new(Events {
             mailbox: self.mailbox.clone(),
@@ -347,7 +380,10 @@ impl<S: TaskStarter> SessionOwner<S> {
             },
         );
         if staged {
-            binding.tasks.staged.push_back((call.task_id.clone(), now));
+            binding
+                .tasks
+                .staged
+                .push_back(Staged::Task(call.task_id.clone(), now));
         }
         Ok(())
     }
@@ -389,10 +425,9 @@ impl<S: TaskStarter> SessionOwner<S> {
             DownstreamPayload::ToolCancel(cancel) => {
                 if task.state == TaskState::Staged {
                     task.state = TaskState::Prevented;
-                    if let Some(position) = staged
-                        .iter()
-                        .position(|(task_id, _)| *task_id == call.task_id)
-                        && let Some((_, at)) = staged.remove(position)
+                    if let Some(position) = staged.iter().position(
+                        |entry| matches!(entry, Staged::Task(task_id, _) if *task_id == call.task_id),
+                    ) && let Some(Staged::Task(_, at)) = staged.remove(position)
                         && task.supervisor.is_some()
                         && let Some(preparation) = &self.preparation
                     {
@@ -410,24 +445,32 @@ impl<S: TaskStarter> SessionOwner<S> {
     }
 
     /// Starts the binding's staged tasks in arrival order, once the ACK of
-    /// its `prepared` report has made it `prepared`, before any later
-    /// instruction of the binding.
+    /// its `prepared` report has made it `prepared` or the report of a
+    /// `session.drives` was handed to the outbox, before any later
+    /// instruction of the binding; a staged `session.drives` is handled in
+    /// its turn, and the tasks after it wait for its report.
     pub(crate) fn start_staged(&mut self) {
         let Some(binding) = self
             .record
             .as_mut()
             .and_then(|record| record.current.as_mut())
-            .filter(|binding| binding.state == SessionState::Prepared)
+            .filter(|binding| {
+                binding.state == SessionState::Prepared && binding.applying.is_none()
+            })
         else {
             return;
         };
         let connection_id = binding.connection_id.clone();
-        for (task_id, supervisor, staged) in binding.tasks.start_staged() {
+        let (started, drives) = binding.tasks.start_staged();
+        for (task_id, supervisor, staged) in started {
             self.starter.start(&supervisor);
             if let Some(preparation) = &self.preparation {
                 preparation.connection.task_started(Some(staged));
             }
             self.running.insert((connection_id.clone(), task_id));
+        }
+        if let Some(drives) = drives {
+            self.apply_drives(*drives);
         }
     }
 

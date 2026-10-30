@@ -11,8 +11,8 @@ use protocol::connection::LostChange;
 use protocol::id::{Id, SafeId};
 use protocol::local::SessionEntry;
 use protocol::ports::{
-    Close, ConnectionPort, KeptReply, Prepare, ProbeRequest, ProbeSlot, ReportSink, SessionFactory,
-    SessionHandle, TicketAnswer, TicketRequest, ToolCall,
+    Close, ConnectionPort, Drives, KeptReply, Prepare, ProbeRequest, ProbeSlot, ReportSink,
+    SessionFactory, SessionHandle, TicketAnswer, TicketRequest, ToolCall,
 };
 use tokio::sync::mpsc;
 
@@ -192,6 +192,13 @@ impl Owners {
     pub fn close(&self, session_id: &SafeId, close: Close) {
         if let Some(owned) = self.owners.get(session_id) {
             owned.handle.close(close);
+        }
+    }
+
+    /// Hands `drives` to its Session's owner, when the Session has one.
+    pub fn drives(&self, session_id: &SafeId, drives: Drives) {
+        if let Some(owned) = self.owners.get(session_id) {
+            owned.handle.drives(drives);
         }
     }
 

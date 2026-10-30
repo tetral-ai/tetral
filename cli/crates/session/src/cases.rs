@@ -63,6 +63,7 @@ mod tests {
             drive_exclude: Vec::new(),
             drive_mount_failures: Vec::new(),
             tasks: Default::default(),
+            applying: None,
         }
     }
 

@@ -19,7 +19,7 @@ use protocol::connection::RepositoryFailure;
 use protocol::id::{Id, SafeId};
 use protocol::local::SessionState;
 use protocol::ports::{
-    Close, ConnectionPort, EntriesReply, Prepare, ProbeRequest, ProbeSlot, ReportId,
+    Close, ConnectionPort, Drives, EntriesReply, Prepare, ProbeRequest, ProbeSlot, ReportId,
     ReportListener, ReportOutcome, ReportSink, SessionFactory, SessionHandle, TaskOwnerReply,
     TaskOwnership, TicketAnswer, TicketRequest, ToolCall,
 };
@@ -82,6 +82,13 @@ pub enum SessionMessage {
     MountsDone {
         operation: u64,
         failures: Vec<drive::mount::Failure>,
+    },
+    /// A `session.drives` of one of this Session's bindings.
+    Drives(Box<Drives>),
+    /// A `session.drives` was handled, or stopped at the connection's end.
+    DrivesApplied {
+        drives: Box<Drives>,
+        applied: Option<drive::binding_change::Applied>,
     },
 }
 
@@ -233,6 +240,10 @@ impl SessionHandle for Handle {
         self.send(SessionMessage::Close { close, reply });
     }
 
+    fn drives(&self, drives: Drives) {
+        self.send(SessionMessage::Drives(Box::new(drives)));
+    }
+
     fn tool(&self, call: ToolCall) {
         self.send(SessionMessage::Tool(Box::new(call)));
     }
@@ -324,6 +335,8 @@ pub(crate) struct SessionOwner<S> {
     /// The text last reported for each drive while the sync state could not
     /// be opened.
     pub open_failures: HashMap<String, String>,
+    /// A `session.drives` whose handling waits for the drive sync to open.
+    pub drives_waiting: Option<crate::drives::PendingChange>,
 }
 
 async fn own<S: TaskStarter>(
@@ -374,6 +387,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             shutdown_answered: false,
             drive_sync: crate::drives::DriveSyncSlot::default(),
             open_failures: HashMap::new(),
+            drives_waiting: None,
         }
     }
 
@@ -399,6 +413,10 @@ impl<S: TaskStarter> SessionOwner<S> {
                 operation,
                 failures,
             } => self.mounts_done(operation, failures),
+            SessionMessage::Drives(drives) => self.drives(*drives),
+            SessionMessage::DrivesApplied { drives, applied } => {
+                self.drives_applied(*drives, applied);
+            }
             SessionMessage::Shutdown => self.shutdown(),
             SessionMessage::Entries(reply) => {
                 let entries = match (&self.record, &self.preparation) {
@@ -500,6 +518,9 @@ impl<S: TaskStarter> SessionOwner<S> {
         binding.state = SessionState::Unavailable;
         binding.waiting.clear();
         binding.reports.clear();
+        if let Some(stop) = binding.applying.take() {
+            let _ = stop.send(());
+        }
         let (unconfirmed, unstaged) = binding.tasks.connection_ended();
         for task_id in unconfirmed {
             self.unconfirmed.insert((connection.clone(), task_id));
@@ -616,6 +637,7 @@ mod tests {
                 drive_exclude: Vec::new(),
                 drive_mount_failures: Vec::new(),
                 tasks: Default::default(),
+                applying: None,
             }),
             unavailable: None,
         }
@@ -1299,5 +1321,90 @@ mod tests {
                 message: "the directory probe ended without a result".to_owned(),
             })
         );
+    }
+
+    /// Reports and task starts, in the order they happened.
+    #[derive(Clone, Default)]
+    struct Ordered(Arc<Mutex<Vec<String>>>);
+
+    impl ReportSink for Ordered {
+        fn submit(&self, submission: Submission) -> ReportId {
+            let final_for = submission.final_for.clone();
+            let bytes = (submission.build)(&id("conn_1"), &id("r1")).unwrap();
+            let entry = match protocol::decode::<SessionStatus>(&bytes) {
+                Ok(SessionStatus {
+                    outcome: SessionOutcome::Applied { .. },
+                    request_message_id,
+                    ..
+                }) if final_for == [request_message_id.clone()] => {
+                    format!("applied {}", request_message_id.as_str())
+                }
+                _ => "another report".to_owned(),
+            };
+            self.0.lock().unwrap().push(entry);
+            ReportId(0)
+        }
+        fn cancel(&self, _report: ReportId) {}
+        fn add_final(&self, _report: ReportId, _instruction: Id) {}
+    }
+
+    struct OrderedStarter(Ordered, Vec<mpsc::UnboundedReceiver<SupervisorMessage>>);
+
+    impl TaskStarter for OrderedStarter {
+        fn supervise(
+            &mut self,
+            _task: TaskStart,
+            _reports: Arc<dyn ReportSink>,
+            _listener: Arc<dyn TaskListener>,
+        ) -> Option<SupervisorMailbox> {
+            let (mailbox, messages) = mpsc::unbounded_channel();
+            self.1.push(messages);
+            Some(mailbox)
+        }
+
+        fn start(&mut self, _supervisor: &SupervisorMailbox) {
+            self.0.0.lock().unwrap().push("start".to_owned());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tool_execute_after_a_session_drives_starts_once_its_report_is_handed_over() {
+        let ordered = Ordered::default();
+        let (mailbox, messages) = mpsc::unbounded_channel();
+        let preparation = Preparation {
+            session_id: SafeId::new("sess_1").unwrap(),
+            connection: Arc::new(TestConnection::default()),
+            reports: Arc::new(ordered.clone()),
+            shared: shared(),
+        };
+        let starter = OrderedStarter(ordered.clone(), Vec::new());
+        let mut owner = SessionOwner::new(Some(preparation), starter, mailbox.clone());
+        owner.record = Some(record_with(SessionState::Prepared));
+        tokio::spawn(own(owner, messages));
+        let drives = Drives {
+            connection_id: id("conn_1"),
+            message_id: id("msg_drives"),
+            binding_id: id("bind_1"),
+            drives: serde_json::from_value(
+                json!([{"drive_id": "drive_a", "access": "read_write"}]),
+            )
+            .unwrap(),
+            traceparent: None,
+        };
+        // No drive context comes, so the handling waits for its drive sync.
+        mailbox
+            .send(SessionMessage::Drives(Box::new(drives.clone())))
+            .unwrap();
+        mailbox.send(tool("task_1")).unwrap();
+        handled(&mailbox).await;
+        assert!(ordered.0.lock().unwrap().is_empty());
+        mailbox
+            .send(SessionMessage::DrivesApplied {
+                drives: Box::new(drives),
+                applied: Some(drive::binding_change::Applied::default()),
+            })
+            .unwrap();
+        handled(&mailbox).await;
+        assert_eq!(*ordered.0.lock().unwrap(), ["applied msg_drives", "start"]);
     }
 }

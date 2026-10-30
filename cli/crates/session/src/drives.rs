@@ -4,21 +4,32 @@
 //! `drive_mount_failures`. A sync state that cannot be opened fails every
 //! bound drive with its error, reported once per drive and text in this
 //! App Server process, and is opened again at the next preparation.
+//!
+//! A `session.drives` of a binding waits in its staging queue until the
+//! preparation's ACK, is handled at once for a `prepared` binding and is
+//! ignored for a `closing` or `failed` one. Its handling on the drive sync
+//! ([`drive::binding_change`]) holds every later `tool.execute` of the
+//! binding until its `applied` report is handed to the outbox; the
+//! connection's end during its final upload stops it without a report.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use drive::binding_change::{Applied, BindingChange};
 use drive::cache::ContentCache;
 use drive::mount::{Bound, Failure, Mounting, Registry};
 use drive::state::{FILE_NAME, SyncState};
 use drive::transfer::Binding as DriveBinding;
 use drive::{DriveSync, DriveTransfer, SyncConfig};
-use protocol::connection::DriveAccess;
-use protocol::field::AbsolutePath;
+use protocol::connection::{
+    DriveAccess, DriveBinding as BoundDrive, DriveExclude, SessionOutcome, SessionStatus,
+};
+use protocol::field::{AbsolutePath, List};
 use protocol::id::Id;
-use protocol::ports::TaskOwnership;
+use protocol::local::SessionState;
+use protocol::ports::{Drives, Submission, TaskOwnership};
 use protocol::tool::DriveMountFailure;
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 
 use crate::owner::{SessionMessage, SessionOwner, TaskStarter};
 use crate::record::Binding;
@@ -61,14 +72,17 @@ pub(crate) enum DriveSyncSlot {
 
 /// Each bound drive of `binding` as the mount check takes it.
 fn bound(binding: &Binding) -> Vec<Bound> {
-    binding
-        .drives
+    bound_of(&binding.drives, &binding.drive_exclude)
+}
+
+/// Each drive of `drives`, with its paths in `drive_exclude`.
+fn bound_of(drives: &[BoundDrive], drive_exclude: &[DriveExclude]) -> Vec<Bound> {
+    drives
         .iter()
         .map(|drive| Bound {
             drive_id: drive.drive_id.clone(),
             read_only: drive.access == DriveAccess::ReadOnly,
-            exclude: binding
-                .drive_exclude
+            exclude: drive_exclude
                 .iter()
                 .filter(|exclude| exclude.drive_id.as_str() == drive.drive_id.as_str())
                 .flat_map(|exclude| exclude.paths.iter().map(|path| path.as_str().to_owned()))
@@ -111,6 +125,119 @@ impl<S: TaskStarter> SessionOwner<S> {
                 self.open_drive_sync();
             }
         }
+    }
+
+    /// A `session.drives` of the binding it names on its connection.
+    pub(crate) fn drives(&mut self, drives: Drives) {
+        let Some(binding) = self.current_binding().filter(|binding| {
+            binding.binding_id == drives.binding_id && binding.connection_id == drives.connection_id
+        }) else {
+            return;
+        };
+        match binding.state {
+            SessionState::Closing => observe::info!("drives.ignored_closing"),
+            SessionState::Failed => observe::info!("drives.ignored_failed"),
+            SessionState::Prepared if binding.applying.is_none() && !binding.tasks.has_staged() => {
+                self.apply_drives(drives);
+            }
+            _ => binding.tasks.stage_drives(drives),
+        }
+    }
+
+    /// Handles `drives` for the current binding, on the drive sync, opened
+    /// first when the Session has none and binds a drive now.
+    pub(crate) fn apply_drives(&mut self, drives: Drives) {
+        let Some(connection) = self
+            .preparation
+            .as_ref()
+            .map(|preparation| preparation.connection.clone())
+        else {
+            return;
+        };
+        let Some(binding) = self.current_binding() else {
+            return;
+        };
+        let (stop, stopped) = oneshot::channel();
+        binding.applying = Some(stop);
+        let change = BindingChange {
+            old: bound(binding),
+            new: bound_of(&drives.drives, &binding.drive_exclude),
+            request_message_id: drives.message_id.clone(),
+            connection,
+        };
+        let waiting = PendingChange {
+            drives,
+            change,
+            stopped,
+        };
+        match &mut self.drive_sync {
+            DriveSyncSlot::Open(sync) => {
+                let sync = sync.clone();
+                self.spawn_change(sync, waiting);
+            }
+            DriveSyncSlot::Closed if waiting.change.new.is_empty() => {
+                let _ = self.mailbox.send(SessionMessage::DrivesApplied {
+                    drives: Box::new(waiting.drives),
+                    applied: Some(Applied::default()),
+                });
+            }
+            DriveSyncSlot::Opening(_) => self.drives_waiting = Some(waiting),
+            DriveSyncSlot::Closed => {
+                self.drives_waiting = Some(waiting);
+                self.drive_sync = DriveSyncSlot::Opening(Vec::new());
+                self.open_drive_sync();
+            }
+        }
+    }
+
+    fn spawn_change(&self, sync: DriveSync, waiting: PendingChange) {
+        let mailbox = self.mailbox.clone();
+        let PendingChange {
+            drives,
+            change,
+            stopped,
+        } = waiting;
+        tokio::spawn(async move {
+            let stop = async move {
+                let _ = stopped.await;
+            };
+            let applied = sync.change_binding(change, stop).await;
+            let _ = mailbox.send(SessionMessage::DrivesApplied {
+                drives: Box::new(drives),
+                applied,
+            });
+        });
+    }
+
+    /// A `session.drives` was handled: the binding takes its drive set, its
+    /// `applied` report goes to the outbox, and the instructions staged
+    /// behind it follow. One the connection's end stopped changes nothing.
+    pub(crate) fn drives_applied(&mut self, drives: Drives, applied: Option<Applied>) {
+        let Some(record) = self.record.as_mut() else {
+            return;
+        };
+        for binding in [&mut record.current, &mut record.unavailable]
+            .into_iter()
+            .flatten()
+            .filter(|binding| {
+                binding.binding_id == drives.binding_id
+                    && binding.connection_id == drives.connection_id
+            })
+        {
+            binding.applying = None;
+            if applied.is_some() {
+                binding.drives = drives.drives.clone();
+            }
+        }
+        let Some(applied) = applied else {
+            return;
+        };
+        if let Some(preparation) = &self.preparation {
+            let report = applied_report(preparation.session_id.to_id(), &drives, &applied);
+            preparation.reports.submit(report);
+        }
+        self.mount_failures_reported(&applied.failures);
+        self.start_staged();
     }
 
     fn open_drive_sync(&self) {
@@ -179,6 +306,9 @@ impl<S: TaskStarter> SessionOwner<S> {
         match opened {
             Ok(sync) => {
                 self.drive_sync = DriveSyncSlot::Open(sync.clone());
+                if let Some(waiting) = self.drives_waiting.take() {
+                    self.spawn_change(sync.clone(), waiting);
+                }
                 if let Some(binding) = self.current_binding()
                     && binding.state == protocol::local::SessionState::Prepared
                 {
@@ -194,6 +324,25 @@ impl<S: TaskStarter> SessionOwner<S> {
                 }
             }
             Err(error) => {
+                if let Some(waiting) = self.drives_waiting.take() {
+                    let all: Vec<Failure> = waiting
+                        .change
+                        .new
+                        .iter()
+                        .map(|bound| Failure {
+                            drive_id: bound.drive_id.as_str().to_owned(),
+                            error: error.clone(),
+                        })
+                        .collect();
+                    let failures = new_open_failures(&mut self.open_failures, all);
+                    let _ = self.mailbox.send(SessionMessage::DrivesApplied {
+                        drives: Box::new(waiting.drives),
+                        applied: Some(Applied {
+                            failures,
+                            lost_changes: Vec::new(),
+                        }),
+                    });
+                }
                 for operation in waiting {
                     let Some(binding) = self
                         .current_binding()
@@ -299,4 +448,44 @@ fn new_open_failures(
                 != Some(failure.error.clone())
         })
         .collect()
+}
+
+/// A `session.drives` whose handling waits for the drive sync to open.
+pub(crate) struct PendingChange {
+    drives: Drives,
+    change: BindingChange,
+    /// Ends when the connection ends.
+    stopped: oneshot::Receiver<()>,
+}
+
+/// The `applied` report of `drives`, its `lost_changes` fitted with its
+/// other fields.
+fn applied_report(session_id: Id, drives: &Drives, applied: &Applied) -> Submission {
+    let request_message_id = drives.message_id.clone();
+    let binding_id = drives.binding_id.clone();
+    let failures = failures(applied.failures.clone());
+    let lost = applied.lost_changes.clone();
+    let mut submission = Submission::new(
+        drives.connection_id.clone(),
+        move |connection_id, message_id| {
+            let status = |lost_changes| SessionStatus {
+                connection_id: connection_id.clone(),
+                message_id: message_id.clone(),
+                request_message_id: request_message_id.clone(),
+                session_id: session_id.clone(),
+                binding_id: binding_id.clone(),
+                outcome: SessionOutcome::Applied {
+                    drive_mount_failures: (!failures.is_empty()).then(|| List(failures.clone())),
+                    lost_changes,
+                },
+            };
+            let fitted = drive::lost_changes::fit(&lost, |candidate| {
+                protocol::encode(&status(candidate.cloned())).len()
+            });
+            status(fitted)
+        },
+    );
+    submission.final_for = vec![drives.message_id.clone()];
+    submission.traceparent = drives.traceparent.clone();
+    submission
 }
