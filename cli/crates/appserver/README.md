@@ -56,8 +56,10 @@ ones it uses belong here too.
   lock file, a socket file or a process ID alone shows nothing (`lock`).
 - A local API handler reads only the state the owners report and never waits
   for Engine or touches the filesystem; `GET /v1/sessions` lists what the
-  Session binding owners and the Connection owner's staging hold
-  (`local_api`).
+  Session binding owners and the Connection owner's staging hold, and
+  `GET /v1/metrics` the local metrics in the text format 0.0.4
+  (`observe::render`), with `tetral_startup_phase_seconds` set from the
+  phases of `observe::STARTUP` once a ready was accepted (`local_api`).
 - The first of `POST /v1/shutdown`, SIGINT and SIGTERM starts the shutdown;
   later ones change nothing. The sequence stops the Connection owner, which
   ends every task and answers once each task's processes are confirmed
