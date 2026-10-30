@@ -366,6 +366,18 @@ these phases, missing-grant rollback and workspace isolation.
   the Runner wait and reaches the connector as the gRPC deadline;
   connector-side cancellation follows the
   [Gateway discovery contract](../gateway/README.md#discovery-and-manifest-delivery).
+- **Inputs that never start a run.** A `machine_message` input (a change to one
+  of the Session's computers, written by `internal/computer.WriteMachineMessageTx`)
+  carries no events and never places a Runtime. Under the Session mutation lock,
+  preparation reads the Session's binding: with none, an `added` or `removed`
+  message is accepted unbound (the next load reads the computer rows) and any
+  other stays queued, and the job completes; with one, the input is claimed and
+  sent to that pod as `AcceptNonStartingInput`, and an accepted or duplicate
+  reply accepts it. The transaction that creates a binding enqueues one job for
+  each queued such input without an active job, in creation order. Pod-loss
+  repair hands accepted ones back to Queue; a Runtime's own release leaves them
+  as they are. Such an input or its job never makes the Session look busy to a
+  Session update, a thread archive or recovery's residency check.
 - **Agent-mail custody.** Child creation atomically persists the child, context
   prefix, first mail, Inbox row, Queue job, and spawn receipt. First and later
   mail then share one delivery path: `CommitInputs` makes the Message durable,
@@ -434,10 +446,10 @@ withdraws old channels from new admission, lets admitted RPCs finish under their
 own bounds, then closes them. Leaf-only renewal preserves admitted work. Each
 direct command has one attempt; Queue owns later delivery and receipt recovery.
 The descriptor-complete policy covers AcceptInput, RecoverThread, AcceptAgentMail,
-AcceptTaskNotification, Interrupt, ResolveToolConfirmation, ApplyRuntimeConfig
-and CleanupSession. Each initial attempt bound is 30000ms and can be configured
-with `TETRAL_RUNTIME_<METHOD_IN_SNAKE_CASE>_TIMEOUT_MS`; caller and lease deadlines
-remain shorter where applicable. The interrupt plan and native client consume
+AcceptTaskNotification, AcceptNonStartingInput, Interrupt, ResolveToolConfirmation,
+ApplyRuntimeConfig and CleanupSession. Each initial attempt bound is 30000ms and can
+be configured with `TETRAL_RUNTIME_<METHOD_IN_SNAKE_CASE>_TIMEOUT_MS`; caller and
+lease deadlines remain shorter where applicable. The interrupt plan and native client consume
 that same typed policy rather than separate fixed limits.
 
 ## Manifest discovery

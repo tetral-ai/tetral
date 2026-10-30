@@ -755,6 +755,20 @@ func (s *recordingRuntimeCommandSender) AcceptTaskNotification(_ context.Context
 	return &agentruntimev1.AcceptTaskNotificationResponse{Outcome: &agentruntimev1.AcceptTaskNotificationResponse_Accepted{Accepted: &agentruntimev1.AcceptTaskNotificationAccepted{}}}, nil
 }
 
+func (s *recordingRuntimeCommandSender) AcceptNonStartingInput(_ context.Context, target RuntimePodTarget, request *agentruntimev1.AcceptNonStartingInputRequest) (*agentruntimev1.AcceptNonStartingInputResponse, error) {
+	result, err := s.record(target, request)
+	if err != nil || result.Status == "" {
+		return nil, err
+	}
+	if result.Status == RuntimeDeliveryDuplicate {
+		return &agentruntimev1.AcceptNonStartingInputResponse{Outcome: &agentruntimev1.AcceptNonStartingInputResponse_Duplicate{Duplicate: &agentruntimev1.AcceptNonStartingInputDuplicate{}}}, nil
+	}
+	if result.Status == RuntimeDeliveryRejected {
+		return &agentruntimev1.AcceptNonStartingInputResponse{Outcome: &agentruntimev1.AcceptNonStartingInputResponse_Rejected{Rejected: &agentruntimev1.AcceptNonStartingInputRejected{Reason: agentruntimev1.AcceptNonStartingInputFailure_ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_BUSY, Retryable: result.Retryable}}}, nil
+	}
+	return &agentruntimev1.AcceptNonStartingInputResponse{Outcome: &agentruntimev1.AcceptNonStartingInputResponse_Accepted{Accepted: &agentruntimev1.AcceptNonStartingInputAccepted{}}}, nil
+}
+
 func (s *recordingRuntimeCommandSender) Interrupt(_ context.Context, target RuntimePodTarget, request *agentruntimev1.InterruptRequest) (*agentruntimev1.InterruptResponse, error) {
 	result, err := s.record(target, request)
 	if err != nil || result.Status == "" {
