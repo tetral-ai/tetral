@@ -111,8 +111,10 @@ operations `instances.*` and `instance_credentials.*`.
   `instance_events.listener_disconnected`), reads the instance object of each
   notice and queues the event for its own subscribers in that workspace.
   Delivery is best effort: a subscriber more than 64 events behind is closed,
-  a reconnecting subscriber gets no backlog, and every stream ends at
-  shutdown.
+  a reconnecting subscriber gets no backlog, every stream ends at shutdown,
+  and every open stream ends when the pod listens again after a failure,
+  since the notices sent meanwhile are lost, so that its Controller reads
+  the instances again.
 - `last_credential_reuse` is the latest use of a credential that an
   activation revoked (client routes below).
 - Each issued, fetched, activated or revoked credential writes one

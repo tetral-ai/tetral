@@ -557,6 +557,20 @@ func (e streamedEvents) none(t *testing.T) {
 	}
 }
 
+// ended waits until the stream ends, failing on an event or after 10
+// seconds.
+func (e streamedEvents) ended(t *testing.T) {
+	t.Helper()
+	select {
+	case event, open := <-e:
+		if open {
+			t.Fatalf("unexpected event %+v; want the stream to end", event)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stream did not end within 10 seconds")
+	}
+}
+
 // readServerSentEventOrEnd returns the next event's name and data, or an
 // empty name once the stream ends.
 func readServerSentEventOrEnd(stream *bufio.Reader) (string, string) {

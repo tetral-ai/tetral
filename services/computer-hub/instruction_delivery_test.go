@@ -881,7 +881,14 @@ func waitUntil(t *testing.T, condition func() bool) {
 // the pod then opens again.
 func (f *hubFixture) restartListener(pod string) {
 	f.t.Helper()
-	listen := `LISTEN ` + instance.ConnectionNoticeChannel(pod)
+	f.restartChannelListener(instance.ConnectionNoticeChannel(pod))
+}
+
+// restartChannelListener ends the one LISTEN connection on channel, which its
+// listener then opens again.
+func (f *hubFixture) restartChannelListener(channel string) {
+	f.t.Helper()
+	listen := `LISTEN ` + channel
 	waitUntil(f.t, func() bool {
 		return f.count(`SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND query=$1`, listen) == 1
 	})
