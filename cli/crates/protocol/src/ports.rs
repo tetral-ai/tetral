@@ -4,7 +4,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::connection::{DownstreamType, McpTools, SessionPreparePayload, SessionStatus};
+use crate::connection::{
+    DownstreamType, LostChange, McpTools, SessionPreparePayload, SessionStatus,
+};
 use crate::id::{Id, SafeId};
 use crate::local::SessionEntry;
 use crate::tool::{DriveSyncOutcome, DriveSyncReport, ProtocolErrorReport, ToolStatus};
@@ -367,7 +369,13 @@ pub trait ConnectionPort: Send + Sync {
     fn task_ended(&self);
     /// A `tool.execute` was rejected `resource_exhausted` (`TaskRefused`).
     fn task_refused(&self);
+    /// Appends a final upload's `lost_changes` entries to the kept ones
+    /// (`KeepLostChanges`); `kept` runs once they are written.
+    fn keep_lost_changes(&self, entries: Vec<LostChange>, kept: KeptReply);
 }
+
+/// Runs once kept `lost_changes` entries are written.
+pub type KeptReply = Box<dyn FnOnce() + Send>;
 
 #[cfg(test)]
 mod tests {

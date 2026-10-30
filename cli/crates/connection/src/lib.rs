@@ -10,6 +10,7 @@ mod git_ticket;
 pub mod heartbeat;
 pub mod http;
 pub mod ledger;
+pub mod lost_changes;
 pub mod outbox;
 pub mod owner;
 pub mod probe_slots;

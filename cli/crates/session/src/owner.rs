@@ -758,6 +758,13 @@ mod tests {
         fn task_started(&self, _staged: Option<Duration>) {}
         fn task_ended(&self) {}
         fn task_refused(&self) {}
+        fn keep_lost_changes(
+            &self,
+            _: Vec<protocol::connection::LostChange>,
+            kept: protocol::ports::KeptReply,
+        ) {
+            kept();
+        }
     }
 
     #[derive(Default)]

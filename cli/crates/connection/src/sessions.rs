@@ -7,10 +7,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use protocol::connection::LostChange;
 use protocol::id::{Id, SafeId};
 use protocol::local::SessionEntry;
 use protocol::ports::{
-    Close, ConnectionPort, Prepare, ProbeRequest, ProbeSlot, ReportSink, SessionFactory,
+    Close, ConnectionPort, KeptReply, Prepare, ProbeRequest, ProbeSlot, ReportSink, SessionFactory,
     SessionHandle, TicketAnswer, TicketRequest, ToolCall,
 };
 use tokio::sync::mpsc;
@@ -40,6 +41,16 @@ pub(crate) enum PortMessage {
     TaskStarted(Option<Duration>),
     TaskEnded,
     TaskRefused,
+    KeepLostChanges(Vec<LostChange>, Kept),
+}
+
+/// The reply of a `KeepLostChanges`.
+pub(crate) struct Kept(pub KeptReply);
+
+impl std::fmt::Debug for Kept {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("kept reply")
+    }
 }
 
 /// The Connection owner's side of `ConnectionPort`: each call is a message
@@ -108,6 +119,10 @@ impl ConnectionPort for Port {
 
     fn task_refused(&self) {
         self.send(PortMessage::TaskRefused);
+    }
+
+    fn keep_lost_changes(&self, entries: Vec<LostChange>, kept: KeptReply) {
+        self.send(PortMessage::KeepLostChanges(entries, Kept(kept)));
     }
 }
 

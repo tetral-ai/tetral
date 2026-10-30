@@ -208,7 +208,8 @@ mailbox submission; the body owner releases the budget on its last reference.
 | `src/classify.rs` | The reading of an event's envelope and identities, and the content fingerprint |
 | `src/protocol_error.rs` | The classes of protocol errors, their codes and texts, and their reports |
 | `src/attempt.rs` | One attempt's query by its kind, the validity of `connected`, and the task that reads its stream; `ATTEMPT_TOTAL` |
-| `src/ready.rs` | Ready with its startup phases, the sender check, and the grant of an ACK |
+| `src/ready.rs` | Ready with its startup phases and the kept `lost_changes` entries, the sender check, and the grant of an ACK |
+| `src/lost_changes.rs` | `lost-changes.json` (`KeptLostChanges`): appending on `KeepLostChanges`, removing on a report's `FinalAcked` and on a ready's ACK, and the records `lost_changes.not_saved` and `lost_changes.unreadable` |
 | `src/heartbeat.rs` | Which heartbeat events start a send and which ACKs may set the deadline |
 | `src/staging.rs` | The staging queue and `STAGING_MAX` |
 | `src/ledger.rs` | The replay ledger, its limits and reserve, and when an entry goes |

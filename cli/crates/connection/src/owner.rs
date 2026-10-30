@@ -45,7 +45,7 @@ use observe::{Identity, STARTUP, TraceContext};
 use protocol::bootstrap::BootstrapKey;
 use protocol::connection::{
     DisconnectPayload, Downstream, DownstreamPayload, DownstreamType, Envelope, Heartbeat,
-    PreparationError, PreparationErrorCode, SessionOutcome, SessionStatus,
+    LostChange, PreparationError, PreparationErrorCode, SessionOutcome, SessionStatus,
 };
 use protocol::errors::{ErrorBody, ErrorCode};
 use protocol::field::{Nullable, PositiveInt};
@@ -71,6 +71,7 @@ use crate::git_ticket::{self, GIT_TICKET_PATH, TicketFetch};
 use crate::heartbeat::Heartbeats;
 use crate::http::{Answer, REQUEST_TOTAL, Transport};
 use crate::ledger::{self, Entry, EntryState, Ledger, Need, Seen};
+use crate::lost_changes::KeptLostChanges;
 use crate::outbox::{Outbox, OutboxConfig, OutboxEvent, OutboxTimes};
 use crate::probe_slots::{ProbeSlots, SlotLimits};
 use crate::protocol_error::{self, ProtocolErrorKind};
@@ -477,6 +478,9 @@ struct Registration {
     deadline: Duration,
     /// `None` when ready failed its own decoder.
     ready: Option<Outgoing>,
+    /// The `lost_changes` entries kept when ready was built, which its ACK
+    /// removes.
+    lost_changes: Vec<LostChange>,
     staging: Staging<Instruction>,
 }
 
@@ -559,6 +563,7 @@ struct Owner {
     stop_replies: Vec<oneshot::Sender<()>>,
     /// The Sessions whose tasks the stop still waits for.
     tasks_pending: BTreeSet<SafeId>,
+    lost_changes: KeptLostChanges,
 }
 
 impl Owner {
@@ -586,6 +591,7 @@ impl Owner {
             instance_id: config.instance_id,
             credential: config.credential,
             written: None,
+            lost_changes: KeptLostChanges::load(&config.state_root),
             state_root: config.state_root,
             ready: config.ready,
             started: config.started,
@@ -761,6 +767,10 @@ impl Owner {
             }
             PortMessage::TaskEnded => self.task_pressure.ended(state::seams::now()),
             PortMessage::TaskRefused => self.task_pressure.refused(state::seams::now()),
+            PortMessage::KeepLostChanges(entries, kept) => {
+                self.lost_changes.keep(entries);
+                (kept.0)();
+            }
         }
     }
 
@@ -1188,7 +1198,14 @@ impl Owner {
             tickets: HashMap::new(),
         });
         let message_id = held.next_message_id();
-        let built = ready::ready(&self.ready, &held.id, message_id.clone(), now);
+        let lost_changes = self.lost_changes.entries().to_vec();
+        let built = ready::ready(
+            &self.ready,
+            &held.id,
+            message_id.clone(),
+            now,
+            &lost_changes,
+        );
         let ready = ready::checked(&built, &held.id, &message_id).map(|body| Outgoing {
             stream,
             message_id,
@@ -1208,6 +1225,7 @@ impl Owner {
         held.registration = Some(Registration {
             deadline: now + self.times.registration_deadline,
             ready,
+            lost_changes,
             staging: Staging::with_capacity(self.times.staging_max),
         });
         Phase::Held(held)
@@ -1426,6 +1444,7 @@ impl Owner {
                     Stream::Waiting { .. } | Stream::Resuming(_) => None,
                 };
                 held.ledger.final_acked(&instruction, current);
+                self.lost_changes.report_acked(&instruction);
                 state::seams::count("connection.final_acked");
                 Phase::Held(held)
             }
@@ -1575,6 +1594,7 @@ impl Owner {
                 state::seams::count("connection.granted");
                 self.last_error = None;
                 let staged = registration.staging.open();
+                self.lost_changes.ready_acked(&registration.lost_changes);
                 held_ref.registration = None;
                 for instruction in staged {
                     self.route(held_ref, instruction);
@@ -2287,6 +2307,15 @@ mod tests {
         budget: Arc<crate::report_memory::Budget>,
         server_url: &str,
     ) -> (Owner, mpsc::UnboundedReceiver<OutboxEvent>) {
+        let root = StateRoot::new(std::env::temp_dir().as_os_str()).unwrap();
+        owner_rooted(budget, server_url, root)
+    }
+
+    fn owner_rooted(
+        budget: Arc<crate::report_memory::Budget>,
+        server_url: &str,
+        state_root: StateRoot,
+    ) -> (Owner, mpsc::UnboundedReceiver<OutboxEvent>) {
         let bootstrap = protocol::bootstrap::Bootstrap::decode(
             br#"{"server_url":"http://127.0.0.1:1","instance_id":"inst_a","credential_id":"cred_a","connection_key":"tetral_ck_a","expires_at":"2099-01-01T00:00:00Z"}"#,
         ).unwrap();
@@ -2305,7 +2334,7 @@ mod tests {
                 )
                 .unwrap(),
             },
-            state_root: StateRoot::new(std::env::temp_dir().as_os_str()).unwrap(),
+            state_root,
             started: Duration::ZERO,
             sessions: Arc::new(NoSessions),
             times: Times::default(),
@@ -2775,5 +2804,198 @@ mod tests {
             assert_eq!(admit(&mut ledger, &routed, &message, 1), admitted, "{name}");
         }
         assert_eq!(ledger.len(), 3);
+    }
+
+    /// An owner of the state root at `root`, as an App Server start makes it.
+    fn started_in(root: &std::path::Path) -> Owner {
+        let root = StateRoot::new(root.as_os_str()).unwrap();
+        let budget = crate::report_memory::Budget::new(512, 512);
+        owner_rooted(budget, "http://127.0.0.1:1", root).0
+    }
+
+    fn lost(request: &str, drive: &str) -> LostChange {
+        serde_json::from_value(json!({
+            "request_message_id": request, "drive_id": drive,
+            "paths": ["a.txt"], "paths_total": 1,
+        }))
+        .unwrap()
+    }
+
+    fn keep(owner: &mut Owner, entries: Vec<LostChange>) {
+        let (sent, kept) = std::sync::mpsc::channel();
+        owner.port_message(PortMessage::KeepLostChanges(
+            entries,
+            crate::sessions::Kept(Box::new(move || sent.send(()).unwrap())),
+        ));
+        kept.try_recv().expect("kept is answered");
+    }
+
+    /// The ready a new connection `id` sends, and the connection.
+    fn ready_of(owner: &mut Owner, id: &str) -> (Value, Box<Held>) {
+        let task = tokio::spawn(std::future::pending::<()>());
+        let limit = EventLimit::new(EVENT_MAX_BYTES);
+        let Phase::Held(held) =
+            owner.new_connection(id_of(id), 1, task.abort_handle(), &limit, Duration::ZERO)
+        else {
+            panic!("a held connection");
+        };
+        let ready = held.registration.as_ref().unwrap().ready.as_ref().unwrap();
+        (serde_json::from_slice(&ready.body).unwrap(), held)
+    }
+
+    fn id_of(text: &str) -> Id {
+        Id::new(text).unwrap()
+    }
+
+    fn ready_ack(owner: &mut Owner, held: Box<Held>) {
+        let message_id = held
+            .registration
+            .as_ref()
+            .unwrap()
+            .ready
+            .as_ref()
+            .unwrap()
+            .message_id
+            .clone();
+        let ack = json!({
+            "connection_id": held.id, "message_id": message_id,
+            "accepted": true, "valid_for_ms": 45_000,
+        });
+        let answer = Answer::Success(serde_json::to_vec(&ack).unwrap());
+        owner.ready_answered(held, &answer, Duration::ZERO);
+    }
+
+    fn kept_file(root: &std::path::Path) -> Value {
+        serde_json::from_slice(&std::fs::read(root.join("lost-changes.json")).unwrap()).unwrap()
+    }
+
+    /// The `event` of each record.
+    #[derive(Clone, Default)]
+    struct Events(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Events {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Name(Option<String>);
+            impl tracing::field::Visit for Name {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "event" {
+                        self.0 = Some(value.to_owned());
+                    }
+                }
+                fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+            }
+            let mut name = Name(None);
+            event.record(&mut name);
+            self.0.lock().unwrap().extend(name.0);
+        }
+    }
+
+    impl Events {
+        fn start(&self) -> tracing::subscriber::DefaultGuard {
+            use tracing_subscriber::layer::SubscriberExt;
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(self.clone()))
+        }
+
+        fn has(&self, event: &str) -> bool {
+            self.0.lock().unwrap().iter().any(|each| each == event)
+        }
+    }
+
+    #[tokio::test]
+    async fn kept_lost_changes_survive_a_restart_until_a_ready_listing_them_is_acknowledged() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let mut owner = started_in(root);
+        keep(&mut owner, vec![lost("close_1", "drive_a")]);
+        keep(&mut owner, vec![lost("drives_2", "drive_a")]);
+        // The close's report is final; the other report's connection ends.
+        let held = ready_of(&mut owner, "conn_a").1;
+        let final_acked = OutboxEvent::FinalAcked {
+            connection: id_of("conn_a"),
+            instruction: id_of("close_1"),
+        };
+        owner.outbox_event(Phase::Held(held), final_acked, Duration::ZERO);
+        assert_eq!(kept_file(root), json!([lost("drives_2", "drive_a")]));
+
+        let mut owner = started_in(root);
+        let (ready, _unacknowledged) = ready_of(&mut owner, "conn_b");
+        assert_eq!(ready["lost_changes"], json!([lost("drives_2", "drive_a")]));
+        let (ready, held) = ready_of(&mut owner, "conn_c");
+        assert_eq!(ready["lost_changes"], json!([lost("drives_2", "drive_a")]));
+        // An entry kept after that ready was built stays for the next one.
+        keep(&mut owner, vec![lost("drives_3", "drive_b")]);
+        ready_ack(&mut owner, held);
+        assert_eq!(kept_file(root), json!([lost("drives_3", "drive_b")]));
+        let (ready, held) = ready_of(&mut owner, "conn_d");
+        assert_eq!(ready["lost_changes"], json!([lost("drives_3", "drive_b")]));
+        ready_ack(&mut owner, held);
+        assert_eq!(kept_file(root), json!([]));
+        let (ready, _) = ready_of(&mut owner, "conn_e");
+        assert!(ready.get("lost_changes").is_none(), "{ready}");
+
+        // A folder that cannot be written: the entry is still listed.
+        let events = Events::default();
+        let _guard = events.start();
+        let mut permissions = std::fs::metadata(root).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o500);
+        std::fs::set_permissions(root, permissions.clone()).unwrap();
+        keep(&mut owner, vec![lost("close_4", "drive_a")]);
+        let (ready, _) = ready_of(&mut owner, "conn_f");
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
+        std::fs::set_permissions(root, permissions).unwrap();
+        assert_eq!(ready["lost_changes"], json!([lost("close_4", "drive_a")]));
+        assert!(events.has("lost_changes.not_saved"));
+        assert_eq!(kept_file(root), json!([]));
+
+        // A file that holds no entry array starts an empty list.
+        std::fs::write(root.join("lost-changes.json"), "{}").unwrap();
+        let mut owner = started_in(root);
+        assert!(events.has("lost_changes.unreadable"));
+        let (ready, _) = ready_of(&mut owner, "conn_g");
+        assert!(ready.get("lost_changes").is_none(), "{ready}");
+    }
+
+    #[tokio::test]
+    async fn one_writer_keeps_the_entries_of_two_sessions_released_together() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut owner = started_in(directory.path());
+        let (mailbox, mut inbox) = mpsc::unbounded_channel();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let sessions: Vec<_> = ["sess_a", "sess_b"]
+            .into_iter()
+            .map(|session| {
+                let port = Port {
+                    mailbox: mailbox.clone(),
+                };
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    protocol::ports::ConnectionPort::keep_lost_changes(
+                        &port,
+                        vec![lost(&format!("close_{session}"), "drive_a")],
+                        Box::new(|| {}),
+                    );
+                })
+            })
+            .collect();
+        for session in sessions {
+            session.join().unwrap();
+        }
+        drop(mailbox);
+        while let Some(Message::Port(message)) = inbox.recv().await {
+            owner.port_message(message);
+        }
+        let mut kept: Vec<String> = kept_file(directory.path())
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["request_message_id"].as_str().unwrap().to_owned())
+            .collect();
+        kept.sort();
+        assert_eq!(kept, ["close_sess_a", "close_sess_b"]);
     }
 }
