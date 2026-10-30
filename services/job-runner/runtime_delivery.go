@@ -1074,9 +1074,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 // never places a Runtime for it. With no binding, an added or removed machine
 // message is accepted unbound, since the next load reads the computer rows,
 // and every other such input is queued unbound until a binding transaction
-// enqueues it again; either way the job completes. A row still delivering to
-// a binding that a pod loss removed is treated the same way. With a binding,
-// it claims delivery to that Runtime.
+// enqueues it again; either way the job completes. A row still delivering
+// when no binding remains is treated the same way. With a binding, it claims
+// delivery to that Runtime.
 func (s *PostgreSQLRuntimeDeliveryStore) prepareNonStartingInputTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, port int, now time.Time) (RuntimeCommandPlan, error) {
 	if job.InputKind != queue.RuntimeInputKindMachineMessage {
 		return RuntimeCommandPlan{}, runtimecontrol.PreparationError{Kind: "runtime_inbox_invariant", Message: "input kind has no delivery payload", Retryable: false}

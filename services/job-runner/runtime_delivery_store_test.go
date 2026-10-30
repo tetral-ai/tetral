@@ -1935,6 +1935,25 @@ func (f *machineMessageFixture) deliverNext() bool {
 	return true
 }
 
+// placeUserMessage prepares a user message of the main thread as Job Runner
+// does, which places the Session on the fixture's candidate Runtime, and
+// returns the new binding's ID.
+func (f *machineMessageFixture) placeUserMessage(name string) string {
+	f.t.Helper()
+	seedBridgeAPIEvent(f.t, f.admin, "default", f.sessionID, f.mainID, "sevt_"+name, 1, "user.message", `{"content":[{"type":"text","text":"hello"}]}`)
+	input := RuntimeJob{
+		JobID: "qjob_" + name, LeaseToken: "lease_" + name, Kind: queue.KindRuntimeInput,
+		WorkspaceID: "default", SessionID: f.sessionID, SessionThreadID: f.mainID, RuntimeInputID: "rin_" + name,
+		EventIDs: []string{"sevt_" + name}, SequenceFrom: 1, SequenceTo: 1, InputKind: "messages", PayloadJSON: `{"type":"messages"}`,
+	}
+	seedRuntimeInboxBirthForJob(f.t, f.admin, input)
+	plan, err := f.store.PrepareRuntimeCommand(f.ctx, input)
+	if err != nil || plan.AttemptedBinding.BindingID == "" {
+		f.t.Fatalf("messages placement = %+v/%v; want a new binding", plan.AttemptedBinding, err)
+	}
+	return plan.AttemptedBinding.BindingID
+}
+
 func (f *machineMessageFixture) deliverAll() int {
 	f.t.Helper()
 	processed := 0
@@ -2107,17 +2126,7 @@ func TestReplacedMessageWaitsForTheNextRuntime(t *testing.T) {
 		t.Fatalf("replaced message made %d bindings and %d Runtime calls; want none", bindings, len(f.sender.requests))
 	}
 
-	seedBridgeAPIEvent(t, f.admin, "default", f.sessionID, f.mainID, "sevt_mmsg_replaced_user", 1, "user.message", `{"content":[{"type":"text","text":"hello"}]}`)
-	input := RuntimeJob{
-		JobID: "qjob_mmsg_replaced_user", LeaseToken: "lease_mmsg_replaced_user", Kind: queue.KindRuntimeInput,
-		WorkspaceID: "default", SessionID: f.sessionID, SessionThreadID: f.mainID, RuntimeInputID: "rin_mmsg_replaced_user",
-		EventIDs: []string{"sevt_mmsg_replaced_user"}, SequenceFrom: 1, SequenceTo: 1, InputKind: "messages", PayloadJSON: `{"type":"messages"}`,
-	}
-	seedRuntimeInboxBirthForJob(t, f.admin, input)
-	plan, err := f.store.PrepareRuntimeCommand(f.ctx, input)
-	if err != nil || plan.AttemptedBinding.BindingID == "" {
-		t.Fatalf("messages placement = %+v/%v; want a new binding", plan.AttemptedBinding, err)
-	}
+	placed := f.placeUserMessage("mmsg_replaced_user")
 	if message := f.messages()[0]; message.Status != "queued" || message.ActiveJobs != 1 {
 		t.Fatalf("replaced message after the binding = %+v; want queued with one job", message)
 	}
@@ -2125,8 +2134,8 @@ func TestReplacedMessageWaitsForTheNextRuntime(t *testing.T) {
 		t.Fatalf("processed %d jobs; want the replaced message's", processed)
 	}
 	message := f.messages()[0]
-	if requests := f.nonStartingRequests(); len(requests) != 1 || requests[0].GetRuntimeInputId() != message.ID || requests[0].GetBindingId() != plan.AttemptedBinding.BindingID {
-		t.Fatalf("Runtime requests = %v; want the replaced message once, to %s", requests, plan.AttemptedBinding.BindingID)
+	if requests := f.nonStartingRequests(); len(requests) != 1 || requests[0].GetRuntimeInputId() != message.ID || requests[0].GetBindingId() != placed {
+		t.Fatalf("Runtime requests = %v; want the replaced message once, to %s", requests, placed)
 	}
 	if message.Status != "accepted" || !message.Bound || message.ActiveJobs != 0 {
 		t.Fatalf("delivered replaced message = %+v; want accepted under the new binding", message)
@@ -2173,34 +2182,58 @@ func TestPodLossHandsBackAcceptedMessages(t *testing.T) {
 	}
 }
 
-// A pod loss while a machine message is delivering: its job's next attempt
-// finds the pod gone and runs the lost-binding repair, and the job, prepared
-// again with no binding, leaves an added message accepted and a replaced one
-// queued, both with no binding.
-func TestPodLossDuringDeliveryReleasesTheDeliveringMessage(t *testing.T) {
-	for change, want := range map[string]string{computer.ChangeAdded: "accepted", computer.ChangeReplaced: "queued"} {
-		t.Run(change, func(t *testing.T) {
-			f := newMachineMessageFixture(t, "sesn_mmsg_lost_"+change)
-			f.bind("bind_mmsg_lost_" + change)
+// A pod loss while a machine message is delivering hands the message back
+// with its job. Prepared again with no binding, the job leaves an added
+// message accepted and a replaced one queued, both with no binding. When
+// another input's preparation repairs the loss and places a new Runtime
+// first, the job delivers the message once, to that Runtime.
+func TestPodLossDuringDeliveryHandsBackTheDeliveringMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name, session, change, want string
+		newRuntime                  bool
+	}{
+		{name: "added", session: "sesn_mmsg_lost_added", change: computer.ChangeAdded, want: "accepted"},
+		{name: "replaced", session: "sesn_mmsg_lost_replaced", change: computer.ChangeReplaced, want: "queued"},
+		{name: "added with a new Runtime placed first", session: "sesn_mmsg_lost_placed", change: computer.ChangeAdded, want: "accepted", newRuntime: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMachineMessageFixture(t, tc.session)
+			f.bind("bind_" + tc.session)
 			f.sender.result = RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true,
 				ErrorKind: "runtime_transport_unavailable", ErrorMessage: "runtime transport unavailable"}
-			f.write(change, true)
+			f.write(tc.change, true)
 			if processed := f.deliverAll(); processed != 1 {
 				t.Fatalf("processed %d jobs; want one", processed)
 			}
 			if got := f.messages(); got[0].Status != "delivering" || !got[0].Bound || got[0].ActiveJobs != 1 {
 				t.Fatalf("message before the pod loss = %+v; want delivering under the binding with its job", got[0])
 			}
-			f.podLost = true
+			placed, calls, bindings := "", 1, 0
+			if tc.newRuntime {
+				f.candidate = enginekubernetes.BindingCandidate{Namespace: f.candidate.Namespace, PodName: "runtime-pod-1", PodUID: "pod_new_" + tc.session, PodIP: "10.0.0.11"}
+				registerPlacementCandidateForTest(t, f.admin, f.candidate)
+				f.sender.result = RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}
+				placed, calls, bindings = f.placeUserMessage("mmsg_lost_user"), 2, 1
+			} else {
+				f.podLost = true
+			}
 			f.exec(`UPDATE queue_jobs SET available_at=clock_timestamp()-interval '1 second' WHERE workspace_id='default' AND kind='runtime_input' AND status='pending'`)
 			if processed := f.deliverAll(); processed != 1 {
 				t.Fatalf("processed %d jobs after the pod loss; want one", processed)
 			}
-			if got := f.messages(); got[0].Status != want || got[0].Bound || got[0].ActiveJobs != 0 {
-				t.Fatalf("message after the pod loss = %+v; want %s with no binding or job", got[0], want)
+			if got := f.messages(); got[0].Status != tc.want || got[0].Bound != tc.newRuntime || got[0].ActiveJobs != 0 {
+				t.Fatalf("message after the pod loss = %+v; want %s, bound %v, with no job", got[0], tc.want, tc.newRuntime)
 			}
-			if _, bindings, _ := f.sessionFacts(); bindings != 0 || len(f.sender.requests) != 1 {
-				t.Fatalf("after the pod loss: %d bindings, %d Runtime calls; want no binding and only the first attempt", bindings, len(f.sender.requests))
+			requests := f.nonStartingRequests()
+			if len(requests) != calls || (tc.newRuntime && requests[1].GetBindingId() != placed) {
+				t.Fatalf("Runtime requests = %v; want %d, the last to %q", requests, calls, placed)
+			}
+			var deadLettered int
+			if err := f.admin.QueryRowContext(f.ctx, `SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND status=$1`, queue.StatusDeadLettered).Scan(&deadLettered); err != nil {
+				t.Fatal(err)
+			}
+			if _, got, _ := f.sessionFacts(); got != bindings || deadLettered != 0 {
+				t.Fatalf("after the pod loss: %d bindings, %d dead-lettered jobs; want %d and 0", got, deadLettered, bindings)
 			}
 		})
 	}

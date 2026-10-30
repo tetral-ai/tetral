@@ -378,9 +378,11 @@ these phases, missing-grant rollback and workspace isolation.
   sent to that pod as `AcceptNonStartingInput`, and an accepted or duplicate
   reply accepts it. The transaction that creates a binding enqueues one job for
   each queued such input without an active job, in creation order. Pod-loss
-  repair hands accepted ones back to Queue; a Runtime's own release leaves them
-  as they are. Such an input or its job never makes the Session look busy to a
-  Session update or a thread archive.
+  repair hands accepted ones back to Queue and returns a delivering one to
+  queued with its job, which then delivers it to the Runtime holding the
+  Session, if any; a Runtime's own release leaves accepted ones as they are.
+  Such an input or its job never makes the Session look busy to a Session
+  update or a thread archive.
 - **Agent-mail custody.** Child creation atomically persists the child, context
   prefix, first mail, Inbox row, Queue job, and spawn receipt. First and later
   mail then share one delivery path: `CommitInputs` makes the Message durable,

@@ -29,6 +29,8 @@ type AcceptedRuntimeInput struct {
 // caller must hold Session arbitration and the exact binding/process fence,
 // established either by cooperative release or proven-loss repair. Existing
 // job identities and attempt lineage survive; committed inputs are untouched.
+// Of delivering inputs it hands back interrupt control, agent mail and the
+// kinds that never start a run, each returning to queued with no binding.
 // Uncommitted approval reviewers require their admitted dependency to settle
 // before cooperative release and remain under their existing closeout owner.
 func HandBackRuntimeInputsTx(
@@ -127,7 +129,8 @@ func handBackRuntimeInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID,
 			if !input.QueueJobID.Valid {
 				return 0, PreparationError{Kind: "runtime_inbox_invariant", Message: "delivering runtime input has no active queue custody", Retryable: false}
 			}
-			if !quiesced && input.InputKind != "interrupt_control" && input.InputKind != "agent_mail" {
+			if !quiesced && input.InputKind != "interrupt_control" && input.InputKind != "agent_mail" &&
+				!queue.IsNonStartingRuntimeInputKind(input.InputKind) {
 				continue
 			}
 		}
@@ -138,7 +141,20 @@ func handBackRuntimeInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID,
 			continue
 		}
 		if input.QueueJobID.Valid {
-			if input.InboxStatus == "delivering" {
+			if input.InboxStatus == "delivering" && !quiesced && queue.IsNonStartingRuntimeInputKind(input.InputKind) {
+				// A leased job keeps its lease: its holder, which may be the
+				// job whose preparation runs this repair, prepares it again.
+				if _, err := tx.Exec(ctx,
+					`UPDATE queue_jobs
+					    SET available_at = $3, ready_at = clock_timestamp(), updated_at = $3
+					  WHERE workspace_id = $1 AND id = $2 AND status = 'pending'`,
+					workspaceID,
+					input.QueueJobID.String,
+					now,
+				); err != nil {
+					return 0, err
+				}
+			} else if input.InboxStatus == "delivering" {
 				if _, err := tx.Exec(ctx,
 					`UPDATE queue_jobs
 					    SET status = 'pending', available_at = $3, ready_at = clock_timestamp(),

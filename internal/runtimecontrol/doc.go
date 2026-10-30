@@ -28,7 +28,7 @@
 // accepted with no binding;
 // HandBackQuiescedRuntimeInputsTx leaves an accepted one as it is, and
 // HandBackRuntimeInputsTx (pod loss) hands it back with a new job built by
-// RuntimeInputEnqueueRequest.
+// RuntimeInputEnqueueRequest and hands back a delivering one with its own job.
 //
 // INVARIANTS:
 //   - No other writer sets session_runtime_status.status or writes the
