@@ -332,6 +332,7 @@ fn spawn(root: &Path, stub: &Arc<Stub>, cache: &ContentCache, state: SyncState) 
         tasks: Arc::new(Tasks),
         mounting: Mounting::Unavailable("no FUSE: test".to_owned()),
         registry: Arc::new(NoRegistry),
+        clock: state::clock::Clock::seams(),
     });
     sync.binding_current(Binding {
         connection_id: Id::new("conn_a").unwrap(),

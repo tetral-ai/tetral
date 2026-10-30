@@ -3,6 +3,7 @@
 
 pub mod cache;
 pub mod catchup;
+pub mod commit;
 #[cfg(target_os = "linux")]
 pub mod fuse;
 pub mod local;
@@ -13,7 +14,10 @@ pub mod ops;
 pub mod paths;
 pub mod state;
 pub mod sync;
+pub mod sync_point;
 pub mod transfer;
+pub mod upload;
 
 pub use sync::{DriveSync, SyncConfig};
+pub use sync_point::{SyncOutcome, SyncPointRequest};
 pub use transfer::DriveTransfer;

@@ -1877,6 +1877,8 @@ dependencies = [
  "state",
  "tempfile",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "unicode-normalization",
 ]
 

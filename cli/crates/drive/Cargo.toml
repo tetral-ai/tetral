@@ -11,6 +11,7 @@ observe.workspace = true
 protocol.workspace = true
 rand.workspace = true
 rustix = { workspace = true, features = ["fs", "net", "process"] }
+serde_json.workspace = true
 sha2.workspace = true
 sqlx = { workspace = true, features = ["runtime-tokio"] }
 state.workspace = true
@@ -21,5 +22,6 @@ unicode-normalization.workspace = true
 fuser.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 tempfile.workspace = true

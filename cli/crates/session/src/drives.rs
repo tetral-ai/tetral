@@ -29,6 +29,7 @@ pub struct DriveContext {
     pub cache: ContentCache,
     pub mounting: Mounting,
     pub registry: Arc<dyn Registry>,
+    pub clock: state::clock::Clock,
 }
 
 impl std::fmt::Debug for DriveContext {
@@ -154,6 +155,7 @@ impl<S: TaskStarter> SessionOwner<S> {
                     tasks,
                     mounting: context.mounting.clone(),
                     registry: context.registry.clone(),
+                    clock: context.clock.clone(),
                 });
                 context.registry.add(session_id, sync.clone());
                 sync

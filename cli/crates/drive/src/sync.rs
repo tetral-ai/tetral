@@ -13,25 +13,30 @@
 //! and a read whose blob is missing waits for a running catch-up of its
 //! drive; a detached drive drops them, which fails them with `EIO`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use protocol::drive_transfer::CommitResponse;
 use protocol::drive_transfer::{ListChangesResponse, ListFilesResponse, Operation};
 use protocol::id::{Id, SafeId};
 use protocol::path::DrivePath;
 use protocol::ports::TaskOwnership;
 use rustix::io::Errno;
+use state::clock::Clock;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::cache::ContentCache;
 use crate::catchup::{self, Record, Version};
+use crate::commit::{Flight, Rejected};
 use crate::mount::{Bound, Failure, Mounted, Mounting, Registry};
 use crate::ops::{Done, Notice, Op};
 use crate::paths;
-use crate::state::{ListingRow, SyncState, Tables, Write};
+use crate::state::{Key, ListingRow, SyncState, Tables, Write};
+use crate::sync_point::{SyncOutcome, SyncPoint, SyncPointRequest};
 use crate::transfer::{Binding, DriveTransfer, Ended, ListChanges, ListFiles, Request};
+use crate::upload::{Uploaded, Uploads};
 
 /// What a Session's Drive sync owner is built with.
 pub struct SyncConfig {
@@ -44,6 +49,7 @@ pub struct SyncConfig {
     pub tasks: Arc<dyn TaskOwnership>,
     pub mounting: Mounting,
     pub registry: Arc<dyn Registry>,
+    pub clock: Clock,
 }
 
 /// A handle on a Session's Drive sync owner.
@@ -53,6 +59,7 @@ pub struct DriveSync {
     pub(crate) session_id: SafeId,
     pub(crate) cache: ContentCache,
     pub(crate) tasks: Arc<dyn TaskOwnership>,
+    clock: Clock,
 }
 
 impl std::fmt::Debug for DriveSync {
@@ -122,6 +129,25 @@ pub(crate) enum Message {
     Reported(Vec<Failure>),
     Detach(String),
     DetachAll,
+    UploadEnded {
+        key: Key,
+        id: u64,
+        generation: u64,
+        ended: Uploaded,
+    },
+    CommitAnswered {
+        drive: String,
+        id: u64,
+        answer: Result<CommitResponse, Ended>,
+    },
+    SyncPoint {
+        request: SyncPointRequest,
+        began: std::time::Duration,
+        reply: oneshot::Sender<SyncOutcome>,
+    },
+    TaskStarted(String),
+    TaskExited(String),
+    Close(oneshot::Sender<()>),
 }
 
 pub(crate) enum Answer {
@@ -151,6 +177,20 @@ impl DriveSync {
         let owner = Owner {
             state: config.state,
             transfer: config.transfer,
+            cache: config.cache.clone(),
+            clock: config.clock.clone(),
+            uploads: Uploads::default(),
+            listed: HashSet::new(),
+            listed_uploading: HashSet::new(),
+            reported_tasks: HashSet::new(),
+            startup_due: HashSet::new(),
+            flights: HashMap::new(),
+            flight_ids: 0,
+            recorded_during_flight: HashSet::new(),
+            sync_points: BTreeMap::new(),
+            sync_point_ids: 0,
+            unreported: Vec::new(),
+            last_connection: None,
             binding: watch::Sender::new(None),
             mailbox: mailbox.clone(),
             mounts: HashMap::new(),
@@ -180,6 +220,7 @@ impl DriveSync {
             session_id: config.session_id,
             cache: config.cache,
             tasks: config.tasks,
+            clock: config.clock,
         };
         let mut owner = owner;
         owner.handle = Some(sync.clone());
@@ -284,6 +325,40 @@ impl DriveSync {
         self.send(Message::DetachAll);
     }
 
+    /// The sync point of a call whose result is being built; it begins at
+    /// this call, and the future gives its outcome.
+    pub fn sync_point(
+        &self,
+        request: SyncPointRequest,
+    ) -> impl std::future::Future<Output = SyncOutcome> + use<> {
+        let (reply, answer) = oneshot::channel();
+        let began = self.clock.now();
+        self.send(Message::SyncPoint {
+            request,
+            began,
+            reply,
+        });
+        async move { answer.await.unwrap_or_default() }
+    }
+
+    /// An `exec_command` task of the Session started.
+    pub fn task_started(&self, task_id: &Id) {
+        self.send(Message::TaskStarted(task_id.as_str().to_owned()));
+    }
+
+    /// A task of the Session exited: the uploads of its changes start.
+    pub fn task_exited(&self, task_id: &Id) {
+        self.send(Message::TaskExited(task_id.as_str().to_owned()));
+    }
+
+    /// Ends the owner once it has closed the sync state; the requests in
+    /// flight then have no effect.
+    pub async fn close(&self) {
+        let (reply, closed) = oneshot::channel();
+        self.send(Message::Close(reply));
+        let _ = closed.await;
+    }
+
     /// The drives a failed listing unmounted, with its error.
     pub async fn unmounted(&self) -> BTreeMap<String, String> {
         let (reply, answer) = oneshot::channel();
@@ -327,9 +402,33 @@ struct Running {
 
 pub(crate) struct Owner {
     pub(crate) state: SyncState,
-    transfer: Arc<dyn DriveTransfer>,
+    pub(crate) transfer: Arc<dyn DriveTransfer>,
+    pub(crate) cache: ContentCache,
+    pub(crate) clock: Clock,
+    pub(crate) uploads: Uploads,
+    /// The changes a result listed `uploading` or `upload_pending`.
+    pub(crate) listed: HashSet<Key>,
+    /// The changes a result listed `uploading` that have neither changed
+    /// nor faulted since.
+    pub(crate) listed_uploading: HashSet<Key>,
+    /// The tasks that finished their first sync point.
+    pub(crate) reported_tasks: HashSet<String>,
+    /// The changes pending at start or when the binding became current on
+    /// a new connection, until a commit carries them.
+    pub(crate) startup_due: HashSet<Key>,
+    /// The commit in flight of each drive mount.
+    pub(crate) flights: HashMap<String, Flight>,
+    pub(crate) flight_ids: u64,
+    /// The paths of commits in flight that a change record reached.
+    pub(crate) recorded_during_flight: HashSet<Key>,
+    pub(crate) sync_points: BTreeMap<u64, SyncPoint>,
+    pub(crate) sync_point_ids: u64,
+    /// The rejections no sync point carries, for drive sync reports.
+    pub(crate) unreported: Vec<Rejected>,
+    /// The connection of the binding last current.
+    last_connection: Option<Id>,
     pub(crate) binding: watch::Sender<Option<Binding>>,
-    mailbox: mpsc::UnboundedSender<Message>,
+    pub(crate) mailbox: mpsc::UnboundedSender<Message>,
     pub(crate) mounts: HashMap<String, Mount>,
     /// The highest `drive.changed` seq received for each drive.
     notified: HashMap<String, i64>,
@@ -373,10 +472,69 @@ pub(crate) fn now_ns() -> i64 {
 
 impl Owner {
     async fn run(mut self, mut inbox: mpsc::UnboundedReceiver<Message>) {
-        while let Some(message) = inbox.recv().await {
+        // App Server start is a retry point; the stored commits go first.
+        self.retry_faults(None).await;
+        self.startup_due = self
+            .state
+            .tables()
+            .pending_changes
+            .keys()
+            .cloned()
+            .collect();
+        self.resend_stored();
+        loop {
+            let wake = [self.quiet_wake(), self.sync_point_wake()]
+                .into_iter()
+                .flatten()
+                .min();
+            let message = match wake {
+                Some(at) => tokio::select! {
+                    message = inbox.recv() => message,
+                    () = self.clock.sleep_until(at) => {
+                        self.quiet_uploads();
+                        self.sync_points_progress().await;
+                        continue;
+                    }
+                },
+                None => inbox.recv().await,
+            };
+            let message = match message {
+                Some(Message::Close(reply)) => {
+                    self.state.close().await;
+                    let _ = reply.send(());
+                    return;
+                }
+                Some(message) => message,
+                None => return,
+            };
             self.handle(message).await;
             self.answer_checks();
         }
+    }
+
+    /// The binding became current; on a new connection, or the first time
+    /// after start, every pending change uploads and is due, faults
+    /// included.
+    async fn binding_current(&mut self, binding: Binding) {
+        let new = self.last_connection.as_ref() != Some(&binding.connection_id);
+        self.last_connection = Some(binding.connection_id.clone());
+        self.binding.send_replace(Some(binding));
+        if !new {
+            return;
+        }
+        self.retry_faults(None).await;
+        let keys: Vec<Key> = self
+            .state
+            .tables()
+            .pending_changes
+            .keys()
+            .cloned()
+            .collect();
+        for key in &keys {
+            self.start_upload(key, None);
+        }
+        self.startup_due.extend(keys);
+        self.changes_ready().await;
     }
 
     async fn handle(&mut self, message: Message) {
@@ -396,9 +554,7 @@ impl Owner {
                     self.trigger(&drive);
                 }
             }
-            Message::BindingCurrent(binding) => {
-                self.binding.send_replace(Some(binding));
-            }
+            Message::BindingCurrent(binding) => self.binding_current(binding).await,
             Message::BindingGone => {
                 self.binding.send_replace(None);
             }
@@ -469,6 +625,23 @@ impl Owner {
                     self.detach(&drive);
                 }
             }
+            Message::UploadEnded {
+                key,
+                id,
+                generation,
+                ended,
+            } => self.upload_ended(key, id, generation, ended).await,
+            Message::CommitAnswered { drive, id, answer } => {
+                self.commit_answered(drive, id, answer).await;
+            }
+            Message::SyncPoint {
+                request,
+                began,
+                reply,
+            } => self.sync_point(request, began, reply).await,
+            Message::TaskStarted(task) => self.task_started(task),
+            Message::TaskExited(task) => self.task_exited(&task),
+            Message::Close(_) => unreachable!("the run loop ends at a close"),
         }
     }
 
@@ -727,6 +900,17 @@ impl Owner {
     /// pages of each file whose content it replaced.
     async fn write_replacing(&mut self, drive: &str, write: Write) -> Result<(), String> {
         let replaced = catchup::replaced(self.state.tables(), &write);
+        if self.flights.contains_key(drive) {
+            let tables = self.state.tables();
+            let reached = write
+                .files
+                .iter()
+                .map(|row| (row.drive_id.clone(), row.path.clone()))
+                .chain(write.files_removed.iter().cloned())
+                .filter(|key| tables.inflight_commits.contains_key(key));
+            let reached: Vec<Key> = reached.collect();
+            self.recorded_during_flight.extend(reached);
+        }
         self.write(write).await?;
         if let Some(mounted) = self.mounted.get(drive) {
             for file_id in replaced {

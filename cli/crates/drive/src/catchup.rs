@@ -418,3 +418,39 @@ pub fn replaced(tables: &Tables, write: &Write) -> Vec<i64> {
         .map(|row| row.file_id)
         .collect()
 }
+
+/// The write that brings the local entry at each of `paths` of `drive_id`
+/// to the drive version its row holds, as a record of that version would,
+/// unless something blocks it; `applied_seq` stays.
+pub(crate) fn restore(tables: &Tables, drive_id: &str, paths: &[String], now_ns: i64) -> Write {
+    let cursor = tables.drive_cursor.get(drive_id).cloned();
+    let mut work = work(tables, drive_id, now_ns);
+    let before = work.rows.clone();
+    for path in paths {
+        let state = work.row(path).and_then(|row| {
+            Some(Version {
+                version_id: row.version_id.clone()?,
+                sha256: row.synced_sha256.clone()?,
+                size: row.synced_size?,
+                executable: row.synced_executable?,
+            })
+        });
+        work.apply(
+            &Record {
+                path: path.clone(),
+                state,
+            },
+            false,
+        );
+    }
+    let (mut write, next_file_id) = work.into_write(&before);
+    if let Some(cursor) = cursor
+        && cursor.next_file_id != next_file_id
+    {
+        write.cursor.push(Cursor {
+            next_file_id,
+            ..cursor
+        });
+    }
+    write
+}

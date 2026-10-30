@@ -44,10 +44,12 @@ Drives on this machine belong here, with two owners:
   (`Tables`) and the writes (`Write`), each one SQLite transaction.
 - `transfer.rs`: `DriveTransfer`, its requests (`Request`, `ListFiles`,
   `ListChanges`, `Upload`, `Commit`, `Download`), `ContentSink`, the answer
-  classes (`Class`) and `Ended`.
+  classes (`Class`), `Ended`, and the request deadline of a PUT or a commit
+  (`total`).
 - `sync.rs`: the Drive sync owner (`DriveSync`): its messages, its current
   binding, the triggers of each mounted drive's catch-up, its pages and
-  failed listings, and the check before a command.
+  failed listings, the check before a command, and the wake of the quiet
+  period and of sync points on the clock it is given.
 - `catchup.rs`: the writes of a finished listing and of a page of change
   records (`finish_listing`, `apply_page`), the application of a record and
   `page_applied_seq`.
@@ -64,6 +66,13 @@ Drives on this machine belong here, with two owners:
   `/proc/self/mountinfo`.
 - `paths.rs`: NFC names, the path checks, excluded paths and the local-only
   rules.
+- `upload.rs`: the upload triggers, the upload slot requests, the quiet
+  period (`QUIET`), hashing, the PUT's answers and faults.
+- `commit.rs`: due changes, commit building and splitting, the answers,
+  stored commits sent again after a start, `409 content_missing` and the
+  drive winning over a rejected change.
+- `sync_point.rs`: a result's sync point (`SyncPointRequest`): coverage,
+  the wait (`RESULT_WAIT`), the commit step and the outcome (`SyncOutcome`).
 - `local.rs`: the rows one operation changes (`Edit`), the pending changes it
   records and their bases, and the base an accepted in-flight commit gives
   (`accepted_in_flight`).

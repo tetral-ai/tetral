@@ -84,8 +84,9 @@ impl DriveTransfer for Stub {
         unimplemented!()
     }
 
+    /// Commits are never answered: these tests watch catch-up alone.
     fn commit(&self, _: Request<Commit>) -> Transfer<'_, CommitResponse> {
-        unimplemented!()
+        Box::pin(std::future::pending())
     }
 
     fn download_content<'a>(
@@ -175,6 +176,7 @@ impl Harness {
             tasks: Arc::new(NoTasks),
             mounting: Mounting::Unavailable("no FUSE: test".to_owned()),
             registry: Arc::new(NoRegistry),
+            clock: state::clock::Clock::seams(),
         });
         sync.binding_current(Binding {
             connection_id: Id::new("conn_a").unwrap(),
@@ -466,7 +468,20 @@ async fn an_expired_cursor_lists_the_drive_again_and_keeps_pending_changes_and_f
         })
         .await
         .unwrap();
-    let before = state.tables().pending_changes.clone();
+    let kept = |tables: &Tables| -> Vec<(String, String, Option<String>)> {
+        tables
+            .pending_changes
+            .values()
+            .map(|change| {
+                (
+                    change.path.clone(),
+                    change.change.clone(),
+                    change.base_sha256.clone(),
+                )
+            })
+            .collect()
+    };
+    let before = kept(state.tables());
     let mut harness = Harness::run(directory.path(), state);
     harness.sync.mounted(Id::new(DRIVE).unwrap(), Vec::new());
     harness.changes((3, None), Err(Ended::CursorExpired)).await;
@@ -480,7 +495,7 @@ async fn an_expired_cursor_lists_the_drive_again_and_keeps_pending_changes_and_f
     harness.until_applied(9).await;
     assert_eq!(harness.versions().await, expected(&now));
     let tables = harness.sync.tables().await;
-    assert_eq!(tables.pending_changes, before);
+    assert_eq!(kept(&tables), before);
     // The pending write keeps its local entry; the others follow the drive.
     assert_eq!(
         harness.row("a").await.unwrap().local_sha256,

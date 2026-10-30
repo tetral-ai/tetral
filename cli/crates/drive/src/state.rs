@@ -473,7 +473,7 @@ impl SyncState {
 }
 
 impl Tables {
-    fn apply(&mut self, write: Write) {
+    pub(crate) fn apply(&mut self, write: Write) {
         for key in write.files_removed {
             self.files.remove(&key);
         }
@@ -520,6 +520,65 @@ impl Tables {
                 .insert((row.drive_id.clone(), row.path.clone()), row);
         }
     }
+}
+
+/// The write that turns `before` into `after` for the rows of `files`,
+/// `pending_changes`, `drive_cursor` and `inflight_commits`; a drive whose
+/// in-flight rows differ has them all replaced.
+pub(crate) fn diff(before: &Tables, after: &Tables) -> Write {
+    let mut write = Write::default();
+    for key in before.files.keys() {
+        if !after.files.contains_key(key) {
+            write.files_removed.push(key.clone());
+        }
+    }
+    for (key, row) in &after.files {
+        if before.files.get(key) != Some(row) {
+            write.files.push(row.clone());
+        }
+    }
+    for key in before.pending_changes.keys() {
+        if !after.pending_changes.contains_key(key) {
+            write.pending_removed.push(key.clone());
+        }
+    }
+    for (key, row) in &after.pending_changes {
+        if before.pending_changes.get(key) != Some(row) {
+            write.pending.push(row.clone());
+        }
+    }
+    for drive in before.drive_cursor.keys() {
+        if !after.drive_cursor.contains_key(drive) {
+            write.cursor_removed.push(drive.clone());
+        }
+    }
+    for (drive, row) in &after.drive_cursor {
+        if before.drive_cursor.get(drive) != Some(row) {
+            write.cursor.push(row.clone());
+        }
+    }
+    let drives: std::collections::BTreeSet<&String> = before
+        .inflight_commits
+        .keys()
+        .chain(after.inflight_commits.keys())
+        .map(|(drive, _)| drive)
+        .collect();
+    for drive in drives {
+        let of = |tables: &Tables| -> Vec<InflightChange> {
+            tables
+                .inflight_commits
+                .iter()
+                .filter(|((each, _), _)| each == drive)
+                .map(|(_, row)| row.clone())
+                .collect()
+        };
+        let (was, is) = (of(before), of(after));
+        if was != is {
+            write.inflight_removed_drives.push(drive.clone());
+            write.inflight.extend(is);
+        }
+    }
+    write
 }
 
 fn new_path(path: &Path) -> PathBuf {

@@ -22,7 +22,7 @@ use tokio::sync::oneshot;
 use crate::cache::Needed;
 use crate::local::{Edit, Written};
 use crate::paths;
-use crate::state::{FileRow, Write};
+use crate::state::{FileRow, Key, Write};
 use crate::sync::{DriveSync, Message, Owner, Reply, now_ns};
 
 /// The inode number of a drive's top folder.
@@ -664,7 +664,7 @@ impl Owner {
         if path.is_empty() { top } else { top.join(path) }
     }
 
-    fn content_path(&self, drive: &str, file_id: i64) -> PathBuf {
+    pub(crate) fn content_path(&self, drive: &str, file_id: i64) -> PathBuf {
         self.session_dir
             .join("content")
             .join(drive)
@@ -928,7 +928,19 @@ impl Owner {
 
     /// Commits the edit's rows, then carries out what follows them.
     async fn commit(&mut self, edit: Write, after: After) -> Result<(), Errno> {
+        let changed: Vec<Key> = edit
+            .pending
+            .iter()
+            .map(|change| (change.drive_id.clone(), change.path.clone()))
+            .chain(edit.pending_removed.iter().cloned())
+            .collect();
         self.write(edit).await.map_err(|_| Errno::IO)?;
+        for key in &changed {
+            self.local_change(key);
+        }
+        if !changed.is_empty() {
+            self.changes_ready().await;
+        }
         for path in after.remove_files {
             let _ = fs::remove_file(path);
         }

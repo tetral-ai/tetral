@@ -290,6 +290,7 @@ fn spawn(
         tasks: Arc::new(NoTasks),
         mounting: Mounting::Fuse,
         registry: calls.clone(),
+        clock: state::clock::Clock::seams(),
     });
     sync.binding_current(Binding {
         connection_id: Id::new("conn_a").unwrap(),

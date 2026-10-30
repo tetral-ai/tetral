@@ -264,6 +264,7 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
         cache: content_cache,
         mounting,
         registry: Arc::new(connection.clone()),
+        clock: state::clock::Clock::seams(),
     })));
     let (lifecycle, finished) = spawn(ShutdownParts {
         ownership,
