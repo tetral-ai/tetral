@@ -933,10 +933,12 @@ func (t *postgresqlTransaction) rejectRuntimeConfigUpdateRaces(ctx context.Conte
 		    AND partition_key = $2
 		    AND kind IN ('runtime_input', 'runtime_config_update', 'cleanup_session')
 		    AND status IN ('pending', 'leased')
+		    AND NOT (kind = 'runtime_input' AND dedupe_key LIKE ANY($3))
 		  ORDER BY queue_partition_sequence ASC
 		  LIMIT 1`,
 		string(t.workspaceID),
 		queue.FormatSessionPartitionKey(t.workspaceID, sessionID),
+		nonStartingInputDedupePatterns(t.workspaceID, sessionID),
 	).Scan(&activeJobKind); err != nil && !dbconnect.IsNoRows(err) {
 		return err
 	}
@@ -960,9 +962,11 @@ func (t *postgresqlTransaction) rejectRuntimeConfigUpdateRaces(ctx context.Conte
 			 WHERE workspace_id = $1
 			   AND session_id = $2
 			   AND status IN ('accepted', 'delivering', 'parked')
+			   AND input_kind <> ALL($3)
 		)`,
 		string(t.workspaceID),
 		sessionID,
+		queue.NonStartingRuntimeInputKinds(),
 	).Scan(&inboxExists); err != nil {
 		return err
 	}
@@ -1669,8 +1673,9 @@ func (t *postgresqlTransaction) rejectActiveThreadRuntimeInput(ctx context.Conte
 			   AND session_id = $2
 			   AND session_thread_id = $3
 			   AND status IN ('delivering', 'accepted')
+			   AND input_kind <> ALL($4)
 		)`,
-		string(t.workspaceID), sessionID, threadID,
+		string(t.workspaceID), sessionID, threadID, queue.NonStartingRuntimeInputKinds(),
 	).Scan(&exists); err != nil {
 		return err
 	}
@@ -1686,8 +1691,9 @@ func (t *postgresqlTransaction) rejectActiveThreadRuntimeInput(ctx context.Conte
 			   AND status IN ('pending', 'leased')
 			   AND payload_json::jsonb ->> 'session_id' = $2
 			   AND payload_json::jsonb ->> 'session_thread_id' = $3
+			   AND NOT dedupe_key LIKE ANY($4)
 		)`,
-		string(t.workspaceID), sessionID, threadID,
+		string(t.workspaceID), sessionID, threadID, nonStartingInputDedupePatterns(t.workspaceID, sessionID),
 	).Scan(&exists); err != nil {
 		return err
 	}
@@ -1695,6 +1701,20 @@ func (t *postgresqlTransaction) rejectActiveThreadRuntimeInput(ctx context.Conte
 		return &ConflictError{Message: "session thread has active runtime input", InvalidRequest: true}
 	}
 	return nil
+}
+
+// nonStartingInputDedupePatterns are LIKE patterns matching the dedupe keys of
+// the Session's runtime_input jobs of kinds that never start a run, whose
+// runtime input IDs start with the kind and a colon. Such an input never makes
+// an idle Session look busy.
+func nonStartingInputDedupePatterns(ws workspace.ID, sessionID string) []string {
+	kinds := queue.NonStartingRuntimeInputKinds()
+	patterns := make([]string, 0, len(kinds))
+	escape := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	for _, kind := range kinds {
+		patterns = append(patterns, escape.Replace(queue.FormatRuntimeInputDedupeKey(ws, sessionID, kind+":"))+"%")
+	}
+	return patterns
 }
 
 func (t *postgresqlTransaction) rejectUnresolvedThreadWait(ctx context.Context, sessionID string, threadID string) error {

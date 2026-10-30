@@ -209,11 +209,15 @@ func (s *Service) AddComputer(ctx context.Context, ws workspace.ID, sessionID st
 		if err != nil {
 			return err
 		}
-		ids, err := storeComputersTx(ctx, tx, ws, sessionID, checked, s.clock().UTC())
+		now := s.clock().UTC()
+		ids, err := storeComputersTx(ctx, tx, ws, sessionID, checked, now)
 		if err != nil {
 			return err
 		}
 		computerID = ids[0]
+		if err := tx.WriteMachineMessage(ctx, sessionID, computerID, computer.ChangeAdded, now); err != nil {
+			return err
+		}
 		return tx.SaveComputerIdempotencyRecord(ctx, idempotency.Scope, computer.IdempotencyRecord{Fingerprint: idempotency.Fingerprint, SessionID: sessionID, ComputerID: computerID})
 	})
 	if err != nil {

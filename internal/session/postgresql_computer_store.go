@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/instance"
@@ -22,6 +23,14 @@ func (t *postgresqlTransaction) AddComputers(ctx context.Context, sessionID stri
 		return nil, err
 	}
 	return computer.AddComputers(ctx, tx, t.workspaceID, sessionID, checked)
+}
+
+func (t *postgresqlTransaction) WriteMachineMessage(ctx context.Context, sessionID string, computerID string, change string, now time.Time) error {
+	tx, err := t.rawDBTx()
+	if err != nil {
+		return err
+	}
+	return computer.WriteMachineMessageTx(ctx, tx, t.workspaceID, sessionID, computerID, change, now)
 }
 
 func (t *postgresqlTransaction) GetComputer(ctx context.Context, sessionID string, computerID string) (computer.Object, error) {

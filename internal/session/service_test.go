@@ -3544,6 +3544,10 @@ func (tx *recordingSessionTx) AddComputers(_ context.Context, sessionID string, 
 	return ids, nil
 }
 
+func (tx *recordingSessionTx) WriteMachineMessage(context.Context, string, string, string, time.Time) error {
+	return nil
+}
+
 func (tx *recordingSessionTx) GetComputer(_ context.Context, sessionID string, computerID string) (computer.Object, error) {
 	if sess, ok := tx.store.sessions[sessionID]; ok {
 		for _, object := range sess.Computers {
