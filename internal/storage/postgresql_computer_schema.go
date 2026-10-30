@@ -24,6 +24,7 @@ const createPostgreSQLComputersTable = `CREATE TABLE computers (
  binding_id TEXT,
  error_code TEXT,
  error_message TEXT,
+ last_failed_code TEXT,
  created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
  detached_at TIMESTAMPTZ,
  PRIMARY KEY(workspace_id,id),
@@ -67,6 +68,58 @@ const createPostgreSQLComputerRequestsTable = `CREATE TABLE computer_requests (
  CHECK((worker_id IS NULL)=(claimed_at IS NULL)),
  CHECK((worker_id IS NULL)=(claim_credential_id IS NULL)),
  CHECK(state<>'claimed' OR (worker_id IS NOT NULL AND instance_id IS NOT NULL))
+)`
+
+// A binding is one preparation of a computer on one connection: kind prepare
+// for a session.prepare Engine issued, late_close for the close of a Session
+// a machine still holds. At most one binding of a computer on a connection is
+// active (preparing, prepared or failed); a failed one becomes invalid when
+// the computer is prepared again. created_at is written with the binding's
+// session.prepare and reported_at with its stored report, each by the
+// database clock of that transaction.
+const createPostgreSQLComputerBindingsTable = `CREATE TABLE computer_bindings (
+ workspace_id TEXT NOT NULL,
+ session_id TEXT NOT NULL,
+ computer_id TEXT NOT NULL,
+ binding_id TEXT NOT NULL CHECK(binding_id ~ '^bind_[0-9a-f]{16}$'),
+ instance_id TEXT NOT NULL,
+ connection_id TEXT NOT NULL,
+ kind TEXT NOT NULL CHECK(kind IN ('prepare','late_close')),
+ state TEXT NOT NULL CHECK(state IN ('preparing','prepared','failed','invalid','closing','closed')),
+ prepare_message_id TEXT,
+ close_message_id TEXT,
+ cwd TEXT,
+ error_code TEXT,
+ error_message TEXT,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+ reported_at TIMESTAMPTZ,
+ PRIMARY KEY(workspace_id,binding_id),
+ FOREIGN KEY(workspace_id,session_id,computer_id) REFERENCES computers(workspace_id,session_id,id) ON DELETE CASCADE,
+ FOREIGN KEY(workspace_id,instance_id) REFERENCES instances(workspace_id,id),
+ FOREIGN KEY(workspace_id,connection_id) REFERENCES instance_connections(workspace_id,id),
+ CHECK(kind<>'prepare' OR prepare_message_id IS NOT NULL),
+ CHECK((error_code IS NULL)=(error_message IS NULL)),
+ CHECK(state<>'failed' OR error_code IS NOT NULL),
+ CHECK(state<>'prepared' OR cwd IS NOT NULL)
+)`
+
+// A computer git ticket lets git-proxy inject the tokens of one cloud
+// computer's repositories. Only the SHA-256 of the ticket is stored; at most
+// one ticket of a computer is live, and each fetch revokes the one before.
+// git-proxy finds a ticket by its hash before it knows the Workspace, through
+// the SELECT-only git_ticket_lookup policy.
+const createPostgreSQLComputerGitTicketsTable = `CREATE TABLE computer_git_tickets (
+ workspace_id TEXT NOT NULL,
+ session_id TEXT NOT NULL,
+ computer_id TEXT NOT NULL,
+ ticket_id TEXT NOT NULL,
+ token_hash BYTEA NOT NULL UNIQUE CHECK(octet_length(token_hash)=32),
+ state TEXT NOT NULL CHECK(state IN ('live','revoked')),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+ revoked_at TIMESTAMPTZ,
+ PRIMARY KEY(workspace_id,ticket_id),
+ FOREIGN KEY(workspace_id,session_id,computer_id) REFERENCES computers(workspace_id,session_id,id) ON DELETE CASCADE,
+ CHECK((state='revoked')=(revoked_at IS NOT NULL))
 )`
 
 // The hub's request pressure gauges count, across Workspaces, the pending
@@ -114,6 +167,11 @@ func postgresqlComputerTableSteps() []postgresqlSchemaStep {
 		{"create_computer_requests", createPostgreSQLComputerRequestsTable},
 		{"index_computer_requests_open", `CREATE UNIQUE INDEX idx_computer_requests_open ON computer_requests(workspace_id,computer_id) WHERE state IN ('pending','claimed')`},
 		{"index_computer_requests_pending", `CREATE INDEX idx_computer_requests_pending ON computer_requests(workspace_id,environment_id,storage_sequence) WHERE state='pending'`},
+		{"create_computer_bindings", createPostgreSQLComputerBindingsTable},
+		{"index_computer_bindings_active", `CREATE UNIQUE INDEX idx_computer_bindings_active ON computer_bindings(workspace_id,computer_id,connection_id) WHERE state IN ('preparing','prepared','failed')`},
+		{"index_computer_bindings_prepared", `CREATE INDEX idx_computer_bindings_prepared ON computer_bindings(workspace_id,connection_id) WHERE state='prepared'`},
+		{"create_computer_git_tickets", createPostgreSQLComputerGitTicketsTable},
+		{"index_computer_git_tickets_live", `CREATE UNIQUE INDEX idx_computer_git_tickets_live ON computer_git_tickets(workspace_id,computer_id) WHERE state='live'`},
 	}
 }
 
@@ -122,5 +180,6 @@ func postgresqlComputerFunctionSteps() []postgresqlSchemaStep {
 		{"rls_policy_request_pressure_computer_requests", `CREATE POLICY request_pressure ON computer_requests FOR SELECT USING (current_setting('tetral.request_pressure', true) = 'true' AND current_user = (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'public.computer_requests'::regclass))`},
 		{"create_computer_hub_request_pressure", createPostgreSQLComputerHubRequestPressure},
 		{"revoke_computer_hub_request_pressure_public", `REVOKE ALL ON FUNCTION public.tetral_computer_hub_request_pressure() FROM PUBLIC`},
+		{"rls_policy_git_ticket_lookup_computer_git_tickets", `CREATE POLICY git_ticket_lookup ON computer_git_tickets FOR SELECT USING (current_setting('tetral.git_ticket_lookup', true) = 'true')`},
 	}
 }

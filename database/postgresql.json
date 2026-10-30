@@ -69,7 +69,9 @@
     "drive_upload_budgets",
     "computers",
     "computer_idempotency_records",
-    "computer_requests"
+    "computer_requests",
+    "computer_bindings",
+    "computer_git_tickets"
   ],
   "append_only_workspace_tables": [
     "session_file_attachment_consumptions",
@@ -88,6 +90,13 @@
     "cleanup_schedule_cursor"
   ],
   "special_policies": [
+    {
+      "table": "computer_git_tickets",
+      "name": "git_ticket_lookup",
+      "command": "SELECT",
+      "using": "(current_setting('tetral.git_ticket_lookup'::text, true) = 'true'::text)",
+      "check": ""
+    },
     {
       "table": "session_git_tickets",
       "name": "git_ticket_lookup",

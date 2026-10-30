@@ -164,6 +164,10 @@
 //	                                                        (WriteMachineMessageTx); insert-only                             inputs
 //	computer_requests                                      computer-hub through internal/computer and internal/hubflow      computer-hub request routes (the request
 //	                                                        (claims, fulfilment at ready, release, fail)                      pressure function across Workspaces)
+//	computer_bindings                                      api and computer-hub through internal/computer (preparations     computer-hub reports, instance
+//	                                                        issued, reports stored)                                          binding_count
+//	computer_git_tickets                                   computer-hub through internal/gitticket (one live ticket per     git-proxy per-request validation (the
+//	                                                        computer)                                                        git_ticket_lookup policy)
 //
 // UPDATE-WITH: the table DDL in postgresql_schema.go,
 // postgresql_runtime_schema.go, postgresql_auth_schema.go,
