@@ -30,15 +30,8 @@ import (
 	"github.com/tetral-ai/tetral/integration/transporttest"
 )
 
-// A machine reaches GitHub only through git-proxy, which runs as its own
-// process behind a TLS front in the test process: the front's origin is the
-// git_proxy_url the hubs return, and machines trust its certificate through
-// GIT_SSL_CAINFO. git-proxy, in turn, reaches github.com through a CONNECT
-// proxy in the test process that its HTTPS_PROXY names; the proxy tunnels
-// every github.com:443 connection to a GitHub stand-in, git http-backend over
-// bare repositories behind a github.com certificate that git-proxy trusts
-// through SSL_CERT_FILE. The stand-in answers only requests that carry the
-// repository's token the way git-proxy injects it.
+// README.md describes the path from a machine through git-proxy to the GitHub
+// stand-in and the token the stand-in requires.
 
 // github is the GitHub stand-in, its CONNECT proxy and the test CA that
 // signs both its certificate and git-proxy's front.
