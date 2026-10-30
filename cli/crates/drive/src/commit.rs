@@ -513,7 +513,12 @@ impl Owner {
                 if let Some(row) = after.files.get_mut(key) {
                     row.version_id = version_id.map(|id| id.as_str().to_owned());
                     row.synced_sha256 = Some(sha256.clone());
-                    row.synced_size = self.uploads.sizes.get(key).copied().or(row.size);
+                    row.synced_size = self
+                        .uploads
+                        .sizes
+                        .get(&(key.0.clone(), sha256.clone()))
+                        .copied()
+                        .or(row.size);
                     row.synced_executable = Some(*executable);
                     if !changed && row.present && row.content.as_deref() == Some("session") {
                         adopt.push((self.content_path(&key.0, row.file_id), sha256.clone()));

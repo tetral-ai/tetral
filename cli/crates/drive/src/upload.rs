@@ -59,8 +59,9 @@ pub(crate) struct Uploads {
     pub last_write: HashMap<Key, Duration>,
     /// The hashes a PUT to each drive answered `200` during this run.
     pub put: HashSet<(String, String)>,
-    /// The size of the content each uploaded change names.
-    pub sizes: HashMap<Key, i64>,
+    /// The size of each content an upload of a drive hashed, by drive and
+    /// hash.
+    pub sizes: HashMap<(String, String), i64>,
     /// The `exec_command` tasks of the Session that run.
     pub running_tasks: HashSet<String>,
     /// The writes whose content a commit answered `409 content_missing`:
@@ -237,7 +238,9 @@ impl Owner {
         match ended {
             Uploaded::Done { sha256, size } => {
                 self.uploads.put.insert((key.0.clone(), sha256.clone()));
-                self.uploads.sizes.insert(key.clone(), size);
+                self.uploads
+                    .sizes
+                    .insert((key.0.clone(), sha256.clone()), size);
                 let _ = self
                     .write(Write {
                         pending: vec![PendingChange {

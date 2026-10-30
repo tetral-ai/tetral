@@ -66,6 +66,33 @@ async fn due_changes_split_at_ten_thousand_deletions_first_and_the_next_commit_f
 }
 
 #[tokio::test]
+async fn an_accepted_write_takes_the_size_of_its_own_content() {
+    let mut env = Env::new();
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.write("a", "one", NO_TASK).await;
+    let first = session.sync_point(None, RESULT_WAIT, None);
+    env.call().await.uploaded();
+    let commit = env.call().await;
+    // A longer rewrite uploads while the commit is in flight.
+    session.write("a", "a longer two", NO_TASK).await;
+    let second = session.sync_point(None, RESULT_WAIT, None);
+    let upload = env.call().await;
+    assert_eq!(upload.sha256(), sha256(b"a longer two"));
+    upload.uploaded();
+    commit.accepted();
+    // The rewrite's commit follows once the first answer is applied.
+    let next = env.call().await;
+    let row = session.tables().await.files[&support::key("a")].clone();
+    assert_eq!(
+        (row.synced_sha256, row.synced_size),
+        (Some(sha256(b"one")), Some(3))
+    );
+    next.accepted();
+    outcome(first).await;
+    outcome(second).await;
+}
+
+#[tokio::test]
 async fn a_commit_ends_where_its_body_would_pass_sixteen_mebibytes() {
     let mut env = Env::new();
     let writes: Vec<String> = (0..300)
