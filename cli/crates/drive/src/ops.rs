@@ -721,8 +721,8 @@ impl Owner {
     fn target(&self, drive: &str, parent: u64, name: &[u8]) -> Result<String, Errno> {
         let path = self.child(drive, parent, name)?;
         paths::check(&path)?;
-        if paths::excluded(&path, self.exclude_of(drive)) {
-            return Err(Errno::ACCESS);
+        if let Some(errno) = paths::exclusion_error(&path, self.exclude_of(drive)) {
+            return Err(errno);
         }
         Ok(path)
     }
@@ -1100,8 +1100,8 @@ impl Owner {
             "folder" => return Err(Errno::ISDIR),
             _ => return Err(Errno::INVAL),
         }
-        if paths::excluded(&path, self.exclude_of(drive)) {
-            return Err(Errno::ACCESS);
+        if let Some(errno) = paths::exclusion_error(&path, self.exclude_of(drive)) {
+            return Err(errno);
         }
         Ok((path, row))
     }

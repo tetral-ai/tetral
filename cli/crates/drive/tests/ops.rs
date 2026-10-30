@@ -428,7 +428,7 @@ async fn a_name_in_nfd_reaches_its_nfc_entry_and_is_recorded_under_it() {
 }
 
 #[tokio::test]
-async fn excluded_paths_fail_with_eacces_and_record_nothing() {
+async fn excluded_paths_fail_with_eacces_at_them_and_enoent_below_and_record_nothing() {
     let stub = Stub::default();
     stub.list("notes.md", "notes", false);
     let mut harness = Harness::start(stub, &["datasets/"]).await;
@@ -452,12 +452,36 @@ async fn excluded_paths_fail_with_eacces_and_record_nothing() {
     let datasets = 90;
     let refused = [
         (
+            "make the folder datasets",
+            harness.mkdir("", "datasets").await.err(),
+            Errno::ACCESS,
+        ),
+        (
+            "create the file datasets",
+            harness
+                .sync
+                .create(&drive, TOP_INODE, b"datasets", 0o644, Some(TASK_PID))
+                .await
+                .err(),
+            Errno::ACCESS,
+        ),
+        (
+            "rename notes.md to datasets",
+            harness
+                .sync
+                .rename(&drive, TOP_INODE, b"notes.md", TOP_INODE, b"datasets", None)
+                .await
+                .err(),
+            Errno::ACCESS,
+        ),
+        (
             "create datasets/b.csv",
             harness
                 .sync
                 .create(&drive, datasets, b"b.csv", 0o644, Some(TASK_PID))
                 .await
                 .err(),
+            Errno::NOENT,
         ),
         (
             "open datasets/a.csv for append with create",
@@ -466,10 +490,7 @@ async fn excluded_paths_fail_with_eacces_and_record_nothing() {
                 .create(&drive, datasets, b"a.csv", 0o644, Some(TASK_PID))
                 .await
                 .err(),
-        ),
-        (
-            "make the folder datasets",
-            harness.mkdir("", "datasets").await.err(),
+            Errno::NOENT,
         ),
         (
             "rename notes.md to datasets/notes.md",
@@ -478,10 +499,11 @@ async fn excluded_paths_fail_with_eacces_and_record_nothing() {
                 .rename(&drive, TOP_INODE, b"notes.md", datasets, b"notes.md", None)
                 .await
                 .err(),
+            Errno::NOENT,
         ),
     ];
-    for (row, error) in refused {
-        assert_eq!(error, Some(Errno::ACCESS), "{row}");
+    for (row, error, expected) in refused {
+        assert_eq!(error, Some(expected), "{row}");
     }
     assert_eq!(harness.tables().await, before);
     assert_eq!(

@@ -93,6 +93,24 @@ pub fn excluded(path: &str, exclude: &[String]) -> bool {
     })
 }
 
+/// The error of creating at or renaming to an excluded `path`: `EACCES` at
+/// an `exclude` entry itself, and `ENOENT` below one, since the excluded
+/// folder does not exist; `None` for a path no entry excludes.
+pub fn exclusion_error(path: &str, exclude: &[String]) -> Option<Errno> {
+    let mut below = false;
+    for entry in exclude {
+        let entry = entry.trim_end_matches('/');
+        if entry.is_empty() || !at_or_below(path, entry) {
+            continue;
+        }
+        if path == entry {
+            return Some(Errno::ACCESS);
+        }
+        below = true;
+    }
+    below.then_some(Errno::NOENT)
+}
+
 /// Why the entry of `kind` at `path` is local-only, or `None` for a synced
 /// entry; `holds` tells whether a path holds a present entry.
 pub fn local_only(path: &str, kind: &str, holds: impl Fn(&str) -> bool) -> Option<&'static str> {
