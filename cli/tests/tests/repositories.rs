@@ -309,15 +309,25 @@ fn a_refused_or_empty_ticket_fails_every_repository_with_cause_clone_and_clones_
     );
     let empty = report(&engine, &empty);
     assert_eq!(failures(&empty), expected);
+    // The refusal's own message, and the schema failure's description.
+    for (report, message) in [
+        (&refused, "injected by the answer control"),
+        (&empty, "the git ticket answer does not match its schema"),
+    ] {
+        let messages: Vec<&Value> = report["repository_failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|failure| &failure["message"])
+            .collect();
+        assert_eq!(messages, [message, message]);
+    }
     for path in &paths {
         assert!(!path.exists(), "{}", path.display());
     }
     assert!(git.requests().is_empty());
     assert_eq!(machine.machine.seams.count(GIT_SPAWN), 0);
-    case.observe(format!(
-        "both prepared with both repositories failed with cause clone ({:?}, {:?}); the refused fetch was sent once; nothing was cloned and no git ran",
-        refused["repository_failures"][0]["message"], empty["repository_failures"][0]["message"],
-    ));
+    case.observe("both prepared with both repositories failed with cause clone, each with the refusal's message or the schema failure's description; the refused fetch was sent once; nothing was cloned and no git ran");
     case.pass();
 }
 
