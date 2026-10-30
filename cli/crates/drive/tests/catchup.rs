@@ -446,13 +446,10 @@ async fn applied_seq_stays_before_a_commit_the_page_cut() {
 #[tokio::test]
 async fn an_expired_cursor_lists_the_drive_again_and_keeps_pending_changes_and_files() {
     let directory = tempfile::tempdir().unwrap();
-    let content = directory.path().join("content/drive_a");
+    let content = directory.path().join("sessions/sess_a/content/drive_a");
     let blobs = directory.path().join("cache/blobs");
     std::fs::create_dir_all(&content).unwrap();
     std::fs::create_dir_all(&blobs).unwrap();
-    for (name, bytes) in [("7", "local seven"), ("8", "local eight")] {
-        std::fs::write(content.join(name), bytes).unwrap();
-    }
     for index in 0..3 {
         std::fs::write(blobs.join(hash(&index.to_string())), "blob").unwrap();
     }
@@ -464,7 +461,11 @@ async fn an_expired_cursor_lists_the_drive_again_and_keeps_pending_changes_and_f
             Vec::new(),
         )
         .await;
-    harness.sync.tables().await;
+    let listed = harness.sync.tables().await;
+    let generation = listed.drive_cursor[DRIVE].generation;
+    // The local content of the write pending on `a`.
+    let a = content.join(harness.row("a").await.unwrap().file_id.to_string());
+    std::fs::write(&a, "local a").unwrap();
     // Two pending writes, written behind the owner and seen when it starts again.
     drop(harness);
     let mut state = SyncState::open(&directory.path().join("sync-state.db"))
@@ -505,6 +506,7 @@ async fn an_expired_cursor_lists_the_drive_again_and_keeps_pending_changes_and_f
     assert_eq!(harness.versions().await, expected(&now));
     let tables = harness.sync.tables().await;
     assert_eq!(kept(&tables), before);
+    assert_eq!(tables.drive_cursor[DRIVE].generation, generation);
     // The pending write keeps its local entry; the others follow the drive.
     assert_eq!(
         harness.row("a").await.unwrap().local_sha256,
@@ -515,8 +517,7 @@ async fn an_expired_cursor_lists_the_drive_again_and_keeps_pending_changes_and_f
         Some(hash("d"))
     );
     assert!(harness.row("b").await.is_none());
-    assert_eq!(std::fs::read(content.join("7")).unwrap(), b"local seven");
-    assert_eq!(std::fs::read(content.join("8")).unwrap(), b"local eight");
+    assert_eq!(std::fs::read(&a).unwrap(), b"local a");
     assert_eq!(std::fs::read_dir(&blobs).unwrap().count(), 3);
 }
 
