@@ -2668,13 +2668,41 @@ mod tests {
     }
 
     /// A drive sync that records each sync point and answers with one
-    /// committed write, and a download for a `running` result.
-    #[derive(Debug, Default)]
-    struct Points(std::sync::Mutex<Vec<DriveSyncPoint>>);
+    /// committed write, and a download for a `running` result; and records
+    /// each check, answered once `release` has a permit, with one unmounted
+    /// drive for a `view_image`.
+    #[derive(Debug)]
+    struct Points {
+        points: std::sync::Mutex<Vec<DriveSyncPoint>>,
+        checks: std::sync::Mutex<Vec<DriveCheck>>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+
+    impl Default for Points {
+        fn default() -> Points {
+            Points {
+                points: std::sync::Mutex::default(),
+                checks: std::sync::Mutex::default(),
+                release: Arc::new(tokio::sync::Semaphore::new(0)),
+            }
+        }
+    }
 
     impl DriveSyncPort for Points {
-        fn check(&self, _: DriveCheck) -> DriveAnswer {
-            Box::pin(async { None })
+        fn check(&self, check: DriveCheck) -> DriveAnswer {
+            let view_image = check.view_image;
+            self.checks.lock().unwrap().push(check);
+            let release = self.release.clone();
+            Box::pin(async move {
+                release.acquire().await.unwrap().forget();
+                view_image.then(|| {
+                    serde_json::from_value(json!({
+                        "committed": 0, "deleted": 0, "rejected": [], "not_synced": [],
+                        "unmounted": [{"drive_id": "drive_a", "error": "no FUSE: test"}],
+                    }))
+                    .unwrap()
+                })
+            })
         }
 
         fn sync_point(&self, point: DriveSyncPoint) -> DriveAnswer {
@@ -2687,7 +2715,7 @@ mod tests {
                     "downloaded_bytes": 1, "size_bytes": 2,
                 }]);
             }
-            self.0.lock().unwrap().push(point);
+            self.points.lock().unwrap().push(point);
             Box::pin(async move { Some(serde_json::from_value(outcome).unwrap()) })
         }
 
@@ -2728,7 +2756,7 @@ mod tests {
         let terminal = reports.recv().await.unwrap();
 
         let seen: Vec<(bool, bool, Duration)> = points
-            .0
+            .points
             .lock()
             .unwrap()
             .iter()
@@ -2756,6 +2784,90 @@ mod tests {
                 .get("downloading")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn a_command_starts_after_its_drive_check_and_a_view_image_result_carries_the_check() {
+        let root = tempfile::tempdir().unwrap();
+        let input = |tool: &str, input: serde_json::Value| -> ToolInput {
+            serde_json::from_value(json!({"tool": tool, "input": input})).unwrap()
+        };
+        // An exec_command waits for its held check, which a cancel ends.
+        for cancel in [false, true] {
+            let (mut supervisor, mailbox, mut reports, _gone, _) =
+                staged_supervisor(root.path(), false);
+            let points = Arc::new(Points::default());
+            supervisor.spec.drive_sync = Some(points.clone());
+            mailbox.send(SupervisorMessage::Start).unwrap();
+            let staged = supervisor.staged();
+            tokio::pin!(staged);
+            tokio::select! {
+                _ = &mut staged => panic!("started before its drive check was answered"),
+                () = async {
+                    while points.checks.lock().unwrap().is_empty() {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                } => {}
+            }
+            assert!(!points.checks.lock().unwrap()[0].view_image);
+            if cancel {
+                mailbox
+                    .send(SupervisorMessage::Cancel(Box::new(Control {
+                        connection_id: id("connection"),
+                        correlation: correlation("cancel"),
+                        traceparent: None,
+                        payload: serde_json::from_value(json!({
+                            "session_id": "session", "binding_id": "binding",
+                            "tool_use_event_id": "event", "task_id": "task",
+                        }))
+                        .unwrap(),
+                    })))
+                    .unwrap();
+                let staged = tokio::time::timeout(Duration::from_secs(10), staged).await;
+                assert!(matches!(staged, Ok(Staged::Cancelled)));
+                let terminal = reports.recv().await.unwrap();
+                assert_eq!(terminal.body["result"]["result"]["cancelled"], true);
+            } else {
+                points.release.add_permits(1);
+                assert!(matches!(staged.await, Staged::Started(Ok(_))));
+            }
+        }
+
+        // A view_image's result carries its check's answer, from no sync
+        // point.
+        let (mut supervisor, mailbox, mut reports, _gone, _) =
+            staged_supervisor(root.path(), false);
+        let points = Arc::new(Points::default());
+        supervisor.spec.drive_sync = Some(points.clone());
+        supervisor.tool = Some(input("view_image", json!({"path": "image.png"})));
+        points.release.add_permits(1);
+        mailbox.send(SupervisorMessage::Start).unwrap();
+        assert!(matches!(supervisor.staged().await, Staged::Started(Ok(_))));
+        let envelope = crate::child::failed(
+            HelperTool::ViewImage,
+            crate::exec::tool_error("helper_failure", "no image", None),
+        );
+        supervisor.report_file(envelope, Duration::ZERO).await;
+        let result = reports.recv().await.unwrap();
+        assert_eq!(
+            result.body["result"]["drive_sync"]["unmounted"],
+            json!([{"drive_id": "drive_a", "error": "no FUSE: test"}])
+        );
+        assert!(points.checks.lock().unwrap()[0].view_image);
+        assert!(points.points.lock().unwrap().is_empty());
+
+        // An edit has no check.
+        let (mut supervisor, mailbox, _reports, _gone, _) = staged_supervisor(root.path(), false);
+        let points = Arc::new(Points::default());
+        supervisor.spec.drive_sync = Some(points.clone());
+        supervisor.tool = Some(input(
+            "edit",
+            json!({"path": "a.txt", "old_string": "a", "new_string": "b"}),
+        ));
+        mailbox.send(SupervisorMessage::Start).unwrap();
+        let staged = tokio::time::timeout(Duration::from_secs(10), supervisor.staged()).await;
+        assert!(matches!(staged, Ok(Staged::Started(Ok(_)))));
+        assert!(points.checks.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
