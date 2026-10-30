@@ -609,3 +609,66 @@ fn saved_outcome(binding: &Binding) -> Option<SessionOutcome> {
 pub fn inside_state_root(cwd: &Path, root: &Path) -> bool {
     lexical(cwd).starts_with(lexical(root))
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_report_over_its_limit_is_fitted_from_the_last_failure_backwards_to_exactly_what_fits() {
+        let status = |count: usize| {
+            let failures = (0..count)
+                .map(|index| {
+                    serde_json::from_value::<RepositoryFailure>(json!({
+                        "url": format!("https://github.com/acme/r{index}"),
+                        "path": format!("/w/r{index}"),
+                        "cause": "clone", "message": "x".repeat(1_024),
+                    }))
+                    .unwrap()
+                })
+                .collect();
+            SessionStatus {
+                connection_id: Id::new("conn_a").unwrap(),
+                message_id: Id::new("msg_a").unwrap(),
+                request_message_id: Id::new("msg_prepare").unwrap(),
+                session_id: Id::new("sess_a").unwrap(),
+                binding_id: Id::new("bind_a").unwrap(),
+                outcome: SessionOutcome::Prepared {
+                    cwd: serde_json::from_value(json!("/w")).unwrap(),
+                    drive_mount_failures: None,
+                    repository_failures: Some(List(failures)),
+                },
+            }
+        };
+        let over = status(70);
+        assert!(protocol::encode(&over).len() > MESSAGE_MAX_BYTES);
+        let fitting = fitted(over);
+        assert_eq!(protocol::encode(&fitting).len(), MESSAGE_MAX_BYTES);
+        let SessionOutcome::Prepared {
+            repository_failures: Some(List(failures)),
+            ..
+        } = &fitting.outcome
+        else {
+            panic!("a prepared report");
+        };
+        let lengths: Vec<usize> = failures
+            .iter()
+            .map(|failure| failure.message.len())
+            .collect();
+        let whole = lengths
+            .iter()
+            .take_while(|&&length| length == 1_024)
+            .count();
+        assert_eq!(lengths.len(), 70);
+        assert!(whole > 0 && lengths[whole] < 1_024, "{lengths:?}");
+        assert!(
+            lengths[whole + 1..].iter().all(|&length| length == 0),
+            "{lengths:?}"
+        );
+        assert_eq!(failures[whole].message, "x".repeat(lengths[whole]));
+        let fits = status(3);
+        assert_eq!(fitted(fits.clone()), fits);
+    }
+}

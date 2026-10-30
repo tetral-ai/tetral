@@ -364,32 +364,3 @@ pub fn fit(
         failures[index].message = cut(message, keep).to_owned();
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn failure(message: &str) -> RepositoryFailure {
-        serde_json::from_value(serde_json::json!({
-            "url": "https://github.com/acme/a", "path": "/w/a",
-            "cause": "clone", "message": message,
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn a_report_over_its_limit_is_fitted_from_the_last_failure_backwards_to_exactly_what_fits() {
-        let size = |failures: &[RepositoryFailure]| serde_json::to_vec(failures).unwrap().len();
-        let mut failures = vec![failure(&"a".repeat(600)), failure(&"é".repeat(300))];
-        let total = size(&failures);
-        let limit = total - 700;
-        fit(&mut failures, limit, size);
-        assert_eq!(size(&failures), limit);
-        assert_eq!(failures[1].message, "");
-        assert_eq!(failures[0].message.len(), 600 - (700 - 600));
-        let mut fitting = vec![failure("short")];
-        let before = fitting.clone();
-        fit(&mut fitting, 1_000, size);
-        assert_eq!(fitting, before);
-    }
-}
