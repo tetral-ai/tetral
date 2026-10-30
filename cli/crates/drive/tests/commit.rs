@@ -1,7 +1,8 @@
 //! Commits of a Session's drive sync against a stub `DriveTransfer` that
 //! holds every upload and commit until the test answers it: splitting,
 //! bases, a lost answer across a restart, `409 content_missing`,
-//! `413 file_too_large`, and the drive winning over a rejected change.
+//! `413 file_too_large`, the drive winning over a rejected change, and a
+//! `429` counted at the upload slots' pressure point.
 
 mod support;
 
@@ -293,4 +294,39 @@ async fn a_rejection_after_a_newer_record_keeps_the_newer_version() {
     assert_eq!(session.read("a").await.unwrap(), "newer");
     let row = session.tables().await.files[&support::key("a")].clone();
     assert_eq!(row.version_id.as_deref(), Some("v5"));
+}
+
+#[tokio::test]
+async fn an_upload_answered_429_counts_one_rate_limited_rejection_in_the_local_metrics() {
+    let rejected = || {
+        observe::registry()
+            .counter(
+                "tetral_uploads_rejected_total",
+                &[("cause", "rate_limited")],
+            )
+            .get()
+    };
+    let before = rejected();
+    let mut env = Env::new();
+    env.stub.list("f", "old");
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.write("f", "new", 1).await;
+    session.task_exited(1);
+    let support::Call::Upload { rate_limited, .. } = env.call().await else {
+        panic!("an upload")
+    };
+    // The transfer client calls it at the 429, before it waits to retry.
+    rate_limited.expect("the upload's pressure point is told")();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while rejected() == before {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("counted within 10 s");
+    assert_eq!(rejected(), before + 1);
+    assert!(observe::render().contains(&format!(
+        "tetral_uploads_rejected_total{{cause=\"rate_limited\"}} {}",
+        before + 1
+    )));
 }

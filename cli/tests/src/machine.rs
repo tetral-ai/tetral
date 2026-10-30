@@ -227,7 +227,7 @@ impl Machine {
 
     /// Configures a state root in `directory` and starts `server_run` on it
     /// with its own seam clock.
-    fn start_as(
+    pub fn start_as(
         case: &mut Case,
         directory: &Path,
         bootstrap: &Value,

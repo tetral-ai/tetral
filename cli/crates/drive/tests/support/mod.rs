@@ -55,6 +55,8 @@ pub enum Call {
         session: String,
         sha256: String,
         traceparent: Option<String>,
+        /// What the transfer client calls at a `429 rate_limited`.
+        rate_limited: Option<Arc<dyn Fn() + Send + Sync>>,
         answer: oneshot::Sender<Result<UploadContentResponse, Ended>>,
     },
     Commit {
@@ -227,6 +229,7 @@ impl DriveTransfer for SessionStub {
                 session: self.session.clone(),
                 sha256: request.body.sha256.as_str().to_owned(),
                 traceparent: request.traceparent,
+                rate_limited: request.body.rate_limited.clone(),
                 answer,
             });
             match answered.await {
