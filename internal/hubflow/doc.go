@@ -7,8 +7,10 @@
 //
 //	AcceptReady (ready.go) accepts a connection's ready (instance.AcceptReady),
 //	               fulfils the Controller requests it answers
-//	               (computer.FulfilRequests) and notices the pod holding the
-//	               connection's stream, which then starts its heartbeats.
+//	               (computer.FulfilRequests), issues a session.prepare for
+//	               every attached computer on the instance
+//	               (computer.IssuePreparationsOn) and notices the pod holding
+//	               the connection's stream, which then starts its heartbeats.
 //	               Caller: the ready route.
 //	EndConnection (end.go) the single end step of a connection, for every cause:
 //	               lease_expired (a new connection replaces one whose lease

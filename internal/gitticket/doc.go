@@ -10,8 +10,10 @@
 //     returned once. PostgreSQLComputerTicketStore.FindByTokenHash reads one
 //     for git-proxy through the same git_ticket_lookup handshake, as a Ticket
 //     with ComputerID set, whose repositories are the only ones it reaches.
-//   - The Ticket durable domain type and the status vocabulary StatusPending,
-//     StatusLive, StatusRotated, which is the CHECK-constrained status column.
+//   - The Ticket durable domain type and the status vocabulary: StatusPending,
+//     StatusLive and StatusRotated, the CHECK-constrained status column of
+//     session_git_tickets; StatusLive and StatusRevoked, the state column of
+//     computer_git_tickets.
 //   - The capability-token format: a 256-bit token (TokenBytes=32) encoded
 //     base64url without padding, always TokenChars=43 characters; carried in the
 //     HeaderName request header and persisted only as its 32-byte SHA-256
@@ -60,9 +62,12 @@
 // UPDATE-WITH:
 //
 //	internal/gitticket/store.go (CreatePending, ActivatePending, FindByTokenHash, FindBySessionTokenHash);
-//	internal/gitticket/token.go (status vocabulary, token/hash format and bounds);
+//	internal/gitticket/computer_store.go (IssueComputerTicket, PostgreSQLComputerTicketStore, StatusRevoked);
+//	internal/gitticket/token.go (the other statuses, token/hash format and bounds);
+//	internal/storage/postgresql_computer_schema.go (computer_git_tickets and its live partial unique index);
+//	services/computer-hub/client_git_ticket.go (the git-ticket route that issues computer tickets);
 //	internal/storage/postgresql_schema.go (session_git_tickets table, the live partial
 //	  unique index, the status/rotation CHECK constraints, the git_ticket_lookup RLS policy);
-//	internal/sandbox/github_preparation.go (prepareGitHubRepositories, recoverInstalledGitTicket);
+//	internal/sandbox/github_preparation.go (GitHubRepositoryConverger.materialize, recoverInstalledGitTicket);
 //	services/git-proxy/ticket.go (TicketValidator.Validate).
 package gitticket
