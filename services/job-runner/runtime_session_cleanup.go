@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/imagestore"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 
 	"github.com/tetral-ai/tetral/internal/blob"
@@ -747,6 +748,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeSessionDeleteSandboxCustody(ctx
 	}
 	if pending {
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "sandbox_attachment_cleanup_pending", ErrorMessage: "sandbox attachment cleanup is not complete"}, nil
+	}
+	if err := imagestore.DeleteSession(ctx, s.Client, s.AttachmentBlobStore, workspace.ID(job.WorkspaceID), job.SessionID); err != nil {
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "attachment_cleanup_failed", ErrorMessage: "attachment cleanup failed"}, nil
 	}
 	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.session_delete_cleanup_sandbox_rows", func(tx *dbconnect.Tx) error {
 		return deleteSessionSandboxRowsTx(ctx, tx, job.WorkspaceID, job.SessionID)
