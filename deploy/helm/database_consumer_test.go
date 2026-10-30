@@ -116,6 +116,8 @@ func TestProtectedDatabaseConsumerCensus(t *testing.T) {
 			t.Fatalf("%s production command lost its SQL owner", role)
 		}
 	}
+	// The daily drive CronJob runs Cleanup's binary as a second process.
+	processOwners := map[string]string{"cleanup-drives": "cleanup"}
 	for _, profile := range []string{"standard-routed", "hardened"} {
 		t.Run(profile, func(t *testing.T) {
 			objects := uniqueObjects(t, renderChart(t, helm, chart, "transport.profile="+profile, "transport.goPoolMax=7", "transport.bunPoolMax=3"))
@@ -151,7 +153,11 @@ func TestProtectedDatabaseConsumerCensus(t *testing.T) {
 					}
 					seen[role] = true
 					generations, poolKey, poolMax := 1, "TETRAL_DB_MAX_OPEN_CONNS", "7"
-					if _, ok := goOwners[role]; !ok {
+					owner := role
+					if processOwner, ok := processOwners[role]; ok {
+						owner = processOwner
+					}
+					if _, ok := goOwners[owner]; !ok {
 						if role != "provider-gateway" && role != "mcp-connector" {
 							t.Fatalf("uncensused native SQL consumer %s", role)
 						}
@@ -172,7 +178,7 @@ func TestProtectedDatabaseConsumerCensus(t *testing.T) {
 					t.Logf("protected SQL consumer=%s DSNs=%d pool=%s generations=%d", role, dsns, poolMax, generations)
 				}
 			}
-			if len(seen) != len(goOwners)+len(bunOwners) {
+			if len(seen) != len(goOwners)+len(processOwners)+len(bunOwners) {
 				t.Fatalf("rendered protected consumers=%v; production Go=%v Bun=%v", seen, goOwners, bunOwners)
 			}
 			total, err := renderedPoolSlots(objects, deploymentRoles)
@@ -181,8 +187,8 @@ func TestProtectedDatabaseConsumerCensus(t *testing.T) {
 			}
 			total += jobSlots
 			ledger := transportMap(t, transportAt(t, objects["v1|ConfigMap|tetral-system|tetral-database-connection-budget"], "data"))
-			if fmt.Sprint(ledger["maximumOwnedPoolSlots"]) != strconv.Itoa(total) || total != 337 {
-				t.Fatalf("independent twelve-consumer total=%d differs from ledger %v", total, ledger)
+			if fmt.Sprint(ledger["maximumOwnedPoolSlots"]) != strconv.Itoa(total) || total != 344 {
+				t.Fatalf("independent thirteen-consumer total=%d differs from ledger %v", total, ledger)
 			}
 		})
 	}

@@ -1249,6 +1249,7 @@ func TestKubernetesManifestDNSEgressIsUniform(t *testing.T) {
 		{"auth.yaml", "auth"},
 		{"bridge.yaml", "bridge"},
 		{"cleanup.yaml", "cleanup"},
+		{"cleanup.yaml", "cleanup-drives"},
 		{"event-stream.yaml", "event-stream"},
 		{"provider-gateway.yaml", "provider-gateway"},
 		{"mcp-connector.yaml", "mcp-connector"},
@@ -2171,7 +2172,9 @@ func TestKubernetesManifestCleanupIsComposedFromServiceLocalManifests(t *testing
 	requireServiceLocalManifestComposition(t, "cleanup", "cleanup.yaml", []string{
 		"serviceaccount.yaml",
 		"cronjob.yaml",
+		"cronjob-drives.yaml",
 		"networkpolicy.yaml",
+		"networkpolicy-drives.yaml",
 	})
 }
 

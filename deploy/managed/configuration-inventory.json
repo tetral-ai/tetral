@@ -418,7 +418,7 @@
       "units": "jobs, Go duration",
       "unset_zero": "Whitespace empty defaults; metrics export unset disables export; zero invalid.",
       "constraints": "Positive count/timeout; optional HTTP(S) export URL must omit credentials.",
-      "projection": "Fixed CronJob claim 100/schedule 1 minute/Forbid; optional exporter stays service env opt-in with no remote backend prescribed.",
+      "projection": "Fixed CronJob claim 100/schedule 1 minute/Forbid; optional exporter stays service env opt-in with no remote backend prescribed. The cleanup-drives CronJob runs tetral-cleanup drives on cleanup.drives.schedule (default \"0 3 * * *\"), Forbid, with the blob Secret keys.",
       "proofs": [
         "deploy/helm/database_consumer_test.go",
         "deploy/helm/configuration_projection_test.go"

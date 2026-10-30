@@ -214,6 +214,11 @@ drives:
   # by the api and the computer-hub; at least 65536, the least a request counts.
   uploadBudgetBytesPerMinute: 500000000
 
+cleanup:
+  drives:
+    # Schedule of the daily drive cleanup CronJob, cleanup-drives.
+    schedule: "0 3 * * *"
+
 resources:
   agentRuntime:
     requests:

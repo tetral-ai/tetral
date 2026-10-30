@@ -5,7 +5,7 @@ metadata:
   namespace: tetral-system
 data:
   status: "unresolved"
-  maximumOwnedPoolSlots: "1000"
+  maximumOwnedPoolSlots: "1020"
   operatorReserveSlots: "8"
   availableServerConnections: "unknown"
   externalConsumerSlots: "unknown"
