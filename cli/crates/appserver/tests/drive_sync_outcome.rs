@@ -579,6 +579,34 @@ async fn a_mount_failure_is_in_the_first_report_and_a_view_image_result_and_down
     fixture.sync.detach_all();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_whose_check_found_a_failed_mount_starts_beside_a_mounted_drive() {
+    // The command's check sends its failure to the drive sync just before
+    // the launch reads the mounted drive's root, which that sync answers.
+    const FAILED: &str = "drive_b";
+    let fixture = Fixture::new(vec![DRIVE], &[], Vec::new(), b"").await;
+    std::fs::write(fixture.drives.join(FAILED), b"").unwrap();
+    let bound = [DRIVE, FAILED].map(|drive| Bound {
+        drive_id: SafeId::new(drive).unwrap(),
+        read_only: false,
+        exclude: Vec::new(),
+    });
+    let failures = fixture.sync.mount_drives(bound.to_vec()).await;
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    // The task mounts only the drive that is mounted.
+    let (_mailbox, mut reports) = fixture.start(
+        "task",
+        json!({ "tool": "exec_command", "input": { "cmd": "echo started", "wait_ms": 30_000 } }),
+    );
+    let terminal = next(&mut reports, "the terminal report").await;
+    assert_eq!(
+        terminal["result"]["result"]["stdout"]["text"], "started\n",
+        "{terminal}"
+    );
+    assert_eq!(unmounted(&terminal), [FAILED]);
+    fixture.sync.detach_all();
+}
+
 /// A one-pixel PNG.
 const PIXEL: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,

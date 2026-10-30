@@ -31,6 +31,10 @@ which owns that task's process tree; the translation of a call's
   as the leader of a new session and process group, with only its pipes,
   the launch-status descriptor 3 and, for exec, environment-data descriptor 4
   (`isolation/mod.rs`).
+- The check's `bwrap` lookup and the launch's profile and transform read
+  the task's paths in the App Server, the drive mounts this process serves
+  among them. They run on blocking threads, never on the runtime's workers,
+  so that the Drive sync owner that answers those reads can always run.
 - The `bwrap` is the one Codex's helper picks for the same command: the
   system `bwrap` on `PATH` that passes the `--help` probe, otherwise the
   bundled one beside `tetral`. A valid, nonzero `CODEX_BWRAP_SHA256` checks

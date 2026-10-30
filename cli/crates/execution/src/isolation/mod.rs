@@ -18,8 +18,10 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::models::PermissionProfile;
 use codex_sandboxing::{
-    SandboxCommand, SandboxManager, SandboxTransformRequest, SandboxablePreference,
+    SandboxCommand, SandboxExecRequest, SandboxManager, SandboxTransformRequest,
+    SandboxablePreference,
 };
 use codex_utils_path_uri::PathUri;
 use protocol::tool::RejectionCode;
@@ -201,51 +203,25 @@ impl Isolation {
         {
             launcher_environment.insert(name.to_owned(), value.to_string_lossy().into_owned());
         }
-        let manager = SandboxManager::new();
-        #[cfg(target_os = "linux")]
-        let profile = &linux::launch_profile(permissions.profile());
-        #[cfg(not(target_os = "linux"))]
-        let profile = permissions.profile();
-        let sandbox = manager.select_initial(
-            profile,
-            SandboxablePreference::Require,
-            codex_sandboxing::SandboxType::None,
-            false,
-        );
-        let cwd_uri = PathUri::from_host_native_path(cwd).map_err(LaunchError::Spawn)?;
-        let start = match &command.directory {
-            Some(directory) => directory.clone(),
-            None => std::env::current_dir().map_err(LaunchError::Spawn)?,
-        };
-        let start_uri = PathUri::from_host_native_path(&start).map_err(LaunchError::Spawn)?;
-        let mut argv = command.argv.into_iter();
-        let program = argv.next().unwrap_or_default();
-        let request = manager
-            .transform(SandboxTransformRequest {
-                command: SandboxCommand {
-                    program: program.into(),
-                    args: argv.collect(),
-                    cwd: start_uri,
-                    env: launcher_environment,
-                    managed_network: None,
-                    additional_permissions: None,
-                },
-                permissions: profile,
-                sandbox,
-                enforce_managed_network: false,
-                environment_id: None,
-                network: None,
-                sandbox_policy_cwd: &cwd_uri,
-                sandbox_exe: Some(tetral),
-                use_legacy_landlock: false,
-                windows_sandbox_level: WindowsSandboxLevel::Disabled,
-            })
-            .map_err(|_| {
-                LaunchError::Rejected(PolicyRejection {
-                    code: RejectionCode::UnsupportedPolicy,
-                    message: "sandbox_policy cannot be enforced for this command".to_owned(),
-                })
-            })?;
+        // The profile and the transform read the task's paths, so they run
+        // off the runtime's workers.
+        let profile = permissions.profile().clone();
+        let cwd = cwd.to_path_buf();
+        let tetral = tetral.to_path_buf();
+        let directory = command.directory.clone();
+        let argv = command.argv;
+        let request = tokio::task::spawn_blocking(move || {
+            transform(
+                profile,
+                &cwd,
+                &tetral,
+                directory,
+                argv,
+                launcher_environment,
+            )
+        })
+        .await
+        .map_err(|error| LaunchError::Spawn(io::Error::other(error)))??;
         let Some((program, args)) = request.command.split_first() else {
             return Err(LaunchError::Spawn(io::Error::other(
                 "the sandboxed command is empty",
@@ -282,6 +258,63 @@ impl Isolation {
             .ok_or_else(|| LaunchError::Spawn(io::Error::other("the command has no process ID")))?;
         Ok(Process { child, pid })
     }
+}
+
+/// The sandboxed form of `argv`, to start in `directory` or the App Server's
+/// own working directory, under `profile` resolved against `cwd`.
+fn transform(
+    profile: PermissionProfile,
+    cwd: &Path,
+    tetral: &Path,
+    directory: Option<PathBuf>,
+    argv: Vec<String>,
+    launcher_environment: HashMap<String, String>,
+) -> Result<SandboxExecRequest, LaunchError> {
+    let manager = SandboxManager::new();
+    #[cfg(target_os = "linux")]
+    let profile = &linux::launch_profile(&profile);
+    #[cfg(not(target_os = "linux"))]
+    let profile = &profile;
+    let sandbox = manager.select_initial(
+        profile,
+        SandboxablePreference::Require,
+        codex_sandboxing::SandboxType::None,
+        false,
+    );
+    let cwd_uri = PathUri::from_host_native_path(cwd).map_err(LaunchError::Spawn)?;
+    let start = match directory {
+        Some(directory) => directory,
+        None => std::env::current_dir().map_err(LaunchError::Spawn)?,
+    };
+    let start_uri = PathUri::from_host_native_path(&start).map_err(LaunchError::Spawn)?;
+    let mut argv = argv.into_iter();
+    let program = argv.next().unwrap_or_default();
+    manager
+        .transform(SandboxTransformRequest {
+            command: SandboxCommand {
+                program: program.into(),
+                args: argv.collect(),
+                cwd: start_uri,
+                env: launcher_environment,
+                managed_network: None,
+                additional_permissions: None,
+            },
+            permissions: profile,
+            sandbox,
+            enforce_managed_network: false,
+            environment_id: None,
+            network: None,
+            sandbox_policy_cwd: &cwd_uri,
+            sandbox_exe: Some(tetral),
+            use_legacy_landlock: false,
+            windows_sandbox_level: WindowsSandboxLevel::Disabled,
+        })
+        .map_err(|_| {
+            LaunchError::Rejected(PolicyRejection {
+                code: RejectionCode::UnsupportedPolicy,
+                message: "sandbox_policy cannot be enforced for this command".to_owned(),
+            })
+        })
 }
 
 /// The child's side of a launch, as Codex's pipe spawn prepares it: a new
