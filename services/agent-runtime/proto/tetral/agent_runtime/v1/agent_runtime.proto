@@ -9,6 +9,7 @@ service AgentRuntimePodService {
   rpc AcceptInput(AcceptInputRequest) returns (AcceptInputResponse);
   rpc AcceptAgentMail(AcceptAgentMailRequest) returns (AcceptAgentMailResponse);
   rpc AcceptTaskNotification(AcceptTaskNotificationRequest) returns (AcceptTaskNotificationResponse);
+  rpc AcceptNonStartingInput(AcceptNonStartingInputRequest) returns (AcceptNonStartingInputResponse);
   rpc Interrupt(InterruptRequest) returns (InterruptResponse);
   rpc ResolveToolConfirmation(ResolveToolConfirmationRequest) returns (ResolveToolConfirmationResponse);
   rpc ApplyRuntimeConfig(ApplyRuntimeConfigRequest) returns (ApplyRuntimeConfigResponse);
@@ -184,6 +185,48 @@ enum AcceptTaskNotificationFailure {
   ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_CONFLICT = 5;
   ACCEPT_TASK_NOTIFICATION_FAILURE_CONTEXT_LOAD_FAILED = 6;
   ACCEPT_TASK_NOTIFICATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE = 7;
+}
+
+// An input that never starts a run, delivered only to the Runtime that
+// already holds the Session. For input_kind machine_message, payload_json is
+// {"change": "added" | "removed" | "replaced", "row": <the computer's Runtime row>}.
+message AcceptNonStartingInputRequest {
+  string workspace_id = 1;
+  string session_id = 2;
+  string session_thread_id = 3;
+  string binding_id = 4;
+  int64 binding_generation = 5;
+  string target_pod_uid = 6;
+  string runtime_input_id = 7;
+  int64 input_order = 8;
+  string runtime_process_id = 9;
+  string input_kind = 10;
+  string payload_json = 11;
+}
+
+message AcceptNonStartingInputResponse {
+  oneof outcome {
+    AcceptNonStartingInputAccepted accepted = 1;
+    AcceptNonStartingInputDuplicate duplicate = 2;
+    AcceptNonStartingInputRejected rejected = 3;
+  }
+}
+
+message AcceptNonStartingInputAccepted {}
+message AcceptNonStartingInputDuplicate {}
+message AcceptNonStartingInputRejected {
+  AcceptNonStartingInputFailure reason = 1;
+  bool retryable = 2;
+}
+
+enum AcceptNonStartingInputFailure {
+  ACCEPT_NON_STARTING_INPUT_FAILURE_UNSPECIFIED = 0;
+  ACCEPT_NON_STARTING_INPUT_FAILURE_SELECTED_POD_MISMATCH = 1;
+  ACCEPT_NON_STARTING_INPUT_FAILURE_BINDING_MISMATCH = 2;
+  ACCEPT_NON_STARTING_INPUT_FAILURE_IDENTITY_CONFLICT = 3;
+  ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_BUSY = 4;
+  ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_CONFLICT = 5;
+  ACCEPT_NON_STARTING_INPUT_FAILURE_CONTEXT_LOAD_FAILED = 6;
 }
 
 message InterruptRequest {
