@@ -1,5 +1,6 @@
-//! The drive path a restricted command reaches: a Task supervisor wired to
-//! a Session's drive sync through `DriveSyncPort`, with a real FUSE mount,
+//! The drive path a restricted command reaches: a Task supervisor given a
+//! Session's drive sync through `DriveSyncPort` as it starts, with a real
+//! FUSE mount,
 //! the real restricted process of a `test-seams` `tetral`, a stub
 //! `DriveTransfer` that holds every upload, and a clock the test moves.
 #![cfg(target_os = "linux")]
@@ -22,7 +23,9 @@ use execution::limits::Visible;
 use execution::policy::{DriveMount, SessionDrives, TaskPermissions, TranslationInputs};
 use execution::report::Correlation;
 use execution::store::{LOG_HEAD_BYTES, TaskFiles};
-use execution::supervisor::{self, Bounds, Context, SupervisorMessage, TaskListener, TaskSpec};
+use execution::supervisor::{
+    self, Bounds, Context, SupervisorMessage, TaskDrives, TaskListener, TaskSpec,
+};
 use protocol::connection::DriveAccess;
 use protocol::drive_transfer::{
     CommitResponse, ListChangesResponse, ListFilesResponse, UploadContentResponse,
@@ -225,6 +228,12 @@ async fn a_restricted_command_reaches_the_drive_through_tetral_drives_under_a_li
         }),
         trusted_programs: isolation::trusted_programs(&tetral, None, &project),
     };
+    // Admitted while the binding had no drive, the task gets its drives
+    // as it starts.
+    let admitted = TranslationInputs {
+        drives: None,
+        ..inputs.clone()
+    };
     let (sent, mut reports) = mpsc::unbounded_channel();
     let spec = TaskSpec {
         connection_id: id("conn_a"),
@@ -235,7 +244,7 @@ async fn a_restricted_command_reaches_the_drive_through_tetral_drives_under_a_li
             task_id: id("task"),
             request_message_id: id("execute"),
         },
-        permissions: TaskPermissions::admit(Some(&policy), &inputs).unwrap(),
+        permissions: TaskPermissions::admit(Some(&policy), &admitted).unwrap(),
         limits: Visible::requested(None),
         cwd: project.clone(),
         files: TaskFiles::new(
@@ -247,7 +256,7 @@ async fn a_restricted_command_reaches_the_drive_through_tetral_drives_under_a_li
         received: state::seams::now(),
         record: real_root.join("record"),
         listener: Arc::new(NoEvents),
-        drive_sync: Some(port),
+        drive_sync: None,
     };
     let cmd = format!(
         "printf %s \"$TETRAL_DRIVES\" && ls \"$TETRAL_DRIVES\"/{DRIVE} && echo written > \"$TETRAL_DRIVES\"/{DRIVE}/f"
@@ -269,6 +278,12 @@ async fn a_restricted_command_reaches_the_drive_through_tetral_drives_under_a_li
             activity: Arc::new(protocol::ports::NoActivity),
         },
     );
+    mailbox
+        .send(SupervisorMessage::Drives(Box::new(TaskDrives {
+            permissions: TaskPermissions::admit(Some(&policy), &inputs).unwrap(),
+            drive_sync: Some(port),
+        })))
+        .unwrap();
     mailbox.send(SupervisorMessage::Start).unwrap();
 
     // The terminal result's sync point covers `f`; its upload is held past

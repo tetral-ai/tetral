@@ -229,6 +229,10 @@ impl Default for Bounds {
 }
 
 pub enum SupervisorMessage {
+    /// The binding's drives as a staged task starts, which a
+    /// `session.drives` handled while it waited may have changed; sent just
+    /// before [`SupervisorMessage::Start`].
+    Drives(Box<TaskDrives>),
     /// The binding owner starts the staged task.
     Start,
     /// An admitted `tool.stdin` of the task.
@@ -247,6 +251,13 @@ pub enum SupervisorMessage {
     ConnectionEnded,
     /// The App Server shuts down.
     Shutdown,
+}
+
+/// A staged task's permissions translated with the binding's drives at its
+/// start, and the Session's drive sync then.
+pub struct TaskDrives {
+    pub permissions: TaskPermissions,
+    pub drive_sync: Option<Arc<dyn DriveSyncPort>>,
 }
 
 /// A control of the task, admitted by its binding owner on the task's
@@ -583,6 +594,12 @@ impl Supervisor {
                 None
                 | Some(SupervisorMessage::ConnectionEnded)
                 | Some(SupervisorMessage::Shutdown) => return Staged::Discarded,
+                Some(SupervisorMessage::Drives(drives)) => {
+                    if check.is_none() {
+                        self.spec.permissions = drives.permissions;
+                        self.spec.drive_sync = drives.drive_sync;
+                    }
+                }
                 Some(SupervisorMessage::Start) => {
                     if check.is_none() {
                         self.left_queue = Some(state::seams::now());
@@ -709,7 +726,8 @@ impl Supervisor {
                         }
                     }
                     Some(
-                        SupervisorMessage::Start
+                        SupervisorMessage::Drives(_)
+                        | SupervisorMessage::Start
                         | SupervisorMessage::Prevent
                         | SupervisorMessage::ConnectionEnded
                         | SupervisorMessage::Shutdown,
@@ -1026,7 +1044,7 @@ impl Supervisor {
                     Some(SupervisorMessage::ConnectionEnded) => self.stop(pid, Expiry::ConnectionEnded),
                     Some(SupervisorMessage::Shutdown) => self.stop(pid, Expiry::Shutdown),
                     Some(SupervisorMessage::Prevent) => self.binding_closed(pid),
-                    Some(SupervisorMessage::Start) => {}
+                    Some(SupervisorMessage::Drives(_) | SupervisorMessage::Start) => {}
                     None => forgotten = true,
                 },
             }
@@ -1162,7 +1180,11 @@ impl Supervisor {
                     Some(SupervisorMessage::Prevent) => self.binding_closed(pid),
                     // The binding owner refuses a `tool.stdin` of a file
                     // tool's task.
-                    Some(SupervisorMessage::Stdin(_) | SupervisorMessage::Start) => {}
+                    Some(
+                        SupervisorMessage::Stdin(_)
+                        | SupervisorMessage::Drives(_)
+                        | SupervisorMessage::Start,
+                    ) => {}
                     None => forgotten = true,
                 },
             }
@@ -2180,7 +2202,8 @@ impl FinishedTask {
                 }
                 // Joined final reports are already gone. No terminal message
                 // can restart execution or reconstruct an acknowledged body.
-                SupervisorMessage::Start
+                SupervisorMessage::Drives(_)
+                | SupervisorMessage::Start
                 | SupervisorMessage::Prevent
                 | SupervisorMessage::Joined(_)
                 | SupervisorMessage::Outcome(_, _)

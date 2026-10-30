@@ -27,7 +27,7 @@ use std::time::Duration;
 use execution::policy::{DriveMount, SessionDrives, TaskPermissions, TranslationInputs, validate};
 use execution::report::{Body, Correlation, Report};
 use execution::supervisor::{
-    Control, SupervisorMailbox, SupervisorMessage, TASK_NOT_FOUND, TaskListener,
+    Control, SupervisorMailbox, SupervisorMessage, TASK_NOT_FOUND, TaskDrives, TaskListener,
 };
 use execution::{cleanup, isolation, process, store};
 use protocol::connection::{Downstream, DownstreamPayload, DownstreamType};
@@ -84,7 +84,14 @@ pub struct TaskStart {
 
 /// A task its staging queue started: its `task_id`, its supervisor and the
 /// time it was staged.
-type StartedTask = (Id, SupervisorMailbox, Duration);
+type StartedTask = (Id, SupervisorMailbox, Duration, Option<Box<Translation>>);
+
+/// What a staged task's policy is translated from again at its start, with
+/// the binding's drives then.
+struct Translation {
+    policy: Option<Value>,
+    inputs: TranslationInputs,
+}
 
 /// One binding's tasks: its registry by `task_id` and its staging queue.
 #[derive(Debug, Default)]
@@ -114,6 +121,8 @@ struct Task {
     namespace: Option<u64>,
     /// Whether its processes are confirmed gone.
     gone: bool,
+    /// While it is staged, what its policy is translated from.
+    translation: Option<Box<Translation>>,
 }
 
 impl std::fmt::Debug for Task {
@@ -213,8 +222,9 @@ impl Tasks {
             };
             if let Some(task) = self.registry.get_mut(&task_id) {
                 task.state = TaskState::Started;
+                let translation = task.translation.take();
                 if let Some(supervisor) = task.supervisor.clone() {
-                    started.push((task_id, supervisor, staged));
+                    started.push((task_id, supervisor, staged, translation));
                 }
             }
         }
@@ -293,9 +303,9 @@ impl<S: TaskStarter> SessionOwner<S> {
         let cwd = named
             .and_then(|binding| binding.cwd.as_ref())
             .map(|cwd| PathBuf::from(cwd.as_str()));
-        let drives = named.and_then(|binding| self.session_drives(binding));
+        let drives = named.and_then(|binding| session_drives(&self.drive_sync, binding));
         let task_name = store::task_name();
-        let (payload, permissions) = validated(
+        let (payload, permissions, translation) = validated(
             shared,
             call,
             cwd.as_deref().unwrap_or(&shared.paths.canonical),
@@ -381,6 +391,7 @@ impl<S: TaskStarter> SessionOwner<S> {
                 },
                 namespace: None,
                 gone: false,
+                translation: staged.then(|| Box::new(translation)),
             },
         );
         if staged {
@@ -465,8 +476,26 @@ impl<S: TaskStarter> SessionOwner<S> {
             return;
         };
         let connection_id = binding.connection_id.clone();
+        let mounts = session_drives(&self.drive_sync, binding);
+        let drive_sync = match &self.drive_sync {
+            crate::drives::DriveSyncSlot::Open(sync) => {
+                Some(Arc::new(sync.clone()) as Arc<dyn protocol::ports::DriveSyncPort>)
+            }
+            _ => None,
+        };
         let (started, drives) = binding.tasks.start_staged();
-        for (task_id, supervisor, staged) in started {
+        for (task_id, supervisor, staged, translation) in started {
+            // A `session.drives` handled while the task waited may have
+            // changed the drives it reaches.
+            if let Some(Translation { policy, mut inputs }) = translation.map(|boxed| *boxed) {
+                inputs.drives = mounts.clone();
+                if let Ok(permissions) = TaskPermissions::admit(policy.as_ref(), &inputs) {
+                    let _ = supervisor.send(SupervisorMessage::Drives(Box::new(TaskDrives {
+                        permissions,
+                        drive_sync: drive_sync.clone(),
+                    })));
+                }
+            }
             self.starter.start(&supervisor);
             if let Some(preparation) = &self.preparation {
                 preparation.connection.task_started(Some(staged));
@@ -674,26 +703,27 @@ fn named_binding<'a>(record: Option<&'a Record>, call: &ToolCall) -> Option<&'a 
         })
 }
 
-impl<S: TaskStarter> SessionOwner<S> {
-    /// The drive mounts a task of `binding` reaches: those under the
-    /// `TETRAL_DRIVES` folder its drive sync gives, each with its access.
-    fn session_drives(&self, binding: &Binding) -> Option<SessionDrives> {
-        let crate::drives::DriveSyncSlot::Open(sync) = &self.drive_sync else {
-            return None;
-        };
-        let directory = protocol::ports::DriveSyncPort::drives_variable(sync)?;
-        Some(SessionDrives {
-            mounts: binding
-                .drives
-                .iter()
-                .map(|drive| DriveMount {
-                    path: directory.join(drive.drive_id.as_str()),
-                    access: drive.access,
-                })
-                .collect(),
-            directory,
-        })
-    }
+/// The drive mounts a task of `binding` reaches: those under the
+/// `TETRAL_DRIVES` folder its drive sync gives, each with its access.
+fn session_drives(
+    drive_sync: &crate::drives::DriveSyncSlot,
+    binding: &Binding,
+) -> Option<SessionDrives> {
+    let crate::drives::DriveSyncSlot::Open(sync) = drive_sync else {
+        return None;
+    };
+    let directory = protocol::ports::DriveSyncPort::drives_variable(sync)?;
+    Some(SessionDrives {
+        mounts: binding
+            .drives
+            .iter()
+            .map(|drive| DriveMount {
+                path: directory.join(drive.drive_id.as_str()),
+                access: drive.access,
+            })
+            .collect(),
+        directory,
+    })
 }
 
 /// Steps 3 and 4 of a `tool.execute`: its schema, budgets and tool against
@@ -706,7 +736,7 @@ fn validated(
     cwd: &Path,
     task_name: &str,
     drives: Option<SessionDrives>,
-) -> Result<(ExecutePayload, TaskPermissions), Body> {
+) -> Result<(ExecutePayload, TaskPermissions, Translation), Body> {
     let (payload, value) = match protocol::decode_value::<Downstream>(call.data.as_bytes()) {
         Ok((
             Downstream {
@@ -732,9 +762,9 @@ fn validated(
             cwd,
         ),
     };
-    let permissions = TaskPermissions::admit(value["payload"].get("sandbox_policy"), &inputs)
-        .map_err(Body::Rejected)?;
-    Ok((payload, permissions))
+    let policy = value["payload"].get("sandbox_policy").cloned();
+    let permissions = TaskPermissions::admit(policy.as_ref(), &inputs).map_err(Body::Rejected)?;
+    Ok((payload, permissions, Translation { policy, inputs }))
 }
 
 /// The rest of step 3 for a decoded `tool`: one that the ready lists, and for

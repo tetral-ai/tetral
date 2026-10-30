@@ -1458,7 +1458,9 @@ mod tests {
         fn add_final(&self, _report: ReportId, _instruction: Id) {}
     }
 
-    struct OrderedStarter(Ordered, Vec<mpsc::UnboundedReceiver<SupervisorMessage>>);
+    type Supervised = Arc<std::sync::Mutex<Vec<mpsc::UnboundedReceiver<SupervisorMessage>>>>;
+
+    struct OrderedStarter(Ordered, Supervised);
 
     impl TaskStarter for OrderedStarter {
         fn supervise(
@@ -1468,7 +1470,7 @@ mod tests {
             _listener: Arc<dyn TaskListener>,
         ) -> Option<SupervisorMailbox> {
             let (mailbox, messages) = mpsc::unbounded_channel();
-            self.1.push(messages);
+            self.1.lock().unwrap().push(messages);
             Some(mailbox)
         }
 
@@ -1487,7 +1489,8 @@ mod tests {
             reports: Arc::new(ordered.clone()),
             shared: shared(),
         };
-        let starter = OrderedStarter(ordered.clone(), Vec::new());
+        let supervised = Supervised::default();
+        let starter = OrderedStarter(ordered.clone(), supervised.clone());
         let mut owner = SessionOwner::new(Some(preparation), starter, mailbox.clone());
         owner.record = Some(record_with(SessionState::Prepared));
         tokio::spawn(own(owner, messages));
@@ -1516,5 +1519,11 @@ mod tests {
             .unwrap();
         handled(&mailbox).await;
         assert_eq!(*ordered.0.lock().unwrap(), ["applied msg_drives", "start"]);
+        // Its permissions are translated again with the drives then.
+        let messages = &mut supervised.lock().unwrap()[0];
+        assert!(matches!(
+            messages.try_recv(),
+            Ok(SupervisorMessage::Drives(_))
+        ));
     }
 }
