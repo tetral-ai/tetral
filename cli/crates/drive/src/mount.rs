@@ -79,7 +79,7 @@ pub fn probe(root: &Path) -> Mounting {
     }
 }
 
-/// Drives are mounted on Linux only so far.
+/// Drives mount only on Linux.
 #[cfg(not(target_os = "linux"))]
 pub fn probe(_root: &Path) -> Mounting {
     Mounting::Unavailable("drives not enabled".to_owned())
@@ -279,10 +279,6 @@ pub(crate) fn new_failures(
 }
 
 impl crate::sync::Owner {
-    fn session_id_text(&self) -> SafeId {
-        self.session_id.clone()
-    }
-
     /// The mount check of each drive of `bound`; the failures, in order.
     pub(crate) fn check_mounts(&mut self, bound: Vec<Bound>) -> Vec<Failure> {
         bound
@@ -328,7 +324,7 @@ impl crate::sync::Owner {
         )?;
         self.mounted.insert(drive.to_owned(), mounted);
         self.registry
-            .mounted(drive_id.clone(), self.session_id_text());
+            .mounted(drive_id.clone(), self.session_id.clone());
         self.mount_catch_up(drive_id, bound.exclude.clone());
         Ok(())
     }
@@ -342,7 +338,7 @@ impl crate::sync::Owner {
             let point = self.machine_path(drive, "");
             self.registry.detached(
                 Id::new(drive).expect("a mounted drive's id"),
-                self.session_id_text(),
+                self.session_id.clone(),
             );
             detach(&mounted, &point);
         }

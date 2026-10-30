@@ -198,16 +198,7 @@ impl Work<'_> {
                 && row.kind == "file"
                 && row.local_sha256.as_deref() == Some(version.sha256.as_str())
         });
-        let file_id = match &existing {
-            Some(row) => row.file_id,
-            None => self.new_id(),
-        };
-        let mut row = existing.unwrap_or_else(|| {
-            let mut row = self.folder(path);
-            row.file_id = file_id;
-            row
-        });
-        row.file_id = file_id;
+        let mut row = existing.unwrap_or_else(|| self.folder(path));
         row.kind = "file".to_owned();
         row.present = true;
         row.content = Some("cache".to_owned());
