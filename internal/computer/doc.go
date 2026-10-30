@@ -98,4 +98,16 @@
 //
 // Every writer that changes an input of the unused rule calls RefreshUnused
 // in its transaction.
+//
+// UPDATE-WITH:
+//
+//	internal/storage/postgresql_computer_schema.go (the computer, binding,
+//	  request and idempotency tables, the machine message table's step and
+//	  the request pressure function), internal/storage/postgresql_schema.go
+//	  (the machine message table's DDL), internal/schemaidentity,
+//	  database/postgresql.json and database/roles.json;
+//	internal/protocol (the session.prepare payload and the session-status
+//	  report that bindings carry);
+//	services/api/README.md and services/computer-hub/README.md (the routes
+//	  these writers serve).
 package computer

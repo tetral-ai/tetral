@@ -28,4 +28,13 @@
 // Media types: image/jpeg, image/png, image/gif, image/webp, application/pdf
 // and text/plain. Callers check type and size before Store; storing any other
 // type is a defect.
+//
+// UPDATE-WITH:
+//
+//	internal/storage/postgresql_schema.go (session_attachments, its media type
+//	  constraint and the attachment_gc policy), internal/schemaidentity,
+//	  database/postgresql.json and database/roles.json;
+//	services/bridge/bridge_api_attachments.go (ResolveAttachment and the
+//	  collection task) and services/job-runner/runtime_session_cleanup.go
+//	  (Session deletion).
 package imagestore
