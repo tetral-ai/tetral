@@ -2,7 +2,8 @@
 //! server, as separate processes over real HTTP and SSE: one handled only
 //! after its binding's preparation ACK, one for a closing binding ignored,
 //! and one naming a binding the CLI never received refused as a protocol
-//! error.
+//! error. The Session binding owner counts the test seam counter
+//! `drives.applied` as it submits an `applied` report.
 
 use std::path::Path;
 
@@ -78,9 +79,10 @@ fn a_session_drives_waits_for_the_preparation_ack_is_ignored_while_closing_and_n
     send_drives(&engine, &connection, "drives_1", "bind_a");
     quiesce(&machine, 2);
     assert_eq!(state_of(&machine, "sess_a"), "prepared_pending_ack");
-    assert!(reports_for(&engine, "drives_1").is_empty());
+    assert_eq!(machine.seams.count("drives.applied"), 0);
     engine.control("answer", json!({ "action": "release" }));
     assert_eq!(outcome(&engine, &preparation), prepared(&project));
+    machine.seams.wait_for_count("drives.applied", 1);
     wait_until("the applied report", || {
         !reports_for(&engine, "drives_1").is_empty()
     });

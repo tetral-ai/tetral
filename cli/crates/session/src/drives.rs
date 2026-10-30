@@ -251,6 +251,7 @@ impl<S: TaskStarter> SessionOwner<S> {
         if let Some(preparation) = &self.preparation {
             let report = applied_report(preparation.session_id.to_id(), &drives, &applied);
             preparation.reports.submit(report);
+            state::seams::count("drives.applied");
         }
         self.mount_failures_reported(&applied.failures);
         self.start_staged();
