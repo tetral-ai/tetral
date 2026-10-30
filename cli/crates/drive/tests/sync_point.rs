@@ -32,6 +32,9 @@ async fn an_upload_starts_two_seconds_after_the_last_write_or_at_the_task_exit_a
     let mut env = Env::new();
     let session = env.session("sess_a", Write::default(), true).await;
     session.task_started(1);
+    session.write("a", "on", 1).await;
+    // A second write starts the quiet period again.
+    env.advance(Duration::from_millis(1_500)).await;
     session.write("a", "one", 1).await;
     env.advance(QUIET - Duration::from_millis(100)).await;
     env.no_call(SHORT).await;
