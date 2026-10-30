@@ -1944,7 +1944,7 @@ func (f *machineMessageFixture) deliverNext() bool {
 // cleanup, and requires the binding deleted.
 func (f *machineMessageFixture) cleanUpIdle(podGone bool) {
 	f.t.Helper()
-	seedBridgeAPIEvent(f.t, f.admin, "default", f.sessionID, f.mainID, "sevt_idle_"+f.sessionID, 1, "session.status_idle", `{"type":"session.status_idle"}`)
+	seedBridgeAPIEvent(f.t, f.admin, "default", f.sessionID, f.mainID, "sevt_idle_"+f.sessionID, f.nextSequence(), "session.status_idle", `{"type":"session.status_idle"}`)
 	f.exec(`UPDATE session_events SET latest_stream_position=1 WHERE workspace_id='default' AND event_id=$1`, "sevt_idle_"+f.sessionID)
 	f.exec(`UPDATE session_runtime_status SET status='idle', status_event_id=$2, cleanup_job_id='cleanup_mmsg', cleanup_enqueued_at=clock_timestamp()
 		WHERE workspace_id='default' AND session_id=$1`, f.sessionID, "sevt_idle_"+f.sessionID)
@@ -1975,11 +1975,7 @@ func (f *machineMessageFixture) cleanUpIdle(podGone bool) {
 // returns the new binding's ID.
 func (f *machineMessageFixture) placeUserMessage(name string) string {
 	f.t.Helper()
-	var sequence int64
-	if err := f.admin.QueryRowContext(f.ctx, `SELECT COALESCE(MAX(sequence), 0) + 1 FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`,
-		f.sessionID, f.mainID).Scan(&sequence); err != nil {
-		f.t.Fatal(err)
-	}
+	sequence := f.nextSequence()
 	seedBridgeAPIEvent(f.t, f.admin, "default", f.sessionID, f.mainID, "sevt_"+name, sequence, "user.message", `{"content":[{"type":"text","text":"hello"}]}`)
 	input := RuntimeJob{
 		JobID: "qjob_" + name, LeaseToken: "lease_" + name, Kind: queue.KindRuntimeInput,
@@ -1992,6 +1988,17 @@ func (f *machineMessageFixture) placeUserMessage(name string) string {
 		f.t.Fatalf("messages placement = %+v/%v; want a new binding", plan.AttemptedBinding, err)
 	}
 	return plan.AttemptedBinding.BindingID
+}
+
+// nextSequence returns the main thread's next event sequence.
+func (f *machineMessageFixture) nextSequence() int64 {
+	f.t.Helper()
+	var sequence int64
+	if err := f.admin.QueryRowContext(f.ctx, `SELECT COALESCE(MAX(sequence), 0) + 1 FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`,
+		f.sessionID, f.mainID).Scan(&sequence); err != nil {
+		f.t.Fatal(err)
+	}
+	return sequence
 }
 
 func (f *machineMessageFixture) deliverAll() int {
@@ -2336,6 +2343,48 @@ func TestIdleCleanupHandsBackMachineMessagesOnlyForAGonePod(t *testing.T) {
 				t.Fatalf("message after the new placement = %+v with requests %v; want accepted, delivered once more, to %s", got, requests, placed)
 			}
 		})
+	}
+}
+
+// A user message the Runtime accepted behind a run and an interrupt then
+// dropped is cancelled in the interrupt's commit, so a pod loss does not hand
+// it back and it is never delivered again.
+func TestPodLossNeverHandsBackAnInterruptedMessage(t *testing.T) {
+	f := newMachineMessageFixture(t, "sesn_interrupted_pod_loss")
+	binding := f.bind("bind_interrupted_pod_loss")
+	message, interrupt := "sevt_m2_interrupted_pod_loss", "sevt_interrupt_interrupted_pod_loss"
+	seedBridgeAPIEvent(t, f.admin, "default", f.sessionID, f.mainID, message, f.nextSequence(), "user.message", `{"content":[{"type":"text","text":"follow-up"}]}`)
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, f.admin, "default", f.sessionID, f.mainID, "rin_m2", "messages", `["`+message+`"]`, "accepted", binding.BindingID, binding.PodUID, 1, 1)
+	seedBridgeAPIEvent(t, f.admin, "default", f.sessionID, f.mainID, interrupt, f.nextSequence(), "user.interrupt", `{}`)
+	// The interrupt's commit, as Bridge runs it after the Runtime dropped the message.
+	if err := dbconnect.NewClientForTesting(f.workloads.DB).WithWorkspaceTx(f.ctx, "default", "test.interrupt_commit", func(tx *dbconnect.Tx) error {
+		return runtimecontrol.CancelInterruptedAcceptedInputsTx(f.ctx, tx, "default", f.sessionID, f.mainID, interrupt, time.Now().UTC())
+	}); err != nil {
+		t.Fatal(err)
+	}
+	repair := runtimePodLossSweepStore(t, f.workloads.DB, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
+	})
+	if _, err := runRuntimePodLossRepair(f.ctx, repair); err != nil {
+		t.Fatalf("pod-loss repair: %v", err)
+	}
+	f.candidate = enginekubernetes.BindingCandidate{Namespace: f.candidate.Namespace, PodName: "runtime-pod-1", PodUID: "pod_new_interrupted_pod_loss", PodIP: "10.0.0.11"}
+	registerPlacementCandidateForTest(t, f.admin, f.candidate)
+	processed := f.deliverAll()
+	var status string
+	var jobs int
+	if err := f.admin.QueryRowContext(f.ctx, `SELECT status,
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND dedupe_key='runtime_input:default:'||$1||':rin_m2')
+		FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id='rin_m2'`, f.sessionID).Scan(&status, &jobs); err != nil {
+		t.Fatal(err)
+	}
+	if processed != 0 || status != "cancelled" || jobs != 0 {
+		t.Fatalf("interrupted message after the pod loss = %s with %d jobs, %d jobs processed; want cancelled with none", status, jobs, processed)
+	}
+	for _, request := range f.sender.requests {
+		if _, ok := request.(*agentruntimev1.AcceptInputRequest); ok {
+			t.Fatalf("Runtime received %v; want the interrupted message never delivered", request)
+		}
 	}
 }
 
