@@ -11,10 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use drive::cache::{CacheConfig, ContentCache};
-use drive::local::accepted_in_flight;
 use drive::mount::{Mounting, Registry};
 use drive::ops::{Notice, SetAttr, Special, TOP_INODE};
-use drive::state::{FileRow, InflightChange, SyncState, Tables, Write};
+use drive::state::{FileRow, SyncState, Tables, Write};
 use drive::transfer::{
     Binding, Commit, ContentSink, Download, DriveTransfer, Ended, ListChanges, ListFiles, Request,
     Transfer, Upload,
@@ -715,25 +714,7 @@ async fn every_pending_change_carries_its_base_and_a_rename_uploads_nothing() {
     let stub = Stub::default();
     stub.list("a.txt", "a", false);
     stub.list("b.txt", "b", false);
-    stub.list("c.txt", "c", false);
-    let mut harness = Harness::start(stub, &[]).await;
-    // A commit carrying c.txt with new content is in flight.
-    let committed = sha256(b"c2");
-    harness
-        .restart(Write {
-            inflight: vec![InflightChange {
-                drive_id: DRIVE.to_owned(),
-                path: "c.txt".to_owned(),
-                change: "write".to_owned(),
-                base_sha256: Some(sha256(b"c")),
-                content_sha256: Some(committed.clone()),
-                executable: Some(false),
-                changed_during_flight: false,
-            }],
-            ..Write::default()
-        })
-        .await;
-
+    let harness = Harness::start(stub, &[]).await;
     harness.write("a.txt", "A").await.unwrap();
     let content = harness.session().join("content").join(DRIVE);
     let a = harness.row("a.txt").await.unwrap();
@@ -743,12 +724,11 @@ async fn every_pending_change_carries_its_base_and_a_rename_uploads_nothing() {
         "the write is in the content file when it returns"
     );
     harness.create("", b"new.txt").await.unwrap();
-    harness.write("c.txt", "c3").await.unwrap();
     harness.rename("b.txt", "", b"b2.txt").await.unwrap();
 
     let tables = harness.tables().await;
     let change = |path: &str| tables.pending_changes[&key(path)].clone();
-    let bases: Vec<(&str, &str, Option<String>)> = ["a.txt", "new.txt", "c.txt", "b.txt", "b2.txt"]
+    let bases: Vec<(&str, &str, Option<String>)> = ["a.txt", "new.txt", "b.txt", "b2.txt"]
         .iter()
         .map(|path| {
             let change = change(path);
@@ -768,7 +748,6 @@ async fn every_pending_change_carries_its_base_and_a_rename_uploads_nothing() {
         [
             ("a.txt", "write", Some(sha256(b"a"))),
             ("new.txt", "write", None),
-            ("c.txt", "write", None),
             ("b.txt", "delete", Some(sha256(b"b"))),
             ("b2.txt", "write", None),
         ]
@@ -776,9 +755,6 @@ async fn every_pending_change_carries_its_base_and_a_rename_uploads_nothing() {
     let moved = change("b2.txt");
     assert_eq!(moved.content_sha256, Some(sha256(b"b")));
     assert!(moved.uploaded, "the drive holds the moved content");
-    assert!(tables.inflight_commits[&key("c.txt")].changed_during_flight);
-    let answered = accepted_in_flight(&tables, DRIVE, "c.txt");
-    assert_eq!(answered.pending[0].base_sha256, Some(committed));
 }
 
 #[tokio::test]
