@@ -4,10 +4,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::connection::{DownstreamType, McpTools, SessionPreparePayload, SessionStatus};
+use crate::connection::{
+    DownstreamType, DriveBinding, LostChange, McpTools, SessionPreparePayload, SessionStatus,
+};
 use crate::id::{Id, SafeId};
 use crate::local::SessionEntry;
-use crate::tool::{DriveSyncReport, ProtocolErrorReport, ToolStatus};
+use crate::tool::{DriveSyncOutcome, DriveSyncReport, ProtocolErrorReport, ToolStatus};
 use crate::{DecodeError, Message, decode, encode};
 
 /// The endpoints of the reports that answer or follow instructions.
@@ -181,6 +183,17 @@ pub struct Close {
     pub binding_id: Id,
 }
 
+/// A `session.drives` for the Session binding owner of its `session_id`.
+#[derive(Debug, Clone)]
+pub struct Drives {
+    pub connection_id: Id,
+    pub message_id: Id,
+    pub binding_id: Id,
+    pub drives: Vec<DriveBinding>,
+    /// The instruction's `traceparent`, when it is usable.
+    pub traceparent: Option<String>,
+}
+
 /// A `tool.execute`, `tool.stdin` or `tool.cancel` that the replay ledger
 /// has read, for the Session binding owner of its `session_id`, which
 /// decodes, admits or rejects it.
@@ -212,6 +225,15 @@ pub struct ToolCall {
 /// One probe-slot request of a Session binding owner, unique within it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProbeRequest(pub u64);
+
+/// One git-ticket request of a Session binding owner, unique within it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TicketRequest(pub u64);
+
+/// The Connection owner's answer to a git-ticket request: the ticket, or
+/// the message a repository failure carries, the error body's `message` or
+/// the CLI's description of an answer that failed its schema.
+pub type TicketAnswer = Result<crate::connection::GitTicketResponse, String>;
 
 /// The Connection owner's answer to a probe-slot request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,9 +273,12 @@ pub trait SessionFactory: Send + Sync {
 pub trait SessionHandle: Send + Sync {
     fn prepare(&self, prepare: Prepare);
     fn close(&self, close: Close);
+    fn drives(&self, drives: Drives);
     fn tool(&self, call: ToolCall);
     /// The answer to the owner's request `request`.
     fn probe_slot(&self, request: ProbeRequest, answer: ProbeSlot);
+    /// The answer to the owner's git-ticket request `request`.
+    fn git_ticket(&self, request: TicketRequest, answer: TicketAnswer);
     /// The connection ended: its bindings become `unavailable`.
     fn connection_ended(&self, connection_id: Id);
     /// The App Server shuts down: running probes are killed and every task
@@ -263,6 +288,32 @@ pub trait SessionHandle: Send + Sync {
     /// The owner's bindings as `GET /v1/sessions` lists them, read from its
     /// state alone.
     fn entries(&self, reply: EntriesReply);
+    /// The owner's task ends; the Connection owner routes it nothing more.
+    fn end(&self);
+}
+
+/// The activity that keeps an App Server with an idle exit running; its
+/// implementation belongs to `appserver`. Each time is on the seam clock.
+pub trait ActivitySink: Send + Sync {
+    /// The Connection owner read a `tool.execute`, `tool.stdin`,
+    /// `tool.cancel` or `mcp.call` from the stream at `at`, duplicates
+    /// included (`ToolInstructionArrived`).
+    fn tool_instruction_arrived(&self, at: Duration);
+    /// An `exec_command` task's command actually started (`ExecStarted`).
+    fn exec_started(&self);
+    /// An `exec_command` task whose command started exited at `at`
+    /// (`ExecExited`).
+    fn exec_exited(&self, at: Duration);
+}
+
+/// Activity that nothing observes: the App Server runs without an idle
+/// exit.
+pub struct NoActivity;
+
+impl ActivitySink for NoActivity {
+    fn tool_instruction_arrived(&self, _: Duration) {}
+    fn exec_started(&self) {}
+    fn exec_exited(&self, _: Duration) {}
 }
 
 /// Takes the `task_id` of the task a host process belongs to, or `None`.
@@ -276,6 +327,55 @@ pub trait TaskOwnership: Send + Sync {
     fn task_of(&self, pid: u32, reply: TaskOwnerReply);
 }
 
+/// A call's drive check, before its command starts or its image is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriveCheck {
+    pub task_id: Id,
+    /// A `view_image`, whose result's `drive_sync` the answer is; an
+    /// `exec_command`'s failures go to its first report instead.
+    pub view_image: bool,
+}
+
+/// The sync point of a result being built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriveSyncPoint {
+    pub task_id: Id,
+    /// The `report_seq` 1 report of an `exec_command`.
+    pub first: bool,
+    /// The result's `status` is `running`.
+    pub running: bool,
+    /// How long it waits for the content of the changes it covers.
+    pub wait: Duration,
+    pub traceparent: Option<String>,
+}
+
+/// A drive check's answer: the `view_image` result's `drive_sync`, and the
+/// bound drives left unmounted, which the call's isolation leaves out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DriveChecked {
+    pub drive_sync: Option<DriveSyncOutcome>,
+    pub unmounted: Vec<Id>,
+}
+
+pub type DriveCheckAnswer =
+    std::pin::Pin<Box<dyn std::future::Future<Output = DriveChecked> + Send>>;
+
+/// A result's finished `drive_sync`, or none.
+pub type DriveAnswer =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Option<DriveSyncOutcome>> + Send>>;
+
+/// How a Task supervisor reaches its Session's Drive sync owner; its
+/// implementation belongs to `drive`, which builds and fits every
+/// `drive_sync` itself.
+pub trait DriveSyncPort: Send + Sync + std::fmt::Debug {
+    /// Mounts every bound drive found unmounted and waits for catch-up,
+    /// never for this machine's own uploads.
+    fn check(&self, check: DriveCheck) -> DriveCheckAnswer;
+    fn sync_point(&self, point: DriveSyncPoint) -> DriveAnswer;
+    /// The `TETRAL_DRIVES` value of the Session's commands, if any.
+    fn drives_variable(&self) -> Option<std::path::PathBuf>;
+}
+
 /// How Session binding owners and Drive sync owners reach the Connection
 /// owner; its implementation belongs to `connection`. The Connection owner
 /// counts the Session records and the running directory probes.
@@ -287,6 +387,17 @@ pub trait ConnectionPort: Send + Sync {
     fn probe_slot_withdraw(&self, session_id: &SafeId, request: ProbeRequest);
     /// Returns a slot once its probe is reaped, or unused (`ProbeSlotFree`).
     fn probe_slot_free(&self);
+    /// Fetches a git ticket for the binding `binding_id` of the connection
+    /// `connection_id` (`FetchGitTicket`); the answer comes through
+    /// [`SessionHandle::git_ticket`], and none comes once that connection
+    /// has ended.
+    fn fetch_git_ticket(
+        &self,
+        session_id: &SafeId,
+        request: TicketRequest,
+        connection_id: &Id,
+        binding_id: &Id,
+    );
     /// The Session's record is deleted (`RecordGone`).
     fn record_gone(&self, session_id: &SafeId);
     /// After the shutdown, every task of the Session is confirmed gone
@@ -307,7 +418,18 @@ pub trait ConnectionPort: Send + Sync {
     fn task_ended(&self);
     /// A `tool.execute` was rejected `resource_exhausted` (`TaskRefused`).
     fn task_refused(&self);
+    /// Appends a final upload's `lost_changes` entries to the kept ones
+    /// (`KeepLostChanges`); `kept` runs once they are written.
+    fn keep_lost_changes(&self, entries: Vec<LostChange>, kept: KeptReply);
+    /// An owner that holds no record has had the outcome of every report it
+    /// made, after taking `received` instructions (`OwnerIdle`); the
+    /// Connection owner ends it ([`SessionHandle::end`]) when it has routed
+    /// it no later one.
+    fn owner_idle(&self, session_id: &SafeId, received: u64);
 }
+
+/// Runs once kept `lost_changes` entries are written.
+pub type KeptReply = Box<dyn FnOnce() + Send>;
 
 #[cfg(test)]
 mod tests {

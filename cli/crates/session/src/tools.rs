@@ -24,16 +24,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use execution::policy::{TaskPermissions, TranslationInputs, validate};
+use execution::policy::{DriveMount, SessionDrives, TaskPermissions, TranslationInputs, validate};
 use execution::report::{Body, Correlation, Report};
 use execution::supervisor::{
-    Control, SupervisorMailbox, SupervisorMessage, TASK_NOT_FOUND, TaskListener,
+    Control, SupervisorMailbox, SupervisorMessage, TASK_NOT_FOUND, TaskDrives, TaskListener,
 };
 use execution::{cleanup, isolation, process, store};
 use protocol::connection::{Downstream, DownstreamPayload, DownstreamType};
 use protocol::id::Id;
 use protocol::local::SessionState;
-use protocol::ports::{ReportSink, TaskOwnerReply, ToolCall};
+use protocol::ports::{Drives, ReportSink, TaskOwnerReply, ToolCall};
 use protocol::tool::{
     ControlErrorCode, ExecutePayload, ExecutionTool, ProtocolError, RejectionCode,
     ToolExecutionCapability, ToolInput, VisibleLimits,
@@ -78,15 +78,37 @@ pub struct TaskStart {
     pub traceparent: Option<String>,
     /// When the instruction was received, on the seam clock.
     pub received: Duration,
+    /// The Session's drive sync, once it is open.
+    pub drive_sync: Option<Arc<dyn protocol::ports::DriveSyncPort>>,
+}
+
+/// A task its staging queue started: its `task_id`, its supervisor and the
+/// time it was staged.
+type StartedTask = (Id, SupervisorMailbox, Duration, Option<Box<Translation>>);
+
+/// What a staged task's policy is translated from again at its start, with
+/// the binding's drives then.
+struct Translation {
+    policy: Option<Value>,
+    inputs: TranslationInputs,
 }
 
 /// One binding's tasks: its registry by `task_id` and its staging queue.
 #[derive(Debug, Default)]
 pub struct Tasks {
     registry: HashMap<Id, Task>,
-    /// The tasks admitted while the binding waits for its ACK, in arrival
-    /// order, each with the time on the seam clock it was staged.
-    staged: VecDeque<(Id, Duration)>,
+    /// The tasks admitted while the binding waits for its ACK or for the
+    /// report of a `session.drives`, and the `session.drives` that wait, in
+    /// arrival order.
+    staged: VecDeque<Staged>,
+}
+
+/// An entry of a binding's staging queue.
+#[derive(Debug)]
+enum Staged {
+    /// A task, with the time on the seam clock it was staged.
+    Task(Id, Duration),
+    Drives(Box<Drives>),
 }
 
 struct Task {
@@ -99,6 +121,8 @@ struct Task {
     namespace: Option<u64>,
     /// Whether its processes are confirmed gone.
     gone: bool,
+    /// While it is staged, what its policy is translated from.
+    translation: Option<Box<Translation>>,
 }
 
 impl std::fmt::Debug for Task {
@@ -125,7 +149,10 @@ impl Tasks {
     /// staged.
     fn prevent_staged(&mut self) -> Vec<Duration> {
         let mut unstaged = Vec::new();
-        for (task_id, staged) in std::mem::take(&mut self.staged) {
+        for entry in std::mem::take(&mut self.staged) {
+            let Staged::Task(task_id, staged) = entry else {
+                continue;
+            };
             if let Some(task) = self.registry.get_mut(&task_id) {
                 task.state = TaskState::Prevented;
                 if task.supervisor.is_some() {
@@ -183,17 +210,35 @@ impl Tasks {
         }
     }
 
-    /// The staged tasks in arrival order, each now started, with its
-    /// supervisor and the time it was staged.
-    fn start_staged(&mut self) -> Vec<(Id, SupervisorMailbox, Duration)> {
-        std::mem::take(&mut self.staged)
-            .into_iter()
-            .filter_map(|(task_id, staged)| {
-                let task = self.registry.get_mut(&task_id)?;
+    /// The staged tasks in arrival order up to the first staged
+    /// `session.drives`, each now started, with its supervisor and the time
+    /// it was staged; and that `session.drives`, which leaves the queue.
+    fn start_staged(&mut self) -> (Vec<StartedTask>, Option<Box<Drives>>) {
+        let mut started = Vec::new();
+        while let Some(entry) = self.staged.pop_front() {
+            let (task_id, staged) = match entry {
+                Staged::Task(task_id, staged) => (task_id, staged),
+                Staged::Drives(drives) => return (started, Some(drives)),
+            };
+            if let Some(task) = self.registry.get_mut(&task_id) {
                 task.state = TaskState::Started;
-                Some((task_id, task.supervisor.clone()?, staged))
-            })
-            .collect()
+                let translation = task.translation.take();
+                if let Some(supervisor) = task.supervisor.clone() {
+                    started.push((task_id, supervisor, staged, translation));
+                }
+            }
+        }
+        (started, None)
+    }
+
+    /// Queues a `session.drives` behind the instructions staged before it.
+    pub fn stage_drives(&mut self, drives: Drives) {
+        self.staged.push_back(Staged::Drives(Box::new(drives)));
+    }
+
+    /// Whether anything waits in the staging queue.
+    pub fn has_staged(&self) -> bool {
+        !self.staged.is_empty()
     }
 }
 
@@ -254,15 +299,18 @@ impl<S: TaskStarter> SessionOwner<S> {
                 "the connection has no room to record a new task",
             ));
         }
-        let cwd = named_binding(self.record.as_ref(), call)
+        let named = named_binding(self.record.as_ref(), call);
+        let cwd = named
             .and_then(|binding| binding.cwd.as_ref())
             .map(|cwd| PathBuf::from(cwd.as_str()));
+        let drives = named.and_then(|binding| session_drives(&self.drive_sync, binding));
         let task_name = store::task_name();
-        let (payload, permissions) = validated(
+        let (payload, permissions, translation) = validated(
             shared,
             call,
             cwd.as_deref().unwrap_or(&shared.paths.canonical),
             &task_name,
+            drives,
         )?;
         let prepared = self
             .record
@@ -299,8 +347,16 @@ impl<S: TaskStarter> SessionOwner<S> {
             record: cleanup::record_path(root, &task_name),
             traceparent: call.traceparent.clone(),
             received: call.received,
+            drive_sync: match &self.drive_sync {
+                crate::drives::DriveSyncSlot::Open(sync) => Some(Arc::new(sync.clone())),
+                _ => None,
+            },
         };
-        let staged = binding.state == SessionState::PreparedPendingAck;
+        // A task waits behind the ACK, and behind a `session.drives` handled
+        // or staged before it.
+        let staged = binding.state == SessionState::PreparedPendingAck
+            || binding.applying.is_some()
+            || binding.tasks.has_staged();
         let tool = tool_of(&start.tool);
         let listener = Arc::new(Events {
             mailbox: self.mailbox.clone(),
@@ -335,10 +391,14 @@ impl<S: TaskStarter> SessionOwner<S> {
                 },
                 namespace: None,
                 gone: false,
+                translation: staged.then(|| Box::new(translation)),
             },
         );
         if staged {
-            binding.tasks.staged.push_back((call.task_id.clone(), now));
+            binding
+                .tasks
+                .staged
+                .push_back(Staged::Task(call.task_id.clone(), now));
         }
         Ok(())
     }
@@ -380,10 +440,9 @@ impl<S: TaskStarter> SessionOwner<S> {
             DownstreamPayload::ToolCancel(cancel) => {
                 if task.state == TaskState::Staged {
                     task.state = TaskState::Prevented;
-                    if let Some(position) = staged
-                        .iter()
-                        .position(|(task_id, _)| *task_id == call.task_id)
-                        && let Some((_, at)) = staged.remove(position)
+                    if let Some(position) = staged.iter().position(
+                        |entry| matches!(entry, Staged::Task(task_id, _) if *task_id == call.task_id),
+                    ) && let Some(Staged::Task(_, at)) = staged.remove(position)
                         && task.supervisor.is_some()
                         && let Some(preparation) = &self.preparation
                     {
@@ -401,24 +460,50 @@ impl<S: TaskStarter> SessionOwner<S> {
     }
 
     /// Starts the binding's staged tasks in arrival order, once the ACK of
-    /// its `prepared` report has made it `prepared`, before any later
-    /// instruction of the binding.
+    /// its `prepared` report has made it `prepared` or the report of a
+    /// `session.drives` was handed to the outbox, before any later
+    /// instruction of the binding; a staged `session.drives` is handled in
+    /// its turn, and the tasks after it wait for its report.
     pub(crate) fn start_staged(&mut self) {
         let Some(binding) = self
             .record
             .as_mut()
             .and_then(|record| record.current.as_mut())
-            .filter(|binding| binding.state == SessionState::Prepared)
+            .filter(|binding| {
+                binding.state == SessionState::Prepared && binding.applying.is_none()
+            })
         else {
             return;
         };
         let connection_id = binding.connection_id.clone();
-        for (task_id, supervisor, staged) in binding.tasks.start_staged() {
+        let mounts = session_drives(&self.drive_sync, binding);
+        let drive_sync = match &self.drive_sync {
+            crate::drives::DriveSyncSlot::Open(sync) => {
+                Some(Arc::new(sync.clone()) as Arc<dyn protocol::ports::DriveSyncPort>)
+            }
+            _ => None,
+        };
+        let (started, drives) = binding.tasks.start_staged();
+        for (task_id, supervisor, staged, translation) in started {
+            // A `session.drives` handled while the task waited may have
+            // changed the drives it reaches.
+            if let Some(Translation { policy, mut inputs }) = translation.map(|boxed| *boxed) {
+                inputs.drives = mounts.clone();
+                if let Ok(permissions) = TaskPermissions::admit(policy.as_ref(), &inputs) {
+                    let _ = supervisor.send(SupervisorMessage::Drives(Box::new(TaskDrives {
+                        permissions,
+                        drive_sync: drive_sync.clone(),
+                    })));
+                }
+            }
             self.starter.start(&supervisor);
             if let Some(preparation) = &self.preparation {
                 preparation.connection.task_started(Some(staged));
             }
             self.running.insert((connection_id.clone(), task_id));
+        }
+        if let Some(drives) = drives {
+            self.apply_drives(*drives);
         }
     }
 
@@ -464,6 +549,17 @@ impl<S: TaskStarter> SessionOwner<S> {
             TaskEvent::Gone => entry.gone = true,
             TaskEvent::Withdrawn => {}
         }
+        // The drive sync's upload triggers: the quiet period while an
+        // `exec_command` runs, and the exit of the task that wrote.
+        if let crate::drives::DriveSyncSlot::Open(sync) = &self.drive_sync {
+            match event {
+                TaskEvent::Started(_) if entry.tool == ExecutionTool::ExecCommand => {
+                    sync.task_started(&task.task_id);
+                }
+                TaskEvent::Gone => sync.task_exited(&task.task_id),
+                _ => {}
+            }
+        }
     }
 
     /// After the shutdown has ended every task, tells the Connection owner
@@ -492,6 +588,10 @@ impl<S: TaskStarter> SessionOwner<S> {
     /// processes are not confirmed gone.
     pub(crate) fn cleanup_pending(&self) -> bool {
         !self.unconfirmed.is_empty()
+            || self
+                .clones
+                .values()
+                .any(|running| !running.current.load(std::sync::atomic::Ordering::Acquire))
             || self.preparation.as_ref().is_some_and(|preparation| {
                 preparation
                     .shared
@@ -581,7 +681,13 @@ pub(crate) fn unbound(shared: &Shared, call: ToolCall, reports: &dyn ReportSink)
             "the connection has no room to record a new task",
         ),
         DownstreamType::ToolExecute => {
-            match validated(shared, &call, &shared.paths.canonical, &store::task_name()) {
+            match validated(
+                shared,
+                &call,
+                &shared.paths.canonical,
+                &store::task_name(),
+                None,
+            ) {
                 Err(body) => body,
                 Ok(_) => binding_unavailable(),
             }
@@ -601,6 +707,29 @@ fn named_binding<'a>(record: Option<&'a Record>, call: &ToolCall) -> Option<&'a 
         })
 }
 
+/// The drive mounts a task of `binding` reaches: those under the
+/// `TETRAL_DRIVES` folder its drive sync gives, each with its access.
+fn session_drives(
+    drive_sync: &crate::drives::DriveSyncSlot,
+    binding: &Binding,
+) -> Option<SessionDrives> {
+    let crate::drives::DriveSyncSlot::Open(sync) = drive_sync else {
+        return None;
+    };
+    let directory = protocol::ports::DriveSyncPort::drives_variable(sync)?;
+    Some(SessionDrives {
+        mounts: binding
+            .drives
+            .iter()
+            .map(|drive| DriveMount {
+                path: directory.join(drive.drive_id.as_str()),
+                access: drive.access,
+            })
+            .collect(),
+        directory,
+    })
+}
+
 /// Steps 3 and 4 of a `tool.execute`: its schema, budgets and tool against
 /// the ready's list, then its policy, translated with `cwd` as the working
 /// directory its trusted programs are looked up from and `task_name` naming
@@ -610,7 +739,8 @@ fn validated(
     call: &ToolCall,
     cwd: &Path,
     task_name: &str,
-) -> Result<(ExecutePayload, TaskPermissions), Body> {
+    drives: Option<SessionDrives>,
+) -> Result<(ExecutePayload, TaskPermissions, Translation), Body> {
     let (payload, value) = match protocol::decode_value::<Downstream>(call.data.as_bytes()) {
         Ok((
             Downstream {
@@ -629,16 +759,16 @@ fn validated(
         socket_directory: shared.tools.socket_directory.clone(),
         task_temporary_directory: store::task_temporary_directory(&parent, task_name),
         task_directories: parent,
-        drives: None,
+        drives,
         trusted_programs: isolation::trusted_programs(
             &shared.tools.tetral,
             shared.tools.cua_driver.as_deref(),
             cwd,
         ),
     };
-    let permissions = TaskPermissions::admit(value["payload"].get("sandbox_policy"), &inputs)
-        .map_err(Body::Rejected)?;
-    Ok((payload, permissions))
+    let policy = value["payload"].get("sandbox_policy").cloned();
+    let permissions = TaskPermissions::admit(policy.as_ref(), &inputs).map_err(Body::Rejected)?;
+    Ok((payload, permissions, Translation { policy, inputs }))
 }
 
 /// The rest of step 3 for a decoded `tool`: one that the ready lists, and for

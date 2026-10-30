@@ -10,16 +10,18 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use execution::cleanup::Leftovers;
 use execution::supervisor::{SupervisorMailbox, SupervisorMessage, TaskListener};
+use protocol::connection::RepositoryFailure;
 use protocol::id::{Id, SafeId};
 use protocol::local::SessionState;
 use protocol::ports::{
-    Close, ConnectionPort, EntriesReply, Prepare, ProbeRequest, ProbeSlot, ReportId,
+    Close, ConnectionPort, Drives, EntriesReply, Prepare, ProbeRequest, ProbeSlot, ReportId,
     ReportListener, ReportOutcome, ReportSink, SessionFactory, SessionHandle, TaskOwnerReply,
-    TaskOwnership, ToolCall,
+    TaskOwnership, TicketAnswer, TicketRequest, ToolCall,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -47,12 +49,24 @@ pub enum SessionMessage {
         operation: u64,
         output: Option<Output>,
     },
+    GitTicket {
+        request: TicketRequest,
+        answer: TicketAnswer,
+    },
+    /// The repositories of `operation` are cloned or reused, but for
+    /// `failures`.
+    RepositoriesDone {
+        operation: u64,
+        failures: Vec<RepositoryFailure>,
+    },
     Report {
         report: ReportId,
         outcome: ReportOutcome,
     },
     ConnectionEnded(Id),
     Shutdown,
+    /// The Connection owner routes nothing more: the owner's task ends.
+    End,
     Entries(EntriesReply),
     /// What a task's supervisor reported about its processes.
     Task {
@@ -63,6 +77,24 @@ pub enum SessionMessage {
     TaskOwner {
         pid: u32,
         reply: TaskOwnerReply,
+    },
+    /// The Session's drive sync opened, or the error of its sync state.
+    DriveSyncOpened(Result<drive::DriveSync, String>),
+    /// A close's final upload ended with these entries.
+    CloseUploaded(Vec<protocol::connection::LostChange>),
+    /// A close deleted the Session's local data; a late close's entries.
+    CloseDeleted(Vec<protocol::connection::LostChange>),
+    /// The mounts of a preparation ended with these new failures.
+    MountsDone {
+        operation: u64,
+        failures: Vec<drive::mount::Failure>,
+    },
+    /// A `session.drives` of one of this Session's bindings.
+    Drives(Box<Drives>),
+    /// A `session.drives` was handled, or stopped at the connection's end.
+    DrivesApplied {
+        drives: Box<Drives>,
+        applied: Option<drive::binding_change::Applied>,
     },
 }
 
@@ -139,6 +171,7 @@ pub struct Shared {
     /// Which Sessions a record an earlier App Server left keeps
     /// `cleanup_pending`.
     pub leftovers: Leftovers,
+    pub drives: crate::drives::DriveContexts,
 }
 
 /// Creates the Session binding owners of an App Server.
@@ -187,6 +220,11 @@ impl<S: TaskStarter + Clone + Sync> SessionFactory for Factory<S> {
     }
 }
 
+/// The owner's answers to its drive sync's task ownership questions.
+pub(crate) fn task_ownership(mailbox: SessionMailbox) -> Arc<dyn TaskOwnership> {
+    Arc::new(Handle { mailbox })
+}
+
 /// The Connection owner's handle on one owner: each call is a message.
 struct Handle {
     mailbox: SessionMailbox,
@@ -208,6 +246,10 @@ impl SessionHandle for Handle {
         self.send(SessionMessage::Close { close, reply });
     }
 
+    fn drives(&self, drives: Drives) {
+        self.send(SessionMessage::Drives(Box::new(drives)));
+    }
+
     fn tool(&self, call: ToolCall) {
         self.send(SessionMessage::Tool(Box::new(call)));
     }
@@ -216,12 +258,20 @@ impl SessionHandle for Handle {
         self.send(SessionMessage::ProbeSlot { request, answer });
     }
 
+    fn git_ticket(&self, request: TicketRequest, answer: TicketAnswer) {
+        self.send(SessionMessage::GitTicket { request, answer });
+    }
+
     fn connection_ended(&self, connection_id: Id) {
         self.send(SessionMessage::ConnectionEnded(connection_id));
     }
 
     fn shutdown(&self) {
         self.send(SessionMessage::Shutdown);
+    }
+
+    fn end(&self) {
+        self.send(SessionMessage::End);
     }
 
     fn entries(&self, reply: EntriesReply) {
@@ -276,6 +326,10 @@ pub(crate) struct SessionOwner<S> {
     pub requests: HashMap<ProbeRequest, u64>,
     /// Each probe not yet reaped, by operation.
     pub probes: HashMap<u64, Running>,
+    /// Each git-ticket request not yet answered, and its operation.
+    pub tickets: HashMap<TicketRequest, u64>,
+    /// The clones of each operation that still run.
+    pub clones: HashMap<u64, crate::repositories::Running>,
     /// The tasks of ended connections, by connection and `task_id`, whose
     /// processes are not yet confirmed gone.
     pub unconfirmed: HashSet<(Id, Id)>,
@@ -286,6 +340,24 @@ pub(crate) struct SessionOwner<S> {
     pub shutting_down: bool,
     /// The Connection owner was told that every task is confirmed gone.
     pub shutdown_answered: bool,
+    pub drive_sync: crate::drives::DriveSyncSlot,
+    /// The text last reported for each drive while the sync state could not
+    /// be opened.
+    pub open_failures: HashMap<String, String>,
+    /// A `session.drives` whose handling waits for the drive sync to open.
+    pub drives_waiting: Option<crate::drives::PendingChange>,
+    pub closing: Option<crate::close::Closing>,
+    /// The report of the close completed on the current connection.
+    pub saved: Option<crate::close::Saved>,
+    /// The instructions it took: each `session.prepare`, `session.close`,
+    /// `session.drives` and tool instruction.
+    pub received: u64,
+    /// Whether it was created for a close of a Session with no record, and
+    /// so ends once its reports have their outcomes.
+    pub recordless: bool,
+    /// The `closed` reports of a record-less owner still waiting for their
+    /// outcomes.
+    pub closed_reports: Vec<ReportId>,
 }
 
 async fn own<S: TaskStarter>(
@@ -307,9 +379,12 @@ async fn own<S: TaskStarter>(
             } => None,
         };
         owner.check_deadlines();
-        if let Some(message) = message {
-            owner.handle(message);
+        match message {
+            Some(SessionMessage::End) => return,
+            Some(message) => owner.handle(message),
+            None => {}
         }
+        owner.close_progress();
     }
 }
 
@@ -328,26 +403,70 @@ impl<S: TaskStarter> SessionOwner<S> {
             last_request: 0,
             requests: HashMap::new(),
             probes: HashMap::new(),
+            tickets: HashMap::new(),
+            clones: HashMap::new(),
             unconfirmed: HashSet::new(),
             running: HashSet::new(),
             shutting_down: false,
             shutdown_answered: false,
+            drive_sync: crate::drives::DriveSyncSlot::default(),
+            open_failures: HashMap::new(),
+            drives_waiting: None,
+            closing: None,
+            saved: None,
+            received: 0,
+            recordless: false,
+            closed_reports: Vec::new(),
         }
     }
 
     fn handle(&mut self, message: SessionMessage) {
+        if matches!(
+            message,
+            SessionMessage::Tool(_)
+                | SessionMessage::Close { .. }
+                | SessionMessage::Prepare(_)
+                | SessionMessage::Drives(_)
+        ) {
+            self.received += 1;
+        }
         match message {
             SessionMessage::Tool(call) => self.tool(*call),
             SessionMessage::Close { close, reply } => {
-                self.close(&close);
+                self.close_admitted(close);
                 let _ = reply.send(());
             }
-            SessionMessage::Prepare(prepare) => self.prepare(*prepare),
+            SessionMessage::CloseUploaded(lost) => self.close_uploaded(lost),
+            SessionMessage::CloseDeleted(lost) => self.close_deleted(lost),
+            SessionMessage::Prepare(prepare) => {
+                // The Connection owner counts it as a record from now on.
+                self.recordless = false;
+                self.prepare(*prepare);
+            }
             SessionMessage::ProbeSlot { request, answer } => self.probe_slot(request, answer),
             SessionMessage::ProbeDone { operation, output } => self.probe_done(operation, output),
-            SessionMessage::Report { report, outcome } => self.report_outcome(report, outcome),
+            SessionMessage::GitTicket { request, answer } => self.git_ticket(request, answer),
+            SessionMessage::RepositoriesDone {
+                operation,
+                failures,
+            } => self.repositories_done(operation, failures),
+            SessionMessage::Report { report, outcome } => {
+                if !self.closed_report_outcome(report) {
+                    self.report_outcome(report, outcome);
+                }
+            }
             SessionMessage::ConnectionEnded(connection) => self.connection_ended(&connection),
+            SessionMessage::DriveSyncOpened(opened) => self.drive_sync_opened(opened),
+            SessionMessage::MountsDone {
+                operation,
+                failures,
+            } => self.mounts_done(operation, failures),
+            SessionMessage::Drives(drives) => self.drives(*drives),
+            SessionMessage::DrivesApplied { drives, applied } => {
+                self.drives_applied(*drives, applied);
+            }
             SessionMessage::Shutdown => self.shutdown(),
+            SessionMessage::End => {}
             SessionMessage::Entries(reply) => {
                 let entries = match (&self.record, &self.preparation) {
                     (Some(record), Some(preparation)) => record.entries(&preparation.session_id),
@@ -397,9 +516,10 @@ impl<S: TaskStarter> SessionOwner<S> {
         }
     }
 
-    /// A close of the current binding: it enters `closing`, its preparation
-    /// ends, retries of its reports stop and its staged tasks never start.
-    fn close(&mut self, close: &Close) {
+    /// Step 1 and 2 of a close of the current binding: it enters `closing`,
+    /// its preparation ends, retries of its reports stop, its staged tasks
+    /// never start and its running ones end.
+    pub(crate) fn close_binding(&mut self, close: &Close) {
         let Some(binding) = self
             .record
             .as_mut()
@@ -428,6 +548,15 @@ impl<S: TaskStarter> SessionOwner<S> {
     /// preparation of one ends, its staged tasks are discarded and its
     /// running ones end.
     fn connection_ended(&mut self, connection: &Id) {
+        let current = self
+            .record
+            .as_ref()
+            .and_then(|record| record.current.as_ref())
+            .is_some_and(|binding| binding.connection_id == *connection);
+        if current {
+            self.drive_binding_gone();
+        }
+        self.close_connection_ended(connection);
         let Some(record) = self.record.as_mut() else {
             return;
         };
@@ -440,6 +569,9 @@ impl<S: TaskStarter> SessionOwner<S> {
         binding.state = SessionState::Unavailable;
         binding.waiting.clear();
         binding.reports.clear();
+        if let Some(stop) = binding.applying.take() {
+            let _ = stop.send(());
+        }
         let (unconfirmed, unstaged) = binding.tasks.connection_ended();
         for task_id in unconfirmed {
             self.unconfirmed.insert((connection.clone(), task_id));
@@ -456,6 +588,9 @@ impl<S: TaskStarter> SessionOwner<S> {
 
     fn shutdown(&mut self) {
         self.shutting_down = true;
+        if let crate::drives::DriveSyncSlot::Open(sync) = &self.drive_sync {
+            sync.detach_all();
+        }
         if let Some(record) = &self.record {
             for binding in [&record.current, &record.unavailable].into_iter().flatten() {
                 binding.tasks.shutdown();
@@ -473,10 +608,15 @@ impl<S: TaskStarter> SessionOwner<S> {
         self.answer_shutdown();
     }
 
-    /// Ends `operation`: a slot request it still has is withdrawn and its
-    /// probe killed. Its result, if one comes, is discarded since no binding
-    /// holds the operation any more.
+    /// Ends `operation`: a slot request it still has is withdrawn, its probe
+    /// killed and its clones told that it is no longer current. Its result,
+    /// if one comes, is discarded since no binding holds the operation any
+    /// more.
     pub(crate) fn end_operation(&mut self, operation: u64) {
+        self.tickets.retain(|_, waiting| *waiting != operation);
+        if let Some(running) = self.clones.get(&operation) {
+            running.current.store(false, Ordering::Release);
+        }
         let withdrawn: Vec<ProbeRequest> = self
             .requests
             .iter()
@@ -542,7 +682,13 @@ mod tests {
                 operation: 1,
                 waiting: Vec::new(),
                 reports: Vec::new(),
+                repositories: Vec::new(),
+                repository_failures: Vec::new(),
+                drives: Vec::new(),
+                drive_exclude: Vec::new(),
+                drive_mount_failures: Vec::new(),
                 tasks: Default::default(),
+                applying: None,
             }),
             unavailable: None,
         }
@@ -588,6 +734,7 @@ mod tests {
                 cua_driver: None,
             }),
             leftovers: Leftovers::none(),
+            drives: crate::drives::no_drives(),
         }
     }
 
@@ -610,8 +757,9 @@ mod tests {
     impl ReportSink for Rejections {
         fn submit(&self, submission: Submission) -> ReportId {
             let bytes = (submission.build)(&id("conn_1"), &id("r1")).unwrap();
-            if let ToolStatus::Execution(ExecutionReport::Rejected { header, error }) =
-                protocol::decode::<ToolStatus>(&bytes).unwrap()
+            // A close's `closed` report is not counted.
+            if let Ok(ToolStatus::Execution(ExecutionReport::Rejected { header, error })) =
+                protocol::decode::<ToolStatus>(&bytes)
             {
                 let task_id = header.task_id.as_str().to_owned();
                 let code = serde_json::to_value(error.code).unwrap();
@@ -664,6 +812,7 @@ mod tests {
         requests: Mutex<Vec<ProbeRequest>>,
         withdrawn: Mutex<Vec<ProbeRequest>>,
         freed: AtomicUsize,
+        idle: Mutex<Vec<u64>>,
     }
 
     impl ConnectionPort for TestConnection {
@@ -673,6 +822,7 @@ mod tests {
         fn probe_slot_withdraw(&self, _session_id: &SafeId, request: ProbeRequest) {
             self.withdrawn.lock().unwrap().push(request);
         }
+        fn fetch_git_ticket(&self, _: &SafeId, _: TicketRequest, _: &Id, _: &Id) {}
         fn probe_slot_free(&self) {
             self.freed.fetch_add(1, Ordering::SeqCst);
         }
@@ -683,6 +833,16 @@ mod tests {
         fn task_started(&self, _staged: Option<Duration>) {}
         fn task_ended(&self) {}
         fn task_refused(&self) {}
+        fn keep_lost_changes(
+            &self,
+            _: Vec<protocol::connection::LostChange>,
+            kept: protocol::ports::KeptReply,
+        ) {
+            kept();
+        }
+        fn owner_idle(&self, _: &SafeId, received: u64) {
+            self.idle.lock().unwrap().push(received);
+        }
     }
 
     #[derive(Default)]
@@ -699,6 +859,102 @@ mod tests {
         }
         fn cancel(&self, _report: ReportId) {}
         fn add_final(&self, _report: ReportId, _instruction: Id) {}
+    }
+
+    /// Keeps each report's listener, for the test to give its outcome.
+    #[derive(Default)]
+    struct HeldReports(Mutex<Vec<Option<Arc<dyn ReportListener>>>>);
+
+    impl ReportSink for HeldReports {
+        fn submit(&self, submission: Submission) -> ReportId {
+            let mut held = self.0.lock().unwrap();
+            held.push(submission.listener);
+            ReportId(held.len() as u64 - 1)
+        }
+        fn cancel(&self, _report: ReportId) {}
+        fn add_final(&self, _report: ReportId, _instruction: Id) {}
+    }
+
+    #[tokio::test]
+    async fn an_owner_without_a_record_asks_to_end_after_its_closed_reports_outcome_and_ends() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_path_buf();
+        let mut shared = shared();
+        let paths = Arc::make_mut(&mut shared.paths);
+        paths.given = root.clone();
+        paths.canonical = root.clone();
+        let connection = Arc::new(TestConnection::default());
+        let reports = Arc::new(HeldReports::default());
+        let owner = Factory::new(shared, NoTasks).create(
+            SafeId::new("sess_1").unwrap(),
+            connection.clone(),
+            reports.clone(),
+        );
+        owner.close(close_of("bind_1"));
+        let listener = loop {
+            if let Some(listener) = reports.0.lock().unwrap().first() {
+                break listener.clone().expect("its outcome is awaited");
+            }
+            tokio::task::yield_now().await;
+        };
+        let entries = |owner: &Arc<dyn SessionHandle>| {
+            let (reply, entries) = oneshot::channel();
+            owner.entries(Box::new(move |entries| {
+                let _ = reply.send(entries);
+            }));
+            entries
+        };
+        entries(&owner).await.unwrap();
+        assert!(connection.idle.lock().unwrap().is_empty());
+
+        listener.outcome(ReportId(0), ReportOutcome::Dropped);
+        entries(&owner).await.unwrap();
+        assert_eq!(*connection.idle.lock().unwrap(), [1]);
+        owner.end();
+        assert!(entries(&owner).await.is_err(), "the owner's task ended");
+    }
+
+    #[tokio::test]
+    async fn a_closed_owner_with_a_record_asks_to_end_once_its_saved_report_goes_with_its_connection()
+     {
+        let directory = tempfile::tempdir().unwrap();
+        let mut shared = shared();
+        let paths = Arc::make_mut(&mut shared.paths);
+        paths.given = directory.path().to_path_buf();
+        paths.canonical = directory.path().to_path_buf();
+        let connection = Arc::new(TestConnection::default());
+        let reports = Arc::new(HeldReports::default());
+        let (mailbox, messages) = mpsc::unbounded_channel();
+        let preparation = Preparation {
+            session_id: SafeId::new("sess_1").unwrap(),
+            connection: connection.clone(),
+            reports: reports.clone(),
+            shared,
+        };
+        let mut owner = SessionOwner::new(Some(preparation), NoTasks, mailbox.clone());
+        owner.record = Some(record_with(SessionState::Prepared));
+        tokio::spawn(own(owner, messages));
+        let (reply, _) = oneshot::channel();
+        mailbox
+            .send(SessionMessage::Close {
+                close: close_of("bind_1"),
+                reply,
+            })
+            .unwrap();
+        while reports.0.lock().unwrap().is_empty() {
+            handled(&mailbox).await;
+            tokio::task::yield_now().await;
+        }
+        handled(&mailbox).await;
+        assert!(
+            connection.idle.lock().unwrap().is_empty(),
+            "its saved report stays"
+        );
+        mailbox
+            .send(SessionMessage::ConnectionEnded(id("conn_1")))
+            .unwrap();
+        handled(&mailbox).await;
+        assert_eq!(connection.idle.lock().unwrap().len(), 1);
     }
 
     fn close_of(binding_id: &str) -> Close {
@@ -1195,6 +1451,7 @@ mod tests {
         let passed = state::seams::now().saturating_sub(Duration::from_millis(1));
         let entered = Output::Entered {
             cwd: "/project".to_owned(),
+            repositories: Vec::new(),
         };
         let entry = entry_after_probe_done(passed, Some(entered)).await;
         assert_eq!(entry.state, SessionState::Failed);
@@ -1216,5 +1473,99 @@ mod tests {
                 message: "the directory probe ended without a result".to_owned(),
             })
         );
+    }
+
+    /// Reports and task starts, in the order they happened.
+    #[derive(Clone, Default)]
+    struct Ordered(Arc<Mutex<Vec<String>>>);
+
+    impl ReportSink for Ordered {
+        fn submit(&self, submission: Submission) -> ReportId {
+            let final_for = submission.final_for.clone();
+            let bytes = (submission.build)(&id("conn_1"), &id("r1")).unwrap();
+            let entry = match protocol::decode::<SessionStatus>(&bytes) {
+                Ok(SessionStatus {
+                    outcome: SessionOutcome::Applied { .. },
+                    request_message_id,
+                    ..
+                }) if final_for == [request_message_id.clone()] => {
+                    format!("applied {}", request_message_id.as_str())
+                }
+                _ => "another report".to_owned(),
+            };
+            self.0.lock().unwrap().push(entry);
+            ReportId(0)
+        }
+        fn cancel(&self, _report: ReportId) {}
+        fn add_final(&self, _report: ReportId, _instruction: Id) {}
+    }
+
+    type Supervised = Arc<std::sync::Mutex<Vec<mpsc::UnboundedReceiver<SupervisorMessage>>>>;
+
+    struct OrderedStarter(Ordered, Supervised);
+
+    impl TaskStarter for OrderedStarter {
+        fn supervise(
+            &mut self,
+            _task: TaskStart,
+            _reports: Arc<dyn ReportSink>,
+            _listener: Arc<dyn TaskListener>,
+        ) -> Option<SupervisorMailbox> {
+            let (mailbox, messages) = mpsc::unbounded_channel();
+            self.1.lock().unwrap().push(messages);
+            Some(mailbox)
+        }
+
+        fn start(&mut self, _supervisor: &SupervisorMailbox) {
+            self.0.0.lock().unwrap().push("start".to_owned());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tool_execute_after_a_session_drives_starts_once_its_report_is_handed_over() {
+        let ordered = Ordered::default();
+        let (mailbox, messages) = mpsc::unbounded_channel();
+        let preparation = Preparation {
+            session_id: SafeId::new("sess_1").unwrap(),
+            connection: Arc::new(TestConnection::default()),
+            reports: Arc::new(ordered.clone()),
+            shared: shared(),
+        };
+        let supervised = Supervised::default();
+        let starter = OrderedStarter(ordered.clone(), supervised.clone());
+        let mut owner = SessionOwner::new(Some(preparation), starter, mailbox.clone());
+        owner.record = Some(record_with(SessionState::Prepared));
+        tokio::spawn(own(owner, messages));
+        let drives = Drives {
+            connection_id: id("conn_1"),
+            message_id: id("msg_drives"),
+            binding_id: id("bind_1"),
+            drives: serde_json::from_value(
+                json!([{"drive_id": "drive_a", "access": "read_write"}]),
+            )
+            .unwrap(),
+            traceparent: None,
+        };
+        // No drive context comes, so the handling waits for its drive sync.
+        mailbox
+            .send(SessionMessage::Drives(Box::new(drives.clone())))
+            .unwrap();
+        mailbox.send(tool("task_1")).unwrap();
+        handled(&mailbox).await;
+        assert!(ordered.0.lock().unwrap().is_empty());
+        mailbox
+            .send(SessionMessage::DrivesApplied {
+                drives: Box::new(drives),
+                applied: Some(drive::binding_change::Applied::default()),
+            })
+            .unwrap();
+        handled(&mailbox).await;
+        assert_eq!(*ordered.0.lock().unwrap(), ["applied msg_drives", "start"]);
+        // Its permissions are translated again with the drives then.
+        let messages = &mut supervised.lock().unwrap()[0];
+        assert!(matches!(
+            messages.try_recv(),
+            Ok(SupervisorMessage::Drives(_))
+        ));
     }
 }

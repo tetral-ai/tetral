@@ -5,7 +5,7 @@
 //! paths with another method `405`, both with an empty body.
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use connection::Connection;
@@ -39,6 +39,7 @@ pub fn router(sources: StatusSources) -> Router {
     Router::new()
         .route("/v1/status", get(status))
         .route("/v1/sessions", get(sessions))
+        .route("/v1/metrics", get(metrics))
         .route("/v1/shutdown", post(shutdown))
         .with_state(sources)
 }
@@ -98,6 +99,42 @@ fn status_error(
     }
 }
 
+async fn status(State(sources): State<StatusSources>) -> Json<Status> {
+    Json(current_status(&sources).await)
+}
+
+async fn sessions(State(sources): State<StatusSources>) -> Json<Sessions> {
+    Json(Sessions {
+        sessions: sources.connection.sessions().await,
+    })
+}
+
+/// The local metrics in the Prometheus text format 0.0.4, with the startup
+/// phases of `observe::STARTUP` once a ready was accepted.
+async fn metrics() -> ([(header::HeaderName, &'static str); 1], String) {
+    if let Some(phases) = observe::STARTUP.accepted_phases() {
+        let registry = observe::registry();
+        for (phase, ms) in [
+            ("config", phases.config),
+            ("connect", phases.connect),
+            ("ready", phases.ready),
+        ] {
+            registry
+                .gauge("tetral_startup_phase_seconds", &[("phase", phase)])
+                .set(ms.as_u64() as f64 / 1000.0);
+        }
+    }
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        observe::render(),
+    )
+}
+
+async fn shutdown(State(sources): State<StatusSources>) -> (StatusCode, Json<Value>) {
+    sources.lifecycle.shutdown();
+    (StatusCode::ACCEPTED, Json(json!({})))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,19 +173,4 @@ mod tests {
         );
         assert_eq!(status_error(ConnectionState::Online, None, false), None);
     }
-}
-
-async fn status(State(sources): State<StatusSources>) -> Json<Status> {
-    Json(current_status(&sources).await)
-}
-
-async fn sessions(State(sources): State<StatusSources>) -> Json<Sessions> {
-    Json(Sessions {
-        sessions: sources.connection.sessions().await,
-    })
-}
-
-async fn shutdown(State(sources): State<StatusSources>) -> (StatusCode, Json<Value>) {
-    sources.lifecycle.shutdown();
-    (StatusCode::ACCEPTED, Json(json!({})))
 }

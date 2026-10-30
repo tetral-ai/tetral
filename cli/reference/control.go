@@ -24,7 +24,9 @@ type fault struct {
 	// without an answer), `withhold` (accept, then hold the answer until the
 	// answer control releases it), `wrong_identity` (answer for another
 	// message_id), `without_accepted` (answer the ACK without `accepted`),
-	// `schema_fail` (answer `200` with Body, `{}` by default), `error`
+	// `schema_fail` (answer `200` with Body, `{}` by default), `hold_request`
+	// (hold the request before it is authenticated until the answer control
+	// releases it, then serve it as it would be served then), `error`
 	// (answer Code with Status, by default the status the client error table
 	// gives Code, accepting nothing) or `throttle` (read the body at
 	// BytesPerSecond of the clock, so that a clock held still stalls it; it
@@ -46,7 +48,22 @@ type fault struct {
 func (server *Server) takeFault(endpoint, messageID string, throttle bool) *fault {
 	for index, candidate := range server.faults {
 		if candidate.Endpoint != endpoint || (candidate.MessageID != "" && candidate.MessageID != messageID) ||
-			(candidate.Action == "throttle") != throttle {
+			(candidate.Action == "throttle") != throttle || candidate.Action == "hold_request" {
+			continue
+		}
+		candidate.Count--
+		if candidate.Count <= 0 {
+			server.faults = slices.Delete(server.faults, index, index+1)
+		}
+		return candidate
+	}
+	return nil
+}
+
+// takeHold takes the next `hold_request` of an endpoint.
+func (server *Server) takeHold(endpoint string) *fault {
+	for index, candidate := range server.faults {
+		if candidate.Endpoint != endpoint || candidate.Action != "hold_request" {
 			continue
 		}
 		candidate.Count--
@@ -72,7 +89,10 @@ type requestLog struct {
 	Query        map[string]string `json:"query,omitempty"`
 	ConnectionID string            `json:"connection_id,omitempty"`
 	MessageID    string            `json:"message_id,omitempty"`
-	Traceparent  string            `json:"traceparent,omitempty"`
+	// CredentialID is the credential that the request's key names, in any
+	// state, so a test can tell which key a request carried.
+	CredentialID string `json:"credential_id,omitempty"`
+	Traceparent  string `json:"traceparent,omitempty"`
 	// BodySHA256 is the lowercase hexadecimal SHA-256 of an upstream
 	// message's body as read, so a test can tell a byte-identical retry.
 	BodySHA256 string `json:"body_sha256,omitempty"`
@@ -218,16 +238,23 @@ func (server *Server) controlInstruction(kind string) func(json.RawMessage) (any
 
 // controlSend writes any event on an instance's current stream as given,
 // a malformed one included, or writes again an instruction issued on the
-// stream's connection, sent or still queued. Nothing is recorded as issued.
+// stream's connection, sent or still queued. Nothing is recorded as issued;
+// a session.drives is noted so that its applied report is accepted. With
+// count, the same event is written that many times, each once the stream's
+// buffer has room.
 func (server *Server) controlSend(body json.RawMessage) (any, error) {
 	var input struct {
 		InstanceID string          `json:"instance_id"`
 		Event      json.RawMessage `json:"event"`
 		Data       *string         `json:"data"`
 		Resend     string          `json:"resend"`
+		Count      int             `json:"count"`
 	}
 	if err := decodeControl(body, &input); err != nil {
 		return nil, err
+	}
+	if input.Count > 1 {
+		return server.sendRepeated(input.InstanceID, input.Event, input.Count)
 	}
 	server.mu.Lock()
 	defer server.mu.Unlock()
@@ -259,8 +286,44 @@ func (server *Server) controlSend(body json.RawMessage) (any, error) {
 		Type      string `json:"type"`
 	}
 	_ = json.Unmarshal(data, &fields)
+	conn.noteSentDrives(data)
 	conn.stream.send(data, fields.MessageID, fields.Type)
 	return map[string]any{"connection_id": conn.id}, nil
+}
+
+// sendRepeated writes event count times on the instance's current stream,
+// waiting for room in its buffer instead of closing it.
+func (server *Server) sendRepeated(instanceID string, event json.RawMessage, count int) (any, error) {
+	if len(event) == 0 {
+		return nil, errors.New("send with count needs event")
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		return nil, err
+	}
+	var fields struct {
+		MessageID string `json:"message_id"`
+		Type      string `json:"type"`
+	}
+	_ = json.Unmarshal(data, &fields)
+	for sent := 0; sent < count; {
+		server.mu.Lock()
+		conn := server.live(instanceID)
+		if conn == nil || conn.stream == nil || conn.stream.isClosed() {
+			server.mu.Unlock()
+			return nil, fmt.Errorf("instance %q has no open stream", instanceID)
+		}
+		room := len(conn.stream.frames) < cap(conn.stream.frames)
+		if room {
+			conn.stream.send(data, fields.MessageID, fields.Type)
+			sent++
+		}
+		server.mu.Unlock()
+		if !room {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	return map[string]any{"sent": count}, nil
 }
 
 // eventsMode is how one events request is answered instead of at once.
@@ -331,6 +394,10 @@ func (server *Server) controlAnswer(body json.RawMessage) (any, error) {
 		})
 		return map[string]any{}, nil
 	case "drop", "withhold", "wrong_identity", "without_accepted", "schema_fail":
+	case "hold_request":
+		if input.MessageID != "" {
+			return nil, errors.New("a hold_request matches an endpoint only, since it applies before the body is decoded")
+		}
 	case "delay":
 		if input.DelayMs <= 0 {
 			return nil, errors.New("a delay needs delay_ms above 0")

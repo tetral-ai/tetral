@@ -92,6 +92,7 @@ pub struct Tetral {
     stdin_open: bool,
     sockets: SocketContext,
     stderr_backpressure: bool,
+    output_limit: usize,
 }
 
 impl Tetral {
@@ -123,6 +124,7 @@ impl Tetral {
             stdin_open: false,
             sockets,
             stderr_backpressure: false,
+            output_limit: OUTPUT_LIMIT,
         }
     }
 
@@ -179,6 +181,13 @@ impl Tetral {
         self
     }
 
+    /// Retains up to `bytes` of each output stream instead of
+    /// [`OUTPUT_LIMIT`], for a run whose whole log a test reads.
+    pub fn output_limit(mut self, bytes: usize) -> Self {
+        self.output_limit = bytes;
+        self
+    }
+
     /// Starts the child with concurrent, bounded output capture and an
     /// owned stdin writer. Dropping the returned handle reaps the child.
     pub fn spawn(mut self) -> RunningChild {
@@ -216,7 +225,7 @@ impl Tetral {
             self.stdin,
             self.stdin_open,
             blocked_stderr,
-            OUTPUT_LIMIT,
+            self.output_limit,
         )
     }
 

@@ -55,6 +55,29 @@ that is no longer the binding's is discarded.
   each task's start and the end of each started task, its processes
   confirmed gone or its start rejected, and each `tool.execute` it
   rejects `resource_exhausted` (`ConnectionPort`, `tools`).
+- A close of the binding on the current connection prevents its staged
+  starts and `session.drives`, has every running task of the binding end as
+  at a cancel, and waits until the binding's tasks, probes and clones are
+  gone, a `session.drives` being handled has handed its `applied` report
+  to the outbox and the Session's drive sync is no longer being opened,
+  since its open writes `sessions/<session_id>/`; then the final upload of the Session's drives, ending 30
+  seconds after the close's admission, the drives' unmount, the deletion of
+  the repositories, the tasks' temporary directories and
+  `sessions/<session_id>/`, and the `closed` report with the abandoned
+  changes. Each repeat of a close that is still running gets the same
+  report; a repeat after it gets the saved report, kept until that
+  connection ends. A close of a binding that a new binding of the same
+  connection replaced is `closed` at once (`close`).
+- A late close, for a Session with no binding on the close's connection,
+  waits for every managed descendant of the Session, keeps the pending
+  changes of its sync state as `lost_changes` under the close's
+  `message_id`, deletes the Session's data as above without uploading and
+  reports `closed`. The connection's end during an ordinary close before
+  its report ends its final upload in keep mode: nothing is abandoned,
+  deleted or reported, and the late close that follows joins the wait.
+  An owner created for the close of a Session with no record asks the
+  Connection owner to end it once its reports have their outcomes
+  (`close`).
 - A task's supervisor reports its PID namespace and its confirmed end to
   the owner. A connection's end sends every task of its binding the end
   (staged ones never start, running ones end at once) and keeps each started
@@ -62,7 +85,9 @@ that is no longer the binding's is discarded.
   record an earlier App Server left for the Session is unconfirmed
   (`execution::cleanup::Leftovers`), a preparation of the Session fails with
   `cleanup_pending`, checked right after the connection it names. The
-  shutdown sends every task the end through the termination procedure, and
+  shutdown first detaches every mount of the Session's drive sync
+  (`fusermount3 -u -z`), then sends every task the end through the
+  termination procedure, and
   once each started task's processes are confirmed gone the owner tells the
   Connection owner (`ConnectionPort::tasks_gone`). A host process belongs to
   the task whose reported namespace holds it
@@ -102,6 +127,31 @@ that is no longer the binding's is discarded.
   `PROBE_LIMIT` whenever it wakes and wakes at least once per recheck interval
   while a probe runs; it acts on a passed limit before the message it woke
   for, so a result taken after the limit is discarded (`owner`).
+- A cloud computer's repositories are checked by the probe too: a `path` at
+  or below the state root, lexically or by its resolved path, fails the
+  preparation, and so does an existing entry at a `path` that
+  `sessions/<session_id>/repositories.json` does not list (`prepare`). A
+  preparation with repositories then asks the Connection owner for one git
+  ticket and clones or reuses each repository in order, one `git` child at
+  a time in its own process group with the App Server's environment; the
+  ticket, the URL rewrite to git-proxy and the commit identity go only into
+  each repository's local configuration, and the ticket into no log or
+  report (`repositories`). A clone that succeeds is listed in
+  `repositories.json` even when its preparation is no longer current, so
+  that the next preparation reuses it; a preparation with no repositories
+  runs no `git`.
+- A preparation that binds drives mounts them before its clones, through the
+  Session's drive sync, which the owner opens from
+  `sessions/<session_id>/sync-state.db` at the first such preparation once
+  the App Server's drive context exists (`drives::DriveContext`); each open
+  is counted as the test seam counter `drive_sync.opening`, and one whose
+  context never comes fails as a sync state that cannot be opened. The
+  report lists the new mount failures in `drive_mount_failures`, and the
+  drive sync keeps their texts when the report is built. A sync state that
+  cannot be opened fails every bound drive with its error, once per drive
+  and text in the App Server process, and is opened again at the next
+  preparation. The drive sync's requests carry the binding once it is
+  `prepared`, and none after its connection ends (`drives`).
 
 ## Entry points
 
@@ -119,14 +169,24 @@ that is no longer the binding's is discarded.
 - `owner.rs`: `Factory`, `SessionMessage`, `SessionMailbox`, the owner's
   loop and state, `TaskStarter`, and a close, a connection's end and the
   shutdown as they end a preparation.
+- `close.rs`: the steps of an ordinary and a late close, the saved
+  `closed` report, and the deletion of the Session's local data.
 - `tools.rs`: the admission of tool instructions (`ToolContext`,
   `TaskStart`), a binding's task registry and staging queue (`Tasks`),
   their reports, the tasks' events (`TaskKey`, `TaskEvent`),
   `cleanup_pending` and the owner of a host process.
+- `drives.rs`: the drive sync of a preparation's mounts, and a
+  `session.drives`: its queueing, the hold of later commands, its handling
+  on the drive sync and its `applied` report, counted as the test seam
+  counter `drives.applied` when it is submitted.
 - `record.rs`: `Record`, `Binding` and the entries of `GET /v1/sessions`.
 - `cases.rs`: the cases of a `session.prepare` (`Case`, `decide`).
 - `prepare.rs`: the steps of a preparation, from the connection check to the
   report and its ACK.
 - `probe.rs`: the spawn and supervision of one probe (`spawn`, `Probe`,
   `PROBE_LIMIT`).
-- `probe_child.rs`: the probe's checks and the creation of a missing `cwd`.
+- `probe_child.rs`: the probe's checks, the creation of a missing `cwd` and
+  each repository path's check.
+- `repositories.rs`: `repositories.json`, the clone and reuse of each
+  repository, the cause and message of each failure, the fitting of a
+  report's failures to its limit, and the test seam counter `git.spawn`.

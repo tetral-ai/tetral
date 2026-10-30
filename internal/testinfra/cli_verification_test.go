@@ -34,7 +34,7 @@ func TestCLIVerificationProfilesKeepDefaultCoverageAndIsolateDedicatedTests(t *t
 			wantCommands := [][]string{
 				{"cargo", "build", "--locked"},
 				{"cargo", "test", "--locked", "--", "--list"},
-				{"cargo", "test", "--locked", "--", "--skip", cliReleaseTest, "--skip", cliCapacityTest},
+				{"cargo", "test", "--locked", "--no-fail-fast", "--", "--skip", cliReleaseTest, "--skip", cliCapacityTest},
 			}
 			if profile.name != "functional" {
 				// A substring collision is safe for the dedicated job because

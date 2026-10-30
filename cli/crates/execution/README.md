@@ -31,6 +31,10 @@ which owns that task's process tree; the translation of a call's
   as the leader of a new session and process group, with only its pipes,
   the launch-status descriptor 3 and, for exec, environment-data descriptor 4
   (`isolation/mod.rs`).
+- The check's `bwrap` lookup and the launch's profile and transform read
+  the task's paths in the App Server, the drive mounts this process serves
+  among them. They run on blocking threads, never on the runtime's workers,
+  so that the Drive sync owner that answers those reads can always run.
 - The `bwrap` is the one Codex's helper picks for the same command: the
   system `bwrap` on `PATH` that passes the `--help` probe, otherwise the
   bundled one beside `tetral`. A valid, nonzero `CODEX_BWRAP_SHA256` checks
@@ -130,9 +134,10 @@ which owns that task's process tree; the translation of a call's
   availability check that begins `starting`, during which that `tool.stdin`
   waits and the task's other messages are still read: a cancel or the
   binding's close prevents the start and makes the task's `terminal` report
-  at once, and the connection's end discards the task without one. Each waiting reply is a timer and a waiter of the
-  supervisor, which meanwhile keeps reading output and handling the exit and
-  other controls (`supervisor`).
+  at once, and the connection's end discards the task without one. The
+  binding's close ends a running task as a cancel does. Each waiting reply
+  is a timer and a waiter of the supervisor, which meanwhile keeps reading
+  output and handling the exit and other controls (`supervisor`).
 - A read replies at once when a window holds output or the task has ended,
   otherwise at the first new output, the exit or the end of its wait; a
   write's reply waits its wait, ending early only at the exit. Both take
@@ -239,7 +244,8 @@ which owns that task's process tree; the translation of a call's
 ## Where things are
 
 - `supervisor.rs`: `spawn`, a task's `TaskSpec` and its `TaskListener`, the
-  shared `Context` and its `Bounds`, `SupervisorMessage`, `Control`
+  shared `Context` and its `Bounds` and `ActivitySink`, told of each
+  `exec_command` command's start and exit, `SupervisorMessage`, `Control`
   and `SupervisorMailbox`; the start, the running loop, the reports, the
   controls with their waiters and replies, the confirmation and the
   cleanup.

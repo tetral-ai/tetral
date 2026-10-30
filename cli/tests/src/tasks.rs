@@ -122,6 +122,18 @@ impl TaskMachine {
         TaskMachine::prepared(engine, machine, directory)
     }
 
+    /// [`TaskMachine::start`] with `arguments` after `server run`'s own.
+    pub fn start_with(case: &mut Case, directory: &Path, arguments: &[&str]) -> TaskMachine {
+        let engine = task_engine();
+        let machine = Machine::start_with_tools_and(
+            case,
+            directory,
+            &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+            arguments,
+        );
+        TaskMachine::prepared(engine, machine, directory)
+    }
+
     /// [`TaskMachine::start`] with the App Server run from the `tetral` at
     /// `tetral` with `path` as its `PATH`
     /// ([`Machine::start_with_tools_from`]); a restart runs the default

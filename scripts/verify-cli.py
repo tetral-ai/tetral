@@ -22,7 +22,7 @@ TARGETS = {
 def commands(profile):
     if profile == "functional":
         base = ["cargo", "test", "--locked"]
-        return base + ["--", "--list"], base + ["--", "--skip", RELEASE, "--skip", CAPACITY]
+        return base + ["--", "--list"], base + ["--no-fail-fast", "--", "--skip", RELEASE, "--skip", CAPACITY]
     target, test = TARGETS[profile]
     base = ["cargo", "test", "--locked", "-p", "tetral-tests", "--test", target]
     return base + ["--", "--list"], base + [test, "--", "--exact"]

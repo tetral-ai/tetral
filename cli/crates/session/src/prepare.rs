@@ -2,24 +2,34 @@
 //! connection it names, an earlier execution of the Session still being
 //! cleaned up, the cases against the Session's binding, the state
 //! root checked lexically without touching the target, a probe slot, the
-//! probe, the commit of its result while the connection, binding and
-//! operation are all still current, the report and, on its ACK, `prepared`.
+//! probe, the repository paths' checks, the mounts of the bound drives
+//! (`drives`), the git ticket and the clones (`repositories`), the commit
+//! of its result while the connection, binding and operation are all still
+//! current, the report and, on its ACK, `prepared`.
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use observe::{Identity, TraceContext};
-use protocol::connection::{PreparationError, PreparationErrorCode, SessionOutcome, SessionStatus};
-use protocol::field::AbsolutePath;
+use protocol::connection::{
+    MESSAGE_MAX_BYTES, PreparationError, PreparationErrorCode, RepositoryFailure, SessionOutcome,
+    SessionStatus,
+};
+use protocol::field::{AbsolutePath, List};
 use protocol::id::Id;
 use protocol::local::SessionState;
-use protocol::ports::{Prepare, ProbeRequest, ProbeSlot, ReportId, ReportOutcome, Submission};
+use protocol::ports::{
+    Prepare, ProbeRequest, ProbeSlot, ReportId, ReportOutcome, Submission, TicketAnswer,
+    TicketRequest,
+};
 
 use crate::cases::{self, Case};
 use crate::owner::{ReportEvents, Running, SessionMessage, SessionOwner, TaskStarter};
 use crate::probe;
-use crate::probe_child::{Input, Output, lexical};
+use crate::probe_child::{Input, Output, RepositoryCheck, lexical};
 use crate::record::{Binding, Record, Requester};
+use crate::repositories::{self, Job};
 
 /// The whole message of a probe that ends without a result line: no
 /// operating system error caused it, and the fixed text of
@@ -99,7 +109,13 @@ impl<S: TaskStarter> SessionOwner<S> {
             operation,
             waiting: vec![requester],
             reports: Vec::new(),
+            repositories: prepare.payload.repositories.clone(),
+            repository_failures: Vec::new(),
+            drives: prepare.payload.drives.clone(),
+            drive_exclude: prepare.payload.drive_exclude.clone(),
+            drive_mount_failures: Vec::new(),
             tasks: Default::default(),
+            applying: None,
         };
         let record = self.record.get_or_insert_with(Record::default);
         record.current = Some(binding);
@@ -162,6 +178,11 @@ impl<S: TaskStarter> SessionOwner<S> {
             cwd: binding.requested_cwd.as_str().into(),
             create_cwd: binding.create_cwd,
             state_root: preparation.shared.paths.canonical_utf8.clone(),
+            repository_paths: binding
+                .repositories
+                .iter()
+                .map(|repository| repository.path.as_str().to_owned())
+                .collect(),
         };
         let mailbox = self.mailbox.clone();
         let done = move |output| {
@@ -206,8 +227,8 @@ impl<S: TaskStarter> SessionOwner<S> {
             return;
         }
         match output {
-            Some(Output::Entered { cwd }) => match AbsolutePath::new(cwd) {
-                Ok(cwd) => self.prepared(operation, cwd),
+            Some(Output::Entered { cwd, repositories }) => match AbsolutePath::new(cwd) {
+                Ok(cwd) => self.probed(operation, cwd, &repositories),
                 Err(error) => self.fail(
                     operation,
                     PreparationError::new(
@@ -236,15 +257,169 @@ impl<S: TaskStarter> SessionOwner<S> {
         }
     }
 
+    /// The probe of `operation` found its canonical `cwd`. A repository path
+    /// in the state root, lexically or resolved, then one where an entry
+    /// that this Session did not clone exists, fails the preparation;
+    /// otherwise its bound drives are mounted (`drives`), then its
+    /// repositories are cloned once a git ticket comes.
+    fn probed(&mut self, operation: u64, cwd: AbsolutePath, checks: &[RepositoryCheck]) {
+        let (Some(preparation), Some(binding)) = (
+            &self.preparation,
+            self.record
+                .as_ref()
+                .and_then(|record| record.current.as_ref())
+                .filter(|binding| binding.operation == operation),
+        ) else {
+            return;
+        };
+        let paths = &preparation.shared.paths;
+        let pairs = || binding.repositories.iter().zip(checks);
+        let failure = if checks.len() != binding.repositories.len() {
+            Some(PreparationError {
+                code: PreparationErrorCode::CwdInaccessible,
+                message: PROBE_ENDED_WITHOUT_RESULT.to_owned(),
+            })
+        } else if pairs().any(|(repository, check)| {
+            let path = Path::new(repository.path.as_str());
+            check.inside_state_root
+                || inside_state_root(path, &paths.given)
+                || inside_state_root(path, &paths.canonical)
+        }) {
+            Some(PreparationError::new(
+                PreparationErrorCode::RepositoryPathForbidden,
+                None,
+            ))
+        } else if checks.iter().any(|check| check.exists) {
+            let listed = repositories::listed(&state::paths::session_directory(
+                &paths.canonical,
+                preparation.session_id.as_str(),
+            ));
+            pairs()
+                .any(|(repository, check)| {
+                    check.exists && !listed.iter().any(|path| path == repository.path.as_str())
+                })
+                .then(|| PreparationError::new(PreparationErrorCode::RepositoryPathExists, None))
+        } else {
+            None
+        };
+        if let Some(error) = failure {
+            return self.fail(operation, error);
+        }
+        self.mount_drives(operation, cwd);
+    }
+
+    /// After the mounts of `operation`: its repositories are cloned once a
+    /// git ticket comes.
+    pub(crate) fn clone_repositories(&mut self, operation: u64, cwd: AbsolutePath) {
+        let (Some(preparation), Some(binding)) = (
+            &self.preparation,
+            self.record
+                .as_ref()
+                .and_then(|record| record.current.as_ref())
+                .filter(|binding| binding.operation == operation),
+        ) else {
+            return;
+        };
+        if binding.repositories.is_empty() {
+            return self.prepared(operation, cwd, Vec::new());
+        }
+        self.last_request += 1;
+        let request = TicketRequest(self.last_request);
+        self.tickets.insert(request, operation);
+        preparation.connection.fetch_git_ticket(
+            &preparation.session_id,
+            request,
+            &binding.connection_id,
+            &binding.binding_id,
+        );
+        if let Some(binding) = self.current_binding() {
+            binding.cwd = Some(cwd);
+        }
+    }
+
+    /// The git ticket for `request`: the repositories are cloned with it, or
+    /// all fail with cause `clone` and the fetch's message.
+    pub(crate) fn git_ticket(&mut self, request: TicketRequest, answer: TicketAnswer) {
+        let Some(operation) = self
+            .tickets
+            .remove(&request)
+            .filter(|operation| self.is_preparing(*operation))
+        else {
+            return;
+        };
+        let Some(preparation) = &self.preparation else {
+            return;
+        };
+        let session_directory = state::paths::session_directory(
+            &preparation.shared.paths.canonical,
+            preparation.session_id.as_str(),
+        );
+        let Some(binding) = self.current_binding() else {
+            return;
+        };
+        let repositories = binding.repositories.clone();
+        let cwd = binding.cwd.clone().expect("a probed binding has its cwd");
+        let ticket = match answer {
+            Ok(ticket) => ticket,
+            Err(message) => {
+                let failures = repositories::ticket_failures(&repositories, &message);
+                return self.prepared(operation, cwd, failures);
+            }
+        };
+        let current = Arc::new(AtomicBool::new(true));
+        let (kill, killed) = tokio::sync::watch::channel(false);
+        self.clones.insert(
+            operation,
+            repositories::Running {
+                current: current.clone(),
+                kill,
+            },
+        );
+        let mailbox = self.mailbox.clone();
+        tokio::spawn(async move {
+            let failures = repositories::run(Job {
+                session_directory,
+                repositories,
+                ticket,
+                current,
+                killed,
+            })
+            .await;
+            let _ = mailbox.send(SessionMessage::RepositoriesDone {
+                operation,
+                failures,
+            });
+        });
+    }
+
+    /// The clones of `operation` ended with `failures`; they count only
+    /// while its preparation is still current.
+    pub(crate) fn repositories_done(&mut self, operation: u64, failures: Vec<RepositoryFailure>) {
+        self.clones.remove(&operation);
+        if !self.is_preparing(operation) {
+            return;
+        }
+        let Some(cwd) = self
+            .current_binding()
+            .and_then(|binding| binding.cwd.clone())
+        else {
+            return;
+        };
+        self.prepared(operation, cwd, failures);
+    }
+
     /// The preparation of `operation` found its canonical `cwd`, which becomes
     /// the binding's default directory: each waiting instruction gets its
     /// report, and the binding waits for an ACK.
-    fn prepared(&mut self, operation: u64, cwd: AbsolutePath) {
+    fn prepared(&mut self, operation: u64, cwd: AbsolutePath, failures: Vec<RepositoryFailure>) {
         let Some(binding) = self.current_binding().filter(|b| b.operation == operation) else {
             return;
         };
         binding.cwd = Some(cwd);
+        binding.repository_failures = failures;
         binding.state = SessionState::PreparedPendingAck;
+        let mount_failures = binding.drive_mount_failures.clone();
+        self.mount_failures_reported(&mount_failures);
         self.report_waiting();
     }
 
@@ -283,6 +458,7 @@ impl<S: TaskStarter> SessionOwner<S> {
         binding.reports.remove(index);
         if outcome == ReportOutcome::Acked && binding.state == SessionState::PreparedPendingAck {
             binding.state = SessionState::Prepared;
+            self.drive_binding_current();
             self.start_staged();
         }
     }
@@ -337,15 +513,16 @@ impl<S: TaskStarter> SessionOwner<S> {
         let preparation = self.preparation.as_ref().expect("a preparing owner");
         let session_id = preparation.session_id.to_id();
         let request_message_id = requester.message_id.clone();
-        let mut submission =
-            Submission::new(connection, move |connection_id, message_id| SessionStatus {
+        let mut submission = Submission::new(connection, move |connection_id, message_id| {
+            fitted(SessionStatus {
                 connection_id,
                 message_id,
                 request_message_id,
                 session_id,
                 binding_id,
                 outcome,
-            });
+            })
+        });
         submission.final_for = vec![requester.message_id.clone()];
         submission.traceparent = requester.traceparent.clone();
         submission.listener = Some(Arc::new(ReportEvents {
@@ -354,11 +531,11 @@ impl<S: TaskStarter> SessionOwner<S> {
         submission
     }
 
-    fn current_binding(&mut self) -> Option<&mut Binding> {
+    pub(crate) fn current_binding(&mut self) -> Option<&mut Binding> {
         self.record.as_mut()?.current.as_mut()
     }
 
-    fn is_preparing(&self, operation: u64) -> bool {
+    pub(crate) fn is_preparing(&self, operation: u64) -> bool {
         self.record
             .as_ref()
             .and_then(|record| record.current.as_ref())
@@ -368,6 +545,41 @@ impl<S: TaskStarter> SessionOwner<S> {
     }
 }
 
+/// `status` with its repository failures' messages shortened, from the
+/// last failure backwards, until the report fits its limit.
+fn fitted(mut status: SessionStatus) -> SessionStatus {
+    if protocol::encode(&status).len() <= MESSAGE_MAX_BYTES {
+        return status;
+    }
+    let SessionOutcome::Prepared {
+        repository_failures: Some(List(failures)),
+        ..
+    } = &mut status.outcome
+    else {
+        return status;
+    };
+    let mut fitting = std::mem::take(failures);
+    let mut probe = status.clone();
+    repositories::fit(&mut fitting, MESSAGE_MAX_BYTES, |failures| {
+        if let SessionOutcome::Prepared {
+            repository_failures: Some(List(each)),
+            ..
+        } = &mut probe.outcome
+        {
+            failures.clone_into(each);
+        }
+        protocol::encode(&probe).len()
+    });
+    if let SessionOutcome::Prepared {
+        repository_failures: Some(List(failures)),
+        ..
+    } = &mut status.outcome
+    {
+        *failures = fitting;
+    }
+    status
+}
+
 /// The result saved for a binding whose preparation ended, as a report says
 /// it again.
 fn saved_outcome(binding: &Binding) -> Option<SessionOutcome> {
@@ -375,8 +587,13 @@ fn saved_outcome(binding: &Binding) -> Option<SessionOutcome> {
         (SessionState::PreparedPendingAck | SessionState::Prepared, Some(cwd), _) => {
             Some(SessionOutcome::Prepared {
                 cwd: cwd.clone(),
-                drive_mount_failures: None,
-                repository_failures: None,
+                drive_mount_failures: (!binding.drive_mount_failures.is_empty()).then(|| {
+                    List(crate::drives::failures(
+                        binding.drive_mount_failures.clone(),
+                    ))
+                }),
+                repository_failures: (!binding.repository_failures.is_empty())
+                    .then(|| List(binding.repository_failures.clone())),
             })
         }
         (SessionState::Failed, _, Some(error)) => Some(SessionOutcome::Failed {
@@ -391,4 +608,67 @@ fn saved_outcome(binding: &Binding) -> Option<SessionOutcome> {
 /// filesystem.
 pub fn inside_state_root(cwd: &Path, root: &Path) -> bool {
     lexical(cwd).starts_with(lexical(root))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_report_over_its_limit_is_fitted_from_the_last_failure_backwards_to_exactly_what_fits() {
+        let status = |count: usize| {
+            let failures = (0..count)
+                .map(|index| {
+                    serde_json::from_value::<RepositoryFailure>(json!({
+                        "url": format!("https://github.com/acme/r{index}"),
+                        "path": format!("/w/r{index}"),
+                        "cause": "clone", "message": "x".repeat(1_024),
+                    }))
+                    .unwrap()
+                })
+                .collect();
+            SessionStatus {
+                connection_id: Id::new("conn_a").unwrap(),
+                message_id: Id::new("msg_a").unwrap(),
+                request_message_id: Id::new("msg_prepare").unwrap(),
+                session_id: Id::new("sess_a").unwrap(),
+                binding_id: Id::new("bind_a").unwrap(),
+                outcome: SessionOutcome::Prepared {
+                    cwd: serde_json::from_value(json!("/w")).unwrap(),
+                    drive_mount_failures: None,
+                    repository_failures: Some(List(failures)),
+                },
+            }
+        };
+        let over = status(70);
+        assert!(protocol::encode(&over).len() > MESSAGE_MAX_BYTES);
+        let fitting = fitted(over);
+        assert_eq!(protocol::encode(&fitting).len(), MESSAGE_MAX_BYTES);
+        let SessionOutcome::Prepared {
+            repository_failures: Some(List(failures)),
+            ..
+        } = &fitting.outcome
+        else {
+            panic!("a prepared report");
+        };
+        let lengths: Vec<usize> = failures
+            .iter()
+            .map(|failure| failure.message.len())
+            .collect();
+        let whole = lengths
+            .iter()
+            .take_while(|&&length| length == 1_024)
+            .count();
+        assert_eq!(lengths.len(), 70);
+        assert!(whole > 0 && lengths[whole] < 1_024, "{lengths:?}");
+        assert!(
+            lengths[whole + 1..].iter().all(|&length| length == 0),
+            "{lengths:?}"
+        );
+        assert_eq!(failures[whole].message, "x".repeat(lengths[whole]));
+        let fits = status(3);
+        assert_eq!(fitted(fits.clone()), fits);
+    }
 }

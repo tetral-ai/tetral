@@ -94,5 +94,7 @@ platform parent and contain no override entry point.
 - `config.rs`: `Config`, its reading and its replacement.
 - `credentials.rs`: the bounded reading and the replacement of
   `credentials.json`.
+- `clock.rs`: `Clock`, the clock an owner with deadlines of its own is
+  given at construction: `seams::now`, or one a test moves.
 - `seams.rs`: the clock, `sleep_until`, the barriers, the counters and, under
   `test-seams`, the process side of the seam protocol.

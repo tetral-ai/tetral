@@ -222,6 +222,30 @@ impl Drop for Case<'_> {
     }
 }
 
+/// The platform as a ready names it; Rust's names of the operating system
+/// and the architecture are the ready's.
+pub fn platform() -> String {
+    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn operating_system() -> String {
+    if cfg!(target_os = "macos") {
+        format!("macOS {}", output("sw_vers", &["-productVersion"]))
+    } else {
+        output("uname", &["-sr"])
+    }
+}
+
+fn output(program: &str, arguments: &[&str]) -> String {
+    let result = Command::new(program)
+        .args(arguments)
+        .current_dir(workspace_dir())
+        .output()
+        .unwrap_or_else(|error| panic!("{program} did not start: {error}"));
+    assert!(result.status.success(), "{program} {arguments:?} failed");
+    String::from_utf8_lossy(&result.stdout).trim().to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::process::ExitStatusExt;
@@ -295,28 +319,4 @@ mod tests {
         assert!(saved.contains("Result: not run: the platform lacks this facility"));
         assert!(saved.contains("## failed\n\nResult: failed\n"));
     }
-}
-
-/// The platform as a ready names it; Rust's names of the operating system
-/// and the architecture are the ready's.
-pub fn platform() -> String {
-    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
-}
-
-fn operating_system() -> String {
-    if cfg!(target_os = "macos") {
-        format!("macOS {}", output("sw_vers", &["-productVersion"]))
-    } else {
-        output("uname", &["-sr"])
-    }
-}
-
-fn output(program: &str, arguments: &[&str]) -> String {
-    let result = Command::new(program)
-        .args(arguments)
-        .current_dir(workspace_dir())
-        .output()
-        .unwrap_or_else(|error| panic!("{program} did not start: {error}"));
-    assert!(result.status.success(), "{program} {arguments:?} failed");
-    String::from_utf8_lossy(&result.stdout).trim().to_owned()
 }

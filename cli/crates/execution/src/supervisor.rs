@@ -19,6 +19,13 @@
 //! the task without one. Each waiting reply is a timer and a waiter of the
 //! supervisor, which meanwhile keeps reading output and handling the exit
 //! and other controls. Every wait reads the seam clock.
+//! With a Session drive sync (`DriveSyncPort`), an `exec_command` or
+//! `view_image` runs the drive check after the availability check, still
+//! `starting`, and leaves the drives it found unmounted out of the task's
+//! permissions; each execution report and each newly built `tool.stdin`
+//! reply runs its sync point before it is frozen, and carries its
+//! `drive_sync`. While a `running` report's sync point runs, output, the
+//! controls and the command's end go on being handled.
 //! A file tool's task runs its child instead of a command
 //! ([`crate::file_tools`]): `running` from the spawn, its `terminal` report
 //! is made once the child's result is received, or once its child is gone
@@ -47,10 +54,14 @@ use std::time::Duration;
 use observe::{Identity, TraceContext};
 use protocol::field::PositiveInt;
 use protocol::id::Id;
-use protocol::ports::{ReportId, ReportListener, ReportOutcome, ReportSink};
+use protocol::ports::{
+    ActivitySink, DriveCheck, DriveCheckAnswer, DriveChecked, DriveSyncPoint, DriveSyncPort,
+    ReportId, ReportListener, ReportOutcome, ReportSink,
+};
 use protocol::tool::{
-    CancelPayload, ControlErrorCode, HelperEnvelope, HelperStatus, HelperTool, Metrics,
-    ProtocolError, ReportPhase, StdinPayload, StreamSnapshot, ToolError, ToolInput, ToolResult,
+    CancelPayload, ControlErrorCode, DriveSyncOutcome, HelperEnvelope, HelperStatus, HelperTool,
+    Metrics, ProtocolError, ReportPhase, StdinPayload, StreamSnapshot, ToolError, ToolInput,
+    ToolResult,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::pipe::Receiver;
@@ -59,7 +70,7 @@ use tokio::sync::mpsc;
 use tracing::Instrument;
 
 use crate::cancel::Receipt;
-use crate::capture::StreamCapture;
+use crate::capture::{StreamCapture, Window};
 use crate::cleanup;
 use crate::exec::{self, ExecCall, ExitFacts, OnExpiry, Outcome};
 use crate::file_tools::{FileCall, Pipes};
@@ -139,6 +150,10 @@ const NOT_STARTED_IN_WAIT: &str = "process did not start within the wait";
 
 const STDIN_CLOSED: &str = "task stdin is closed or not accepting input";
 
+/// The wait of a sync point for a result whose command has exited and for
+/// an `edit` result; a `running` result's sync point waits for no content.
+pub const SYNC_WAIT: Duration = Duration::from_secs(30);
+
 /// The message of the control error `task_not_found`, which also answers
 /// every control of a task whose start was rejected.
 pub const TASK_NOT_FOUND: &str = "task_id names no task of the named binding on this connection";
@@ -158,6 +173,10 @@ pub struct TaskSpec {
     /// Where the task's record goes ([`cleanup::record_path`]).
     pub record: PathBuf,
     pub listener: Arc<dyn TaskListener>,
+    /// The Session's drive sync, when the Session has one: the check before
+    /// an `exec_command` or `view_image` starts, `TETRAL_DRIVES`, and the
+    /// sync point before each result.
+    pub drive_sync: Option<Arc<dyn DriveSyncPort>>,
 }
 
 /// What a supervisor tells its task's binding owner about the task's
@@ -184,6 +203,8 @@ pub struct Context {
     /// The running system's boot ID, which each record carries; without it
     /// no record is written.
     pub boot_id: Option<String>,
+    /// Told of each `exec_command` command's start and exit.
+    pub activity: Arc<dyn ActivitySink>,
 }
 
 /// The waits and sizes of a supervisor, each a constant but for tests.
@@ -210,13 +231,18 @@ impl Default for Bounds {
 }
 
 pub enum SupervisorMessage {
+    /// The binding's drives as a staged task starts, which a
+    /// `session.drives` handled while it waited may have changed; sent just
+    /// before [`SupervisorMessage::Start`].
+    Drives(Box<TaskDrives>),
     /// The binding owner starts the staged task.
     Start,
     /// An admitted `tool.stdin` of the task.
     Stdin(Box<Control<StdinPayload>>),
     /// An admitted `tool.cancel` of the task.
     Cancel(Box<Control<CancelPayload>>),
-    /// The task's binding closes: a staged task never starts.
+    /// The task's binding closes: a staged task never starts, and a running
+    /// one ends as at a cancel.
     Prevent,
     /// An identical `tool.execute` with this `message_id` joined the task:
     /// the task's final report, its `terminal` or `rejected`, ends it too.
@@ -227,6 +253,13 @@ pub enum SupervisorMessage {
     ConnectionEnded,
     /// The App Server shuts down.
     Shutdown,
+}
+
+/// A staged task's permissions translated with the binding's drives at its
+/// start, and the Session's drive sync then.
+pub struct TaskDrives {
+    pub permissions: TaskPermissions,
+    pub drive_sync: Option<Arc<dyn DriveSyncPort>>,
 }
 
 /// A control of the task, admitted by its binding owner on the task's
@@ -339,6 +372,10 @@ struct Supervisor {
     gone: bool,
     /// When they were last checked.
     checked: Duration,
+    /// How long the drive check before the start took.
+    drive_wait: Duration,
+    /// A `view_image`'s `drive_sync`, from its drive check.
+    image_drive_sync: Option<DriveSyncOutcome>,
 }
 
 /// What a task runs.
@@ -359,6 +396,18 @@ impl Work {
 
 /// The availability check while it runs.
 type Checking = Pin<Box<dyn Future<Output = Result<Available, PolicyRejection>> + Send>>;
+
+/// A report's sync point: its `drive_sync`, and how long it took.
+type Synced = Pin<Box<dyn Future<Output = (Option<DriveSyncOutcome>, Duration)> + Send>>;
+
+/// A `running` report whose sync point has not answered yet: its outcome
+/// and output windows as of the wait's end.
+struct PendingRunning {
+    outcome: Outcome,
+    stdout: Window,
+    stderr: Window,
+    synced: Synced,
+}
 
 /// Why a task did not reach `running`.
 enum Start {
@@ -465,6 +514,8 @@ impl Supervisor {
             _namespace: None,
             gone: false,
             checked: Duration::ZERO,
+            drive_wait: Duration::ZERO,
+            image_drive_sync: None,
         };
         (supervisor, mailbox)
     }
@@ -488,7 +539,7 @@ impl Supervisor {
                 match self.launch(&available, work).await {
                     Err(Start::Rejected(rejection)) => self.reject(rejection),
                     Err(Start::Failed(error)) => {
-                        self.report_start_failure(error);
+                        self.report_start_failure(error).await;
                         self.release_held();
                     }
                     Ok((Work::Exec(call), status)) => {
@@ -516,19 +567,54 @@ impl Supervisor {
     /// binding's close prevents the start, or the task is discarded. A
     /// check that a message overtakes is dropped, its probes with it.
     async fn staged(&mut self) -> Staged {
+        enum Step {
+            Message(Option<SupervisorMessage>),
+            Checked(Result<Available, PolicyRejection>),
+            Drive(DriveChecked),
+        }
         let mut check: Option<Checking> = None;
+        let mut drive: Option<(Available, DriveCheckAnswer, Duration)> = None;
         loop {
-            let message = match check.as_mut() {
-                None => self.messages.recv().await,
-                Some(checking) => tokio::select! {
-                    checked = checking.as_mut() => return Staged::Started(checked),
-                    message = self.messages.recv() => message,
+            let step = match (drive.as_mut(), check.as_mut()) {
+                (Some((_, answer, _)), _) => tokio::select! {
+                    checked = answer.as_mut() => Step::Drive(checked),
+                    message = self.messages.recv() => Step::Message(message),
                 },
+                (None, Some(checking)) => tokio::select! {
+                    checked = checking.as_mut() => Step::Checked(checked),
+                    message = self.messages.recv() => Step::Message(message),
+                },
+                (None, None) => Step::Message(self.messages.recv().await),
+            };
+            let message = match step {
+                Step::Message(message) => message,
+                Step::Checked(Ok(available)) => match self.drive_check() {
+                    Some(answer) => {
+                        check = None;
+                        drive = Some((available, answer, state::seams::now()));
+                        continue;
+                    }
+                    None => return Staged::Started(Ok(available)),
+                },
+                Step::Checked(checked) => return Staged::Started(checked),
+                Step::Drive(checked) => {
+                    let (available, _, began) = drive.take().expect("a drive check runs");
+                    self.drive_wait = state::seams::now().saturating_sub(began);
+                    self.image_drive_sync = checked.drive_sync;
+                    self.leave_out(&checked.unmounted);
+                    return Staged::Started(Ok(available));
+                }
             };
             match message {
                 None
                 | Some(SupervisorMessage::ConnectionEnded)
                 | Some(SupervisorMessage::Shutdown) => return Staged::Discarded,
+                Some(SupervisorMessage::Drives(drives)) => {
+                    if check.is_none() {
+                        self.spec.permissions = drives.permissions;
+                        self.spec.drive_sync = drives.drive_sync;
+                    }
+                }
                 Some(SupervisorMessage::Start) => {
                     if check.is_none() {
                         self.left_queue = Some(state::seams::now());
@@ -537,12 +623,14 @@ impl Supervisor {
                 }
                 Some(SupervisorMessage::Cancel(control)) => {
                     self.left_queue.get_or_insert_with(state::seams::now);
-                    self.cancel(*control);
+                    if self.cancel(*control) {
+                        self.report_cancelled_staged().await;
+                    }
                     return Staged::Cancelled;
                 }
                 Some(SupervisorMessage::Prevent) => {
                     self.left_queue.get_or_insert_with(state::seams::now);
-                    self.report_cancelled_staged();
+                    self.report_cancelled_staged().await;
                     return Staged::Cancelled;
                 }
                 Some(SupervisorMessage::Stdin(control)) => self.held.push(*control),
@@ -551,6 +639,42 @@ impl Supervisor {
                 }
                 Some(SupervisorMessage::Joined(instruction)) => self.join(instruction),
             }
+        }
+    }
+
+    /// The drive check of an `exec_command` or `view_image` of a Session
+    /// with a drive sync; an `edit` has none.
+    fn drive_check(&self) -> Option<DriveCheckAnswer> {
+        let view_image = match self.input() {
+            ToolInput::ExecCommand(_) => false,
+            ToolInput::ViewImage(_) => true,
+            ToolInput::Edit(_) => return None,
+        };
+        let port = self.spec.drive_sync.as_ref()?;
+        Some(port.check(DriveCheck {
+            task_id: self.spec.correlation.task_id.clone(),
+            view_image,
+        }))
+    }
+
+    /// Leaves the mount points of `unmounted` drives out of the task's
+    /// permissions, so that its isolation never names a drive that is not
+    /// there.
+    fn leave_out(&mut self, unmounted: &[Id]) {
+        let Some(drives) = self
+            .spec
+            .drive_sync
+            .as_ref()
+            .and_then(|port| port.drives_variable())
+        else {
+            return;
+        };
+        let points: Vec<PathBuf> = unmounted
+            .iter()
+            .map(|drive| drives.join(drive.as_str()))
+            .collect();
+        if !points.is_empty() {
+            self.spec.permissions = self.spec.permissions.without(&points);
         }
     }
 
@@ -632,9 +756,14 @@ impl Supervisor {
                         self.control_error(&control, ControlErrorCode::TaskNotFound, TASK_NOT_FOUND);
                     }
                     Some(SupervisorMessage::Stdin(control)) => self.stdin(*control),
-                    Some(SupervisorMessage::Cancel(control)) => self.cancel(*control),
+                    Some(SupervisorMessage::Cancel(control)) => {
+                        if self.cancel(*control) {
+                            self.report_cancelled_staged().await;
+                        }
+                    }
                     Some(
-                        SupervisorMessage::Start
+                        SupervisorMessage::Drives(_)
+                        | SupervisorMessage::Start
                         | SupervisorMessage::Prevent
                         | SupervisorMessage::ConnectionEnded
                         | SupervisorMessage::Shutdown,
@@ -752,6 +881,10 @@ impl Supervisor {
                     std::env::vars_os(),
                     call.env.as_ref(),
                     spec.files.temporary(),
+                    spec.drive_sync
+                        .as_ref()
+                        .and_then(|port| port.drives_variable())
+                        .as_deref(),
                 )
                 .map_err(|_| failed(NOT_STARTED))?,
             ),
@@ -802,14 +935,16 @@ impl Supervisor {
     /// The `terminal` report of a command that never started: `status:
     /// error`, null exit facts and empty streams; of a file tool, its
     /// error.
-    fn report_start_failure(&mut self, error: ToolError) {
+    async fn report_start_failure(&mut self, error: ToolError) {
         if let Some(call) = FileCall::of(self.input()) {
-            self.report_file(crate::child::failed(call.tool(), error), Duration::ZERO);
+            self.report_file(crate::child::failed(call.tool(), error), Duration::ZERO)
+                .await;
             return;
         }
         let outcome = self.outcome(HelperStatus::Error, Some(error), ExitFacts::default());
         let empty = StreamCapture::new();
-        self.report(ReportPhase::Terminal, outcome, &empty, &empty);
+        self.report(ReportPhase::Terminal, outcome, &empty, &empty)
+            .await;
         self.ended = Some(State {
             ended: true,
             ..State::default()
@@ -829,6 +964,9 @@ impl Supervisor {
         let wait_ends = self.spawned + call.wait;
         let mut waited = false;
         let mut forgotten = false;
+        // The `running` report waits for its sync point while the task's
+        // output, controls and ending go on.
+        let mut pending: Option<PendingRunning> = None;
         self.next_write();
         loop {
             // A launch failure is written before the sandbox exits, but may
@@ -884,6 +1022,9 @@ impl Supervisor {
                             && let Some(rest) = bytes.strip_prefix(crate::child::STARTED)
                         {
                             self.start = Some(state::seams::now());
+                            self.context.activity.exec_started();
+                            // The exit may have been observed first.
+                            self.exec_exited();
                             self.find_leader(pid);
                             bytes = rest;
                         }
@@ -895,6 +1036,7 @@ impl Supervisor {
                 waited_status = wait_child(self.process.as_mut()), if self.exit.is_none() => {
                     let facts = waited_status.map_or_else(|_| ExitFacts::default(), ExitFacts::observed);
                     self.exit = Some((facts, state::seams::now()));
+                    self.exec_exited();
                     self.exited();
                 }
                 () = initial_wait(wait_ends, started), if !waited && quiet => {
@@ -906,8 +1048,12 @@ impl Supervisor {
                         (Some(_), OnExpiry::Kill) => {
                             self.ending = Some((Termination::begin(pid, bounds.termination), Expiry::Wait));
                         }
-                        (Some(start), OnExpiry::Detach) => self.report_running(start),
+                        (Some(start), OnExpiry::Detach) => pending = Some(self.running_report(start)),
                     }
+                }
+                answered = async { pending.as_mut().expect("a pending report").synced.as_mut().await }, if pending.is_some() => {
+                    let running = pending.take().expect("a pending report");
+                    self.report_running_synced(running, answered);
                 }
                 () = state::seams::sleep_until(lifetime_ends), if detached && started && quiet => {
                     self.ending = Some((Termination::begin(pid, bounds.termination), Expiry::Lifetime));
@@ -931,21 +1077,31 @@ impl Supervisor {
                 }
                 message = self.messages.recv(), if !forgotten => match message {
                     Some(SupervisorMessage::Stdin(control)) => self.stdin(*control),
-                    Some(SupervisorMessage::Cancel(control)) => self.cancel(*control),
+                    Some(SupervisorMessage::Cancel(control)) => {
+                        if self.cancel(*control) {
+                            self.report_cancelled_staged().await;
+                        }
+                    }
                     Some(SupervisorMessage::Outcome(report, _)) => {
                         self.awaited.remove(&report);
                     }
                     Some(SupervisorMessage::Joined(instruction)) => self.join(instruction),
                     Some(SupervisorMessage::ConnectionEnded) => self.stop(pid, Expiry::ConnectionEnded),
                     Some(SupervisorMessage::Shutdown) => self.stop(pid, Expiry::Shutdown),
-                    Some(SupervisorMessage::Start | SupervisorMessage::Prevent) => {}
+                    Some(SupervisorMessage::Prevent) => self.binding_closed(pid),
+                    Some(SupervisorMessage::Drives(_) | SupervisorMessage::Start) => {}
                     None => forgotten = true,
                 },
             }
         }
+        if let Some(mut running) = pending.take() {
+            let answered = running.synced.as_mut().await;
+            self.report_running_synced(running, answered);
+        }
         drop((self.out.reader.take(), self.err.reader.take()));
         if self.exit.is_none() {
             self.exit = Some((ExitFacts::default(), state::seams::now()));
+            self.exec_exited();
         }
         self.exited();
         if self.writing.is_some() {
@@ -955,7 +1111,7 @@ impl Supervisor {
         self.next_write();
         let expiry = self.ending.map(|(_, expiry)| expiry);
         if !failure.is_empty() {
-            self.report_start_failure(launch_failure(&failure));
+            self.report_start_failure(launch_failure(&failure)).await;
             return;
         }
         if expiry == Some(Expiry::NotStarted) {
@@ -963,7 +1119,8 @@ impl Supervisor {
                 "exec_spawn_failed",
                 NOT_STARTED_IN_WAIT,
                 None,
-            ));
+            ))
+            .await;
             return;
         }
         let state = self.state();
@@ -983,7 +1140,8 @@ impl Supervisor {
             std::mem::take(&mut self.out.capture),
             std::mem::take(&mut self.err.capture),
         );
-        self.report(ReportPhase::Terminal, outcome, &out, &err);
+        self.report(ReportPhase::Terminal, outcome, &out, &err)
+            .await;
         for (log, stream, capture) in [
             (&self.spec.files.stdout, &self.out, &out),
             (&self.spec.files.stderr, &self.err, &err),
@@ -1057,19 +1215,24 @@ impl Supervisor {
                     }
                 }
                 message = self.messages.recv(), if !forgotten => match message {
-                    Some(SupervisorMessage::Cancel(control)) => self.cancel(*control),
+                    Some(SupervisorMessage::Cancel(control)) => {
+                        if self.cancel(*control) {
+                            self.report_cancelled_staged().await;
+                        }
+                    }
                     Some(SupervisorMessage::Outcome(report, _)) => {
                         self.awaited.remove(&report);
                     }
                     Some(SupervisorMessage::Joined(instruction)) => self.join(instruction),
                     Some(SupervisorMessage::ConnectionEnded) => self.stop(pid, Expiry::ConnectionEnded),
                     Some(SupervisorMessage::Shutdown) => self.stop(pid, Expiry::Shutdown),
+                    Some(SupervisorMessage::Prevent) => self.binding_closed(pid),
                     // The binding owner refuses a `tool.stdin` of a file
                     // tool's task.
                     Some(
                         SupervisorMessage::Stdin(_)
-                        | SupervisorMessage::Start
-                        | SupervisorMessage::Prevent,
+                        | SupervisorMessage::Drives(_)
+                        | SupervisorMessage::Start,
                     ) => {}
                     None => forgotten = true,
                 },
@@ -1085,13 +1248,26 @@ impl Supervisor {
             call.outcome(&pipes)
         };
         pipes.close();
-        self.report_file(envelope, run);
+        self.report_file(envelope, run).await;
     }
 
     /// Hands a file tool's `terminal` report, with its `metrics` for work
-    /// that ran for `run`, to the outbox; the task has then ended.
-    fn report_file(&mut self, mut envelope: HelperEnvelope, run: Duration) {
-        envelope.metrics = Some(self.metrics(run));
+    /// that ran for `run`, to the outbox; the task has then ended. An
+    /// `edit` result's `drive_sync` comes from its sync point, a
+    /// `view_image` result's from its drive check.
+    async fn report_file(&mut self, mut envelope: HelperEnvelope, run: Duration) {
+        let mut metrics = self.metrics(run);
+        envelope.drive_sync = match envelope.tool {
+            HelperTool::ViewImage => self.image_drive_sync.take(),
+            _ => {
+                let (drive_sync, took) = self.sync_point(false, ReportPhase::Terminal).await;
+                metrics.sync_ms = exec::millis(took);
+                metrics.wall_time_ms =
+                    exec::millis(state::seams::now().saturating_sub(self.spec.received));
+                drive_sync
+            }
+        };
+        envelope.metrics = Some(metrics);
         self.report_seq += 1;
         let body = Body::Result {
             phase: ReportPhase::Terminal,
@@ -1137,7 +1313,15 @@ impl Supervisor {
 
     /// The `running` report at the end of a `detach` initial wait, from both
     /// streams' windows.
-    fn report_running(&mut self, start: Duration) {
+    #[cfg(test)]
+    async fn report_running(&mut self, start: Duration) {
+        let mut running = self.running_report(start);
+        let answered = running.synced.as_mut().await;
+        self.report_running_synced(running, answered);
+    }
+
+    /// The `running` report as of now, its sync point started.
+    fn running_report(&mut self, start: Duration) -> PendingRunning {
         let (stdout, stderr) = (
             self.out.capture.take_window(),
             self.err.capture.take_window(),
@@ -1145,7 +1329,27 @@ impl Supervisor {
         let mut outcome = self.outcome(HelperStatus::Running, None, ExitFacts::default());
         outcome.duration = state::seams::now().saturating_sub(start);
         outcome.metrics = None;
-        self.report(ReportPhase::Running, outcome, &stdout, &stderr);
+        let synced = Box::pin(self.sync_point(self.report_seq == 0, ReportPhase::Running));
+        PendingRunning {
+            outcome,
+            stdout,
+            stderr,
+            synced,
+        }
+    }
+
+    fn report_running_synced(
+        &mut self,
+        running: PendingRunning,
+        answered: (Option<DriveSyncOutcome>, Duration),
+    ) {
+        let PendingRunning {
+            outcome,
+            stdout,
+            stderr,
+            ..
+        } = running;
+        self.report_synced(ReportPhase::Running, outcome, &stdout, &stderr, answered);
     }
 
     /// An `exec_command` result with empty streams, no duration and the
@@ -1165,18 +1369,66 @@ impl Supervisor {
             cancelled: None,
             was_running: None,
             written_bytes: None,
+            drive_sync: None,
         }
     }
 
-    /// Renders both streams with the task's limits into `outcome`, fits the
-    /// report and hands it to the outbox.
-    fn report(
+    /// The sync point of the task's next execution report, with how long it
+    /// took; none without a drive sync.
+    fn sync_point(
+        &self,
+        first: bool,
+        phase: ReportPhase,
+    ) -> impl Future<Output = (Option<DriveSyncOutcome>, Duration)> + Send + use<> {
+        let running = phase == ReportPhase::Running;
+        let answer = self.spec.drive_sync.as_ref().map(|port| {
+            port.sync_point(DriveSyncPoint {
+                task_id: self.spec.correlation.task_id.clone(),
+                first,
+                running,
+                wait: if running { Duration::ZERO } else { SYNC_WAIT },
+                traceparent: self.spec.traceparent.clone(),
+            })
+        });
+        let began = state::seams::now();
+        async move {
+            let Some(answer) = answer else {
+                return (None, Duration::ZERO);
+            };
+            let drive_sync = answer.await;
+            (drive_sync, state::seams::now().saturating_sub(began))
+        }
+    }
+
+    /// Runs the report's sync point, renders both streams with the task's
+    /// limits into `outcome`, fits the report and hands it to the outbox.
+    async fn report(
+        &mut self,
+        phase: ReportPhase,
+        outcome: Outcome,
+        stdout: &(dyn StreamOutput + Sync),
+        stderr: &(dyn StreamOutput + Sync),
+    ) {
+        let answered = self.sync_point(self.report_seq == 0, phase).await;
+        self.report_synced(phase, outcome, stdout, stderr, answered);
+    }
+
+    /// Fits the report with its sync point's answer and hands it to the
+    /// outbox.
+    fn report_synced(
         &mut self,
         phase: ReportPhase,
         mut outcome: Outcome,
-        stdout: &dyn StreamOutput,
-        stderr: &dyn StreamOutput,
+        stdout: &(dyn StreamOutput + Sync),
+        stderr: &(dyn StreamOutput + Sync),
+        (drive_sync, took): (Option<DriveSyncOutcome>, Duration),
     ) {
+        outcome.drive_sync = drive_sync;
+        if let Some(metrics) = outcome.metrics.as_mut() {
+            metrics.sync_ms = exec::millis(took);
+            metrics.wall_time_ms =
+                exec::millis(state::seams::now().saturating_sub(self.spec.received));
+        }
         let limits = self.spec.limits;
         outcome.stdout = stdout.snapshot(limits.bytes, limits.lines);
         outcome.stderr = stderr.snapshot(limits.bytes, limits.lines);
@@ -1320,9 +1572,17 @@ impl Supervisor {
         Metrics {
             wall_time_ms: exec::millis(now.saturating_sub(self.spec.received)),
             queued_ms: exec::millis(left_queue.saturating_sub(self.spec.received)),
-            drive_wait_ms: exec::millis(Duration::ZERO),
+            drive_wait_ms: exec::millis(self.drive_wait),
             run_ms: exec::millis(run),
             sync_ms: exec::millis(Duration::ZERO),
+        }
+    }
+
+    /// An `exec_command` whose command started has exited, at the exit's
+    /// time.
+    fn exec_exited(&self) {
+        if let (Some(_), Some((_, at))) = (self.start, &self.exit) {
+            self.context.activity.exec_exited(*at);
         }
     }
 
@@ -1504,8 +1764,10 @@ impl Supervisor {
         self.next_write();
     }
 
-    /// A `tool.cancel`, recorded and answered at once.
-    fn cancel(&mut self, control: Control<CancelPayload>) {
+    /// A `tool.cancel`, recorded and answered at once; whether it found the
+    /// task staged, whose `terminal` report the caller then makes.
+    #[must_use]
+    fn cancel(&mut self, control: Control<CancelPayload>) -> bool {
         let state = self.state();
         let receipt = if state.ended {
             Receipt::Ended
@@ -1531,8 +1793,7 @@ impl Supervisor {
         self.out.capture = out;
         self.err.capture = err;
         if receipt == Receipt::Staged {
-            self.report_cancelled_staged();
-            return;
+            return true;
         }
         // Writes stop, but the command's stdin stays open: its end of file
         // would let the command exit before the termination ends it.
@@ -1546,6 +1807,22 @@ impl Supervisor {
                 Expiry::Cancel,
             ));
         }
+        false
+    }
+
+    /// The task's binding closes while it runs: as at a cancel, writes stop
+    /// and the termination begins, and its `terminal` report says
+    /// `cancelled`.
+    fn binding_closed(&mut self, pid: u32) {
+        if self.exit.is_some() || self.ending.is_some() {
+            return;
+        }
+        self.cancelled = true;
+        self.write_interrupted();
+        self.ending = Some((
+            Termination::begin(pid, self.context.bounds.termination),
+            Expiry::Cancel,
+        ));
     }
 
     /// Connection end, App Server shutdown or report-capacity exhaustion:
@@ -1581,15 +1858,17 @@ impl Supervisor {
 
     /// The `terminal` report of a task cancelled, or whose binding closed,
     /// before it started.
-    fn report_cancelled_staged(&mut self) {
+    async fn report_cancelled_staged(&mut self) {
         if let Some(call) = FileCall::of(self.input()) {
-            self.report_file(call.cancelled(false), Duration::ZERO);
+            self.report_file(call.cancelled(false), Duration::ZERO)
+                .await;
             return;
         }
         let mut outcome = self.outcome(HelperStatus::Success, None, ExitFacts::default());
         outcome.cancelled = Some(true);
         let empty = StreamCapture::new();
-        self.report(ReportPhase::Terminal, outcome, &empty, &empty);
+        self.report(ReportPhase::Terminal, outcome, &empty, &empty)
+            .await;
         self.ended = Some(State {
             ended: true,
             ..State::default()
@@ -1618,6 +1897,7 @@ impl Supervisor {
             cancelled: None,
             was_running: None,
             written_bytes: None,
+            drive_sync: None,
         }
     }
 
@@ -1641,7 +1921,14 @@ impl Supervisor {
             self.out.capture.take_window(),
             self.err.capture.take_window(),
         );
-        self.reply(control, outcome, &stdout, &stderr, limits, None);
+        self.reply_synced(
+            control,
+            outcome,
+            Box::new(stdout),
+            Box::new(stderr),
+            limits,
+            None,
+        );
     }
 
     /// A write that ended `stdin_closed`: the result, with the bytes
@@ -1661,11 +1948,11 @@ impl Supervisor {
             self.out.capture.take_window(),
             self.err.capture.take_window(),
         );
-        self.reply(
+        self.reply_synced(
             control,
             outcome,
-            &stdout,
-            &stderr,
+            Box::new(stdout),
+            Box::new(stderr),
             limits,
             Some(closed_error()),
         );
@@ -1692,7 +1979,14 @@ impl Supervisor {
             Counters(self.err.capture.counters()),
         );
         let error = closed.then(closed_error);
-        self.reply(control, outcome, &stdout, &stderr, limits, error);
+        self.reply_synced(
+            control,
+            outcome,
+            Box::new(stdout),
+            Box::new(stderr),
+            limits,
+            error,
+        );
     }
 
     fn control_error<P>(&mut self, control: &Control<P>, code: ControlErrorCode, message: &str) {
@@ -1715,33 +2009,20 @@ impl Supervisor {
     fn reply<P>(
         &mut self,
         control: &Control<P>,
-        mut outcome: Outcome,
+        outcome: Outcome,
         stdout: &dyn StreamOutput,
         stderr: &dyn StreamOutput,
         limits: Visible,
         error: Option<ProtocolError<ControlErrorCode>>,
     ) {
-        outcome.stdout = stdout.snapshot(limits.bytes, limits.lines);
-        outcome.stderr = stderr.snapshot(limits.bytes, limits.lines);
-        let mut report = Report {
-            correlation: control.correlation.clone(),
-            body: Body::Control {
-                result: Some(Box::new(report::bounded(
-                    outcome.envelope(),
-                    ErrorBounds::default(),
-                ))),
-                error,
-            },
-        };
-        report::fit(
-            &mut report,
+        let report = control_report(
+            control.correlation.clone(),
             &control.connection_id,
-            &Rendering {
-                stdout,
-                stderr,
-                visible_bytes: limits.bytes,
-                visible_lines: limits.lines,
-            },
+            outcome,
+            stdout,
+            stderr,
+            limits,
+            error,
         );
         self.submit(
             report.correlation,
@@ -1749,6 +2030,149 @@ impl Supervisor {
             control.traceparent.clone(),
             report.body,
         );
+    }
+
+    /// A newly built `tool.stdin` reply: with a drive sync, it is frozen
+    /// once its sync point answers, while the supervisor goes on.
+    fn reply_synced(
+        &mut self,
+        control: &Control<StdinPayload>,
+        outcome: Outcome,
+        stdout: Box<dyn StreamOutput + Send + Sync>,
+        stderr: Box<dyn StreamOutput + Send + Sync>,
+        limits: Visible,
+        error: Option<ProtocolError<ControlErrorCode>>,
+    ) {
+        let Some(port) = self.spec.drive_sync.clone() else {
+            return self.reply(control, outcome, &*stdout, &*stderr, limits, error);
+        };
+        let ended = self.state().ended;
+        spawn_synced_reply(
+            SyncedReply {
+                reports: self.context.reports.clone(),
+                port,
+                ended,
+                control: Control {
+                    connection_id: control.connection_id.clone(),
+                    correlation: control.correlation.clone(),
+                    traceparent: control.traceparent.clone(),
+                    payload: (),
+                },
+                task_id: self.spec.correlation.task_id.clone(),
+                limits,
+                error,
+            },
+            outcome,
+            stdout,
+            stderr,
+        );
+    }
+}
+
+/// A control reply of `outcome`, its streams rendered with `limits` and
+/// fitted.
+fn control_report(
+    correlation: Correlation,
+    connection_id: &Id,
+    mut outcome: Outcome,
+    stdout: &dyn StreamOutput,
+    stderr: &dyn StreamOutput,
+    limits: Visible,
+    error: Option<ProtocolError<ControlErrorCode>>,
+) -> Report {
+    outcome.stdout = stdout.snapshot(limits.bytes, limits.lines);
+    outcome.stderr = stderr.snapshot(limits.bytes, limits.lines);
+    let mut report = Report {
+        correlation,
+        body: Body::Control {
+            result: Some(Box::new(report::bounded(
+                outcome.envelope(),
+                ErrorBounds::default(),
+            ))),
+            error,
+        },
+    };
+    report::fit(
+        &mut report,
+        connection_id,
+        &Rendering {
+            stdout,
+            stderr,
+            visible_bytes: limits.bytes,
+            visible_lines: limits.lines,
+        },
+    );
+    report
+}
+
+/// What a `tool.stdin` reply waiting for its sync point is sent with.
+struct SyncedReply {
+    reports: Arc<dyn ReportSink>,
+    port: Arc<dyn DriveSyncPort>,
+    /// Whether the task had ended when the reply was built.
+    ended: bool,
+    control: Control<()>,
+    task_id: Id,
+    limits: Visible,
+    error: Option<ProtocolError<ControlErrorCode>>,
+}
+
+/// Runs the reply's sync point, then fits the reply with its `drive_sync`
+/// and hands it to the outbox, as a compact error when it does not fit the
+/// report budget.
+fn spawn_synced_reply(
+    reply: SyncedReply,
+    mut outcome: Outcome,
+    stdout: Box<dyn StreamOutput + Send + Sync>,
+    stderr: Box<dyn StreamOutput + Send + Sync>,
+) {
+    let point = DriveSyncPoint {
+        task_id: reply.task_id.clone(),
+        first: false,
+        running: outcome.status == HelperStatus::Running,
+        wait: if reply.ended {
+            SYNC_WAIT
+        } else {
+            Duration::ZERO
+        },
+        traceparent: reply.control.traceparent.clone(),
+    };
+    let answer = reply.port.sync_point(point);
+    tokio::spawn(
+        async move {
+            outcome.drive_sync = answer.await;
+            let report = control_report(
+                reply.control.correlation.clone(),
+                &reply.control.connection_id,
+                outcome,
+                &*stdout,
+                &*stderr,
+                reply.limits,
+                reply.error,
+            );
+            send_reply(&*reply.reports, &reply.control, report.body, false);
+        }
+        .instrument(tracing::Span::current()),
+    );
+}
+
+/// Hands a control reply to the outbox; one that does not fit the report
+/// budget goes as its compact error, which the reserve takes.
+fn send_reply<P>(reports: &dyn ReportSink, control: &Control<P>, body: Body, reserved: bool) {
+    let fallback = capacity_error(&body);
+    let submission = |body| {
+        let mut value = Report {
+            correlation: control.correlation.clone(),
+            body,
+        }
+        .submission(control.connection_id.clone());
+        value.traceparent = control.traceparent.clone();
+        value
+    };
+    if reserved {
+        reports.submit(submission(body));
+    } else if reports.try_submit(submission(body)).is_err() {
+        reports.submit(submission(fallback));
     }
 }
 
@@ -1823,6 +2247,7 @@ fn stream_counters(stream: &StreamSnapshot) -> StreamSnapshot {
 struct FinishedTask {
     messages: mpsc::UnboundedReceiver<SupervisorMessage>,
     reports: Arc<dyn ReportSink>,
+    drive_sync: Option<Arc<dyn DriveSyncPort>>,
     task_id: Id,
     state: State,
     counters: (StreamSnapshot, StreamSnapshot),
@@ -1836,6 +2261,7 @@ impl FinishedTask {
         Self {
             messages: supervisor.messages,
             reports: supervisor.context.reports,
+            drive_sync: supervisor.spec.drive_sync,
             task_id: supervisor.spec.correlation.task_id,
             state,
             counters: supervisor.kept,
@@ -1865,7 +2291,8 @@ impl FinishedTask {
                 }
                 // Joined final reports are already gone. No terminal message
                 // can restart execution or reconstruct an acknowledged body.
-                SupervisorMessage::Start
+                SupervisorMessage::Drives(_)
+                | SupervisorMessage::Start
                 | SupervisorMessage::Prevent
                 | SupervisorMessage::Joined(_)
                 | SupervisorMessage::Outcome(_, _)
@@ -1898,7 +2325,35 @@ impl FinishedTask {
             if closed {
                 outcome.error = Some(exec::tool_error("stdin_closed", STDIN_CLOSED, None));
             }
-            self.reply(&control, outcome, closed.then(closed_error));
+            let error = closed.then(closed_error);
+            match &self.drive_sync {
+                Some(port) => {
+                    let (stdout, stderr) = (
+                        Counters(outcome.stdout.clone()),
+                        Counters(outcome.stderr.clone()),
+                    );
+                    spawn_synced_reply(
+                        SyncedReply {
+                            reports: self.reports.clone(),
+                            port: port.clone(),
+                            ended: true,
+                            control: Control {
+                                connection_id: control.connection_id.clone(),
+                                correlation: control.correlation.clone(),
+                                traceparent: control.traceparent.clone(),
+                                payload: (),
+                            },
+                            task_id: self.task_id.clone(),
+                            limits: Visible::requested(control.payload.limits.as_ref()),
+                            error,
+                        },
+                        outcome,
+                        Box::new(stdout),
+                        Box::new(stderr),
+                    );
+                }
+                None => self.reply(&control, outcome, error),
+            }
         } else {
             self.error(
                 &control,
@@ -1923,6 +2378,7 @@ impl FinishedTask {
             cancelled: None,
             was_running: None,
             written_bytes: None,
+            drive_sync: None,
         }
     }
 
@@ -1954,21 +2410,7 @@ impl FinishedTask {
     }
 
     fn send<P>(&self, control: &Control<P>, body: Body, reserved: bool) {
-        let fallback = capacity_error(&body);
-        let submission = |body| {
-            let mut value = Report {
-                correlation: control.correlation.clone(),
-                body,
-            }
-            .submission(control.connection_id.clone());
-            value.traceparent = control.traceparent.clone();
-            value
-        };
-        if reserved {
-            self.reports.submit(submission(body));
-        } else if self.reports.try_submit(submission(body)).is_err() {
-            self.reports.submit(submission(fallback));
-        }
+        send_reply(&*self.reports, control, body, reserved);
     }
 }
 
@@ -2246,6 +2688,7 @@ mod tests {
             received: state::seams::now(),
             record: root.join("record"),
             listener,
+            drive_sync: None,
         };
         let context = Context {
             tetral: root.join("unused"),
@@ -2257,6 +2700,7 @@ mod tests {
             }),
             bounds: Bounds::default(),
             boot_id: None,
+            activity: Arc::new(protocol::ports::NoActivity),
         };
         let tool: ToolInput =
             serde_json::from_value(json!({"tool":"exec_command","input":{"cmd":"unused"}}))
@@ -2308,6 +2752,212 @@ mod tests {
         supervisor.spawned = state::seams::now();
         supervisor.start = Some(supervisor.spawned);
         release
+    }
+
+    /// A drive sync that records each sync point and answers with one
+    /// committed write, and a download for a `running` result; and records
+    /// each check, answered once `release` has a permit, with one unmounted
+    /// drive for a `view_image`.
+    #[derive(Debug)]
+    struct Points {
+        points: std::sync::Mutex<Vec<DriveSyncPoint>>,
+        checks: std::sync::Mutex<Vec<DriveCheck>>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+
+    impl Default for Points {
+        fn default() -> Points {
+            Points {
+                points: std::sync::Mutex::default(),
+                checks: std::sync::Mutex::default(),
+                release: Arc::new(tokio::sync::Semaphore::new(0)),
+            }
+        }
+    }
+
+    impl DriveSyncPort for Points {
+        fn check(&self, check: DriveCheck) -> DriveCheckAnswer {
+            let view_image = check.view_image;
+            self.checks.lock().unwrap().push(check);
+            let release = self.release.clone();
+            Box::pin(async move {
+                release.acquire().await.unwrap().forget();
+                DriveChecked {
+                    drive_sync: view_image.then(|| {
+                        serde_json::from_value(json!({
+                            "committed": 0, "deleted": 0, "rejected": [], "not_synced": [],
+                            "unmounted": [{"drive_id": "drive_a", "error": "no FUSE: test"}],
+                        }))
+                        .unwrap()
+                    }),
+                    unmounted: Vec::new(),
+                }
+            })
+        }
+
+        fn sync_point(&self, point: DriveSyncPoint) -> protocol::ports::DriveAnswer {
+            let mut outcome = json!({
+                "committed": 1, "deleted": 0, "rejected": [], "not_synced": [],
+            });
+            if point.running {
+                outcome["downloading"] = json!([{
+                    "path": "/state/sessions/session/drives/drive/big.log",
+                    "downloaded_bytes": 1, "size_bytes": 2,
+                }]);
+            }
+            self.points.lock().unwrap().push(point);
+            Box::pin(async move { Some(serde_json::from_value(outcome).unwrap()) })
+        }
+
+        fn drives_variable(&self) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn each_result_and_stdin_reply_carries_the_drive_sync_of_its_own_sync_point() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut supervisor, _mailbox, mut reports, _gone, _) =
+            staged_supervisor(root.path(), false);
+        let points = Arc::new(Points::default());
+        supervisor.spec.drive_sync = Some(points.clone());
+        let _release = live_command(&mut supervisor).await;
+        let start = supervisor.start.unwrap();
+        supervisor.report_running(start).await;
+        let running = reports.recv().await.unwrap();
+        let read: Control<StdinPayload> = Control {
+            connection_id: id("connection"),
+            correlation: correlation("read"),
+            traceparent: None,
+            payload: serde_json::from_value(json!({
+                "session_id": "session", "binding_id": "binding",
+                "tool_use_event_id": "event", "task_id": "task", "chars": "",
+            }))
+            .unwrap(),
+        };
+        supervisor.reply_window(&read, None);
+        let reply = reports.recv().await.unwrap();
+        let mut outcome = supervisor.outcome(HelperStatus::Success, None, ExitFacts::default());
+        outcome.metrics = Some(supervisor.metrics(Duration::ZERO));
+        let empty = StreamCapture::new();
+        supervisor
+            .report(ReportPhase::Terminal, outcome, &empty, &empty)
+            .await;
+        let terminal = reports.recv().await.unwrap();
+
+        let seen: Vec<(bool, bool, Duration)> = points
+            .points
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|point| (point.first, point.running, point.wait))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (true, true, Duration::ZERO),
+                (false, true, Duration::ZERO),
+                (false, false, SYNC_WAIT),
+            ]
+        );
+        for recorded in [&running, &reply, &terminal] {
+            protocol::decode::<protocol::tool::ToolStatus>(
+                &serde_json::to_vec(&recorded.body).unwrap(),
+            )
+            .unwrap_or_else(|error| panic!("{error}: {}", recorded.body));
+            assert_eq!(recorded.body["result"]["drive_sync"]["committed"], 1);
+        }
+        assert!(running.body["result"]["drive_sync"]["downloading"].is_array());
+        assert!(reply.body["result"]["drive_sync"]["downloading"].is_array());
+        assert!(
+            terminal.body["result"]["drive_sync"]
+                .get("downloading")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_command_starts_after_its_drive_check_and_a_view_image_result_carries_the_check() {
+        let root = tempfile::tempdir().unwrap();
+        let input = |tool: &str, input: serde_json::Value| -> ToolInput {
+            serde_json::from_value(json!({"tool": tool, "input": input})).unwrap()
+        };
+        // An exec_command waits for its held check, which a cancel ends.
+        for cancel in [false, true] {
+            let (mut supervisor, mailbox, mut reports, _gone, _) =
+                staged_supervisor(root.path(), false);
+            let points = Arc::new(Points::default());
+            supervisor.spec.drive_sync = Some(points.clone());
+            mailbox.send(SupervisorMessage::Start).unwrap();
+            let staged = supervisor.staged();
+            tokio::pin!(staged);
+            tokio::select! {
+                _ = &mut staged => panic!("started before its drive check was answered"),
+                () = async {
+                    while points.checks.lock().unwrap().is_empty() {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                } => {}
+            }
+            assert!(!points.checks.lock().unwrap()[0].view_image);
+            if cancel {
+                mailbox
+                    .send(SupervisorMessage::Cancel(Box::new(Control {
+                        connection_id: id("connection"),
+                        correlation: correlation("cancel"),
+                        traceparent: None,
+                        payload: serde_json::from_value(json!({
+                            "session_id": "session", "binding_id": "binding",
+                            "tool_use_event_id": "event", "task_id": "task",
+                        }))
+                        .unwrap(),
+                    })))
+                    .unwrap();
+                let staged = tokio::time::timeout(Duration::from_secs(10), staged).await;
+                assert!(matches!(staged, Ok(Staged::Cancelled)));
+                let terminal = reports.recv().await.unwrap();
+                assert_eq!(terminal.body["result"]["result"]["cancelled"], true);
+            } else {
+                points.release.add_permits(1);
+                assert!(matches!(staged.await, Staged::Started(Ok(_))));
+            }
+        }
+
+        // A view_image's result carries its check's answer, from no sync
+        // point.
+        let (mut supervisor, mailbox, mut reports, _gone, _) =
+            staged_supervisor(root.path(), false);
+        let points = Arc::new(Points::default());
+        supervisor.spec.drive_sync = Some(points.clone());
+        supervisor.tool = Some(input("view_image", json!({"path": "image.png"})));
+        points.release.add_permits(1);
+        mailbox.send(SupervisorMessage::Start).unwrap();
+        assert!(matches!(supervisor.staged().await, Staged::Started(Ok(_))));
+        let envelope = crate::child::failed(
+            HelperTool::ViewImage,
+            crate::exec::tool_error("helper_failure", "no image", None),
+        );
+        supervisor.report_file(envelope, Duration::ZERO).await;
+        let result = reports.recv().await.unwrap();
+        assert_eq!(
+            result.body["result"]["drive_sync"]["unmounted"],
+            json!([{"drive_id": "drive_a", "error": "no FUSE: test"}])
+        );
+        assert!(points.checks.lock().unwrap()[0].view_image);
+        assert!(points.points.lock().unwrap().is_empty());
+
+        // An edit has no check.
+        let (mut supervisor, mailbox, _reports, _gone, _) = staged_supervisor(root.path(), false);
+        let points = Arc::new(Points::default());
+        supervisor.spec.drive_sync = Some(points.clone());
+        supervisor.tool = Some(input(
+            "edit",
+            json!({"path": "a.txt", "old_string": "a", "new_string": "b"}),
+        ));
+        mailbox.send(SupervisorMessage::Start).unwrap();
+        let staged = tokio::time::timeout(Duration::from_secs(10), supervisor.staged()).await;
+        assert!(matches!(staged, Ok(Staged::Started(Ok(_)))));
+        assert!(points.checks.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2383,7 +3033,9 @@ mod tests {
         // Model the running loop having ended its bounded wait for exit with
         // a pending capacity error. The child is deliberately still alive.
         supervisor.report_exhausted = true;
-        supervisor.report_start_failure(exec::tool_error("resource_exhausted", "full", None));
+        supervisor
+            .report_start_failure(exec::tool_error("resource_exhausted", "full", None))
+            .await;
         supervisor.context.bounds.gone_check = Duration::from_millis(1);
         let mut settling = Box::pin(supervisor.settle());
         std::future::poll_fn(|cx| {
@@ -2531,6 +3183,7 @@ mod tests {
         output.write(b"finished output\n");
         let task = FinishedTask {
             messages,
+            drive_sync: None,
             reports: Arc::new(Reports {
                 next: AtomicU64::new(1),
                 full: false,

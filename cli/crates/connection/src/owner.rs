@@ -21,6 +21,14 @@
 //! its admission gets a failed preparation report; none changes a task,
 //! binding or result.
 //!
+//! A credential renewal runs on the held connection: the fetch, the write
+//! of `credentials.json` and the resume with the new credential
+//! ([`crate::credential`]). From the first resume attempt with it until
+//! `connected` or the connection's end the owner starts no other request,
+//! and a `401 credential_revoked` answer to a request sent with a credential
+//! no longer in use is not applied: that request is sent again with the new
+//! one. It tells the Report outbox the switch's start and the new key.
+//!
 //! The owner also admits each `session.prepare` before it reaches a Session
 //! binding owner ([`crate::sessions`]) and holds the probe slots
 //! ([`crate::probe_slots`]). Its stop is answered once every probe that
@@ -28,15 +36,16 @@
 //! reported its tasks' processes gone, so that the shutdown waits for them
 //! until its own deadline.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use drive::{DriveSync, DriveTransfer};
 use observe::{Identity, STARTUP, TraceContext};
 use protocol::bootstrap::BootstrapKey;
 use protocol::connection::{
     DisconnectPayload, Downstream, DownstreamPayload, DownstreamType, Envelope, Heartbeat,
-    PreparationError, PreparationErrorCode, SessionOutcome, SessionStatus,
+    LostChange, PreparationError, PreparationErrorCode, SessionOutcome, SessionStatus,
 };
 use protocol::errors::{ErrorBody, ErrorCode};
 use protocol::field::{Nullable, PositiveInt};
@@ -44,20 +53,26 @@ use protocol::fingerprint::fingerprint;
 use protocol::id::{Id, SafeId};
 use protocol::local::{ConnectionState, ErrorObject, SessionEntry, SessionState};
 use protocol::ports::{
-    Close, Prepare, ProbeSlot, ReportSink, SessionFactory, Submission, ToolCall,
+    ActivitySink, Close, Drives, Prepare, ProbeSlot, ReportSink, SessionFactory, Submission,
+    TicketRequest, ToolCall,
 };
 use protocol::time::Rfc3339Utc;
 use protocol::tool::ProtocolVersion;
+use state::clock::Clock;
+use state::paths::StateRoot;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
 use crate::attempt::{self, ATTEMPT_TOTAL, AttemptKind};
 use crate::backoff::{BASE_MAX, BASE_START, Backoff, random_jitter};
 use crate::classify::{self, Read, SessionMessage};
-use crate::clock::Clock;
+use crate::credential::{self, CREDENTIAL_PATH, INVALID_RESPONSE, Renewal};
+use crate::drive_transfer::{DriveLink, HttpDriveTransfer};
+use crate::git_ticket::{self, GIT_TICKET_PATH, TicketFetch};
 use crate::heartbeat::Heartbeats;
 use crate::http::{Answer, REQUEST_TOTAL, Transport};
 use crate::ledger::{self, Entry, EntryState, Ledger, Need, Seen};
+use crate::lost_changes::KeptLostChanges;
 use crate::outbox::{Outbox, OutboxConfig, OutboxEvent, OutboxTimes};
 use crate::probe_slots::{ProbeSlots, SlotLimits};
 use crate::protocol_error::{self, ProtocolErrorKind};
@@ -142,11 +157,15 @@ pub struct Config {
     pub server_url: String,
     pub instance_id: Id,
     pub credential: Credential,
+    /// The state root whose `credentials.json` a renewal replaces.
+    pub state_root: StateRoot,
     pub ready: ReadyFields,
     /// The App Server's start on the seam clock.
     pub started: Duration,
     /// Creates the Session binding owner of each Session.
     pub sessions: Arc<dyn SessionFactory>,
+    /// Told of each tool and local MCP instruction read from the stream.
+    pub activity: Arc<dyn ActivitySink>,
     pub times: Times,
 }
 
@@ -193,9 +212,25 @@ pub(crate) enum Message {
         request: u64,
         answer: Answer,
     },
+    /// The write of `credential` by the task tagged `tag` ended.
+    Persisted {
+        tag: u64,
+        credential: Credential,
+        saved: bool,
+    },
     Outbox(OutboxEvent),
     Port(PortMessage),
     Sessions(oneshot::Sender<SessionsView>),
+    DriveSyncs(DriveSyncs),
+    DriveSyncList(oneshot::Sender<Vec<DriveSync>>),
+}
+
+/// A change of the drive syncs the Connection owner signals.
+pub(crate) enum DriveSyncs {
+    Added(SafeId, DriveSync),
+    Removed(SafeId),
+    Mounted(Id, SafeId),
+    Detached(Id, SafeId),
 }
 
 /// A handle on the Connection owner.
@@ -203,6 +238,7 @@ pub(crate) enum Message {
 pub struct Connection {
     mailbox: mpsc::UnboundedSender<Message>,
     status: tokio::sync::watch::Receiver<ConnectionStatus>,
+    drive_transfer: Arc<HttpDriveTransfer>,
 }
 
 impl std::fmt::Debug for Message {
@@ -218,6 +254,13 @@ impl Connection {
         let (mailbox, inbox) = mpsc::unbounded_channel();
         let (events, reports) = mpsc::unbounded_channel();
         let transport = Arc::new(Transport::new(&config.server_url));
+        let (drive_link, link) = DriveLink::new(config.credential.key.clone());
+        let drive_transfer = Arc::new(HttpDriveTransfer::with_transport(
+            transport.clone(),
+            link,
+            events.clone(),
+            Clock::seams(),
+        ));
         let outbox = Outbox::spawn(OutboxConfig {
             transport: transport.clone(),
             key: config.credential.key.clone(),
@@ -235,13 +278,27 @@ impl Connection {
             sink,
             config.times.records_max,
         );
-        let owner = Owner::new(config, transport, outbox, owners, mailbox.clone());
+        let owner = Owner::new(
+            config,
+            transport,
+            outbox,
+            drive_link,
+            owners,
+            mailbox.clone(),
+        );
         let (status, snapshot) = tokio::sync::watch::channel(owner.status());
         tokio::spawn(own(owner, inbox, reports, status));
         Connection {
             mailbox,
             status: snapshot,
+            drive_transfer,
         }
+    }
+
+    /// The drive transfer client of the connection's credential, for the
+    /// Drive sync owners and the Content cache.
+    pub fn drive_transfer(&self) -> Arc<dyn DriveTransfer> {
+        self.drive_transfer.clone()
     }
 
     /// The last status published by the owner, without waiting for its mailbox.
@@ -255,6 +312,37 @@ impl Connection {
         answer
             .await
             .expect("the Connection owner answers every message")
+    }
+
+    /// Adds `session_id`'s Drive sync owner, which is told of every
+    /// `connected`.
+    pub fn add_drive_sync(&self, session_id: SafeId, sync: DriveSync) {
+        self.send(Message::DriveSyncs(DriveSyncs::Added(session_id, sync)));
+    }
+
+    pub fn remove_drive_sync(&self, session_id: SafeId) {
+        self.send(Message::DriveSyncs(DriveSyncs::Removed(session_id)));
+    }
+
+    /// `session_id`'s drive sync has `drive_id` mounted: it gets the
+    /// drive's `drive.changed` notices until it is detached.
+    pub fn drive_mounted(&self, drive_id: Id, session_id: SafeId) {
+        self.send(Message::DriveSyncs(DriveSyncs::Mounted(
+            drive_id, session_id,
+        )));
+    }
+
+    pub fn drive_detached(&self, drive_id: Id, session_id: SafeId) {
+        self.send(Message::DriveSyncs(DriveSyncs::Detached(
+            drive_id, session_id,
+        )));
+    }
+
+    /// Each Session's Drive sync owner.
+    pub async fn drive_syncs(&self) -> Vec<DriveSync> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Message::DriveSyncList(reply));
+        answer.await.unwrap_or_default()
     }
 
     /// The entries of `GET /v1/sessions`: each Session binding owner's,
@@ -350,6 +438,9 @@ enum Phase {
 struct Attempt {
     stream: u64,
     kind: AttemptKind,
+    /// The credential it authenticates with, the one in use from its
+    /// `connected` on.
+    credential: Credential,
     deadline: Duration,
     task: AbortHandle,
     /// The event limit its stream reads with.
@@ -374,6 +465,12 @@ struct Held {
     routed: HashSet<(String, String)>,
     /// The event limit that a resume's stream starts with.
     event_max_bytes: usize,
+    renewal: Option<Renewal>,
+    /// The credentials of `credential.renew` notices not yet handled, each
+    /// once: those received before `online` and during another renewal.
+    notices: VecDeque<Id>,
+    /// The git-ticket fetches until their answers, by number.
+    tickets: HashMap<u64, TicketFetch>,
 }
 
 enum Stream {
@@ -392,6 +489,9 @@ struct Registration {
     deadline: Duration,
     /// `None` when ready failed its own decoder.
     ready: Option<Outgoing>,
+    /// The `lost_changes` entries kept when ready was built, which its ACK
+    /// removes.
+    lost_changes: Vec<LostChange>,
     staging: Staging<Instruction>,
 }
 
@@ -412,6 +512,9 @@ struct Outgoing {
 enum Operation {
     Ready,
     Heartbeat(HeartbeatRequest),
+    Credential,
+    /// The git-ticket fetch of that number.
+    GitTicket(u64),
 }
 
 #[derive(Clone)]
@@ -425,17 +528,28 @@ struct HeartbeatRequest {
 struct Pending {
     connection: Id,
     operation: Operation,
+    /// The credential the request carries.
+    credential_id: Id,
     task: AbortHandle,
 }
 
 struct Owner {
+    server_url: String,
     instance_id: Id,
+    /// The credential in use, from the `connected` of the attempt that
+    /// carried it.
     credential: Credential,
+    /// A renewed credential written while no connection took it, which the
+    /// next attempt carries, as a restart would.
+    written: Option<Credential>,
+    state_root: StateRoot,
     ready: ReadyFields,
     started: Duration,
     times: Times,
     transport: Arc<Transport>,
     outbox: Outbox,
+    /// The drive transfer client's view of the held connection and its key.
+    drive: DriveLink,
     mailbox: mpsc::UnboundedSender<Message>,
     phase: Phase,
     /// The reconnect backoff; each upstream message has its own.
@@ -448,6 +562,10 @@ struct Owner {
     requests: HashMap<u64, Pending>,
     reported: Reported,
     owners: Owners,
+    /// Each Session's Drive sync owner, and the drive syncs that have each
+    /// drive mounted.
+    drive_syncs: HashMap<SafeId, DriveSync>,
+    mounted_drives: HashMap<Id, BTreeSet<SafeId>>,
     slots: ProbeSlots,
     /// The task pressure point `tetral_tasks`.
     task_pressure: TaskPressure,
@@ -456,6 +574,8 @@ struct Owner {
     stop_replies: Vec<oneshot::Sender<()>>,
     /// The Sessions whose tasks the stop still waits for.
     tasks_pending: BTreeSet<SafeId>,
+    lost_changes: KeptLostChanges,
+    activity: Arc<dyn ActivitySink>,
 }
 
 impl Owner {
@@ -463,20 +583,29 @@ impl Owner {
         config: Config,
         transport: Arc<Transport>,
         outbox: Outbox,
+        drive: DriveLink,
         owners: Owners,
         mailbox: mpsc::UnboundedSender<Message>,
     ) -> Owner {
         let times = config.times;
         Owner {
             owners,
+            drive_syncs: HashMap::new(),
+            mounted_drives: HashMap::new(),
             slots: ProbeSlots::new(times.probe_slots),
             task_pressure: TaskPressure::new(observe::registry(), times.task_pressure_quiet),
             stop_replies: Vec::new(),
             tasks_pending: BTreeSet::new(),
             transport,
             outbox,
+            drive,
+            server_url: config.server_url,
             instance_id: config.instance_id,
             credential: config.credential,
+            written: None,
+            lost_changes: KeptLostChanges::load(&config.state_root),
+            activity: config.activity,
+            state_root: config.state_root,
             ready: config.ready,
             started: config.started,
             times,
@@ -504,7 +633,8 @@ impl Owner {
         } else {
             let kind = AttemptKind::Fresh { previous: None };
             let limit = self.times.event_max_bytes;
-            Phase::Connecting(self.attempt(kind, state::seams::now(), limit))
+            let credential = self.credential.clone();
+            Phase::Connecting(self.attempt(kind, state::seams::now(), limit, credential))
         };
         self.reported.change(self.state());
     }
@@ -528,6 +658,14 @@ impl Owner {
                 let _ = reply.send(self.sessions_view());
                 return;
             }
+            Message::DriveSyncs(change) => {
+                self.drive_syncs_changed(change);
+                return;
+            }
+            Message::DriveSyncList(reply) => {
+                let _ = reply.send(self.drive_syncs.values().cloned().collect());
+                return;
+            }
             _ if matches!(self.phase, Phase::Stopped) => return,
             _ => state::seams::now(),
         };
@@ -537,10 +675,18 @@ impl Owner {
             Message::Event { stream, data } => self.event(phase, stream, data, now),
             Message::StreamEnded { stream } => self.stream_ended(phase, stream, now),
             Message::Answered { request, answer } => self.answered(phase, request, answer, now),
+            Message::Persisted {
+                tag,
+                credential,
+                saved,
+            } => self.persisted(phase, tag, credential, saved, now),
             Message::Outbox(event) => self.outbox_event(phase, event, now),
-            Message::Status(_) | Message::Stop(_) | Message::Port(_) | Message::Sessions(_) => {
-                phase
-            }
+            Message::Status(_)
+            | Message::Stop(_)
+            | Message::Port(_)
+            | Message::Sessions(_)
+            | Message::DriveSyncs(_)
+            | Message::DriveSyncList(_) => phase,
         };
         self.reported.change(self.state());
     }
@@ -618,7 +764,16 @@ impl Owner {
                     self.owners.answer(&next, ProbeSlot::Granted);
                 }
             }
+            PortMessage::GitTicket {
+                session_id,
+                request,
+                connection_id,
+                binding_id,
+            } => self.fetch_git_ticket(session_id, request, &connection_id, &binding_id),
             PortMessage::RecordGone(session_id) => self.owners.record_gone(&session_id),
+            PortMessage::OwnerIdle(session_id, received) => {
+                self.owners.idle(&session_id, received);
+            }
             PortMessage::TasksGone(session_id) => {
                 self.tasks_pending.remove(&session_id);
             }
@@ -633,6 +788,10 @@ impl Owner {
             }
             PortMessage::TaskEnded => self.task_pressure.ended(state::seams::now()),
             PortMessage::TaskRefused => self.task_pressure.refused(state::seams::now()),
+            PortMessage::KeepLostChanges(entries, kept) => {
+                self.lost_changes.keep(entries);
+                (kept.0)();
+            }
         }
     }
 
@@ -694,7 +853,8 @@ impl Owner {
         self.phase = match phase {
             Phase::Waiting { at, kind } if now >= at => {
                 let limit = self.times.event_max_bytes;
-                Phase::Connecting(self.attempt(kind, now, limit))
+                let credential = self.written.clone().unwrap_or(self.credential.clone());
+                Phase::Connecting(self.attempt(kind, now, limit, credential))
             }
             Phase::Connecting(attempt) if now >= attempt.deadline => {
                 self.attempt_failed(Phase::Connecting(attempt), now)
@@ -724,7 +884,12 @@ impl Owner {
                 let kind = AttemptKind::Resume {
                     connection: held.id.clone(),
                 };
-                held.stream = Stream::Resuming(self.attempt(kind, now, held.event_max_bytes));
+                let credential = match &held.renewal {
+                    Some(Renewal::Switching { credential }) => credential.clone(),
+                    _ => self.credential.clone(),
+                };
+                let limit = held.event_max_bytes;
+                held.stream = Stream::Resuming(self.attempt(kind, now, limit, credential));
             }
             Stream::Resuming(attempt) if now >= attempt.deadline => {
                 attempt.task.abort();
@@ -738,8 +903,37 @@ impl Owner {
         Phase::Held(held)
     }
 
-    /// Sends ready and the latest heartbeat again once their retry is due.
+    /// Sends ready, the latest heartbeat and a renewal's fetch again once
+    /// their retry is due; during a switch it sends nothing.
     fn send_due(&mut self, held: &mut Held, now: Duration) {
+        if let Some(Renewal::Fetching { body, retry_at, .. }) = held.renewal.as_mut()
+            && retry_at.is_some_and(|at| now >= at)
+        {
+            *retry_at = None;
+            let body = body.clone();
+            self.post(&held.id, CREDENTIAL_PATH, Operation::Credential, body);
+        }
+        if matches!(held.renewal, Some(Renewal::Switching { .. })) {
+            return;
+        }
+        let due: Vec<u64> = held
+            .tickets
+            .iter_mut()
+            .filter(|(_, fetch)| fetch.retry_at.is_some_and(|at| now >= at))
+            .map(|(number, fetch)| {
+                fetch.retry_at = None;
+                *number
+            })
+            .collect();
+        for number in due {
+            let body = held.tickets[&number].body.clone();
+            self.post(
+                &held.id,
+                GIT_TICKET_PATH,
+                Operation::GitTicket(number),
+                body,
+            );
+        }
         if let Some(ready) = held
             .registration
             .as_mut()
@@ -770,17 +964,23 @@ impl Owner {
         self.last_tag
     }
 
-    /// Starts an attempt whose stream reads events of up to
-    /// `max_event_bytes`, counted as the test seam counter
+    /// Starts an attempt with `credential` whose stream reads events of up
+    /// to `max_event_bytes`, counted as the test seam counter
     /// `connection.attempt`.
-    fn attempt(&mut self, kind: AttemptKind, now: Duration, max_event_bytes: usize) -> Attempt {
+    fn attempt(
+        &mut self,
+        kind: AttemptKind,
+        now: Duration,
+        max_event_bytes: usize,
+        credential: Credential,
+    ) -> Attempt {
         state::seams::count("connection.attempt");
         let stream = self.tag();
         let limit = EventLimit::new(max_event_bytes);
         let task = tokio::spawn(attempt::run(
             self.transport.clone(),
-            self.credential.key.clone(),
-            kind.query(&self.instance_id, &self.credential.credential_id),
+            credential.key.clone(),
+            kind.query(&self.instance_id, &credential.credential_id),
             limit.clone(),
             stream,
             self.mailbox.clone(),
@@ -789,6 +989,7 @@ impl Owner {
         Attempt {
             stream,
             kind,
+            credential,
             deadline: now + self.times.attempt_total,
             task,
             limit,
@@ -811,6 +1012,7 @@ impl Owner {
             Pending {
                 connection: connection.clone(),
                 operation,
+                credential_id: self.credential.credential_id.clone(),
                 task,
             },
         );
@@ -922,6 +1124,7 @@ impl Owner {
             Phase::Connecting(attempt) if attempt.stream == stream => {
                 match attempt.kind.connected(&data) {
                     Some((connection, false)) => {
+                        self.adopt(attempt.credential);
                         self.new_connection(connection, stream, attempt.task, &attempt.limit, now)
                     }
                     _ => Phase::Connecting(attempt),
@@ -933,25 +1136,36 @@ impl Owner {
                         attempt.kind.connected(&data),
                         attempt.task.clone(),
                         attempt.limit.clone(),
+                        attempt.credential.clone(),
                     )),
                     _ => None,
                 };
                 let live =
                     matches!(&held.stream, Stream::Live { stream: live, .. } if *live == stream);
                 match resume {
-                    Some((Some((_, true)), task, _)) => {
+                    Some((Some((_, true)), task, _, credential)) => {
                         held.stream = Stream::Live { stream, task };
                         self.reported.reconnected(Reconnect::Resume);
+                        self.signal_connected();
+                        if matches!(held.renewal, Some(Renewal::Switching { .. })) {
+                            held.renewal = None;
+                            self.adopt(credential);
+                            let key = self.credential.key.clone();
+                            self.drive.switch_ended(&held.id, key.clone());
+                            self.outbox.switch_ended(held.id.clone(), key);
+                            self.next_renewal(&mut held);
+                        }
                         Phase::Held(held)
                     }
-                    Some((Some((connection, false)), task, limit)) => {
+                    Some((Some((connection, false)), task, limit, credential)) => {
                         // The old connection ends, but not this stream, which
                         // carries the new one.
                         held.stream = Stream::Waiting { at: now };
                         self.release_held(*held);
+                        self.adopt(credential);
                         self.new_connection(connection, stream, task, &limit, now)
                     }
-                    Some((None, _, _)) => Phase::Held(held),
+                    Some((None, _, _, _)) => Phase::Held(held),
                     None if live => self.live_event(held, stream, data, now),
                     None => Phase::Held(held),
                 }
@@ -974,14 +1188,21 @@ impl Owner {
     ) -> Phase {
         limit.set(self.times.event_max_bytes);
         STARTUP.first_connected(now);
+        self.signal_connected();
         if self.held_count > 0 {
             self.reported.reconnected(Reconnect::New);
         }
         self.held_count += 1;
         self.last_held = Some(id.clone());
         let tool_execution = self.ready.capabilities.tool_execution.is_some();
-        self.outbox
-            .connection_started(self.held_count, id.clone(), tool_execution);
+        self.drive
+            .connection_started(id.clone(), self.credential.key.clone());
+        self.outbox.connection_started(
+            self.held_count,
+            id.clone(),
+            self.credential.key.clone(),
+            tool_execution,
+        );
         let mut held = Box::new(Held {
             id,
             stream: Stream::Live { stream, task },
@@ -993,9 +1214,19 @@ impl Owner {
             ledger: Ledger::new(self.times.ledger),
             routed: HashSet::new(),
             event_max_bytes: self.times.event_max_bytes,
+            renewal: None,
+            notices: VecDeque::new(),
+            tickets: HashMap::new(),
         });
         let message_id = held.next_message_id();
-        let built = ready::ready(&self.ready, &held.id, message_id.clone(), now);
+        let lost_changes = self.lost_changes.entries().to_vec();
+        let built = ready::ready(
+            &self.ready,
+            &held.id,
+            message_id.clone(),
+            now,
+            &lost_changes,
+        );
         let ready = ready::checked(&built, &held.id, &message_id).map(|body| Outgoing {
             stream,
             message_id,
@@ -1015,6 +1246,7 @@ impl Owner {
         held.registration = Some(Registration {
             deadline: now + self.times.registration_deadline,
             ready,
+            lost_changes,
             staging: Staging::with_capacity(self.times.staging_max),
         });
         Phase::Held(held)
@@ -1037,7 +1269,12 @@ impl Owner {
                 Phase::Held(held)
             }
             Read::Other(envelope, data) => self.connection_message(held, &envelope, &data, now),
-            Read::Session(message) => self.session_instruction(held, stream, message, now),
+            Read::Session(message) => {
+                if message.is_activity() {
+                    self.activity.tool_instruction_arrived(now);
+                }
+                self.session_instruction(held, stream, message, now)
+            }
         }
     }
 
@@ -1129,6 +1366,24 @@ impl Owner {
                 );
                 Phase::Held(held)
             }
+            DownstreamPayload::DriveChanged(notice) => {
+                // No ACK; a notice for a drive no drive sync has mounted goes.
+                for session in self
+                    .mounted_drives
+                    .get(&notice.drive_id)
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(sync) = self.drive_syncs.get(session) {
+                        sync.drive_changed(notice.drive_id.clone(), notice.seq.get());
+                    }
+                }
+                Phase::Held(held)
+            }
+            DownstreamPayload::CredentialRenew(renew) => {
+                self.renewal_notice(&mut held, renew.credential_id);
+                Phase::Held(held)
+            }
             DownstreamPayload::Disconnect(DisconnectPayload::Stream { .. }) => {
                 if let Stream::Live { task, .. } = &held.stream {
                     task.abort();
@@ -1151,6 +1406,43 @@ impl Owner {
                 self.blocked(Phase::Held(held), error)
             }
             _ => Phase::Held(held),
+        }
+    }
+
+    fn drive_syncs_changed(&mut self, change: DriveSyncs) {
+        match change {
+            DriveSyncs::Added(session, sync) => {
+                self.drive_syncs.insert(session, sync);
+            }
+            DriveSyncs::Removed(session) => {
+                self.drive_syncs.remove(&session);
+                for sessions in self.mounted_drives.values_mut() {
+                    sessions.remove(&session);
+                }
+                self.mounted_drives
+                    .retain(|_, sessions| !sessions.is_empty());
+            }
+            DriveSyncs::Mounted(drive, session) => {
+                self.mounted_drives
+                    .entry(drive)
+                    .or_default()
+                    .insert(session);
+            }
+            DriveSyncs::Detached(drive, session) => {
+                if let Some(sessions) = self.mounted_drives.get_mut(&drive) {
+                    sessions.remove(&session);
+                    if sessions.is_empty() {
+                        self.mounted_drives.remove(&drive);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every drive sync catches up after each `connected`, resumed or not.
+    fn signal_connected(&self) {
+        for sync in self.drive_syncs.values() {
+            sync.connected();
         }
     }
 
@@ -1178,6 +1470,7 @@ impl Owner {
                     Stream::Waiting { .. } | Stream::Resuming(_) => None,
                 };
                 held.ledger.final_acked(&instruction, current);
+                self.lost_changes.report_acked(&instruction);
                 state::seams::count("connection.final_acked");
                 Phase::Held(held)
             }
@@ -1260,12 +1553,33 @@ impl Owner {
             return phase;
         };
         state::seams::count("connection.answered");
-        let held = match phase {
+        let mut held = match phase {
             Phase::Held(held) if held.id == pending.connection => held,
             other => return other,
         };
+        let switching = matches!(held.renewal, Some(Renewal::Switching { .. }));
+        if let Answer::Refused(error) = &answer
+            && error.code == ErrorCode::CredentialRevoked
+            && (switching || pending.credential_id != self.credential.credential_id)
+        {
+            held.send_again(&pending.operation, now);
+            return Phase::Held(held);
+        }
         match (answer, pending.operation) {
+            (Answer::Refused(error), Operation::Credential) if !ends_connection(&error) => {
+                self.fetch_rejected(&mut held, error.code.as_str());
+                Phase::Held(held)
+            }
+            (Answer::Refused(error), Operation::GitTicket(number)) if !ends_connection(&error) => {
+                self.ticket_answered(&mut held, number, Answer::Refused(error), now);
+                Phase::Held(held)
+            }
             (Answer::Refused(error), _) => self.request_refused(held, &error, now),
+            (answer, Operation::Credential) => self.credential_answered(held, answer, now),
+            (answer, Operation::GitTicket(number)) => {
+                self.ticket_answered(&mut held, number, answer, now);
+                Phase::Held(held)
+            }
             (answer, Operation::Ready) => self.ready_answered(held, &answer, now),
             (answer, Operation::Heartbeat(heartbeat)) => {
                 self.heartbeat_answered(held, &answer, heartbeat, now)
@@ -1306,10 +1620,12 @@ impl Owner {
                 state::seams::count("connection.granted");
                 self.last_error = None;
                 let staged = registration.staging.open();
+                self.lost_changes.ready_acked(&registration.lost_changes);
                 held_ref.registration = None;
                 for instruction in staged {
                     self.route(held_ref, instruction);
                 }
+                self.next_renewal(held_ref);
             }
             None => {
                 let at = now + ready.backoff.next_wait();
@@ -1460,10 +1776,235 @@ fn instruction_span(
 }
 
 impl Owner {
+    /// Takes `credential` as the one in use, from the `connected` of the
+    /// attempt that carried it.
+    fn adopt(&mut self, credential: Credential) {
+        if credential.credential_id != self.credential.credential_id {
+            self.credential = credential;
+        }
+        self.written = None;
+    }
+
+    /// A `credential.renew` for `credential_id`. One for the credential of
+    /// the running renewal, or already waiting, changes nothing.
+    fn renewal_notice(&mut self, held: &mut Held, credential_id: Id) {
+        let running = held
+            .renewal
+            .as_ref()
+            .is_some_and(|renewal| *renewal.credential_id() == credential_id);
+        if running || held.notices.contains(&credential_id) {
+            return;
+        }
+        held.notices.push_back(credential_id);
+        self.next_renewal(held);
+    }
+
+    /// Fetches the credential of the next notice, once the connection is
+    /// `online` and no renewal runs.
+    fn next_renewal(&mut self, held: &mut Held) {
+        if held.registration.is_some() || held.renewal.is_some() {
+            return;
+        }
+        while let Some(credential_id) = held.notices.pop_front() {
+            let message_id = held.next_message_id();
+            let Some(body) = credential::request(&held.id, &message_id, &credential_id) else {
+                continue;
+            };
+            self.post(
+                &held.id,
+                CREDENTIAL_PATH,
+                Operation::Credential,
+                body.clone(),
+            );
+            held.renewal = Some(Renewal::Fetching {
+                credential_id,
+                body,
+                backoff: self.message_backoff(),
+                retry_at: None,
+            });
+            return;
+        }
+    }
+
+    /// A fetch's answer that is never sent again: the credential in use
+    /// stays.
+    fn fetch_rejected(&mut self, held: &mut Held, code: &'static str) {
+        if let Some(renewal) = held.renewal.take() {
+            credential::rejected(renewal.credential_id(), code);
+        }
+        self.next_renewal(held);
+    }
+
+    /// A `2xx` answer or no answer to the fetch: the credential is written,
+    /// or the fetch is sent again within the connection deadline.
+    fn credential_answered(&mut self, mut held: Box<Held>, answer: Answer, now: Duration) -> Phase {
+        let Some(Renewal::Fetching {
+            credential_id,
+            backoff,
+            retry_at,
+            ..
+        }) = held.renewal.as_mut()
+        else {
+            return Phase::Held(held);
+        };
+        match answer {
+            Answer::Success(body) => match credential::fetched(&body, credential_id) {
+                Some(credential) => self.persist(&mut held, credential),
+                None => self.fetch_rejected(&mut held, INVALID_RESPONSE),
+            },
+            // The connection's end ends the renewal, so a retry past the
+            // current deadline is kept: heartbeat ACKs move the deadline.
+            _ => *retry_at = Some(now + backoff.next_wait()),
+        }
+        Phase::Held(held)
+    }
+
+    /// Writes `credential` in a task of its own; the test seam barrier
+    /// `renewal.persisted` follows a write that succeeded.
+    fn persist(&mut self, held: &mut Held, credential: Credential) {
+        let tag = self.tag();
+        let root = self.state_root.clone();
+        let server_url = self.server_url.clone();
+        let instance_id = self.instance_id.clone();
+        let mailbox = self.mailbox.clone();
+        let written = credential.clone();
+        tokio::spawn(async move {
+            let writing = written.clone();
+            let saved = tokio::task::spawn_blocking(move || {
+                credential::persist(&root, &server_url, &instance_id, &writing).is_ok()
+            })
+            .await
+            .unwrap_or(false);
+            if saved {
+                state::seams::barrier("renewal.persisted").await;
+            }
+            let _ = mailbox.send(Message::Persisted {
+                tag,
+                credential: written,
+                saved,
+            });
+        });
+        held.renewal = Some(Renewal::Persisting { credential, tag });
+    }
+
+    /// The end of a write. Once written, the stream closes and the resume
+    /// with the new credential starts at the owner's next check; a write of
+    /// a renewal no longer running leaves the credential for the next
+    /// attempt, which reads the same file a restart would.
+    fn persisted(
+        &mut self,
+        phase: Phase,
+        tag: u64,
+        credential: Credential,
+        saved: bool,
+        now: Duration,
+    ) -> Phase {
+        let mut held = match phase {
+            Phase::Held(held) if matches!(&held.renewal, Some(Renewal::Persisting { tag: running, .. }) if *running == tag) => {
+                held
+            }
+            other => {
+                if saved {
+                    self.written = Some(credential);
+                }
+                return other;
+            }
+        };
+        if !saved {
+            held.renewal = None;
+            self.next_renewal(&mut held);
+            return Phase::Held(held);
+        }
+        self.drive.switch_started(&held.id);
+        self.outbox.switch_started(held.id.clone());
+        match std::mem::replace(&mut held.stream, Stream::Waiting { at: now }) {
+            Stream::Live { task, .. } => task.abort(),
+            Stream::Resuming(attempt) => attempt.task.abort(),
+            Stream::Waiting { .. } => {}
+        }
+        held.renewal = Some(Renewal::Switching { credential });
+        Phase::Held(held)
+    }
+
+    /// Fetches a git ticket for a binding of the held connection; a fetch
+    /// asked for during a credential switch goes once the switch ends, and
+    /// one for another connection gets no answer, since that connection's
+    /// end has ended its preparation.
+    fn fetch_git_ticket(
+        &mut self,
+        session_id: SafeId,
+        request: TicketRequest,
+        connection_id: &Id,
+        binding_id: &Id,
+    ) {
+        let backoff = self.message_backoff();
+        let Phase::Held(held) = &mut self.phase else {
+            return;
+        };
+        if held.id != *connection_id {
+            return;
+        }
+        let message_id = held.next_message_id();
+        let Some(body) = git_ticket::request(&held.id, &message_id, binding_id) else {
+            self.owners.git_ticket(
+                &session_id,
+                request,
+                Err("the git ticket request failed its own check".to_owned()),
+            );
+            return;
+        };
+        self.last_tag += 1;
+        let number = self.last_tag;
+        let switching = matches!(held.renewal, Some(Renewal::Switching { .. }));
+        held.tickets.insert(
+            number,
+            TicketFetch {
+                session_id,
+                request,
+                body: body.clone(),
+                backoff,
+                retry_at: switching.then(state::seams::now),
+            },
+        );
+        if !switching {
+            let connection = held.id.clone();
+            self.post(
+                &connection,
+                GIT_TICKET_PATH,
+                Operation::GitTicket(number),
+                body,
+            );
+        }
+    }
+
+    /// The answer to the git-ticket fetch `number`: the Session binding
+    /// owner gets the ticket or the failure's message. A fetch that got no
+    /// answer is sent again when its next attempt starts before the
+    /// connection deadline, and fails otherwise.
+    fn ticket_answered(&mut self, held: &mut Held, number: u64, answer: Answer, now: Duration) {
+        let Some(fetch) = held.tickets.get_mut(&number) else {
+            return;
+        };
+        if matches!(answer, Answer::Failed(_)) {
+            let at = now + fetch.backoff.next_wait();
+            if held.deadline.is_some_and(|deadline| at < deadline) {
+                fetch.retry_at = Some(at);
+                return;
+            }
+        }
+        let answer = git_ticket::answer(answer);
+        let fetch = held.tickets.remove(&number).expect("the fetch is pending");
+        self.owners
+            .git_ticket(&fetch.session_id, fetch.request, answer);
+    }
+
     /// Closes the connection's stream; the outbox drops its reports, the
     /// waiting probe-slot requests are cancelled and every Session binding
     /// owner ends the connection's bindings.
     fn release_held(&mut self, held: Held) {
+        if let Some(Renewal::Switching { credential }) = held.renewal {
+            self.written = Some(credential);
+        }
         match held.stream {
             Stream::Live { task, .. } => task.abort(),
             Stream::Resuming(attempt) => attempt.task.abort(),
@@ -1473,19 +2014,21 @@ impl Owner {
             self.owners.answer(&requester, ProbeSlot::Cancelled);
         }
         self.owners.connection_ended(&held.id);
+        self.drive.connection_ended(&held.id);
         self.outbox.connection_ended(held.id);
     }
 
     /// Hands a Session instruction on once the ready ACK came, counted as
     /// the test seam counter `route.session`: a `session.prepare`, a
-    /// `session.close` or a tool instruction to the Session binding owner of
-    /// its `session_id`.
+    /// `session.close`, a `session.drives` or a tool instruction to the
+    /// Session binding owner of its `session_id`.
     fn route(&mut self, held: &mut Held, instruction: Instruction) {
         state::seams::count("route.session");
         let _entered = instruction.span.clone().entered();
         match instruction.message.envelope.kind {
             DownstreamType::SessionPrepare => self.route_prepare(held, instruction),
             DownstreamType::SessionClose => self.route_close(held, &instruction),
+            DownstreamType::SessionDrives => self.route_drives(held, &instruction),
             DownstreamType::ToolExecute
             | DownstreamType::ToolStdin
             | DownstreamType::ToolCancel => self.route_tool(held, instruction),
@@ -1636,9 +2179,81 @@ impl Owner {
         };
         self.owners.close(&close.session_id, close_message);
     }
+
+    /// Hands a `session.drives` to its Session's owner; one whose binding
+    /// no `session.prepare` of this connection named is a protocol error.
+    fn route_drives(&mut self, held: &Held, instruction: &Instruction) {
+        let message = &instruction.message;
+        let Ok(Downstream {
+            payload: DownstreamPayload::SessionDrives(drives),
+            ..
+        }) = protocol::decode::<Downstream>(message.data.as_bytes())
+        else {
+            return;
+        };
+        let routed = (
+            drives.session_id.as_str().to_owned(),
+            drives.binding_id.as_str().to_owned(),
+        );
+        if !held.routed.contains(&routed) {
+            return self.protocol_error(
+                &held.id,
+                ProtocolErrorKind::UnknownBinding,
+                Some(message.envelope.message_id.clone()),
+                instruction.trace.as_ref(),
+            );
+        }
+        let drives_message = Drives {
+            connection_id: held.id.clone(),
+            message_id: message.envelope.message_id.clone(),
+            binding_id: drives.binding_id,
+            drives: drives.drives,
+            traceparent: instruction
+                .trace
+                .as_ref()
+                .map(|trace| trace.header_value().to_owned()),
+        };
+        self.owners.drives(&drives.session_id, drives_message);
+    }
 }
 
 impl Held {
+    /// Sends `operation` again at the end of the switch, or at once when
+    /// none runs: a `401 credential_revoked` answered it under a credential
+    /// that is being or has been replaced.
+    fn send_again(&mut self, operation: &Operation, now: Duration) {
+        match operation {
+            Operation::Ready => {
+                if let Some(ready) = self
+                    .registration
+                    .as_mut()
+                    .and_then(|registration| registration.ready.as_mut())
+                {
+                    ready.retry_at = Some(now);
+                }
+            }
+            Operation::Heartbeat(heartbeat) => {
+                if let Some(latest) = self
+                    .heartbeat
+                    .as_mut()
+                    .filter(|latest| latest.seq == heartbeat.seq)
+                {
+                    latest.retry_at = Some(now);
+                }
+            }
+            Operation::Credential => {
+                if let Some(Renewal::Fetching { retry_at, .. }) = self.renewal.as_mut() {
+                    *retry_at = Some(now);
+                }
+            }
+            Operation::GitTicket(number) => {
+                if let Some(fetch) = self.tickets.get_mut(number) {
+                    fetch.retry_at = Some(now);
+                }
+            }
+        }
+    }
+
     fn next_message_id(&mut self) -> Id {
         self.messages += 1;
         Id::new(format!("c{}", self.messages)).expect("c<n> is an Id")
@@ -1661,6 +2276,14 @@ impl Held {
             self.heartbeat
                 .as_ref()
                 .and_then(|heartbeat| heartbeat.retry_at),
+            match &self.renewal {
+                Some(Renewal::Fetching { retry_at, .. }) => *retry_at,
+                _ => None,
+            },
+            self.tickets
+                .values()
+                .filter_map(|fetch| fetch.retry_at)
+                .min(),
             stream,
         ]
         .into_iter()
@@ -1668,6 +2291,15 @@ impl Held {
         .min()
         .unwrap_or(Duration::MAX)
     }
+}
+
+/// Whether a refusal ends the connection or blocks it ([`Owner::request_refused`]).
+fn ends_connection(error: &ErrorBody) -> bool {
+    matches!(error.code.status(), 401 | 403)
+        || matches!(
+            error.code,
+            ErrorCode::ConnectionConflict | ErrorCode::StaleConnection
+        )
 }
 
 fn error_object(error: &ErrorBody) -> ErrorObject {
@@ -1681,6 +2313,24 @@ fn code_text(code: ErrorCode) -> String {
     match serde_json::to_value(code) {
         Ok(serde_json::Value::String(text)) => text,
         _ => unreachable!("an error code serializes as its name"),
+    }
+}
+
+impl drive::mount::Registry for Connection {
+    fn add(&self, session_id: SafeId, sync: DriveSync) {
+        self.add_drive_sync(session_id, sync);
+    }
+
+    fn remove(&self, session_id: SafeId) {
+        self.remove_drive_sync(session_id);
+    }
+
+    fn mounted(&self, drive_id: Id, session_id: SafeId) {
+        self.drive_mounted(drive_id, session_id);
+    }
+
+    fn detached(&self, drive_id: Id, session_id: SafeId) {
+        self.drive_detached(drive_id, session_id);
     }
 }
 
@@ -1699,7 +2349,63 @@ mod tests {
             _: Arc<dyn protocol::ports::ConnectionPort>,
             _: Arc<dyn ReportSink>,
         ) -> Arc<dyn protocol::ports::SessionHandle> {
-            panic!("this connection fixture admits no Session")
+            Arc::new(Silent)
+        }
+        fn unbound_tool(&self, _: ToolCall, _: Arc<dyn ReportSink>) {
+            panic!("this connection fixture admits no tools")
+        }
+    }
+
+    /// The owner a close creates in this fixture: it answers nothing.
+    struct Silent;
+
+    impl protocol::ports::SessionHandle for Silent {
+        fn prepare(&self, _: Prepare) {}
+        fn close(&self, _: Close) {}
+        fn drives(&self, _: Drives) {}
+        fn tool(&self, _: ToolCall) {}
+        fn probe_slot(&self, _: protocol::ports::ProbeRequest, _: ProbeSlot) {}
+        fn git_ticket(&self, _: TicketRequest, _: protocol::ports::TicketAnswer) {}
+        fn connection_ended(&self, _: Id) {}
+        fn shutdown(&self) {}
+        fn entries(&self, reply: protocol::ports::EntriesReply) {
+            reply(Vec::new());
+        }
+        fn end(&self) {}
+    }
+
+    /// Session owners that keep each git ticket answer they are given, as
+    /// (request, whether it failed).
+    #[derive(Default)]
+    struct TicketAnswers(std::sync::Mutex<Vec<(u64, bool)>>);
+
+    impl protocol::ports::SessionHandle for TicketAnswers {
+        fn prepare(&self, _: Prepare) {}
+        fn close(&self, _: Close) {}
+        fn drives(&self, _: Drives) {}
+        fn tool(&self, _: ToolCall) {}
+        fn probe_slot(&self, _: protocol::ports::ProbeRequest, _: ProbeSlot) {}
+        fn git_ticket(&self, request: TicketRequest, answer: protocol::ports::TicketAnswer) {
+            self.0.lock().unwrap().push((request.0, answer.is_err()));
+        }
+        fn connection_ended(&self, _: Id) {}
+        fn shutdown(&self) {}
+        fn entries(&self, reply: protocol::ports::EntriesReply) {
+            reply(Vec::new());
+        }
+        fn end(&self) {}
+    }
+
+    struct TicketFactory(Arc<TicketAnswers>);
+
+    impl SessionFactory for TicketFactory {
+        fn create(
+            &self,
+            _: SafeId,
+            _: Arc<dyn protocol::ports::ConnectionPort>,
+            _: Arc<dyn ReportSink>,
+        ) -> Arc<dyn protocol::ports::SessionHandle> {
+            self.0.clone()
         }
         fn unbound_tool(&self, _: ToolCall, _: Arc<dyn ReportSink>) {
             panic!("this connection fixture admits no tools")
@@ -1715,6 +2421,15 @@ mod tests {
     fn owner_at(
         budget: Arc<crate::report_memory::Budget>,
         server_url: &str,
+    ) -> (Owner, mpsc::UnboundedReceiver<OutboxEvent>) {
+        let root = StateRoot::new(std::env::temp_dir().as_os_str()).unwrap();
+        owner_rooted(budget, server_url, root)
+    }
+
+    fn owner_rooted(
+        budget: Arc<crate::report_memory::Budget>,
+        server_url: &str,
+        state_root: StateRoot,
     ) -> (Owner, mpsc::UnboundedReceiver<OutboxEvent>) {
         let bootstrap = protocol::bootstrap::Bootstrap::decode(
             br#"{"server_url":"http://127.0.0.1:1","instance_id":"inst_a","credential_id":"cred_a","connection_key":"tetral_ck_a","expires_at":"2099-01-01T00:00:00Z"}"#,
@@ -1734,8 +2449,10 @@ mod tests {
                 )
                 .unwrap(),
             },
+            state_root,
             started: Duration::ZERO,
             sessions: Arc::new(NoSessions),
+            activity: Arc::new(protocol::ports::NoActivity),
             times: Times::default(),
         };
         let transport = Arc::new(Transport::new(&config.server_url));
@@ -1759,7 +2476,8 @@ mod tests {
             Arc::new(outbox.clone()),
             128,
         );
-        let mut owner = Owner::new(config, transport, outbox, owners, mailbox);
+        let drive = DriveLink::new(config.credential.key.clone()).0;
+        let mut owner = Owner::new(config, transport, outbox, drive, owners, mailbox);
         owner.backoff = Backoff::new(BASE_START, BASE_MAX, || 0.0);
         (owner, reports)
     }
@@ -1781,6 +2499,9 @@ mod tests {
                 ledger: Ledger::new(ledger::Limits::default()),
                 routed: HashSet::new(),
                 event_max_bytes: crate::stream::TOOL_EVENT_MAX_BYTES,
+                renewal: None,
+                notices: VecDeque::new(),
+                tickets: HashMap::new(),
             }),
             task,
         )
@@ -1853,6 +2574,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_credential_fetch_is_retried_past_the_deadline_and_a_ticket_fetch_fails_there() {
+        let (mut owner, _) = owner_with_budget(crate::report_memory::Budget::new(512, 512));
+        let (mut held, task) = held(1);
+        held.deadline = Some(Duration::from_secs(10));
+        let backoff = || Backoff::new(Duration::from_secs(30), BASE_MAX, || 0.0);
+        held.renewal = Some(Renewal::Fetching {
+            credential_id: Id::new("cred_b").unwrap(),
+            body: Vec::new(),
+            backoff: backoff(),
+            retry_at: None,
+        });
+        let failed = || Answer::Failed(crate::http::Failure::Server);
+        let Phase::Held(mut held) = owner.credential_answered(held, failed(), Duration::ZERO)
+        else {
+            panic!("held connection");
+        };
+        // Heartbeat ACKs may still move the deadline past the retry.
+        assert!(matches!(
+            held.renewal,
+            Some(Renewal::Fetching { retry_at: Some(at), .. }) if at == Duration::from_secs(30)
+        ));
+        let fetch = |request, backoff| TicketFetch {
+            session_id: SafeId::new("sess_a").unwrap(),
+            request,
+            body: Vec::new(),
+            backoff,
+            retry_at: None,
+        };
+        held.tickets.insert(
+            1,
+            fetch(
+                TicketRequest(1),
+                Backoff::new(Duration::from_secs(1), BASE_MAX, || 0.0),
+            ),
+        );
+        held.tickets.insert(2, fetch(TicketRequest(2), backoff()));
+        let answers = Arc::new(TicketAnswers::default());
+        let (mailbox, _inbox) = mpsc::unbounded_channel();
+        owner.owners = Owners::new(
+            Arc::new(TicketFactory(answers.clone())),
+            Arc::new(Port { mailbox }),
+            Arc::new(owner.outbox.clone()),
+            128,
+        );
+        owner.owners.close(
+            &SafeId::new("sess_a").unwrap(),
+            Close {
+                connection_id: Id::new("conn_a").unwrap(),
+                message_id: Id::new("msg_a").unwrap(),
+                binding_id: Id::new("bind_a").unwrap(),
+            },
+        );
+        owner.ticket_answered(&mut held, 1, failed(), Duration::ZERO);
+        owner.ticket_answered(&mut held, 2, failed(), Duration::ZERO);
+        assert_eq!(held.tickets[&1].retry_at, Some(Duration::from_secs(1)));
+        assert!(!held.tickets.contains_key(&2));
+        assert_eq!(
+            *answers.0.lock().unwrap(),
+            [(2, true)],
+            "only the fetch past the deadline is answered, with its failure"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn each_resumed_streams_own_heartbeat_resets_backoff_and_old_acks_do_not() {
         let (mut owner, _) = owner_with_budget(crate::report_memory::Budget::new(512, 512));
         for stream in 1..=3 {
@@ -1893,6 +2679,206 @@ mod tests {
             matches!(held.stream, Stream::Waiting { at } if at == Duration::from_secs(6)),
             "the old ACK did not reset the four-second recovery wait"
         );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn credential_revoked_sends_a_heartbeat_of_the_old_credential_again_and_blocks_on_the_current_one()
+     {
+        let revoked = || {
+            Answer::Refused(ErrorBody {
+                code: ErrorCode::CredentialRevoked,
+                message: String::new(),
+                retry_after_ms: None,
+                missing_sha256: None,
+            })
+        };
+        // (the credential the heartbeat carried, whether it is sent again)
+        for (carried, again) in [("cred_old", true), ("cred_a", false)] {
+            let (mut owner, _) = owner_with_budget(crate::report_memory::Budget::new(512, 512));
+            let (mut held, task) = held(1);
+            let (heartbeat, _) = heartbeat_ack(1, 1);
+            held.heartbeat = Some(Outgoing {
+                stream: 1,
+                message_id: heartbeat.message_id.clone(),
+                body: Vec::new(),
+                first_send: Duration::ZERO,
+                seq: 1,
+                backoff: Backoff::new(BASE_START, BASE_MAX, || 0.0),
+                retry_at: None,
+            });
+            owner.requests.insert(
+                7,
+                Pending {
+                    connection: held.id.clone(),
+                    operation: Operation::Heartbeat(heartbeat),
+                    credential_id: Id::new(carried).unwrap(),
+                    task: task.abort_handle(),
+                },
+            );
+            let now = Duration::from_secs(5);
+            match owner.answered(Phase::Held(held), 7, revoked(), now) {
+                Phase::Held(held) if again => {
+                    assert_eq!(held.heartbeat.unwrap().retry_at, Some(now));
+                }
+                Phase::Blocked if !again => {}
+                _ => panic!("{carried}: sent again {again} expected"),
+            }
+            task.abort();
+        }
+    }
+
+    /// A Session's drive sync under `root` that mounts nothing and whose
+    /// requests go nowhere.
+    async fn drive_sync(root: &std::path::Path, session: &str) -> DriveSync {
+        struct NoRegistry;
+        impl drive::mount::Registry for NoRegistry {
+            fn add(&self, _: SafeId, _: DriveSync) {}
+            fn remove(&self, _: SafeId) {}
+            fn mounted(&self, _: Id, _: SafeId) {}
+            fn detached(&self, _: Id, _: SafeId) {}
+        }
+        struct NoTasks;
+        impl protocol::ports::TaskOwnership for NoTasks {
+            fn task_of(&self, _: u32, reply: protocol::ports::TaskOwnerReply) {
+                reply(None);
+            }
+        }
+        struct NoReports;
+        impl ReportSink for NoReports {
+            fn submit(&self, _: Submission) -> protocol::ports::ReportId {
+                protocol::ports::ReportId(0)
+            }
+            fn cancel(&self, _: protocol::ports::ReportId) {}
+            fn add_final(&self, _: protocol::ports::ReportId, _: Id) {}
+        }
+        let key = protocol::bootstrap::Bootstrap::decode(
+            br#"{"server_url":"http://127.0.0.1:1","instance_id":"inst_a","credential_id":"cred_a","connection_key":"tetral_ck_a","expires_at":"2099-01-01T00:00:00Z"}"#,
+        )
+        .unwrap()
+        .connection_key;
+        let clock = Clock::new(|| Duration::ZERO, Duration::from_millis(1));
+        let (events, _) = mpsc::unbounded_channel();
+        let transfer: Arc<dyn DriveTransfer> =
+            Arc::new(crate::drive_transfer::HttpDriveTransfer::new(
+                "http://127.0.0.1:1",
+                DriveLink::new(key).1,
+                events,
+                clock.clone(),
+            ));
+        let cache = drive::cache::ContentCache::spawn(drive::cache::CacheConfig {
+            root: root.to_owned(),
+            transfer: transfer.clone(),
+            clock: clock.clone(),
+            free_space: Arc::new(|| Ok(u64::MAX)),
+        })
+        .unwrap();
+        let session_dir = root.join("sessions").join(session);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let state = drive::state::SyncState::create(&session_dir.join("sync-state.db"))
+            .await
+            .unwrap();
+        DriveSync::spawn(drive::SyncConfig {
+            session_id: SafeId::new(session).unwrap(),
+            root: root.to_owned(),
+            state,
+            transfer,
+            cache,
+            tasks: Arc::new(NoTasks),
+            mounting: drive::mount::Mounting::Fuse,
+            registry: Arc::new(NoRegistry),
+            clock,
+            reports: Arc::new(NoReports),
+        })
+    }
+
+    fn downstream(connection: &str, message_id: &str, kind: &str, payload: Value) -> String {
+        json!({
+            "protocol_version": 1, "connection_id": connection, "message_id": message_id,
+            "type": kind, "payload": payload,
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn every_connected_reaches_every_drive_sync_and_drive_changed_those_that_mounted_its_drive()
+     {
+        let root = tempfile::tempdir().unwrap();
+        let (mut owner, _) = owner_with_budget(crate::report_memory::Budget::new(512, 512));
+        let (a, b) = (
+            drive_sync(root.path(), "sess_a").await,
+            drive_sync(root.path(), "sess_b").await,
+        );
+        let session = |text: &str| SafeId::new(text).unwrap();
+        for change in [
+            DriveSyncs::Added(session("sess_a"), a.clone()),
+            DriveSyncs::Added(session("sess_b"), b.clone()),
+            DriveSyncs::Mounted(id_of("drive_a"), session("sess_a")),
+            DriveSyncs::Mounted(id_of("drive_b"), session("sess_a")),
+            DriveSyncs::Mounted(id_of("drive_b"), session("sess_b")),
+        ] {
+            owner.drive_syncs_changed(change);
+        }
+        let now = Duration::from_secs(1);
+        let (held, task) = held(1);
+        let mut phase = Phase::Held(held);
+        let changed = |drive: &str, seq: i64| {
+            downstream(
+                "conn_a",
+                &format!("msg_changed_{seq}"),
+                "drive.changed",
+                json!({"drive_id": drive, "seq": seq}),
+            )
+        };
+        for (drive, seq) in [("drive_a", 5), ("drive_b", 6), ("drive_c", 7)] {
+            phase = owner.event(phase, 1, changed(drive, seq), now);
+        }
+        owner.drive_syncs_changed(DriveSyncs::Detached(id_of("drive_b"), session("sess_b")));
+        phase = owner.event(phase, 1, changed("drive_b", 8), now);
+
+        // A resumed connected, then a new connection's.
+        let credential = owner.credential.clone();
+        let attempt = |stream, kind| Attempt {
+            stream,
+            kind,
+            credential: credential.clone(),
+            deadline: Duration::from_secs(60),
+            task: task.abort_handle(),
+            limit: EventLimit::new(1_024),
+        };
+        let Phase::Held(mut held) = phase else {
+            panic!("held connection");
+        };
+        held.stream = Stream::Resuming(attempt(
+            2,
+            AttemptKind::Resume {
+                connection: id_of("conn_a"),
+            },
+        ));
+        let connected = |connection: &str, resumed: bool| {
+            downstream(
+                connection,
+                "msg_connected",
+                "connected",
+                json!({"resumed": resumed}),
+            )
+        };
+        let phase = owner.event(Phase::Held(held), 2, connected("conn_a", true), now);
+        assert!(
+            matches!(&phase, Phase::Held(held) if matches!(held.stream, Stream::Live { stream: 2, .. }))
+        );
+        let fresh = attempt(3, AttemptKind::Fresh { previous: None });
+        let phase = owner.event(Phase::Connecting(fresh), 3, connected("conn_b", false), now);
+        assert!(matches!(&phase, Phase::Held(held) if held.id.as_str() == "conn_b"));
+
+        let seqs = |pairs: &[(&str, i64)]| {
+            (pairs.iter().map(|(drive, seq)| ((*drive).to_owned(), *seq))).collect()
+        };
+        assert_eq!(
+            a.notices_taken().await,
+            (2, seqs(&[("drive_a", 5), ("drive_b", 8)]))
+        );
+        assert_eq!(b.notices_taken().await, (2, seqs(&[("drive_b", 6)])));
         task.abort();
     }
 
@@ -1947,7 +2933,7 @@ mod tests {
         let connection = held.id.clone();
         owner
             .outbox
-            .connection_started(1, connection.clone(), false);
+            .connection_started(1, connection.clone(), owner.credential.key.clone(), false);
         owner.phase = Phase::Held(held);
         owner.handle(Message::Event {
             stream: 1,
@@ -2005,7 +2991,7 @@ mod tests {
         owner.last_held = Some(connection.clone());
         owner
             .outbox
-            .connection_started(1, connection.clone(), false);
+            .connection_started(1, connection.clone(), owner.credential.key.clone(), false);
         owner.phase = Phase::Held(held);
         let report =
             protocol_error::report(connection.clone(), ProtocolErrorKind::Unparseable, None);
@@ -2199,5 +3185,209 @@ mod tests {
             assert_eq!(admit(&mut ledger, &routed, &message, 1), admitted, "{name}");
         }
         assert_eq!(ledger.len(), 3);
+    }
+
+    /// An owner of the state root at `root`, as an App Server start makes it.
+    fn started_in(root: &std::path::Path) -> Owner {
+        let root = StateRoot::new(root.as_os_str()).unwrap();
+        let budget = crate::report_memory::Budget::new(512, 512);
+        owner_rooted(budget, "http://127.0.0.1:1", root).0
+    }
+
+    fn lost(request: &str, drive: &str) -> LostChange {
+        serde_json::from_value(json!({
+            "request_message_id": request, "drive_id": drive,
+            "paths": ["a.txt"], "paths_total": 1,
+        }))
+        .unwrap()
+    }
+
+    fn keep(owner: &mut Owner, entries: Vec<LostChange>) {
+        let (sent, kept) = std::sync::mpsc::channel();
+        owner.port_message(PortMessage::KeepLostChanges(
+            entries,
+            crate::sessions::Kept(Box::new(move || sent.send(()).unwrap())),
+        ));
+        kept.try_recv().expect("kept is answered");
+    }
+
+    /// The ready a new connection `id` sends, and the connection.
+    fn ready_of(owner: &mut Owner, id: &str) -> (Value, Box<Held>) {
+        let task = tokio::spawn(std::future::pending::<()>());
+        let limit = EventLimit::new(EVENT_MAX_BYTES);
+        let Phase::Held(held) =
+            owner.new_connection(id_of(id), 1, task.abort_handle(), &limit, Duration::ZERO)
+        else {
+            panic!("a held connection");
+        };
+        let ready = held.registration.as_ref().unwrap().ready.as_ref().unwrap();
+        (serde_json::from_slice(&ready.body).unwrap(), held)
+    }
+
+    fn id_of(text: &str) -> Id {
+        Id::new(text).unwrap()
+    }
+
+    fn ready_ack(owner: &mut Owner, held: Box<Held>) {
+        let message_id = held
+            .registration
+            .as_ref()
+            .unwrap()
+            .ready
+            .as_ref()
+            .unwrap()
+            .message_id
+            .clone();
+        let ack = json!({
+            "connection_id": held.id, "message_id": message_id,
+            "accepted": true, "valid_for_ms": 45_000,
+        });
+        let answer = Answer::Success(serde_json::to_vec(&ack).unwrap());
+        owner.ready_answered(held, &answer, Duration::ZERO);
+    }
+
+    fn kept_file(root: &std::path::Path) -> Value {
+        serde_json::from_slice(&std::fs::read(root.join("lost-changes.json")).unwrap()).unwrap()
+    }
+
+    /// The `event` of each record.
+    #[derive(Clone, Default)]
+    struct Events(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Events {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Name(Option<String>);
+            impl tracing::field::Visit for Name {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "event" {
+                        self.0 = Some(value.to_owned());
+                    }
+                }
+                fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+            }
+            let mut name = Name(None);
+            event.record(&mut name);
+            self.0.lock().unwrap().extend(name.0);
+        }
+    }
+
+    impl Events {
+        fn start(&self) -> tracing::subscriber::DefaultGuard {
+            use tracing_subscriber::layer::SubscriberExt;
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(self.clone()))
+        }
+
+        fn has(&self, event: &str) -> bool {
+            self.0.lock().unwrap().iter().any(|each| each == event)
+        }
+    }
+
+    #[tokio::test]
+    async fn kept_lost_changes_survive_a_restart_until_a_ready_listing_them_is_acknowledged() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let mut owner = started_in(root);
+        keep(&mut owner, vec![lost("close_1", "drive_a")]);
+        keep(&mut owner, vec![lost("drives_2", "drive_a")]);
+        // The close's report is final; the other report's connection ends.
+        let held = ready_of(&mut owner, "conn_a").1;
+        let final_acked = OutboxEvent::FinalAcked {
+            connection: id_of("conn_a"),
+            instruction: id_of("close_1"),
+        };
+        owner.outbox_event(Phase::Held(held), final_acked, Duration::ZERO);
+        assert_eq!(kept_file(root), json!([lost("drives_2", "drive_a")]));
+
+        let mut owner = started_in(root);
+        let (ready, _unacknowledged) = ready_of(&mut owner, "conn_b");
+        assert_eq!(ready["lost_changes"], json!([lost("drives_2", "drive_a")]));
+        let (ready, held) = ready_of(&mut owner, "conn_c");
+        assert_eq!(ready["lost_changes"], json!([lost("drives_2", "drive_a")]));
+        // An entry kept after that ready was built stays for the next one.
+        keep(&mut owner, vec![lost("drives_3", "drive_b")]);
+        ready_ack(&mut owner, held);
+        assert_eq!(kept_file(root), json!([lost("drives_3", "drive_b")]));
+        let (ready, held) = ready_of(&mut owner, "conn_d");
+        assert_eq!(ready["lost_changes"], json!([lost("drives_3", "drive_b")]));
+        ready_ack(&mut owner, held);
+        assert_eq!(kept_file(root), json!([]));
+        let (ready, _) = ready_of(&mut owner, "conn_e");
+        assert!(ready.get("lost_changes").is_none(), "{ready}");
+
+        // The ACK of a ready removes the entries its fitting left out too.
+        for index in 0..3 {
+            let request = format!("close_{index}_{}", "x".repeat(30_000));
+            keep(&mut owner, vec![lost(&request, "drive_a")]);
+        }
+        let (ready, held) = ready_of(&mut owner, "conn_e2");
+        let listed = ready["lost_changes"].as_array().map_or(0, Vec::len);
+        assert!(listed < 3, "{listed} entries fit");
+        ready_ack(&mut owner, held);
+        assert_eq!(kept_file(root), json!([]));
+
+        // A folder that cannot be written: the entry is still listed.
+        let events = Events::default();
+        let _guard = events.start();
+        let mut permissions = std::fs::metadata(root).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o500);
+        std::fs::set_permissions(root, permissions.clone()).unwrap();
+        keep(&mut owner, vec![lost("close_4", "drive_a")]);
+        let (ready, _) = ready_of(&mut owner, "conn_f");
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
+        std::fs::set_permissions(root, permissions).unwrap();
+        assert_eq!(ready["lost_changes"], json!([lost("close_4", "drive_a")]));
+        assert!(events.has("lost_changes.not_saved"));
+        assert_eq!(kept_file(root), json!([]));
+
+        // A file that holds no entry array starts an empty list.
+        std::fs::write(root.join("lost-changes.json"), "{}").unwrap();
+        let mut owner = started_in(root);
+        assert!(events.has("lost_changes.unreadable"));
+        let (ready, _) = ready_of(&mut owner, "conn_g");
+        assert!(ready.get("lost_changes").is_none(), "{ready}");
+    }
+
+    #[tokio::test]
+    async fn one_writer_keeps_the_entries_of_two_sessions_released_together() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut owner = started_in(directory.path());
+        let (mailbox, mut inbox) = mpsc::unbounded_channel();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let sessions: Vec<_> = ["sess_a", "sess_b"]
+            .into_iter()
+            .map(|session| {
+                let port = Port {
+                    mailbox: mailbox.clone(),
+                };
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    protocol::ports::ConnectionPort::keep_lost_changes(
+                        &port,
+                        vec![lost(&format!("close_{session}"), "drive_a")],
+                        Box::new(|| {}),
+                    );
+                })
+            })
+            .collect();
+        for session in sessions {
+            session.join().unwrap();
+        }
+        drop(mailbox);
+        while let Some(Message::Port(message)) = inbox.recv().await {
+            owner.port_message(message);
+        }
+        let mut kept: Vec<String> = kept_file(directory.path())
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["request_message_id"].as_str().unwrap().to_owned())
+            .collect();
+        kept.sort();
+        assert_eq!(kept, ["close_sess_a", "close_sess_b"]);
     }
 }

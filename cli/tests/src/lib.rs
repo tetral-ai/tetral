@@ -2,12 +2,14 @@
 
 pub mod app_server;
 pub mod binaries;
+pub mod git_server;
 pub mod machine;
 pub mod other_user;
 pub mod record;
 pub mod reference;
 pub mod run;
 pub mod seams;
+pub mod sessions;
 pub mod snapshot;
 pub mod socket_directory;
 pub mod tasks;

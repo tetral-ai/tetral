@@ -55,8 +55,18 @@ runs as child processes of itself.
   the log file, which it opens once the start can no longer fail; one that
   cannot be opened is recorded as `log.file_open_failed`, and the App Server
   runs on. The command checks `--idle-exit`'s `<duration>`, a positive
-  integer followed by `s`, `m` or `h`, with its other arguments; the App
-  Server does not act on it.
+  integer followed by `s`, `m` or `h`, with its other arguments; with it the
+  App Server also exits once idle that long (`appserver::idle`), with exit
+  code 0 and its status.
+- `tetral diag --app <app> --output <path>`: writes a `tar.gz` with mode
+  `0600` holding the root's log files (`logs/`), `config.toml`,
+  `system.json` and the App Server's `status.json` and `metrics.txt`, or
+  `status.json` `{"server_state": "not_running"}` alone when no App Server
+  answers both within five seconds; it takes no lock, so it runs beside an
+  App Server. `credentials.json` is read only for the connection key that
+  every entry is searched for, with `tetral_ck_`; a match fails with
+  `io_failed` naming the entry and leaves no file. A relative or existing
+  `--output` fails the argument check with `invalid_arguments`.
 - `tetral server status --app <app>` and `tetral server stop --app <app>`:
   `GET /v1/status` and `POST /v1/shutdown` through the SDK, writing the status
   or `{}`; `server_not_running` when no App Server is listening. One five-second
@@ -75,8 +85,11 @@ runs as child processes of itself.
 - `src/commands.rs`: the command line and the checks every command runs.
 - `src/server.rs`: `server run`, `server status` and `server stop`, and the
   codes of their failures.
+- `src/diag.rs`: `diag`, its entries, the key search and the archive.
 - `src/configure.rs`: `configure`, its commit with the barriers
   `configure.locked`, `configure.credentials_replaced` and
   `configure.config_replaced`, and the in-process tests of a commit stopped
   at each.
+- `src/drives.rs`: `drives enable`, which on Linux takes the root's lock
+  and changes nothing.
 - `src/output.rs`: the error codes, `CommandError` and the one result object.

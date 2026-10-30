@@ -1,44 +1,29 @@
 #![doc = include_str!("../README.md")]
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
-use tokio::sync::mpsc;
+pub mod binding_change;
+pub mod cache;
+pub mod catchup;
+pub mod commit;
+pub mod final_upload;
+#[cfg(target_os = "linux")]
+pub mod fuse;
+pub mod local;
+pub mod lost_changes;
+pub mod mount;
+#[cfg(target_os = "linux")]
+pub mod mountinfo;
+pub mod ops;
+pub mod outcome;
+pub mod paths;
+pub mod report;
+pub mod state;
+pub mod sync;
+pub mod sync_point;
+pub mod transfer;
+pub mod upload;
 
-/// How the Drive sync owners and the Content cache send their drive transfer
-/// requests; its implementation belongs to the `connection` crate.
-pub trait DriveTransfer: Send + Sync {}
-
-pub enum DriveSyncMessage {}
-
-pub type DriveSyncMailbox = mpsc::UnboundedSender<DriveSyncMessage>;
-
-pub fn spawn_drive_sync_owner() -> DriveSyncMailbox {
-    let (mailbox, mut messages) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        while let Some(message) = messages.recv().await {
-            handle_drive_sync_message(message);
-        }
-    });
-    mailbox
-}
-
-fn handle_drive_sync_message(message: DriveSyncMessage) {
-    match message {}
-}
-
-pub enum ContentCacheMessage {}
-
-pub type ContentCacheMailbox = mpsc::UnboundedSender<ContentCacheMessage>;
-
-pub fn spawn_content_cache() -> ContentCacheMailbox {
-    let (mailbox, mut messages) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        while let Some(message) = messages.recv().await {
-            handle_content_cache_message(message);
-        }
-    });
-    mailbox
-}
-
-fn handle_content_cache_message(message: ContentCacheMessage) {
-    match message {}
-}
+pub use final_upload::{FinalMode, FinalUpload, FinalUploadRequest};
+pub use sync::{DriveSync, SyncConfig};
+pub use sync_point::{SyncOutcome, SyncPointRequest};
+pub use transfer::DriveTransfer;

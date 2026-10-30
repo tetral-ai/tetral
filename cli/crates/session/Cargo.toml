@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+drive.workspace = true
 execution.workspace = true
 observe.workspace = true
 protocol.workspace = true

@@ -3,6 +3,7 @@
 
 pub mod capabilities;
 pub mod configuration;
+pub mod idle;
 pub mod lifecycle;
 pub mod local_api;
 pub mod lock;

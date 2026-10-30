@@ -42,6 +42,8 @@ pub struct Started {
     /// The records an earlier App Server left, read before the first
     /// connection, and which Sessions they keep `cleanup_pending`.
     pub leftovers: (Check, Leftovers),
+    /// Whether drives can be mounted, from the FUSE probe at start.
+    pub mounting: drive::mount::Mounting,
 }
 
 /// Owns the socket name for exactly as long as its root lock is held.
@@ -63,16 +65,15 @@ impl SocketOwnership {
 
 impl Drop for SocketOwnership {
     fn drop(&mut self) {
-        if let Some(socket) = self.socket.take() {
-            if let Err(error) = std::fs::remove_file(&socket) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    observe::warn!(
-                        "server.socket_cleanup_failed",
-                        error.os_code = error.raw_os_error().unwrap_or(0),
-                        error.code = observe::Code("socket_cleanup_failed")
-                    );
-                }
-            }
+        if let Some(socket) = self.socket.take()
+            && let Err(error) = std::fs::remove_file(&socket)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            observe::warn!(
+                "server.socket_cleanup_failed",
+                error.os_code = error.raw_os_error().unwrap_or(0),
+                error.code = observe::Code("socket_cleanup_failed")
+            );
         }
         // The lock field is dropped only after this cleanup returns.
         state::seams::barrier_blocking("shutdown.socket_removed");
@@ -137,9 +138,10 @@ pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
     let tetral = std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .map_err(StartError::Executable)?;
-    let capabilities = capabilities::assemble(&tetral)?;
     let canonical_root =
         std::fs::canonicalize(root.path()).map_err(|error| IoFailure::new(root.path(), error))?;
+    let mounting = drive::mount::probe(&canonical_root);
+    let capabilities = capabilities::assemble(&tetral, &mounting)?;
     observe::STARTUP.config_loaded(state::seams::now());
     private::check_canonical_root_utf8(&canonical_root)?;
     execution::store::clear_task_parent(&execution::store::task_parent(&canonical_root));
@@ -170,6 +172,7 @@ pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
         root: root.path().to_path_buf(),
         canonical_root,
         leftovers,
+        mounting,
     })
 }
 

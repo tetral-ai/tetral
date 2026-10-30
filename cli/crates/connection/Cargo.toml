@@ -27,12 +27,13 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 state.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "macros", "rt", "sync", "time"] }
 tokio-rustls.workspace = true
 tower-service.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+drive = { workspace = true, features = ["test-seams"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "aws_lc_rs"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread"] }

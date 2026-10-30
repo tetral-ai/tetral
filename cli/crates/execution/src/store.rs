@@ -39,7 +39,7 @@ const TEMPORARY_ROOT: &str = "/tmp";
 const TEMPORARY_ROOT: &str = "/private/tmp";
 
 /// The directory of a Session's task directories.
-const TASKS: &str = "tasks";
+pub const TASKS: &str = "tasks";
 
 const STDOUT_LOG: &str = "stdout.log";
 const STDERR_LOG: &str = "stderr.log";

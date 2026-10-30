@@ -172,10 +172,10 @@ mod tests {
         let path = directory.path().join("document.txt");
         fs::write(&path, "old text").unwrap();
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o500)).unwrap();
-        let input = serde_json::from_value(
-            json!({"path":"document.txt","old_string":"old","new_string":"new"}),
-        )
-        .unwrap();
+        // An absolute path, so that the test process keeps its directory.
+        let input =
+            serde_json::from_value(json!({"path":path,"old_string":"old","new_string":"new"}))
+                .unwrap();
         let result = edit(directory.path(), &input, MAX_BYTES);
         let sibling = fs::write(directory.path().join("sibling"), "not allowed");
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -199,7 +199,7 @@ mod tests {
             ("old", "too much text", true, 7, "too_large"),
         ] {
             let input = serde_json::from_value(
-                json!({"path":"document.txt","old_string":old,"new_string":new,"replace_all":all}),
+                json!({"path":path,"old_string":old,"new_string":new,"replace_all":all}),
             )
             .unwrap();
             assert_eq!(
@@ -213,7 +213,7 @@ mod tests {
         }
         fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
         let input = serde_json::from_value(
-            json!({"path":"document.txt","old_string":"old","new_string":"new","replace_all":true}),
+            json!({"path":path,"old_string":"old","new_string":"new","replace_all":true}),
         )
         .unwrap();
         let result = edit(directory.path(), &input, MAX_BYTES);
