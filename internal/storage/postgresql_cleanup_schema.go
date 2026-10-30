@@ -78,6 +78,39 @@ AS $$ BEGIN
  END IF;
 END $$`
 
+// Only tetral_cleanup_drive_page, executing as the actual table owner with its
+// purpose flag set, reads drives across Workspaces; it returns identifiers
+// only, deleted drives included.
+const createPostgreSQLCleanupDriveDiscoveryPolicy = `CREATE POLICY cleanup_drive_discovery ON drives
+ FOR SELECT
+ USING (current_setting('tetral.cleanup_drive_discovery', true) = 'true' AND current_user = (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'public.drives'::regclass))`
+
+// tetral_cleanup_drive_page returns at most $3 drives after the exclusive
+// (workspace_id, drive_id) position $1/$2 in that order. It rejects a partly
+// NULL or empty position and a limit outside 1..100 with
+// invalid_parameter_value. Separate statements keep the position an index
+// condition under a generic plan.
+const createPostgreSQLCleanupDrivePageFunction = `CREATE FUNCTION public.tetral_cleanup_drive_page(text, text, integer)
+RETURNS TABLE(workspace_id text, drive_id text)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog
+AS $$ BEGIN
+ IF ($1 IS NULL) <> ($2 IS NULL) OR $1 = '' OR $2 = '' THEN
+  RAISE EXCEPTION 'invalid cleanup drive position' USING ERRCODE='22023';
+ END IF;
+ IF $3 IS NULL OR $3 < 1 OR $3 > 100 THEN
+  RAISE EXCEPTION 'invalid cleanup drive limit' USING ERRCODE='22023';
+ END IF;
+ PERFORM pg_catalog.set_config('tetral.cleanup_drive_discovery','true',true);
+ IF $1 IS NULL THEN
+  RETURN QUERY SELECT d.workspace_id, d.drive_id FROM public.drives d
+   ORDER BY d.workspace_id, d.drive_id LIMIT $3;
+ ELSE
+  RETURN QUERY SELECT d.workspace_id, d.drive_id FROM public.drives d
+   WHERE (d.workspace_id, d.drive_id) > ($1, $2)
+   ORDER BY d.workspace_id, d.drive_id LIMIT $3;
+ END IF;
+END $$`
+
 func postgresqlCleanupScheduleTableSteps() []postgresqlSchemaStep {
 	return []postgresqlSchemaStep{
 		{"create_cleanup_schedule_cursor", createPostgreSQLCleanupScheduleCursorTable},
@@ -91,5 +124,9 @@ func postgresqlCleanupDiscoverySteps() []postgresqlSchemaStep {
 		{"rls_policy_cleanup_discovery", createPostgreSQLCleanupDiscoveryPolicy},
 		{"create_cleanup_due_sessions", createPostgreSQLCleanupDueSessionsFunction},
 		{"revoke_cleanup_due_sessions_public", `REVOKE ALL ON FUNCTION public.tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer) FROM PUBLIC`},
+		{"rls_policy_cleanup_drive_discovery_drop", "DROP POLICY IF EXISTS cleanup_drive_discovery ON drives"},
+		{"rls_policy_cleanup_drive_discovery", createPostgreSQLCleanupDriveDiscoveryPolicy},
+		{"create_cleanup_drive_page", createPostgreSQLCleanupDrivePageFunction},
+		{"revoke_cleanup_drive_page_public", `REVOKE ALL ON FUNCTION public.tetral_cleanup_drive_page(text, text, integer) FROM PUBLIC`},
 	}
 }
