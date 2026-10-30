@@ -346,7 +346,9 @@ pub fn cut(text: &str, max_bytes: usize) -> &str {
 
 /// Shortens `failures`' messages from the last failure backwards, each to
 /// the bytes that still fit and down to empty, until `size` of them is at
-/// most `max_bytes`.
+/// most `max_bytes`. Cutting a byte shrinks the encoding by at least a
+/// byte, so a message with escaped characters may lose a few more bytes
+/// than strictly needed.
 pub fn fit(
     failures: &mut [RepositoryFailure],
     max_bytes: usize,
@@ -360,12 +362,6 @@ pub fn fit(
         let message = &failures[index].message;
         let keep = message.len().saturating_sub(over);
         failures[index].message = cut(message, keep).to_owned();
-        // An escaped character may count more than its bytes: cut further
-        // while the report still does not fit and the message has bytes.
-        while size(failures) > max_bytes && !failures[index].message.is_empty() {
-            let shorter = failures[index].message.len() - 1;
-            failures[index].message = cut(&failures[index].message, shorter).to_owned();
-        }
     }
 }
 
