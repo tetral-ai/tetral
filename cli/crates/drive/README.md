@@ -80,7 +80,8 @@ Drives on this machine belong here, with two owners:
 - `binding_change.rs`: the five steps of a `session.drives`
   (`BindingChange`, `Applied`) and the removal of a drive's rows.
 - `final_upload.rs`: the final upload of some drives (`FinalUploadRequest`):
-  its end time, abandon and keep mode (`FinalMode`), and abandoning.
+  its end time, abandon and keep mode (`FinalMode`), abandoning, and its
+  release, which ends it at once and cancels nothing (`FinalKeeper`).
 - `lost_changes.rs`: `lost_changes` entries and their fitting into a
   report's or ready's 65,536 bytes (`fit`).
 - `sync_point.rs`: a result's sync point (`SyncPointRequest`): coverage,

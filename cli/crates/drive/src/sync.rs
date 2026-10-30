@@ -165,6 +165,7 @@ pub(crate) enum Message {
     },
     /// The final upload `id` ends at once in keep mode.
     FinalKeep(u64),
+    FinalRelease(u64),
     RemoveDrive {
         drive: String,
         reply: oneshot::Sender<()>,
@@ -692,6 +693,7 @@ impl Owner {
                 self.final_upload(id, request, reply).await;
             }
             Message::FinalKeep(id) => self.final_keep(id).await,
+            Message::FinalRelease(id) => self.final_release(id),
             Message::RemoveDrive { drive, reply } => {
                 self.remove_drive(&drive).await;
                 let _ = reply.send(());

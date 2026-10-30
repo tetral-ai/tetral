@@ -1,6 +1,6 @@
 //! Final uploads: the end at the end time however late it started, what
 //! abandoning removes and restores, the end once every covered change is
-//! decided, and keep mode.
+//! decided, keep mode, and a released one.
 
 mod support;
 
@@ -170,4 +170,27 @@ async fn keep_mode_leaves_the_changes_pending_and_keeps_no_entry() {
         panic!("a write");
     };
     assert_eq!(content_sha256.as_str(), support::sha256(b"g"));
+}
+
+#[tokio::test]
+async fn a_released_final_upload_ends_at_once_and_cancels_nothing() {
+    let mut env = Env::new();
+    let (session, commit) = with_held_commit(&mut env).await;
+    session.write("f", "new", 1).await;
+    let upload = start(&session, Duration::from_secs(30), FinalMode::Keep);
+    let put = env.call().await;
+    upload.keeper().release();
+    assert!(ended(upload).await.is_empty());
+    // Its end time passing cancels nothing either.
+    env.advance(Duration::from_secs(30)).await;
+    session.caught_up().await;
+    let (Call::Upload { answer: put, .. }, Call::Commit { answer: held, .. }) = (put, commit)
+    else {
+        unreachable!()
+    };
+    assert!(
+        !put.is_closed() && !held.is_closed(),
+        "both requests still run"
+    );
+    assert_eq!(session.tables().await.pending_changes.len(), 2);
 }

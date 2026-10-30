@@ -12,6 +12,8 @@
 //! those drives is uploaded or committed until they are mounted again. In
 //! keep mode the changes stay pending; a stored commit is sent again when
 //! the binding becomes current on a new connection, or at the next start.
+//! A released final upload ends at once and cancels nothing: its uploads
+//! and commits go on as ordinary ones.
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
@@ -53,7 +55,8 @@ pub struct FinalUpload {
     lost_changes: oneshot::Receiver<Vec<LostChange>>,
 }
 
-/// What ends a final upload at once in keep mode, apart from its end.
+/// What ends a final upload at once, in keep mode or released, apart from
+/// its end.
 pub struct FinalKeeper {
     id: u64,
     mailbox: mpsc::UnboundedSender<Message>,
@@ -63,6 +66,12 @@ impl FinalKeeper {
     /// Ends it at once in keep mode, as the connection's end does.
     pub fn keep_now(&self) {
         let _ = self.mailbox.send(Message::FinalKeep(self.id));
+    }
+
+    /// Ends it at once without cancelling anything; its uploads and commits
+    /// go on as ordinary ones, as when a tool call ends an idle exit.
+    pub fn release(&self) {
+        let _ = self.mailbox.send(Message::FinalRelease(self.id));
     }
 }
 
@@ -154,6 +163,14 @@ impl Owner {
         if let Some(upload) = self.final_uploads.get_mut(&id) {
             upload.mode = FinalMode::Keep;
             self.end_final(id).await;
+        }
+    }
+
+    /// The final upload `id` ends now and leaves its uploads and commits
+    /// running.
+    pub(crate) fn final_release(&mut self, id: u64) {
+        if let Some(upload) = self.final_uploads.remove(&id) {
+            let _ = upload.reply.send(Vec::new());
         }
     }
 
