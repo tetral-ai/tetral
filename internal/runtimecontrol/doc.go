@@ -21,6 +21,15 @@
 //     that sets a thread running again, an MCP discovery input.
 //   - This package: a child thread's termination.
 //
+// Inputs that never start a run (queue.IsNonStartingRuntimeInputKind):
+// AppendNonStartingInputTx is the one writer of a new Inbox row of such a kind,
+// queued, unbound and without events, together with its runtime_input job. Its
+// caller is internal/computer.WriteMachineMessageTx (api; computer-hub as its
+// routes land). Such a row may be accepted with no binding;
+// HandBackQuiescedRuntimeInputsTx leaves an accepted one as it is, and
+// HandBackRuntimeInputsTx (pod loss) hands it back with a new job built by
+// RuntimeInputEnqueueRequest.
+//
 // INVARIANTS:
 //   - No other writer sets session_runtime_status.status or writes the
 //     Session's session.status_running or session.status_idle (the main
@@ -31,6 +40,9 @@
 // UPDATE-WITH:
 //   - session_status.go (RefreshSessionStatusTx), termination.go, events.go
 //     (PublicProjection of the main thread's status events).
+//   - non_starting_input.go (AppendNonStartingInputTx), input_custody.go,
+//     input.go, internal/queue (the input kinds that never start a run) and
+//     services/job-runner/runtime_delivery.go (their preparation).
 //   - services/bridge (bridge_api_events.go, bridge_api_settlement.go,
 //     bridge_api_children.go) and services/job-runner (runtime_pod_lost.go,
 //     runtime_delivery.go, mcp_discovery_input.go).

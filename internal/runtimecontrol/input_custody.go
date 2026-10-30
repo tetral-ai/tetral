@@ -45,7 +45,9 @@ func HandBackRuntimeInputsTx(
 // HandBackQuiescedRuntimeInputsTx reclaims delivering inputs as well: local
 // producers have joined, and their accepted-but-unacknowledged delivery must
 // remain discoverable when the old binding is removed. The existing job's
-// identity and attempt count survive, while its old lease is fenced.
+// identity and attempt count survive, while its old lease is fenced. An
+// accepted input of a kind that never starts a run stays as it is: the
+// Runtime's own release already handed it back or dropped it.
 func HandBackQuiescedRuntimeInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, sessionID string, binding Binding, now time.Time) (int, error) {
 	return handBackRuntimeInputsTx(ctx, tx, workspaceID, sessionID, binding, now, true)
 }
@@ -130,6 +132,9 @@ func handBackRuntimeInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID,
 			}
 		}
 		if input.InboxStatus != "accepted" && input.InboxStatus != "delivering" {
+			continue
+		}
+		if quiesced && input.InboxStatus == "accepted" && queue.IsNonStartingRuntimeInputKind(input.InputKind) {
 			continue
 		}
 		if input.QueueJobID.Valid {
@@ -233,6 +238,9 @@ func runtimeInputQueuePayloadJSON(
 	sessionID string,
 	input AcceptedRuntimeInput,
 ) ([]byte, error) {
+	if queue.IsNonStartingRuntimeInputKind(input.InputKind) {
+		return nonStartingInputQueuePayloadJSON(workspaceID, sessionID, input.SessionThreadID, input.RuntimeInputID, input.InputKind)
+	}
 	if !input.SequenceFrom.Valid || !input.SequenceTo.Valid || input.SequenceFrom.Int64 <= 0 || input.SequenceTo.Int64 < input.SequenceFrom.Int64 {
 		return nil, PreparationError{Kind: "runtime_inbox_invariant", Message: "runtime input has an invalid sequence range", Retryable: false}
 	}
