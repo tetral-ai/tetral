@@ -412,12 +412,13 @@ async fn changes_pending_before_their_folder_became_a_repository_keep_recording_
     let mut env = Env::new();
     let session = env.session("sess_a", Write::default(), true).await;
     session.task_started(1);
-    // `a` and `d` are uploaded, not yet committed, when the folder becomes
-    // a repository: a later change must record a new upload.
+    // `a`, `d` and `e` are uploaded, not yet committed, when the folder
+    // becomes a repository: a later change must record a new upload.
     session.write("a", "one", 1).await;
     session.write("d", "old", 1).await;
+    session.write("e", "eel", 1).await;
     env.advance(Duration::from_secs(2)).await;
-    assert_eq!(uploads(&mut env, 2).await, sorted([b"one", b"old"]));
+    assert_eq!(uploads(&mut env, 3).await, sorted([b"one", b"old", b"eel"]));
     session.write("b", "new", 1).await;
     let drive = session.drive.clone();
     session
@@ -425,9 +426,15 @@ async fn changes_pending_before_their_folder_became_a_repository_keep_recording_
         .mkdir(&drive, TOP_INODE, b".git", Some(1))
         .await
         .unwrap();
-    // The removal of the new file `b` settles its pending write; a later
-    // write of `a` and a rename of the local-only `c` onto `d` record.
+    // The removal of the new file `b` and the rename of the new file `e`
+    // to the local-only `x` settle their pending writes; a later write of
+    // `a` and a rename of the local-only `c` onto `d` record.
     session.remove("b", 1).await;
+    session
+        .sync
+        .rename(&drive, TOP_INODE, b"e", TOP_INODE, b"x", Some(1))
+        .await
+        .unwrap();
     session.write("a", "two", 1).await;
     session.write("c", "sea", 1).await;
     session
