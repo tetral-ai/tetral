@@ -234,7 +234,8 @@ func TestSessionComputerAddNeedsAnIdleSession(t *testing.T) {
 
 // Session creation's computer forms, and the Session object's computers and
 // environment_id on creation, its replay, retrieve, list and after an
-// addition.
+// addition. Creation writes no machine message, since the first load shows
+// its computers; the addition writes one.
 func TestSessionCreationComputers(t *testing.T) {
 	env := newSessionIntegrationEnv(t)
 	seedComputerInstances(t, env)
@@ -285,6 +286,12 @@ func TestSessionCreationComputers(t *testing.T) {
 		t.Fatalf("created Session = %s; want the cloud computer, then the user computer, and the cloud computer's environment_id", first.Body.String())
 	}
 	ids := []string{created.Computers[0].ID, created.Computers[1].ID}
+	machineMessages := func() int {
+		return countSessionIntegrationRows(t, env.admin, `SELECT count(*) FROM session_machine_messages WHERE workspace_id = $1`, workspace.DefaultID)
+	}
+	if count := machineMessages(); count != 0 {
+		t.Fatalf("Session creations wrote %d machine messages; want none", count)
+	}
 	var replayed computerSession
 	decodeSessionIntegrationJSON(t, env.requestWithKey(http.MethodPost, "/v1/sessions", "create-two", body), &replayed)
 	if replayed.ID != created.ID || len(replayed.Computers) != 2 || replayed.Computers[0].ID != ids[0] || replayed.Computers[1].ID != ids[1] {
@@ -294,6 +301,9 @@ func TestSessionCreationComputers(t *testing.T) {
 	assertHTTPStatus(t, added, http.StatusCreated)
 	var third computerObject
 	decodeSessionIntegrationJSON(t, added, &third)
+	if count := machineMessages(); count != 1 {
+		t.Fatalf("an addition wrote %d machine messages; want one", count)
+	}
 	want := append(ids, third.ID)
 	var retrieved computerSession
 	decodeSessionIntegrationJSON(t, env.request(http.MethodGet, "/v1/sessions/"+created.ID, ""), &retrieved)
