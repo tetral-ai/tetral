@@ -26,7 +26,9 @@
 // queued, unbound and without events, together with its runtime_input job. Its
 // caller is internal/computer.WriteMachineMessageTx (api). Such a row may be
 // accepted with no binding;
-// HandBackQuiescedRuntimeInputsTx leaves an accepted one as it is, and
+// HandBackQuiescedRuntimeInputsTx (a Runtime's release) and
+// HandBackCleanedRuntimeInputsTx (an idle cleanup the Runtime accepted) leave
+// an accepted one as it is and return a delivering one to queued with its job;
 // HandBackRuntimeInputsTx (pod loss) hands it back with a new job built by
 // RuntimeInputEnqueueRequest and hands back a delivering one with its own job.
 //

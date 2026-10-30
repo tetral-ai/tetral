@@ -293,7 +293,7 @@ admitted reasoning counters are unchanged.
 
 1. Runtime Pod accepts `CleanupSession` and clears its hot state (or is proven gone), proving no active run can still resolve a wait;
 2. durable `approval` waits and their recoverable Sandbox execution records remain for a later confirmation; other `pending` external waits and unowned Sandbox executions expire by terminal projection;
-3. the Runtime binding and `session_runtime_status` finalize after those settlements are durable;
+3. the binding's delivering inputs go back to Queue with their jobs and its accepted ones stay as they are, because the Runtime accepts the cleanup only while it holds no accepted input; when the pod is proven gone, its inputs go back as pod-loss repair hands them back; then the Runtime binding and `session_runtime_status` finalize after those settlements are durable;
 4. durable `session_threads`, `session_events`, `session_messages`, Sandbox bindings, and provider resources are never deleted by TTL cleanup.
 
 **The tree fence.** The cleanup alarm is a hint and may be stale (armed while
@@ -381,7 +381,8 @@ these phases, missing-grant rollback and workspace isolation.
   repair, and an idle cleanup that finds the Runtime pod gone, hand accepted
   ones back to Queue and return a delivering one to queued with its job, which
   then delivers it to the Runtime holding the Session, if any; a Runtime's own
-  release leaves accepted ones as they are.
+  release, an idle cleanup it accepts included, leaves accepted ones as they
+  are and returns a delivering one to queued with its job.
   Such an input or its job never makes the Session look busy to a Session
   update or a thread archive.
 - **Agent-mail custody.** Child creation atomically persists the child, context

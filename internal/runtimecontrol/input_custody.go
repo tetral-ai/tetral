@@ -83,7 +83,7 @@ func HandBackRuntimeInputsTx(
 	binding Binding,
 	now time.Time,
 ) (int, error) {
-	return handBackRuntimeInputsTx(ctx, tx, workspaceID, sessionID, binding, now, false)
+	return handBackRuntimeInputsTx(ctx, tx, workspaceID, sessionID, binding, now, handBackPodLoss)
 }
 
 // HandBackQuiescedRuntimeInputsTx reclaims delivering inputs as well: local
@@ -93,10 +93,27 @@ func HandBackRuntimeInputsTx(
 // accepted input of a kind that never starts a run stays as it is: the
 // Runtime's own release already handed it back or dropped it.
 func HandBackQuiescedRuntimeInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, sessionID string, binding Binding, now time.Time) (int, error) {
-	return handBackRuntimeInputsTx(ctx, tx, workspaceID, sessionID, binding, now, true)
+	return handBackRuntimeInputsTx(ctx, tx, workspaceID, sessionID, binding, now, handBackQuiesced)
 }
 
-func handBackRuntimeInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, sessionID string, binding Binding, now time.Time, quiesced bool) (int, error) {
+// HandBackCleanedRuntimeInputsTx hands back, for an idle cleanup the Runtime
+// accepted, only the binding's delivering inputs, each to queued with its job,
+// and leaves every accepted input as it is: the Runtime accepts the cleanup
+// only while it holds no accepted input, so an accepted row is one it already
+// consumed, such as agent mail, which stays accepted after its delivery.
+func HandBackCleanedRuntimeInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, sessionID string, binding Binding, now time.Time) (int, error) {
+	return handBackRuntimeInputsTx(ctx, tx, workspaceID, sessionID, binding, now, handBackCleanup)
+}
+
+type handBackMode int
+
+const (
+	handBackPodLoss handBackMode = iota
+	handBackQuiesced
+	handBackCleanup
+)
+
+func handBackRuntimeInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, sessionID string, binding Binding, now time.Time, mode handBackMode) (int, error) {
 	rows, err := tx.Query(ctx,
 		`SELECT inbox.session_thread_id,
 		        inbox.runtime_input_id,
@@ -171,7 +188,7 @@ func handBackRuntimeInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID,
 			if !input.QueueJobID.Valid {
 				return 0, PreparationError{Kind: "runtime_inbox_invariant", Message: "delivering runtime input has no active queue custody", Retryable: false}
 			}
-			if !quiesced && input.InputKind != "interrupt_control" && input.InputKind != "agent_mail" &&
+			if mode == handBackPodLoss && input.InputKind != "interrupt_control" && input.InputKind != "agent_mail" &&
 				!queue.IsNonStartingRuntimeInputKind(input.InputKind) {
 				continue
 			}
@@ -179,11 +196,12 @@ func handBackRuntimeInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID,
 		if input.InboxStatus != "accepted" && input.InboxStatus != "delivering" {
 			continue
 		}
-		if quiesced && input.InboxStatus == "accepted" && queue.IsNonStartingRuntimeInputKind(input.InputKind) {
+		if input.InboxStatus == "accepted" &&
+			(mode == handBackCleanup || (mode == handBackQuiesced && queue.IsNonStartingRuntimeInputKind(input.InputKind))) {
 			continue
 		}
 		if input.QueueJobID.Valid {
-			if input.InboxStatus == "delivering" && !quiesced && queue.IsNonStartingRuntimeInputKind(input.InputKind) {
+			if input.InboxStatus == "delivering" && mode == handBackPodLoss && queue.IsNonStartingRuntimeInputKind(input.InputKind) {
 				// A leased job keeps its lease: its holder, which may be the
 				// job whose preparation runs this repair, prepares it again.
 				if _, err := tx.Exec(ctx,

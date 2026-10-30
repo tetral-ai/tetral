@@ -2073,9 +2073,12 @@ func (f *machineMessageFixture) sessionFacts() (string, int, int) {
 func (f *machineMessageFixture) nonStartingRequests() []*agentruntimev1.AcceptNonStartingInputRequest {
 	var requests []*agentruntimev1.AcceptNonStartingInputRequest
 	for _, request := range f.sender.requests {
+		if _, cleanup := request.(*agentruntimev1.CleanupSessionRequest); cleanup {
+			continue
+		}
 		accept, ok := request.(*agentruntimev1.AcceptNonStartingInputRequest)
 		if !ok {
-			f.t.Fatalf("Runtime received %T; want only AcceptNonStartingInput", request)
+			f.t.Fatalf("Runtime received %T; want only AcceptNonStartingInput besides an idle cleanup", request)
 		}
 		requests = append(requests, accept)
 	}
@@ -2286,19 +2289,21 @@ func TestPodLossDuringDeliveryHandsBackTheDeliveringMessage(t *testing.T) {
 	}
 }
 
-// Idle cleanup that finds the Runtime pod gone hands the binding's messages
-// back before it deletes the binding: an accepted one returns to queued with
-// a new job, and a delivering one keeps its job, which delivers it once to the
-// Runtime that holds the Session next. A cleanup the Runtime accepts is its
-// own release and leaves an accepted one as it is.
-func TestIdleCleanupHandsBackMachineMessagesOnlyForAGonePod(t *testing.T) {
+// Idle cleanup hands the binding's messages back before it deletes the
+// binding. A delivering one returns to queued with its job, which delivers it
+// once to the Runtime that holds the Session next, both when the Runtime pod is
+// gone and when the Runtime accepts the cleanup. An accepted one returns to
+// queued with a new job when the pod is gone; a cleanup the Runtime accepts is
+// its own release and leaves an accepted one as it is.
+func TestIdleCleanupHandsBackMachineMessages(t *testing.T) {
 	for _, tc := range []struct {
 		name, session        string
 		delivering, podAlive bool
 	}{
-		{name: "accepted", session: "sesn_mmsg_gone_accepted"},
-		{name: "delivering", session: "sesn_mmsg_gone_delivering", delivering: true},
+		{name: "accepted, pod gone", session: "sesn_mmsg_gone_accepted"},
+		{name: "delivering, pod gone", session: "sesn_mmsg_gone_delivering", delivering: true},
 		{name: "accepted, Runtime accepts the cleanup", session: "sesn_mmsg_alive_accepted", podAlive: true},
+		{name: "delivering, Runtime accepts the cleanup", session: "sesn_mmsg_alive_delivering", delivering: true, podAlive: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newMachineMessageFixture(t, tc.session)
@@ -2316,8 +2321,9 @@ func TestIdleCleanupHandsBackMachineMessagesOnlyForAGonePod(t *testing.T) {
 				t.Fatalf("message before the cleanup = %+v; want %s under the binding", got, want)
 			}
 			before := f.messages()[0]
+			f.sender.result = RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}
 			f.cleanUpIdle(!tc.podAlive)
-			if tc.podAlive {
+			if tc.podAlive && !tc.delivering {
 				if got := f.messages()[0]; got != before {
 					t.Fatalf("message after the cleanup the Runtime accepted = %+v; want it as it was: %+v", got, before)
 				}
@@ -2329,20 +2335,70 @@ func TestIdleCleanupHandsBackMachineMessagesOnlyForAGonePod(t *testing.T) {
 			if !tc.delivering {
 				return
 			}
-			f.candidate = enginekubernetes.BindingCandidate{Namespace: f.candidate.Namespace, PodName: "runtime-pod-1", PodUID: "pod_new_" + tc.session, PodIP: "10.0.0.11"}
-			registerPlacementCandidateForTest(t, f.admin, f.candidate)
-			f.podLost = false
-			f.sender.result = RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}
-			placed := f.placeUserMessage("mmsg_gone_user")
+			if !tc.podAlive {
+				f.candidate = enginekubernetes.BindingCandidate{Namespace: f.candidate.Namespace, PodName: "runtime-pod-1", PodUID: "pod_new_" + tc.session, PodIP: "10.0.0.11"}
+				registerPlacementCandidateForTest(t, f.admin, f.candidate)
+				f.podLost = false
+			}
+			placed := f.placeUserMessage("mmsg_cleanup_user")
 			f.exec(`UPDATE queue_jobs SET available_at=clock_timestamp()-interval '1 second' WHERE workspace_id='default' AND kind='runtime_input' AND status='pending'`)
 			if processed := f.deliverAll(); processed != 1 {
 				t.Fatalf("processed %d jobs after the new placement; want one", processed)
 			}
+			var deadLettered int
+			if err := f.admin.QueryRowContext(f.ctx, `SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND status='dead_lettered'`).Scan(&deadLettered); err != nil {
+				t.Fatal(err)
+			}
 			requests := f.nonStartingRequests()
-			if got := f.messages()[0]; got.Status != "accepted" || !got.Bound || got.ActiveJobs != 0 || len(requests) != 2 || requests[1].GetBindingId() != placed {
-				t.Fatalf("message after the new placement = %+v with requests %v; want accepted, delivered once more, to %s", got, requests, placed)
+			if got := f.messages()[0]; got.Status != "accepted" || !got.Bound || got.ActiveJobs != 0 || len(requests) != 2 || requests[1].GetBindingId() != placed || deadLettered != 0 {
+				t.Fatalf("message after the new placement = %+v with requests %v and %d dead-lettered jobs; want accepted, delivered once more, to %s, and none dead-lettered",
+					got, requests, deadLettered, placed)
 			}
 		})
+	}
+}
+
+// Agent mail stays accepted after its delivery. An idle cleanup the Runtime
+// accepts leaves it so: the Session is released and nothing is delivered
+// again.
+func TestIdleCleanupTheRuntimeAcceptsLeavesDeliveredAgentMail(t *testing.T) {
+	f := newMachineMessageFixture(t, "sesn_cleanup_delivered_mail")
+	f.bind("bind_cleanup_delivered_mail")
+	childID := "thr_cleanup_delivered_mail_child"
+	sessionfixture.SeedBridgeAPIChildThread(t, f.admin, "default", f.sessionID, f.mainID, childID)
+	deliveryID := "delivery_cleanup_delivered_mail"
+	messageJSON := sessionfixture.BridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "task_"+childID, "done"))
+	seedBridgeAPIEvent(t, f.admin, "default", f.sessionID, childID, "sevt_cleanup_delivered_mail_sent", 1, "agent.thread_message_sent",
+		sessionfixture.BridgeInterAgentSentEventJSON(t, deliveryID, childID, f.mainID, "", "sevt_cleanup_delivered_mail_tool", messageJSON))
+	sessionfixture.SeedAgentMailCustody(t, f.admin, f.sessionID, f.mainID, deliveryID, time.Now())
+	mail := func() (status string, bound bool, activeJobs int) {
+		t.Helper()
+		if err := f.admin.QueryRowContext(f.ctx, `SELECT i.status, i.binding_id IS NOT NULL,
+			(SELECT count(*) FROM queue_jobs j WHERE j.workspace_id='default' AND j.dedupe_key='runtime_input:default:'||i.session_id||':'||i.runtime_input_id AND j.status IN ('pending','leased'))
+			FROM session_runtime_inbox i WHERE i.workspace_id='default' AND i.session_id=$1 AND i.input_kind='agent_mail'`, f.sessionID).
+			Scan(&status, &bound, &activeJobs); err != nil {
+			t.Fatal(err)
+		}
+		return status, bound, activeJobs
+	}
+	if processed := f.deliverAll(); processed != 1 {
+		t.Fatalf("processed %d jobs; want the mail's", processed)
+	}
+	if status, bound, jobs := mail(); status != "accepted" || !bound || jobs != 0 {
+		t.Fatalf("mail after its delivery = %s, bound %t, %d active jobs; want accepted under the binding", status, bound, jobs)
+	}
+	f.cleanUpIdle(false)
+	processed := f.deliverAll()
+	deliveries := 0
+	for _, request := range f.sender.requests {
+		if _, ok := request.(*agentruntimev1.AcceptAgentMailRequest); ok {
+			deliveries++
+		}
+	}
+	_, bindings, _ := f.sessionFacts()
+	if status, _, jobs := mail(); status != "accepted" || jobs != 0 || processed != 0 || deliveries != 1 || bindings != 0 {
+		t.Fatalf("mail after the cleanup = %s with %d active jobs, %d jobs processed, %d deliveries, %d bindings; want accepted, none processed, one delivery, no binding",
+			status, jobs, processed, deliveries, bindings)
 	}
 }
 

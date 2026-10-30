@@ -567,16 +567,19 @@ func cleanupHasNewerUnprocessedInputTx(ctx context.Context, tx *dbconnect.Tx, wo
 }
 
 // FinalizeRuntimeCleanup settles hot Runtime custody and releases only the
-// Runtime binding. Sandbox resources outlive idle cleanup; Session deletion
-// records its own durable Sandbox release operation below.
+// Runtime binding. Before the binding is deleted, its delivering inputs go back
+// to Queue with their jobs; accepted ones stay, since the Runtime accepted the
+// cleanup while it held no accepted input. Sandbox resources outlive idle
+// cleanup; Session deletion records its own durable Sandbox release operation
+// below.
 func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeCleanup(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
 	return s.finalizeRuntimeCleanup(ctx, job, false)
 }
 
 // FinalizeGoneRuntimeCleanup finalizes a cleanup whose Runtime pod is proven
 // gone. That is a pod loss, so before the binding is deleted its inputs go
-// back to Queue as the pod-loss repair hands them back; only one of the two
-// hands back a binding's inputs.
+// back to Queue as the pod-loss repair hands them back, accepted inputs that
+// never start a run included.
 func (s *PostgreSQLRuntimeDeliveryStore) FinalizeGoneRuntimeCleanup(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
 	return s.finalizeRuntimeCleanup(ctx, job, true)
 }
@@ -629,8 +632,12 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeRuntimeCleanup(ctx context.Cont
 		if err := expireCleanupSandboxExecutionsTx(ctx, tx, loaded, now); err != nil {
 			return err
 		}
-		if targetGone && loaded.CleanupJobID != "" {
-			if _, err := runtimecontrol.HandBackRuntimeInputsTx(ctx, tx, loaded.WorkspaceID, loaded.SessionID, loaded.binding(), now); err != nil {
+		if loaded.CleanupJobID != "" {
+			handBack := runtimecontrol.HandBackCleanedRuntimeInputsTx
+			if targetGone {
+				handBack = runtimecontrol.HandBackRuntimeInputsTx
+			}
+			if _, err := handBack(ctx, tx, loaded.WorkspaceID, loaded.SessionID, loaded.binding(), now); err != nil {
 				return err
 			}
 		}
