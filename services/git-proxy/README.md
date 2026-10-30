@@ -130,7 +130,9 @@ to `github.com` (`githubScheme = "https"` in `relay.go`) verified strictly
 against a public-CA chain: `transport.go` sets no `TLSClientConfig`, so the Go
 standard library's default certificate verification applies unchanged and no
 insecure-TLS skip exists anywhere in the transport. A replacement must not
-introduce one.
+introduce one. The upstream leg honours `HTTPS_PROXY` and `NO_PROXY` when the
+process environment sets them, which the deployment never does: through a
+proxy it is a CONNECT tunnel, so TLS still ends at `github.com`.
 
 ### Drain
 
