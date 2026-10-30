@@ -81,8 +81,13 @@ pub struct Transport {
     /// Controlled socket observations for deadline tests. Real socket and TLS
     /// tests exercise the production progress source separately.
     #[cfg(test)]
-    progress_sample: Option<Arc<dyn Fn(Duration) -> (u64, u64, bool) + Send + Sync>>,
+    progress_sample: Option<ProgressSample>,
 }
+
+/// A test's socket observation at a clock time: the bytes acknowledged, the
+/// bytes the socket still holds, and whether the whole body was written.
+#[cfg(test)]
+type ProgressSample = Arc<dyn Fn(Duration) -> (u64, u64, bool) + Send + Sync>;
 
 /// The acknowledged bytes a report attempt last read, and whether it saw its
 /// body sent.

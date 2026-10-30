@@ -65,16 +65,15 @@ impl SocketOwnership {
 
 impl Drop for SocketOwnership {
     fn drop(&mut self) {
-        if let Some(socket) = self.socket.take() {
-            if let Err(error) = std::fs::remove_file(&socket) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    observe::warn!(
-                        "server.socket_cleanup_failed",
-                        error.os_code = error.raw_os_error().unwrap_or(0),
-                        error.code = observe::Code("socket_cleanup_failed")
-                    );
-                }
-            }
+        if let Some(socket) = self.socket.take()
+            && let Err(error) = std::fs::remove_file(&socket)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            observe::warn!(
+                "server.socket_cleanup_failed",
+                error.os_code = error.raw_os_error().unwrap_or(0),
+                error.code = observe::Code("socket_cleanup_failed")
+            );
         }
         // The lock field is dropped only after this cleanup returns.
         state::seams::barrier_blocking("shutdown.socket_removed");
