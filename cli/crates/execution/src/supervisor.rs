@@ -233,7 +233,8 @@ pub enum SupervisorMessage {
     Stdin(Box<Control<StdinPayload>>),
     /// An admitted `tool.cancel` of the task.
     Cancel(Box<Control<CancelPayload>>),
-    /// The task's binding closes: a staged task never starts.
+    /// The task's binding closes: a staged task never starts, and a running
+    /// one ends as at a cancel.
     Prevent,
     /// An identical `tool.execute` with this `message_id` joined the task:
     /// the task's final report, its `terminal` or `rejected`, ends it too.
@@ -1020,7 +1021,8 @@ impl Supervisor {
                     Some(SupervisorMessage::Joined(instruction)) => self.join(instruction),
                     Some(SupervisorMessage::ConnectionEnded) => self.stop(pid, Expiry::ConnectionEnded),
                     Some(SupervisorMessage::Shutdown) => self.stop(pid, Expiry::Shutdown),
-                    Some(SupervisorMessage::Start | SupervisorMessage::Prevent) => {}
+                    Some(SupervisorMessage::Prevent) => self.binding_closed(pid),
+                    Some(SupervisorMessage::Start) => {}
                     None => forgotten = true,
                 },
             }
@@ -1152,13 +1154,10 @@ impl Supervisor {
                     Some(SupervisorMessage::Joined(instruction)) => self.join(instruction),
                     Some(SupervisorMessage::ConnectionEnded) => self.stop(pid, Expiry::ConnectionEnded),
                     Some(SupervisorMessage::Shutdown) => self.stop(pid, Expiry::Shutdown),
+                    Some(SupervisorMessage::Prevent) => self.binding_closed(pid),
                     // The binding owner refuses a `tool.stdin` of a file
                     // tool's task.
-                    Some(
-                        SupervisorMessage::Stdin(_)
-                        | SupervisorMessage::Start
-                        | SupervisorMessage::Prevent,
-                    ) => {}
+                    Some(SupervisorMessage::Stdin(_) | SupervisorMessage::Start) => {}
                     None => forgotten = true,
                 },
             }
@@ -1685,6 +1684,21 @@ impl Supervisor {
             ));
         }
         false
+    }
+
+    /// The task's binding closes while it runs: as at a cancel, writes stop
+    /// and the termination begins, and its `terminal` report says
+    /// `cancelled`.
+    fn binding_closed(&mut self, pid: u32) {
+        if self.exit.is_some() || self.ending.is_some() {
+            return;
+        }
+        self.cancelled = true;
+        self.write_interrupted();
+        self.ending = Some((
+            Termination::begin(pid, self.context.bounds.termination),
+            Expiry::Cancel,
+        ));
     }
 
     /// Connection end, App Server shutdown or report-capacity exhaustion:

@@ -130,7 +130,8 @@ which owns that task's process tree; the translation of a call's
   availability check that begins `starting`, during which that `tool.stdin`
   waits and the task's other messages are still read: a cancel or the
   binding's close prevents the start and makes the task's `terminal` report
-  at once, and the connection's end discards the task without one. Each waiting reply is a timer and a waiter of the
+  at once, and the connection's end discards the task without one. The
+  binding's close ends a running task as a cancel does. Each waiting reply is a timer and a waiter of the
   supervisor, which meanwhile keeps reading output and handling the exit and
   other controls (`supervisor`).
 - A read replies at once when a window holds output or the task has ended,
