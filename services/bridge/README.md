@@ -781,6 +781,7 @@ handoff, Bridge recovery and worker drain compose the actual owning services.
 | `bridge_api_mcp_test.go`, `mcp_manifest_continuity_test.go`, `mcp_collision_split_test.go` | MCP claim/commit idempotency, reservation fencing, capture-before-deliver, generation-ordered supersession, collision split |
 | `bridge_api_attachments_test.go`, `bridge_api_file_attachments_test.go`, `attachment_transport_test.go`, `scoped_transport_capacity_test.go` | Read-only Gateway resolvers, scope validation, offset-addressed file chunk reads, helper-transport capacity scoping |
 | `bridge_api_image_store_test.go` | Image store attachments, against MinIO as the bridge role: live until the lifetime ends, unavailable to another Session, collected with their bytes, shared bytes kept until the last row expires |
+| `session_status_test.go` | The Session's running and idle over all its threads: one `session.status_running` and one `session.status_idle` per change, a running child keeping the Session running, the main thread's stop reason and every waiting call of `requires_action` in the Session idle |
 | `closeout_sentinel_test.go` | `scope_superseded` stale mapping and precise `closeout_unrepairable` status typing |
 | `completion_mail_test.go`, `integration/completion_mail_delivery_test.go` | Child completion-return discriminator, atomic envelope-plus-wake write, and a final answer holding U+0000 read, admitted and cold-loaded verbatim by the parent |
 | `config_test.go`, `cmd/bridge-api/main_test.go` | Startup config validation and production dependency assembly |

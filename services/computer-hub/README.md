@@ -566,6 +566,15 @@ termination grace period carry the drain, which is why Helm refuses a
   activates it too, revoking the old credential unless it has expired; a use
   of the revoked old credential recorded with one `credential_reused` event,
   a use of a deleted or an expired one not.
+- `client_preparation_test.go`, over HTTP and SSE with the test CLI: a
+  `session.prepare` for each attached computer at ready, and one for a user
+  computer added while its connection is online and none after its prepared
+  report; a failed preparation prepared again with a new binding and no second
+  error for the same code; each failure of a prepared report written once,
+  and its replay writing nothing; a binding left preparing for 10 minutes
+  taking its report; a late report for an invalid or closing binding changing
+  nothing; git ticket fetches; the `session_computer` cold start from the
+  stored times; and a `session.prepare` of exactly 65,536 bytes in one event.
 - `client_cold_start_test.go`, with the process telemetry installed: one `cli`
   cold start with the reported phases for the first answered ready, none for a
   replay or a ready without `startup`, and a refused one observing nothing.
