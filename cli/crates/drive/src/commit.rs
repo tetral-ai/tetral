@@ -37,6 +37,8 @@ pub(crate) struct Flight {
 /// A rejected change for a result or a drive sync report.
 pub(crate) struct Rejected {
     pub key: Key,
+    /// The task recorded on the rejected change.
+    pub task: Option<String>,
     pub entry: DriveRejection,
 }
 
@@ -339,6 +341,7 @@ impl Owner {
         self.recorded_during_flight
             .retain(|(each, _)| *each != drive);
         self.commit_ended(&drive, flight.sync_point, resend).await;
+        self.send_reports();
     }
 
     /// `409 content_missing`: the writes naming a missing hash upload
@@ -425,6 +428,10 @@ impl Owner {
                     restore.push(key.1.clone());
                     rejected.push(Rejected {
                         key: key.clone(),
+                        task: before
+                            .pending_changes
+                            .get(&key)
+                            .and_then(|pending| pending.task_id.clone()),
                         entry: self.rejection(
                             &key,
                             change,
@@ -590,6 +597,7 @@ impl Owner {
             None,
             Rejected {
                 key: key.clone(),
+                task: change.task_id.clone(),
                 entry,
             },
         );

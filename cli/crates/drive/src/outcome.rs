@@ -35,7 +35,13 @@ pub struct Fitted {
 }
 
 /// The `drive_sync` of `facts`, or none when they hold nothing to report.
-pub fn fit(mut facts: Facts) -> Fitted {
+pub fn fit(facts: Facts) -> Fitted {
+    fit_within(facts, MAX_BYTES)
+}
+
+/// [`fit`] into at most `max` bytes, for a report whose envelope leaves
+/// less room.
+pub fn fit_within(mut facts: Facts, max: usize) -> Fitted {
     let present = facts.committed > 0
         || facts.deleted > 0
         || !facts.rejected.is_empty()
@@ -67,7 +73,7 @@ pub fn fit(mut facts: Facts) -> Fitted {
     'adding: for list in 0..4 {
         while kept[list] < lens[list].min(DRIVE_SYNC_LISTED_MAX) {
             kept[list] += 1;
-            if size(&build(&facts, kept, lens)) > MAX_BYTES {
+            if size(&build(&facts, kept, lens)) > max {
                 kept[list] -= 1;
                 break 'adding;
             }

@@ -333,6 +333,7 @@ fn spawn(root: &Path, stub: &Arc<Stub>, cache: &ContentCache, state: SyncState) 
         mounting: Mounting::Unavailable("no FUSE: test".to_owned()),
         registry: Arc::new(NoRegistry),
         clock: state::clock::Clock::seams(),
+        reports: std::sync::Arc::new(NoReports),
     });
     sync.binding_current(Binding {
         connection_id: Id::new("conn_a").unwrap(),
@@ -846,4 +847,15 @@ async fn a_renamed_file_keeps_its_id_and_cache_content_and_its_source_keeps_the_
     .unwrap();
     assert_eq!(harness.read("b.md").await.unwrap(), "alpha");
     assert_eq!(harness.stub.downloads.load(Ordering::SeqCst), 2);
+}
+
+/// A report outbox for owners whose tests make no drive sync report.
+struct NoReports;
+
+impl protocol::ports::ReportSink for NoReports {
+    fn submit(&self, _: protocol::ports::Submission) -> protocol::ports::ReportId {
+        panic!("no drive sync report is expected")
+    }
+    fn cancel(&self, _: protocol::ports::ReportId) {}
+    fn add_final(&self, _: protocol::ports::ReportId, _: protocol::id::Id) {}
 }

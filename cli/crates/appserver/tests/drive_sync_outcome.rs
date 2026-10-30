@@ -184,6 +184,7 @@ async fn a_restricted_command_reaches_the_drive_through_tetral_drives_under_a_li
         mounting: Mounting::Fuse,
         registry: Arc::new(NoRegistry),
         clock,
+        reports: Arc::new(NoReports),
     });
     sync.binding_current(Binding {
         connection_id: id("conn_a"),
@@ -303,4 +304,15 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// A report outbox for owners whose tests make no drive sync report.
+struct NoReports;
+
+impl protocol::ports::ReportSink for NoReports {
+    fn submit(&self, _: protocol::ports::Submission) -> protocol::ports::ReportId {
+        panic!("no drive sync report is expected")
+    }
+    fn cancel(&self, _: protocol::ports::ReportId) {}
+    fn add_final(&self, _: protocol::ports::ReportId, _: protocol::id::Id) {}
 }

@@ -12,7 +12,7 @@ use std::time::Duration;
 use drive::cache::{CacheConfig, ContentCache};
 use drive::mount::{Mounting, Registry};
 use drive::ops::{SetAttr, TOP_INODE};
-use drive::state::{SyncState, Tables, Write};
+use drive::state::{FileRow, PendingChange, SyncState, Tables, Write};
 use drive::transfer::{
     Binding, Commit, ContentSink, Download, DriveTransfer, Ended, ListChanges, ListFiles, Request,
     Transfer, Upload,
@@ -305,8 +305,49 @@ impl TestClock {
     }
 }
 
+/// The drive sync reports handed to the outbox, each validated; with
+/// `full`, the ordinary budget refuses them and only the reserve has room.
+#[derive(Default)]
+pub struct Reports {
+    pub sent: Mutex<Vec<Value>>,
+    pub full: std::sync::atomic::AtomicBool,
+    pub reserved: AtomicU64,
+}
+
+impl protocol::ports::ReportSink for Reports {
+    fn submit(&self, submission: protocol::ports::Submission) -> protocol::ports::ReportId {
+        self.reserved.fetch_add(1, Ordering::SeqCst);
+        self.record(submission)
+    }
+
+    fn try_submit(
+        &self,
+        submission: protocol::ports::Submission,
+    ) -> Result<protocol::ports::ReportId, protocol::ports::ReportAdmissionError> {
+        if self.full.load(Ordering::SeqCst) {
+            return Err(protocol::ports::ReportAdmissionError::ResourceExhausted);
+        }
+        Ok(self.record(submission))
+    }
+
+    fn cancel(&self, _: protocol::ports::ReportId) {}
+    fn add_final(&self, _: protocol::ports::ReportId, _: Id) {}
+}
+
+impl Reports {
+    fn record(&self, submission: protocol::ports::Submission) -> protocol::ports::ReportId {
+        let message = Id::new(protocol::ports::LONGEST_REPORT_MESSAGE_ID).unwrap();
+        let bytes = (submission.build)(&submission.connection_id, &message).unwrap();
+        protocol::decode::<protocol::tool::DriveSyncReport>(&bytes).expect("a valid report");
+        let mut sent = self.sent.lock().unwrap();
+        sent.push(serde_json::from_slice(&bytes).unwrap());
+        protocol::ports::ReportId(sent.len() as u64)
+    }
+}
+
 /// What the Sessions of one test share.
 pub struct Env {
+    pub reports: Arc<Reports>,
     pub root: tempfile::TempDir,
     pub stub: Arc<Stub>,
     pub cache: ContentCache,
@@ -339,6 +380,7 @@ impl Env {
         })
         .unwrap();
         Env {
+            reports: Arc::default(),
             root,
             stub,
             cache,
@@ -384,6 +426,7 @@ impl Env {
             mounting: Mounting::Unavailable("no FUSE: test".to_owned()),
             registry: Arc::new(NoRegistry),
             clock: self.clock.clock(),
+            reports: self.reports.clone(),
         });
         sync.binding_current(Binding {
             connection_id: Id::new("conn_a").unwrap(),
@@ -539,6 +582,15 @@ impl Session {
     }
 }
 
+/// Waits until `done` holds.
+pub async fn eventually(done: impl Fn() -> bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(tokio::time::Instant::now() < deadline, "within 10 s");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 /// The outcome of a sync point started with [`Session::sync_point`].
 pub async fn outcome(point: tokio::task::JoinHandle<SyncOutcome>) -> SyncOutcome {
     tokio::time::timeout(Duration::from_secs(10), point)
@@ -631,4 +683,65 @@ pub fn summary(changes: &[CommitChange]) -> Vec<(String, &'static str, Option<St
             ),
         })
         .collect()
+}
+
+/// An uploaded write of a new file at `path`, pending since before the
+/// start.
+pub fn uploaded_write(path: &str) -> (FileRow, PendingChange) {
+    let hash = sha256(path.as_bytes());
+    let row = FileRow {
+        drive_id: DRIVE.to_owned(),
+        path: path.to_owned(),
+        file_id: 0,
+        kind: "file".to_owned(),
+        present: true,
+        version_id: None,
+        synced_sha256: None,
+        synced_size: None,
+        synced_executable: None,
+        content: Some("session".to_owned()),
+        local_sha256: Some(hash.clone()),
+        size: Some(path.len() as i64),
+        executable: Some(false),
+        mtime_ns: Some(1),
+        ctime_ns: Some(1),
+        origin: None,
+        link_target: None,
+        local_only: None,
+    };
+    let change = PendingChange {
+        drive_id: DRIVE.to_owned(),
+        path: path.to_owned(),
+        change: "write".to_owned(),
+        base_sha256: None,
+        content_sha256: Some(hash),
+        executable: Some(false),
+        uploaded: true,
+        last_write_at: 1,
+        task_id: None,
+        fault_code: None,
+    };
+    (row, change)
+}
+
+/// Uploaded writes at `writes` and deletions at `deletes`, each with a
+/// distinct `file_id`.
+pub fn seed(writes: &[String], deletes: &[String]) -> Write {
+    let mut seed = Write::default();
+    for (index, path) in writes.iter().enumerate() {
+        let (mut row, change) = uploaded_write(path);
+        row.file_id = index as i64 + 2;
+        seed.files.push(row);
+        seed.pending.push(change);
+    }
+    for path in deletes {
+        seed.pending.push(PendingChange {
+            change: "delete".to_owned(),
+            base_sha256: Some(sha256(b"gone")),
+            content_sha256: None,
+            uploaded: false,
+            ..uploaded_write(path).1
+        });
+    }
+    seed
 }

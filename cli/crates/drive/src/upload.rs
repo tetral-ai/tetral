@@ -252,6 +252,7 @@ impl Owner {
         // A sync point whose wait this ends commits its covered changes.
         self.sync_points_progress().await;
         self.changes_ready().await;
+        self.send_reports();
     }
 
     /// A fault keeps the change pending with its code; it is tried again

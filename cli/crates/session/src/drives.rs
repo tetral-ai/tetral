@@ -122,6 +122,7 @@ impl<S: TaskStarter> SessionOwner<S> {
         let root = preparation.shared.paths.canonical.clone();
         let directory = state::paths::session_directory(&root, session_id.as_str());
         let tasks: Arc<dyn TaskOwnership> = crate::owner::task_ownership(self.mailbox.clone());
+        let reports = preparation.reports.clone();
         let mailbox = self.mailbox.clone();
         tokio::spawn(async move {
             let context = loop {
@@ -156,6 +157,7 @@ impl<S: TaskStarter> SessionOwner<S> {
                     mounting: context.mounting.clone(),
                     registry: context.registry.clone(),
                     clock: context.clock.clone(),
+                    reports,
                 });
                 context.registry.add(session_id, sync.clone());
                 sync

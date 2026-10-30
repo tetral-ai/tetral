@@ -177,6 +177,7 @@ impl Harness {
             mounting: Mounting::Unavailable("no FUSE: test".to_owned()),
             registry: Arc::new(NoRegistry),
             clock: state::clock::Clock::seams(),
+            reports: std::sync::Arc::new(NoReports),
         });
         sync.binding_current(Binding {
             connection_id: Id::new("conn_a").unwrap(),
@@ -718,4 +719,15 @@ async fn a_permanent_list_answer_unmounts_the_drive_and_a_new_listing_starts_cle
     );
     assert!(harness.row("stale").await.is_none());
     assert_eq!(harness.versions().await, expected(&[file("a", "a")]));
+}
+
+/// A report outbox for owners whose tests make no drive sync report.
+struct NoReports;
+
+impl protocol::ports::ReportSink for NoReports {
+    fn submit(&self, _: protocol::ports::Submission) -> protocol::ports::ReportId {
+        panic!("no drive sync report is expected")
+    }
+    fn cancel(&self, _: protocol::ports::ReportId) {}
+    fn add_final(&self, _: protocol::ports::ReportId, _: protocol::id::Id) {}
 }

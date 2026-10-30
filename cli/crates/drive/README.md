@@ -74,6 +74,9 @@ Drives on this machine belong here, with two owners:
 - `outcome.rs`: the facts of a result's `drive_sync` (`Facts`) and their
   fitting into 65,536 bytes (`fit`); `DriveSync` answers the Task
   supervisor's `DriveSyncPort` with it (`sync.rs`).
+- `report.rs`: drive sync reports of the rejections no sync point
+  carries, one per recorded task, built for the current binding and
+  handed to the outbox once (`body`).
 - `sync_point.rs`: a result's sync point (`SyncPointRequest`): coverage,
   the wait (`RESULT_WAIT`), the commit step and the outcome (`SyncOutcome`).
 - `local.rs`: the rows one operation changes (`Edit`), the pending changes it

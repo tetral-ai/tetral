@@ -50,6 +50,8 @@ pub struct SyncConfig {
     pub mounting: Mounting,
     pub registry: Arc<dyn Registry>,
     pub clock: Clock,
+    /// The report outbox, for drive sync reports.
+    pub reports: Arc<dyn protocol::ports::ReportSink>,
 }
 
 /// A handle on a Session's Drive sync owner.
@@ -198,6 +200,7 @@ impl DriveSync {
             sync_points: BTreeMap::new(),
             sync_point_ids: 0,
             unreported: Vec::new(),
+            reports: config.reports,
             last_connection: None,
             binding: watch::Sender::new(None),
             mailbox: mailbox.clone(),
@@ -438,6 +441,7 @@ pub(crate) struct Owner {
     pub(crate) sync_point_ids: u64,
     /// The rejections no sync point carries, for drive sync reports.
     pub(crate) unreported: Vec<Rejected>,
+    pub(crate) reports: Arc<dyn protocol::ports::ReportSink>,
     /// The connection of the binding last current.
     last_connection: Option<Id>,
     pub(crate) binding: watch::Sender<Option<Binding>>,
@@ -532,6 +536,7 @@ impl Owner {
         let new = self.last_connection.as_ref() != Some(&binding.connection_id);
         self.last_connection = Some(binding.connection_id.clone());
         self.binding.send_replace(Some(binding));
+        self.send_reports();
         if !new {
             return;
         }

@@ -291,6 +291,7 @@ fn spawn(
         mounting: Mounting::Fuse,
         registry: calls.clone(),
         clock: state::clock::Clock::seams(),
+        reports: std::sync::Arc::new(NoReports),
     });
     sync.binding_current(Binding {
         connection_id: Id::new("conn_a").unwrap(),
@@ -598,4 +599,15 @@ async fn io_under_a_detached_mount_fails_with_eio_and_records_nothing() {
     assert!(harness.sync.tables().await.pending_changes.is_empty());
     assert_eq!(harness.calls(), ["+drive_a", "-drive_a", "+drive_a"]);
     harness.detach_all(&["drive_a"]).await;
+}
+
+/// A report outbox for owners whose tests make no drive sync report.
+struct NoReports;
+
+impl protocol::ports::ReportSink for NoReports {
+    fn submit(&self, _: protocol::ports::Submission) -> protocol::ports::ReportId {
+        panic!("no drive sync report is expected")
+    }
+    fn cancel(&self, _: protocol::ports::ReportId) {}
+    fn add_final(&self, _: protocol::ports::ReportId, _: protocol::id::Id) {}
 }

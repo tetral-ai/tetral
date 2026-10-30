@@ -13,6 +13,7 @@ pub mod mountinfo;
 pub mod ops;
 pub mod outcome;
 pub mod paths;
+pub mod report;
 pub mod state;
 pub mod sync;
 pub mod sync_point;
