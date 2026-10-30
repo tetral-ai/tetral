@@ -89,6 +89,8 @@ const (
 	OperationSessionResourcesList        Operation = "session_resources.list"
 	OperationSessionResourcesRead        Operation = "session_resources.read"
 	OperationSessionResourcesUpdate      Operation = "session_resources.update"
+	OperationSessionComputersCreate      Operation = "session_computers.create"
+	OperationSessionComputersRead        Operation = "session_computers.read"
 	OperationSessionThreadsArchive       Operation = "session_threads.archive"
 	OperationSessionThreadsList          Operation = "session_threads.list"
 	OperationSessionThreadsRead          Operation = "session_threads.read"
@@ -202,6 +204,8 @@ var registeredOperations = []Operation{
 	OperationSessionResourcesList,
 	OperationSessionResourcesRead,
 	OperationSessionResourcesUpdate,
+	OperationSessionComputersCreate,
+	OperationSessionComputersRead,
 	OperationSessionThreadsArchive,
 	OperationSessionThreadsList,
 	OperationSessionThreadsRead,
@@ -290,6 +294,7 @@ var operationRoutes = []OperationRoute{
 	{"GET", "/v1/models/{model_id}", OperationModelsRead},
 	{"GET", "/v1/sessions", OperationSessionsList},
 	{"GET", "/v1/sessions/{session_id}", OperationSessionsRead},
+	{"GET", "/v1/sessions/{session_id}/computers/{computer_id}", OperationSessionComputersRead},
 	{"GET", "/v1/sessions/{session_id}/events", OperationSessionEventsList},
 	{"GET", "/v1/sessions/{session_id}/events/stream", OperationSessionEventsStream},
 	{"GET", "/v1/sessions/{session_id}/resources", OperationSessionResourcesList},
@@ -332,6 +337,7 @@ var operationRoutes = []OperationRoute{
 	{"POST", "/v1/sessions", OperationSessionsCreate},
 	{"POST", "/v1/sessions/{session_id}", OperationSessionsUpdate},
 	{"POST", "/v1/sessions/{session_id}/archive", OperationSessionsArchive},
+	{"POST", "/v1/sessions/{session_id}/computers", OperationSessionComputersCreate},
 	{"POST", "/v1/sessions/{session_id}/events", OperationSessionEventsCreate},
 	{"POST", "/v1/sessions/{session_id}/resources", OperationSessionResourcesCreate},
 	{"POST", "/v1/sessions/{session_id}/resources/{resource_id}", OperationSessionResourcesUpdate},
