@@ -123,6 +123,8 @@ pub(crate) enum Message {
     Bind(Vec<Bound>),
     /// The drives the binding binds.
     Bound(oneshot::Sender<Vec<Bound>>),
+    /// The bound drives not mounted.
+    NotMounted(oneshot::Sender<Vec<Id>>),
     /// The new mount failures of an `exec_command`'s check, kept for its
     /// first report.
     FirstFailures {
@@ -701,6 +703,15 @@ impl Owner {
             Message::Bound(reply) => {
                 let _ = reply.send(self.bound.clone());
             }
+            Message::NotMounted(reply) => {
+                let unmounted = self
+                    .bound
+                    .iter()
+                    .filter(|bound| !self.mounts.contains_key(bound.drive_id.as_str()))
+                    .map(|bound| bound.drive_id.to_id())
+                    .collect();
+                let _ = reply.send(unmounted);
+            }
             Message::FirstFailures { task_id, failures } => {
                 self.first_failures.insert(task_id, failures);
             }
@@ -1098,26 +1109,34 @@ fn failed(request: &str, ended: &Ended) -> String {
 }
 
 impl protocol::ports::DriveSyncPort for DriveSync {
-    fn check(&self, check: protocol::ports::DriveCheck) -> protocol::ports::DriveAnswer {
+    fn check(&self, check: protocol::ports::DriveCheck) -> protocol::ports::DriveCheckAnswer {
         let sync = self.clone();
         Box::pin(async move {
             let (reply, answer) = oneshot::channel();
             sync.send(Message::Bound(reply));
             let bound = answer.await.unwrap_or_default();
             let failures = sync.check_drives(bound).await;
-            if !check.view_image {
+            let (reply, answer) = oneshot::channel();
+            sync.send(Message::NotMounted(reply));
+            let unmounted_drives = answer.await.unwrap_or_default();
+            let drive_sync = if check.view_image {
+                sync.fitted(crate::outcome::Facts {
+                    unmounted: unmounted(failures),
+                    ..crate::outcome::Facts::default()
+                })
+            } else {
                 if !failures.is_empty() {
                     sync.send(Message::FirstFailures {
                         task_id: check.task_id.as_str().to_owned(),
                         failures,
                     });
                 }
-                return None;
+                None
+            };
+            protocol::ports::DriveChecked {
+                drive_sync,
+                unmounted: unmounted_drives,
             }
-            sync.fitted(crate::outcome::Facts {
-                unmounted: unmounted(failures),
-                ..crate::outcome::Facts::default()
-            })
         })
     }
 

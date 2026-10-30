@@ -580,11 +580,11 @@ async fn a_mount_failure_is_in_the_first_report_and_a_view_image_result_and_down
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_command_whose_check_found_a_failed_mount_starts_beside_a_mounted_drive() {
+async fn a_command_whose_check_found_a_failed_mount_runs_without_that_drive_beside_a_mounted_one() {
     // The command's check sends its failure to the drive sync just before
     // the launch reads the mounted drive's root, which that sync answers.
     const FAILED: &str = "drive_b";
-    let fixture = Fixture::new(vec![DRIVE], &[], Vec::new(), b"").await;
+    let mut fixture = Fixture::new(vec![DRIVE], &[], Vec::new(), b"").await;
     std::fs::write(fixture.drives.join(FAILED), b"").unwrap();
     let bound = [DRIVE, FAILED].map(|drive| Bound {
         drive_id: SafeId::new(drive).unwrap(),
@@ -593,17 +593,55 @@ async fn a_command_whose_check_found_a_failed_mount_starts_beside_a_mounted_driv
     });
     let failures = fixture.sync.mount_drives(bound.to_vec()).await;
     assert_eq!(failures.len(), 1, "{failures:?}");
-    // The task mounts only the drive that is mounted.
+    // The policy names both drives, as the binding binds them.
+    fixture.bound = vec![DRIVE, FAILED];
+    let cmd = format!("echo started && echo written > \"$TETRAL_DRIVES\"/{DRIVE}/f");
     let (_mailbox, mut reports) = fixture.start(
         "task",
-        json!({ "tool": "exec_command", "input": { "cmd": "echo started", "wait_ms": 30_000 } }),
+        json!({ "tool": "exec_command", "input": { "cmd": cmd, "wait_ms": 30_000 } }),
     );
+    let hash = tokio::time::timeout(Duration::from_secs(60), fixture.uploaded.recv())
+        .await
+        .expect("f's upload within 60 s")
+        .unwrap();
+    assert_eq!(hash, sha256_hex(b"written\n"));
+    fixture
+        .nanos
+        .fetch_add(supervisor::SYNC_WAIT.as_nanos() as u64, Ordering::SeqCst);
     let terminal = next(&mut reports, "the terminal report").await;
+    assert_eq!(terminal["result"]["result"]["exit_code"], 0, "{terminal}");
     assert_eq!(
         terminal["result"]["result"]["stdout"]["text"], "started\n",
         "{terminal}"
     );
     assert_eq!(unmounted(&terminal), [FAILED]);
+
+    // A later command reads the mounted drive; the failure is not reported
+    // again.
+    let cmd = format!("cat \"$TETRAL_DRIVES\"/{DRIVE}/f");
+    let (_mailbox, mut reports) = fixture.start(
+        "later",
+        json!({ "tool": "exec_command", "input": { "cmd": cmd, "wait_ms": 30_000 } }),
+    );
+    // Its terminal sync point waits for f's held upload: the clock moves
+    // past each wait until the report comes.
+    let mut waits = 0;
+    let later = loop {
+        waits += 1;
+        assert!(waits <= 30, "the later terminal report within 30 waits");
+        fixture
+            .nanos
+            .fetch_add(supervisor::SYNC_WAIT.as_nanos() as u64, Ordering::SeqCst);
+        if let Ok(report) = tokio::time::timeout(Duration::from_secs(1), reports.recv()).await {
+            break report.unwrap();
+        }
+    };
+    assert_eq!(later["result"]["result"]["exit_code"], 0, "{later}");
+    assert_eq!(
+        later["result"]["result"]["stdout"]["text"], "written\n",
+        "{later}"
+    );
+    assert_eq!(unmounted(&later), Vec::<String>::new(), "{later}");
     fixture.sync.detach_all();
 }
 

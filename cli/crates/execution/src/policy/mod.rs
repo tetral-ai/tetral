@@ -5,7 +5,10 @@
 mod translate;
 mod validate;
 
-use codex_protocol::models::PermissionProfile;
+use std::path::PathBuf;
+
+use codex_protocol::models::{ManagedFileSystemPermissions, PermissionProfile};
+use codex_protocol::permissions::FileSystemPath;
 use protocol::tool::{ProtocolError, RejectionCode};
 use serde_json::Value;
 
@@ -16,9 +19,10 @@ pub use validate::{Network, ValidPolicy, validate};
 /// with fixed text naming the failing field.
 pub type PolicyRejection = ProtocolError<RejectionCode>;
 
-/// The permissions of one task. They are built once, at admission, and kept
-/// with the task; nothing rebuilds them, so a running process never changes
-/// its permissions.
+/// The permissions of one task. They are built at admission, translated
+/// again with the binding's drives as the task starts, and lose the drives
+/// its drive check found unmounted; a running process never changes its
+/// permissions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskPermissions {
     profile: PermissionProfile,
@@ -38,5 +42,25 @@ impl TaskPermissions {
 
     pub fn profile(&self) -> &PermissionProfile {
         &self.profile
+    }
+
+    /// These permissions without any entry at or below one of `paths`.
+    pub fn without(&self, paths: &[PathBuf]) -> TaskPermissions {
+        let mut profile = self.profile.clone();
+        if let PermissionProfile::Managed {
+            file_system: ManagedFileSystemPermissions::Restricted { entries, .. },
+            ..
+        } = &mut profile
+        {
+            entries.retain(|entry| match &entry.path {
+                FileSystemPath::Path { path } => path.to_abs_path().is_ok_and(|path| {
+                    !paths
+                        .iter()
+                        .any(|left_out| path.as_path().starts_with(left_out))
+                }),
+                _ => true,
+            });
+        }
+        TaskPermissions { profile }
     }
 }

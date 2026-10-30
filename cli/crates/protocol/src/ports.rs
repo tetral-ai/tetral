@@ -349,6 +349,17 @@ pub struct DriveSyncPoint {
     pub traceparent: Option<String>,
 }
 
+/// A drive check's answer: the `view_image` result's `drive_sync`, and the
+/// bound drives left unmounted, which the call's isolation leaves out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DriveChecked {
+    pub drive_sync: Option<DriveSyncOutcome>,
+    pub unmounted: Vec<Id>,
+}
+
+pub type DriveCheckAnswer =
+    std::pin::Pin<Box<dyn std::future::Future<Output = DriveChecked> + Send>>;
+
 /// A result's finished `drive_sync`, or none.
 pub type DriveAnswer =
     std::pin::Pin<Box<dyn std::future::Future<Output = Option<DriveSyncOutcome>> + Send>>;
@@ -359,7 +370,7 @@ pub type DriveAnswer =
 pub trait DriveSyncPort: Send + Sync + std::fmt::Debug {
     /// Mounts every bound drive found unmounted and waits for catch-up,
     /// never for this machine's own uploads.
-    fn check(&self, check: DriveCheck) -> DriveAnswer;
+    fn check(&self, check: DriveCheck) -> DriveCheckAnswer;
     fn sync_point(&self, point: DriveSyncPoint) -> DriveAnswer;
     /// The `TETRAL_DRIVES` value of the Session's commands, if any.
     fn drives_variable(&self) -> Option<std::path::PathBuf>;

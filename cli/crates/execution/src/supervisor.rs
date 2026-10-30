@@ -53,8 +53,8 @@ use observe::{Identity, TraceContext};
 use protocol::field::PositiveInt;
 use protocol::id::Id;
 use protocol::ports::{
-    ActivitySink, DriveAnswer, DriveCheck, DriveSyncPoint, DriveSyncPort, ReportId, ReportListener,
-    ReportOutcome, ReportSink,
+    ActivitySink, DriveCheck, DriveCheckAnswer, DriveChecked, DriveSyncPoint, DriveSyncPort,
+    ReportId, ReportListener, ReportOutcome, ReportSink,
 };
 use protocol::tool::{
     CancelPayload, ControlErrorCode, DriveSyncOutcome, HelperEnvelope, HelperStatus, HelperTool,
@@ -556,14 +556,14 @@ impl Supervisor {
         enum Step {
             Message(Option<SupervisorMessage>),
             Checked(Result<Available, PolicyRejection>),
-            Drive(Option<DriveSyncOutcome>),
+            Drive(DriveChecked),
         }
         let mut check: Option<Checking> = None;
-        let mut drive: Option<(Available, DriveAnswer, Duration)> = None;
+        let mut drive: Option<(Available, DriveCheckAnswer, Duration)> = None;
         loop {
             let step = match (drive.as_mut(), check.as_mut()) {
                 (Some((_, answer, _)), _) => tokio::select! {
-                    drive_sync = answer.as_mut() => Step::Drive(drive_sync),
+                    checked = answer.as_mut() => Step::Drive(checked),
                     message = self.messages.recv() => Step::Message(message),
                 },
                 (None, Some(checking)) => tokio::select! {
@@ -583,10 +583,11 @@ impl Supervisor {
                     None => return Staged::Started(Ok(available)),
                 },
                 Step::Checked(checked) => return Staged::Started(checked),
-                Step::Drive(drive_sync) => {
+                Step::Drive(checked) => {
                     let (available, _, began) = drive.take().expect("a drive check runs");
                     self.drive_wait = state::seams::now().saturating_sub(began);
-                    self.image_drive_sync = drive_sync;
+                    self.image_drive_sync = checked.drive_sync;
+                    self.leave_out(&checked.unmounted);
                     return Staged::Started(Ok(available));
                 }
             };
@@ -629,7 +630,7 @@ impl Supervisor {
 
     /// The drive check of an `exec_command` or `view_image` of a Session
     /// with a drive sync; an `edit` has none.
-    fn drive_check(&self) -> Option<DriveAnswer> {
+    fn drive_check(&self) -> Option<DriveCheckAnswer> {
         let view_image = match self.input() {
             ToolInput::ExecCommand(_) => false,
             ToolInput::ViewImage(_) => true,
@@ -640,6 +641,27 @@ impl Supervisor {
             task_id: self.spec.correlation.task_id.clone(),
             view_image,
         }))
+    }
+
+    /// Leaves the mount points of `unmounted` drives out of the task's
+    /// permissions, so that its isolation never names a drive that is not
+    /// there.
+    fn leave_out(&mut self, unmounted: &[Id]) {
+        let Some(drives) = self
+            .spec
+            .drive_sync
+            .as_ref()
+            .and_then(|port| port.drives_variable())
+        else {
+            return;
+        };
+        let points: Vec<PathBuf> = unmounted
+            .iter()
+            .map(|drive| drives.join(drive.as_str()))
+            .collect();
+        if !points.is_empty() {
+            self.spec.permissions = self.spec.permissions.without(&points);
+        }
     }
 
     /// The availability check of the task, borrowing nothing of the
@@ -2689,23 +2711,26 @@ mod tests {
     }
 
     impl DriveSyncPort for Points {
-        fn check(&self, check: DriveCheck) -> DriveAnswer {
+        fn check(&self, check: DriveCheck) -> DriveCheckAnswer {
             let view_image = check.view_image;
             self.checks.lock().unwrap().push(check);
             let release = self.release.clone();
             Box::pin(async move {
                 release.acquire().await.unwrap().forget();
-                view_image.then(|| {
-                    serde_json::from_value(json!({
-                        "committed": 0, "deleted": 0, "rejected": [], "not_synced": [],
-                        "unmounted": [{"drive_id": "drive_a", "error": "no FUSE: test"}],
-                    }))
-                    .unwrap()
-                })
+                DriveChecked {
+                    drive_sync: view_image.then(|| {
+                        serde_json::from_value(json!({
+                            "committed": 0, "deleted": 0, "rejected": [], "not_synced": [],
+                            "unmounted": [{"drive_id": "drive_a", "error": "no FUSE: test"}],
+                        }))
+                        .unwrap()
+                    }),
+                    unmounted: Vec::new(),
+                }
             })
         }
 
-        fn sync_point(&self, point: DriveSyncPoint) -> DriveAnswer {
+        fn sync_point(&self, point: DriveSyncPoint) -> protocol::ports::DriveAnswer {
             let mut outcome = json!({
                 "committed": 1, "deleted": 0, "rejected": [], "not_synced": [],
             });
