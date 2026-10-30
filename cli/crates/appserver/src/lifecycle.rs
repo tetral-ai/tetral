@@ -103,7 +103,10 @@ async fn own(
     loop {
         let running = server == ServerState::Running;
         let due = idle.as_ref().filter(|_| running).and_then(IdleExit::due);
+        // The inbox goes first: a tool instruction read before the upload's
+        // end reached this task ends the exit, as their arrival order says.
         let message = tokio::select! {
+            biased;
             message = inbox.recv() => match message {
                 Some(message) => message,
                 None => return,
