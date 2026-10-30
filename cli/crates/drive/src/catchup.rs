@@ -141,7 +141,15 @@ impl Work<'_> {
                 .row(path)
                 .is_some_and(|row| self.local_only(path, &row.kind).is_some())
             && !replaceable;
-        self.pending.contains(path) || below_file || over_folder || in_local_only || local_only
+        let link_here = self
+            .row(path)
+            .is_some_and(|row| row.present && (row.kind == "symlink" || row.kind == "special"));
+        self.pending.contains(path)
+            || below_file
+            || over_folder
+            || link_here
+            || in_local_only
+            || local_only
     }
 
     fn apply(&mut self, record: &Record, relisting: bool) {

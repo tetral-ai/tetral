@@ -534,13 +534,22 @@ async fn records_follow_the_rules_of_pending_changes_folders_and_excluded_paths(
     let tables = harness.sync.tables().await;
     let mut local = tables.files[&(DRIVE.to_owned(), "local".to_owned())].clone();
     local.origin = Some("local".to_owned());
+    // `link` is a symbolic link made here.
+    let link = FileRow {
+        path: "link".to_owned(),
+        file_id: 900,
+        kind: "symlink".to_owned(),
+        link_target: Some("kept".to_owned()),
+        local_only: Some("symlink".to_owned()),
+        ..local.clone()
+    };
     drop(harness);
     let mut state = SyncState::open(&directory.path().join("sync-state.db"))
         .await
         .unwrap();
     state
         .apply(Write {
-            files: vec![local],
+            files: vec![local, link],
             pending: vec![pending("kept/x")],
             ..Write::default()
         })
@@ -560,6 +569,7 @@ async fn records_follow_the_rules_of_pending_changes_folders_and_excluded_paths(
                     record(4, 1, "remote/only", None),
                     record(4, 2, "local/only", None),
                     record(4, 3, "datasets/more", Some("more")),
+                    record(4, 4, "link", Some("drive link")),
                 ],
                 false,
             )),
@@ -595,6 +605,17 @@ async fn records_follow_the_rules_of_pending_changes_folders_and_excluded_paths(
     assert!(harness.row("local/only").await.is_none());
     assert!(harness.row("local").await.is_some());
     assert!(harness.row("datasets/more").await.is_none());
+    // The link stays, taking only the drive's version.
+    let link = harness.row("link").await.unwrap();
+    assert_eq!(
+        (
+            link.kind.as_str(),
+            link.link_target.as_deref(),
+            link.content
+        ),
+        ("symlink", Some("kept"), None)
+    );
+    assert_eq!(link.synced_sha256, Some(hash("drive link")));
     assert_eq!(harness.applied_seq().await, 4);
 }
 
