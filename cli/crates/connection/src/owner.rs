@@ -3256,6 +3256,17 @@ mod tests {
         let (ready, _) = ready_of(&mut owner, "conn_e");
         assert!(ready.get("lost_changes").is_none(), "{ready}");
 
+        // The ACK of a ready removes the entries its fitting left out too.
+        for index in 0..3 {
+            let request = format!("close_{index}_{}", "x".repeat(30_000));
+            keep(&mut owner, vec![lost(&request, "drive_a")]);
+        }
+        let (ready, held) = ready_of(&mut owner, "conn_e2");
+        let listed = ready["lost_changes"].as_array().map_or(0, Vec::len);
+        assert!(listed < 3, "{listed} entries fit");
+        ready_ack(&mut owner, held);
+        assert_eq!(kept_file(root), json!([]));
+
         // A folder that cannot be written: the entry is still listed.
         let events = Events::default();
         let _guard = events.start();
