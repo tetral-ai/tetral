@@ -26,8 +26,16 @@ func TestBridgeAPIConfigRequiresMCPConnectorRoute(t *testing.T) {
 	if cfg.MCPConnectorGRPCAddress != env[EnvBridgeMCPConnectorGRPCAddr] || cfg.GatewayTokenPath != env[EnvBridgeGatewayTokenPath] {
 		t.Fatalf("BridgeAPIConfigFromEnv = %#v; want env projection", cfg)
 	}
-	if cfg.ProviderRescheduleBudget != 3 || cfg.CompactionRescheduleBudget != 2 || cfg.AttachmentLifetime != time.Hour {
-		t.Fatalf("BridgeAPIConfigFromEnv retry budgets = %d/%d, attachment lifetime %s; want 3/2 and 1h", cfg.ProviderRescheduleBudget, cfg.CompactionRescheduleBudget, cfg.AttachmentLifetime)
+	if cfg.ProviderRescheduleBudget != 3 || cfg.CompactionRescheduleBudget != 2 {
+		t.Fatalf("BridgeAPIConfigFromEnv retry budgets = %d/%d; want 3/2", cfg.ProviderRescheduleBudget, cfg.CompactionRescheduleBudget)
+	}
+	configured := configTestEnv{
+		EnvBridgeMCPConnectorGRPCAddr: env[EnvBridgeMCPConnectorGRPCAddr],
+		EnvBridgeGatewayTokenPath:     env[EnvBridgeGatewayTokenPath],
+		EnvAttachmentLifetimeSeconds:  "120",
+	}
+	if cfg, err := BridgeAPIConfigFromEnv(configured); err != nil || cfg.AttachmentLifetime != 2*time.Minute {
+		t.Fatalf("BridgeAPIConfigFromEnv %s=120 = %s, %v; want an attachment lifetime of 2m", EnvAttachmentLifetimeSeconds, cfg.AttachmentLifetime, err)
 	}
 
 	for _, missing := range []string{EnvBridgeMCPConnectorGRPCAddr, EnvBridgeGatewayTokenPath} {
