@@ -21,7 +21,8 @@
 //! and other controls. Every wait reads the seam clock.
 //! With a Session drive sync (`DriveSyncPort`), an `exec_command` or
 //! `view_image` runs the drive check after the availability check, still
-//! `starting`; each execution report and each newly built `tool.stdin`
+//! `starting`, and leaves the drives it found unmounted out of the task's
+//! permissions; each execution report and each newly built `tool.stdin`
 //! reply runs its sync point before it is frozen, and carries its
 //! `drive_sync`.
 //! A file tool's task runs its child instead of a command
